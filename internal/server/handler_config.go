@@ -2116,7 +2116,7 @@ type chatVerbosityResponse struct {
 }
 
 // HandleGetChatVerbosityConfig reports the shared web/desktop presentation
-// policy and its effective renderer modes.
+// policy. The client resolves the effective renderer modes locally.
 func (h *Handler) HandleGetChatVerbosityConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	cfg := config.ChatVerbosityConfig{}

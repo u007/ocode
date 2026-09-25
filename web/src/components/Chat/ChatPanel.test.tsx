@@ -56,6 +56,7 @@ vi.mock("../../api/client", () => ({
     // matches (the pre-existing tests' behaviour). Tests that exercise the
     // full-transcript path override this with mockResolvedValue.
     searchSession: vi.fn(() => new Promise<unknown>(() => {})),
+    truncateSession: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -169,6 +170,74 @@ beforeAll(() => {
     get() {
       return 0;
     },
+  });
+});
+
+describe("ChatPanel deferred restore boundary", () => {
+  it("computes an absolute target for a partially paginated transcript", async () => {
+    const events: unknown[] = [];
+    const listener = (event: Event) => events.push((event as CustomEvent<unknown>).detail);
+    window.addEventListener("ocode:restore-draft", listener);
+    try {
+      render(
+        <ChatProvider>
+          <LiveSeed
+            sessionId="ses-absolute"
+            messages={[
+              mk("assistant", "before"),
+              { role: "user", content: "selected request", user_seq: 7 },
+              mk("assistant", "after"),
+            ]}
+            total={103}
+          />
+          <ChatPanel sessionId="ses-absolute" />
+        </ChatProvider>,
+      );
+      await tick();
+      act(() => {
+        hoisted.resolve.current({ messages: [], total: 0, title: "" });
+      });
+      await tick();
+
+      fireEvent.click(screen.getByRole("button", { name: "Restore to input" }));
+      fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+      expect(events).toEqual([
+        {
+          sessionId: "ses-absolute",
+          text: "selected request",
+          targetIndex: 101,
+          userSeq: 7,
+        },
+      ]);
+    } finally {
+      window.removeEventListener("ocode:restore-draft", listener);
+    }
+  });
+
+  it("does not truncate local history or call the legacy endpoint when restore is confirmed", async () => {
+    render(
+      <ChatProvider>
+        <LiveSeed
+          sessionId="ses-no-eager-truncate"
+          messages={[mk("user", "selected request"), mk("assistant", "reply")]}
+          total={2}
+        />
+        <ChatPanel sessionId="ses-no-eager-truncate" />
+      </ChatProvider>,
+    );
+    await tick();
+    act(() => {
+      hoisted.resolve.current({ messages: [], total: 0, title: "" });
+    });
+    await tick();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore to input" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+    expect(screen.getByText("selected request")).toBeInTheDocument();
+    expect(screen.getByText("reply")).toBeInTheDocument();
+    expect(api.truncateSession).not.toHaveBeenCalled();
   });
 });
 
@@ -1153,7 +1222,7 @@ describe("ChatPanel", () => {
     expect(toolHeaders.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("shows an 'Open question' button on a pending question call that re-arms the dialog", async () => {
+  it("shows an 'Open question' button that explicitly shows the same request", async () => {
     const prompt = `QUESTION_PROMPT:\n${JSON.stringify([
       { header: "Deploy target", question: "Where?", options: [{ label: "Staging", description: "" }] },
     ])}\nWAITING_FOR_USER_RESPONSE`;
@@ -1167,10 +1236,14 @@ describe("ChatPanel", () => {
       { role: "tool", content: prompt, tool_call_id: "q-1" },
     ];
     let pending: unknown = null;
+    let hiddenQuestionRequestId: string | null | undefined;
     let probeDispatch: ReturnType<typeof useChatDispatch> | null = null;
     function Probe() {
       probeDispatch = useChatDispatch();
       pending = useChatSelector((s) => getSessionSlice(s, "sess-q").pendingQuestion);
+      hiddenQuestionRequestId = useChatSelector(
+        (s) => getSessionSlice(s, "sess-q").hiddenQuestionRequestId,
+      );
       return null;
     }
     render(
@@ -1182,16 +1255,18 @@ describe("ChatPanel", () => {
     );
     await tick();
     await flushRAF();
-    // Simulate the dialog being lost while the ask is still pending (a
-    // reconcile/reload that dropped it); the card offers to re-open it.
-    act(() => probeDispatch!({ type: "QUESTION_RESOLVED", sessionId: "sess-q" }));
-    expect(pending).toBeNull();
+    // The user hides the dialog locally; the transcript card must show the
+    // same request without manufacturing a new QUESTION_REQUEST.
+    act(() => probeDispatch!({ type: "QUESTION_HIDE", sessionId: "sess-q", requestId: "q-1" }));
+    expect(pending).toMatchObject({ request_id: "q-1" });
+    expect(hiddenQuestionRequestId).toBe("q-1");
     const btn = screen.getByRole("button", { name: "Open question" });
     fireEvent.click(btn);
     expect(pending).toEqual({
       request_id: "q-1",
       questions: [{ header: "Deploy target", question: "Where?", options: [{ label: "Staging", description: "" }] }],
     });
+    expect(hiddenQuestionRequestId).toBeNull();
   });
 
   it("renders orphan tool result as single when parent not loaded", async () => {

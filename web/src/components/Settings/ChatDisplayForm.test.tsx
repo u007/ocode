@@ -34,6 +34,7 @@ const balancedConfig: ChatVerbosityConfig = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
   __resetChatVerbosityForTests();
   mockGet.mockResolvedValue(balancedConfig);
   mockSet.mockResolvedValue(balancedConfig);
@@ -51,6 +52,46 @@ describe("ChatDisplayForm", () => {
     expect((screen.getByLabelText("Tool call details") as HTMLSelectElement).value).toBe("expanded");
     expect((screen.getByLabelText("Tool output") as HTMLSelectElement).value).toBe("preset");
     expect((screen.getByLabelText("Activity notices") as HTMLSelectElement).value).toBe("expanded");
+  });
+
+  it("shows the resolved preset value on the Follow preset option and updates it before save", async () => {
+    render(<ChatDisplayForm />);
+    await waitFor(() =>
+      expect((screen.getByRole("radio", { name: /Balanced/ }) as HTMLInputElement).checked).toBe(true),
+    );
+
+    // Balanced collapses both older thinking and tool-call details (spec §9),
+    // so the option text must name the value it resolves to — not just "preset".
+    const optionTexts = (label: string) =>
+      Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map(
+        (option) => option.textContent,
+      );
+    expect(optionTexts("Older thinking")).toContain("Follow preset — Collapsed");
+    expect(optionTexts("Tool call details")).toContain("Follow preset — Collapsed");
+    expect(optionTexts("Tool output")).toContain("Follow preset — Expanded");
+    expect(optionTexts("Activity notices")).toContain("Follow preset — Expanded");
+
+    // Switching the radio is a draft change: the label follows immediately,
+    // before anything is saved, and no save is issued.
+    fireEvent.click(screen.getByRole("radio", { name: /Full/ }));
+    await waitFor(() => expect(optionTexts("Older thinking")).toContain("Follow preset — Expanded"));
+    expect(optionTexts("Tool call details")).toContain("Follow preset — Expanded");
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it("keeps the resolved-value suffix after resetting overrides to the preset option", async () => {
+    render(<ChatDisplayForm />);
+    await waitFor(() =>
+      expect((screen.getByRole("radio", { name: /Balanced/ }) as HTMLInputElement).checked).toBe(true),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset overrides" }));
+
+    const olderThinking = screen.getByLabelText("Older thinking") as HTMLSelectElement;
+    expect(olderThinking.value).toBe("preset");
+    expect(Array.from(olderThinking.options).map((option) => option.textContent)).toContain(
+      "Follow preset — Collapsed",
+    );
   });
 
   it("resets only the category overrides, leaving the preset selected", async () => {

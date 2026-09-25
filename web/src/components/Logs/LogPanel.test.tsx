@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LogPanel, { appendLogCapped, type LogEntry } from "./LogPanel";
 
@@ -395,5 +395,72 @@ describe("LogPanel scroll behavior", () => {
     const url = String(fetchMock.mock.calls[0]?.[0]);
     expect(url).toContain("/api/remote/james%40217.216.72.49/api/logs");
     expect(url).toContain("session_id=s1");
+  });
+});
+
+/**
+ * "Clear logs" was guarded by `window.confirm`, which SILENTLY RETURNS FALSE in
+ * the Wails/WKWebView desktop webview — so the clear never ran in the desktop app
+ * while looking correct in a browser. It must be a rendered dialog.
+ */
+describe("LogPanel clear confirmation", () => {
+  function clearRequests(fetchMock: ReturnType<typeof vi.fn>) {
+    return fetchMock.mock.calls.filter((call) => {
+      const init = call[1] as RequestInit | undefined;
+      return init?.method === "DELETE";
+    });
+  }
+
+  function renderPanel() {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "[]" });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    render(<LogPanel active={false} sessionId="test-session" />);
+    return fetchMock;
+  }
+
+  it("does not clear until the confirm is accepted", async () => {
+    const fetchMock = renderPanel();
+    await act(async () => {});
+    fireEvent.click(screen.getByTitle("Clear logs"));
+
+    expect(screen.getByRole("dialog")).toBeDefined();
+    expect(clearRequests(fetchMock)).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear logs" }));
+    await act(async () => {});
+    expect(clearRequests(fetchMock)).toHaveLength(1);
+    expect(String(clearRequests(fetchMock)[0][0])).toContain("session_id=test-session");
+  });
+
+  it("keeps the logs when the confirm is cancelled", async () => {
+    const fetchMock = renderPanel();
+    await act(async () => {});
+    fireEvent.click(screen.getByTitle("Clear logs"));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(clearRequests(fetchMock)).toHaveLength(0);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the confirm open and shows the reason when the clear fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => "[]" });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    render(<LogPanel active={false} sessionId="test-session" />);
+    await act(async () => {});
+
+    // Fail only the DELETE; the initial GET still succeeds.
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) =>
+      init?.method === "DELETE"
+        ? { ok: false, status: 500, text: async () => "boom", json: async () => ({ error: "boom" }) }
+        : { ok: true, text: async () => "[]" },
+    );
+
+    fireEvent.click(screen.getByTitle("Clear logs"));
+    fireEvent.click(screen.getByRole("button", { name: "Clear logs" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toMatch(/500|boom|failed/i),
+    );
+    expect(screen.getByRole("dialog")).toBeDefined();
   });
 });

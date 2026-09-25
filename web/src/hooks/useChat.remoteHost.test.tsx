@@ -11,6 +11,7 @@ const mockGetSessionState = vi.fn().mockResolvedValue({ bootstrap_stage: "ready"
 const mockRetrySession = vi.fn().mockResolvedValue({ sessionId: "sess-remote" });
 const mockResolvePermission = vi.fn().mockResolvedValue({ ok: true });
 const mockAnswerQuestion = vi.fn().mockResolvedValue({ status: "ok" });
+const mockCancelQuestion = vi.fn().mockResolvedValue({ status: "ok" });
 
 vi.mock("../api/client", async () => {
   const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
@@ -24,6 +25,7 @@ vi.mock("../api/client", async () => {
       getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
       resolvePermission: (...a: unknown[]) => mockResolvePermission(...a),
       answerQuestion: (...a: unknown[]) => mockAnswerQuestion(...a),
+      cancelQuestion: (...a: unknown[]) => mockCancelQuestion(...a),
       listProjects: vi.fn().mockResolvedValue([]),
       getCurrentProject: vi.fn().mockResolvedValue(null),
       listProjectSessions: vi.fn().mockResolvedValue([]),
@@ -79,6 +81,7 @@ describe("useChat remote host routing", () => {
     mockGetSessionState.mockClear();
     mockResolvePermission.mockClear();
     mockAnswerQuestion.mockClear();
+    mockCancelQuestion.mockClear();
     mockRetrySession.mockClear();
   });
 
@@ -100,7 +103,7 @@ describe("useChat remote host routing", () => {
       await result.current.chat.sendMessage("hello");
     });
 
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "hello", "devbox");
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "hello", "devbox", undefined);
   });
 
   // A brand-new draft tab (no registered tab) sends chat with the active
@@ -183,7 +186,7 @@ describe("useChat remote host routing", () => {
     });
 
     // Tab is still registered under /srv/app → host = devbox
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "still remote", "devbox");
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-remote", "still remote", "devbox", undefined);
   });
 
   // A tab bound to a local project sends no host.
@@ -203,7 +206,7 @@ describe("useChat remote host routing", () => {
       await result.current.chat.sendMessage("hello");
     });
 
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-local", "hello", undefined);
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-local", "hello", undefined, undefined);
   });
 
   // An ambiguous path (saved both local and remote) sends no host.
@@ -225,7 +228,7 @@ describe("useChat remote host routing", () => {
       await result.current.chat.sendMessage("hello");
     });
 
-    expect(mockSendMessage).toHaveBeenCalledWith("sess-shared", "hello", undefined);
+    expect(mockSendMessage).toHaveBeenCalledWith("sess-shared", "hello", undefined, undefined);
   });
 
   // cancelSession also receives the host.
@@ -267,6 +270,48 @@ describe("useChat remote host routing", () => {
     });
 
     expect(mockRetrySession).toHaveBeenCalledWith("sess-remote", "devbox");
+  });
+});
+
+describe("useChat question visibility", () => {
+  beforeEach(() => {
+    mockCancelQuestion.mockClear();
+  });
+
+  it("hides a question locally without calling the server cancellation endpoint", () => {
+    const { result } = renderWithSession("sess-hide");
+    act(() => {
+      result.current.dispatch({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-hide",
+        question: { request_id: "q-1", questions: [] },
+      });
+    });
+
+    act(() => result.current.chat.hideQuestion("q-1"));
+
+    expect(result.current.chat.pendingQuestion?.request_id).toBe("q-1");
+    expect(result.current.chat.hiddenQuestionRequestId).toBe("q-1");
+    expect(mockCancelQuestion).not.toHaveBeenCalled();
+  });
+
+  it("retains the explicit final cancellation for the footer action", async () => {
+    const { result } = renderWithSession("sess-dont-answer");
+    act(() => {
+      result.current.dispatch({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-dont-answer",
+        question: { request_id: "q-1", questions: [] },
+      });
+    });
+
+    await act(async () => {
+      await result.current.chat.cancelQuestion("q-1");
+    });
+
+    expect(mockCancelQuestion).toHaveBeenCalledWith("q-1", "sess-dont-answer", undefined);
+    expect(result.current.chat.pendingQuestion).toBeNull();
+    expect(result.current.chat.hiddenQuestionRequestId).toBeNull();
   });
 });
 

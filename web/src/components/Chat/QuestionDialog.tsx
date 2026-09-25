@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useListNavigation } from "../../hooks/useListNavigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -32,7 +33,9 @@ interface Props {
     requestId: string,
     answers: QuestionAnswerPayload[],
   ) => Promise<boolean>;
-  /** Cancel/dismiss the prompt without answering it (TUI Esc parity). */
+  /** Locally hide the pending prompt without resolving it server-side. */
+  onHide: (requestId: string) => void;
+  /** Explicitly dismiss the prompt on the server without answering it. */
   onCancel: (requestId: string) => Promise<boolean>;
   /** Assistant message (prose + reasoning) that led to this prompt. */
   context?: AskContext | null;
@@ -83,11 +86,115 @@ interface QState {
   customText: string;
 }
 
+interface QuestionOptionListProps {
+  question: QuestionPrompt;
+  questionIndex: number;
+  options: DisplayOption[];
+  selected: Set<string>;
+  customText: string;
+  loading: boolean;
+  onToggle: (questionIndex: number, option: DisplayOption) => void;
+  onCustomTextChange: (text: string) => void;
+}
+
+function QuestionOptionList({
+  question,
+  questionIndex,
+  options,
+  selected,
+  customText,
+  loading,
+  onToggle,
+  onCustomTextChange,
+}: QuestionOptionListProps) {
+  const optionIds = options.map(
+    (option, index) => `question:${questionIndex}:option:${index}:${option.label}`,
+  );
+  const navigation = useListNavigation({
+    itemIds: optionIds,
+    onActivate: (index) => {
+      const option = options[index];
+      if (option) onToggle(questionIndex, option);
+    },
+    ...(question.multiple
+      ? {
+          multiple: true,
+          onToggle: (index: number) => {
+            const option = options[index];
+            if (option) onToggle(questionIndex, option);
+          },
+        }
+      : {}),
+    resetKey: `${questionIndex}:${options.map((option) => option.label).join("\u0000")}`,
+  });
+
+  return (
+    <div
+      className="space-y-1"
+      onKeyDown={navigation.onKeyDown}
+    >
+      {options.map((option, index) => {
+        const checked = selected.has(option.label);
+        const Icon = question.multiple
+          ? checked
+            ? CheckSquare
+            : Square
+          : checked
+            ? CircleDot
+            : Circle;
+        const itemProps = navigation.getItemProps(index);
+        return (
+          <div key={option.label} className="space-y-1">
+            <button
+              {...itemProps}
+              type="button"
+              aria-pressed={checked}
+              onClick={() => onToggle(questionIndex, option)}
+              disabled={loading}
+              autoFocus={questionIndex === 0 && index === 0}
+              className={`flex w-full items-start gap-2 rounded-md border p-2 text-left transition-colors ${
+                checked
+                  ? "border-blue-500 bg-blue-500/10"
+                  : "border-border bg-muted hover:bg-muted"
+              } ${navigation.isActive(index) ? "ring-2 ring-inset ring-blue-400" : ""}`}
+            >
+              <Icon
+                className={`mt-0.5 h-4 w-4 flex-shrink-0 ${checked ? "text-blue-400" : "text-muted-foreground"}`}
+              />
+              <span className="min-w-0">
+                <span className="block text-sm text-foreground">
+                  {option.label}
+                </span>
+                {option.description && (
+                  <span className="block text-xs text-muted-foreground">
+                    {option.description}
+                  </span>
+                )}
+              </span>
+            </button>
+            {option.custom && checked && (
+              <Input
+                autoFocus
+                value={customText}
+                onChange={(e) => onCustomTextChange(e.target.value)}
+                placeholder="Type your answer…"
+                disabled={loading}
+                className="ml-6 bg-card text-foreground"
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function QuestionDialog({
   open,
   requestId,
   questions,
   onSubmit,
+  onHide,
   onCancel,
   context,
 }: Props) {
@@ -178,14 +285,23 @@ export default function QuestionDialog({
         setLoading(false);
       }
     } catch {
+      // intentionally not logged: the parent callback owns the user-facing error; keep the dialog retryable.
       setLoading(false);
     }
   };
 
-  // Dismiss without answering — mirrors the TUI's Esc-to-cancel. Kept on the
-  // dialog's own open-change handler so the X button, Escape, and an overlay
-  // click all funnel here. Suppressed while a submit/cancel is in flight so an
-  // in-flight answer is never double-resolved.
+  // X and Escape are local presentation actions: the server still holds the
+  // pending ask, and the transcript's "Open question" button can restore it.
+  // Suppressed while a submit/cancel is in flight so an in-flight answer is
+  // never double-resolved.
+  const handleHide = () => {
+    if (loading) return;
+    onHide(requestId);
+  };
+
+  // "Don't answer" is the explicit final dismissal path. Keep it asynchronous:
+  // the dialog remains retryable until the server confirms the dismissal (or
+  // reports that the ask is already gone).
   const handleCancel = async () => {
     if (loading) return;
     setLoading(true);
@@ -193,77 +309,35 @@ export default function QuestionDialog({
       const ok = await onCancel(requestId);
       if (!ok) setLoading(false);
     } catch {
+      // intentionally not logged: the parent callback owns the user-facing error; keep the dialog retryable.
       setLoading(false);
     }
   };
 
   const renderQuestion = (q: QuestionPrompt, qi: number) => {
     const s = state[qi];
-    const multiple = !!q.multiple;
     return (
       <div className="space-y-3">
         <p className="text-sm text-foreground">{q.question}</p>
-        <div className="space-y-1">
-          {optionsPerQuestion[qi].map((opt, index) => {
-            const checked = s.selected.has(opt.label);
-            const Icon = multiple
-              ? checked
-                ? CheckSquare
-                : Square
-              : checked
-                ? CircleDot
-                : Circle;
-            return (
-              <div key={opt.label} className="space-y-1">
-                <button
-                  type="button"
-                  onClick={() => toggle(qi, opt)}
-                  disabled={loading}
-                  autoFocus={qi === 0 && index === 0}
-                  className={`flex w-full items-start gap-2 rounded-md border p-2 text-left transition-colors ${
-                    checked
-                      ? "border-blue-500 bg-blue-500/10"
-                      : "border-border bg-muted hover:bg-muted"
-                  }`}
-                >
-                  <Icon
-                    className={`mt-0.5 h-4 w-4 flex-shrink-0 ${checked ? "text-blue-400" : "text-muted-foreground"}`}
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm text-foreground">
-                      {opt.label}
-                    </span>
-                    {opt.description && (
-                      <span className="block text-xs text-muted-foreground">
-                        {opt.description}
-                      </span>
-                    )}
-                  </span>
-                </button>
-                {opt.custom && checked && (
-                  <Input
-                    autoFocus
-                    value={s.customText}
-                    onChange={(e) => setCustomText(qi, e.target.value)}
-                    placeholder="Type your answer…"
-                    disabled={loading}
-                    className="ml-6 bg-card text-foreground"
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
+        <QuestionOptionList
+          question={q}
+          questionIndex={qi}
+          options={optionsPerQuestion[qi]}
+          selected={s.selected}
+          customText={s.customText}
+          loading={loading}
+          onToggle={toggle}
+          onCustomTextChange={(text) => setCustomText(qi, text)}
+        />
       </div>
     );
   };
 
   return (
-    // Dismissible: Escape and the close (X) button both cancel the prompt
-    // (TUI Esc parity) via onOpenChange, rewriting the sentinel so the agent is
-    // not left paused. Overlay clicks stay suppressed (onInteractOutside) so a
-    // stray click cannot discard a half-answered multi-question form.
-    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && void handleCancel()}>
+    // X and Escape hide the prompt locally. Overlay clicks stay suppressed
+    // (onInteractOutside) so a stray click cannot discard a half-answered
+    // multi-question form; the footer action remains the server-side escape.
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleHide()}>
       <DialogContent
         className="dialog-viewport-max sm:max-w-lg bg-card border-border flex flex-col overflow-hidden"
         onInteractOutside={(e) => e.preventDefault()}
@@ -278,7 +352,7 @@ export default function QuestionDialog({
         </DialogHeader>
 
         {/* Everything that can grow (model context, question text, long option
-            lists) scrolls here, so the Cancel/Submit row stays pinned and
+            lists) scrolls here, so the Don't answer/Submit row stays pinned and
             reachable no matter how tall the prompt is. */}
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-clip">
           <AskContextPreview context={context} />
@@ -311,7 +385,7 @@ export default function QuestionDialog({
             onClick={() => void handleCancel()}
             disabled={loading}
           >
-            Cancel
+            Don't answer
           </Button>
           <Button
             type="button"

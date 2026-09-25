@@ -1,5 +1,7 @@
 # Phase 06 — Web API types, conflicts section, operation banner
 
+Status: **DONE + VERIFIED 2026-09-25.** See the decisions at the end.
+
 Phase 6 of the web Git tab conflict/operation-recovery work, tracked from
 `.opencode/plans/2026-09-25-git-conflicts-and-operations/INDEX.md`.
 
@@ -151,3 +153,62 @@ contract exists to prevent.
 - The rebase ours/theirs inversion is the highest-consequence detail in this
   phase. It must be pinned by a test that asserts the *wording*, not just the
   presence of two buttons.
+
+## Implementation decisions (recorded 2026-09-25)
+
+- **The rebase inversion also covers `am`.** The plan named rebase; an in-
+  progress `git am` is a patch series being replayed onto the current branch
+  and has the same ours/theirs semantics, so it gets the same "Keep upstream"
+  / "Keep my commit" wording. Showing the plain labels during an `am` would be
+  the same dangerous misreading.
+
+- **The stale-error clear uses a ref, not a state updater.** Comparing the
+  previous operation state and calling `setError` inside a `setState` updater
+  is a side effect in the render phase, which double-fires under StrictMode.
+  A ref makes the transition explicit and idempotent.
+
+- **The panel normalizes `conflicts` / `operation` on arrival.** The Go
+  structs always populate them, but a server predating this feature omits them
+  from the JSON, and both are read during render — so `status.conflicts.length`
+  was a latent crash of the entire Git panel against a mixed-version
+  deployment. Caught by an existing test whose fixture had no `conflicts`
+  field; normalized once where `status` is derived, with a regression test.
+
+- **Host travels as `?host=`, not a URL prefix.** The plan said "the host
+  argument is what routes a call through the remote proxy", which is true but
+  easy to misread as a path prefix. Every existing git call uses
+  `projQuery(project, host)` and the server proxies on that basis; the first
+  draft of the client test asserted `/api/remote/<host>/...` and was wrong.
+
+## Verification (2026-09-25)
+
+`client.gitConflicts.test.ts` (4) and `GitPanel.conflicts.test.tsx` (19), plus
+the pre-existing GitPanel suites (55 total across `src/components/Git/`).
+Full web suite: 2121 passing; the only 3 failures belong to another session's
+untracked `useListNavigation.test.tsx`. `npm run build` clean, typecheck clean
+for every file this phase touched.
+
+Three mutations confirmed the tests bite: reverting the rebase labels to
+ours/theirs; removing the Continue disable condition; and clearing the error on
+every reload instead of only on the idle -> operation edge.
+
+## Correction found in Phase 07 review (2026-09-25)
+
+Two details in this phase's implementation contradicted the contract this
+phase was supposed to deliver. Both are now fixed; the concept page written in
+Phase 08 was correct all along, so the code had drifted from its own docs.
+
+- **Action naming.** A bisect's stop action is the verb **`abort`** on the
+  wire, because that is the entry in the server's `gitOperationCommand` table;
+  the server maps it to `git bisect reset`. The button is still *labelled*
+  "Reset", because that is what git calls the command. The client had been
+  sending `"reset"`, which the server rejects with 400 — so every click on
+  Reset during a bisect failed. The server's `GitOperationRequest.Action` doc
+  comment also listed `reset` as an accepted action; it now lists the real
+  vocabulary and explains the difference.
+- **Which kinds invert the ours/theirs labels.** Only `rebase` and
+  `rebase-interactive`. `am` was included here, which is wrong: verified in a
+  scratch repo with `git am -3`, stage 2 ("ours") is the current HEAD and
+  stage 3 ("theirs") is the incoming patch, i.e. cherry-pick semantics. Under
+  the old code an `am` conflict offered "Keep upstream" / "Keep my commit",
+  pointing at the wrong side of the user's own history.

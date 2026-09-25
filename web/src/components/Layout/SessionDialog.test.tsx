@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SessionDialog, { SESSION_DIALOG_PAGE_SIZE } from "./SessionDialog";
 
@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   cancelLiveDeltas: vi.fn(),
   chatDispatch: vi.fn(),
   closeSessionTab: vi.fn(),
+  openSessionTab: vi.fn(),
   toggleSessionPicker: vi.fn(),
   projectSessions: [] as Array<{ id: string; title: string; created_at: string; updated_at: string }>,
 }));
@@ -33,7 +34,7 @@ vi.mock("../../stores/projectStore", () => ({
     tabs: [{ id: "session-1" }],
     activeTabId: "session-1",
     closeSessionTab: mocks.closeSessionTab,
-    openSessionTab: vi.fn(),
+    openSessionTab: mocks.openSessionTab,
     toggleSessionPicker: mocks.toggleSessionPicker,
     openNewSessionTab: vi.fn(),
     prefetchProjectSessions: vi.fn(),
@@ -131,5 +132,57 @@ describe("SessionDialog session list", () => {
 
     expect(screen.getAllByText(/^Session \d+$/)).toHaveLength(total);
     expect(screen.queryByRole("button", { name: /Load more/ })).not.toBeInTheDocument();
+  });
+});
+
+
+describe("SessionDialog keyboard navigation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.projectSessions = [session];
+  });
+
+  it("moves from search to a session and opens it with Enter", () => {
+    render(<SessionDialog />);
+    const input = screen.getByPlaceholderText("Search sessions...");
+    const row = screen.getByText("Alpha session").closest("button");
+    expect(row).not.toBeNull();
+
+    act(() => input.focus());
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(row);
+
+    fireEvent.keyDown(row!, { key: "Enter" });
+    expect(mocks.openSessionTab).toHaveBeenCalledWith("session-1", "Alpha session");
+    expect(mocks.toggleSessionPicker).toHaveBeenCalled();
+
+    mocks.openSessionTab.mockClear();
+    const close = screen.getByRole("button", { name: "Close Alpha session" });
+    act(() => close.focus());
+    fireEvent.keyDown(close, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(close);
+    expect(mocks.openSessionTab).not.toHaveBeenCalled();
+  });
+
+  it("loads the next visible page and focuses its first new row", async () => {
+    mocks.projectSessions = Array.from({ length: SESSION_DIALOG_PAGE_SIZE + 1 }, (_, index) => ({
+      id: `session-${index}`,
+      title: `Session ${index}`,
+      created_at: "",
+      updated_at: "",
+    }));
+    render(<SessionDialog />);
+    const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-list-nav-row]"));
+    expect(rows).toHaveLength(SESSION_DIALOG_PAGE_SIZE);
+
+    act(() => rows[SESSION_DIALOG_PAGE_SIZE - 1].focus());
+    fireEvent.keyDown(rows[SESSION_DIALOG_PAGE_SIZE - 1], { key: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(document.querySelectorAll("[data-list-nav-row]")).toHaveLength(SESSION_DIALOG_PAGE_SIZE + 1);
+      expect(document.activeElement).toBe(
+        screen.getByText(`Session ${SESSION_DIALOG_PAGE_SIZE}`).closest("button"),
+      );
+    });
   });
 });

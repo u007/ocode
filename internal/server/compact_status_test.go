@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +110,237 @@ func TestManualCompactPublishesContextStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestManualCompactPublishesLifecycle pins the cross-client contract: while
+// the summarizer is blocked, /state is active and every subscriber receives a
+// start frame; after the transcript snapshot, the terminal frame clears the
+// operation. A client that only listens to the old post-compact messages event
+// would miss the entire active interval.
+func TestManualCompactPublishesLifecycle(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+
+	client := &blockingCompactClient{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	as := &agentSession{
+		agent:    agent.NewAgent(client, nil, autoCompactConfig(), nil),
+		model:    "fake-model",
+		messages: seedTranscript(),
+	}
+	h.mu.Lock()
+	h.agents[id] = as
+	h.mu.Unlock()
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	rec := httptest.NewRecorder()
+	finished := make(chan struct{})
+	go func() {
+		h.HandleCompactSession(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/compact", nil), id)
+		close(finished)
+	}()
+	defer func() {
+		select {
+		case <-client.release:
+		default:
+			close(client.release)
+		}
+	}()
+
+	select {
+	case <-client.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("manual compaction never reached the summarizer")
+	}
+
+	state, ok := h.sessions.State(id)
+	if !ok || !state.Compacting || state.CompactionStartedAt.IsZero() {
+		t.Fatalf("state while summarizer is blocked = %+v, want active compaction", state)
+	}
+	stateRec := httptest.NewRecorder()
+	h.HandleSessionState(stateRec, httptest.NewRequest("GET", "/api/sessions/"+id+"/state", nil), id)
+	if stateRec.Code != http.StatusOK {
+		t.Fatalf("state status %d, want 200 (body %s)", stateRec.Code, stateRec.Body.String())
+	}
+	var statePayload struct {
+		Compacting           bool   `json:"compacting"`
+		CompactionStartedAt  string `json:"compaction_started_at"`
+		CompactionGeneration uint64 `json:"compaction_generation"`
+	}
+	if err := json.Unmarshal(stateRec.Body.Bytes(), &statePayload); err != nil {
+		t.Fatalf("decode active state response: %v", err)
+	}
+	if !statePayload.Compacting || statePayload.CompactionStartedAt == "" || statePayload.CompactionGeneration == 0 {
+		t.Fatalf("active state response = %+v, want compacting with a start time", statePayload)
+	}
+
+	events := make([]string, 0, 4)
+	startDeadline := time.After(3 * time.Second)
+	startSeen := false
+	for !startSeen {
+		select {
+		case ev := <-sub:
+			if ev.SessionID != id {
+				continue
+			}
+			events = append(events, ev.Event)
+			if ev.Event == "compaction_started" {
+				startSeen = true
+			}
+		case <-startDeadline:
+			t.Fatal("manual compaction did not publish a start event")
+		}
+	}
+	close(client.release)
+
+	doneDeadline := time.After(3 * time.Second)
+	doneSeen := false
+	for !doneSeen {
+		select {
+		case ev := <-sub:
+			if ev.SessionID != id {
+				continue
+			}
+			events = append(events, ev.Event)
+			if ev.Event != "compaction_done" {
+				continue
+			}
+			doneSeen = true
+			raw, err := json.Marshal(ev.Data)
+			if err != nil {
+				t.Fatalf("marshal compaction_done payload: %v", err)
+			}
+			var payload struct {
+				OK         bool   `json:"ok"`
+				Error      string `json:"error"`
+				Generation uint64 `json:"generation"`
+			}
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatalf("decode compaction_done payload: %v", err)
+			}
+			if !payload.OK || payload.Error != "" || payload.Generation == 0 {
+				t.Fatalf("compaction_done payload = %+v, want successful completion", payload)
+			}
+		case <-doneDeadline:
+			t.Fatal("manual compaction did not publish a terminal lifecycle event")
+		}
+	}
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("manual compaction request did not finish")
+	}
+
+	if !startSeen {
+		t.Fatalf("lifecycle events = %v, want a start event", events)
+	}
+	messagesAt, doneAt := -1, -1
+	for i, event := range events {
+		if event == "messages" && messagesAt < 0 {
+			messagesAt = i
+		}
+		if event == "compaction_done" && doneAt < 0 {
+			doneAt = i
+		}
+	}
+	if messagesAt < 0 || doneAt < 0 || messagesAt > doneAt {
+		t.Fatalf("lifecycle order = %v, want messages before compaction_done", events)
+	}
+	state, _ = h.sessions.State(id)
+	if state.Compacting || !state.CompactionStartedAt.IsZero() {
+		t.Fatalf("state after terminal event = %+v, want idle", state)
+	}
+}
+
+func TestManualCompactFailurePublishesTerminalError(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, proj, id)
+	h.sessions.Register(id, proj)
+	as := &agentSession{
+		agent:    agent.NewAgent(failingCompactClient{}, nil, autoCompactConfig(), nil),
+		model:    "fake-model",
+		messages: seedTranscript(),
+	}
+	h.mu.Lock()
+	h.agents[id] = as
+	h.mu.Unlock()
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
+	rec := httptest.NewRecorder()
+	h.HandleCompactSession(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/compact", nil), id)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("compact status %d, want 500 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	startSeen, doneSeen := false, false
+	deadline := time.After(3 * time.Second)
+	for !doneSeen {
+		select {
+		case ev := <-sub:
+			if ev.SessionID != id {
+				continue
+			}
+			switch ev.Event {
+			case "compaction_started":
+				startSeen = true
+			case "compaction_done":
+				doneSeen = true
+				raw, err := json.Marshal(ev.Data)
+				if err != nil {
+					t.Fatalf("marshal failure payload: %v", err)
+				}
+				var payload compactionDoneEvent
+				if err := json.Unmarshal(raw, &payload); err != nil {
+					t.Fatalf("decode failure payload: %v", err)
+				}
+				if payload.OK || payload.Error == "" {
+					t.Fatalf("failure payload = %+v, want ok=false with an error", payload)
+				}
+			}
+		case <-deadline:
+			t.Fatal("failed manual compaction did not publish a terminal event")
+		}
+	}
+	if !startSeen {
+		t.Fatal("failed manual compaction did not publish a start event")
+	}
+	state, _ := h.sessions.State(id)
+	if state.Compacting {
+		t.Fatalf("state after failed compaction = %+v, want idle", state)
+	}
+}
+
+type blockingCompactClient struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingCompactClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	c.once.Do(func() { close(c.started) })
+	<-c.release
+	return &agent.Message{Role: "assistant", Content: validCompactSummaryForTest()}, nil
+}
+
+func (*blockingCompactClient) GetProvider() string { return "mock" }
+func (*blockingCompactClient) GetModel() string    { return "mock-compact" }
+
+type failingCompactClient struct{}
+
+func (failingCompactClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	return nil, errors.New("summarizer failed")
+}
+func (failingCompactClient) GetProvider() string { return "mock" }
+func (failingCompactClient) GetModel() string    { return "mock-compact" }
 
 // TestSessionContextUsesPostCompactionEstimate pins the AGENTS.md "one
 // resolution, two entry points" invariant: HandleSessionContext must fall back

@@ -1,9 +1,10 @@
 import { useState, type ReactElement } from "react";
-import { render as rtlRender, screen, act } from "@testing-library/react";
+import { render as rtlRender, screen, act, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import MessageBubble from "./MessageBubble";
 import type { Message } from "../../api/types";
 import { ChatDisplayTestProvider } from "./chatDisplayTestUtils";
+import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
 
 // MessageBubble's tool/assistant-with-tools paths read the controlled
 // ChatDisplayContext; wrap every render so the throwing hook has a provider.
@@ -147,5 +148,51 @@ describe("MessageBubble whitespace-only assistant content", () => {
       <MessageBubble message={{ role: "assistant", content: "\n\nDone.\n" }} />,
     );
     expect(container.querySelector("div.bg-muted")!.textContent).toContain("Done.");
+  });
+});
+
+describe("MessageBubble deferred restore", () => {
+  it("explains that history stays visible until the restored draft is sent", () => {
+    render(
+      <MessageBubble
+        message={{ role: "user", content: "selected request", user_seq: 7 }}
+        sessionId="ses-1"
+        restoreTargetIndex={123}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore to input" }));
+
+    expect(screen.getByText(/stay in history until you send/i)).toBeInTheDocument();
+    expect(screen.getByText(/following history/i)).toBeInTheDocument();
+    expect(screen.queryByText(/remove it and all following messages from history/i)).not.toBeInTheDocument();
+  });
+
+  it("dispatches the selected content, absolute target, and durable user sequence", () => {
+    const events: RestoreDetail[] = [];
+    const listener = (event: Event) => events.push((event as CustomEvent<RestoreDetail>).detail);
+    window.addEventListener(RESTORE_EVENT, listener);
+    try {
+      render(
+        <MessageBubble
+          message={{ role: "user", content: "selected request", user_seq: 7 }}
+          sessionId="ses-1"
+          restoreTargetIndex={123}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Restore to input" }));
+      fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+      expect(events).toEqual([
+        {
+          sessionId: "ses-1",
+          text: "selected request",
+          targetIndex: 123,
+          userSeq: 7,
+        },
+      ]);
+    } finally {
+      window.removeEventListener(RESTORE_EVENT, listener);
+    }
   });
 });

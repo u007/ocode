@@ -40,6 +40,20 @@ Advisor amendments are mandatory:
 - [ ] Open web/desktop clients update after a save; reconnect recovers missed config changes.
 - [ ] Settings, docs, focused tests, typecheck, build, and formatting checks pass or have clearly documented blockers.
 
+> **Correction (2026-09-25).** Checklist items above under-specified the preset
+> matrix, and they are the likely origin of a shipped divergence. Per spec §9,
+> **Balanced collapses older thinking AND tool-call details** (tool output stays
+> expanded with a 20-line tail preview; each activity notice stays inline), and
+> **Quiet** collapses all four. The implementer matched this checklist's wording
+> rather than §9's table, so both resolvers shipped with Balanced tool-call
+> details expanded — contradicting the spec, the form's own Balanced
+> description, and the tests. Both are now realigned to §9
+> (`resolveChatDisplayPolicy` in `web/src/lib/chatVerbosity.ts`,
+> `ResolveChatVerbosityPolicy` in `internal/config/ocodeconfig.go`). **§9 is the
+> source of truth for the cells, not this checklist.** The same change also
+> added the dynamic `Follow preset — <Expanded|Collapsed>` option label. See
+> `.opencode/plans/2026-09-25-chat-display-follow-preset-value.md`.
+
 ## Implementation Steps
 
 ### 1. Establish the failing tests and inspect current seams

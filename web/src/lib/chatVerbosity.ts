@@ -109,7 +109,11 @@ export function resolveChatDisplayPolicy(input?: ConfigInput | null): ChatDispla
   let toolOutput: ChatDisplayOverride = "expanded";
   let notices: ChatDisplayOverride = "expanded";
   if (config.preset === "balanced") {
+    // Spec §9: balanced hides older thinking AND tool-call details; tool
+    // output stays expanded (with the 20-line tail preview) and each activity
+    // notice stays inline.
     olderThinking = "collapsed";
+    toolCalls = "collapsed";
   } else if (config.preset === "quiet") {
     olderThinking = "collapsed";
     toolCalls = "collapsed";

@@ -11,7 +11,14 @@ import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import { isTempSessionTabId } from "../../lib/tabDrafts";
-import { getCompactionState, setCompactionState, clearCompaction } from "../../lib/compactionState";
+import {
+  getCompactionState,
+  setCompactionState,
+  clearCompaction,
+  markLocalCompactionStart,
+  markLocalCompactionEnd,
+} from "../../lib/compactionState";
+import { reportActionError } from "../../lib/actionErrors";
 import { applyThemeColors } from "../../hooks/useTheme";
 
 import {
@@ -1563,7 +1570,7 @@ async function handleCompact(args: string, ctx: CommandContext): Promise<Command
 
   // Synchronous state change closes the submission race before the API awaits.
   if (getCompactionState(sessionId)?.status === "active") return { handled: true };
-  setCompactionState(sessionId, { status: "active", startedAt: Date.now() });
+  markLocalCompactionStart(sessionId);
   try {
     // Optional focus steers the summary (TUI `/compact <focus>`); an empty
     // focus is the plain compaction the no-arg form has always done.
@@ -1571,15 +1578,19 @@ async function handleCompact(args: string, ctx: CommandContext): Promise<Command
     // Completion is reported by the persisted compaction-summary notice now
     // rendered inline in the transcript, so drop the composer bottom bar
     // instead of retaining a "Compacted: X → Y" banner until dismissed.
+    markLocalCompactionEnd(sessionId);
     clearCompaction(sessionId);
     return { handled: true };
   } catch (err) {
-    setCompactionState(sessionId, { status: "error", error: err instanceof Error ? err.message : String(err) });
+    markLocalCompactionEnd(sessionId);
+    const message = err instanceof Error ? err.message : String(err);
+    setCompactionState(sessionId, { status: "error", error: message });
+    reportActionError(err, "Compact conversation");
     return {
       handled: true,
       messages: [{
         role: "assistant",
-        content: `**Compaction failed:** ${err instanceof Error ? err.message : String(err)}`,
+        content: `**Compaction failed:** ${message}`,
       }],
     };
   }

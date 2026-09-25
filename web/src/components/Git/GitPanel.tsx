@@ -79,7 +79,87 @@ const STATUS_BADGES: Record<string, { label: string; color: string }> = {
   deleted: { label: "D", color: "bg-red-500/20 text-red-400" },
   renamed: { label: "R", color: "bg-blue-500/20 text-blue-400" },
   untracked: { label: "?", color: "bg-muted/20 text-muted-foreground" },
+  conflicted: { label: "!", color: "bg-red-500/20 text-red-400" },
 };
+
+/** Which actions are valid for an operation kind.
+ *
+ *  This MUST match the server's `gitOperationCommand` table exactly. Showing a
+ *  button the server will refuse (a merge has no "skip") or hiding one it
+ *  accepts (a bisect advances via good/bad, never "continue") makes the panel
+ *  lie about what the user can do. A merge deliberately has no skip: skipping
+ *  has no meaning when there is no sequence of commits to step through. */
+const OPERATION_ACTIONS: Record<string, { action: string; label: string; destructive?: boolean }[]> = {
+  merge: [
+    { action: "continue", label: "Continue" },
+    { action: "abort", label: "Abort", destructive: true },
+  ],
+  rebase: [
+    { action: "continue", label: "Continue" },
+    { action: "abort", label: "Abort", destructive: true },
+    { action: "skip", label: "Skip" },
+  ],
+  "rebase-interactive": [
+    { action: "continue", label: "Continue" },
+    { action: "abort", label: "Abort", destructive: true },
+    { action: "skip", label: "Skip" },
+  ],
+  am: [
+    { action: "continue", label: "Continue" },
+    { action: "abort", label: "Abort", destructive: true },
+    { action: "skip", label: "Skip" },
+  ],
+  "cherry-pick": [
+    { action: "continue", label: "Continue" },
+    { action: "abort", label: "Abort", destructive: true },
+    { action: "skip", label: "Skip" },
+  ],
+  revert: [
+    { action: "continue", label: "Continue" },
+    { action: "abort", label: "Abort", destructive: true },
+    { action: "skip", label: "Skip" },
+  ],
+  // A bisect advances by classifying commits; there is no "continue". The
+  // button is LABELLED "Reset" because that is what git calls it, but the wire
+  // action is "abort" — the server's table maps that to `git bisect reset`.
+  // Sending "reset" here was a real 400 (caught 2026-09-25).
+  bisect: [
+    { action: "good", label: "Good" },
+    { action: "bad", label: "Bad" },
+    { action: "skip", label: "Skip" },
+    { action: "abort", label: "Reset", destructive: true },
+  ],
+};
+
+/** Labels for the two conflict-side buttons.
+ *
+ *  THE most consequential detail in this feature. During a rebase git's
+ *  "ours" is the UPSTREAM branch being replayed onto and "theirs" is the
+ *  user's own commit — the exact opposite of the intuitive reading. A user
+ *  who reads "Use ours" as "keep my work" would silently discard their commit
+ *  while believing they had kept it. So the wording changes, and the tooltip
+ *  names the side explicitly.
+ *
+ *  Only a rebase inverts. `am` and `cherry-pick` do NOT: verified in a scratch
+ *  repo with `git am -3`, stage 2 ("ours") is the current HEAD and stage 3
+ *  ("theirs") is the incoming patch. Labelling am's sides as upstream/commit
+ *  pointed the user at the wrong side of their own history. */
+function conflictSideLabels(operationKind?: string) {
+  if (operationKind === "rebase" || operationKind === "rebase-interactive") {
+    return {
+      ours: "Keep upstream",
+      theirs: "Keep my commit",
+      oursTip: "Keep the upstream version (during a rebase, git calls this 'ours')",
+      theirsTip: "Keep your own commit (during a rebase, git calls this 'theirs')",
+    };
+  }
+  return {
+    ours: "Use ours",
+    theirs: "Use theirs",
+    oursTip: "Keep our version of this file",
+    theirsTip: "Keep their version of this file",
+  };
+}
 
 interface Props {
   onOpenFile?: (path: string, projectRoot?: string) => void;
@@ -201,6 +281,10 @@ export default function GitPanel({
   const [commitMessage, setCommitMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether the previous load reported an operation in progress. Used only to
+  // detect the idle -> operation edge; a ref because the comparison drives a
+  // side effect (clearing the now-stale pull error).
+  const wasInOperationRef = useRef(false);
   // Transient success notice ("pushed", "committed", …). Auto-clears after 5s,
   // mirroring the TUI's status-bar toast.
   const [notice, setNotice] = useState<string | null>(null);
@@ -276,6 +360,21 @@ export default function GitPanel({
         setCommits(log);
         setStashes(stashList);
         if (!background) setError(null);
+        // A pull that stopped on a conflict leaves a sticky error reading
+        // "git pull failed: CONFLICT ...". Once the operation banner is up,
+        // that message is stale and actively misleading — the banner IS the
+        // explanation now.
+        //
+        // This is deliberately the NARROW transition idle -> operation, and it
+        // applies to background loads too. Nothing else may clear an error
+        // here: a failed push must stay visible across polls, which is the
+        // whole point of the sticky-error contract.
+        //
+        // A ref, not a state updater: the comparison is a side effect, and a
+        // state updater runs during the render phase (twice under StrictMode).
+        const nowInOperation = !!ws.status.operation;
+        if (!wasInOperationRef.current && nowInOperation) setError(null);
+        wasInOperationRef.current = nowInOperation;
         // Selection may no longer exist after a mutation/drop: re-resolve it
         // against the fresh snapshots. A selected file can move between panes;
         // a selected stash can be dropped (possibly by index shift).
@@ -369,6 +468,43 @@ export default function GitPanel({
     },
     [load, showNotice],
   );
+
+  // Conflict resolution + operation recovery. Both go through runMutation so
+  // they share the panel's ONE error/notice contract: a failed action's error
+  // stays until the next user action, and a background reload never clears it.
+  const resolveConflict = (path: string, resolution: "ours" | "theirs" | "mark") =>
+    runMutation(
+      () => api.gitResolveConflict({ path, resolution }, projectPath, projectHost),
+      resolution === "mark" ? "marked " + path + " resolved" : "resolved " + path,
+    );
+
+  const runOperation = (action: string, kind: string) =>
+    runMutation(async () => {
+      // The server returns the git command's combined output; commit hooks
+      // run during continue/skip, so that output is shown rather than dropped.
+      const res = (await api.gitOperation(
+        { action: action as "continue", kind: kind as "rebase" },
+        projectPath,
+        projectHost,
+      )) as { output?: string } | undefined;
+      const out = res?.output?.trim();
+      if (out) showNotice(out);
+    }, `${action}d`);
+
+  // Destructive operation actions (abort, and a bisect's reset) discard the
+  // in-progress work, so they go through the same confirmation-dialog pattern
+  // as the existing discard/force-push flows rather than firing directly.
+  const [pendingOperation, setPendingOperation] = useState<{ action: string; kind: string; label: string } | null>(null);
+  const requestOperation = (action: string, kind: string, destructive: boolean, label: string) => {
+    if (destructive) setPendingOperation({ action, kind, label });
+    else void runOperation(action, kind);
+  };
+  const doPendingOperation = () => {
+    if (!pendingOperation) return;
+    const p = pendingOperation;
+    setPendingOperation(null);
+    void runOperation(p.action, p.kind);
+  };
 
   const stageFile = (path: string) =>
     runMutation(() => api.gitStage([path], projectPath, projectHost), "staged " + path);
@@ -692,6 +828,21 @@ export default function GitPanel({
   const stagedFiles = workspace.staged ?? [];
   const unstagedFiles = workspace.unstaged ?? [];
   const status = workspace.status;
+  // `conflicts` is guaranteed by the Go struct, but a server OLDER than
+  // this feature omits it from the JSON. It is read during render, so an
+  // undefined there would crash the entire panel — normalize once here
+  // rather than guarding every read site.
+  const conflicts = status.conflicts ?? [];
+  const operation = status.operation ?? null;
+
+  // While an operation is in progress, the controls that would either be
+  // meaningless or actively dangerous are disabled: an in-progress merge or
+  // rebase is exactly the state where committing, pulling, pushing or
+  // resetting produces a confusing git error instead of a clear message.
+  // Stash is included for that reason even though this feature never uses it.
+  // Resolution and the operation buttons themselves stay enabled — they are
+  // the way OUT.
+  const opInProgress = !!operation;
 
   // Wording for the discard/delete confirmation. A pure-untracked selection is
   // a real delete; anything containing tracked files is a revert to HEAD.
@@ -866,50 +1017,56 @@ export default function GitPanel({
             onChange={(e) => setFileFilter(e.target.value)}
             className="h-7 px-2 rounded-md bg-muted/40 border border-border text-xs focus:outline-none focus:ring-2 focus:ring-ring w-28 sm:w-36 md:w-48"
           />
-          <span className="hidden sm:inline text-xs text-muted-foreground">
+          <span
+            className="hidden sm:inline text-xs text-muted-foreground"
+            data-testid="git-summary-counts"
+          >
+            {conflicts.length > 0 && (
+              <span className="text-red-400">{conflicts.length} conflicted · </span>
+            )}
             {filteredStaged.length} staged · {filteredUnstaged.length} unstaged
           </span>
           <button
             onClick={doFetch}
-            disabled={busy}
+            disabled={busy || opInProgress}
             aria-label="Fetch all remotes"
-            title="Fetch all remotes"
+            title={opInProgress ? "Finish or abort the in-progress git operation first" : "Fetch all remotes"}
             className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground disabled:opacity-40"
           >
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={doPull}
-            disabled={busy}
+            disabled={busy || opInProgress}
             aria-label="Pull from remote"
-            title="Pull from remote"
+            title={opInProgress ? "Finish or abort the in-progress git operation first" : "Pull from remote"}
             className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground disabled:opacity-40"
           >
             <ArrowDownToLine className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={doPush}
-            disabled={busy}
+            disabled={busy || opInProgress}
             aria-label="Push to remote"
-            title="Push to remote"
+            title={opInProgress ? "Finish or abort the in-progress git operation first" : "Push to remote"}
             className="p-1 rounded hover:bg-muted/60 text-muted-foreground hover:text-foreground disabled:opacity-40"
           >
             <ArrowUpToLine className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => setPendingForcePush(true)}
-            disabled={busy}
+            disabled={busy || opInProgress}
             aria-label="Force push with lease"
-            title="Force push with lease"
+            title={opInProgress ? "Finish or abort the in-progress git operation first" : "Force push with lease"}
             className="p-1 rounded hover:bg-muted/60 text-amber-500 hover:text-amber-400 disabled:opacity-40"
           >
             <AlertTriangle className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => setPendingResetRemote(true)}
-            disabled={busy}
+            disabled={busy || opInProgress}
             aria-label="Reset to remote"
-            title="Reset to remote (discard local commits and changes)"
+            title={opInProgress ? "Finish or abort the in-progress git operation first" : "Reset to remote (discard local commits and changes)"}
             className="p-1 rounded hover:bg-muted/60 text-red-400 hover:text-red-300 disabled:opacity-40"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -937,6 +1094,109 @@ export default function GitPanel({
           </button>
         </div>
       </div>
+
+      {/* Operation banner — shown whenever git has stopped mid-operation.
+          Sits directly under the header, above the conflicts section, because
+          it is the reason the conflicts exist and it holds the way out. */}
+      {operation && (
+        <div
+          data-testid="git-operation-banner"
+          className="px-3 py-2 border-b border-border bg-amber-500/10 flex flex-wrap items-center gap-2"
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+          <span className="text-xs font-medium text-amber-400 mr-auto">
+            {operation.label}
+          </span>
+          <div className="flex flex-wrap items-center gap-1">
+            {(OPERATION_ACTIONS[operation.kind] ?? []).map((a) => {
+              // Continue is blocked while any conflict is unresolved. Git
+              // refuses anyway; a disabled button with this tooltip explains
+              // why instead of relaying "you have unmerged files" afterwards.
+              const blockedByConflicts =
+                a.action === "continue" && conflicts.length > 0;
+              return (
+                <button
+                  key={a.action}
+                  onClick={() =>
+                    requestOperation(a.action, operation.kind, !!a.destructive, a.label)
+                  }
+                  disabled={busy || blockedByConflicts}
+                  title={
+                    blockedByConflicts
+                      ? "Resolve the remaining conflicts before continuing"
+                      : undefined
+                  }
+                  className="px-2 py-1 rounded text-xs border border-border hover:bg-muted/60 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {a.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Conflicts section — only rendered when something is conflicted, so a
+          clean repository's layout is unchanged. Above staged, because a
+          conflict must be dealt with before anything can be committed. */}
+      {conflicts.length > 0 && (
+        <div data-testid="git-conflicts" className="border-b border-border">
+          <div className="px-3 py-1.5 text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+            <span>Conflicts</span>
+            <span className="text-red-400">{conflicts.length}</span>
+          </div>
+          {conflicts.map((c) => {
+            const labels = conflictSideLabels(operation?.kind);
+            return (
+              <div
+                key={c.path}
+                data-testid="git-conflict-row"
+                className="px-3 py-1.5 flex flex-wrap items-center gap-2 hover:bg-muted/30"
+              >
+                <span
+                  className={`w-4 h-4 rounded text-[10px] flex items-center justify-center shrink-0 ${STATUS_BADGES.conflicted.color}`}
+                  title={c.code}
+                >
+                  {STATUS_BADGES.conflicted.label}
+                </span>
+                <button
+                  onClick={() => onOpenFile?.(c.path, projectPath)}
+                  className="text-xs font-mono truncate text-left hover:underline min-w-0 flex-1"
+                  title={c.path}
+                >
+                  {c.path}
+                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => resolveConflict(c.path, "ours")}
+                    disabled={busy}
+                    title={labels.oursTip}
+                    className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                  >
+                    {labels.ours}
+                  </button>
+                  <button
+                    onClick={() => resolveConflict(c.path, "theirs")}
+                    disabled={busy}
+                    title={labels.theirsTip}
+                    className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                  >
+                    {labels.theirs}
+                  </button>
+                  <button
+                    onClick={() => resolveConflict(c.path, "mark")}
+                    disabled={busy}
+                    title="Stage this file as you edited it (refused while conflict markers remain)"
+                    className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                  >
+                    Mark resolved
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {error && (
         <div className="px-3 py-1.5 text-xs bg-red-500/10 text-red-400 border-b border-border">
@@ -1135,7 +1395,7 @@ export default function GitPanel({
               </button>
               <button
                 onClick={() => openStashDialog()}
-                disabled={busy || !status.has_changes}
+                disabled={busy || opInProgress || !status.has_changes}
                 title={
                   status.has_changes
                     ? "Stash all changes"
@@ -1268,6 +1528,7 @@ export default function GitPanel({
                   file={shownFile}
                   staged={shownStaged}
                   busy={busy}
+                  opInProgress={opInProgress}
                   onHunk={(i, a) => hunkAction(shownFile, i, a, shownStaged)}
                   onOpen={onOpenFile ? () => onOpenFile(shownFile!.path, projectPath) : undefined}
                 />
@@ -1296,15 +1557,16 @@ export default function GitPanel({
         />
         <button
           onClick={commit}
-          disabled={busy || !status.has_changes || !commitMessage.trim()}
+          disabled={busy || opInProgress || !status.has_changes || !commitMessage.trim()}
+          title={opInProgress ? "Finish or abort the in-progress git operation first" : undefined}
           className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-40"
         >
           Commit
         </button>
         <button
           onClick={commitAndPush}
-          disabled={busy || !status.has_changes || !commitMessage.trim()}
-          title="Commit staged changes, then push to the remote"
+          disabled={busy || opInProgress || !status.has_changes || !commitMessage.trim()}
+          title={opInProgress ? "Finish or abort the in-progress git operation first" : "Commit staged changes, then push to the remote"}
           className="h-9 px-3 shrink-0 whitespace-nowrap rounded-md border border-border bg-muted/40 text-sm font-medium hover:bg-muted/60 disabled:opacity-40"
         >
           Commit &amp; Push
@@ -1363,6 +1625,42 @@ export default function GitPanel({
               Reset to Remote
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Operation-abort confirmation. Aborting discards the in-progress
+          operation, so it follows the same rendered-dialog rule as discard
+          (the desktop webview's native confirm() silently returns false). */}
+      <Dialog
+        open={pendingOperation !== null}
+        onOpenChange={(open) => !open && setPendingOperation(null)}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-sm">
+              <AlertTriangle className="w-4 h-4 text-red-400" />
+              {pendingOperation?.label} this operation?
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground mt-1">
+            This discards the in-progress git operation and restores the repository
+            to the state before it started.
+          </p>
+          <div className="flex justify-end gap-2 mt-3">
+            <button
+              onClick={() => setPendingOperation(null)}
+              className="px-2 py-1 rounded text-xs border border-border hover:bg-muted/60"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={doPendingOperation}
+              data-dialog-default-action
+              className="px-2 py-1 rounded text-xs bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30"
+            >
+              {pendingOperation?.label}
+            </button>
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -1705,12 +2003,17 @@ function FileDiff({
   file,
   staged,
   busy,
+  opInProgress,
   onHunk,
   onOpen,
 }: {
   file: GitDiffFile;
   staged: boolean;
   busy: boolean;
+  /** An operation is in progress: per-hunk stage/unstage/discard are
+   *  disabled, because touching the index mid-merge is how a conflict gets
+   *  silently mangled. The conflict resolver is the way through. */
+  opInProgress: boolean;
   onHunk: (hunkIndex: number, action: GitHunkAction) => void;
   onOpen?: () => void;
 }) {
@@ -1757,7 +2060,7 @@ function FileDiff({
               {staged ? (
                 <button
                   onClick={() => onHunk(i, "unstage")}
-                  disabled={busy}
+                  disabled={busy || opInProgress}
                   className="text-[11px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 disabled:opacity-40 shrink-0"
                 >
                   Unstage hunk
@@ -1766,14 +2069,14 @@ function FileDiff({
                 <>
                   <button
                     onClick={() => onHunk(i, "stage")}
-                    disabled={busy}
+                    disabled={busy || opInProgress}
                     className="text-[11px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 hover:bg-green-500/25 disabled:opacity-40 shrink-0"
                   >
                     {isUntracked ? "Stage file" : "Stage hunk"}
                   </button>
                   <button
                     onClick={() => onHunk(i, "discard")}
-                    disabled={busy}
+                    disabled={busy || opInProgress}
                     title={
                       isUntracked
                         ? "Delete this untracked file"

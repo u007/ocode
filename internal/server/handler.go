@@ -1303,7 +1303,30 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		if rc := h.RCBridge(); rc != nil && id == rc.SessionID {
-			writeError(w, http.StatusConflict, "rewind is not supported for a bridged session")
+			// The TUI owns the in-memory transcript for a bridged session, so it
+			// commits the same durable transaction before it renders or starts the
+			// turn. Wait for its ack so an invalid/expired token never looks
+			// accepted and never falls back to a normal append.
+			ack := make(chan error, 1)
+			select {
+			case rc.RcCh <- RCRequest{Content: req.Content, RewindToken: req.RewindToken, AckCh: ack, ResultCh: make(chan RCResult, 1)}:
+			default:
+				writeError(w, http.StatusServiceUnavailable, "TUI is busy, try again")
+				return
+			}
+			select {
+			case err := <-ack:
+				if err != nil {
+					writePendingRewindError(w, "send", id, err)
+					return
+				}
+			case <-time.After(10 * time.Second):
+				writeError(w, http.StatusGatewayTimeout, "TUI did not commit the pending rewind in time")
+				return
+			case <-r.Context().Done():
+				return
+			}
+			writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: rc.ModelForDispatch()})
 			return
 		}
 		model := h.effectiveSessionModel(id)
@@ -1321,9 +1344,11 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		case <-r.Context().Done():
 			return
 		}
-		if as := h.lookupAgentSession(id); as != nil {
-			model = as.model
-		}
+		// `model` is the value handed to the queued rewind job and therefore
+		// the model the backend will reconcile/use. Do not replace it with a
+		// stale resident agent model here: the 202 must identify the dispatch
+		// the client just accepted, not whichever model that agent held before
+		// the rewind rebuild.
 		writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: model})
 		return
 	}
@@ -1339,7 +1364,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 				writeError(w, http.StatusServiceUnavailable, "TUI is busy, try again")
 				return
 			}
-			writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: rc.Model})
+			writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: rc.ModelForDispatch()})
 			return
 		}
 
@@ -1366,7 +1391,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			writeJSON(w, http.StatusOK, ChatResponse{
 				Content:   content.String(),
 				SessionID: id,
-				Model:     rc.Model,
+				Model:     rc.ModelForDispatch(),
 			})
 		case <-time.After(5 * time.Minute):
 			writeError(w, http.StatusGatewayTimeout, "agent response timed out")
@@ -1773,19 +1798,64 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 	// holding h.mu across it would freeze every other session's turn for its
 	// whole duration.
 	as.mu.Lock()
+	if !h.beginCompaction(id) {
+		as.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, "unable to track compaction state")
+		return
+	}
+	finished := false
+	finish := func(compactionErr string) {
+		if finished {
+			return
+		}
+		finished = true
+		as.mu.Unlock()
+		// compaction_done is critical and may wait briefly for a slow bus
+		// subscriber, so never publish it while holding as.mu.
+		h.finishCompaction(id, compactionErr)
+	}
+	// Keep the lifecycle balanced if a future early return or panic path is
+	// added to this handler. The named cleanup does not swallow the panic.
+	defer func() {
+		if !finished {
+			finish("compaction ended unexpectedly")
+		}
+	}()
 
 	result, enabled := as.agent.CompactWithFocus(as.messages, body.Focus)
 	if !enabled {
-		as.mu.Unlock()
+		finish("")
 		writeError(w, http.StatusUnprocessableEntity, "compaction disabled in config")
 		return
 	}
 	if !result.OK {
-		as.mu.Unlock()
 		if result.Err != nil {
+			if errors.Is(result.Err, agent.ErrCompactionTimeout) {
+				log.Printf("serve: compaction timed out for session %s: %v", id, result.Err)
+				compactionErr := result.Err.Error()
+				if r.Context().Err() != nil {
+					// Client cancellation is not a summarization failure;
+					// clear the shared indicator without an error banner.
+					compactionErr = ""
+				}
+				finish(compactionErr)
+				if r.Context().Err() != nil {
+					return
+				}
+				writeError(w, http.StatusGatewayTimeout, "compaction timed out; transcript unchanged; retry the command")
+				return
+			}
+			if r.Context().Err() != nil {
+				log.Printf("serve: compaction request cancelled for session %s: %v", id, result.Err)
+				finish("")
+				return
+			}
+			log.Printf("serve: compaction failed for session %s: %v", id, result.Err)
+			finish(result.Err.Error())
 			writeError(w, http.StatusInternalServerError, result.Err.Error())
 			return
 		}
+		finish("")
 		writeError(w, http.StatusUnprocessableEntity, "nothing to compact")
 		return
 	}
@@ -1811,7 +1881,7 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 			Data:      as.messages,
 		})
 	}
-	as.mu.Unlock()
+	finish("")
 
 	// Refresh the per-session status snapshot so the web/desktop sidebar's
 	// Context gauge reflects the compacted transcript immediately. Without

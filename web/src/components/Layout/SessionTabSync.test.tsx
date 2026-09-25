@@ -2,6 +2,7 @@ import { act, render } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { ChatProvider, useChatState } from "../../stores/chatStore";
 import { RECONCILE_PAGE_SIZE, ROUTABLE_EVENTS, LIVE_DELTA_FLUSH_MS } from "../../lib/sessionEvents";
+import { getCompactionState, noteCompactionFinishedGeneration, noteCompactionGeneration, resetCompactionGenerations } from "../../lib/compactionState";
 import SessionTabSync from "./SessionTabSync";
 
 const mockGetSessionState = vi.fn();
@@ -31,13 +32,17 @@ vi.mock("../../stores/projectStore", () => ({
 }));
 
 const subscribed = new Map<string, (env: unknown) => void>();
+let reconnectHandler: (() => void) | undefined;
 vi.mock("../../lib/eventBus", () => ({
   eventBus: {
     on: (event: string, handler: (env: unknown) => void) => {
       subscribed.set(event, handler);
       return () => subscribed.delete(event);
     },
-    onReconnect: () => () => {},
+    onReconnect: (handler: () => void) => {
+      reconnectHandler = handler;
+      return () => { reconnectHandler = undefined; };
+    },
   },
 }));
 
@@ -62,11 +67,36 @@ function MessagesProbe({ sessionId }: { sessionId: string }) {
 describe("SessionTabSync", () => {
   beforeEach(() => {
     subscribed.clear();
+    reconnectHandler = undefined;
+    resetCompactionGenerations();
     tabsByProject = {};
     mockGetSessionState.mockReset();
     mockGetSession.mockReset();
     mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 1 });
     mockGetSession.mockResolvedValue({ messages: [], total: 0 });
+  });
+
+  it("resets compaction generations when the SSE stream reconnects", () => {
+    tabsByProject = { "/proj": [{ id: "s1", title: "t" }] };
+    noteCompactionGeneration("s1", 5);
+    noteCompactionFinishedGeneration("s1", 5);
+    render(
+      <ChatProvider>
+        <SessionTabSync />
+      </ChatProvider>,
+    );
+    expect(reconnectHandler).toBeDefined();
+    act(() => { reconnectHandler?.(); });
+    act(() => {
+      subscribed.get("compaction_started")?.({
+        event: "compaction_started",
+        project: "/proj",
+        session_id: "s1",
+        seq: 1,
+        data: { started_at: "2026-09-25T16:00:00Z", generation: 1 },
+      });
+    });
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
   });
 
   it("subscribes to every real event type routeBusEnvelope handles, never the SSE frame name 'envelope'", () => {

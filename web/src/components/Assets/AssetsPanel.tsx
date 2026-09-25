@@ -14,7 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { apiPath, authHeaders } from "@/api/client";
+import { apiPath, authHeaders, remoteApiBase } from "@/api/client";
 import { useProjectState } from "../../stores/projectStore";
 import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
@@ -51,19 +51,26 @@ function fileIcon(mime: string) {
 
 // projectQuery is "" or "&project=<path>" — uploads are project-scoped, so
 // every endpoint call carries the active project alongside ?name=.
-function fileAPIURL(name: string, projectQuery: string): string {
-  return apiPath(`/api/uploads/file?name=${encodeURIComponent(name)}${projectQuery}`);
+// apiBase is "" for a local project and "/api/remote/<host>" for a remote one,
+// so uploads land on the machine the session actually runs on.
+function fileAPIURL(name: string, projectQuery: string, apiBase: string): string {
+  return apiPath(`${apiBase}/api/uploads/file?name=${encodeURIComponent(name)}${projectQuery}`);
 }
 
-async function fetchBlob(name: string, projectQuery: string, signal?: AbortSignal): Promise<string> {
-  const r = await fetch(fileAPIURL(name, projectQuery), { headers: authHeaders(), signal });
+async function fetchBlob(
+  name: string,
+  projectQuery: string,
+  apiBase: string,
+  signal?: AbortSignal
+): Promise<string> {
+  const r = await fetch(fileAPIURL(name, projectQuery, apiBase), { headers: authHeaders(), signal });
   if (!r.ok) throw new Error(`fetch failed: ${r.status}`);
   return URL.createObjectURL(await r.blob());
 }
 
-async function triggerDownload(name: string, projectQuery: string): Promise<void> {
+async function triggerDownload(name: string, projectQuery: string, apiBase: string): Promise<void> {
   try {
-    const url = await fetchBlob(name, projectQuery);
+    const url = await fetchBlob(name, projectQuery, apiBase);
     const a = document.createElement("a");
     a.href = url;
     a.download = name;
@@ -101,9 +108,11 @@ async function copyToClipboard(text: string): Promise<void> {
 interface Props {
   loadingKey?: string;
   onLoadingEvent?: LoadingEventHandler;
+  /** Remote project host (`[user@]host` or `wsl:<distro>`); undefined for local. */
+  projectHost?: string;
 }
 
-export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) {
+export default function AssetsPanel({ loadingKey, onLoadingEvent, projectHost }: Props = {}) {
   const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [selected, setSelected] = useState<UploadedFile | null>(null);
@@ -121,6 +130,10 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
   const previewAbortRef = useRef<AbortController | null>(null);
 
   const projectPath = useProjectState().state.activeProject?.path;
+  // A remote project's files live on the host, so every /api/uploads call must
+  // go through the remote proxy. Sending the remote project path to the LOCAL
+  // server made it try to create a relative "~/…" upload dir → HTTP 500.
+  const apiBase = projectHost ? remoteApiBase(projectHost) : "";
   // Appended to URLs that already carry a query (?name=...).
   const projectQuery = projectPath ? `&project=${encodeURIComponent(projectPath)}` : "";
   // Used where /api/uploads has no other query params.
@@ -146,7 +159,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
     setLoading(true);
     setError(null);
     return runKeyedLoad(async ({ signal }) => {
-      const r = await fetch(apiPath(`/api/uploads${projectOnlyQuery}`), {
+      const r = await fetch(apiPath(`${apiBase}/api/uploads${projectOnlyQuery}`), {
         headers: authHeaders(),
         signal,
       });
@@ -169,7 +182,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
         setLoading(false);
       }
     });
-  }, [projectOnlyQuery, runKeyedLoad]);
+  }, [apiBase, projectOnlyQuery, runKeyedLoad]);
 
   useEffect(() => {
     void loadFiles();
@@ -186,7 +199,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
       const fd = new FormData();
       Array.from(fileList).forEach((f) => fd.append("file", f));
       try {
-        const r = await fetch(apiPath(`/api/uploads${projectOnlyQuery}`), {
+        const r = await fetch(apiPath(`${apiBase}/api/uploads${projectOnlyQuery}`), {
           method: "POST",
           headers: authHeaders(),
           body: fd,
@@ -200,14 +213,14 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [loadFiles, projectOnlyQuery]
+    [apiBase, loadFiles, projectOnlyQuery]
   );
 
   const deleteFile = useCallback(
     async (name: string) => {
       try {
         const r = await fetch(
-          apiPath(`/api/uploads?name=${encodeURIComponent(name)}${projectQuery}`),
+          apiPath(`${apiBase}/api/uploads?name=${encodeURIComponent(name)}${projectQuery}`),
           { method: "DELETE", headers: authHeaders() }
         );
         if (!r.ok && r.status !== 204) {
@@ -221,7 +234,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [projectQuery]
+    [apiBase, projectQuery]
   );
 
   const handleSelect = useCallback(async (file: UploadedFile) => {
@@ -238,7 +251,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
     });
     if (file.mime.startsWith("text/")) {
       try {
-        const r = await fetch(fileAPIURL(file.name, projectQuery), {
+        const r = await fetch(fileAPIURL(file.name, projectQuery, apiBase), {
           headers: authHeaders(),
           signal: controller.signal,
         });
@@ -252,7 +265,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
       }
     } else {
       try {
-        const url = await fetchBlob(file.name, projectQuery, controller.signal);
+        const url = await fetchBlob(file.name, projectQuery, apiBase, controller.signal);
         if (controller.signal.aborted || gen !== blobGeneration.current) {
           URL.revokeObjectURL(url);
           return;
@@ -266,7 +279,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
         console.error("Blob load failed:", e);
       }
     }
-  }, [projectQuery]);
+  }, [apiBase, projectQuery]);
 
   const SelectedIcon = useMemo(
     () => (selected ? fileIcon(selected.mime) : FileIcon),
@@ -397,7 +410,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
                     <div className="flex items-center gap-1 shrink-0">
                       <button
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); void triggerDownload(file.name, projectQuery); }}
+                        onClick={(e) => { e.stopPropagation(); void triggerDownload(file.name, projectQuery, apiBase); }}
                         title="Download"
                         className="text-muted-foreground hover:text-foreground p-1"
                       >
@@ -471,7 +484,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
                   variant="ghost"
                   size="sm"
                   className="h-7 px-2"
-                  onClick={() => void triggerDownload(selected.name, projectQuery)}
+                  onClick={() => void triggerDownload(selected.name, projectQuery, apiBase)}
                 >
                   <Download className="w-3.5 h-3.5 mr-1" />
                   Download
@@ -531,7 +544,7 @@ export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) 
                   <p className="text-muted-foreground text-sm">No preview available</p>
                   <button
                     type="button"
-                    onClick={() => void triggerDownload(selected.name, projectQuery)}
+                    onClick={() => void triggerDownload(selected.name, projectQuery, apiBase)}
                     className="inline-flex items-center text-blue-400 hover:text-blue-300 text-sm"
                   >
                     <Download className="w-3.5 h-3.5 mr-1" />

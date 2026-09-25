@@ -8,9 +8,18 @@ import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
 import { Archive, FileText, Paperclip, Play, RotateCcw, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
-import { apiPath, authHeaders } from "@/api/client";
+import { api, apiPath, authHeaders, remoteApiBase, ApiError } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
-import { RESTORE_EVENT } from "../../lib/inputRestore";
+import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
+import {
+  clearPendingRewind,
+  loadPendingRewind,
+  savePendingRewind,
+  subscribePendingRewind,
+  PENDING_REWIND_TARGET_PREVIEW_MAX,
+  type PendingRewindRecord,
+} from "../../lib/pendingRewindStore";
+import { describeActionError, reportActionErrorMessage } from "../../lib/actionErrors";
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
 import { getCompactionState, isCompactCommand, useCompactionState } from "../../lib/compactionState";
 import CompactionStatus from "./CompactionStatus";
@@ -93,6 +102,12 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // actual queued message text, matching the TUI's renderQueueRow.
   const [queuedItems, setQueuedItems] = useState<QueuedItem[]>([]);
   const queueCount = queuedItems.length;
+  // Durable "restore on next send" state. The server owns the capability; this
+  // local mirror survives reload and keeps the editable draft/banner visible.
+  const [pendingRewind, setPendingRewind] = useState<PendingRewindRecord | null>(null);
+  const [pendingRewindError, setPendingRewindError] = useState<string | null>(null);
+  const [pendingRewindBusy, setPendingRewindBusy] = useState(false);
+  const pendingRewindBusyRef = useRef(false);
   const compaction = useCompactionState(sessionTabId);
   const compacting = compaction?.status === "active";
   const drainingRef = useRef(new Set<string | null | undefined>());
@@ -117,7 +132,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const delayedInputsRef = useRef<string[]>([]);
   const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const delayedGenerationRef = useRef(0);
-  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -210,6 +225,72 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     };
   }, [sessionTabId]);
 
+  // Hydrate a pending rewind on mount / tab switch, then validate the server
+  // capability. The local record survives reload; a committed or invalidated
+  // capability must not silently look armed forever.
+  useEffect(() => {
+    setPendingRewindError(null);
+    if (!sessionTabId) {
+      setPendingRewind(null);
+      return;
+    }
+    if (sessionTabId.startsWith("new-")) {
+      setPendingRewind(null);
+      return;
+    }
+    const record = loadPendingRewind(projectHost, sessionTabId);
+    setPendingRewind(record);
+    if (!record) return;
+    setInput(record.draft);
+    setDraft(sessionTabId, record.draft);
+    let cancelled = false;
+    void api
+      .getRewind(sessionTabId, record.token, projectHost)
+      .then((resource) => {
+        if (cancelled) return;
+        if (resource.status === "stale") {
+          clearPendingRewind(projectHost, sessionTabId);
+          setPendingRewind(null);
+          const message =
+            "This restore is no longer valid because the conversation changed. Your draft is preserved; restore the message again.";
+          reportActionErrorMessage(message);
+          setPendingRewindError(message);
+          return;
+        }
+        if (resource.status === "committed") {
+          // A lost send response already committed this rewind; the transcript
+          // event is authoritative and the armed capability is finished.
+          clearPendingRewind(projectHost, sessionTabId);
+          setPendingRewind(null);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+          clearPendingRewind(projectHost, sessionTabId);
+          setPendingRewind(null);
+          const message =
+            "This restore expired or was already used. Your draft is preserved; restore the message again.";
+          reportActionErrorMessage(message);
+          setPendingRewindError(message);
+          return;
+        }
+        setPendingRewindError(describeActionError(err, "Validate restore"));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionTabId, projectHost]);
+
+  // Same-document and cross-tab mirror updates: another ChatInput write (or a
+  // successful send clearing the record) must update this banner immediately.
+  useEffect(() => {
+    if (!sessionTabId) return;
+    return subscribePendingRewind(projectHost, sessionTabId, (current) => {
+      setPendingRewind(current);
+    });
+  }, [sessionTabId, projectHost]);
+
   // Reinjection: a file the user X'd off stays excluded UNTIL a genuinely new
   // file tab opens. We detect "new" by diffing contextFilePaths against the set
   // of paths we've already seen this session. A path that appears for the first
@@ -243,31 +324,80 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   }, [sessionTabId]);
 
   // "Restore older input" — ChatPanel's user bubble dispatches a typed window
-  // event after confirmation. Only the matching sessionTabId applies it, so
-  // hidden tabs don't mutate. Replace semantics: the restored text replaces
-  // the current draft entirely, focus moves to textarea with cursor at end.
+  // event after confirmation. Only the matching sessionTabId applies it.
+  // Prepare is server-first: the local record is written only after the durable
+  // capability exists, and a local persistence failure cancels that capability
+  // instead of showing a banner the reload would lose.
   useEffect(() => {
     const handler = (e: Event) => {
-      const ce = e as CustomEvent<{ sessionId: string; text: string }>;
+      const ce = e as CustomEvent<RestoreDetail>;
       if (!ce.detail || ce.detail.sessionId !== sessionTabId) return;
-      const text = ce.detail.text ?? "";
-      setInput(text);
-      setDraft(sessionTabId, text);
-      // A programmatic restore is a fresh edit, not a history walk.
-      historyIndexRef.current = -1;
-      historyDraftRef.current = "";
-      // Focus after state applies; queue microtask to ensure DOM updated.
-      requestAnimationFrame(() => {
-        const el = textareaRef.current;
-        if (el) {
-          el.focus();
-          el.setSelectionRange(text.length, text.length);
-        }
-      });
+      if (!sessionTabId || sessionTabId.startsWith("new-")) {
+        setPendingRewindError("Start this chat before restoring a message.");
+        return;
+      }
+      const detail = ce.detail;
+      if (!Number.isSafeInteger(detail.targetIndex) || detail.targetIndex < 0) {
+        setPendingRewindError("This message cannot be restored because its full-transcript position is unknown. Reload the chat and try again.");
+        return;
+      }
+      if (pendingRewindBusyRef.current) return;
+      pendingRewindBusyRef.current = true;
+      setPendingRewindBusy(true);
+      setPendingRewindError(null);
+      const previousDraft = getDraft(sessionTabId);
+      const request = detail.userSeq && detail.userSeq > 0
+        ? { targetIndex: detail.targetIndex, targetContent: detail.text, userSeq: detail.userSeq }
+        : { targetIndex: detail.targetIndex, targetContent: detail.text };
+      void api
+        .prepareRewind(sessionTabId, request, projectHost)
+        .then((resource) => {
+          const record: PendingRewindRecord = {
+            version: 1,
+            host: projectHost === undefined ? "" : projectHost,
+            sessionId: sessionTabId,
+            token: resource.token,
+            draft: detail.text,
+            previousDraft,
+            targetPreview: detail.text.slice(0, PENDING_REWIND_TARGET_PREVIEW_MAX),
+            expiresAt: resource.expires_at,
+          };
+          if (!savePendingRewind(record)) {
+            return api
+              .cancelRewind(sessionTabId, resource.token, projectHost)
+              .catch((cancelErr) => {
+                console.error("failed to roll back an unsaved pending restore", cancelErr);
+              })
+              .then(() => {
+                throw new Error("Could not save the restore state in this browser. History was not changed.");
+              });
+          }
+          setInput(detail.text);
+          setDraft(sessionTabId, detail.text);
+          // A programmatic restore is a fresh edit, not a history walk.
+          historyIndexRef.current = -1;
+          historyDraftRef.current = "";
+          requestAnimationFrame(() => {
+            const el = textareaRef.current;
+            if (el) {
+              el.focus();
+              el.setSelectionRange(detail.text.length, detail.text.length);
+            }
+          });
+        })
+        .catch((err) => {
+          const message = describeActionError(err, "Restore");
+          reportActionErrorMessage(message);
+          setPendingRewindError(message);
+        })
+        .finally(() => {
+          pendingRewindBusyRef.current = false;
+          setPendingRewindBusy(false);
+        });
     };
     window.addEventListener(RESTORE_EVENT, handler as EventListener);
     return () => window.removeEventListener(RESTORE_EVENT, handler as EventListener);
-  }, [sessionTabId]);
+  }, [sessionTabId, projectHost]);
 
   // Auto-drain the queue once the turn (streaming or shell exec) frees up,
   // in FIFO order — mirrors the TUI's drainQueuedItems. Stops as soon as an
@@ -491,10 +621,53 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const updateDraft = (value: string) => {
     setInput(value);
     setDraft(sessionTabId, value);
+    // Keep the reload-safe pending record's draft in sync with the composer.
+    // Without this, a reload after editing a restored message would resurrect
+    // the pre-edit text while still committing the rewind.
+    if (pendingRewind) {
+      const saved = savePendingRewind({ ...pendingRewind, draft: value });
+      if (!saved) {
+        reportActionErrorMessage("Could not save the restored draft in this browser. It will still be sent normally.");
+      }
+    }
     // Any non-history mutation (typing, slash selection, queued-item recall)
     // leaves history mode, so the next ↑ starts from the newest entry again.
     historyIndexRef.current = -1;
     historyDraftRef.current = "";
+  };
+
+  const cancelPendingRewind = () => {
+    if (!pendingRewind || !sessionTabId || pendingRewindBusyRef.current) return;
+    pendingRewindBusyRef.current = true;
+    setPendingRewindBusy(true);
+    setPendingRewindError(null);
+    const restoreDraft = pendingRewind.previousDraft;
+    void api
+      .cancelRewind(sessionTabId, pendingRewind.token, projectHost)
+      .then(() => {
+        clearPendingRewind(projectHost, sessionTabId);
+        setPendingRewind(null);
+        setInput(restoreDraft);
+        setDraft(sessionTabId, restoreDraft);
+        historyIndexRef.current = -1;
+        historyDraftRef.current = "";
+        requestAnimationFrame(() => {
+          const el = textareaRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(restoreDraft.length, restoreDraft.length);
+          }
+        });
+      })
+      .catch((err) => {
+        const message = describeActionError(err, "Cancel restore");
+        reportActionErrorMessage(message);
+        setPendingRewindError(message);
+      })
+      .finally(() => {
+        pendingRewindBusyRef.current = false;
+        setPendingRewindBusy(false);
+      });
   };
 
   // Apply a recalled history entry without counting as a fresh edit — it must
@@ -513,7 +686,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     files.forEach((f) => fd.append("file", f));
     try {
       const query = projectPath ? `?project=${encodeURIComponent(projectPath)}` : "";
-      const r = await fetch(apiPath(`/api/uploads${query}`), {
+      // A remote project's attachments live on the host, so the POST must go
+      // through the remote proxy rather than the local server.
+      const r = await fetch(apiPath(`${remoteApiBase(projectHost)}/api/uploads${query}`), {
         method: "POST",
         headers: authHeaders(),
         body: fd,
@@ -938,6 +1113,35 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       {delayedCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1" role="status">
           {delayedCount} message{delayedCount === 1 ? "" : "s"} waiting to be consolidated…
+        </div>
+      )}
+      {pendingRewind && (
+        <div
+          role="status"
+          className="mb-2 flex flex-wrap items-center gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-foreground"
+        >
+          <span className="font-semibold text-amber-500">Pending rewind</span>
+          <span className="text-muted-foreground">
+            Sending this message replaces it and everything after it.
+          </span>
+          {pendingRewind.targetPreview && (
+            <span className="max-w-full truncate font-mono text-foreground/80">
+              “{pendingRewind.targetPreview}”
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={cancelPendingRewind}
+            disabled={pendingRewindBusy}
+            className="ml-auto shrink-0 rounded border border-border px-2 py-0.5 text-foreground hover:bg-accent"
+          >
+            Cancel restore
+          </button>
+        </div>
+      )}
+      {pendingRewindError && (
+        <div role="alert" className="mb-2 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {pendingRewindError}
         </div>
       )}
       <input

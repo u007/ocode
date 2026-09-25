@@ -26,16 +26,18 @@ type Envelope struct {
 // non-blocking discipline as broadcastEvent in handler.go.
 const busBufferSize = 256
 
-// criticalEvents are the terminal per-turn events a subscriber must not miss:
-// losing one leaves the client's transcript permanently truncated, since
-// neither the mid-turn replay buffer (session_manager.go liveFrameEvents) nor
-// the client's seq-gap reconcile (which only fires on a later envelope) can
-// recover them if nothing else publishes afterward. Publish waits up to
-// criticalPublishTimeout for room instead of dropping these immediately.
+// criticalEvents are the terminal lifecycle events a subscriber must not miss:
+// losing one leaves the client's transcript permanently truncated or its
+// compaction indicator stuck, since neither the mid-turn replay buffer
+// (session_manager.go liveFrameEvents) nor the client's seq-gap reconcile
+// (which only fires on a later envelope) can recover them if nothing else
+// publishes afterward. Publish waits up to criticalPublishTimeout for room
+// instead of dropping these immediately.
 var criticalEvents = map[string]bool{
-	"messages":   true,
-	"turn_done":  true,
-	"turn_error": true,
+	"messages":        true,
+	"turn_done":       true,
+	"turn_error":      true,
+	"compaction_done": true,
 }
 
 // criticalPublishTimeout bounds how long Publish waits for a stalled
@@ -49,7 +51,8 @@ const criticalPublishTimeout = 3 * time.Second
 // ambiguity about which session the event belongs to). Part 03 adds the
 // bootstrap and turn-lifecycle events: session_bootstrap (stages tools/mcp/
 // model + terminal ready and the MCP-timeout warning), turn_started,
-// turn_heartbeat, turn_done, turn_error.
+// turn_heartbeat, turn_done, turn_error. Compaction adds
+// compaction_started/compaction_done.
 var sessionScopedEvents = map[string]bool{
 	"session_started":     true,
 	"session_bootstrap":   true,
@@ -80,7 +83,9 @@ var sessionScopedEvents = map[string]bool{
 	// NOT in liveFrameEvents (session_manager.go) — activity is a momentary
 	// reading, so replaying it into a mid-turn reload would show a stale
 	// "⟳ llm" for a tool that already finished.
-	"agent_activity": true,
+	"agent_activity":     true,
+	"compaction_started": true,
+	"compaction_done":    true,
 }
 
 // EventBus is the single server-side broadcaster. Every published event is

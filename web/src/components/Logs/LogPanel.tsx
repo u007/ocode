@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import ConfirmDialog from "@/components/common/ConfirmDialog";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
 import { useLogPrefs } from "@/hooks/useLogPrefs";
@@ -44,6 +45,10 @@ function LogPanel({ active, sessionId, host }: { active: boolean; sessionId: str
   const [filter, setFilter] = useState("ALL");
   const [autoScroll, setAutoScroll] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Clears the session's log file on disk, so it is gated behind a rendered
+  // confirm: `window.confirm` silently returns false in the Wails/WKWebView
+  // desktop webview, which made the clear unreachable there.
+  const [confirmClear, setConfirmClear] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   // Settings → Logs: whether hidden tabs keep buffering, and the retention
   // cap. Read through refs so pref changes don't re-subscribe the bus handler.
@@ -233,14 +238,12 @@ function LogPanel({ active, sessionId, host }: { active: boolean; sessionId: str
   // Cancel a pending deferred scroll check on unmount.
   useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
+  // Runs only from the clear confirm. A rejection propagates to ConfirmDialog,
+  // which shows the reason inline and keeps the dialog open instead of
+  // dropping the log list as if the file had been cleared.
   const handleClear = async () => {
-    if (!window.confirm("Clear logs for this session?")) return;
-    try {
-      await api.clearLogs(sessionId, host);
-      setLogs([]);
-    } catch (err) {
-      console.error("Failed to clear logs:", err);
-    }
+    await api.clearLogs(sessionId, host);
+    setLogs([]);
   };
 
   const handleScroll = useCallback(() => {
@@ -339,8 +342,9 @@ function LogPanel({ active, sessionId, host }: { active: boolean; sessionId: str
             type="button"
             variant="ghost"
             size="sm"
-            onClick={handleClear}
+            onClick={() => setConfirmClear(true)}
             title="Clear logs"
+            aria-label="Clear logs"
           >
             <Trash2 className="w-4 h-4" />
           </Button>
@@ -379,6 +383,19 @@ function LogPanel({ active, sessionId, host }: { active: boolean; sessionId: str
           ))
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmClear}
+        title="Clear logs for this session?"
+        description="The session's log file is emptied on disk. This cannot be undone."
+        confirmLabel="Clear logs"
+        pendingLabel="Clearing…"
+        onConfirm={async () => {
+          await handleClear();
+          setConfirmClear(false);
+        }}
+        onCancel={() => setConfirmClear(false)}
+      />
     </div>
   );
 }

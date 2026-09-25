@@ -47,6 +47,7 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import ConfirmDialog from "../common/ConfirmDialog";
 import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "../ui/tooltip";
 import { Separator } from "../ui/separator";
@@ -582,6 +583,8 @@ function SortableProjectRow({
             variant="ghost"
             size="sm"
             className="p-1 h-5 w-5 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0"
+            title={`Remove ${project.name} from the project list`}
+            aria-label={`Remove ${project.name} from the project list`}
             onClick={(e) => {
               e.stopPropagation();
               onRemove();
@@ -602,7 +605,8 @@ interface SortableGroupHeaderProps {
   projectCount: number;
   onToggle: () => void;
   onRename: (name: string) => Promise<void>;
-  onDelete: () => Promise<void>;
+  /** Opens the delete confirm; the header never deletes the group itself. */
+  onDelete: () => void;
 }
 
 function SortableGroupHeader({
@@ -1147,6 +1151,98 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [addingRemote, setAddingRemote] = useState(false);
   const [editingRemote, setEditingRemote] = useState<Project | null>(null);
+  // Removing a project or a group is a one-click, un-undoable list edit, so
+  // every entry point (context menus, the row's trash button) only sets one of
+  // these and lets the shared ConfirmDialog do the mutation. They hold the
+  // subject (not just a callback) so each confirm can name exactly what it is
+  // about to drop.
+  const [pendingRemove, setPendingRemove] = useState<Project | null>(null);
+  // Group + how many projects the server will ungroup (HandleDeleteGroup).
+  const [pendingGroupDelete, setPendingGroupDelete] = useState<{
+    name: string;
+    projectCount: number;
+  } | null>(null);
+
+  const confirmRemoveProject = useCallback(async () => {
+    const target = pendingRemove;
+    if (!target) return;
+    // No catch: the store re-throws, and ConfirmDialog renders the reason
+    // inline and stays open so a failed removal never looks like a done one.
+    await removeProject(target.path, target.host);
+    setPendingRemove(null);
+  }, [pendingRemove, removeProject]);
+
+  const confirmDeleteGroup = useCallback(async () => {
+    const target = pendingGroupDelete;
+    if (!target) return;
+    await deleteGroup(target.name);
+    setPendingGroupDelete(null);
+  }, [pendingGroupDelete, deleteGroup]);
+
+  // Rendered in every surface (expanded list, mobile drawer, collapsed rail) —
+  // the rail branch has no dialogs of its own, and a confirm that is missing
+  // from the surface the user clicked is a confirm that never appears.
+  const renderConfirms = () => (
+    <>
+      <ConfirmDialog
+        open={pendingRemove !== null}
+        title="Remove project from the list?"
+        // Deliberately NOT "this cannot be undone": removal only drops the
+        // entry from projects.json (projects.Store.Remove), so files and
+        // transcripts survive and the folder can be re-added. The host+path is
+        // shown because two projects can share a path across hosts.
+        description={
+          pendingRemove && (
+            <>
+              <span className="font-medium text-foreground break-all">{pendingRemove.name}</span>{" "}
+              <span className="font-mono text-xs break-all">
+                ({pendingRemove.host ? `${pendingRemove.host}:${pendingRemove.path}` : pendingRemove.path})
+              </span>
+              <div className="mt-1 text-xs">
+                Its files and chat sessions are not deleted — you can add this folder again at any
+                time.
+              </div>
+            </>
+          )
+        }
+        confirmLabel="Remove"
+        pendingLabel="Removing…"
+        onConfirm={confirmRemoveProject}
+        onCancel={() => setPendingRemove(null)}
+      />
+      <ConfirmDialog
+        open={pendingGroupDelete !== null}
+        title="Delete group?"
+        description={
+          pendingGroupDelete && (
+            <>
+              <span className="font-medium text-foreground break-all">
+                {pendingGroupDelete.name}
+              </span>{" "}
+              will be deleted.
+              <div className="mt-1 text-xs">
+                {pendingGroupDelete.projectCount === 0 ? (
+                  <>No projects are in this group.</>
+                ) : (
+                  <>
+                    Its {pendingGroupDelete.projectCount}{" "}
+                    {pendingGroupDelete.projectCount === 1 ? "project" : "projects"} will move to
+                    Ungrouped — to put {pendingGroupDelete.projectCount === 1 ? "it" : "them"} back
+                    you would have to move {pendingGroupDelete.projectCount === 1 ? "it" : "them"} one
+                    by one.
+                  </>
+                )}
+              </div>
+            </>
+          )
+        }
+        confirmLabel="Delete group"
+        pendingLabel="Deleting…"
+        onConfirm={confirmDeleteGroup}
+        onCancel={() => setPendingGroupDelete(null)}
+      />
+    </>
+  );
 
   const toggleGroupCollapse = useCallback((name: string, currentlyCollapsed: boolean) => {
     setGroupCollapsed(name, !currentlyCollapsed);
@@ -1301,7 +1397,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
                     onSelect={() => selectProject(p)}
                     onEdit={p.host ? () => setEditingRemote(p) : undefined}
                     onToggleExpand={onToggle}
-                    onRemove={() => removeProject(p.path, p.host)}
+                    onRemove={() => setPendingRemove(p)}
                     onAddToGroup={(group) => setProjectGroup(p.path, group, p.host)}
                     onRemoveFromGroup={() => setProjectGroup(p.path, "", p.host)}
                     groups={state.groups}
@@ -1311,6 +1407,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
             </ScrollArea>
           )}
         </div>
+        {renderConfirms()}
       </TooltipProvider>
     );
   }
@@ -1357,7 +1454,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
                         projectCount={groupProjects.length}
                         onToggle={() => toggleGroupCollapse(group.name, !!group.collapsed)}
                         onRename={(name) => renameGroup(group.name, name)}
-                        onDelete={() => deleteGroup(group.name)}
+                        onDelete={() => setPendingGroupDelete({ name: group.name, projectCount: groupProjects.length })}
                       />
                     );
                   }
@@ -1378,7 +1475,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
                       // propagation (so the onSelect above never runs).
                       onRevealTab={isMobile ? onToggle : undefined}
                       onEdit={project.host ? () => setEditingRemote(project) : undefined}
-                      onRemove={() => removeProject(project.path, project.host)}
+                      onRemove={() => setPendingRemove(project)}
                       onRename={(name) => renameProject(project.path, name, project.host)}
                       onCreateGroup={async (name) => {
                         await createGroup(name);
@@ -1471,6 +1568,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
       <EditRemoteDialog project={editingRemote} onClose={() => setEditingRemote(null)} onSave={updateRemoteProject} />
       <CreateGroupDialog open={creatingGroup} onClose={() => setCreatingGroup(false)} onCreate={handleCreateGroup} />
       <DirectoryBrowser open={browserOpen} onOpenChange={setBrowserOpen} onSelect={(path) => { setNewPath(path); setBrowserOpen(false); }} />
+      {renderConfirms()}
       </>
     );
   }

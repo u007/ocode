@@ -24,6 +24,7 @@ const appApi = vi.hoisted(() => ({
 const chatMock = vi.hoisted(() => ({
   pendingPermission: null as unknown,
   pendingQuestion: null as unknown,
+  hiddenQuestionRequestId: null as string | null,
 }));
 
 beforeAll(() => {
@@ -90,8 +91,10 @@ vi.mock("./hooks/useChat", () => ({
     resolvePermission: async () => ({ ok: true }),
     pendingPermission: chatMock.pendingPermission,
     pendingQuestion: chatMock.pendingQuestion,
+    hiddenQuestionRequestId: chatMock.hiddenQuestionRequestId,
     askContext: null,
     submitQuestionAnswers: async () => true,
+    hideQuestion: vi.fn(),
     cancelQuestion: async () => true,
   }),
 }));
@@ -180,6 +183,7 @@ beforeEach(() => {
   tabFocusActions.clear();
   chatMock.pendingPermission = PENDING_PERMISSION;
   chatMock.pendingQuestion = PENDING_QUESTION;
+  chatMock.hiddenQuestionRequestId = null;
   appApi.listProjects.mockReset().mockResolvedValue([{ path: "/proj", name: "proj" }]);
   appApi.getCurrentProject.mockReset().mockResolvedValue({ project: { path: "/proj", name: "proj" } });
   appApi.listProjectSessions.mockReset().mockResolvedValue([]);
@@ -245,5 +249,31 @@ describe("session-scoped ask dialogs", () => {
     await waitFor(() => expect(mainAttr("data-active-view")).toBe("sessions"));
     expect(await screen.findByTestId("permission-dialog")).toBeInTheDocument();
     expect(screen.getByTestId("question-dialog")).toBeInTheDocument();
+  });
+
+  it("does not mount a locally hidden question on the Chat surface", async () => {
+    chatMock.hiddenQuestionRequestId = PENDING_QUESTION.request_id;
+    window.localStorage.setItem("ocode.ui.view-state.v1", viewState("sessions", "chat"));
+    renderApp();
+
+    await screen.findByTestId("chat-panel");
+    expect(await screen.findByTestId("permission-dialog")).toBeInTheDocument();
+    expect(screen.queryByTestId("question-dialog")).toBeNull();
+  });
+
+  it("keeps a locally hidden question hidden off-surface and after returning", async () => {
+    chatMock.hiddenQuestionRequestId = PENDING_QUESTION.request_id;
+    window.localStorage.setItem("ocode.ui.view-state.v1", viewState("files", "chat"));
+    renderApp();
+
+    await waitFor(() => expect(mainAttr("data-active-view")).toBe("files"));
+    await screen.findByTestId("chat-panel");
+    expect(screen.queryByTestId("question-dialog")).toBeNull();
+
+    act(() => tabFocusActions.request({ kind: "chat", projectPath: "/proj" }));
+
+    await waitFor(() => expect(mainAttr("data-active-view")).toBe("sessions"));
+    expect(await screen.findByTestId("permission-dialog")).toBeInTheDocument();
+    expect(screen.queryByTestId("question-dialog")).toBeNull();
   });
 });

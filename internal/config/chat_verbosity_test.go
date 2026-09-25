@@ -78,7 +78,7 @@ func TestResolveChatVerbosityPolicy(t *testing.T) {
 			name:              "balanced",
 			cfg:               ChatVerbosityConfig{Preset: "balanced"},
 			wantOlderThinking: "collapsed",
-			wantToolCalls:     "expanded",
+			wantToolCalls:     "collapsed",
 			wantToolOutput:    "expanded",
 			wantNotices:       "expanded",
 		},
@@ -91,17 +91,20 @@ func TestResolveChatVerbosityPolicy(t *testing.T) {
 			wantNotices:       "collapsed",
 		},
 		{
+			// Balanced now collapses tool calls and expands tool output, so
+			// these overrides re-open one cell and collapse the other: override
+			// precedence in both directions, not a no-op restatement.
 			name: "override",
 			cfg: ChatVerbosityConfig{
 				Preset: "balanced",
 				Overrides: ChatVerbosityOverrides{
-					ToolCalls:  "collapsed",
-					ToolOutput: "expanded",
+					ToolCalls:  "expanded",
+					ToolOutput: "collapsed",
 				},
 			},
 			wantOlderThinking: "collapsed",
-			wantToolCalls:     "collapsed",
-			wantToolOutput:    "expanded",
+			wantToolCalls:     "expanded",
+			wantToolOutput:    "collapsed",
 			wantNotices:       "expanded",
 		},
 	}
@@ -181,6 +184,24 @@ func TestChatVerbosityConfigFileRejectsUnknownOverrideCategory(t *testing.T) {
 	}
 	if _, err := LoadOcodeConfigCopy(); err == nil {
 		t.Fatal("LoadOcodeConfigCopy() = nil, want unknown-category error")
+	}
+}
+
+func TestChatVerbosityConfigFileRejectsExplicitEmptyOverride(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	dir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	body := `{"chat_verbosity":{"preset":"full","overrides":{"older_thinking":""}}}`
+	if err := os.WriteFile(filepath.Join(dir, "ocodeconfig.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadOcodeConfigCopy(); err == nil {
+		t.Fatal("LoadOcodeConfigCopy() = nil, want explicit-empty error")
 	}
 }
 

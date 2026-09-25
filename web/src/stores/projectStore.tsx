@@ -873,7 +873,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       }
       await refreshProjects();
     } catch (err) {
+      // Re-thrown so the sidebar's removal confirm can keep the dialog open
+      // with the reason attached; a swallowed failure closes the dialog as if
+      // the project were gone. Same contract as renameProject below.
       console.error("Failed to remove project:", err);
+      throw err;
     }
   }, [refreshProjects]);
 
@@ -920,7 +924,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       await refreshGroups();
       await refreshProjects();
     } catch (err) {
+      // Re-thrown for the same reason as removeProject: the group-delete
+      // confirm must survive a failure instead of closing as if it worked.
       console.error("Failed to delete group:", err);
+      throw err;
     }
   }, [refreshGroups, refreshProjects]);
 

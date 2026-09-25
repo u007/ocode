@@ -39,8 +39,10 @@ interface Props {
   toolName?: string;
   /** Session/tab id that owns this message — required for restore dispatch validation. */
   sessionId?: string;
-  /** Absolute index in the messages array for restore-to-input truncation (messages[:index]). */
+  /** Local transcript position used only to build a stable fallback key. */
   messageIndex?: number;
+  /** Absolute server index for the durable rewind resource. */
+  restoreTargetIndex?: number;
   /** Stable identity supplied by the virtualized transcript renderer. */
   entryKey?: string;
   /** The last thinking block in the latest assistant turn stays expanded. */
@@ -213,6 +215,7 @@ function MessageBubble({
   toolName = "",
   sessionId,
   messageIndex,
+  restoreTargetIndex,
   entryKey,
   isLatestThinking = false,
   forceOpen = false,
@@ -282,7 +285,12 @@ function MessageBubble({
 
   if (message.role === "user") {
     return (
-      <UserBubble message={message} highlight={highlight} sessionId={sessionId} messageIndex={messageIndex} />
+      <UserBubble
+        message={message}
+        highlight={highlight}
+        sessionId={sessionId}
+        restoreTargetIndex={restoreTargetIndex}
+      />
     );
   }
 
@@ -295,20 +303,30 @@ function UserBubble({
   message,
   highlight,
   sessionId,
-  messageIndex,
+  restoreTargetIndex,
 }: {
   message: Message;
   highlight: string;
   sessionId?: string;
-  messageIndex?: number;
+  restoreTargetIndex?: number;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   const handleConfirm = () => {
-    if (!sessionId) return;
-    // Guard: don't restore while streaming — matches TUI blocking during active turn
-    dispatchRestore(sessionId, message.content, messageIndex);
+    if (!sessionId || restoreTargetIndex === undefined) {
+      setConfirmOpen(false);
+      setRestoreError("This message cannot be restored because its full-transcript position is unknown. Reload the chat and try again.");
+      return;
+    }
+    dispatchRestore({
+      sessionId,
+      text: message.content,
+      targetIndex: restoreTargetIndex,
+      userSeq: message.user_seq || undefined,
+    });
     setConfirmOpen(false);
+    setRestoreError(null);
   };
 
   return (
@@ -336,13 +354,18 @@ function UserBubble({
           className="mt-1 shrink-0"
         />
       </div>
+      {restoreError && (
+        <div role="alert" className="mb-3 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {restoreError}
+        </div>
+      )}
 
       <Dialog open={confirmOpen} onOpenChange={(o) => !o && setConfirmOpen(false)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Restore message to input?</DialogTitle>
             <DialogDescription>
-              This will replace the current draft with this message and remove it and all following messages from history (like re-editing). You can edit and resend.
+              This replaces the current draft with this message. The selected message and following history stay in history until you send the restored draft.
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-40 overflow-auto rounded bg-muted p-3 text-sm text-foreground whitespace-pre-wrap">

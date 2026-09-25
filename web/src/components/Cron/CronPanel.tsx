@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import ConfirmDialog from "@/components/common/ConfirmDialog";
 import type { CronDelivery, CronJob, CronJobWriteRequest } from "@/api/types";
 import { api } from "@/api/client";
 import { describeSchedule, lastRunLabel, nextRunLabel } from "./cronFormat";
@@ -39,6 +40,11 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [historyJob, setHistoryJob] = useState<CronJob | null>(null);
+  // Job awaiting delete confirmation. Native `window.confirm` was the old
+  // guard and it silently returns false in the Wails/WKWebView desktop webview,
+  // which made deleting a job impossible there.
+  const [pendingDelete, setPendingDelete] = useState<CronJob | null>(null);
+  const [pendingOutboxClear, setPendingOutboxClear] = useState(false);
   const initialReadyRef = useRef(false);
   const refreshAllRef = useRef<(() => Promise<KeyedLoadResult<CronLoadData>>) | null>(null);
 
@@ -144,23 +150,26 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
     }
   };
 
+  // Runs only from the delete confirm. Rejections propagate to ConfirmDialog,
+  // which renders the reason inline and keeps the confirm open — closing it
+  // would make a failed delete look like a completed one.
   const deleteJob = async (job: CronJob) => {
-    if (!window.confirm(`Delete cron job \"${job.name}\"?`)) return;
-    try {
-      await api.deleteCronJob(job.id);
-      await refreshAll();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete job");
-    }
+    await api.deleteCronJob(job.id);
+    await refreshAll();
   };
 
+  // Opens the clear-outbox confirm; the drain itself happens in the dialog's
+  // onConfirm so a failure can be reported without an app-wide banner.
   const clearOutbox = async () => {
-    try {
-      await api.drainCronOutbox();
-      await refreshAll();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to clear outbox");
-    }
+    setPendingOutboxClear(true);
+  };
+
+  // Runs only from the clear confirm. Rejections propagate to ConfirmDialog,
+  // which shows the reason inline and keeps the confirm open — a swallowed
+  // failure would empty the list on screen while the entries are still queued.
+  const drainOutbox = async () => {
+    await api.drainCronOutbox();
+    await refreshAll();
   };
 
   const saveTargets = async (nextTargets: Record<string, number>) => {
@@ -310,9 +319,11 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
                                 variant="ghost"
                                 size="sm"
                                 className="h-8 px-2 text-muted-foreground hover:text-red-300"
+                                title={`Delete ${job.name || "this job"}`}
+                                aria-label={`Delete ${job.name || "this job"}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  void deleteJob(job);
+                                  setPendingDelete(job);
                                 }}
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -344,6 +355,53 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
       </div>
 
       <CronJobDialog open={dialogOpen} job={editingJob} onOpenChange={setDialogOpen} onSave={submitJob} />
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete cron job?"
+        description={
+          pendingDelete && (
+            <>
+              <span className="font-medium text-foreground break-all">
+                {pendingDelete.name || pendingDelete.payload.message}
+              </span>{" "}
+              will be deleted and will stop running on its schedule. Run history is kept on disk,
+              but the job is no longer listed.
+            </>
+          )
+        }
+        confirmLabel="Delete"
+        pendingLabel="Deleting…"
+        onConfirm={async () => {
+          if (!pendingDelete) return;
+          await deleteJob(pendingDelete);
+          setPendingDelete(null);
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={pendingOutboxClear}
+        title="Clear pending cron results?"
+        // Verified against Outbox.Drain (internal/scheduler/deliver.go): it
+        // truncates the JSONL file, and the handler drains only after peeking
+        // (internal/server/scheduler.go), so a cleared entry is gone for good
+        // and is never delivered. Say exactly that.
+        description={
+          <>
+            {outbox.length} {outbox.length === 1 ? "result" : "results"} waiting to be delivered
+            will be dropped. Clearing the outbox deletes them without being delivered — a cron
+            result that has not been read yet is lost.
+          </>
+        }
+        confirmLabel="Clear outbox"
+        pendingLabel="Clearing…"
+        onConfirm={async () => {
+          await drainOutbox();
+          setPendingOutboxClear(false);
+        }}
+        onCancel={() => setPendingOutboxClear(false)}
+      />
     </div>
   );
 }

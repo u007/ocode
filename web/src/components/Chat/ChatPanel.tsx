@@ -13,7 +13,7 @@ import {
 import { useChatVerbosity } from "../../lib/chatVerbosity";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
-import { RESTORE_EVENT } from "../../lib/inputRestore";
+import { absoluteRestoreTarget } from "../../lib/inputRestore";
 import { SESSION_PREFETCH_LIMIT, takePrefetchedSession } from "../../lib/sessionPrefetch";
 import {
   buildJumpTargets,
@@ -164,36 +164,6 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     lastCompletedAssistantRef.current = key;
     window.dispatchEvent(new CustomEvent("ocode:assistant-complete", { detail: { text, atBottom: atBottomRef.current } }));
   }, [initialized, messages, slice.isStreaming, slice.turnActive]);
-
-  // Restore-to-input truncation: TUI truncates messages[:index] when restoring a
-  // user message. This listener owns history mutation; ChatInput only handles
-  // the draft. Uses entry.originalIndex (absolute messages index), not the
-  // virtualized row index.
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const ce = e as CustomEvent<{ sessionId: string; text: string; index?: number }>;
-      if (!ce.detail || ce.detail.sessionId !== sessionId) return;
-      const idx = ce.detail.index;
-      if (typeof idx !== "number" || !Number.isFinite(idx)) return;
-      // Don't truncate while a turn is active — it could append after truncation.
-      if (slice.isStreaming || slice.turnActive || slice.live.length > 0) return;
-      // If older messages are not fully loaded, indices are not absolute.
-      if (slice.hasMore) return;
-      if (idx < 0 || idx > slice.messages.length) return;
-      // Only allow restoring a user message; if not, just let ChatInput handle draft.
-      const msg = slice.messages[idx];
-      if (!msg || msg.role !== "user") return;
-      dispatch({ type: "TRUNCATE_MESSAGES", sessionId, keepUntil: idx });
-      // Persist truncation server-side; failure is non-fatal (client already truncated).
-      if (!sessionId.startsWith("new-")) {
-        api.truncateSession(sessionId, idx).catch((err) => {
-          console.warn("truncateSession failed", err);
-        });
-      }
-    };
-    window.addEventListener(RESTORE_EVENT, handler as EventListener);
-    return () => window.removeEventListener(RESTORE_EVENT, handler as EventListener);
-  }, [sessionId, slice.messages, slice.hasMore, slice.isStreaming, slice.turnActive, slice.live, dispatch]);
 
   // In-chat find bar (Ctrl/Cmd+F). Match computation happens in TWO layers:
   //   1. Instant, client-side, over the loaded window (below) — drives
@@ -1309,6 +1279,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                         }
                         sessionId={sessionId}
                         messageIndex={entry.originalIndex}
+                        restoreTargetIndex={absoluteRestoreTarget(windowStartServerIndex, entry.originalIndex) ?? undefined}
                         entryKey={entryKey}
                         isLatestThinking={isLatestThinking}
                         forceOpen={forceOpen}
@@ -1334,7 +1305,12 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                             highlight={highlight}
                             onOpenQuestion={
                               pendingQuestion
-                                ? () => dispatch({ type: "QUESTION_REQUEST", sessionId, question: pendingQuestion })
+                                ? () =>
+                                    dispatch({
+                                      type: "QUESTION_SHOW",
+                                      sessionId,
+                                      requestId: pendingQuestion.request_id,
+                                    })
                                 : undefined
                             }
                             callKey={`${entryKey}:call:${tc.id}`}

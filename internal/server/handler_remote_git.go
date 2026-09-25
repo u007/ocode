@@ -22,8 +22,16 @@ func remoteGitStatus(ctx context.Context, rw remoteWork) GitStatus {
 	status := GitStatus{
 		StagedFiles:  []string{},
 		ChangedFiles: []string{},
+		Conflicts:    []GitConflict{},
 	}
-	// ASCII record separator; git cannot emit it in these fields.
+	// ASCII record separator. Safe for the newline-delimited sections (git
+	// escapes control bytes in those), but NOT for the -z section, whose
+	// records carry raw paths: a filename may legally contain 0x1e, which
+	// would manufacture a phantom section and shift every later field. That
+	// section is therefore base64-encoded in the shell (see
+	// remoteGitConflictsProbe), so its payload cannot contain the separator
+	// no matter what the filename is. The state section is base64 for the
+	// same reason, per-file.
 	const sep = "\x1e"
 	script := remoteGitCommand(rw.Path, "status", "--porcelain=v2", "--branch") + "\n" +
 		"echo " + sep + "\n" +
@@ -35,12 +43,24 @@ func remoteGitStatus(ctx context.Context, rw remoteWork) GitStatus {
 		"echo " + sep + "\n" +
 		remoteGitCommand(rw.Path, "status", "--porcelain", "-u") + "\n" +
 		"echo " + sep + "\n" +
+		remoteGitConflictsProbe(rw.Path) + "\n" +
+		"echo " + sep + "\n" +
+		remoteGitOperationStateProbe(rw.Path) + "\n" +
+		"echo " + sep + "\n" +
+		// The is-inside-work-tree probe stays LAST deliberately: it decides
+		// the script's exit status. In a non-repo it must still succeed via
+		// the `|| echo`, so remoteRun returns no error and the caller reports
+		// is_repo:false rather than an entirely empty status. Appending new
+		// sections before it is required, not stylistic.
 		remoteGitCommand(rw.Path, "rev-parse", "--is-inside-work-tree") + " 2>/dev/null || echo not-a-repo\n"
 	out, err := remoteRun(ctx, rw, script)
 	if err != nil {
 		return status
 	}
-	sections := strings.Split(out, sep)
+	// 8 sections: the 5 pre-existing data probes, conflicts, operation state,
+	// and the trailing is-inside-work-tree. SplitN caps the split count as a
+	// second line of defense against a stray separator.
+	sections := strings.SplitN(out, sep, 8)
 	get := func(i int) string { return strings.TrimSpace(sectionAt(sections, i)) }
 	status.Branch = get(1)
 	status.StagedFiles = nonEmptyLines(get(2))
@@ -68,7 +88,29 @@ func remoteGitStatus(ctx context.Context, rw remoteWork) GitStatus {
 		seen[f] = true
 		status.ChangedFiles = append(status.ChangedFiles, f)
 	}
-	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0
+
+	// Conflicts come from the base64-wrapped -z section, decoded and then
+	// handed to the SAME pure parser the local path uses, so both transports
+	// agree on the codes and the ours/theirs booleans by construction rather
+	// than by duplicated rules.
+	status.Conflicts = parseUnmergedPorcelain(decodeRemoteProbe(sectionAt(sections, 5)))
+	// A conflicted path is reported ONLY in Conflicts, matching the local
+	// pipeline. Leaving it in staged/changed as well would double-count the
+	// same file in the Git tab's badges.
+	conflicted := make(map[string]bool, len(status.Conflicts))
+	for _, c := range status.Conflicts {
+		conflicted[c.Path] = true
+	}
+	status.StagedFiles = withoutPaths(status.StagedFiles, conflicted)
+	status.ChangedFiles = withoutPaths(status.ChangedFiles, conflicted)
+
+	// The operation-state section is a fixed probe block emitted by
+	// remoteGitOperationStateProbe; parsing it produces the same
+	// gitStateEntry values the local path reads from disk, so the shared
+	// phase-01 parser decides the answer.
+	status.Operation = gitOperationStateFor(parseRemoteStateEntries(sectionAt(sections, 6)))
+
+	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0 || len(status.Conflicts) > 0
 
 	// Divergence from the porcelain=v2 --branch section.
 	branchLine := get(0)

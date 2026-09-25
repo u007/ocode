@@ -1,7 +1,7 @@
 ---
 type: Decision
 title: 'Design Spec: Reliable Large-Context Compaction (web/desktop /compact)'
-description: Approved design spec for reliable large-context /compact on web/desktop (2026-09-25).
+description: Design spec for reliable large-context /compact on web/desktop (2026-09-25); IMPLEMENTED — per-batch first-token/idle windows, fixed 30-min cap, context-scoped delta callback, ErrCompactionTimeout→504, sticky inline + app-wide web errors.
 tags:
   - compact
   - compaction
@@ -11,13 +11,28 @@ tags:
   - web
   - server
   - config
-timestamp: 2026-09-25T06:33:47Z
+timestamp: 2026-09-25T12:00:02Z
 ---
 # Design Spec: Reliable Large-Context Compaction (web/desktop `/compact`)
 
-- **Status:** APPROVED design. **Implementation has NOT started.** No source code, tests, or docs have been changed as part of this spec.
+- **Status:** **IMPLEMENTED (2026-09-25).** The approved design below shipped as described; see *As-built notes* for the exact code anchors and the few wording deltas. §11's documentation tasks are done (`docs/concepts/compaction-config.md`, README, CHANGES, TODO, `skills/ocode-agent-architecture/SKILL.md`).
 - **Date:** 2026-09-25
 - **Scope:** ocode — `internal/agent` (compaction core), `internal/server` (compact HTTP handler), `internal/config`, `web/` (compact command + settings).
+
+## As-built notes (2026-09-25)
+
+What actually landed, in the order the design specifies it:
+
+1. **Per-batch windows.** `runCompact` builds a **fresh** batch context *inside* the batch loop (`internal/agent/agent.go:2592-2607`) with `inactivityContextWithParent(operationCtx, idle, firstToken)` (`internal/agent/compact.go:1008`). The batch starts under `summary_first_token_timeout_seconds` (resolved default 300s); the first streamed delta performs the first `reset()`, after which later gaps are bounded by `summary_timeout_seconds`.
+2. **Fixed 30-minute cap.** `compactOverallCap = 30 * time.Minute` (`internal/agent/compact.go:161-164`, a package var so tests shorten it) applied via `newCompactOperationContext()` → `context.WithTimeoutCause(..., ErrCompactionTimeout)` (`compact.go:178-184`). Batch contexts are children of it, so the cap aborts a batch that is *still receiving tokens*. No config knob (§4 non-goal held).
+3. **Context-scoped delta callback.** `withDeltaCallback` / `deltaCallbackFromContext` (`internal/agent/client.go:65-79`) carry the reset hook through the request context; `ChatWithContext` reads it (`client.go:783`) and routes summary deltas to it instead of `GenericClient.OnDelta`. `runCompact` installs it at `agent.go:2606` and never calls `gc.SetOnDelta`; `chatWithDelta`'s shared `SetOnDelta`/`SetOnDelta(nil)` pair is unchanged as §6.3 required.
+4. **Error taxonomy → 504.** `agent.ErrCompactionTimeout` (`internal/agent/compact.go:159`) is the only timeout cause. `HandleCompactSession` (`internal/server/handler.go:1779`, classification `:1829-1857`) maps `errors.Is(result.Err, agent.ErrCompactionTimeout)` → **504** with `"compaction timed out; transcript unchanged; retry the command"`; a dead request context is logged and **no response is written**; any other error stays **500**; 404/422 mappings unchanged. Classification is by sentinel identity only, never by message text.
+5. **Web sticky + app-wide error.** `handleCompact` (`web/src/components/Chat/commands.ts:1562-1597`) keeps the session-scoped `setCompactionState(sessionId, {status:"error", error})` **and** calls `reportActionError(err, "Compact conversation")` (`web/src/lib/actionErrors.ts:55`) in the same catch path, so the failure survives composer/tab remount.
+6. **Config.** `summary_first_token_timeout_seconds` is a real field: `internal/config/ocodeconfig.go:311` (field), `:1106` (default `300`), `:2003-2005` (merge); persisted raw — including explicit `0` — by `applyCompactConfig` (`ocodeconfig.go:1978`); normalized only in `resolveCompactRuntime` (`internal/agent/agent.go:1975`, `<= 0 → 300` at `:2024-2026`, idle `<= 0 → 600` at `:2020-2021`). Web row: `web/src/components/Settings/CompactForm.tsx:23` ("First-token timeout (s)").
+7. **Tests.** `internal/agent/compact_reliability_test.go` (fresh per-batch deadline, first-token grace, absolute cap), `internal/agent/client_reliability_test.go` (per-call callback survives a foreign `SetOnDelta(nil)`), `internal/config/compact_config_reliability_test.go` (round-trip incl. explicit `0`), `internal/server/compact_timeout_test.go` (504 + transcript unchanged), `web/src/components/Chat/commands.compact.error.test.tsx` (dual surfacing).
+8. **Invariant held.** On every failure path the splice is skipped, `saveSession` does not run, and no `messages` broadcast is sent; `finishCompaction` still publishes `compaction_done` so other clients clear the indicator.
+
+Sections below keep their approved-design wording. §2 and §5's "Current (failing) flow" describe the pre-fix state and are historical evidence, not current behavior; §11's "none have been touched by this spec" line is superseded by the status bullet above.
 
 ## 1. Problem
 
@@ -301,6 +316,8 @@ When implementing, these must be updated (none have been touched by this spec):
 4. `CHANGES.md` — entry under the current release.
 5. `docs/concepts/compaction-config.md` — **new**, created via the context system (`doc_write`, path without `docs/` prefix).
 6. `TODO.md` — a concrete bullet for the deferred work: config reload/recovery of an in-flight compaction + async-compaction exploration (non-goals in §4).
+
+All six are now done (README `summary_first_token_timeout_seconds`, CHANGES release notes, `TODO.md` "Large-context compaction recovery after client disconnect/reload", the agent skill's Compact section, and `concepts/compaction-config.md`).
 
 ## 12. Open issues / deferred
 

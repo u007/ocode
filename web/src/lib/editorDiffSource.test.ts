@@ -123,3 +123,36 @@ describe("resolveEditorDiffSource", () => {
     expect(res).toEqual({ kind: "git", patch: "" });
   });
 });
+
+// Phase 07 decision (deliberate, pinned here so it cannot drift by accident).
+//
+// A conflicted file gets NO git diff decorations in the editor, and the reason
+// is NOT the status lists this module never reads. `git diff` emits a COMBINED
+// diff for an unmerged path — a `diff --cc` header and a three-way `@@@` hunk —
+// and the server's parseUnifiedDiff (internal/server/handler_git.go) only
+// recognizes `diff --git`, so the file yields no GitDiffFile at all and arrives
+// here as an empty gitFiles entry.
+//
+// This is accepted for now: the Git tab lists the conflict with its resolution
+// actions, and the file tree badges it. Teaching the parser combined diffs
+// would touch seven call sites (local + remote diff endpoints), so it is logged
+// in TODO.md rather than smuggled into a badge-parity phase.
+describe("resolveEditorDiffSource with a conflicted path", () => {
+  const conflictedStatus = gitStatus({
+    has_changes: true,
+    conflicts: [{ path: "src/app.ts", code: "UU", ours: true, theirs: true }],
+  });
+
+  it("returns an empty git patch rather than falling back to the session diff", () => {
+    const res = resolveEditorDiffSource({
+      projectRoot: "/repo",
+      gitStatus: conflictedStatus,
+      gitFiles: [], // the combined diff is dropped server-side
+      path: "src/app.ts",
+      sessionPatch: SESSION_PATCH,
+    });
+    // "git" with an empty patch is the deliberate answer: a conflicted file is
+    // neither a clean repo (which must not fall back) nor a session edit.
+    expect(res).toEqual({ kind: "git", patch: "" });
+  });
+});

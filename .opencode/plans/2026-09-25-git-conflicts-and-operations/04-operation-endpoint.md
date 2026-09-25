@@ -134,6 +134,40 @@ be built.
   red; drop `GIT_EDITOR` from the environment and confirm the environment
   assertion goes red.
 
+## Implementation decisions (recorded 2026-09-25)
+
+Three places where the built behaviour differs from, or refines, this plan.
+
+- **The continue-with-conflicts pre-check is kept, and it is the only
+  reinterpretation.** This plan's Risks section says a failing continue must
+  be "surfaced verbatim rather than retried or reinterpreted." A 409 up front
+  when conflicts remain does reinterpret one specific case. It is retained
+  because git's own message ("Committing is not possible because you have
+  unmerged files") is prose the user has to decode, while the pre-check names
+  the action to take, and the web UI already disables Continue in exactly this
+  state. **Every other failure is surfaced verbatim** — no retry, no rewriting
+  of git's output. Skip is deliberately not pre-checked, because skipping a
+  conflicted step is the point of skip.
+
+- **A git refusal maps to 409, not 500.** When git itself refuses (a hook vetoed
+  the commit, the state moved under us) the request was legitimate and git gave
+  a legitimate answer; 500 would misreport that as a server fault. The response
+  body is git's combined output, verbatim. A missing `kind`, an unknown action
+  and an unsupported (kind, action) pair are 400; no operation in progress and
+  a stale kind are 409.
+
+- **The operation command is bounded by a 60s timeout** and runs under the
+  request context. `--continue` and `--skip` run commit hooks and may invoke
+  credential helpers, so a child that never exits would otherwise hang the HTTP
+  request forever. This matches the existing network-action timeout.
+
+- **The bisect tests use a real `git bisect start`, not hand-built state.** The
+  plan suggested synthesizing `BISECT_START`/`BISECT_LOG`. A real bisect was
+  verified to work in this environment (unlike `git rebase` and
+  `git checkout`, which are denied) and produces a genuine `BISECT_START`, so
+  the tests use it. The synthesized rebase state remains necessary for
+  `rebase`/`am` in Phase 01, which cannot be produced here at all.
+
 ## Risks and open questions
 
 - **Abort is destructive.** It discards the in-progress merge or rebase

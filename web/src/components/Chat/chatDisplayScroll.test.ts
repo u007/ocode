@@ -21,7 +21,7 @@ describe("chat display scroll anchoring", () => {
     expect(scrollElement.scrollTop).toBe(159);
   });
 
-  it("does nothing when the virtualizer cannot resolve the anchor", () => {
+  it("leaves scrollTop unchanged when the virtualizer cannot resolve the offset", () => {
     const scrollElement = { scrollTop: 12 };
     const virtualizer = {
       scrollToIndex: vi.fn(),

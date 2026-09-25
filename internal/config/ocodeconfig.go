@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -302,8 +303,14 @@ type CompactConfig struct {
 	KeepRecentTokens      int     `json:"keep_recent_tokens"`
 	MinMessages           int     `json:"min_messages"`
 	SummaryTimeoutSeconds int     `json:"summary_timeout_seconds"`
-	SummaryMaxRetries     int     `json:"summary_max_retries"`
-	MaxSummaryInputTokens int     `json:"max_summary_input_tokens"`
+	// SummaryFirstTokenTimeoutSeconds is the initial inactivity allowance for
+	// a compaction batch before its first streamed token. After the first
+	// token, SummaryTimeoutSeconds governs subsequent idle periods. A value
+	// <= 0 is resolved to the runtime default of 300 seconds; the persisted
+	// value itself is left unchanged.
+	SummaryFirstTokenTimeoutSeconds int `json:"summary_first_token_timeout_seconds"`
+	SummaryMaxRetries               int `json:"summary_max_retries"`
+	MaxSummaryInputTokens           int `json:"max_summary_input_tokens"`
 }
 
 const (
@@ -338,6 +345,9 @@ type ChatVerbosityConfig struct {
 // dropping it. Omitted categories stay empty so withDefaults can apply
 // "preset"; an explicit null is rejected as an invalid value.
 func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("chat verbosity overrides must be an object")
+	}
 	var raw map[string]*string
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -349,6 +359,9 @@ func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("unknown override category: %s", name)
 		}
 		if value == nil {
+			return fmt.Errorf("override category %s must be one of %q, %q, or %q", name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+		}
+		if !validChatDisplayOverride(*value) {
 			return fmt.Errorf("override category %s must be one of %q, %q, or %q", name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
 		}
 		*dst = *value
@@ -489,7 +502,11 @@ func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, err
 	notices := ChatDisplayExpanded
 	switch cfg.Preset {
 	case ChatVerbosityBalanced:
+		// Balanced hides older thinking AND tool-call details; tool output
+		// stays expanded (with the render-time 20-line tail preview) and each
+		// activity notice stays inline.
 		olderThinking = ChatDisplayCollapsed
+		toolCalls = ChatDisplayCollapsed
 	case ChatVerbosityQuiet:
 		olderThinking = ChatDisplayCollapsed
 		toolCalls = ChatDisplayCollapsed
@@ -946,21 +963,24 @@ type BashPermissionConfig struct {
 }
 
 type compactConfigFile struct {
-	Enabled               *bool    `json:"enabled"`
-	SummaryProvider       *string  `json:"summary_provider"`
-	SummaryModel          *string  `json:"summary_model"`
-	TokenThreshold        *float64 `json:"token_threshold"`
-	KeepRecentTurns       *int     `json:"keep_recent_turns"`
-	KeepRecentTokens      *int     `json:"keep_recent_tokens"`
-	MinMessages           *int     `json:"min_messages"`
-	SummaryTimeoutSeconds *int     `json:"summary_timeout_seconds"`
-	SummaryMaxRetries     *int     `json:"summary_max_retries"`
-	MaxSummaryInputTokens *int     `json:"max_summary_input_tokens"`
+	Enabled                         *bool    `json:"enabled"`
+	SummaryProvider                 *string  `json:"summary_provider"`
+	SummaryModel                    *string  `json:"summary_model"`
+	TokenThreshold                  *float64 `json:"token_threshold"`
+	KeepRecentTurns                 *int     `json:"keep_recent_turns"`
+	KeepRecentTokens                *int     `json:"keep_recent_tokens"`
+	MinMessages                     *int     `json:"min_messages"`
+	SummaryTimeoutSeconds           *int     `json:"summary_timeout_seconds"`
+	SummaryFirstTokenTimeoutSeconds *int     `json:"summary_first_token_timeout_seconds"`
+	SummaryMaxRetries               *int     `json:"summary_max_retries"`
+	MaxSummaryInputTokens           *int     `json:"max_summary_input_tokens"`
 }
 
+type chatVerbosityOverridesFile map[string]*string
+
 type chatVerbosityConfigFile struct {
-	Preset    *string                 `json:"preset"`
-	Overrides *ChatVerbosityOverrides `json:"overrides"`
+	Preset    *string                     `json:"preset"`
+	Overrides *chatVerbosityOverridesFile `json:"overrides"`
 }
 
 type tuiConfigFile struct {
@@ -1082,13 +1102,14 @@ type ocodeConfigFile struct {
 
 func defaultCompactConfig() CompactConfig {
 	return CompactConfig{
-		Enabled:               true,
-		TokenThreshold:        0.85,
-		KeepRecentTurns:       3,
-		MinMessages:           8,
-		SummaryTimeoutSeconds: 600,
-		SummaryMaxRetries:     1,
-		MaxSummaryInputTokens: 50000,
+		Enabled:                         true,
+		TokenThreshold:                  0.85,
+		KeepRecentTurns:                 3,
+		MinMessages:                     8,
+		SummaryTimeoutSeconds:           600,
+		SummaryFirstTokenTimeoutSeconds: 300,
+		SummaryMaxRetries:               1,
+		MaxSummaryInputTokens:           50000,
 	}
 }
 
@@ -1824,7 +1845,16 @@ func applyChatVerbosityConfig(dst *ChatVerbosityConfig, src *chatVerbosityConfig
 		next.Preset = *src.Preset
 	}
 	if src.Overrides != nil {
-		next.Overrides = *src.Overrides
+		for name, value := range *src.Overrides {
+			dst := chatVerbosityOverrideField(&next.Overrides, name)
+			if dst == nil {
+				return fmt.Errorf("chat_verbosity.overrides: unknown override category: %s", name)
+			}
+			if value == nil || !validChatDisplayOverride(*value) {
+				return fmt.Errorf("chat_verbosity.overrides.%s must be one of %q, %q, or %q", name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+			}
+			*dst = *value
+		}
 	}
 	if err := next.Validate(); err != nil {
 		return err
@@ -1973,6 +2003,9 @@ func applyCompactConfig(dst *CompactConfig, src compactConfigFile) {
 	}
 	if src.SummaryTimeoutSeconds != nil {
 		dst.SummaryTimeoutSeconds = *src.SummaryTimeoutSeconds
+	}
+	if src.SummaryFirstTokenTimeoutSeconds != nil {
+		dst.SummaryFirstTokenTimeoutSeconds = *src.SummaryFirstTokenTimeoutSeconds
 	}
 	if src.SummaryMaxRetries != nil {
 		dst.SummaryMaxRetries = *src.SummaryMaxRetries

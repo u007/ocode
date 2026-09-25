@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/u007/ocode/internal/gitexec"
 )
@@ -188,16 +189,6 @@ func gitOperationStateGitDir(ctx context.Context, dir string) (string, error) {
 		return "", gitexec.WithOutput(err, stderr.String(), string(out))
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// remoteGitResolveConflict resolves a conflict on a remote (SSH/WSL) project.
-//
-// It is implemented in Phase 05 of the conflicts plan. Until then it answers
-// an explicit 501 rather than silently falling through to the LOCAL
-// implementation, which would check out a same-named path on the wrong
-// machine.
-func (h *Handler) remoteGitResolveConflict(w http.ResponseWriter, r *http.Request, host string) {
-	writeError(w, http.StatusNotImplemented, "conflict resolution on remote projects is not implemented yet")
 }
 
 // gitRunInDirLiteral runs a git command in dir with GIT_LITERAL_PATHSPECS=1,
@@ -709,4 +700,195 @@ func (h *Handler) gitMarkResolved(w http.ResponseWriter, dir, spec string) error
 		return err
 	}
 	return nil
+}
+
+// GitOperationRequest is the body of POST /api/git/operation.
+type GitOperationRequest struct {
+	// Action is one of continue, abort, skip, good, bad. Which are valid
+	// depends on the operation — see gitOperationCommand. Note that a
+	// bisect's stop action is the verb "abort" even though git spells the
+	// command `git bisect reset`; the wire vocabulary is this table's, not
+	// git's CLI spelling.
+	Action string `json:"action"`
+	// Kind is the operation the client believes is in progress. The server
+	// re-detects and rejects a mismatch, so a panel left open across
+	// operations cannot abort the wrong one. It is a guard only: the command
+	// is always derived from the server's own detection.
+	Kind string `json:"kind"`
+}
+
+// GitOperationResult is the response of POST /api/git/operation.
+type GitOperationResult struct {
+	Workspace GitWorkspace `json:"workspace"`
+	// Output is the command's combined output. Continue/skip run commit hooks,
+	// so their output is meaningful and must not be dropped.
+	Output string `json:"output,omitempty"`
+}
+
+// gitOperationCommand maps an operation kind and a requested action onto the
+// git argv, reporting whether git actually offers that combination.
+//
+// The action is a closed vocabulary, never a caller-supplied subcommand, so a
+// request cannot smuggle an arbitrary git invocation.
+//
+// Two combinations are deliberately absent because git itself has no such
+// verb: a merge has no `skip`, and a bisect has no `continue` — a bisect
+// advances by marking the current commit good or bad, which is why good/bad
+// exist here. Anything unsupported is refused rather than silently ignored,
+// so a button that cannot work never looks like it did.
+func gitOperationCommand(kind, action string) ([]string, bool) {
+	type pair struct {
+		action    string
+		sub, flag string
+	}
+	table := map[string][]pair{
+		"merge":              {{"continue", "merge", "--continue"}, {"abort", "merge", "--abort"}},
+		"rebase":             {{"continue", "rebase", "--continue"}, {"abort", "rebase", "--abort"}, {"skip", "rebase", "--skip"}},
+		"rebase-interactive": {{"continue", "rebase", "--continue"}, {"abort", "rebase", "--abort"}, {"skip", "rebase", "--skip"}},
+		"am":                 {{"continue", "am", "--continue"}, {"abort", "am", "--abort"}, {"skip", "am", "--skip"}},
+		"cherry-pick":        {{"continue", "cherry-pick", "--continue"}, {"abort", "cherry-pick", "--abort"}, {"skip", "cherry-pick", "--skip"}},
+		"revert":             {{"continue", "revert", "--continue"}, {"abort", "revert", "--abort"}, {"skip", "revert", "--skip"}},
+		"bisect":             {{"good", "bisect", "good"}, {"bad", "bisect", "bad"}, {"skip", "bisect", "skip"}, {"abort", "bisect", "reset"}},
+	}
+	for _, p := range table[kind] {
+		if p.action == action {
+			return []string{p.sub, p.flag}, true
+		}
+	}
+	return nil, false
+}
+
+// gitOperationEnv is the environment for a continue/abort/skip run.
+//
+// `--continue` and `--skip` commit, which opens an editor and can prompt for
+// credentials. This request has no terminal, so both are disabled — otherwise
+// the HTTP call blocks forever rather than failing. GIT_LITERAL_PATHSPECS
+// keeps git from reading any argument as pathspec magic, and
+// gitexec.Env supplies GIT_OPTIONAL_LOCKS=0.
+func gitOperationEnv() []string {
+	// Drop inherited values so exactly one of each reaches the child; duplicate
+	// entries leave the effective value to OS-specific resolution.
+	base := make([]string, 0, len(gitexec.Env())+5)
+	for _, kv := range gitexec.Env() {
+		switch {
+		case strings.HasPrefix(kv, "GIT_EDITOR="),
+			strings.HasPrefix(kv, "GIT_SEQUENCE_EDITOR="),
+			strings.HasPrefix(kv, "GIT_MERGE_AUTOEDIT="),
+			strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT="),
+			strings.HasPrefix(kv, "GIT_LITERAL_PATHSPECS="):
+			continue
+		}
+		base = append(base, kv)
+	}
+	return append(base,
+		"GIT_EDITOR=true",
+		"GIT_SEQUENCE_EDITOR=true",
+		"GIT_MERGE_AUTOEDIT=no",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_LITERAL_PATHSPECS=1",
+	)
+}
+
+// gitOperationTimeout bounds one operation command. `--continue` and `--skip`
+// run commit hooks and can invoke credential helpers, so a child that never
+// exits would otherwise hang the HTTP request forever. The bound matches the
+// existing network-action timeout.
+const gitOperationTimeout = 60 * time.Second
+
+// runGitOperation runs one operation command under ctx and returns its combined
+// output.
+//
+// The lock retry matters here more than elsewhere: a halted repository is
+// exactly when a user's terminal or editor is also touching the same index.
+func runGitOperation(ctx context.Context, dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, gitOperationTimeout)
+	defer cancel()
+
+	var out string
+	err := gitexec.WithLockRetry(func() error {
+		cmd := exec.CommandContext(ctx, gitBinary, args...)
+		if dir != "" {
+			cmd.Dir = dir
+		}
+		cmd.Env = gitOperationEnv()
+		b, cmdErr := cmd.CombinedOutput()
+		out = strings.TrimSpace(string(b))
+		return gitexec.WithOutput(cmdErr, out, "")
+	})
+	return out, err
+}
+
+// HandleGitOperation continues, aborts or skips an in-progress git operation,
+// so a pull that stopped in a rebase or merge has a way out from the web UI.
+func (h *Handler) HandleGitOperation(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		h.remoteGitOperation(w, r, host)
+		return
+	}
+	h.gitOperationLocal(w, r)
+}
+
+func (h *Handler) gitOperationLocal(w http.ResponseWriter, r *http.Request) {
+	var req GitOperationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Kind == "" {
+		writeError(w, http.StatusBadRequest, "kind is required")
+		return
+	}
+
+	dir, ok := h.gitDirForMutation(w, r)
+	if !ok {
+		return
+	}
+
+	// Re-detect rather than trusting the request: the command must match the
+	// operation that is ACTUALLY in progress.
+	status := gitStatusForDir(dir)
+	if status.Operation == nil {
+		writeError(w, http.StatusConflict, "no git operation is in progress")
+		return
+	}
+	if status.Operation.Kind != req.Kind {
+		writeError(w, http.StatusConflict,
+			"operation changed: expected "+req.Kind+", found "+status.Operation.Kind)
+		return
+	}
+
+	args, supported := gitOperationCommand(status.Operation.Kind, req.Action)
+	if !supported {
+		writeError(w, http.StatusBadRequest,
+			req.Action+" is not supported for a "+status.Operation.Kind)
+		return
+	}
+
+	// Continue with conflicts still present fails inside git with prose the user
+	// has to decode ("Committing is not possible because you have unmerged
+	// files"). Refuse up front with a reason they can act on. This does not
+	// reinterpret any other failure: everything else below is surfaced exactly
+	// as git reported it. Skip stays allowed — skipping a conflicted step is
+	// its whole purpose.
+	if req.Action == "continue" && len(status.Conflicts) > 0 {
+		writeError(w, http.StatusConflict,
+			"resolve the remaining conflicts before continuing")
+		return
+	}
+
+	out, err := runGitOperation(r.Context(), dir, args...)
+	if err != nil {
+		slog.Error("git operation action failed",
+			"project", dir, "kind", status.Operation.Kind, "action", req.Action, "args", args, "err", err)
+		// 409, not 500: git refusing is a legitimate answer to a legitimate
+		// request (a hook vetoed the commit, the state changed under us), not
+		// a server fault. git's own words are the body, verbatim.
+		writeError(w, http.StatusConflict, out)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, GitOperationResult{
+		Workspace: gitWorkspaceForDir(dir),
+		Output:    out,
+	})
 }

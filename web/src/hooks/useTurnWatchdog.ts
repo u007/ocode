@@ -10,6 +10,7 @@ import {
 } from "../stores/chatStore";
 import { api } from "../api/client";
 import { RECONCILE_PAGE_SIZE, applyReconcileState } from "../lib/sessionEvents";
+import { getCompactionEventVersion } from "../lib/compactionState";
 
 // `applyReconcileState` lives in lib/sessionEvents (the routing/reconcile
 // module) and is re-exported here so existing unit tests keep importing it
@@ -30,6 +31,7 @@ async function reconcileSession(
 ): Promise<void> {
   try {
     const wasActive = getTurnState(getState(), sessionId).turnActive;
+    const compactionVersion = getCompactionEventVersion(sessionId);
     const state = await api.getSessionState(sessionId, host);
     // Fetch the transcript whenever the server reports the turn inactive: that
     // is the case where the turn may have actually finished OR merely paused on
@@ -46,7 +48,7 @@ async function reconcileSession(
       transcriptPending?.pendingPermission ||
       transcriptPending?.pendingQuestion
     );
-    applyReconcileState(dispatch, sessionId, state, hasPendingAsk, wasActive);
+    applyReconcileState(dispatch, sessionId, state, hasPendingAsk, wasActive, compactionVersion);
     if (!state.turn_active && wasActive && detail) {
       // The turn finished server-side but its terminal events were lost
       // (missed turn_done + turn-boundary messages broadcast). Recovery is

@@ -77,6 +77,68 @@ func TestTurnTriggersAutoCompactHeadless(t *testing.T) {
 	t.Fatalf("auto-compaction never spliced the transcript: len=%d (want < %d)", len(as.messages), len(seed)+2)
 }
 
+// TestAutoCompactPublishesLifecycle covers the same cross-client contract for
+// the asynchronous path: OnCompactStart must make the session active before
+// the summarizer runs, and OnCompact must publish a terminal event even when
+// the result cannot be applied to the transcript.
+func TestAutoCompactPublishesLifecycle(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := "sess-auto-lifecycle"
+	h.sessions.Register(id, proj)
+	client := &blockingCompactClient{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	ag := agent.NewAgent(client, nil, autoCompactConfig(), nil)
+	h.wireCompactCallbacks(id, ag)
+	h.mu.Lock()
+	h.agents[id] = &agentSession{agent: ag, model: "fake-model", messages: seedTranscript()}
+	h.mu.Unlock()
+
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+	if !ag.CompactAsync(seedTranscript(), "") {
+		t.Fatal("CompactAsync refused to start")
+	}
+	select {
+	case <-client.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("automatic compaction never reached the summarizer")
+	}
+	state, ok := h.sessions.State(id)
+	if !ok || !state.Compacting {
+		t.Fatalf("state during automatic compaction = %+v, want active", state)
+	}
+	close(client.release)
+
+	startSeen, doneSeen := false, false
+	deadline := time.After(3 * time.Second)
+	for !doneSeen {
+		select {
+		case ev := <-sub:
+			if ev.SessionID != id {
+				continue
+			}
+			switch ev.Event {
+			case "compaction_started":
+				startSeen = true
+			case "compaction_done":
+				doneSeen = true
+			}
+		case <-deadline:
+			t.Fatal("automatic compaction did not publish a terminal lifecycle event")
+		}
+	}
+	if !startSeen {
+		t.Fatal("automatic compaction did not publish a start event")
+	}
+	state, _ = h.sessions.State(id)
+	if state.Compacting {
+		t.Fatalf("state after automatic compaction = %+v, want idle", state)
+	}
+}
+
 // TestApplyCompactResultSkipsStaleSplice guards the async splice against a
 // transcript that shrank between snapshot and result (e.g. a manual /compact
 // racing the auto pass): out-of-range indices must be dropped, not panic.

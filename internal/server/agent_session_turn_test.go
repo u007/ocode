@@ -432,9 +432,10 @@ func TestTurnStartedIncludesStartedAtAndSessionCreatedAt(t *testing.T) {
 }
 
 // TestTurnDoneIncludesTookMs verifies turn_done carries started_at, ended_at,
-// and took_ms for a successful turn, so the web can show "✓ done at … · took …".
-// The started_at must equal the one published on turn_started, ended_at must
-// not be earlier, and took_ms must match the timestamp difference.
+// and took_ms for a successful turn, while turn_started carries the resolved
+// model, so the web can retain the model actually dispatched. The
+// started_at must equal the one published on turn_started, ended_at must not
+// be earlier, and took_ms must match the timestamp difference.
 func TestTurnDoneIncludesTookMs(t *testing.T) {
 	h := NewHandler()
 	h.turnHeartbeatInterval = time.Hour
@@ -460,6 +461,9 @@ func TestTurnDoneIncludesTookMs(t *testing.T) {
 	startedStr, ok := startedData["started_at"].(string)
 	if !ok || startedStr == "" {
 		t.Fatalf("turn_started missing started_at: %+v", startedData)
+	}
+	if got := startedData["model"]; got != "fake-model" {
+		t.Fatalf("turn_started model = %v, want fake-model", got)
 	}
 	startedAt, err := time.Parse(time.RFC3339Nano, startedStr)
 	if err != nil {
@@ -655,6 +659,9 @@ func TestBridgedTurnTimingStillFlowsOnBus(t *testing.T) {
 	}
 	if startedAt, _ := startedData["started_at"].(string); startedAt == "" {
 		t.Fatalf("bridged turn_started missing started_at: %+v", startedData)
+	}
+	if got := startedData["model"]; got != "fake-model" {
+		t.Fatalf("bridged turn_started model = %v, want fake-model", got)
 	}
 
 	doneData, ok := waitForEnvelopeData(t, sub, id, "turn_done")

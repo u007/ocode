@@ -116,6 +116,47 @@ drained:
 	}
 }
 
+func TestCompactionEventsAreSessionScopedAndDoneIsCritical(t *testing.T) {
+	if !sessionScopedEvents["compaction_started"] || !sessionScopedEvents["compaction_done"] {
+		t.Fatal("compaction lifecycle events must require a session id")
+	}
+	if !criticalEvents["compaction_done"] {
+		t.Fatal("compaction_done must be critical so a slow subscriber cannot lose the terminal state")
+	}
+
+	bus := NewEventBus()
+	sub := bus.Subscribe(nil)
+	defer bus.Unsubscribe(sub)
+	for i := 0; i < busBufferSize; i++ {
+		bus.Publish("text", "/proj", "ses_1", map[string]string{"delta": "x"})
+	}
+	published := make(chan struct{})
+	go func() {
+		bus.Publish("compaction_done", "/proj", "ses_1", map[string]bool{"ok": true})
+		close(published)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	<-sub
+	select {
+	case <-published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("critical compaction_done did not unblock after room was made")
+	}
+	var last Envelope
+	for {
+		select {
+		case env := <-sub:
+			last = env
+		default:
+			goto drained
+		}
+	}
+drained:
+	if last.Event != "compaction_done" {
+		t.Fatalf("last event = %q, want compaction_done", last.Event)
+	}
+}
+
 // TestEventBusViewedProjects: the subscriber-aware scope tracks which
 // projects at least one subscriber declares, and shrinks when the last
 // subscriber for a project leaves.

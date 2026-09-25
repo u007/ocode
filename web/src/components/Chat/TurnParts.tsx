@@ -49,8 +49,9 @@ const TOOL_OUTPUT_LANG: Record<string, string> = {
   replace_lines: "diff",
 };
 
-// ThinkingBlock renders reasoning tokens in a muted panel. The content is shown
-// expanded by default so reasoning is visible immediately in the web UI.
+// ThinkingBlock renders reasoning tokens in a muted panel. The controlled
+// disclosure policy decides the default; the latest thinking block is always
+// expanded.
 export function ThinkingBlock({
   text,
   highlight = "",
@@ -291,8 +292,8 @@ export function QuestionAnswerBlock({
   );
 }
 
-// ToolBlock renders a single tool call and (optionally) its result. The details
-// are expanded by default so tool output is visible immediately.
+// ToolBlock renders a single tool call and (optionally) its result. Call
+// details and output use independent policy-controlled disclosure gates.
 //
 // Memoized: in the live stream, every thinking/text delta replaces the whole
 // `live` array reference, which re-renders ChatPanel's `live.map(...)` and
@@ -316,8 +317,8 @@ export const ToolBlock = memo(function ToolBlock({
    *  authoritative `output` arrives, which then replaces it. */
   stream?: string;
   highlight?: string;
-  /** Set for a `question` call still waiting on the user: re-opens its dialog
-   *  (the dialog can be lost to a reload/reconcile while the ask is pending). */
+  /** Set for a `question` call still waiting on the user: shows that same
+   *  request again after the dialog is locally hidden. */
   onOpenQuestion?: () => void;
   /** Stable transcript identity plus region. Manual disclosure survives remounts. */
   callKey?: string;

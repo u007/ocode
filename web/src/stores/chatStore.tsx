@@ -232,6 +232,12 @@ export interface SessionSlice {
   // silently dropping it (which left the turn stuck paused forever).
   permissionQueue: PermissionRequest[];
   pendingQuestion: QuestionRequest | null;
+  /**
+   * Request id the user intentionally hid from the dialog. This is local UI
+   * state only: the server-side ask remains pending until it is answered or
+   * explicitly dismissed with "Don't answer".
+   */
+  hiddenQuestionRequestId: string | null;
   totalMessages: number; // total messages on server
   hasMore: boolean; // whether older messages exist
   loadingMore: boolean; // currently fetching older messages
@@ -262,6 +268,11 @@ export interface SessionSlice {
   // event for this session id, so each tab tracks its own session instead of
   // whichever session most recently emitted a status event.
   tuiStatus: TUIStatus | null;
+  // Model from the most recent turn this client successfully dispatched to the
+  // backend. This is intentionally separate from tuiStatus.main_model, which
+  // is the sidebar's configured/effective model and may change before the next
+  // send. Undefined means this client has not dispatched a turn in this tab.
+  lastDispatchedModel?: string;
   // Part 05: per-session status/turn state. `turnActive` is the authoritative
   // streaming flag — set by turn_started, cleared by turn_done/turn_error —
   // and `isStreaming` (the legacy promise-derived flag) mirrors it. The
@@ -316,6 +327,7 @@ export const emptySessionSlice: SessionSlice = {
   pendingPermission: null,
   permissionQueue: [],
   pendingQuestion: null,
+  hiddenQuestionRequestId: null,
   totalMessages: 0,
   hasMore: false,
   loadingMore: false,
@@ -431,6 +443,8 @@ export type ChatAction =
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
   | { type: "QUESTION_REQUEST"; sessionId: string; question: QuestionRequest }
+  | { type: "QUESTION_HIDE"; sessionId: string; requestId: string }
+  | { type: "QUESTION_SHOW"; sessionId: string; requestId: string }
   | { type: "QUESTION_RESOLVED"; sessionId: string; requestId?: string }
   | {
       type: "QUESTION_ANSWERED";
@@ -445,6 +459,7 @@ export type ChatAction =
   | { type: "SET_TOTAL"; sessionId: string; total: number }
   | { type: "SET_SPENDING"; spendingUSD: number | null }
   | { type: "SET_TUI_STATUS"; sessionId: string; status: TUIStatus }
+  | { type: "SET_LAST_DISPATCHED_MODEL"; sessionId: string; model: string }
   | { type: "SET_AGENT_ACTIVITY"; sessionId: string; activity: AgentActivityEvent }
   | { type: "SET_STATUS_LOADING"; sessionId: string; loading: boolean }
   | { type: "SET_TURN_STATE"; sessionId: string; turnActive: boolean }
@@ -574,6 +589,36 @@ function updateSession(
   return { ...state, sessions: { ...state.sessions, [sessionId]: updater(current) } };
 }
 
+/**
+ * A question action carrying an old request id must not rewrite or clear a
+ * newer pending request. The hidden id is checked as well as the visible one:
+ * the two normally move together, but checking both keeps a race from
+ * resurrecting or mutating the other request during recovery.
+ */
+function isStaleQuestionAction(
+  slice: SessionSlice,
+  requestId: string | undefined,
+): boolean {
+  if (slice.pendingQuestion && slice.pendingQuestion.request_id !== requestId) return true;
+  if (
+    requestId &&
+    slice.hiddenQuestionRequestId &&
+    slice.hiddenQuestionRequestId !== requestId
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Keep a local hide only when the recovered question is the same request. */
+function hiddenQuestionAfterHydration(
+  slice: SessionSlice,
+  question: QuestionRequest | null,
+): string | null {
+  if (!question || slice.hiddenQuestionRequestId !== question.request_id) return null;
+  return slice.hiddenQuestionRequestId;
+}
+
 /** Locate the live tool part a streamed chunk or result belongs to.
  *
  *  With a callId the match is exact, which is what keeps concurrent tool calls
@@ -635,6 +680,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           pendingPermission: pending.pendingPermission,
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
+          hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
         };
       });
     case "MARK_INITIALIZED":
@@ -839,24 +885,54 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => ({
         ...s,
         pendingQuestion: action.question,
+        // Replays/recovery of the same request must respect a local hide. A
+        // different request is genuinely new and must open normally.
+        hiddenQuestionRequestId:
+          s.hiddenQuestionRequestId === action.question.request_id
+            ? s.hiddenQuestionRequestId
+            : null,
       }));
-    case "QUESTION_RESOLVED":
+    case "QUESTION_HIDE":
       return updateSession(state, action.sessionId, (s) => {
-        // A resolve for a question that isn't the one on screen (a stale
-        // dismissal for an older/superseded round) must not close the newer
-        // dialog. Permission resolves already carry this guard; questions use
-        // a single pending slot, so a mismatched request_id is ignored.
         if (
-          action.requestId &&
-          s.pendingQuestion &&
-          s.pendingQuestion.request_id !== action.requestId
+          !s.pendingQuestion ||
+          s.pendingQuestion.request_id !== action.requestId ||
+          (s.hiddenQuestionRequestId && s.hiddenQuestionRequestId !== action.requestId)
         ) {
           return s;
         }
-        return { ...s, pendingQuestion: null };
+        if (s.hiddenQuestionRequestId === action.requestId) return s;
+        return { ...s, hiddenQuestionRequestId: action.requestId };
+      });
+    case "QUESTION_SHOW":
+      return updateSession(state, action.sessionId, (s) => {
+        if (
+          !s.pendingQuestion ||
+          s.pendingQuestion.request_id !== action.requestId ||
+          s.hiddenQuestionRequestId !== action.requestId
+        ) {
+          return s;
+        }
+        return { ...s, hiddenQuestionRequestId: null };
+      });
+    case "QUESTION_RESOLVED":
+      return updateSession(state, action.sessionId, (s) => {
+        // A resolve for an older/superseded question must not close a newer
+        // dialog or clear its local hide.
+        if (action.requestId && isStaleQuestionAction(s, action.requestId)) return s;
+        return {
+          ...s,
+          pendingQuestion: null,
+          hiddenQuestionRequestId: action.requestId
+            ? s.hiddenQuestionRequestId === action.requestId
+              ? null
+              : s.hiddenQuestionRequestId
+            : null,
+        };
       });
     case "QUESTION_DISMISSED":
-      // Optimistic echo of a Cancel the browser just POSTed. Mirrors
+      // Optimistic echo of a final "Don't answer" the browser just POSTed.
+      // Mirrors
       // QUESTION_ANSWERED: rewrite the local sentinel tool result in place with
       // the same dismissal notice the server persists, so the chat stops
       // showing the prompt and a later reconcile (which re-derives the pending
@@ -869,6 +945,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // interrupted / Continue" notice cannot linger (the server now classifies
       // a dismissed-question tail as stopped, so the next reconcile agrees).
       return updateSession(state, action.sessionId, (s) => {
+        if (isStaleQuestionAction(s, action.requestId)) return s;
         let replaced = false;
         const messages = s.messages.map((m) => {
           if (
@@ -882,7 +959,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           replaced = true;
           return { ...m, content: QUESTION_DISMISSED_RESULT };
         });
-        return { ...s, messages, pendingQuestion: null, interrupted: false };
+        return {
+          ...s,
+          messages,
+          pendingQuestion: null,
+          hiddenQuestionRequestId:
+            s.hiddenQuestionRequestId === action.requestId ? null : s.hiddenQuestionRequestId,
+          interrupted: false,
+        };
       });
     case "QUESTION_ANSWERED":
       // Optimistic echo of the answers the browser just POSTed. The server
@@ -898,6 +982,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // history / hydrated ask) the turn-end snapshot is the only source and
       // the local rewrite is a no-op.
       return updateSession(state, action.sessionId, (s) => {
+        if (isStaleQuestionAction(s, action.requestId)) return s;
         const answers = JSON.stringify(action.answers);
         let replaced = false;
         const messages = s.messages.map((m) => {
@@ -912,7 +997,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           replaced = true;
           return { ...m, content: answers };
         });
-        return { ...s, messages, pendingQuestion: null };
+        return {
+          ...s,
+          messages,
+          pendingQuestion: null,
+          hiddenQuestionRequestId:
+            s.hiddenQuestionRequestId === action.requestId ? null : s.hiddenQuestionRequestId,
+        };
       });
     case "RESET": {
       const sessions = { ...state.sessions };
@@ -924,7 +1015,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (!slice) return state; // already rekeyed by a racing dispatch — no-op
       const sessions = { ...state.sessions };
       delete sessions[action.oldId];
-      sessions[action.newId] = slice;
+      // A hidden id is tied to the old session's UI lifecycle. Keep the
+      // pending question/transcript, but let the rekeyed session show it.
+      sessions[action.newId] = { ...slice, hiddenQuestionRequestId: null };
       return { ...state, sessions };
     }
     case "TOGGLE_RUN_COLLAPSED":
@@ -980,6 +1073,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         }),
         tuiStatusReady: true,
       };
+    }
+    case "SET_LAST_DISPATCHED_MODEL": {
+      const model = action.model.trim();
+      if (!model) return state;
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        lastDispatchedModel: model,
+      }));
     }
     case "SET_STATUS_LOADING":
       return updateSession(state, action.sessionId, (s) => ({
@@ -1042,6 +1143,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         pendingPermission: null,
         permissionQueue: [],
         pendingQuestion: null,
+        hiddenQuestionRequestId: null,
         live: [],
       }));
     case "SET_TUI_STATUS_READY":
@@ -1126,6 +1228,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
                 ? s.permissionQueue
                 : pending.permissionQueue,
             pendingQuestion: s.pendingQuestion ?? pending.pendingQuestion,
+            hiddenQuestionRequestId: hiddenQuestionAfterHydration(
+              s,
+              s.pendingQuestion ?? pending.pendingQuestion,
+            ),
           };
         }
         const capped = capMessages(action.messages, action.total);
@@ -1143,6 +1249,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           pendingPermission: pending.pendingPermission,
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
+          hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
         };
       });
     case "TRUNCATE_MESSAGES":
@@ -1158,6 +1265,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           pendingPermission: null,
           permissionQueue: [],
           pendingQuestion: null,
+          hiddenQuestionRequestId: null,
         };
       });
     default:

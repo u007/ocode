@@ -2020,6 +2020,10 @@ func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 	if rt.SummaryTimeoutSeconds <= 0 {
 		rt.SummaryTimeoutSeconds = 600
 	}
+	rt.SummaryFirstTokenTimeoutSeconds = c.SummaryFirstTokenTimeoutSeconds
+	if rt.SummaryFirstTokenTimeoutSeconds <= 0 {
+		rt.SummaryFirstTokenTimeoutSeconds = 300
+	}
 	rt.SummaryMaxRetries = c.SummaryMaxRetries
 	if rt.SummaryMaxRetries < 0 {
 		rt.SummaryMaxRetries = 0
@@ -2096,7 +2100,17 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, 
 	}
 	crashguard.Go(func() {
 		defer a.compactMu.Unlock()
+		completed := false
+		// Clear the server-side lifecycle even if runCompact panics before it
+		// returns a result. crashguard re-panics afterwards, so this only
+		// matters for a recovered/instrumented path, not the normal flow.
+		defer func() {
+			if !completed && a.OnCompact != nil {
+				a.OnCompact(CompactResult{Err: fmt.Errorf("compaction terminated unexpectedly")})
+			}
+		}()
 		result := a.runCompact(snapshot, rt, focus, force)
+		completed = true
 		if a.OnCompact != nil {
 			a.OnCompact(result)
 		}
@@ -2562,27 +2576,8 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	pruned := pruneToolResults(middle, compactPruneToolMaxChars)
 
 	client := a.compactSummaryClient()
-
-	// Use an inactivity-based timeout: the timer resets each time the LLM
-	// streams data (onDelta fires). This prevents spurious timeouts while
-	// the model is actively generating a summary. One inactivity context
-	// covers the whole pass — each streamed chunk extends the deadline, so
-	// multi-batch summarisation does not starve later batches.
-	var ctx context.Context
-	var cancel context.CancelFunc
-	if rt.SummaryTimeoutSeconds > 0 {
-		var reset func()
-		ctx, cancel, reset = inactivityContext(rt.SummaryTimeoutSeconds)
-		// Wire the reset into the streaming delta callback so each chunk
-		// received from the LLM extends the deadline.
-		if gc, ok := client.(*GenericClient); ok {
-			gc.SetOnDelta(func(kind, text string) { reset() })
-			defer gc.SetOnDelta(nil)
-		}
-	} else {
-		ctx, cancel = contextWithTimeout(rt.SummaryTimeoutSeconds)
-	}
-	defer cancel()
+	operationCtx, operationCancel := newCompactOperationContext()
+	defer operationCancel()
 
 	// Chunked anchored summarisation: when the middle exceeds the per-call
 	// input budget, split it into consecutive batches and summarise each in
@@ -2593,14 +2588,35 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	running := prevSummary
 	totalDropped := 0
 	for bi, batch := range batches {
-		prompt, dropped := buildSummaryPrompt(batch, rt.MaxSummaryInputTokens, running, focus)
-		if dropped > 0 {
-			totalDropped += dropped
-			a.emitDebug("COMPACT", fmt.Sprintf("batch %d/%d: dropped %d msgs from summary input (size cap)", bi+1, len(batches), dropped))
+		idle := time.Duration(rt.SummaryTimeoutSeconds) * time.Second
+		firstToken := time.Duration(rt.SummaryFirstTokenTimeoutSeconds) * time.Second
+		if firstToken <= 0 {
+			firstToken = idle
 		}
-		summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries, a.RecordSideUsageFromMessage)
+		var batchCtx context.Context
+		var batchCancel context.CancelFunc
+		var reset func()
+		if rt.SummaryTimeoutSeconds > 0 {
+			batchCtx, batchCancel, reset = inactivityContextWithParent(operationCtx, idle, firstToken)
+		} else {
+			batchCtx, batchCancel = context.WithCancel(operationCtx)
+			reset = func() {}
+		}
+		if _, ok := client.(*GenericClient); ok {
+			batchCtx = withDeltaCallback(batchCtx, func(string, string) { reset() })
+		}
+		batchStarted := time.Now()
+		summaryText, err := func() (string, error) {
+			defer batchCancel()
+			prompt, dropped := buildSummaryPrompt(batch, rt.MaxSummaryInputTokens, running, focus)
+			if dropped > 0 {
+				totalDropped += dropped
+				a.emitDebug("COMPACT", fmt.Sprintf("batch %d/%d: dropped %d msgs from summary input (size cap)", bi+1, len(batches), dropped))
+			}
+			return runSummary(batchCtx, client, prompt, rt.SummaryMaxRetries, a.RecordSideUsageFromMessage)
+		}()
 		if err != nil {
-			a.emitDebug("COMPACT", fmt.Sprintf("summary failed on batch %d/%d: %v", bi+1, len(batches), err))
+			a.emitDebug("COMPACT", fmt.Sprintf("summary failed on batch %d/%d after %s (idle timeout=%s, first-token timeout=%s, client=%p): %v", bi+1, len(batches), time.Since(batchStarted).Round(time.Millisecond), idle, firstToken, client, err))
 			res.Err = err
 			return res
 		}

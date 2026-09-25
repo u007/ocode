@@ -153,6 +153,36 @@ type CompactResult struct {
 	Err  error
 }
 
+// ErrCompactionTimeout identifies a timeout owned by compaction itself. A
+// different context cancellation (for example a request shutdown) must not be
+// classified as a provider timeout by callers.
+var ErrCompactionTimeout = errors.New("compaction timed out")
+
+// compactOverallCap bounds one complete manual or automatic compaction pass.
+// It is a variable so tests can exercise the cap without waiting 30 minutes;
+// production callers never override it.
+var compactOverallCap = 30 * time.Minute
+
+// contextCause returns the cancellation cause when available, falling back to
+// the standard context error for older/custom contexts.
+func contextCause(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return ctx.Err()
+}
+
+// newCompactOperationContext creates the hard upper bound for one complete
+// compaction pass. Per-batch inactivity contexts are children of this context,
+// so the cap also interrupts a batch that is still receiving tokens.
+func newCompactOperationContext() (context.Context, context.CancelFunc) {
+	limit := compactOverallCap
+	return context.WithTimeoutCause(context.Background(), limit, ErrCompactionTimeout)
+}
+
 // tokenEstimate is a coarse heuristic used when real Usage data is unavailable.
 // It splits text by script (CJK vs non-CJK), applies the provider/model ratio
 // (cpt) to non-CJK and cjkCharsPerToken to CJK, and bills extended-thinking
@@ -787,7 +817,7 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 			}
 			select {
 			case <-ctx.Done():
-				return "", fmt.Errorf("compact: context cancelled during retry: %w", ctx.Err())
+				return "", fmt.Errorf("compact: context cancelled during retry: %w", contextCause(ctx))
 			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
 			}
 		}
@@ -820,8 +850,14 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 		})
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("compact: summary timed out: %w", ctx.Err())
+			return "", fmt.Errorf("compact: summary timed out: %w", contextCause(ctx))
 		case r := <-done:
+			if cause := contextCause(ctx); cause != nil {
+				if errors.Is(cause, ErrCompactionTimeout) {
+					return "", fmt.Errorf("compact: summary timed out: %w", cause)
+				}
+				return "", fmt.Errorf("compact: summary cancelled: %w", cause)
+			}
 			if r.err == nil && strings.TrimSpace(r.content) != "" {
 				if verr := validateSummary(r.content); verr != nil {
 					emitDebug("COMPACT", fmt.Sprintf("attempt %d: %v; retrying", attempt+1, verr))
@@ -837,6 +873,12 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 				lastErr = errors.New("compact: empty summary response")
 			}
 		}
+	}
+	if cause := contextCause(ctx); cause != nil {
+		if errors.Is(cause, ErrCompactionTimeout) {
+			return "", fmt.Errorf("compact: summary timed out: %w", cause)
+		}
+		return "", fmt.Errorf("compact: summary cancelled: %w", cause)
 	}
 	if malformed != "" {
 		// A summary that misses sections still beats failing the compaction
@@ -959,42 +1001,79 @@ func contextWithTimeout(seconds int) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
 }
 
-// inactivityContext creates a context that only times out after `seconds` of
-// inactivity (no data received). The returned reset function must be called
-// each time data is received to extend the deadline. This is useful for long-
-// running LLM calls where the timeout should not fire while data is flowing.
+// inactivityContextWithParent creates a context that starts with an initial
+// first-token allowance, then uses idle as the inactivity window after the
+// first reset. The parent is the overall compaction operation context, so its
+// hard cap also cancels an otherwise-active batch.
+func inactivityContextWithParent(parent context.Context, idle, initial time.Duration) (context.Context, context.CancelFunc, func()) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if idle <= 0 {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, func() {}
+	}
+	if initial <= 0 {
+		initial = idle
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	deadline := time.Now().Add(initial)
+	wake := make(chan struct{}, 1)
+	var mu sync.Mutex
+	reset := func() {
+		mu.Lock()
+		deadline = time.Now().Add(idle)
+		mu.Unlock()
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	crashguard.Go(func() {
+		timer := time.NewTimer(time.Hour)
+		defer timer.Stop()
+		for {
+			mu.Lock()
+			remaining := time.Until(deadline)
+			mu.Unlock()
+			if remaining <= 0 {
+				cancel(ErrCompactionTimeout)
+				return
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(remaining)
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+				continue
+			case <-timer.C:
+				mu.Lock()
+				remaining = time.Until(deadline)
+				mu.Unlock()
+				if remaining <= 0 {
+					cancel(ErrCompactionTimeout)
+					return
+				}
+			}
+		}
+	})
+	return ctx, func() { cancel(context.Canceled) }, reset
+}
+
+// inactivityContext preserves the original seconds-based helper for callers
+// that do not need a separate first-token window.
 func inactivityContext(seconds int) (context.Context, context.CancelFunc, func()) {
 	if seconds <= 0 {
 		return context.Background(), func() {}, func() {}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
-	var mu sync.Mutex
-	reset := func() {
-		mu.Lock()
-		deadline = time.Now().Add(time.Duration(seconds) * time.Second)
-		mu.Unlock()
-	}
-	// Watchdog goroutine: periodically check if the deadline has passed.
-	crashguard.Go(func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				mu.Lock()
-				if time.Now().After(deadline) {
-					mu.Unlock()
-					cancel()
-					return
-				}
-				mu.Unlock()
-			}
-		}
-	})
-	return ctx, cancel, reset
+	d := time.Duration(seconds) * time.Second
+	return inactivityContextWithParent(context.Background(), d, d)
 }
 
 // compactRuntime is the resolved set of knobs the compaction pass needs at
@@ -1008,12 +1087,13 @@ type compactRuntime struct {
 	// tail only). The tail is the later (smaller) of the turn-based boundary and
 	// the token boundary, so the recent context is bounded by whichever is
 	// stricter — this is what lets long single-user-turn agentic runs compact.
-	KeepRecentTokens      int
-	MinMessages           int
-	SummaryTimeoutSeconds int
-	SummaryMaxRetries     int
-	MaxSummaryInputTokens int
-	WindowTokens          int
+	KeepRecentTokens                int
+	MinMessages                     int
+	SummaryTimeoutSeconds           int
+	SummaryFirstTokenTimeoutSeconds int
+	SummaryMaxRetries               int
+	MaxSummaryInputTokens           int
+	WindowTokens                    int
 	// Provider/Model identify the active model so the token estimate can use a
 	// family-appropriate chars-per-token ratio. Empty means "unknown" -> a
 	// conservative default ratio (see charsPerTokenFor).

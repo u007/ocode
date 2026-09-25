@@ -804,8 +804,11 @@ func (h *Handler) publishBootstrapWarning(sessionID, stage, warning string) {
 	})
 }
 
-// publishTurnStarted emits turn_started for a session entering a turn.
-func (h *Handler) publishTurnStarted(sessionID string) {
+// publishTurnStarted emits turn_started for a session entering a turn. The
+// model is the resolved model for this dispatch, not the sidebar's current
+// configured selection; clients use it to retain the last model actually sent
+// to the backend.
+func (h *Handler) publishTurnStarted(sessionID, model string) {
 	startedAt, _ := h.sessions.TurnTiming(sessionID)
 	if startedAt.IsZero() {
 		startedAt = time.Now()
@@ -814,6 +817,9 @@ func (h *Handler) publishTurnStarted(sessionID string) {
 	data := map[string]string{
 		"session_id": sessionID,
 		"started_at": startedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if model != "" {
+		data["model"] = model
 	}
 	if !sessionCreatedAt.IsZero() {
 		data["session_created_at"] = sessionCreatedAt.UTC().Format(time.RFC3339Nano)
@@ -1075,7 +1081,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	// bridge owns the feed.
 	stopActivity := h.startAgentActivityBroadcast(sessionID, as.agent)
 	defer stopActivity()
-	h.publishTurnStarted(sessionID)
+	h.publishTurnStarted(sessionID, as.model)
 
 	// In headless mode (no RC bridge), wire up streaming callbacks so live
 	// tokens and tool activity are broadcast to SSE mirror subscribers.
@@ -1960,12 +1966,16 @@ func (h *Handler) flushStrandedInjections(sessionID string, as *agentSession) {
 	}
 }
 
-// wireCompactCallbacks attaches OnCompact to a server-built agent so async
-// auto-compaction results land back in the session transcript. The TUI wires
-// its own callbacks (tui.wireCompactCallbacks); without this server-side
-// equivalent, headless (web/desktop) compaction results were silently dropped
-// — OnCompact was nil, so MaybeCompactAsync had no effect even if called.
+// wireCompactCallbacks attaches lifecycle and result callbacks to a
+// server-built agent so async auto-compaction is visible to every client and
+// its summary lands back in the session transcript. The TUI wires its own
+// callbacks (tui.wireCompactCallbacks); without this server-side equivalent,
+// headless (web/desktop) compaction results were silently dropped — OnCompact
+// was nil, so MaybeCompactAsync had no effect even if called.
 func (h *Handler) wireCompactCallbacks(sessionID string, ag *agent.Agent) {
+	ag.OnCompactStart = func() {
+		h.beginCompaction(sessionID)
+	}
 	ag.OnCompact = func(r agent.CompactResult) {
 		h.applyCompactResult(sessionID, r)
 	}
@@ -1981,6 +1991,16 @@ func (h *Handler) wireCompactCallbacks(sessionID string, ag *agent.Agent) {
 // transcript has not shrunk since (a racing manual /compact can shrink it —
 // in that case the stale result is dropped).
 func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
+	compactionErr := ""
+	if r.Err != nil {
+		compactionErr = r.Err.Error()
+	}
+	// Always retire the lifecycle slot, including malformed/stale results and
+	// failures. The terminal publish happens after any transcript snapshot this
+	// function emits, while still being independent of its early returns.
+	defer func() {
+		h.finishCompaction(sessionID, compactionErr)
+	}()
 	if !r.OK {
 		if r.Err != nil {
 			log.Printf("serve: auto-compaction failed for session %s: %v", sessionID, r.Err)

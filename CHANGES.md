@@ -1,5 +1,270 @@
 # Changelog
 
+## 2026-09-26 — Remote SSH Assets tab: `list failed: 500 Internal Server Error`
+
+- The **Assets** tab on a remote SSH project now lists (and uploads, deletes,
+  previews) files on the host. It previously failed with
+  `list failed: 500 Internal Server Error`. The web UI was sending the remote
+  project's uploads request to the **local** server, which then tried to create
+  the upload directory at the verbatim `~/www/aimsai2` path — a leading `~` is
+  not absolute, so it resolved against the server process cwd and the
+  `MkdirAll` failed.
+- Three call sites shared the defect and are all fixed: `AssetsPanel.tsx`
+  (list, upload, delete, file fetch/download), `ChatInput.tsx` (chat attachment
+  upload), and `TerminalPanel.tsx` (drag-and-drop upload into a terminal). Each
+  now prefixes its `/api/uploads` URL with the remote proxy base for the tab's
+  host, matching the existing host-scoping contract.
+- Backend half, needed for the above: a remote project is registered with its
+  path **verbatim** (`projects.AddRemote` keeps `~/www/aimsai2` — the separator
+  and `~` belong to the remote shell), but the host-side `ocode serve --remote`
+  **expands** `~` when it saves that project (`projects.Add`). A request proxied
+  through `/api/remote/{host}/` therefore arrived carrying the tilde form while
+  the host's registry held the expanded path, and the exact-match trust gate
+  answered `400 unknown project`. `internal/server/handler_git.go` now falls back
+  to the `projects.ExpandHome` form before rejecting. **The trust boundary is not
+  widened** — only a saved project root is ever returned, `~user` and non-tilde
+  paths pass through unchanged, and an unregistered tilde path still 400s.
+- Tests (mutation-verified — reverting either half fails its test):
+  `internal/server/uploads_test.go` (tilde-form registered project lists 200;
+  unregistered tilde path still 400) and
+  `web/src/components/Assets/AssetsPanel.remoteHost.test.tsx` (listing URL is
+  `/api/remote/<host>/api/uploads?project=…`).
+- Verified live against the real host: `~/www/aimsai2` returned
+  `400 unknown project` before the fix and now returns the project's real
+  upload (`Screenshot 2026-09-02 at 4.25.26 PM.png`); `~/nope` still 400s.
+- **Deployment note:** the host-side half lives in the remote binary, and
+  `EnsureBinary` only re-uploads when `version.Version` changes
+  (`~/.ocode/bin/<version>/`). A remote host that already has the current
+  version cached will keep the old binary until the version is bumped, so this
+  needs a version bump (or removal of the host's cached
+  `~/.ocode/bin/<version>`) to take effect there. The web half needs the desktop
+  app rebuilt, since `web/dist` is embedded.
+
+## 2026-09-25 — Chat display: "Follow preset" now says what it resolves to
+
+- Settings → **Chat display** → Category overrides: a row set to
+  **Follow preset** no longer stops there. The option now reads
+  `Follow preset — Expanded` or `Follow preset — Collapsed`, naming the value
+  the currently selected Full/Balanced/Quiet preset actually resolves to for
+  that category. The value is computed from the **draft** preset, so it updates
+  the moment you switch the Preset radios — before you save — and it comes from
+  the same resolver the chat renderer uses, so the label can never disagree with
+  what the transcript actually shows. The saved value stays `"preset"`; nothing
+  about the config or the wire format changed.
+- Surfacing that value exposed a real bug: **Balanced never collapsed tool-call
+  details**, contradicting its own description in the form and the design spec
+  (§9 matrix, §8 copy, §10). Both resolvers — `web/src/lib/chatVerbosity.ts` and
+  the Go `config.ResolveChatVerbosityPolicy` — now collapse `tool_calls` under
+  Balanced, keeping tool output expanded (20-line tail preview) and each activity
+  notice inline, as the spec has always said.
+- Tests (all mutation-verified — reverting either resolver line or the option
+  suffix fails them): `web/src/components/Settings/ChatDisplayForm.test.tsx`,
+  `web/src/lib/chatVerbosity.test.ts`,
+  `web/src/components/Chat/TurnParts.verbosity.test.tsx` (new render-level
+  Balanced assertion, which uses the real resolver via `ChatDisplayTestProvider`
+  rather than a local fixture copy), `internal/config/chat_verbosity_test.go`.
+  The two "override" cases in the web/Go resolver tests now push a cell in each
+  direction, so they can no longer pass by restating the preset.
+- Design record amended: `docs/superpowers/specs/2026-09-24-chat-verbosity-display-design.md`
+  §8 (dynamic option label) and the status header (resolver alignment).
+
+## 2026-09-25 — Destructive actions confirm, and a failed one now says so
+
+- Removing a project or deleting a project group from the web/desktop sidebar
+  no longer happens on a single click. The row context menu, the row's hover
+  trash button, and the collapsed rail's menu all open a confirmation dialog
+  first. Deleting a group says how many projects will move to Ungrouped and
+  that putting them back is one-by-one.
+- Four destructive actions were still guarded by native `window.confirm`,
+  which silently returns false in the Wails/WKWebView desktop webview — so in
+  the desktop app they looked wired up and did nothing: delete cron job
+  (Cron), clear session logs (Logs), delete profile and remove a provider key
+  (Settings → Profiles). All four now use a rendered dialog, so the action
+  works on desktop as well as in a browser. Each also gained an accessible
+  name where it had none.
+- The last two native-dialog dead ends are gone too. Renaming a profile used
+  `window.prompt` (silently returns null in the desktop webview, so rename did
+  nothing there); it is now a dialog with the same name validation, submitted
+  with Enter, and it reports a server failure without losing the typed name.
+  The cron panel's Clear outbox had no confirmation at all and now states that
+  queued results are dropped **without being delivered** — draining truncates
+  the JSONL delivery log, so a result nobody has read yet is lost.
+- `ConfirmDialog` gained an optional `confirmVariant`, so a dialog that
+  confirms without destroying (the profile rename) does not wear a red
+  destructive button. It still defaults to `destructive`.
+- New shared `web/src/components/common/ConfirmDialog.tsx` owns the structure
+  (safe action default-focused, destructive confirm, pending label). A
+  **rejected** action shows the reason inline and keeps the dialog open, so a
+  failed write is never presented as a completed one. `projectStore`'s
+  `removeProject` and `deleteGroup` now re-throw after logging, matching
+  `renameProject`; previously they swallowed the failure and the confirm
+  closed as if the project were gone.
+- Two more actions that were dead or unguarded on desktop, now fixed:
+  renaming a profile was blocked by a native `window.prompt()` (renders a
+  dialog with a real text input, keeping the existing
+  `[a-z0-9_-]{1,32}` rule and showing the server's reason inline), and
+  **Clear** in the cron outbox panel drained the queue on a single click with
+  no confirmation. `Outbox.Drain` truncates the JSONL file, so a cleared
+  result is never delivered — the confirm now says so and names how many
+  entries will be dropped.
+- `ConfirmDialog` takes an optional `confirmVariant`; the rename dialog passes
+  `"default"` so a confirmation that does not destroy is not painted
+  destructive red.
+- Wording is honest per action: removing a project says its files and chat
+  sessions are not deleted (only the list entry goes), while clearing logs and
+  deleting a profile/key keep "cannot be undone" because those are destructive
+  on disk.
+- Tests: `web/src/components/common/ConfirmDialog.test.tsx`,
+  `web/src/components/Layout/ProjectSidebar.test.tsx`,
+  `web/src/components/Cron/CronPanel.confirm.test.tsx`,
+  `web/src/components/Logs/LogPanel.test.tsx`,
+  `web/src/components/Settings/ProfilesManager.test.tsx`,
+  `web/src/stores/projectStore.test.tsx`. Design record:
+  `docs/superpowers/specs/2026-09-25-shared-confirm-dialog-design.md`.
+
+## 2026-09-25 — Web: list-dialog keyboard navigation
+
+- Custom list popups now share real-focus keyboard navigation: Up/Down move
+  without wrapping, Home/End jump to the boundaries, Enter activates the focused
+  row, and Space toggles only explicit multi-select rows. The search input keeps
+  focus handling separate, and returning at the top boundary restores input
+  focus.
+- Integrated the shared `useListNavigation` contract across ModelDialog,
+  SessionDialog, DirectoryBrowser, QuestionDialog, ReasoningLevelSelector, and
+  ProfileSwitcher while preserving each surface's loading, filtering, focus
+  return, and explicit-submit behavior. cmdk surfaces and native Radix Select
+  menus remain independent.
+- Tests cover movement/clamping, duplicate composite identities, nested actions,
+  input entry/return, multi-select, session load-more, and dialog-specific
+  activation. The companion design is recorded in
+  `docs/superpowers/specs/2026-09-25-list-dialog-keyboard-navigation-design.md`.
+
+## 2026-09-25 — Web: reopen a locally hidden question dialog
+
+- Closing a question with **X** or **Escape** now hides it locally without sending
+  the server-side cancellation request. The pending question remains in the
+  session, so the sidebar attention signal and the question state survive a
+  surface switch or reload.
+- The transcript exposes an **Open question** action for the same request id;
+  reopening dispatches `QUESTION_SHOW`, clears the local hidden marker, and
+  displays the original pending payload. A new request id is not blocked by an
+  older hidden question, while the footer **Don't answer** action remains the
+  explicit server-side dismissal.
+- The session-scoped dialog gate now respects the hidden request id, so an
+  off-surface or hidden question cannot remount over Files, Git, terminal, or
+  another session surface. Tests cover local hide/reopen, repeated-request
+  semantics, and the App-level dialog scope.
+
+## 2026-09-25 — Web/desktop status bar shows the last dispatched model
+
+- The shared bottom status bar now reports the model resolved for the most
+  recent backend-accepted message dispatch instead of mirroring the
+  CoworkSidebar's current `main_model` selection.
+- The value updates from the 202 `ChatResponse.model` for normal, new-session,
+  retry, permission/question continuation, and rewind sends, with
+  `turn_started.model` as a server-event fallback. Bridged RC 202s use the
+  live TUI status model rather than the registration-time value. Failed
+  submissions leave it unchanged, a later turn error retains it, and a
+  new-session rekey carries it forward. Before the first dispatch in a client
+  tab, the model segment is absent rather than presenting the sidebar model as
+  a last-used value.
+- Applies to both the web UI and desktop app because they share the embedded
+  React frontend. Tests: `web/src/components/common/StatusBar.lastModel.test.tsx`,
+  `web/src/stores/chatStore.lastModel.test.ts`,
+  `web/src/lib/sessionEvents.lastModel.test.ts`,
+  `web/src/hooks/useChat.lastModel.test.tsx`,
+  `internal/server/agent_session_turn_test.go`, and
+  `internal/server/handler_last_model_test.go`.
+
+## 2026-09-25 — TUI mouse wheel scrolls messages over the composer
+
+- On the chat tab, the main panel is now one wheel-scrolling surface from the
+  transcript through the composer. Scrolling with the pointer over the focused
+  draft scrolls the message viewport instead of being dropped; composer text,
+  cursor position, keyboard input, and selection are unchanged.
+- Permission and `/btw` popup viewports, the sidebar, the agent-detail drill-in,
+  and the files/git/changes/log/agents tabs keep their existing wheel routing
+  and precedence.
+- Regression coverage: `TestMouseWheelScrollsTranscriptOverMessagesAndComposer`
+  pins wheel scrolling over both the messages and the composer, unchanged draft
+  text, and a wheel outside the chat scroll region that must not move the
+  transcript. Design: `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md`.
+
+## 2026-09-25 — Compaction indicator synced across clients
+
+- Manual `/compact` and automatic compaction now publish a session-scoped
+  `compaction_started` / `compaction_done` lifecycle over the unified event bus.
+  Any other open browser, phone, or desktop client on the same server (including
+  a remote-host event stream) sees the existing "Compacting conversation…"
+  indicator instead of only the client that submitted the command.
+- Compaction is tracked with an overlap-safe per-session counter because a
+  manual pass (under `as.mu`) and an async automatic pass can run together.
+  `compaction_done` is emitted only when the last pass finishes, carries
+  `ok`/`error`, and is a critical bus event so a slow subscriber is less likely
+  to miss the terminal state. The first real error is retained for the group.
+  Both events carry a monotonic `generation` (and `/state` exposes it plus
+  `compaction_error`); a client ignores a `compaction_done` older than its
+  latest `compaction_started`, since event publishes happen outside the session
+  lock and can be reordered. The generation watermarks are cleared on SSE
+  reconnect so a restarted server's counter can safely begin again.
+- `GET /api/sessions/:id/state` now includes `compacting`,
+  `compaction_started_at`, `compaction_generation`, and the in-flight
+  `compaction_error`, so a client that opens mid-operation catches up
+  during initial/reconnect reconcile or the existing 15s revision poll. A
+  pre-fetch lifecycle event invalidates a stale `/state` response, and older
+  servers that omit the fields leave the client's current state untouched.
+- The initiating client keeps its optimistic indicator; agents already resident
+  with no registry row are registered on demand so existing internal paths keep
+  working. Agent eviction/release now skips an in-flight compaction.
+- Tests: `internal/server/session_manager_state_test.go`,
+  `internal/server/compact_status_test.go`,
+  `internal/server/auto_compact_test.go`, `internal/server/event_bus_test.go`,
+  `web/src/lib/sessionEvents.test.ts`. Spec:
+  `docs/superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md`.
+- Scope note: live in-progress sync is guaranteed for clients connected to the
+  same ocode server process or its remote-host bus. Separate server processes
+  sharing a project still converge the completed transcript through the
+  existing revision revalidation, not a live in-progress indicator.
+
+## 2026-09-25 — Large-context web/desktop `/compact` reliability
+
+- Manual and automatic compaction now give each summary batch its own
+  inactivity window, with a separate `summary_first_token_timeout_seconds`
+  setting (default 300s) for slow first tokens. A fixed 30-minute overall cap
+  protects unusually large or stalled passes. The setting is persisted through
+  the existing compact config API/form; `<= 0` is resolved to 300 at runtime.
+- Compaction summary streaming uses a per-call delta callback carried by the
+  request context instead of replacing `GenericClient.OnDelta`, so a concurrent
+  chat cannot clear the timeout reset hook or receive summary deltas.
+- A real compaction timeout now returns HTTP 504 with a retryable message and
+  leaves the transcript unchanged. Web/desktop keeps the sticky inline status
+  and also reports the failure through the app-wide action-error surface.
+- Regression coverage includes multi-batch deadlines, first-token grace, the
+  overall cap while a stream is active, callback precedence, config
+  normalization, server 504 behavior, and web error visibility.
+
+## 2026-09-25 — Web/TUI: durable deferred message rewind
+
+- **Restore to input** now arms a server-owned, single-use rewind capability
+  against the selected message's absolute transcript position and fingerprint.
+  History stays unchanged until the restored draft is sent, so cancelling or
+  editing the draft no longer risks an eager client-side truncation.
+- The composer shows a pending-rewind banner and keeps the capability, edited
+  draft, previous draft, and target preview in origin-local `localStorage`. The
+  record survives reload, tab/session rekeys, and temp-chat promotion; **Cancel
+  restore** invalidates the server capability and restores the prior draft.
+- Tokenized async sends commit the durable truncation plus replacement user row
+  before acknowledging `202`. This works for resident and no-resident headless
+  sessions and for TUI `/rc` sessions, where the TUI acknowledges the commit
+  before rendering or starting the replacement turn. A lost response is
+  resolved by probing the capability: committed means accepted, while stale,
+  expired, or already-used restores preserve the draft and ask the user to
+  restore again.
+- API: `POST /api/sessions/{id}/rewinds`,
+  `GET/DELETE /api/sessions/{id}/rewinds/{token}`, and `rewindToken` on
+  `POST /api/sessions/{id}/message`. Tests cover reload/rekey/cancel behavior,
+  send reconciliation, no-resident bootstrap, and bridged TUI commit/ack paths.
+
 ## 2026-09-25 — Ask dialogs no longer hang on submit
 
 - `POST /api/questions` and `POST /api/permissions/resolve` used to run the
@@ -34,18 +299,50 @@
   virtualization, while running tools, status, questions, permissions, and
   actionable errors stay visible. Config-change events invalidate the local
   policy and reconnect recovery re-fetches it.
-- Tests cover the Go config/API contract, policy resolution, renderer behavior,
-  Settings integration, and live client updates.
+- The shared contract is the `chat_verbosity` config section behind authenticated
+  `GET`/`PUT /api/config/ocode/chat-verbosity` (`internal/config/ocodeconfig.go`,
+  `handler_config.go`): exactly four override categories (`older_thinking`,
+  `tool_calls`, `tool_output`, `activity_notices`), with no server-side
+  normalization — an invalid preset, an invalid override value, or an unknown
+  override category is a hard `400`, and the settings form surfaces the
+  structured error.
+- `chat_verbosity_changed` is consumed as invalidation only (payload ignored —
+  the event envelope carries no host identity) and the store re-fetches the local
+  config, on the event and on SSE reconnect; a failed refetch keeps the last good
+  policy (Full plus a warning when nothing is cached). A policy revision
+  clears/rebases the ChatPanel disclosure map and captures/restores the
+  virtualizer scroll anchor so the reading position holds; in-chat search
+  force-opens the current match transiently without overwriting the manual
+  choice.
+- Tests: Go config/handler suites (`internal/config/chat_verbosity_test.go`,
+  `internal/server/handler_chat_verbosity_test.go`), policy/store/resolver
+  (`web/src/lib/chatVerbosity.test.ts`, `chatVerbosity.store.test.ts`), controlled
+  renderer (`TurnParts.verbosity.test.tsx`), scroll-anchor helpers
+  (`chatDisplayScroll.test.ts`), Settings form + group registration
+  (`ChatDisplayForm.test.tsx`, `SettingsPanel.chatDisplay.test.tsx`), and the
+  provider-wrapped existing direct-render tests (`chatDisplayTestUtils.tsx`).
 
-## 2026-09-25 — Web: conflict-aware Git status and resolution
+## 2026-09-25 — Git: conflict-aware status, resolution, and operation recovery
 
 - Git status now reports unmerged paths and halted repository operations from
   worktree-local Git state. Conflicted paths are removed from the staged and
   unstaged file lists so each path is counted once, including in project and
   tab badges.
-- Added the authenticated conflict-resolution endpoint and the corresponding
-  status/operation regression coverage; existing Git actions continue to use
-  the same status shape with defensive handling for older servers.
+- Added authenticated `POST /api/git/conflict/resolve` and
+  `POST /api/git/operation` for local and SSH/WSL projects. The operation
+  endpoint supports continue/abort/skip for merge, rebase, rebase-interactive,
+  am, cherry-pick, and revert, plus good/bad/skip and `abort` for bisect
+  (the action `abort` is what runs `git bisect reset`). The server
+  re-detects the active operation, rejects stale kinds, refuses continue while
+  conflicts remain, bounds commands at 60 seconds, and returns git refusals as
+  `409` with git's combined output. Remote status and mutation paths reuse the
+  same parser and action policy as local projects; remote path-safety checks
+  still reject shell-metacharacter names with a clear `400`.
+- Existing Git actions continue to use the same status shape with defensive
+  handling for older servers. Regression coverage includes local and remote
+  conflict/operation matrices, stale-kind guards, non-interactive hook
+  environments, the 60-second bound, transport encoding, path containment,
+  conflict resolution, and the TUI `/rc` rewind bridge.
 
 ## 2026-09-25 — MCP: OAuth metadata discovery and safe credential persistence
 

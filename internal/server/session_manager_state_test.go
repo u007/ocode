@@ -59,6 +59,53 @@ func TestBootstrapStageTransitions(t *testing.T) {
 	}
 }
 
+// TestCompactionLifecycleTracksOverlappingOperations keeps the session-level
+// compaction state honest when a manual pass and an automatic pass overlap.
+// A single boolean would let the first completion hide the still-running
+// operation from /state and from clients reconciling after a missed event.
+func TestCompactionLifecycleTracksOverlappingOperations(t *testing.T) {
+	mgr := NewSessionManager(defaultSessionIdleTimeout, func() []string { return nil }, nil)
+	id := session.NewSessionID()
+	mgr.Register(id, t.TempDir())
+
+	ok, startedAt, generation := mgr.BeginCompaction(id)
+	if !ok {
+		t.Fatal("BeginCompaction rejected a registered session")
+	}
+	ok, overlappingStartedAt, overlappingGeneration := mgr.BeginCompaction(id)
+	if !ok {
+		t.Fatal("second BeginCompaction rejected an already active session")
+	}
+	if overlappingGeneration != generation || !overlappingStartedAt.Equal(startedAt) {
+		t.Fatalf("overlapping BeginCompaction metadata = (%s, %d), want shared (%s, %d)", overlappingStartedAt, overlappingGeneration, startedAt, generation)
+	}
+	state, ok := mgr.State(id)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	if !state.Compacting || state.CompactionStartedAt.IsZero() {
+		t.Fatalf("overlapping compaction state = %+v, want active with a start time", state)
+	}
+
+	idle, wasActive, aggregateErr, generation := mgr.EndCompaction(id, "first pass failed")
+	if idle || !wasActive || aggregateErr != "" || generation == 0 {
+		t.Fatalf("first EndCompaction = (idle=%v, wasActive=%v, aggregateErr=%q, generation=%d), want another operation still active", idle, wasActive, aggregateErr, generation)
+	}
+	state, _ = mgr.State(id)
+	if !state.Compacting {
+		t.Fatalf("state after first completion = %+v, want still compacting", state)
+	}
+
+	idle, wasActive, aggregateErr, generation = mgr.EndCompaction(id, "")
+	if !idle || !wasActive || aggregateErr != "first pass failed" || generation == 0 {
+		t.Fatalf("final EndCompaction = (idle=%v, wasActive=%v, aggregateErr=%q, generation=%d), want idle with first error retained", idle, wasActive, aggregateErr, generation)
+	}
+	state, _ = mgr.State(id)
+	if state.Compacting || !state.CompactionStartedAt.IsZero() {
+		t.Fatalf("final compaction state = %+v, want inactive with no start time", state)
+	}
+}
+
 // TestPendingMessageLifecycle covers the persist-then-202 bookkeeping: pending
 // messages are pushed in order, exposed front-to-back, shifted after a turn,
 // and the pending count drives the bootstrap strip length.

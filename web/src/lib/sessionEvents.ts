@@ -7,8 +7,19 @@ import { rekeyDraft } from "./tabDrafts";
 import { rekeyQueue, removeDispatchedQueuedByText, dispatchQueueChanged } from "./tabQueue";
 import { rekeyInputHistory } from "./tabInputHistory";
 import { rekeySidePaneState } from "./sidePaneState";
+import { clearPendingRewind, rekeyPendingRewind } from "./pendingRewindStore";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
 import { sessionRevisionMoved, clearSessionRevision } from "./sessionRevision";
+import {
+  clearCompaction,
+  getCompactionEventVersion,
+  getCompactionGeneration,
+  compactionGenerationFinished,
+  isLocalCompactionPending,
+  noteCompactionFinishedGeneration,
+  noteCompactionGeneration,
+  setCompactionState,
+} from "./compactionState";
 
 /**
  * sessionEvents — pure routing of bus envelopes into chatStore/projectStore.
@@ -118,6 +129,9 @@ export function closeSessionBackend(sessionId: string, host?: string): void {
   // The tab is gone: drop its cross-process revision baseline so the map does
   // not retain every session ever viewed over a long-lived desktop session.
   clearSessionRevision(sessionId, host);
+  // A closed tab's pending rewind must not linger: reopening the session should
+  // start from the persisted transcript, not a stale draft/capability pair.
+  clearPendingRewind(host, sessionId);
   api.closeSession(sessionId, host).catch((err) => {
     console.warn("close session backend failed", err);
   });
@@ -162,6 +176,8 @@ const SESSION_SCOPED_EVENTS = new Set([
   "turn_done",
   "turn_error",
   "messages",
+  "compaction_started",
+  "compaction_done",
   "question",
   "question_resolved",
   "permission",
@@ -203,6 +219,80 @@ export function __resetLastAppliedSeqForTests(): void {
   lastAppliedSeq.clear();
 }
 
+function compactionStartedAt(value: unknown): number {
+  if (typeof value !== "string") return Date.now();
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function compactionGeneration(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function applyCompactionStarted(sessionId: string, data: unknown): void {
+  const payload = data && typeof data === "object" ? data as { started_at?: unknown; generation?: unknown } : {};
+  const generation = compactionGeneration(payload.generation);
+  // The server publishes outside the session lock. A start can therefore be
+  // delivered after its group's done; do not resurrect a completed group.
+  if (compactionGenerationFinished(sessionId, generation)) return;
+  noteCompactionGeneration(sessionId, generation);
+  setCompactionState(sessionId, { status: "active", startedAt: compactionStartedAt(payload.started_at) });
+}
+
+function applyCompactionDone(sessionId: string, data: unknown): void {
+  const payload = data && typeof data === "object"
+    ? data as { ok?: unknown; error?: unknown; generation?: unknown }
+    : {};
+  const generation = compactionGeneration(payload.generation);
+  noteCompactionFinishedGeneration(sessionId, generation);
+  // A done from an older group can be published after a newer group's started
+  // event; clearing here would hide the still-running group.
+  if (generation > 0 && generation < getCompactionGeneration(sessionId)) return;
+  if (payload.ok === false) {
+    setCompactionState(sessionId, {
+      status: "error",
+      error: typeof payload.error === "string" && payload.error.trim()
+        ? payload.error
+        : "compaction failed",
+    });
+    return;
+  }
+  clearCompaction(sessionId);
+}
+
+function applyServerCompactionState(
+  sessionId: string,
+  state: {
+    compacting?: boolean;
+    compaction_started_at?: string;
+    compaction_generation?: number;
+    compaction_error?: string;
+  },
+  versionAtStart?: number,
+): void {
+  // A response fetched before a lifecycle event is stale. This matters most for
+  // compacting:false, which would otherwise clear an indicator that the event
+  // stream has already activated.
+  if (versionAtStart !== undefined && getCompactionEventVersion(sessionId) !== versionAtStart) return;
+  // Older servers do not include these fields; absence means "unknown", not
+  // "idle", so preserve the current client state for compatibility.
+  if (typeof state.compacting !== "boolean") return;
+  if (state.compacting) {
+    const generation = compactionGeneration(state.compaction_generation);
+    if (compactionGenerationFinished(sessionId, generation)) return;
+    noteCompactionGeneration(sessionId, generation);
+    setCompactionState(sessionId, {
+      status: "active",
+      startedAt: compactionStartedAt(state.compaction_started_at),
+    });
+    return;
+  }
+  // The initiating request has an optimistic state that predates the server's
+  // state transition. Do not let a pre-begin false response erase it; the
+  // request's own terminal path (or a later poll) settles it.
+  if (!isLocalCompactionPending(sessionId)) clearCompaction(sessionId);
+}
+
 export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void {
   const { event, session_id: envSessionId, data } = env;
   // The envelope's session_id is authoritative (the server tags at source);
@@ -231,6 +321,12 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeyQueue(started.request_id, eventSessionId);
       rekeyInputHistory(started.request_id, eventSessionId);
       rekeySidePaneState(started.request_id, eventSessionId);
+      rekeyPendingRewind(
+        r.hostFor?.(started.request_id),
+        started.request_id,
+        r.hostFor?.(eventSessionId),
+        eventSessionId,
+      );
       r.projectDispatch({
         type: "UPDATE_TAB_ID",
         oldId: started.request_id,
@@ -272,6 +368,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeyQueue(oldId, newId);
       rekeyInputHistory(oldId, newId);
       rekeySidePaneState(oldId, newId);
+      rekeyPendingRewind(r.hostFor?.(oldId), oldId, r.hostFor?.(newId), newId);
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);
       r.openSessionIds.add(newId);
@@ -379,6 +476,15 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
   // session's slice (they set the streaming/turn state on the session).
   if (event === "turn_started") {
     return routeSessionScoped(r, env, eventSessionId, (sessionId) => {
+      const started = data && typeof data === "object"
+        ? data as { model?: unknown }
+        : {};
+      const model = typeof started.model === "string" ? started.model.trim() : "";
+      if (model) {
+        // The server resolves the model at dispatch time. Keep this separate
+        // from tuiStatus.main_model, which remains the sidebar's selection.
+        r.dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });
+      }
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: true });
       r.dispatch({ type: "SET_ERROR", sessionId, error: null });
     });
@@ -408,6 +514,16 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       // A send refused because the session is paused on a permission ask must
       // open the dialog, not just show the error (see PENDING_ASK_ERROR).
       if (error.includes(PENDING_ASK_ERROR)) scheduleHydratePendingAsks(sessionId, r);
+    });
+  }
+  if (event === "compaction_started") {
+    return routeSessionScoped(r, env, eventSessionId, (sessionId) => {
+      applyCompactionStarted(sessionId, data);
+    });
+  }
+  if (event === "compaction_done") {
+    return routeSessionScoped(r, env, eventSessionId, (sessionId) => {
+      applyCompactionDone(sessionId, data);
     });
   }
   if (event === "session_bootstrap") {
@@ -727,6 +843,7 @@ export async function reconcileOpenSessions(
     realIds.map(async (sessionId) => {
       try {
         const host = router.hostFor?.(sessionId);
+        const compactionVersion = getCompactionEventVersion(sessionId);
         const [state, detail] = await Promise.all([
           api.getSessionState(sessionId, host),
           api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }, host),
@@ -758,7 +875,7 @@ export async function reconcileOpenSessions(
           hasLivePending
         );
         const wasActive = slice.turnActive;
-        applyReconcileState(dispatch, sessionId, state, hasPendingAsk, wasActive);
+        applyReconcileState(dispatch, sessionId, state, hasPendingAsk, wasActive, compactionVersion);
         dispatch({ type: "MERGE_SNAPSHOT", sessionId, messages: detail.messages, total: detail.total });
         // Keep the tab label authoritative for tabs this client never visited
         // (ChatPanel's own detail fetch is the only other title path, and it
@@ -873,10 +990,21 @@ function scheduleHydratePendingAsks(sessionId: string, router: SessionEventRoute
 export function applyReconcileState(
   dispatch: (a: ChatAction) => void,
   sessionId: string,
-  state: { bootstrap_stage: string; turn_active: boolean; last_seq: number; interrupted?: boolean },
+  state: {
+    bootstrap_stage: string;
+    turn_active: boolean;
+    last_seq: number;
+    interrupted?: boolean;
+    compacting?: boolean;
+    compaction_started_at?: string;
+    compaction_generation?: number;
+    compaction_error?: string;
+  },
   hasPendingAsk = false,
   wasActive = false,
+  compactionVersionAtStart?: number,
 ): void {
+  applyServerCompactionState(sessionId, state, compactionVersionAtStart);
   // Server-derived interrupted flag: assigned verbatim from EVERY state
   // payload (idle or active) so it also clears when a turn starts or the tail
   // becomes a reply. The optimistic hide on Continue is the only client-side
@@ -935,6 +1063,7 @@ export async function revalidateSession(
   // long local turn.
   if (slice.turnActive) return;
   const host = router.hostFor?.(sessionId);
+  const compactionVersion = getCompactionEventVersion(sessionId);
   const state = await api.getSessionState(sessionId, host);
   const moved = sessionRevisionMoved(sessionId, host, state.revision);
   const hasClientAsk = !!(slice.pendingPermission || slice.pendingQuestion);
@@ -944,12 +1073,19 @@ export async function revalidateSession(
     (livePending?.questions?.length ?? 0) > 0;
 
   if (!moved) {
+    // Revalidation is also the recovery path for a client that missed a
+    // compaction_done event. Apply this independently of turn state so an idle
+    // session can clear a stale indicator without dispatching unrelated turn
+    // actions on every poll.
+    applyServerCompactionState(sessionId, state, compactionVersion);
     if (state.turn_active || (hasLivePending && !hasClientAsk)) {
       applyReconcileState(
         router.dispatch,
         sessionId,
         state,
         hasClientAsk || hasLivePending,
+        false,
+        compactionVersion,
       );
     }
     if (hasLivePending) dispatchPendingAsks(sessionId, livePending, router.dispatch);
@@ -965,7 +1101,7 @@ export async function revalidateSession(
     hasLivePending ||
     !!transcriptPending.pendingPermission ||
     !!transcriptPending.pendingQuestion;
-  applyReconcileState(router.dispatch, sessionId, state, hasPendingAsk);
+  applyReconcileState(router.dispatch, sessionId, state, hasPendingAsk, false, compactionVersion);
   // MERGE_SNAPSHOT (not SET_MESSAGES): its mid-turn guard preserves whatever
   // live content this client already holds, and it carries the authoritative
   // `total` from the fetch rather than the paginated window's length.

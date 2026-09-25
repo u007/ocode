@@ -1,7 +1,7 @@
 # Plan: Web Git tab — conflict detection, resolution, operation recovery
 
 Date: 2026-09-25
-Status: planned, awaiting user approval. Not yet implemented.
+Status: COMPLETE. Phases 01-08 are DONE and VERIFIED (server + web UI, local + remote SSH/WSL, docs).
 
 ## Goal
 
@@ -38,16 +38,16 @@ rebase or merge and halted on a conflict.
 
 ## Phase order
 
-| Part | Phase | One line |
-| --- | --- | --- |
-| `01-op-state-parser.md` | Operation-state detection | One shared, transport-neutral parser for a halted git operation, built on git's own state files. |
-| `02-status-detection.md` | Status surface | Put the conflicted-file list and the operation into `GitStatus`, fix the double/triple counting of conflicted paths. |
-| `03-resolve-endpoint.md` | Per-file resolution | `POST /api/git/conflict/resolve` with correct handling of the rebase swap and deleted sides. |
-| `04-operation-endpoint.md` | Operation recovery | `POST /api/git/operation` for continue / abort / skip, plus bisect good / bad / reset. |
-| `05-remote-parity.md` | Remote projects | Mirror every new server behavior across the SSH/WSL transport. |
-| `06-web-api-and-conflicts-ui.md` | Web types + Git tab UI | Conflicts section and operation banner, with destructive actions disabled mid-operation. |
-| `07-badge-parity.md` | Badge totals | Keep the session Git tab and project sidebar badges equal to the Git tab's totals. |
-| `08-docs.md` | Documentation | Concept page through the context agent, plus a CHANGES.md entry. |
+| Part | Phase | Status | One line |
+| --- | --- | --- | --- |
+| `01-op-state-parser.md` | Operation-state detection | **DONE** | One shared, transport-neutral parser for a halted git operation, built on git's own state files. |
+| `02-status-detection.md` | Status surface | **DONE** | Put the conflicted-file list and the operation into `GitStatus`, fix the double/triple counting of conflicted paths. |
+| `03-resolve-endpoint.md` | Per-file resolution | **DONE** | `POST /api/git/conflict/resolve` with correct handling of the rebase swap and deleted sides. |
+| `04-operation-endpoint.md` | Operation recovery | **DONE** | `POST /api/git/operation` for continue / abort / skip, plus bisect good / bad / abort (which runs `git bisect reset`). |
+| `05-remote-parity.md` | Remote projects | **DONE** | Mirror every new server behavior across the SSH/WSL transport. |
+| `06-web-api-and-conflicts-ui.md` | Web types + Git tab UI | **DONE** | Conflicts section and operation banner, with destructive actions disabled mid-operation. |
+| `07-badge-parity.md` | Badge totals | **DONE** | Keep the session Git tab and project sidebar badges equal to the Git tab's totals. Partly landed in phase 02. |
+| `08-docs.md` | Documentation | **DONE** | Concept page through the context agent, plus a CHANGES.md entry. |
 
 ## Why the phases are ordered this way
 
@@ -84,9 +84,15 @@ correct total is known by then. Phase 8 closes the work.
 
 ## Known limitations accepted by this design
 
-- The remote pathspec validator rejects any path containing a colon, so a
-  conflicted path that contains `:` cannot be resolved on a remote project.
-  This surfaces as a clear error rather than a silent no-op.
+- The remote path validator (`remoteSafeSpec`) rejects `'";` + backtick +
+  `$&|<>\!*?[](){}#:` and control characters, so a conflicted path containing
+  any of them — including ordinary Next.js routes like `app/[slug]/page.tsx`
+  and `(group)/layout.tsx`, not just a colon — cannot be resolved on a remote
+  project, even though the same file resolves locally. This surfaces as a
+  clear 400 rather than a silent no-op. The validator is deliberately not
+  relaxed: it is the shell-injection guard shared by every remote git
+  mutation. The real fix is passing the path via stdin/argv, as
+  `remoteGitHunk` already does for its patch.
 - `git rebase` and `git checkout` are denied by this environment's
   permission rules, so the rebase-specific behavior is covered by
   synthesized repository state and by asserting the git command mapping,

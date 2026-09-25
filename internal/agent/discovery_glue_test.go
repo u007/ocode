@@ -858,3 +858,149 @@ func TestDiscoveryStatusReportsJudge(t *testing.T) {
 		t.Fatalf("Judge should be empty when typesafe is not connected, got %q", got)
 	}
 }
+
+// --- Strict gate: a cold corpus must NOT fail open to the whole MCP corpus ---
+//
+// Regression: discoveryAllows used to return true for every MCP tool whenever
+// the embedder corpus was not warm ("warm failed → don't gate"). A cold cache
+// is the NORMAL first-turn state for the local backend (runDiscovery defers the
+// warm to the background), so every cold turn exposed the full MCP corpus —
+// 274 zoho-books schemas plus the built-ins, "exposing 322 tools". The names
+// -only index plus discover_more is the documented recovery path, so the gate
+// must hold even when nothing is attached yet.
+
+func TestGateOnColdCorpusGatesMCPTools(t *testing.T) {
+	a := newGateAgent()
+	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 64}, t.TempDir())
+	// Deliberately NOT warmed: Ready() == false is the cold-cache state.
+	a.disco = &discoveryState{enabled: true, engine: eng, session: discovery.NewSession(eng)}
+	if a.disco.engine.Ready() {
+		t.Fatal("precondition: engine must be cold for this test")
+	}
+
+	var names []string
+	for _, d := range a.GetToolDefinitions() {
+		names = append(names, d["name"].(string))
+	}
+	if want := []string{"read"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("cold corpus must gate MCP tools, not fail open: got %v want %v", names, want)
+	}
+}
+
+func TestGateOnColdCorpusStillExposesAttached(t *testing.T) {
+	a := newGateAgent()
+	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 64}, t.TempDir())
+	sess := discovery.NewSession(eng)
+	sess.Seed([]string{"mcp:Notion/search"})
+	a.disco = &discoveryState{enabled: true, engine: eng, session: sess}
+
+	var names []string
+	for _, d := range a.GetToolDefinitions() {
+		names = append(names, d["name"].(string))
+	}
+	if want := []string{"Notion/search", "read"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("a cold corpus must still expose the sticky set: got %v want %v", names, want)
+	}
+}
+
+func TestGateOnDisabledDiscoveryStillFailsOpen(t *testing.T) {
+	// The escape hatch that must SURVIVE the strict gate: when discovery never
+	// initialized (embedder unresolved → initErr), the feature is off and
+	// gating would strand every MCP tool behind a discover_more call that
+	// cannot work.
+	a := newGateAgent()
+	a.disco = &discoveryState{enabled: false, initErr: "no embedder"}
+
+	var names []string
+	for _, d := range a.GetToolDefinitions() {
+		names = append(names, d["name"].(string))
+	}
+	want := []string{"Notion/search", "Notion/update", "read"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("discovery-off must still expose everything: got %v want %v", names, want)
+	}
+}
+
+// --- discover_more consults the relevance judge ---
+
+func TestDiscoverMoreJudgeVetoesCandidate(t *testing.T) {
+	a := newDiscoveryGlueAgent(t)
+	if err := a.disco.engine.Warm(context.Background(), a.discoveryDocs()); err != nil {
+		t.Fatal(err)
+	}
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, map[string]bool{
+		"mcp:Notion/search": true,
+		"mcp:Notion/update": true,
+	}, 0)
+	useJudgeFactory(t, srv)
+
+	out, err := (discoverMoreTool{agent: a}).Execute([]byte(`{"need":"search notion pages"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.requestCount() == 0 {
+		t.Fatal("discover_more must consult the relevance judge")
+	}
+	if !h.asked("mcp:Notion/search") {
+		t.Fatalf("the matching tool must have been a candidate; questions=%v", h.body["questions"])
+	}
+	if a.disco.session.IsAttached("mcp:Notion/search") {
+		t.Fatal("a vetoed candidate must not be attached by discover_more")
+	}
+	if strings.Contains(out, "Notion/search") {
+		t.Fatalf("reply must not claim a vetoed tool was attached: %q", out)
+	}
+}
+
+func TestDiscoverMoreJudgeErrorFailsOpen(t *testing.T) {
+	// A judge failure must never attach FEWER docs than the pre-judge behavior.
+	a := newDiscoveryGlueAgent(t)
+	if err := a.disco.engine.Warm(context.Background(), a.discoveryDocs()); err != nil {
+		t.Fatal(err)
+	}
+	_, srv := newDiscoveryGlueJudgeServer(t, 0, nil, 500) // always errors
+	useJudgeFactory(t, srv)
+
+	if _, err := (discoverMoreTool{agent: a}).Execute([]byte(`{"need":"search notion pages"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !a.disco.session.IsAttached("mcp:Notion/search") {
+		t.Fatal("a judge error must fail open and attach the candidate")
+	}
+}
+
+func TestDiscoverMoreJudgeSeesTurnTailOnColdTurn(t *testing.T) {
+	// The realistic cold turn: runDiscovery early-returns while the background
+	// warm is in flight, so nothing is attached — and the on-demand
+	// discover_more judge must still see the conversation.
+	a := newDiscoveryGlueAgent(t)
+	a.disco.warming.Store(true)
+	h, srv := newDiscoveryGlueJudgeServer(t, 0.99, nil, 0)
+	useJudgeFactory(t, srv)
+
+	msgs := []Message{
+		{Role: "user", Content: "find the notion pages about onboarding"},
+		{Role: "assistant", Content: "looking"},
+		{Role: "user", Content: "update notion page content for onboarding"},
+	}
+	a.RunDiscoveryForMessages(msgs)
+	if a.disco.session.Attached() != nil && len(a.disco.session.Attached()) > 0 {
+		t.Fatalf("cold turn must attach nothing, got %v", a.disco.session.Attached())
+	}
+	a.disco.warming.Store(false) // background warm landed
+
+	if _, err := (discoverMoreTool{agent: a}).Execute([]byte(`{"need":"update notion page content"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if h.requestCount() == 0 {
+		t.Fatal("discover_more must consult the judge on a cold turn")
+	}
+	tail, _ := h.body["transcript_tail"].([]any)
+	if len(tail) == 0 {
+		t.Fatalf("judge state must carry the turn's transcript tail; body=%v", h.body)
+	}
+	blob, _ := json.Marshal(tail)
+	if !strings.Contains(string(blob), "onboarding") {
+		t.Fatalf("judge tail must contain the user's turn, got %s", blob)
+	}
+}

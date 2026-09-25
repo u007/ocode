@@ -36,6 +36,16 @@ Track tested features, provider integrations, and known issues.
 - [x] Async agent runs with transcript capture
 - [x] Background process management (256KB circular buffer)
 - [x] Interrupted-turn notice + Continue in chat (web/desktop, 2026-09-22)
+- [x] Cross-client compaction indicator (manual + automatic, same server/remote-host bus, 2026-09-25; includes reconnect/server-restart generation reset)
+- [x] Large-context compaction timeout policy (per-batch first-token/idle windows + 30-minute cap, 2026-09-25)
+- [x] Deferred durable message rewind (web/headless + TUI `/rc` bridge, 2026-09-25)
+- [x] Git conflict resolution + halted-operation recovery (local + SSH/WSL parity, 2026-09-25)
+- [x] Shared web chat display settings (Full/Balanced/Quiet + category overrides, 2026-09-25)
+- [x] Last-dispatched model status (backend response + turn-event fallback, 2026-09-25)
+- [x] Reopen locally hidden question dialog (X/Escape vs Don't answer, 2026-09-25)
+- [x] List-dialog keyboard navigation (shared real-focus hook across custom popups, 2026-09-25)
+- [x] Project removal confirmation across sidebar entry points (2026-09-25)
+- [x] TUI mouse-wheel scrolling from transcript over composer (2026-09-25)
 
 ### Agents
 - [x] Advisor Tool

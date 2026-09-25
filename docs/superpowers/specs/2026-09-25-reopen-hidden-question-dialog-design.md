@@ -1,7 +1,7 @@
 ---
 type: Design
 title: Reopen a locally hidden question dialog
-description: 'Design spec: locally hide the QuestionDialog via X/Escape with request-ID-scoped hidden state and reopen it from the transcript''s Open question button.'
+description: 'Implemented design spec: locally hide the QuestionDialog via X/Escape with request-ID-scoped hidden state and reopen it from the transcript''s Open question button.'
 tags:
   - web
   - desktop
@@ -9,12 +9,21 @@ tags:
   - question
   - design
   - state
-timestamp: 2026-09-25T07:19:27Z
+timestamp: 2026-09-25T11:47:33Z
 ---
 # Reopen a locally hidden question dialog — design
 
 Date: 2026-09-25
-Status: approved (design approved 2026-09-25; implementation pending)
+Status: **implemented (2026-09-25).** The request-ID-scoped hidden state, the local X/Escape hide, the renamed final action, and the transcript reopen all shipped; see *As-built* below.
+
+## As-built
+
+- Store: `SessionSlice.hiddenQuestionRequestId` (`web/src/stores/chatStore.tsx:240`) with `QUESTION_HIDE` / `QUESTION_SHOW` actions (`:446-447`) and stale-ID guards in the reducer (`:890-916`). `QUESTION_REQUEST` preserves a hide for the same `request_id` (`:890-894`); `QUESTION_ANSWERED` / `QUESTION_DISMISSED` / `QUESTION_RESOLVED` clear only the matching id (`:966`, `:1004`); reset clears it (`:1146`) and `REKEY_SESSION` drops it (`:1020`).
+- App: visibility is derived as designed (`web/src/App.tsx:185`, `:1901` — `pendingQuestion && hiddenQuestionRequestId !== pendingQuestion.request_id && sessionAskVisible`).
+- Dialog: `QuestionDialog` takes separate `onHide` (X/Escape, local, no network) and `onCancel` ("Don't answer", still server-final) (`web/src/components/Chat/QuestionDialog.tsx:35`, `:188-197`, `:324`); overlay clicks stay suppressed (`:273-276`).
+- Reopen: the transcript's existing **Open question** action dispatches `QUESTION_SHOW` (`web/src/components/Chat/ChatPanel.tsx:1310`).
+- Tests: `web/src/App.askDialogScope.test.tsx`, `web/src/components/Chat/QuestionDialog.test.tsx`, and the `QUESTION_HIDE`/`QUESTION_SHOW` cases in `web/src/stores/chatStore.test.tsx`.
+- No backend change, as the design required.
 
 ## Problem
 

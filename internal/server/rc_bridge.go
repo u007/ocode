@@ -37,6 +37,12 @@ type RCRequest struct {
 	// itself rather than via the TUI's local dialog. The TUI branches on this
 	// so the web /rc UI (RemoteApproval=false) keeps its existing behavior.
 	RemoteApproval bool
+	// RewindToken, when set, makes the TUI commit the durable pending rewind
+	// (truncate + append the new user row) before it renders or starts a turn.
+	// AckCh receives the commit error (nil on success); it is buffered by the
+	// sender so a stopped TUI can never block the web handler.
+	RewindToken string
+	AckCh       chan<- error
 }
 
 // RCResolution carries a decision for a permission ask or the answers to a
@@ -265,4 +271,17 @@ func (b *RCBridge) TUIStatus() TUIStatus {
 		return TUIStatus{}
 	}
 	return b.StatusStore().Snapshot()
+}
+
+// ModelForDispatch returns the model the bridged TUI will use for a new
+// request. The registration-time Model field is only a fallback; model
+// switches update the live TUI status snapshot, not that field.
+func (b *RCBridge) ModelForDispatch() string {
+	if b == nil {
+		return ""
+	}
+	if live := b.TUIStatus(); live.MainModel != "" {
+		return live.MainModel
+	}
+	return b.Model
 }

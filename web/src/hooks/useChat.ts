@@ -9,12 +9,26 @@ import {
 import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
 import { api, ApiError } from "../api/client";
 import { resolveSessionHost } from "./useSessionHost";
+import { clearPendingRewind, loadPendingRewind } from "../lib/pendingRewindStore";
+import { reportActionError, reportActionErrorMessage } from "../lib/actionErrors";
 import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
 import type { PermissionDecideResult } from "../components/Chat/PermissionDialog";
 
 interface UseChatOptions {
   /** Called when a new session is created (first message from an empty tab). */
   onNewSession?: (sessionId: string) => void;
+}
+
+/** The armed durable-rewind token for this session, when one exists. The store
+ *  is keyed by host+session so a remote tab can never consume the local one. */
+function armedRewindToken(host: string | undefined, sessionId: string): string | undefined {
+  const record = loadPendingRewind(host, sessionId);
+  if (!record) return undefined;
+  return record.token;
+}
+
+function dispatchedModel(response: { model?: unknown } | null | undefined): string {
+  return typeof response?.model === "string" ? response.model.trim() : "";
 }
 
 // sessionId is the tab this hook is scoped to — a real session id, a
@@ -61,6 +75,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   );
   const pendingQuestion = useChatSelector(
     (s) => getSessionSlice(s, sessionId).pendingQuestion,
+  );
+  const hiddenQuestionRequestId = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).hiddenQuestionRequestId,
   );
   // The assistant message (prose + reasoning) behind the pending ask, shown
   // inside the permission/question dialogs. Shallow-compared so streamed
@@ -150,14 +167,10 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       const draftSlice = getSessionSlice(stateRef.current, sessionId);
       const model = draftSlice.model;
       const permissionMode = draftSlice.permissionMode;
+      const rewindToken = isRealSession ? armedRewindToken(projectHost, sessionId) : undefined;
       const submitPromise = isRealSession
-        ? api.sendMessage(sessionId, content, projectHost)
-        : api
-            .chat(content, undefined, model, sessionId, projectPath, projectHost, permissionMode)
-            .then((res) => {
-              options?.onNewSession?.(res.sessionId);
-              return res;
-            });
+        ? api.sendMessage(sessionId, content, projectHost, rewindToken)
+        : api.chat(content, undefined, model, sessionId, projectPath, projectHost, permissionMode);
 
       // The send endpoints resolve as soon as the server has *dispatched* the
       // turn (202), not when it finishes — they no longer hold a connection
@@ -171,8 +184,69 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       // the success/acceptance signal. A rejected submit (network/validation)
       // resolves false so the caller can roll back any queue bookkeeping.
       return submitPromise
-        .then(() => true)
-        .catch((err) => {
+        .then((res) => {
+          if (!isRealSession) {
+            options?.onNewSession?.(res.sessionId);
+          }
+          // The response carries the model resolved by the backend for this
+          // dispatch, not the current sidebar selection. For a new session,
+          // the callback above rekeys the temporary slice first; key the value
+          // to the real session so an SSE-first rekey cannot create a ghost
+          // temporary slice that later overwrites the live one.
+          const targetSessionId = isRealSession ? sessionId : res.sessionId;
+          const model = dispatchedModel(res);
+          if (model) {
+            dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId: targetSessionId, model });
+          }
+          if (rewindToken) clearPendingRewind(projectHost, sessionId);
+          return true;
+        })
+        .catch(async (err) => {
+          if (rewindToken) {
+            const terminalRewindStatus =
+              err instanceof ApiError &&
+              (err.status === 404 || err.status === 409 || err.status === 410);
+            if (terminalRewindStatus) {
+              clearPendingRewind(projectHost, sessionId);
+              reportActionErrorMessage("This restore is no longer valid because the conversation changed or it expired. Your draft is preserved; restore the message again.");
+              dispatch({ type: "SET_ERROR", sessionId, error: "restore is no longer valid" });
+              dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+              return false;
+            }
+            try {
+              const state = await api.getRewind(sessionId, rewindToken, projectHost);
+              if (state.status === "committed") {
+                // The server committed the rewind but the response was lost.
+                // The authoritative transcript event has already been sent.
+                clearPendingRewind(projectHost, sessionId);
+                reportActionErrorMessage("The restored message was accepted before the connection dropped.");
+                dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+                return true;
+              }
+              if (state.status === "stale") {
+                clearPendingRewind(projectHost, sessionId);
+                reportActionErrorMessage("This restore is no longer valid because the conversation changed. Your draft is preserved; restore the message again.");
+                dispatch({ type: "SET_ERROR", sessionId, error: "restore is no longer valid" });
+                dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+                return false;
+              }
+            } catch (probe) {
+              if (probe instanceof ApiError && (probe.status === 404 || probe.status === 409 || probe.status === 410)) {
+                // The resume/reload state can no longer be consumed: the
+                // conversation changed, it expired, or it was already used.
+                // Keep the draft for the user, but drop the unusable capability.
+                clearPendingRewind(projectHost, sessionId);
+                reportActionErrorMessage("This restore is no longer valid because the conversation changed or it expired. Your draft is preserved; restore the message again.");
+                dispatch({ type: "SET_ERROR", sessionId, error: "restore is no longer valid" });
+                dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+                return false;
+              }
+            }
+            reportActionError(err, "Send restored message");
+            dispatch({ type: "SET_ERROR", sessionId, error: err?.message || "send failed" });
+            dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+            return false;
+          }
           // 409 = the session is paused on a permission/question ask the
           // server refused to step past. Recover the dialog from live state
           // so the user can resolve it (see hydratePendingAsks).
@@ -223,7 +297,11 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     dispatch({ type: "SET_ERROR", sessionId, error: null });
     dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
     try {
-      await api.retrySession(sessionId, projectHost);
+      const response = await api.retrySession(sessionId, projectHost);
+      const model = dispatchedModel(response);
+      if (model) {
+        dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });
+      }
       return true;
     } catch (err) {
       dispatch({
@@ -254,7 +332,11 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       if (!sessionId) return { ok: false, error: "no active session" };
       dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
       try {
-        await api.resolvePermission(requestId, sessionId, decision, projectHost);
+        const response = await api.resolvePermission(requestId, sessionId, decision, projectHost);
+        const model = dispatchedModel(response);
+        if (model) {
+          dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });
+        }
         return { ok: true };
       } catch (err) {
         console.error("Failed to resolve permission:", err);
@@ -289,9 +371,13 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       // immediately, without waiting for the continuation turn's snapshot
       // (see QUESTION_ANSWERED in chatStore).
       dispatch({ type: "QUESTION_ANSWERED", sessionId, requestId, answers });
-      dispatch({ type: "QUESTION_RESOLVED", sessionId });
+      dispatch({ type: "QUESTION_RESOLVED", sessionId, requestId });
       try {
-        await api.answerQuestion(requestId, sessionId, answers, projectHost);
+        const response = await api.answerQuestion(requestId, sessionId, answers, projectHost);
+        const model = dispatchedModel(response);
+        if (model) {
+          dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });
+        }
         return true;
       } catch (err) {
         console.error("Failed to answer question:", err);
@@ -310,12 +396,13 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     [dispatch, sessionId, projectHost, hydratePendingAsks],
   );
 
-  // Cancel a pending agent question prompt without answering it (the web
-  // equivalent of the TUI's Esc on the dialog). Mirrors submitQuestionAnswers:
-  // only a confirmed success dismisses the dialog. A 404/409 means the server
-  // no longer holds this ask (already answered/dismissed elsewhere, or the
-  // agent was released) — retrying can never succeed, so the dialog is
-  // dismissed locally instead of staying stuck open.
+  // Explicitly dismiss a pending agent question without answering it. This is
+  // the final server-side action behind the dialog's "Don't answer" button;
+  // X and Escape use hideQuestion below and never call this endpoint.
+  // Mirrors submitQuestionAnswers: only a confirmed success dismisses the
+  // dialog. A 404/409 means the server no longer holds this ask (already
+  // answered/dismissed elsewhere, or the agent was released) — retrying can
+  // never succeed, so the dialog is dismissed locally instead of sticking.
   const cancelQuestion = useCallback(
     async (requestId: string): Promise<boolean> => {
       if (!sessionId) return false;
@@ -339,6 +426,22 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       }
     },
     [dispatch, sessionId, projectHost],
+  );
+
+  const hideQuestion = useCallback(
+    (requestId: string) => {
+      if (!sessionId) return;
+      dispatch({ type: "QUESTION_HIDE", sessionId, requestId });
+    },
+    [dispatch, sessionId],
+  );
+
+  const showQuestion = useCallback(
+    (requestId: string) => {
+      if (!sessionId) return;
+      dispatch({ type: "QUESTION_SHOW", sessionId, requestId });
+    },
+    [dispatch, sessionId],
   );
 
   // Execute a shell command directly (for ! prefix commands). A remote
@@ -379,6 +482,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     resolvePermission,
     submitQuestionAnswers,
     cancelQuestion,
+    projectHost,
     // isStreaming derives from the per-session turn state (Part 05): set
     // optimistically on 202 (SET_STREAMING), confirmed by turn_started
     // (turnActive), cleared by turn_done/turn_error or a rejected submit.
@@ -386,6 +490,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     hasConversation,
     pendingPermission,
     pendingQuestion,
+    hiddenQuestionRequestId,
     askContext,
+    hideQuestion,
+    showQuestion,
   };
 }

@@ -1,5 +1,8 @@
 # Phase 05 — Remote project parity (SSH / WSL)
 
+Status: **DONE + VERIFIED 2026-09-25.** See the implementation decisions
+and verification sections at the end of this file.
+
 Phase 5 of the web Git tab conflict/operation-recovery work, tracked from
 `.opencode/plans/2026-09-25-git-conflicts-and-operations/INDEX.md`.
 
@@ -148,3 +151,46 @@ Add to `internal/server/handler_remote_git_test.go` and
 - The colon-path limitation is permanent unless `remoteSafeSpec` is
   redesigned. Redesigning it is out of scope here and is noted in
   `TODO.md`.
+
+## Implementation decisions (recorded 2026-09-25)
+
+Three deviations from this plan, all forced by properties of the transport.
+
+- **Both new probes are base64-encoded in the shell.** The plan specified a
+  "size-bounded slice" of each state file and a raw `-z` conflicts section.
+  Neither survives the trip as raw text: `MERGE_MSG` holds a commit message
+  that can contain tabs and newlines, and `-z` emits raw paths that can
+  contain the `0x1e` section separator. Either would forge a state entry or
+  shift every later field in the batch. Both payloads are therefore encoded
+  and decoded with the `base64Decode` convention `remoteReadFile` already
+  uses. The 4 KiB bound and the fixed probe-name list are unchanged, and
+  `gitOperationStateFor` is still called verbatim — the transport stays
+  invisible to the parser.
+
+- **The `-z` section is not last, so `SplitN` carries the cap instead.**
+  The plan's Risks note anticipated a collision. Because the payload is
+  base64 now, a separator byte can no longer appear in it at all; the
+  `SplitN(out, sep, 8)` is kept as a second line of defense rather than as the
+  primary mechanism.
+
+- **`remoteSafeSpec` is not relaxed, and the limitation is reported.**
+  The plan already said to return the validator's error rather than loosen the
+  guard; this phase confirmed how much that costs. The rejected set is wider
+  than the plan's `:` example — it also covers `[]()` and `#`, which blocks
+  ordinary Next.js routes like `app/[slug]/page.tsx` and `(group)/`. The fix
+  is a transport that carries the path via stdin/argv (as `remoteGitHunk`
+  already does for its patch), not a weaker filter. Recorded in TODO.md with
+  the user-visible workarounds.
+
+## Verification (2026-09-25)
+
+16 tests in `handler_remote_git_conflicts_test.go`, all driving the real remote
+code path through the existing `installFakeSSH` harness against a genuine temp
+repository — no mocked transport. `go test -run 'RemoteGit|GitConflict|
+GitOperation'`, the full `./internal/server/` suite (179s), `gofmt -l`,
+`go vet` and `go build ./...` all pass.
+
+Four mutations were confirmed to fail the suite: a fixed `"merge"` string
+instead of reading the state files; dropping `remoteSafeSpec`; dropping
+`GIT_EDITOR`; and swapping the `gitOperationCommand(kind, action)` arguments —
+the last was a real defect this phase introduced and three tests caught it.

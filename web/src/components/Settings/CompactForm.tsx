@@ -8,7 +8,7 @@ import ModelDialog from "../Layout/ModelDialog";
 const EMPTY: CompactConfig = {
   enabled: false, summary_provider: "", summary_model: "", token_threshold: 0,
   keep_recent_turns: 0, keep_recent_tokens: 0, min_messages: 0,
-  summary_timeout_seconds: 0, summary_max_retries: 0, max_summary_input_tokens: 0,
+  summary_timeout_seconds: 0, summary_first_token_timeout_seconds: 0, summary_max_retries: 0, max_summary_input_tokens: 0,
 };
 
 const FIELDS: { key: keyof CompactConfig; label: string; type: "text" | "number" | "checkbox" }[] = [
@@ -20,6 +20,7 @@ const FIELDS: { key: keyof CompactConfig; label: string; type: "text" | "number"
   { key: "keep_recent_tokens", label: "Keep recent tokens", type: "number" },
   { key: "min_messages", label: "Min messages", type: "number" },
   { key: "summary_timeout_seconds", label: "Summary timeout (s)", type: "number" },
+  { key: "summary_first_token_timeout_seconds", label: "First-token timeout (s)", type: "number" },
   { key: "summary_max_retries", label: "Summary max retries", type: "number" },
   { key: "max_summary_input_tokens", label: "Max summary input tokens", type: "number" },
 ];

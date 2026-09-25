@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react"
+import ConfirmDialog from "../common/ConfirmDialog"
+import { Input } from "@/components/ui/input"
 import { getActiveWindowId } from "../ProfileSwitcher"
 import { authedFetch } from "@/api/client"
 
@@ -24,6 +26,14 @@ export default function ProfilesManager() {
   const [creds, setCreds] = useState<Cred[]>([])
   const [credProvider, setCredProvider] = useState<string>("openai")
   const [credKey, setCredKey] = useState("")
+  // Destructive and irreversible (credentials live in auth.profiles.json), so
+  // both actions are gated by a rendered confirm. Native `confirm()` silently
+  // returns false in the Wails/WKWebView desktop webview, which made them
+  // unreachable there.
+  const [pendingDelete, setPendingDelete] = useState<Profile | null>(null)
+  const [pendingKeyDelete, setPendingKeyDelete] = useState<{ name: string; provider: string } | null>(null)
+  // Seeded with the current name when the rename button is pressed.
+  const [pendingRename, setPendingRename] = useState<{ oldName: string; value: string } | null>(null)
   const windowId = getActiveWindowId()
 
   const refresh = async () => {
@@ -68,22 +78,41 @@ export default function ProfilesManager() {
     setNewName("")
     refresh()
   }
-  const rename = async (oldName: string) => {
-    const n = prompt(`Rename "${oldName}" to:`, oldName)
-    if (!n || n===oldName) return
-    const nn = n.trim().toLowerCase()
-    if (!/^[a-z0-9_-]{1,32}$/.test(nn)) { setError("name must match [a-z0-9_-]{1,32}"); return }
+  // Runs only from the rename dialog. Throws on failure (and on an invalid
+  // name) so the dialog keeps the user in place with the reason, instead of
+  // the native prompt() vanishing with the input still wrong.
+  const rename = async (oldName: string, nextName: string) => {
+    const nn = nextName.trim().toLowerCase()
+    if (!nn) throw new Error("Enter a name")
+    if (!/^[a-z0-9_-]{1,32}$/.test(nn)) throw new Error("name must match [a-z0-9_-]{1,32}")
     const res = await authedFetch(`/api/profiles/${encodeURIComponent(oldName)}/rename`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({newName: nn})})
-    if (!res.ok) { const t=await res.text(); setError(t); return }
-    refresh()
+    if (!res.ok) { const t=await res.text(); throw new Error(t || `Failed to rename "${oldName}"`) }
+    setError(null)
+    await refresh()
   }
-  const remove = async (name: string, credCount:number, overrideCount:number) => {
-    if (active === name) { setError(`Cannot delete "${name}" — it is active in this window. Switch to Default first.`); return }
-    const ok = confirm(`Delete "${name}"? Removes ${overrideCount} overrides + ${credCount} keys — cannot undo.`)
-    if (!ok) return
+  // Wired to the rename dialog's confirm button and its Enter key. Throws so
+  // a rejected rename keeps the dialog open with the reason.
+  const confirmRename = async () => {
+    if (!pendingRename) return
+    if (pendingRename.value.trim().toLowerCase() === pendingRename.oldName) {
+      setPendingRename(null)
+      return
+    }
+    await rename(pendingRename.oldName, pendingRename.value)
+    setPendingRename(null)
+  }
+  // Runs only from the delete confirm. Throws on failure so ConfirmDialog can
+  // show the reason inline and stay open instead of the row just vanishing.
+  const remove = async (profile: Profile) => {
+    const name = profile.name
+    if (active === name) throw new Error(`Cannot delete "${name}" — it is active in this window. Switch to Default first.`)
     const res = await authedFetch(`/api/profiles/${encodeURIComponent(name)}`, { method:"DELETE" })
-    if (!res.ok) { const t=await res.text(); setError(t.includes("active") ? `Cannot delete "${name}" — switch to Default first.` : t); return }
-    refresh()
+    if (!res.ok) {
+      const t=await res.text()
+      throw new Error(t.includes("active") ? `Cannot delete "${name}" — switch to Default first.` : (t || `Failed to delete "${name}"`))
+    }
+    setError(null)
+    await refresh()
   }
   const setActiveProfile = async (name:string) => {
     const res = await authedFetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`, { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile: name})})
@@ -99,13 +128,13 @@ export default function ProfilesManager() {
     setCreds(cRes.credentials || [])
     refresh()
   }
+  // Runs only from the key-removal confirm; throws on failure (see remove).
   const deleteKey = async (name: string, provider: string) => {
-    if (!confirm(`Remove ${provider} key from "${name}"?`)) return
     const res = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/auth/${encodeURIComponent(provider)}`, { method:"DELETE" })
-    if (!res.ok) { const t=await res.text(); setError(t); return }
+    if (!res.ok) { const t=await res.text(); throw new Error(t || `Failed to remove the ${provider} key`) }
     const cRes = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/auth`).then(r=>r.json())
     setCreds(cRes.credentials || [])
-    refresh()
+    await refresh()
   }
   const resetField = async (name: string, field: string) => {
     const res = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/overrides/${encodeURIComponent(field)}`, { method:"DELETE" })
@@ -153,8 +182,8 @@ export default function ProfilesManager() {
               </div>
               <div className="flex gap-1 shrink-0">
                 <button onClick={()=>setActiveProfile(p.name)} className={`rounded px-2 py-1 text-xs ${active===p.name?"bg-primary text-primary-foreground":"border border-border hover:bg-accent hover:text-accent-foreground"}`}>{active===p.name?"✓":"Activate"}</button>
-                <button onClick={()=>rename(p.name)} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent hover:text-accent-foreground">Rename</button>
-                <button onClick={()=>remove(p.name, p.credentialCount, p.overrideCount)} className="rounded border border-red-700 text-red-300 px-2 py-1 text-xs hover:bg-red-900/30">Delete</button>
+                <button onClick={()=>setPendingRename({ oldName: p.name, value: p.name })} className="rounded border border-border px-2 py-1 text-xs hover:bg-accent hover:text-accent-foreground">Rename</button>
+                <button onClick={()=>setPendingDelete(p)} className="rounded border border-red-700 text-red-300 px-2 py-1 text-xs hover:bg-red-900/30">Delete</button>
               </div>
             </div>
             {expanded===p.name && (
@@ -168,7 +197,7 @@ export default function ProfilesManager() {
                         <div key={c.provider} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
                           <span className="font-mono">{c.provider}</span>
                           <span className="text-muted-foreground">{c.masked} ({c.kind})</span>
-                          <button onClick={()=>deleteKey(p.name, c.provider)} className="rounded border border-red-700 px-2 py-0.5 text-red-300 hover:bg-red-900/30">Remove</button>
+                          <button onClick={()=>setPendingKeyDelete({ name: p.name, provider: c.provider })} className="rounded border border-red-700 px-2 py-0.5 text-red-300 hover:bg-red-900/30">Remove</button>
                         </div>
                       ))}
                     </div>
@@ -238,6 +267,94 @@ export default function ProfilesManager() {
           <li>Env <code>OCODE_PROFILE</code> wins over window state for <code>alias ocode2='OCODE_PROFILE=work ocode'</code>.</li>
         </ul>
       </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={`Delete profile "${pendingDelete?.name ?? ""}"?`}
+        description={
+          pendingDelete && (
+            <>
+              Removes {pendingDelete.overrideCount} override{pendingDelete.overrideCount === 1 ? "" : "s"} and{" "}
+              {pendingDelete.credentialCount} key{pendingDelete.credentialCount === 1 ? "" : "s"} from{" "}
+              <code>auth.profiles.json</code> — this cannot be undone.
+            </>
+          )
+        }
+        confirmLabel="Delete profile"
+        pendingLabel="Deleting…"
+        onConfirm={async () => {
+          if (!pendingDelete) return
+          await remove(pendingDelete)
+          setPendingDelete(null)
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={pendingKeyDelete !== null}
+        title={`Remove ${pendingKeyDelete?.provider ?? ""} key from "${pendingKeyDelete?.name ?? ""}"?`}
+        description={
+          pendingKeyDelete && (
+            <>
+              The stored key is deleted from <code>auth.profiles.json</code> — this cannot be undone.
+              That provider then falls back to the base <code>auth.json</code> or the environment.
+            </>
+          )
+        }
+        confirmLabel="Remove key"
+        pendingLabel="Removing…"
+        onConfirm={async () => {
+          if (!pendingKeyDelete) return
+          await deleteKey(pendingKeyDelete.name, pendingKeyDelete.provider)
+          setPendingKeyDelete(null)
+        }}
+        onCancel={() => setPendingKeyDelete(null)}
+      />
+
+      {/* Replaces the native prompt(), which silently returns null in the
+          Wails/WKWebView desktop webview, so renaming a profile was impossible
+          in the desktop app. "default" variant: this confirms, it does not
+          destroy. */}
+      <ConfirmDialog
+        open={pendingRename !== null}
+        title="Rename profile?"
+        description={
+          pendingRename && (
+            <>
+              <div className="text-xs">
+                The profile is renamed on disk. Its overrides and keys move with it.
+              </div>
+              <label className="mt-2 block text-xs font-medium" htmlFor="rename-profile-input">
+                New name
+              </label>
+              <Input
+                id="rename-profile-input"
+                aria-label="New profile name"
+                className="mt-1 h-8 text-sm"
+                value={pendingRename.value}
+                autoFocus
+                onChange={(e) =>
+                  setPendingRename({ ...pendingRename, value: e.target.value })
+                }
+                onKeyDown={(e) => {
+                  // Enter submits; the dialog's default focus stays on Cancel
+                  // so an accidental Enter cannot destroy anything.
+                  if (e.key === "Enter") {
+                    e.preventDefault()
+                    void confirmRename()
+                  }
+                }}
+              />
+              <div className="mt-1 text-xs">Lowercase letters, digits, <code>_</code> and <code>-</code>, up to 32 characters.</div>
+            </>
+          )
+        }
+        confirmLabel="Rename"
+        pendingLabel="Renaming…"
+        confirmVariant="default"
+        onConfirm={confirmRename}
+        onCancel={() => setPendingRename(null)}
+      />
     </div>
   )
 }

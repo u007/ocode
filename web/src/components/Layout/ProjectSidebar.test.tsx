@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { SessionSlice } from "../../stores/chatStore";
 import type { Project, ProjectGroup } from "../../api/types";
 import ProjectSidebar, { buildProjectSidebarOrder } from "./ProjectSidebar";
@@ -205,6 +205,16 @@ function railLabels(): (string | null)[] {
     .getAllByRole("button")
     .map((b) => b.getAttribute("aria-label"))
     .filter(Boolean);
+}
+
+/** The open confirm dialog, or null when none is open. */
+function confirmDialog(): HTMLElement | null {
+  return screen.queryByRole("dialog");
+}
+
+/** Click a confirm dialog's destructive button (default: "Remove"). */
+function clickConfirm(name: RegExp = /^Remove$/): void {
+  fireEvent.click(within(confirmDialog()!).getByRole("button", { name }));
 }
 
 // Every test starts from a clean git-count fixture and a disconnected remote
@@ -453,6 +463,203 @@ describe("ProjectSidebar project indicators", () => {
     expect(remote.length).toBeGreaterThan(0);
     expect(remote.every((c) => c.enabled === false)).toBe(true);
     expect(gitCountsFake.calls.some((c) => !c.host && c.enabled === true)).toBe(true);
+  });
+});
+
+// ── Project removal confirmation ────────────────────────────────────────────
+// Removing a project is a one-click list edit with no undo, so every entry
+// point (expanded context menu, expanded trash button, collapsed rail menu)
+// must land in a confirm dialog first. Removing only rewrites projects.json
+// (files/transcripts survive), and the dialog must say so rather than
+// "This cannot be undone".
+describe("ProjectSidebar project removal confirmation", () => {
+  beforeEach(() => {
+    stateFake.projects = [project("/proj", "")];
+    stateFake.groups = [];
+    stateFake.activeProject = null;
+    stateFake.tabsByProject = {};
+    Object.keys(chatSessionsFake).forEach((k) => delete chatSessionsFake[k]);
+    terminalStateFake.byProject = {};
+    actionsFake.removeProject.mockClear();
+    actionsFake.removeProject.mockResolvedValue(undefined);
+  });
+
+  it("does not remove the project until the confirm dialog is accepted", async () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByText("proj"));
+    fireEvent.click(screen.getByText("Remove"));
+
+    // Dialog is up, nothing removed yet.
+    expect(confirmDialog()).not.toBeNull();
+    expect(actionsFake.removeProject).not.toHaveBeenCalled();
+
+    clickConfirm();
+    await waitFor(() =>
+      expect(actionsFake.removeProject).toHaveBeenCalledWith("/proj", undefined),
+    );
+    // The dialog closes once the removal resolves, not before it starts.
+    await waitFor(() => expect(confirmDialog()).toBeNull());
+  });
+
+  it("keeps the project when the confirm dialog is cancelled", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByText("proj"));
+    fireEvent.click(screen.getByText("Remove"));
+    fireEvent.click(within(confirmDialog()!).getByRole("button", { name: "Cancel" }));
+
+    expect(actionsFake.removeProject).not.toHaveBeenCalled();
+    expect(confirmDialog()).toBeNull();
+  });
+
+  it("shows the host and path of a remote project, and reassures that files are kept", () => {
+    stateFake.projects = [remoteProject("/home/user/app", "devbox")];
+    const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    // A remote row renders the name AND the host:path subtitle, both reading
+    // "devbox:/home/user/app", so scope the right-click to the name node.
+    fireEvent.contextMenu(
+      container.querySelector(".group.relative .truncate.font-medium")!,
+    );
+    fireEvent.click(screen.getByText("Remove"));
+
+    const dialog = within(confirmDialog()!);
+    // Two projects can share a path, so the confirm must name host + path.
+    expect(dialog.getByText("devbox:/home/user/app")).toBeDefined();
+    // Removal rewrites projects.json only — say so instead of claiming it
+    // cannot be undone.
+    expect(dialog.getByText(/not deleted/i)).toBeDefined();
+    expect(dialog.queryByText(/cannot be undone/i)).toBeNull();
+
+    clickConfirm();
+    expect(actionsFake.removeProject).toHaveBeenCalledWith("/home/user/app", "devbox");
+  });
+
+  it("the expanded row's trash button also confirms", async () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.click(screen.getByTitle("Remove proj from the project list"));
+
+    expect(confirmDialog()).not.toBeNull();
+    expect(actionsFake.removeProject).not.toHaveBeenCalled();
+    clickConfirm();
+    await waitFor(() => expect(actionsFake.removeProject).toHaveBeenCalledTimes(1));
+  });
+
+  it("the collapsed rail's Remove also confirms", async () => {
+    render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByLabelText("proj"));
+    fireEvent.click(screen.getByText("Remove"));
+
+    // The rail is a separate render branch with no dialogs of its own; the
+    // confirm must be reachable there too.
+    expect(confirmDialog()).not.toBeNull();
+    expect(actionsFake.removeProject).not.toHaveBeenCalled();
+    clickConfirm();
+    await waitFor(() => expect(actionsFake.removeProject).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps the confirm open and shows the reason when the removal fails", async () => {
+    // The store used to swallow this: the dialog closed as if the project were
+    // gone, and the user was never told the removal did not happen.
+    actionsFake.removeProject.mockRejectedValueOnce(new Error("remove project: 404"));
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByText("proj"));
+    fireEvent.click(screen.getByText("Remove"));
+    clickConfirm();
+
+    await waitFor(() =>
+      expect(within(confirmDialog()!).getByRole("alert").textContent).toContain("404"),
+    );
+    expect(confirmDialog()).not.toBeNull();
+  });
+});
+
+// ── Group deletion confirmation ─────────────────────────────────────────────
+// Deleting a group is a bulk edit: HandleDeleteGroup (handler_projects.go:505)
+// ungroups EVERY project in the group before dropping it, so the confirm has to
+// say how many projects move to Ungrouped and that moving them back is manual.
+describe("ProjectSidebar group deletion confirmation", () => {
+  beforeEach(() => {
+    stateFake.projects = [
+      project("/w1", "Work"),
+      project("/w2", "Work"),
+      project("/u1", ""),
+    ];
+    stateFake.groups = [{ name: "Work", order: 1, collapsed: false }];
+    stateFake.activeProject = null;
+    stateFake.tabsByProject = {};
+    Object.keys(chatSessionsFake).forEach((k) => delete chatSessionsFake[k]);
+    terminalStateFake.byProject = {};
+    actionsFake.deleteGroup.mockClear();
+    actionsFake.deleteGroup.mockResolvedValue(undefined);
+  });
+
+  /** Open the group header's context menu and click Delete group. */
+  function requestGroupDelete() {
+    fireEvent.contextMenu(screen.getByText("Work"));
+    fireEvent.click(screen.getByText("Delete group"));
+  }
+
+  it("does not delete the group until the confirm is accepted", async () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    requestGroupDelete();
+
+    expect(confirmDialog()).not.toBeNull();
+    expect(actionsFake.deleteGroup).not.toHaveBeenCalled();
+    clickConfirm(/^Delete group$/);
+    await waitFor(() => expect(actionsFake.deleteGroup).toHaveBeenCalledWith("Work"));
+  });
+
+  it("keeps the group when the confirm is cancelled", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    requestGroupDelete();
+    fireEvent.click(within(confirmDialog()!).getByRole("button", { name: "Cancel" }));
+
+    expect(actionsFake.deleteGroup).not.toHaveBeenCalled();
+    expect(confirmDialog()).toBeNull();
+  });
+
+  it("says how many projects move to Ungrouped and that moving back is manual", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    requestGroupDelete();
+
+    const dialog = within(confirmDialog()!);
+    // The group holds 2 of the 3 fixture projects.
+    expect(dialog.getByText(/2 projects/i)).toBeDefined();
+    expect(dialog.getByText(/one by one/i)).toBeDefined();
+  });
+
+  it("uses the singular for a one-project group", () => {
+    stateFake.projects = [project("/w1", "Work"), project("/u1", "")];
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    requestGroupDelete();
+
+    const dialog = within(confirmDialog()!);
+    expect(dialog.getByText(/Its 1 project will move to Ungrouped/i)).toBeDefined();
+    // "move them one by one" is wrong for a single project.
+    expect(dialog.getByText(/to put it back/i)).toBeDefined();
+  });
+
+  it("says there is nothing to move for an empty group", () => {
+    // A group can legitimately end up empty (its projects were dragged out);
+    // the copy must not claim N projects are being moved.
+    stateFake.projects = [project("/u1", "")];
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    requestGroupDelete();
+
+    const dialog = within(confirmDialog()!);
+    expect(dialog.getByText(/No projects are in this group/i)).toBeDefined();
+    expect(dialog.queryByText(/Ungrouped/)).toBeNull();
+  });
+
+  it("keeps the confirm open and shows the reason when the delete fails", async () => {
+    actionsFake.deleteGroup.mockRejectedValueOnce(new Error("delete group: 404"));
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    requestGroupDelete();
+    clickConfirm(/^Delete group$/);
+
+    await waitFor(() =>
+      expect(within(confirmDialog()!).getByRole("alert").textContent).toContain("404"),
+    );
+    expect(confirmDialog()).not.toBeNull();
   });
 });
 

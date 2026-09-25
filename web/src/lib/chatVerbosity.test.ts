@@ -13,7 +13,8 @@ describe("chat verbosity policy", () => {
 
   it.each([
     ["full", "expanded", "expanded", "expanded", "expanded"],
-    ["balanced", "collapsed", "expanded", "expanded", "expanded"],
+    // Spec §9: balanced collapses older thinking AND tool-call details.
+    ["balanced", "collapsed", "collapsed", "expanded", "expanded"],
     ["quiet", "collapsed", "collapsed", "collapsed", "collapsed"],
   ] as const)(
     "resolves the %s preset matrix",
@@ -31,12 +32,15 @@ describe("chat verbosity policy", () => {
   );
 
   it("applies independent overrides while preserving latest thinking", () => {
+    // The preset cell is collapsed for both, so each override here re-opens a
+    // collapsed default and collapses an expanded one — override precedence in
+    // both directions, not a no-op restatement of the preset.
     const policy = resolveChatDisplayPolicy(
       normalizeChatVerbosityConfig({
         preset: "balanced",
         overrides: {
           older_thinking: "expanded",
-          tool_calls: "collapsed",
+          tool_calls: "expanded",
           tool_output: "collapsed",
           activity_notices: "expanded",
         },
@@ -44,7 +48,7 @@ describe("chat verbosity policy", () => {
     );
     expect(policy.older_thinking).toBe("expanded");
     expect(policy.latest_thinking).toBe("expanded");
-    expect(policy.tool_calls).toBe("collapsed");
+    expect(policy.tool_calls).toBe("expanded");
     expect(policy.tool_output).toBe("collapsed");
     expect(policy.notices).toBe("expanded");
   });

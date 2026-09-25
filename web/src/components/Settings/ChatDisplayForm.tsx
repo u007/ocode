@@ -1,10 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ChatDisplayOverride, ChatVerbosityPreset } from "@/api/types";
 import {
   DEFAULT_CHAT_VERBOSITY_CONFIG,
+  resolveChatDisplayPolicy,
   saveChatVerbosityConfig,
   useChatVerbosity,
 } from "@/lib/chatVerbosity";
+
+type OverrideKey = keyof typeof DEFAULT_CHAT_VERBOSITY_CONFIG.overrides;
 
 const PRESETS: Array<{ id: ChatVerbosityPreset; label: string; description: string }> = [
   { id: "full", label: "Full", description: "Show everything (current default)." },
@@ -21,7 +24,7 @@ const PRESETS: Array<{ id: ChatVerbosityPreset; label: string; description: stri
 ];
 
 const OVERRIDE_CATEGORIES: Array<{
-  key: keyof typeof DEFAULT_CHAT_VERBOSITY_CONFIG.overrides;
+  key: OverrideKey;
   label: string;
 }> = [
   { key: "older_thinking", label: "Older thinking" },
@@ -35,6 +38,26 @@ const OVERRIDE_OPTIONS: Array<{ value: ChatDisplayOverride; label: string }> = [
   { value: "expanded", label: "Always expanded" },
   { value: "collapsed", label: "Always collapsed" },
 ];
+
+/**
+ * The config key differs from the policy key for one category: the config calls
+ * it `activity_notices`, the policy `notices`. Mapping it here (instead of
+ * reading `policy[key]`) keeps the two vocabularies from silently diverging.
+ * The value type is narrowed to the four policy keys that carry a per-category
+ * display mode, so reading the cell needs no cast.
+ */
+type DisplayPolicyKey = "older_thinking" | "tool_calls" | "tool_output" | "notices";
+
+const POLICY_KEY_BY_OVERRIDE: Record<OverrideKey, DisplayPolicyKey> = {
+  older_thinking: "older_thinking",
+  tool_calls: "tool_calls",
+  tool_output: "tool_output",
+  activity_notices: "notices",
+};
+
+function displayLabel(value: "expanded" | "collapsed"): string {
+  return value === "collapsed" ? "Collapsed" : "Expanded";
+}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -78,6 +101,15 @@ export default function ChatDisplayForm() {
 
   const displayError = saveError ?? loadError;
 
+  // The preset cells for the CURRENT DRAFT preset, resolved by the same
+  // function the renderer uses — so the "Follow preset" suffix can never
+  // disagree with what the chat actually shows. Draft-derived, not saved-state,
+  // so it updates the moment a Preset radio changes (before Save).
+  const draftPresetPolicy = useMemo(
+    () => resolveChatDisplayPolicy({ preset, overrides: presetOverrides() }),
+    [preset],
+  );
+
   if (loading && !displayError) {
     return <div className="p-6 text-sm text-muted-foreground">Loading chat display settings…</div>;
   }
@@ -117,7 +149,6 @@ export default function ChatDisplayForm() {
               value={option.id}
               checked={preset === option.id}
               onChange={() => setPreset(option.id)}
-              onClick={() => setPreset(option.id)}
               className="mt-0.5"
             />
             <span>
@@ -148,7 +179,10 @@ export default function ChatDisplayForm() {
             >
               {OVERRIDE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
-                  {option.label}
+                  {option.value === "preset"
+                    ? // The value stays "preset"; only the text is suffixed.
+                      `Follow preset — ${displayLabel(draftPresetPolicy[POLICY_KEY_BY_OVERRIDE[key]])}`
+                    : option.label}
                 </option>
               ))}
             </select>

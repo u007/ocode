@@ -27,7 +27,7 @@ type pendingRewindDTO struct {
 	ExpiresAt        time.Time                   `json:"expires_at"`
 	TargetIndex      int                         `json:"target_index"`
 	UserSeq          int                         `json:"user_seq,omitempty"`
-	CommittedUserSeq int                         `json:"committed_user_seq,omitempty"`
+	CommittedUserSeq int                         `json:"committed_user_seq"`
 }
 
 type pendingRewindPrepareRequest struct {
@@ -109,7 +109,7 @@ func pendingRewindHTTPError(err error) (int, string) {
 	case errors.Is(err, session.ErrPendingRewindExpired):
 		return http.StatusGone, "pending rewind has expired"
 	case errors.Is(err, session.ErrPendingRewindAlreadyCommitted):
-		return http.StatusConflict, "pending rewind has already been committed"
+		return http.StatusGone, "pending rewind has already been committed"
 	default:
 		return http.StatusInternalServerError, "failed to access pending rewind"
 	}
@@ -119,7 +119,11 @@ func writePendingRewindError(w http.ResponseWriter, action, sessionID string, er
 	status, message := pendingRewindHTTPError(err)
 	// Keep the capability token and target content out of logs. These fields
 	// are sufficient to correlate a failed durable operation with its session.
-	log.Printf("server: pending_rewind action=%q session_id=%q status=%d error=%v", action, sessionID, status, err)
+	if status == http.StatusInternalServerError {
+		log.Printf("server: pending_rewind action=%q session_id=%q status=%d error=%v", action, sessionID, status, err)
+	} else {
+		log.Printf("server: pending_rewind action=%q session_id=%q status=%d error_type=%T", action, sessionID, status, err)
+	}
 	writeError(w, status, message)
 }
 

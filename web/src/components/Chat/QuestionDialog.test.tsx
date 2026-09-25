@@ -14,6 +14,7 @@ function renderDialog(
       requestId: string,
       answers: QuestionAnswerPayload[],
     ) => Promise<boolean>;
+    onHide: (requestId: string) => void;
     onCancel: (requestId: string) => Promise<boolean>;
     context: AskContext;
   }> = {},
@@ -29,6 +30,7 @@ function renderDialog(
     },
   ];
   const onSubmit = vi.fn(async () => true);
+  const onHide = vi.fn();
   const onCancel = vi.fn(async () => true);
   const requestId = "req-1";
   const view = render(
@@ -37,12 +39,14 @@ function renderDialog(
       requestId={requestId}
       questions={overrides.questions ?? questions}
       onSubmit={overrides.onSubmit ?? onSubmit}
+      onHide={overrides.onHide ?? onHide}
       onCancel={overrides.onCancel ?? onCancel}
       context={overrides.context}
     />,
   );
   return {
     onSubmit,
+    onHide,
     onCancel,
     requestId,
     unmount: () => view.unmount(),
@@ -160,25 +164,46 @@ describe("QuestionDialog", () => {
     unmount();
   });
 
-  // Regression: the prompt used to be non-dismissible — the only way out was
-  // answering every question. Cancel mirrors the TUI's Esc-to-cancel.
-  it("cancels without answering when the Cancel button is clicked", async () => {
+  it("keeps the async final dismissal when Don't answer is clicked", async () => {
     const { onCancel, onSubmit, requestId } = renderDialog();
-    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /don't answer/i }));
     await waitFor(() => expect(onCancel).toHaveBeenCalledWith(requestId));
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("cancels on Escape (Radix open-change) without a selection", async () => {
-    const { onCancel, requestId } = renderDialog();
+  it("hides on Escape without calling the final cancellation", async () => {
+    const { onHide, onCancel, requestId } = renderDialog();
     fireEvent.keyDown(document.body, { key: "Escape", code: "Escape" });
-    await waitFor(() => expect(onCancel).toHaveBeenCalledWith(requestId));
+    await waitFor(() => expect(onHide).toHaveBeenCalledWith(requestId));
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("hides on X without calling the final cancellation", async () => {
+    const { onHide, onCancel, requestId } = renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(onHide).toHaveBeenCalledWith(requestId));
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("keeps overlay interaction prevented", async () => {
+    const { onHide, onCancel } = renderDialog();
+    const overlay = Array.from(document.querySelectorAll<HTMLElement>('[data-state="open"]')).find(
+      (element) => element.className.includes("bg-black/80"),
+    );
+    expect(overlay).toBeTruthy();
+
+    fireEvent.pointerDown(overlay!);
+    fireEvent.click(overlay!);
+    await waitFor(() => {
+      expect(onHide).not.toHaveBeenCalled();
+      expect(onCancel).not.toHaveBeenCalled();
+    });
   });
 
   it("keeps the dialog retryable when cancel fails", async () => {
     const onCancel = vi.fn(async () => false);
     const { requestId } = renderDialog({ onCancel });
-    const cancel = screen.getByRole("button", { name: /^cancel$/i });
+    const cancel = screen.getByRole("button", { name: /don't answer/i });
     fireEvent.click(cancel);
     await waitFor(() => expect(onCancel).toHaveBeenCalledWith(requestId));
     // Failure keeps the dialog mounted and the button usable for a retry.
@@ -252,9 +277,50 @@ describe("QuestionDialog viewport bounding", () => {
     // …and the decisions are pinned outside it, so Submit/Deny can never be
     // scrolled out of reach on a long prompt.
     const submit = screen.getByRole("button", { name: /submit/i });
-    const cancel = screen.getByRole("button", { name: /^cancel$/i });
+    const cancel = screen.getByRole("button", { name: /don't answer/i });
     expect(scroller!.contains(submit)).toBe(false);
     expect(scroller!.contains(cancel)).toBe(false);
     expect(submit.closest(".shrink-0")).toBeTruthy();
   });
+});
+
+describe("QuestionDialog keyboard navigation", () => {
+  it("navigates options with arrows and toggles multi-select choices with Space/Enter", () => {
+    renderDialog({
+      questions: [
+        {
+          header: "Multi keyboard",
+          question: "Pick any?",
+          multiple: true,
+          options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+        },
+      ],
+    });
+
+    const a = screen.getByText("A").closest("button")!;
+    const b = screen.getByText("B").closest("button")!;
+    const c = screen.getByText("C").closest("button")!;
+    a.focus();
+    fireEvent.keyDown(a, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(b);
+
+    fireEvent.keyDown(b, { key: " " });
+    expect(b).toHaveAttribute("aria-pressed", "true");
+    fireEvent.keyDown(b, { key: "ArrowDown" });
+    fireEvent.keyDown(c, { key: "Enter" });
+    expect(c).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps single-select keyboard activation radio-like", () => {
+    renderDialog();
+    const first = screen.getByText("Visual parity only").closest("button")!;
+    const second = screen.getByText("Full DevTools parity").closest("button")!;
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(second);
+    fireEvent.keyDown(second, { key: "Enter" });
+    expect(second).toHaveAttribute("aria-pressed", "true");
+    expect(first).toHaveAttribute("aria-pressed", "false");
+  });
+
 });

@@ -77,7 +77,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | **Model Display Names** | `agent.ModelDisplayName` surfaces models.dev `name`; TUI picker shows `id — Name`, web `/api/models` exposes `display_name` |
 | **Reasoning Effort** | Toggle thinking budget on Claude models via `Alt+T` (off/low/med/high/xhigh/max) or `/effort`; per-turn effort via `ocode run --effort` |
 | **Prompt Caching** | Anthropic `cache_control` markers on system messages and large tool results; OpenAI server-side caching. Tools → system → messages prefix order is cache-stable. |
-| **Context-Aware Compaction** | Ratio-triggered automatic summarization with custom model support, anchor-update across multiple compactions, `safeCut` invariant, and `max_summary_input_tokens` batching |
+| **Context-Aware Compaction** | Ratio-triggered automatic summarization with custom model support, anchor-update across multiple compactions, `safeCut` invariant, `max_summary_input_tokens` batching, a separate first-token timeout, and a 30-minute overall safety cap |
 | **Custom Compaction / Recap Models** | Offload summarization to a cheap/fast model while chatting on a powerful one — `compact.summary_provider/model` and `recap` model in `ocodeconfig.json`; `/recap` to drive manually |
 | **Session Title Generation** | LLM-generated titles with race guard; `/title` to set/reset |
 | **Async Sub-Agent Runs** | Launch background agents with transcript capture, process registry, detail-view drill-in, and a DAG scheduler (`id` / `depends_on`) that streams predecessor output into dependents |
@@ -88,6 +88,10 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | **Auto-Continue** | `/autocontinue` auto-resumes a turn cut off by `/max-step` (optionally judged by a small model); persists across TUI and web turns |
 | **Interrupted-Turn Notice** | A turn cut off after an answered ask surfaces a Continue action in the transcript |
 | **Chat Display Controls** | Web/desktop Settings → Chat display offers Full, Balanced, and Quiet presets plus per-category expand/collapse overrides; display changes never alter the transcript or model context |
+| **Deferred Message Restore** | Web/desktop **Restore to input** arms a durable, single-use rewind and keeps history unchanged until the edited draft is sent; the pending draft survives reload and can be cancelled safely |
+| **Last Dispatched Model** | The web/desktop status bar shows the model resolved for the most recent backend-accepted turn, independent of the sidebar's currently selected model |
+| **Hidden Question Recovery** | X/Escape hide a pending question locally without cancelling it; the transcript's **Open question** action reopens the same request |
+| **List Dialog Keyboard Navigation** | Custom model/session/directory/question/settings popups support Up/Down, Home/End, Enter, and explicit multi-select Space with real focus and no wrapping |
 
 ### 🔧 Tool System — 40 Built-ins
 
@@ -135,7 +139,12 @@ and provides Fetch, Pull, Push, and confirmed destructive actions. Force push us
 `--force-with-lease`; the explicit **Reset to remote** action fetches and hard-resets
 to the current branch's upstream. Status also reports conflicted paths and halted
 Git operations separately from ordinary staged/unstaged changes, so badges and
-resolution actions do not double-count a conflicted file.
+resolution actions do not double-count a conflicted file. The authenticated
+`POST /api/git/conflict/resolve` and `POST /api/git/operation` endpoints support
+local and SSH/WSL projects, re-check the active operation before running Git,
+and share the same action policy across transports. Remote path-safety checks
+return a clear `400` for shell-metacharacter names; remote UI conflict and
+operation panels remain a later phase.
 
 ### 📁 File Browser
 
@@ -544,7 +553,8 @@ Named config overlays (`profiles` in `ocodeconfig.json`) that swap model / provi
     "summary_model": "claude-haiku-4-5",
     "token_threshold": 0.75,
     "keep_recent_turns": 3,
-    "summary_timeout_seconds": 30,
+    "summary_timeout_seconds": 600,
+    "summary_first_token_timeout_seconds": 300,
     "summary_max_retries": 1,
     "max_summary_input_tokens": 50000
   }
@@ -574,9 +584,9 @@ Named config overlays (`profiles` in `ocodeconfig.json`) that swap model / provi
 
 The server exposes a REST + SSE surface under `/api/*` (see `internal/server/server.go:registerRoutes`). Highlights:
 
-- **Chat & sessions:** `POST /api/chat`, `GET /api/sessions`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/message`, `POST /api/sessions/{id}/compact`, `GET /api/sessions/{id}/export*`, `GET /api/chat/stream` (SSE)
+- **Chat & sessions:** `POST /api/chat`, `GET /api/sessions`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/message`, `POST /api/sessions/{id}/compact`, `POST/GET /api/sessions/{id}/rewinds`, `GET/DELETE /api/sessions/{id}/rewinds/{token}`, `GET /api/sessions/{id}/export*`, `GET /api/chat/stream` (SSE). A message send may include a prepared `rewindToken`; the durable truncate-and-replace commit completes before the `202` acknowledgement.
 - **Models & agents:** `GET /api/models`, `GET /api/agents/runs/stream`
-- **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `POST /api/git/fetch|pull|push|reset-remote`, `GET /api/changes`, `POST /api/changes/undo-*`
+- **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `POST /api/git/fetch|pull|push|reset-remote|conflict/resolve|operation`, `GET /api/changes`, `POST /api/changes/undo-*`
 - **Terminal & shell:** `POST /api/shell`, `GET /api/terminal/ws` (WebSocket), `GET /api/terminal/processes`
 - **Config:** `GET/PUT /api/config/ocode/*` (recap, commit-msg, compact, permissions-auto, permissions-mode, discovery, tui, editor, imagegen, paths, limits, features, autocontinue, browser, local-models, tts, fake-agent, …) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
 - **Permissions / questions / RC:** `GET/POST /api/permissions`, `POST /api/questions`, `POST /api/permissions/resolve`, `POST /api/rc/*`
@@ -638,6 +648,8 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`, `sandbo
 | Tool-pair safety | Implicit | **Explicit `safeCut`** — proven symmetry on both sides |
 | Markers | Typed message part | **Sentinel-tagged system message** `[ocode:compaction-summary]` |
 | Batching | Single pass | **Multi-batch** when middle exceeds `max_summary_input_tokens` |
+| First-token timeout | — | `summary_first_token_timeout_seconds` (default 300s); after the first streamed token, `summary_timeout_seconds` governs idle time |
+| Overall bound | — | Fixed 30-minute maximum per compaction pass; failures leave the transcript unchanged |
 | Recap model | — | **Separate `recap` model** (`/recap`) |
 
 ### Added in ocode (not in opencode)

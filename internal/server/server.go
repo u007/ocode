@@ -261,6 +261,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/unstage", s.authMiddleware(s.handler.HandleGitUnstage))
 	s.mux.HandleFunc("POST /api/git/discard", s.authMiddleware(s.handler.HandleGitDiscard))
 	s.mux.HandleFunc("POST /api/git/conflict/resolve", s.authMiddleware(s.handler.HandleGitResolveConflict))
+	s.mux.HandleFunc("POST /api/git/operation", s.authMiddleware(s.handler.HandleGitOperation))
 	s.mux.HandleFunc("POST /api/git/stash", s.authMiddleware(s.handler.HandleGitStash))
 	s.mux.HandleFunc("GET /api/git/stash/list", s.authMiddleware(s.handler.HandleGitStashList))
 	s.mux.HandleFunc("GET /api/git/stash/show", s.authMiddleware(s.handler.HandleGitStashShow))

@@ -1,15 +1,17 @@
 ---
 type: Decision
 title: TUI wheel scroll over chat composer design
-description: 'Design spec: treat transcript + chat composer as one wheel-scrolling surface on the TUI chat tab.'
+description: 'Design spec: treat transcript + chat composer as one wheel-scrolling surface on the TUI chat tab — implemented as mouseOverChatWheelRegion with renamed regression test.'
 tags:
   - tui
   - mouse
   - scroll
   - design-spec
-timestamp: 2026-09-25T05:03:42Z
+timestamp: 2026-09-25T11:48:58Z
 ---
 # TUI: wheel scroll over chat composer (2026-09-25)
+
+- **Status:** **Implemented (2026-09-25).** As-built: the gate is now `mouseOverChatWheelRegion` (`internal/tui/model.go:8667`, comment block at `:8660`) called at the fallback site (`internal/tui/model.go:3235`); it returns true only when `activeTab == tabChat`, `0 <= X < panelWidth()`, and `appHeaderHeight <= Y < max(appHeaderHeight, inputAreaTopY()+inputAreaHeight())` — the transcript through the bottom of the input area. The popup/sidebar/detail/tab branches keep their precedence ahead of it, so the permission and `/btw` dialogs still scroll their own viewports. The test was renamed to `TestMouseWheelScrollsTranscriptOverMessagesAndComposer` (`internal/tui/model_test.go:4318`) and asserts both the transcript scroll and that the composer text is unchanged (`:4347`, `:4350`). `go test ./internal/tui/ -run MouseWheel` passes.
 
 ## Problem
 

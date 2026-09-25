@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { useEffect } from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import ModelDialog from "./ModelDialog";
 import { ProjectProvider, useProjectDispatch } from "../../stores/projectStore";
 import { useSessionHost } from "../../hooks/useSessionHost";
@@ -75,6 +75,46 @@ vi.mock("../../stores/chatStore", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("ModelDialog keyboard navigation", () => {
+  it("moves from search to a model row and selects it with Enter", async () => {
+    const onClose = vi.fn();
+    render(<ModelDialog open onClose={onClose} />);
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+
+    const input = screen.getByPlaceholderText("Search models...");
+    const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-list-nav-row]"));
+    expect(rows).toHaveLength(4);
+
+    act(() => input.focus());
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(rows[0]);
+
+    fireEvent.keyDown(rows[0], { key: "ArrowDown" });
+    expect(document.activeElement).toBe(rows[1]);
+
+    fireEvent.keyDown(rows[1], { key: "Enter" });
+    await waitFor(() => expect(hoisted.api.setConfigModel).toHaveBeenCalledWith("openai/gpt-b"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps favorite controls outside the primary row navigation", async () => {
+    render(<ModelDialog open onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Recently Used")).toBeInTheDocument());
+
+    const star = screen.getByLabelText("Unfavorite anthropic/claude-a");
+    const firstRow = document.querySelector<HTMLElement>('[data-list-nav-id="recents:anthropic/claude-a"]');
+    expect(firstRow).not.toBeNull();
+    act(() => firstRow!.focus());
+    fireEvent.keyDown(firstRow!, { key: "ArrowDown" });
+    expect(document.activeElement).not.toBe(firstRow);
+
+    act(() => star.focus());
+    fireEvent.keyDown(star, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(star);
+    expect(star).toBeInTheDocument();
+  });
 });
 
 describe("ModelDialog favorites/recents sections", () => {

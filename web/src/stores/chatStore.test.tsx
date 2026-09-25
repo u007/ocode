@@ -1140,6 +1140,194 @@ describe("chatStore in-memory message cap", () => {
     });
     expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
   });
+
+  it("keeps a locally hidden question hidden when the same request is re-requested", () => {
+    let state = initial();
+    const q1 = { request_id: "q1", questions: [] };
+    const q2 = { request_id: "q2", questions: [] };
+
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: q1,
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_HIDE",
+      sessionId: "a",
+      requestId: "q1",
+    });
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBe("q1");
+
+    // Recovery/reconciliation repeats the same request while the user has
+    // intentionally hidden it. It must stay hidden.
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: q1,
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBe("q1");
+
+    // A genuinely new request is not covered by the old local hide.
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: q2,
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q2");
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBeNull();
+  });
+
+  it("guards hide, show, answer, dismiss, and resolve against stale request ids", () => {
+    let state = initial();
+    const q2 = { request_id: "q2", questions: [] };
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: q2,
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_HIDE",
+      sessionId: "a",
+      requestId: "q2",
+    });
+
+    state = chatReducer(state, {
+      type: "QUESTION_HIDE",
+      sessionId: "a",
+      requestId: "q1",
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_SHOW",
+      sessionId: "a",
+      requestId: "q1",
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_ANSWERED",
+      sessionId: "a",
+      requestId: "q1",
+      answers: [],
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_DISMISSED",
+      sessionId: "a",
+      requestId: "q1",
+    });
+    state = chatReducer(state, {
+      type: "QUESTION_RESOLVED",
+      sessionId: "a",
+      requestId: "q1",
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q2");
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBe("q2");
+
+    state = chatReducer(state, {
+      type: "QUESTION_SHOW",
+      sessionId: "a",
+      requestId: "q2",
+    });
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBeNull();
+  });
+
+  it("clears hidden state on matching answer, dismissal, resolve, interrupt, reset, and rekey", () => {
+    const question = (requestId: string) => ({ request_id: requestId, questions: [] });
+    let state = initial();
+
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: question("answer"),
+    });
+    state = chatReducer(state, { type: "QUESTION_HIDE", sessionId: "a", requestId: "answer" });
+    state = chatReducer(state, {
+      type: "QUESTION_ANSWERED",
+      sessionId: "a",
+      requestId: "answer",
+      answers: [],
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBeNull();
+
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: question("dismiss"),
+    });
+    state = chatReducer(state, { type: "QUESTION_HIDE", sessionId: "a", requestId: "dismiss" });
+    state = chatReducer(state, { type: "QUESTION_DISMISSED", sessionId: "a", requestId: "dismiss" });
+    expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBeNull();
+
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: question("resolve"),
+    });
+    state = chatReducer(state, { type: "QUESTION_HIDE", sessionId: "a", requestId: "resolve" });
+    state = chatReducer(state, { type: "QUESTION_RESOLVED", sessionId: "a", requestId: "resolve" });
+    expect(getSessionSlice(state, "a").pendingQuestion).toBeNull();
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBeNull();
+
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: question("interrupt"),
+    });
+    state = chatReducer(state, { type: "QUESTION_HIDE", sessionId: "a", requestId: "interrupt" });
+    state = chatReducer(state, { type: "INTERRUPT", sessionId: "a" });
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBeNull();
+
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: question("rekey"),
+    });
+    state = chatReducer(state, { type: "QUESTION_HIDE", sessionId: "a", requestId: "rekey" });
+    state = chatReducer(state, { type: "REKEY_SESSION", oldId: "a", newId: "b" });
+    expect(getSessionSlice(state, "b").pendingQuestion?.request_id).toBe("rekey");
+    expect(getSessionSlice(state, "b").hiddenQuestionRequestId).toBeNull();
+
+    state = chatReducer(state, { type: "QUESTION_HIDE", sessionId: "b", requestId: "rekey" });
+    state = chatReducer(state, { type: "RESET", sessionId: "b" });
+    expect(getSessionSlice(state, "b").hiddenQuestionRequestId).toBeNull();
+  });
+
+  it("preserves a same-request hide through transcript recovery and clears it for a new request", () => {
+    const messagesFor = (requestId: string): Message[] => [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: requestId, type: "function", function: { name: "question", arguments: "{}" } },
+        ],
+      },
+      mkQ(requestId),
+    ];
+    let state = initial();
+    state = chatReducer(state, {
+      type: "QUESTION_REQUEST",
+      sessionId: "a",
+      question: { request_id: "q1", questions: [] },
+    });
+    state = chatReducer(state, { type: "QUESTION_HIDE", sessionId: "a", requestId: "q1" });
+
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: messagesFor("q1"),
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q1");
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBe("q1");
+
+    state = chatReducer(state, {
+      type: "MERGE_SNAPSHOT",
+      sessionId: "a",
+      messages: messagesFor("q2"),
+      total: 2,
+    });
+    expect(getSessionSlice(state, "a").pendingQuestion?.request_id).toBe("q2");
+    expect(getSessionSlice(state, "a").hiddenQuestionRequestId).toBeNull();
+  });
 });
 
 describe("extractAskContext", () => {

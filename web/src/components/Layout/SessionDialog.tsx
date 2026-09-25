@@ -6,6 +6,7 @@ import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
 import { prefetchSession } from "../../lib/sessionPrefetch";
 import { isChildSessionId } from "../../lib/sessionId";
+import { useListNavigation } from "../../hooks/useListNavigation";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -104,6 +105,21 @@ export default function SessionDialog() {
     setSearchQuery("");
   }, [openSessionTab, toggleSessionPicker]);
 
+  const sessionNavIds = useMemo(
+    () => visibleSessions.map((session) => `session:${session.id}`),
+    [visibleSessions],
+  );
+  const sessionNavigation = useListNavigation({
+    itemIds: sessionNavIds,
+    onActivate: (index) => {
+      const session = visibleSessions[index];
+      if (session) handleSessionClick(session.id, session.title);
+    },
+    inputRef,
+    resetKey: `${sessionPickerOpen}|${activeProject?.path ?? ""}|${activeProject?.host ?? ""}`,
+    ...(hasMore ? { hasMore: true, onReachEnd: loadMore } : {}),
+  });
+
   // Create a new session
   const handleNewSession = useCallback(() => {
     openNewSessionTab(isNewSessionTabEmpty(activeTabId));
@@ -153,7 +169,10 @@ export default function SessionDialog() {
 
   return (
     <Dialog open={sessionPickerOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col p-0 gap-0">
+      <DialogContent
+        className="sm:max-w-lg max-h-[80vh] flex flex-col p-0 gap-0"
+        onKeyDown={sessionNavigation.onKeyDown}
+      >
         <DialogHeader className="px-4 pt-4 pb-2">
           <DialogTitle className="text-sm font-semibold flex items-center gap-2">
             <MessageSquare className="w-4 h-4" />
@@ -174,7 +193,10 @@ export default function SessionDialog() {
         </div>
 
         {/* Session list */}
-        <div ref={listRef} className="flex-1 overflow-y-auto px-4 pb-4 min-h-0 max-h-[50vh]">
+        <div
+          ref={listRef}
+          className="flex-1 overflow-y-auto px-4 pb-4 min-h-0 max-h-[50vh]"
+        >
           {sessionsLoading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -185,19 +207,25 @@ export default function SessionDialog() {
             </div>
           ) : (
             <div className="space-y-1">
-              {visibleSessions.map((session) => {
+              {visibleSessions.map((session, index) => {
+                const navProps = sessionNavigation.getItemProps(index);
                 const open = isTabOpen(session.id);
                 const current = isCurrentSession(session.id);
                 const loading = false;
                 return (
                   <button
                     key={session.id}
+                    {...navProps}
+                    role="button"
                     onClick={() => handleSessionClick(session.id, session.title)}
                     disabled={loading}
                     // Warm the transcript before the click lands so the tab
                     // opens without a cold fetch + loading spinner.
                     onMouseEnter={() => prefetchSession(session.id, activeProject.host)}
-                    onFocus={() => prefetchSession(session.id, activeProject.host)}
+                    onFocus={(event) => {
+                      navProps.onFocus(event);
+                      prefetchSession(session.id, activeProject.host);
+                    }}
                     onMouseDown={(e) => {
                       if (e.button === 1 && open) {
                         e.preventDefault(); // suppress middle-click autoscroll
@@ -208,7 +236,7 @@ export default function SessionDialog() {
                       current
                         ? "bg-accent text-accent-foreground"
                         : "hover:bg-muted text-foreground"
-                    } ${loading ? "opacity-60" : ""}`}
+                    } ${sessionNavigation.isActive(index) ? "ring-2 ring-inset ring-primary/60" : ""} ${loading ? "opacity-60" : ""}`}
                   >
                     {/* Status indicator */}
                     <span className="shrink-0 w-4 flex items-center justify-center">
@@ -249,6 +277,7 @@ export default function SessionDialog() {
                         className="shrink-0 p-1 rounded-md hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground transition-colors"
                         onClick={(e) => requestCloseTab(e, session.id, session.title || session.id)}
                         onKeyDown={(e) => {
+                          e.stopPropagation();
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             requestCloseTab(e as unknown as React.MouseEvent, session.id, session.title || session.id);

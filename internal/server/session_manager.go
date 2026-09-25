@@ -65,6 +65,18 @@ type sessionEntry struct {
 	bootstrapErr string
 	// turnActive is true while a turn is running on this session's agent.
 	turnActive bool
+	// compactingCount tracks manual and automatic compaction passes that can
+	// overlap: the async auto pass runs outside as.mu, while its result
+	// callback later needs that lock. A counter keeps /state active until the
+	// last pass finishes instead of letting the first completion hide the
+	// others.
+	compactingCount     int
+	compactionStartedAt time.Time
+	compactionErr       string
+	// compactionGeneration increments each time a group starts at zero. It is
+	// carried on both lifecycle events so a client can ignore a late `done`
+	// from a previous group that was overtaken by a newer `started` publish.
+	compactionGeneration uint64
 	// turnStartedAt is set when the current turn becomes active; cleared when
 	// it completes (turnEndedAt captures the end time and TurnTookMs is derived
 	// from the pair). These drive the web's current-input and last-took timers.
@@ -436,6 +448,64 @@ func (m *SessionManager) IsTurnActive(sessionID string) bool {
 	return false
 }
 
+// BeginCompaction marks one compaction pass active for sessionID and returns
+// whether the session is known plus the group's start time and generation. All
+// three values are read under the same manager lock, so a start event cannot
+// accidentally carry a later group's timestamp/generation.
+func (m *SessionManager) BeginCompaction(sessionID string) (ok bool, startedAt time.Time, generation uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil {
+		return false, time.Time{}, 0
+	}
+	e.compactingCount++
+	if e.compactingCount == 1 {
+		e.compactionStartedAt = time.Now().UTC()
+		e.compactionErr = ""
+		e.compactionGeneration++
+	}
+	e.lastActivity = time.Now()
+	return true, e.compactionStartedAt, e.compactionGeneration
+}
+
+// EndCompaction finishes one pass and reports whether the session is now idle
+// (no compaction remains). wasActive is false when no pass was registered, so
+// callers do not publish a terminal event for a direct/stale result callback.
+// The aggregate error is the first real failure retained until every
+// overlapping pass finishes, so a later successful pass cannot erase an
+// earlier failure. The caller must publish the terminal lifecycle event only
+// when idle is true; an earlier pass must not clear a client while another
+// pass is still running.
+func (m *SessionManager) EndCompaction(sessionID string, compactionErr string) (idle bool, wasActive bool, aggregateErr string, generation uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil {
+		log.Printf("session manager: EndCompaction(%q) for unknown session", sessionID)
+		return false, false, "", 0
+	}
+	if e.compactingCount == 0 {
+		// Every Begin has a matching End by contract (manual finish closure or
+		// async callback defer). A stale End is the only clue a pairing bug
+		// exists, so surface it without treating it as a hard error.
+		log.Printf("session manager: EndCompaction(%q) with no active compaction (started/ended mismatch)", sessionID)
+		return false, false, "", 0
+	}
+	if compactionErr != "" && e.compactionErr == "" {
+		e.compactionErr = compactionErr
+	}
+	e.compactingCount--
+	if e.compactingCount == 0 {
+		e.compactionStartedAt = time.Time{}
+		aggregateErr = e.compactionErr
+		e.compactionErr = ""
+		e.lastActivity = time.Now()
+		return true, true, aggregateErr, e.compactionGeneration
+	}
+	return false, true, "", e.compactionGeneration
+}
+
 // TurnTiming returns the stored turn start/end for a session. Zero times mean
 // no turn has run yet (or the entry does not exist).
 func (m *SessionManager) TurnTiming(sessionID string) (startedAt, endedAt time.Time) {
@@ -448,7 +518,7 @@ func (m *SessionManager) TurnTiming(sessionID string) (startedAt, endedAt time.T
 }
 
 // EvictIdle releases the built agent of every entry that has sat idle longer
-// than the threshold with no active turn. The registry entry and the on-disk
+// than the threshold with no active turn or compaction. The registry entry and the on-disk
 // session remain; the agent rebuilds on the next message. Returns the ids of
 // the evicted sessions so the caller can drop mirror state.
 //
@@ -470,7 +540,7 @@ func (m *SessionManager) EvictIdle() []string {
 	m.mu.Lock()
 	var candidates []candidate
 	for id, e := range m.entries {
-		if e.agent == nil || e.turnActive {
+		if e.agent == nil || e.turnActive || e.compactingCount > 0 {
 			continue
 		}
 		if time.Since(e.lastActivity) <= m.idleTimeout {
@@ -517,7 +587,7 @@ func (m *SessionManager) EvictIdle() []string {
 // ReleaseAgent releases the built agent for one session immediately,
 // regardless of idle time — the explicit counterpart of EvictIdle for the
 // session-close path (web/desktop UI closing a session tab). Like EvictIdle,
-// it never releases an agent while a turn is active, and a session paused on
+// it never releases an agent while a turn or compaction is active, and a session paused on
 // an unanswered permission/question ask is exempt (releasing it would make
 // the pending resolve 404). The registry entry and the on-disk session
 // remain; a later message rebuilds the agent. Returns true when a resident
@@ -534,7 +604,7 @@ func (m *SessionManager) ReleaseAgent(sessionID string) bool {
 	// setAgent (e.g. a session rebuild) and could see it go nil.
 	m.mu.Lock()
 	e := m.entries[sessionID]
-	if e == nil || e.agent == nil || e.turnActive {
+	if e == nil || e.agent == nil || e.turnActive || e.compactingCount > 0 {
 		m.mu.Unlock()
 		return false
 	}
@@ -557,7 +627,7 @@ func (m *SessionManager) ReleaseAgent(sessionID string) bool {
 	// agent (a rebuild or new turn may have raced in) and that no turn
 	// started since the snapshot, then detach it. onEvict runs outside m.mu.
 	m.mu.Lock()
-	if e2 := m.entries[sessionID]; e2 != nil && e2.agent == as && !e2.turnActive {
+	if e2 := m.entries[sessionID]; e2 != nil && e2.agent == as && !e2.turnActive && e2.compactingCount == 0 {
 		e2.agent = nil
 		e2.lastActivity = time.Now()
 		release = true
@@ -747,12 +817,16 @@ func (m *SessionManager) ConsumeSessionStart(sessionID string) (string, bool) {
 // still buffered (nil/empty once the turn ends), so a client reconnecting
 // mid-turn can replay it instead of only seeing it start from a blank slate.
 type SessionState struct {
-	SessionID      string      `json:"session_id"`
-	BootstrapStage string      `json:"bootstrap_stage"`
-	BootstrapError string      `json:"bootstrap_error,omitempty"`
-	TurnActive     bool        `json:"turn_active"`
-	LastSeq        uint64      `json:"last_seq"`
-	LiveFrames     []liveFrame `json:"live_frames,omitempty"`
+	SessionID            string      `json:"session_id"`
+	BootstrapStage       string      `json:"bootstrap_stage"`
+	BootstrapError       string      `json:"bootstrap_error,omitempty"`
+	TurnActive           bool        `json:"turn_active"`
+	Compacting           bool        `json:"compacting"`
+	CompactionStartedAt  time.Time   `json:"compaction_started_at,omitzero"`
+	CompactionGeneration uint64      `json:"compaction_generation,omitzero"`
+	CompactionError      string      `json:"compaction_error,omitempty"`
+	LastSeq              uint64      `json:"last_seq"`
+	LiveFrames           []liveFrame `json:"live_frames,omitempty"`
 }
 
 // State returns the session's reconcile state. The bool reports whether the
@@ -770,12 +844,16 @@ func (m *SessionManager) State(sessionID string) (SessionState, bool) {
 		frames = append([]liveFrame(nil), e.liveFrames...)
 	}
 	return SessionState{
-		SessionID:      e.SessionID,
-		BootstrapStage: e.bootstrapStage,
-		BootstrapError: e.bootstrapErr,
-		TurnActive:     e.turnActive,
-		LastSeq:        e.lastSeq,
-		LiveFrames:     frames,
+		SessionID:            e.SessionID,
+		BootstrapStage:       e.bootstrapStage,
+		BootstrapError:       e.bootstrapErr,
+		TurnActive:           e.turnActive,
+		Compacting:           e.compactingCount > 0,
+		CompactionStartedAt:  e.compactionStartedAt,
+		CompactionGeneration: e.compactionGeneration,
+		CompactionError:      e.compactionErr,
+		LastSeq:              e.lastSeq,
+		LiveFrames:           frames,
 	}, true
 }
 

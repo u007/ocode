@@ -9,6 +9,9 @@ import type {
   GitStatus,
   GitDiffFile,
   GitCommit,
+  GitConflictResolveRequest,
+  GitOperationRequest,
+  GitOperationResult,
   GitWorkspace,
   GitHunkRequest,
   GitStash,
@@ -55,8 +58,10 @@ import type {
 	VaultItemMeta,
 	VaultStatus,
 	VaultGenOptions,
-	ChatVerbosityConfig,
-	ChatVerbosityResponse,
+  ChatVerbosityConfig,
+  ChatVerbosityResponse,
+  PendingRewind,
+  PreparePendingRewindRequest,
 } from "./types";
 
 import { noteSessionRevision } from "../lib/sessionRevision";
@@ -70,6 +75,7 @@ export interface CompactConfig {
   keep_recent_tokens: number;
   min_messages: number;
   summary_timeout_seconds: number;
+  summary_first_token_timeout_seconds: number;
   summary_max_retries: number;
   max_summary_input_tokens: number;
 }
@@ -614,6 +620,19 @@ export const api = {
       return detail;
     });
   },
+  prepareRewind: (id: string, request: PreparePendingRewindRequest, host?: string) =>
+    fetchJSON<PendingRewind>(`/api/sessions/${id}/rewinds`, {
+      method: "POST",
+      body: JSON.stringify(request),
+    }, host),
+  getRewind: (id: string, token: string, host?: string) =>
+    fetchJSON<PendingRewind>(`/api/sessions/${id}/rewinds/${encodeURIComponent(token)}`, {
+      method: "GET",
+    }, host),
+  cancelRewind: (id: string, token: string, host?: string) =>
+    fetchJSON<{ cancelled: boolean }>(`/api/sessions/${id}/rewinds/${encodeURIComponent(token)}`, {
+      method: "DELETE",
+    }, host),
   truncateSession: (id: string, keepUntil: number, host?: string) =>
     fetchJSON<SessionDetail>(`/api/sessions/${id}/truncate`, {
       method: "POST",
@@ -1030,6 +1049,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
+  /** Resolve one conflicted file: resolution is "ours" | "theirs" | "mark".
+   *  `mark` stages the file as-is and the server refuses while conflict
+   *  markers remain, so the user cannot half-resolve. */
+  gitResolveConflict: (req: GitConflictResolveRequest, project?: string, host?: string) =>
+    fetchJSON<GitWorkspace>(`/api/git/conflict/resolve${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  /** Continue / abort / skip an operation that halted mid-flight. `kind` is
+   *  the operation the panel currently shows; the server re-detects it and
+   *  rejects a mismatch with 409, so a stale panel cannot abort a different
+   *  operation. Which actions are valid depends on the kind — a merge has no
+   *  skip, a bisect has no continue. */
+  gitOperation: (req: GitOperationRequest, project?: string, host?: string) =>
+    fetchJSON<GitOperationResult>(`/api/git/operation${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
   gitStash: (message: string, paths: string[], project?: string, host?: string, includeUntracked = false) =>
     fetchJSON<GitStatus>(`/api/git/stash${projQuery(project, host)}`, {
       method: "POST",
@@ -1321,6 +1360,12 @@ export const api = {
       // Handler.sessionInterrupted. Drives the chat's interrupted-turn notice.
       // Absent when false, so a missing flag never invents an interruption.
       interrupted?: boolean;
+      // Server-authoritative compaction lifecycle. Absent on older servers;
+      // callers must preserve their local state when the field is missing.
+      compacting?: boolean;
+      compaction_started_at?: string;
+      compaction_generation?: number;
+      compaction_error?: string;
     }>(`/api/sessions/${id}/state`, undefined, host),
   // Per-session status snapshot (Part 03): superset of /api/tui-status with
   // session_id populated and context_* included, so each tab renders its own
@@ -1438,14 +1483,19 @@ export const api = {
   // requests — a second session would just sit there doing nothing. The turn's
   // output arrives over the session mirror (see SessionTabSync), which is where
   // the UI renders it from anyway.
-  sendMessage: (sessionId: string, content: string, host?: string) => {
+  sendMessage: (sessionId: string, content: string, host?: string, rewindToken?: string) => {
     // Must be the same window id the ProfileSwitcher wrote its active profile
     // to (see getWindowId); re-deriving it here is what let the two diverge.
     const windowId = getWindowId()
     return fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
       method: "POST",
       headers: { "X-Window-Id": windowId },
-      body: JSON.stringify({ content, windowId, async: true }),
+      body: JSON.stringify({
+        content,
+        windowId,
+        async: true,
+        ...(rewindToken ? { rewindToken } : {}),
+      }),
     }, host)
   },
   chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string, host?: string, permissionMode?: string) => {
@@ -1990,11 +2040,12 @@ export const api = {
       }),
     }, host),
 
-  // Cancel (dismiss) a pending `question` prompt without answering it — the
-  // web equivalent of the TUI's Esc on the question dialog. The server rewrites
-  // the sentinel tool result in place with a dismissal notice, persists it, and
-  // broadcasts `question_resolved`; no continuation turn runs, so the session
-  // goes idle and the next user message starts an ordinary turn.
+  // Explicitly dismiss a pending `question` prompt without answering it. This
+  // is the final server-side action behind the dialog's "Don't answer" button;
+  // X and Escape only hide the dialog locally. The server rewrites the sentinel
+  // tool result in place with a dismissal notice, persists it, and broadcasts
+  // `question_resolved`; no continuation turn runs, so the session goes idle
+  // and the next user message starts an ordinary turn.
   cancelQuestion: (requestId: string, sessionId: string | null, host?: string) =>
     fetchJSON<ChatResponse>("/api/questions/cancel", {
       method: "POST",

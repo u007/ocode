@@ -4,6 +4,7 @@ import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/
 import type { ModelInfo } from "../../api/types";
 import { advisorSelectionPayload, capProviderGroups, claudeCodeAdvisorModelInfos, CLAUDE_CODE_PROVIDER, CLAUDE_CODE_SECTION_TITLE, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
 import { reportActionError } from "../../lib/actionErrors";
+import { useListNavigation } from "../../hooks/useListNavigation";
 import { Search, Check, Star, X, RefreshCw } from "lucide-react";
 import {
   Dialog,
@@ -56,6 +57,7 @@ interface Props {
 export default function ModelDialog({ open, onClose, purpose = "main", onPick, currentValues, sessionId, host }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [search, setSearch] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   // Model id whose favorite toggle request is in flight; its star is disabled
   // until the response resyncs, so double-clicks can't race the shared file.
   const [pendingFavorite, setPendingFavorite] = useState<string | null>(null);
@@ -295,6 +297,33 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // configured registry.
   const cappedProviders = capProviderGroups(providerGroups, undefined, LOCAL_MODELS_UNCAPPED);
 
+  // Navigation identity follows rendered order, not just ModelInfo.name: a
+  // recent/favorite model can also be present in a provider group in a
+  // future/alternate registry ordering. Section-qualified ids keep those rows
+  // independent without changing the existing section/row-cap behavior.
+  const modelNavRows = useMemo(() => {
+    const rows: Array<{ id: string; section: string; model: ModelInfo }> = [];
+    if (sections) {
+      for (const model of sections.recents) {
+        rows.push({ id: `recents:${model.name}`, section: "recents", model });
+      }
+      for (const model of sections.favorites) {
+        rows.push({ id: `favorites:${model.name}`, section: "favorites", model });
+      }
+    }
+    for (const [provider, providerModels] of Object.entries(cappedProviders.groups)) {
+      for (const model of providerModels) {
+        rows.push({ id: `${provider}:${model.name}`, section: provider, model });
+      }
+    }
+    return rows;
+  }, [cappedProviders, sections]);
+  const modelNavIndex = useMemo(
+    () => new Map(modelNavRows.map((row, index) => [row.id, index])),
+    [modelNavRows],
+  );
+  const modelNavIds = useMemo(() => modelNavRows.map((row) => row.id), [modelNavRows]);
+
   const getCurrentModel = () => {
     switch (purpose) {
       case "small":
@@ -422,6 +451,16 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     onClose();
   };
 
+  const modelNavigation = useListNavigation({
+    itemIds: modelNavIds,
+    onActivate: (index) => {
+      const row = modelNavRows[index];
+      if (row) handleSelect(row.model);
+    },
+    inputRef: searchInputRef,
+    resetKey: `${open}|${purpose}|${showAllProviders}|${sessionId ?? ""}|${host ?? ""}`,
+  });
+
   // Star toggle — the web/desktop counterpart of the TUI picker's ctrl+f.
   // Optimistically flips the row, then resyncs every star from the canonical
   // favorites list the endpoint returns; reverts on failure.
@@ -526,7 +565,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // `withProvider` mirrors the TUI's modelPickerLabel(id) which shows the full
   // "provider/model" id in the Recently Used / Favorites sections where there
   // is no per-provider header to disambiguate.
-  const renderRow = (m: ModelInfo, opts?: { withProvider?: boolean }) => {
+  const renderRow = (m: ModelInfo, section: string, opts?: { withProvider?: boolean }) => {
+    const navIndex = modelNavIndex.get(`${section}:${m.name}`) ?? -1;
+    const navProps = navIndex >= 0 ? modelNavigation.getItemProps(navIndex) : null;
     const selected =
       getCurrentModel() === (purpose === "advisor" ? m.model : m.name) || m.active;
     // Only canonical "provider/model" ids can enter the shared favorites
@@ -545,10 +586,12 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     return (
       <div key={m.name} className="flex items-start gap-1">
         <button
+          {...(navProps ?? {})}
+          type="button"
           onClick={() => handleSelect(m)}
           className={`w-full min-w-0 flex items-start justify-between gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
             selected ? "bg-blue-600/20 text-blue-400" : "text-foreground hover:bg-muted"
-          }`}
+          } ${navIndex >= 0 && modelNavigation.isActive(navIndex) ? "ring-2 ring-inset ring-blue-400" : ""}`}
         >
           <span className="min-w-0 flex-1 whitespace-normal break-words [overflow-wrap:anywhere]">
             {label}
@@ -588,7 +631,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-      <DialogContent className="sm:max-w-2xl bg-card border-border">
+      <DialogContent
+        className="sm:max-w-2xl bg-card border-border"
+        onKeyDown={modelNavigation.onKeyDown}
+      >
         <DialogHeader>
           <DialogTitle className="text-foreground">{PURPOSE_TITLES[purpose]}</DialogTitle>
         </DialogHeader>
@@ -603,6 +649,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               placeholder="Search models..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              ref={searchInputRef}
               className="w-full pl-10 pr-4 py-2 bg-muted border border-border rounded-md text-sm text-foreground placeholder-muted-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               autoFocus
             />
@@ -652,7 +699,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 Recently Used
               </div>
-              {sections.recents.map((m) => renderRow(m, { withProvider: true }))}
+              {sections.recents.map((m) => renderRow(m, "recents", { withProvider: true }))}
             </div>
           )}
           {sections && sections.favorites.length > 0 && (
@@ -660,7 +707,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               <div className="px-2 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 ★ Favorites
               </div>
-              {sections.favorites.map((m) => renderRow(m, { withProvider: true }))}
+              {sections.favorites.map((m) => renderRow(m, "favorites", { withProvider: true }))}
             </div>
           )}
           {Object.entries(cappedProviders.groups).map(([provider, providerModels]) => (
@@ -672,7 +719,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
                 // The Claude Code rows show the full "claude-code/<model>" id,
                 // exactly as the TUI's section does (there is no real registry
                 // provider header to disambiguate them).
-                renderRow(m, provider === CLAUDE_CODE_PROVIDER ? { withProvider: true } : undefined),
+                renderRow(m, provider, provider === CLAUDE_CODE_PROVIDER ? { withProvider: true } : undefined),
               )}
             </div>
           ))}

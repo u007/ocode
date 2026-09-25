@@ -5,6 +5,7 @@ import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
 import { api } from "../../api/client";
 import { applyReconcileState } from "../../hooks/useTurnWatchdog";
+import { getCompactionEventVersion, resetCompactionGenerations } from "../../lib/compactionState";
 import {
   routeBusEnvelope,
   reconcileOpenSessions,
@@ -82,6 +83,9 @@ export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
       eventBus.on(event, (env) => routeBusEnvelope(env, router)),
     );
     const offReconnect = eventBus.onReconnect(() => {
+      // A reconnect may be a new server process whose generation counter
+      // restarted at 1; discard the previous boot's generation watermarks.
+      resetCompactionGenerations();
       // Reconcile every open session: turn state + transcript refetch, plus
       // a replay of whatever streaming activity is still buffered from an
       // in-progress turn (see reconcileOpenSessions).
@@ -129,13 +133,14 @@ export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
     prevActiveRef.current = activeTabId;
     if (!activeTabId || activeTabId === prev || activeTabId.startsWith("new-")) return;
     let cancelled = false;
+    const compactionVersion = getCompactionEventVersion(activeTabId);
     api
       .getSessionState(activeTabId, hostForRef.current(activeTabId))
       .then((state) => {
         if (!cancelled) {
           const slice = getSessionSlice(chatStateRef.current, activeTabId);
           const hasPendingAsk = !!(slice.pendingPermission || slice.pendingQuestion);
-          applyReconcileState(chatDispatch, activeTabId, state, hasPendingAsk, slice.turnActive);
+          applyReconcileState(chatDispatch, activeTabId, state, hasPendingAsk, slice.turnActive, compactionVersion);
         }
       })
       .catch(() => {

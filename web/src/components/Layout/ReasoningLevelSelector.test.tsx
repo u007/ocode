@@ -45,4 +45,31 @@ describe("ReasoningLevelSelector scoping (per-chat-session reasoning level)", ()
     await waitFor(() => expect(hoisted.api.setThinkingBudget).toHaveBeenCalledWith("low", undefined));
     expect(hoisted.api.setSessionThinkingBudget).not.toHaveBeenCalled();
   });
+
+  it("supports keyboard navigation, Escape focus restoration, and Tab close", async () => {
+    render(<ReasoningLevelSelector thinkingBudget={0} sessionId="ses_123" host="box" />);
+    const trigger = screen.getByRole("button", { name: /Reason:/ });
+    fireEvent.click(trigger);
+
+    const off = screen.getByRole("button", { name: /^OFF/ });
+    await waitFor(() => expect(document.activeElement).toBe(off));
+    fireEvent.keyDown(off, { key: "ArrowDown" });
+    const low = screen.getByRole("button", { name: /^LOW/ });
+    expect(document.activeElement).toBe(low);
+    fireEvent.keyDown(low, { key: "Enter" });
+    await waitFor(() =>
+      expect(hoisted.api.setSessionThinkingBudget).toHaveBeenCalledWith("ses_123", "low", "box"),
+    );
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    const reopened = screen.getByRole("button", { name: /Reason:/ });
+    fireEvent.keyDown(screen.getByRole("button", { name: /^LOW/ }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^LOW/ })).toBeNull());
+    expect(document.activeElement).toBe(reopened);
+
+    fireEvent.click(reopened);
+    fireEvent.keyDown(screen.getByRole("button", { name: /^LOW/ }), { key: "Tab" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^LOW/ })).toBeNull());
+  });
 });

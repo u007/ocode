@@ -1,7 +1,7 @@
 ---
 type: Design
 title: Chat Verbosity Display — Design Spec
-description: 'Approved design spec for chat verbosity display: chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Specification only — not implemented.'
+description: 'Approved design spec for chat verbosity display, implemented 2026-09-25 (local web/desktop SPA only): chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Design record with as-built status notes.'
 tags:
   - design
   - spec
@@ -10,13 +10,15 @@ tags:
   - settings
   - verbosity
   - superpowers
-timestamp: 2026-09-24T12:11:31Z
+timestamp: 2026-09-25T16:19:13Z
 ---
 # Chat Verbosity Display — Design Spec
 
-**Status:** Approved design (2026-09-24), **amended the same day after advisor review**. Specification only — none of the changes described here are implemented yet; every "will"/"planned" item below is work to be done, gated on the test-first plan in §14. Nothing in this document should be read as claiming implementation is complete.
+**Status:** Approved design (2026-09-24), **amended the same day after advisor review**; **implemented 2026-09-25** (local web/desktop SPA only — TUI rendering and remote-host config fetching unchanged, per the v1 scope in §3). The body below remains the design record as approved, plus amendment 7 below: future-tense wording describes what was built, and the shipped implementation follows it (shared chat_verbosity config, authenticated GET/PUT /api/config/ocode/chat-verbosity, invalidation-only chat_verbosity_changed, ChatPanel-owned disclosure with policy revision, single ToolBlock outer/inner gate, latest-thinking invariant, strict 400 failure handling with no silent normalization, and virtualizer scroll anchoring), except as corrected by **amendment 7** (the §8 dynamic `Follow preset` label ships in the same change, and the shipped resolver's `balanced`/`tool_calls` cell — which had diverged to `expanded` — is realigned to §9's `collapsed`); and except that §11 search force-open ships **transient** — a `forceOpen` render prop derived from the current match, never written into the disclosure map — so a collapsed block reverts to its manual/policy state when the match cursor moves away and a manual choice is never overwritten. For the as-built file map and regression tests see skills/ocode-web/SKILL.md item 35 and the 2026-09-25 CHANGES.md entry.
 
-**Amendment note (2026-09-24):** six advisor-reviewed changes are incorporated throughout: (1) `chat_verbosity_changed` is an invalidation signal only — its payload is never applied (§5, §6, §7); (2) disclosure state is owned by `ChatPanel` in a policy-versioned map because virtualized rows unmount (§7, §10, §11); (3) precise "latest thinking" semantics (§9, §10); (4) a single `ToolBlock` implementation with one outer call/details gate and one inner output gate (§10); (5) explicit virtualizer anchoring on policy changes (§11); (6) strict failure handling with no server-side normalization of malformed values (§6, §7, §12).
+**Amendment note (2026-09-24):** six advisor-reviewed changes are incorporated throughout: (1) `chat_verbosity_changed` is an invalidation signal only — its payload is never applied (§5, §6, §7); (2) disclosure state is owned by `ChatPanel` in a policy-versioned map because virtualized rows unmount (§7, §10, §11); (3) precise "latest thinking" semantics (§9, §10); (4) a single `ToolBlock` implementation with one outer call/details gate and one inner output gate (§10); (5) explicit virtualizer anchoring on policy changes (§11); (6) strict failure handling with no server-side normalization of malformed values (§6, §7, §12). **Amendment 7 (2026-09-25)** adds a seventh change: (7) §8's per-category override selects show a dynamic `Follow preset — <Expanded|Collapsed>` label whose suffix is the §9 cell for the currently selected draft preset (the option value stays `preset`), and the `balanced`/`tool_calls` resolver cell is aligned to §9 (`collapsed`) — §9 itself is unchanged.
+
+**Amendment 7 — resolver divergence note:** the shipped resolver — `web/src/lib/chatVerbosity.ts` (`resolveChatDisplayPolicy`) and `internal/config.ResolveChatVerbosityPolicy` (`internal/config/ocodeconfig.go`) — had diverged from §9 for the `balanced`/`tool_calls` cell: both resolved `expanded` under `balanced` (collapsing tool-call details only under `quiet`) instead of §9's `collapsed`. The code is being aligned to the spec — §9 is the source of truth and is not amended — and `skills/ocode-web/SKILL.md` item 35(b) is updated in the same change.
 
 ---
 
@@ -37,7 +39,7 @@ Verified anchors in the current codebase (line numbers as of this writing):
 - **Compaction summaries** — `web/src/components/Chat/CompactionNotice.tsx` is already collapsed by default (`useState(false)`, line 40); no new override applies to it in v1.
 - **Desktop parity** — the desktop shell embeds the same React SPA and server (see `skills/ocode-desktop` and `skills/ocode-web`); there is no separate desktop frontend to change.
 - **Repository error-handling rules** — any catch/log/rethrow added by the eventual implementation must follow the house conduct rules captured in `skills/kaizen/conduct-tuning-*/SKILL.md`: a caught error that is rethrown owes a structured log of what was attempted plus the error first; an empty catch is banned; the only carve-out is a known-benign/suppressed case marked with an inline `// intentionally not logged: <reason>` comment.
-- **Not present anywhere yet** — repository-wide search finds no `chat_verbosity`, `ChatVerbosity`, `chat-verbosity`, or `chatVerbosity` in `internal/` or `web/src/`. This document specifies net-new work.
+- **Not present anywhere yet** — repository-wide search finds no `chat_verbosity`, `ChatVerbosity`, `chat-verbosity`, or `chatVerbosity` in `internal/` or `web/src/`. This document specifies net-new work. (Pre-implementation observation from 2026-09-24; since implemented 2026-09-25 — see the Status note above.)
 
 ## 2. Goals
 
@@ -180,6 +182,8 @@ interface EffectiveVerbosity {
 function resolveChatVerbosity(cfg: ChatVerbosityConfig | null | undefined): EffectiveVerbosity;
 ```
 
+> **Note (implemented 2026-09-25):** As shipped, the resolved policy is `ChatDisplayPolicy` (`web/src/api/types.ts`), and the pure resolver is `resolveChatDisplayPolicy` (`web/src/lib/chatVerbosity.ts`) with a Go twin `config.ResolveChatVerbosityPolicy` (`internal/config/ocodeconfig.go`) — both resolvers must implement the §9 matrix in step. The shipped fields use the §6 wire-case names: `older_thinking`, `latest_thinking`, `tool_calls`, `tool_output`, `notices`, plus a constant `status: "expanded"` field that materializes §10's 'StatusBlock is never hidden or grouped'. Note the one non-casing rename: the config key `activity_notices` maps to the policy field `notices`, so anything reading a resolved cell must not index it with the config key. The CONFIG/override keys are unchanged from the `Category` union above.
+
 - Resolution rule: `effective(cat) = overrides[cat] !== "preset" ? overrides[cat] : presetTable[preset][cat]`; `latestThinking ≡ "expanded"` regardless of preset and overrides. Unknown enum strings defensively fall back (`preset`→`full` category default; bad override→`preset`) **only** as a crash-prevention backstop: the API guarantees validated payloads (§6), so exercising this path indicates a defect and the store logs a structured warning when a *successful* fetch nonetheless fails validation.
 - **Store behavior (amended):**
   - Baseline: `GET` once on first subscriber; expose `useChatVerbosity()` returning memoized `EffectiveVerbosity`. Multiple chat tabs share one fetch/subscription (no per-tab stampede); overlapping invalidations coalesce into a single in-flight GET.
@@ -218,11 +222,15 @@ unchanged.
   The latest thinking block always stays expanded.
 
   Per-category overrides
-  Older thinking      [ Follow preset        ▾ ]
-  Tool call details   [ Follow preset        ▾ ]
-  Tool output         [ Follow preset        ▾ ]
-  Activity notices    [ Follow preset        ▾ ]
-                      options: Follow preset | Always expanded | Always collapsed
+  Older thinking      [ Follow preset — Expanded   ▾ ]
+  Tool call details   [ Follow preset — Expanded   ▾ ]
+  Tool output         [ Follow preset — Expanded   ▾ ]
+  Activity notices    [ Follow preset — Expanded   ▾ ]
+                      options: Follow preset — <Expanded|Collapsed> |
+                               Always expanded | Always collapsed
+                      suffix = the §9 cell for the selected preset (Full is
+                      selected above; under Balanced, "Tool call details"
+                      reads "Follow preset — Collapsed")
 
   [ Reset overrides ]                     [ Save changes ]
   Couldn't save chat display settings: <reason>     ← inline, role="alert", only on error
@@ -232,7 +240,8 @@ Behavior:
 
 - Loads via `GET` on mount (`loading` state, `CompactForm` pattern); load failure — including a `400` from a malformed stored section (§6) — shows the inline error (role `alert`) and leaves the form at defaults; the error text names the offending field when the server provides it. The renderer independently follows the §7 contract (retain last cached policy, else explicit Full fallback + warning).
 - Preset is a radio group; overrides are four labeled selects. All state is local until **Save changes**, which `PUT`s the whole section and disables the button while saving (`disabled={saving}`).
-- **Reset overrides** sets the four selects back to "Follow preset" locally (still requires Save); it does not touch the preset.
+- **Dynamic `Follow preset` label (amendment 7)** — the suffixed option keeps the `value` `"preset"`; only its visible TEXT changes to `Follow preset — <Expanded|Collapsed>`, computed from the §9 cell for the currently selected **draft** preset (via the same resolver the renderer uses), so it updates **before Save** whenever the preset radio changes. The option is always present: every category resolves definitively (`expanded` or `collapsed`) under all three presets. The §9 `full` `*` heuristic is not reflected in the suffix — under Full, both tool regions read `Follow preset — Expanded` regardless of the `lineCount <= 50` initial-open heuristic. The select keeps its per-category `aria-label`; tests query by option text, not the aria-label.
+- **Reset overrides** sets the four selects back to the `preset` option locally — displayed as `Follow preset — <Expanded|Collapsed>`, with the suffix recomputed from the then-selected preset (still requires Save); it does not touch the preset.
 - Inline errors for both load and save failures; silent success on save, consistent with the other settings forms.
 - Saving publishes `chat_verbosity_changed`; every open chat tab (and other windows on the same server) receives it **as an invalidation signal and re-fetches** (§5) — the form itself does not need to push state anywhere else.
 
@@ -366,7 +375,8 @@ TDD order: land the suites below failing against the current tree, then implemen
 - ChatPanel integration, **committed and live paths**: modes reach `MessageBubble`/`TurnParts` from both `renderEntries` and the live-buffer dispatch; a search-selected match force-opens its containing collapsed block (and the latch survives cursor movement **and row unmount**).
 
 **TypeScript — Settings form**
-- `ChatDisplayForm.test.tsx` (+ a `SettingsPanel` group-dispatch case): loads and renders GET values; radio + four selects present with options; Reset overrides returns selects to "Follow preset" without touching the preset; Save issues `PUT` with the exact payload and is disabled while saving; save failure, load failure, and a **400 from a malformed stored section** each render the inline `role="alert"` error (field name preserved); success renders no error.
+- `ChatDisplayForm.test.tsx` (+ a `SettingsPanel` group-dispatch case): loads and renders GET values; radio + four selects present with options; Reset overrides returns selects to the suffixed `Follow preset — <Expanded|Collapsed>` option (suffix recomputed from the then-selected preset) without touching the preset; Save issues `PUT` with the exact payload and is disabled while saving; save failure, load failure, and a **400 from a malformed stored section** each render the inline `role="alert"` error (field name preserved); success renders no error.
+- **Dynamic `Follow preset` label (amendment 7):** each override select's first option has `value="preset"` and text `Follow preset — <Expanded|Collapsed>` matching the §9 cell of the currently selected draft preset; changing the preset radio updates the suffix **before** Save; the option exists under Full, Balanced, and Quiet; under Full the `*` heuristic is not reflected (both tool regions read `Expanded`); the select's per-category `aria-label` is unchanged, and assertions target option text.
 
 **Gates before merge:** `go build ./...`, `go vet`, `go test ./internal/config ./internal/server`; `tsgo --noEmit`, focused Vitest runs for the files above, and `vite build`.
 

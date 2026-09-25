@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +13,7 @@ import { api } from "../../api/client";
 import type { DirectoryEntry } from "../../api/types";
 import { cn } from "../../lib/utils";
 import { parseKeywords, matchesKeywords } from "../../lib/keywordFilter";
+import { useListNavigation } from "../../hooks/useListNavigation";
 
 interface Props {
   open: boolean;
@@ -28,6 +29,7 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
   const [error, setError] = useState("");
   const [selectedPath, setSelectedPath] = useState("");
   const [filter, setFilter] = useState("");
+  const filterInputRef = useRef<HTMLInputElement>(null);
 
   const browse = useCallback(async (path?: string) => {
     setLoading(true);
@@ -77,6 +79,23 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
     return directories.filter((d) => matchesKeywords(`${d.name} ${d.path}`, keywords));
   }, [directories, keywords]);
 
+  const directoryNavIds = useMemo(
+    () => filteredDirectories.map((directory) => `directory:${directory.path}`),
+    [filteredDirectories],
+  );
+  const directoryNavigation = useListNavigation({
+    itemIds: directoryNavIds,
+    inputRef: filterInputRef,
+    onActivate: (index) => {
+      const entry = filteredDirectories[index];
+      if (!entry) return;
+      setSelectedPath(entry.path);
+      onSelect(entry.path);
+      onOpenChange(false);
+    },
+    resetKey: `${open}|${currentPath}`,
+  });
+
   const handleConfirm = () => {
     if (selectedPath) {
       onSelect(selectedPath);
@@ -96,7 +115,10 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md"
+        onKeyDown={directoryNavigation.onKeyDown}
+      >
         <DialogHeader>
           <DialogTitle>Browse for Folder</DialogTitle>
         </DialogHeader>
@@ -134,6 +156,7 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
             autoFocus
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
+            ref={filterInputRef}
             placeholder="Filter by keywords..."
             className="h-8 pl-7 pr-7 text-xs"
           />
@@ -175,16 +198,18 @@ export default function DirectoryBrowser({ open, onOpenChange, onSelect }: Props
             </div>
           ) : (
             <div className="py-1">
-              {filteredDirectories.map((entry) => (
+              {filteredDirectories.map((entry, index) => (
                 <button
                   key={entry.path}
+                  {...directoryNavigation.getItemProps(index)}
+                  type="button"
                   className={cn(
                     "w-full flex items-center gap-3 px-3 py-2 text-sm text-left hover:bg-accent hover:text-accent-foreground transition-colors",
                     selectedPath === entry.path && "bg-accent text-accent-foreground",
+                    directoryNavigation.isActive(index) && "ring-2 ring-inset ring-accent-foreground/60",
                   )}
                   onClick={() => setSelectedPath(entry.path)}
                   onDoubleClick={() => handleDoubleClick(entry)}
-                  type="button"
                 >
                   <Folder className="w-4 h-4 shrink-0 text-muted-foreground/70" />
                   <div className="min-w-0 flex-1">

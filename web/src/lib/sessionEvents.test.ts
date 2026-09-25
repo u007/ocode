@@ -18,6 +18,15 @@ import { chatReducer, initialState } from "../stores/chatStore";
 import { clearDraft, getDraft, setDraft } from "./tabDrafts";
 import { clearQueue, getQueue, pushQueued, QUEUE_CHANGED_EVENT } from "./tabQueue";
 import { browserStore } from "./browserStore";
+import {
+  __resetCompactionStateForTests,
+  clearCompaction,
+  getCompactionState,
+  markLocalCompactionEnd,
+  markLocalCompactionStart,
+  resetCompactionGenerations,
+  setCompactionState,
+} from "./compactionState";
 
 const mockGetSessionState = vi.fn();
 const mockGetSession = vi.fn();
@@ -59,8 +68,69 @@ function makeRouter(
 describe("routeBusEnvelope", () => {
   beforeEach(() => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
+    __resetCompactionStateForTests();
+    clearCompaction("s1");
+    clearCompaction("s2");
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it("routes compaction lifecycle events for a client that did not start them", () => {
+    const { router } = makeRouter(["s1"]);
+    routeBusEnvelope(
+      env("compaction_started", { data: { started_at: "2026-09-25T15:00:00Z" } }),
+      router,
+    );
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
+
+    routeBusEnvelope(env("compaction_done", { data: { ok: true } }), router);
+    expect(getCompactionState("s1")).toBeUndefined();
+  });
+
+  it("keeps a failed compaction visible to the other client", () => {
+    const { router } = makeRouter(["s1"]);
+    routeBusEnvelope(env("compaction_started", { data: { started_at: "2026-09-25T15:00:00Z" } }), router);
+    routeBusEnvelope(
+      env("compaction_done", { data: { ok: false, error: "summarizer failed" } }),
+      router,
+    );
+    expect(getCompactionState("s1")).toEqual({ status: "error", error: "summarizer failed" });
+  });
+
+  it("ignores a late done from an older generation after a newer start", () => {
+    const { router } = makeRouter(["s1"]);
+    routeBusEnvelope(
+      env("compaction_started", { data: { started_at: "2026-09-25T15:00:02Z", generation: 2 } }),
+      router,
+    );
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
+
+    routeBusEnvelope(env("compaction_done", { data: { ok: true, generation: 1 } }), router);
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
+
+    routeBusEnvelope(env("compaction_done", { data: { ok: true, generation: 2 } }), router);
+    expect(getCompactionState("s1")).toBeUndefined();
+  });
+
+  it("does not resurrect a group whose done arrived before its late start", () => {
+    const { router } = makeRouter(["s1"]);
+    routeBusEnvelope(env("compaction_done", { data: { ok: true, generation: 3 } }), router);
+    routeBusEnvelope(
+      env("compaction_started", { data: { started_at: "2026-09-25T15:00:03Z", generation: 3 } }),
+      router,
+    );
+    expect(getCompactionState("s1")).toBeUndefined();
+  });
+
+  it("accepts a new server generation after an SSE reconnect resets the counter", () => {
+    const { router } = makeRouter(["s1"]);
+    routeBusEnvelope(env("compaction_done", { data: { ok: true, generation: 5 } }), router);
+    resetCompactionGenerations();
+    routeBusEnvelope(
+      env("compaction_started", { data: { started_at: "2026-09-25T16:00:00Z", generation: 1 } }),
+      router,
+    );
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
+  });
 
   it("routes chat events to the open session's slice", () => {
     vi.useFakeTimers();
@@ -648,6 +718,7 @@ describe("reconcileOpenSessions", () => {
   beforeEach(() => {
     mockGetSessionState.mockReset();
     mockGetSession.mockReset();
+    clearCompaction("s1");
   });
 
   it("refetches state + transcript for every real open session, skipping new-* tabs", async () => {
@@ -661,6 +732,37 @@ describe("reconcileOpenSessions", () => {
     expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
     expect(actions.some((a) => a.type === "SET_TURN_STATE" && a.sessionId === "s1" && !a.turnActive)).toBe(true);
     expect(actions.some((a) => a.type === "MERGE_SNAPSHOT" && a.sessionId === "s1")).toBe(true);
+  });
+
+  it("hydrates an active compaction for a client that opened mid-operation", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "ready",
+      turn_active: false,
+      last_seq: 12,
+      compacting: true,
+      compaction_started_at: "2026-09-25T15:00:00Z",
+    });
+    mockGetSession.mockResolvedValue({ messages: [], total: 0 });
+    const { router } = makeRouter(["s1"]);
+    await reconcileOpenSessions(new Set(["s1"]), router);
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
+  });
+
+  it("does not let a stale false state clear a start event received mid-fetch", async () => {
+    let resolveState!: (value: unknown) => void;
+    mockGetSessionState.mockReturnValue(new Promise((resolve) => { resolveState = resolve; }));
+    mockGetSession.mockResolvedValue({ messages: [], total: 0 });
+    const { router } = makeRouter(["s1"]);
+    const reconciling = reconcileOpenSessions(new Set(["s1"]), router);
+
+    routeBusEnvelope(
+      env("compaction_started", { data: { started_at: "2026-09-25T15:00:00Z" } }),
+      router,
+    );
+    resolveState({ bootstrap_stage: "ready", turn_active: false, last_seq: 13, compacting: false });
+    await reconciling;
+
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
   });
 
   it("routes reconcile through the session's host", async () => {
@@ -1054,6 +1156,7 @@ describe("revalidateSession", () => {
     mockGetSessionState.mockReset();
     mockGetSession.mockReset();
     resetSessionRevisions();
+    clearCompaction("s1");
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
   afterEach(() => {
@@ -1111,6 +1214,53 @@ describe("revalidateSession", () => {
     const { router } = makeRouter(["s1"]);
     await revalidateSession("s1", router);
     expect(mockGetSession).not.toHaveBeenCalled();
+  });
+
+  it("clears an active indicator when the authoritative state reports idle", async () => {
+    setCompactionState("s1", { status: "active", startedAt: Date.now() });
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+      compacting: false,
+    });
+    const { router } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+    expect(getCompactionState("s1")).toBeUndefined();
+  });
+
+  it("preserves an active indicator when an older server omits compaction fields", async () => {
+    setCompactionState("s1", { status: "active", startedAt: Date.now() });
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 1,
+    });
+    const { router } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+    expect(getCompactionState("s1")).toMatchObject({ status: "active" });
+  });
+
+  it("does not clear the initiating tab's optimistic state from a pre-begin poll", async () => {
+    try {
+      markLocalCompactionStart("s1");
+      mockGetSessionState.mockResolvedValue({
+        bootstrap_stage: "",
+        turn_active: false,
+        last_seq: 1,
+        compacting: false,
+      });
+      const { router } = makeRouter(["s1"]);
+      await revalidateSession("s1", router);
+      expect(getCompactionState("s1")).toMatchObject({ status: "active" });
+
+      markLocalCompactionEnd("s1");
+      await revalidateSession("s1", router);
+      expect(getCompactionState("s1")).toBeUndefined();
+    } finally {
+      markLocalCompactionEnd("s1");
+      clearCompaction("s1");
+    }
   });
 
   it("applies the authoritative title when the revision moved (cross-process title write)", async () => {

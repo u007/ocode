@@ -1,7 +1,7 @@
 ---
 type: Design
 title: Deferred, durable message rewind for ocode Web/Desktop
-description: Approved design spec for deferred, durable message rewind in ocode Web/Desktop.
+description: 'Design spec for deferred, durable message rewind in ocode Web/Desktop — IMPLEMENTED: server pending_rewinds resource + endpoints, commit-before-202 turn path (resident/no-resident/TUI /rc), localStorage recovery and cancel, lost-response probe.'
 tags:
   - design-spec
   - session
@@ -9,13 +9,30 @@ tags:
   - web
   - tui
   - sqlite
-timestamp: 2026-09-25T04:36:29Z
+timestamp: 2026-09-25T11:41:14Z
 ---
 # Deferred, durable message rewind for ocode Web/Desktop
 
-**Type:** Design spec (documentation only — no source implementation yet)
+**Type:** Design spec (implemented)
 **Date:** 2026-09-25
-**Status:** Approved design; implementation to follow TDD below.
+**Status:** **IMPLEMENTED (2026-09-25).** The server resource, the three endpoints, the commit-before-202 turn path (resident, no-resident and TUI `/rc` bridge), and the web localStorage recovery/cancel UI all shipped. See *As-built notes* below for code anchors.
+
+---
+
+## 0. As-built notes (2026-09-25)
+
+What the code does now, in the order the design specifies it:
+
+1. **Server capability.** `POST|GET|DELETE /api/sessions/{id}/rewinds[/{token}]` are registered at `internal/server/server.go:225-227` and handled by `HandlePreparePendingRewind` / `HandlePendingRewindStatus` / `HandleCancelPendingRewind` (`internal/server/handler_rewind.go:143`, `:179`, `:202`). Prepare and cancel take the per-session turn lock and answer **409 while a turn is active**; status is deliberately lock-free so it never blocks a running turn. The store is `internal/session/pending_rewind.go`: one row per session in the session's own SQLite file, `pendingRewindTTL = 24 * time.Hour` (`:40`), SHA-256 transcript fingerprint computed server-side, `armed | committed | stale`, lazy expiry prune, `ErrPendingRewindAlreadyCommitted` (`:56`), and the rekey move `movePendingRewindForRekey` (`:726`, invoked from `internal/session/session.go:1667`). Cancel of a committed row answers **410**.
+2. **localStorage recovery and cancel.** `web/src/lib/pendingRewindStore.ts` persists versioned `v1` records under `ocode.ui.pendingRewind.v1:<host>::<sessionId>` (load/save/clear/subscribe/rekey). `ChatInput` hydrates on session change (`loadPendingRewind`, `web/src/components/Chat/ChatInput.tsx:241`, live subscription at `:289`), keeps the draft synced back into the record (`:627`), renders the compact **Pending rewind** banner with a **Cancel restore** button (`:1116-1140`) that calls `DELETE …/rewinds/{token}` and restores the exact pre-Restore draft, and issues the cancel itself if the `localStorage` write fails after prepare (fail-closed). Restore shows the §2.10 confirmation dialog (`web/src/components/Chat/MessageBubble.tsx:363-…`). Rekey rewrites the record (`web/src/App.tsx:859`, `web/src/lib/sessionEvents.ts:315`, `:362`).
+3. **Commit before 202.** `dispatchTurnWithRewind` (`internal/server/agent_session.go:1626`) queues the job; `executeTurnJob` runs `commitPendingRewindTurn` (`:1661`) **before** `close(job.persistAck)` — the 202 gate. That single transaction deletes transcript rows from the target onward, inserts the replacement user row with the next `UserSeq`, marks the resource `committed` + `committed_user_seq`, and bumps `history_gen`; afterwards it reconciles a resident agent (`as.messages = result.KeptPrefix`, `:1690`), reseeds the pending queue (`h.sessions.ReplacePending`, `:1693`), broadcasts the authoritative shortened transcript, and only then acks.
+4. **No-resident path.** With no resident `agentSession` the same durable transaction runs; the ordinary bootstrap appends the already-persisted user row exactly once (`TestRewindTokenizedAsyncSendWithoutResidentKeepsOneDurableRow`). A commit failure closes `persistAck` with an error and **no turn starts**.
+5. **TUI `/rc` bridge.** `RCRequest.RewindToken` plus the `AckCh` ready/error channel (`internal/server/rc_bridge.go:40-45`). The TUI commits through `commitRCRequestRewind` (`internal/tui/model.go:15620`) before rendering or starting `askAgent`, acks on success, and treats `ErrPendingRewindAlreadyCommitted` as an acknowledgment without a second turn (`internal/tui/model.go:4746-4754`); a bridge failure never starts a turn.
+6. **Lost-response probe.** After a failed tokenized send the client probes `GET /rewinds/{token}` (`web/src/hooks/useChat.ts:198-231`): `committed` → treated as acceptance (clear the record, keep the transcript, **do not resend**), `stale` → clear + prompt to restore again, 404/409/410 → clear the unusable capability but keep the draft. The server side of the same contract is `ErrPendingRewindAlreadyCommitted` handling in `commitPendingRewindTurn` (`internal/server/agent_session.go:1663-1669`): a duplicate token is accepted without appending or starting another turn.
+7. **Regressions held.** Slash commands and `!shell` sends still omit the token; `truncateSession` survives in `web/src/api/client.ts:636` for compatibility but no web Restore path calls it.
+8. **Tests.** `internal/session/pending_rewind_test.go`, `internal/server/handler_rewind_test.go` (prepare/status/cancel, commit-before-ack, no-resident, failures-don't-append, duplicate-token, RC ack), `internal/tui/rc_rewind_test.go` + `rc_rewind_update_test.go`, `web/src/lib/pendingRewindStore.test.ts`, `web/src/hooks/useChat.rewind.test.tsx`, `web/src/api/client.rewind.test.ts`, `web/src/components/Chat/ChatInput.restore.test.tsx`.
+
+Design sections below are retained as approved; line references in §1 are the pre-implementation evidence they were written against.
 
 ---
 
@@ -424,10 +441,12 @@ project's established habit).
 
 ## 8. Scope & constraints
 
-- **Documentation-only change:** this spec is the deliverable. No source code,
-  tests, or unrelated docs are modified by this write.
-- Implementation order is TDD per §6; the legacy immediate `/truncate` endpoint
-  is left in place for compatibility but Web Restore stops calling it.
+- **This spec was written as documentation-only and is now implemented.** The
+  source, tests, and related docs have since landed (see *As-built notes*);
+  nothing else outside the feature was modified by this document.
+- Implementation order was TDD per §6; the legacy immediate `/truncate`
+  endpoint is left in place for compatibility but Web Restore no longer calls
+  it.
 - Open questions: none blocking (all semantics above were user-approved; any
   post-approval change to TTL, banner copy, or commit-point behavior requires
   updating this spec first).

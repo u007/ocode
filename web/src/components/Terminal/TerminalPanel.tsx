@@ -296,7 +296,9 @@ export default function TerminalPanel({
     files.forEach((f) => fd.append("file", f));
     try {
       const query = projectPath ? `?project=${encodeURIComponent(projectPath)}` : "";
-      const r = await fetch(apiPath(`/api/uploads${query}`), {
+      // A remote project's uploads live on the host, so the POST must go
+      // through the remote proxy rather than the local server.
+      const r = await fetch(apiPath(`${remoteApiBase(host)}/api/uploads${query}`), {
         method: "POST",
         headers: authHeaders(),
         body: fd,
@@ -324,7 +326,7 @@ export default function TerminalPanel({
     } catch (err) {
       console.error("terminal: file upload failed:", err);
     }
-  }, [projectPath]);
+  }, [projectPath, host]);
 
   // ── Context menu (right-click) — Supacode-style ────────────────
   const handleContextMenu = useCallback((e: React.MouseEvent) => {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/gitexec"
+	"github.com/u007/ocode/internal/projects"
 )
 
 // GitDiffFile represents a single file's diff in the working tree.
@@ -109,12 +110,40 @@ func (h *Handler) HandleGitStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) gitProjectDir(r *http.Request) (string, bool) {
 	dir := h.workDir
 	if p := r.URL.Query().Get("project"); p != "" && p != h.workDir {
-		if !h.isRegisteredProjectRoot(p) {
+		resolved, ok := h.resolveRegisteredProjectRoot(p)
+		if !ok {
 			return "", false
 		}
-		dir = p
+		dir = resolved
 	}
 	return dir, true
+}
+
+// resolveRegisteredProjectRoot maps a ?project= value to a saved project root.
+//
+// A remote project is registered with its path verbatim ("~/www/aimsai2" — the
+// separator and "~" belong to the remote shell, see projects.AddRemote), but the
+// host-side `ocode serve --remote` expands "~" when it saves that project
+// (projects.Add). A request proxied through /api/remote/{host}/ therefore
+// arrives carrying the tilde form while the host's registry holds the expanded
+// path, so the exact-match gate rejects it. Fall back to the home-expanded
+// form, resolved against THIS server's home (the host, for a proxied request).
+//
+// The trust decision is unchanged: only a saved project root is ever returned,
+// and the expansion narrows rather than widens the accepted set — "~user" and
+// every non-tilde path pass through unchanged.
+func (h *Handler) resolveRegisteredProjectRoot(p string) (string, bool) {
+	if h.isRegisteredProjectRoot(p) {
+		return p, true
+	}
+	expanded, err := projects.ExpandHome(p)
+	if err != nil || expanded == p {
+		return "", false
+	}
+	if h.isRegisteredProjectRoot(expanded) {
+		return expanded, true
+	}
+	return "", false
 }
 
 // isRegisteredProjectRoot reports whether p is one of the saved project roots.

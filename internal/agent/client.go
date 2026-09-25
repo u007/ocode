@@ -59,7 +59,30 @@ const (
 	ctxKeyTopP
 	ctxKeyTopK
 	ctxKeyMaxTokens
+	ctxKeyDeltaCallback
 )
+
+// withDeltaCallback carries a stream callback for one ChatWithContext call.
+// Keeping it in the context avoids replacing GenericClient.OnDelta, which is
+// shared by callers such as chatWithDelta and can otherwise clear a running
+// compaction's callback.
+func withDeltaCallback(ctx context.Context, fn func(kind, text string)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyDeltaCallback, fn)
+}
+
+func deltaCallbackFromContext(ctx context.Context) func(kind, text string) {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(ctxKeyDeltaCallback).(func(kind, text string))
+	return fn
+}
 
 // llmHTTPClient deliberately sets no Client.Timeout: a blanket deadline covers
 // the streamed response body too, which is how long generations died mid-stream
@@ -274,6 +297,16 @@ func (c *GenericClient) onDelta() func(kind, text string) {
 	c.deltaMu.Lock()
 	defer c.deltaMu.Unlock()
 	return c.OnDelta
+}
+
+// onDeltaContext prefers a callback carried by this call's context. The
+// context-scoped callback is intentionally exclusive: a compaction summary
+// must never be emitted through a concurrent chat's shared OnDelta callback.
+func (c *GenericClient) onDeltaContext(ctx context.Context) func(kind, text string) {
+	if fn := deltaCallbackFromContext(ctx); fn != nil {
+		return fn
+	}
+	return c.onDelta()
 }
 
 // SetOnUsage installs (or clears, with nil) the streaming-usage callback on
@@ -746,11 +779,13 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 		messages = c.applyRedactionSafetyNet(messages)
 	}
 
+	baseCtx := ctx
+	perCallDelta := deltaCallbackFromContext(baseCtx)
 	var lastErr error
 	attempts := 0
 	for attempt := 0; ; attempt++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if baseCtx.Err() != nil {
+			return nil, contextCause(baseCtx)
 		}
 		attempts = attempt + 1
 		// Track whether any delta was streamed to the UI during this attempt.
@@ -760,10 +795,17 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 		// after partial deltas. Retrying after deltas would duplicate streamed
 		// text in the transcript, so we gate retries on deltaEmitted.
 		deltaEmitted := false
+		callCtx := baseCtx
+		if perCallDelta != nil {
+			callCtx = withDeltaCallback(baseCtx, func(kind, text string) {
+				deltaEmitted = true
+				perCallDelta(kind, text)
+			})
+		}
 		c.deltaMu.Lock()
 		origDelta := c.OnDelta
 		var myToken *int
-		if origDelta != nil {
+		if perCallDelta == nil && origDelta != nil {
 			myToken = new(int)
 			c.OnDelta = func(kind, text string) {
 				deltaEmitted = true
@@ -777,13 +819,13 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 			err error
 		)
 		if c.usesAnthropicMessagesAPI() {
-			msg, err = c.chatAnthropic(ctx, messages, tools)
+			msg, err = c.chatAnthropic(callCtx, messages, tools)
 		} else if c.Provider == "copilot" {
-			msg, err = c.chatCopilot(ctx, messages, tools)
+			msg, err = c.chatCopilot(callCtx, messages, tools)
 		} else if c.isGoogleProvider() {
-			msg, err = c.chatGoogle(ctx, messages, tools)
+			msg, err = c.chatGoogle(callCtx, messages, tools)
 		} else {
-			msg, err = c.chatOpenAI(ctx, messages, tools)
+			msg, err = c.chatOpenAI(callCtx, messages, tools)
 		}
 		c.deltaMu.Lock()
 		// Only restore if nothing else re-pointed OnDelta while we were
@@ -799,7 +841,7 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 		}
 		lastErr = err
 
-		if ctx.Err() != nil {
+		if callCtx.Err() != nil {
 			break
 		}
 
@@ -838,7 +880,7 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 			if c.RetryNotifier != nil {
 				c.RetryNotifier(attempt, maxRetries, delay, lastErr)
 			}
-			if !llmRetryWait(ctx, delay) {
+			if !llmRetryWait(callCtx, delay) {
 				break
 			}
 		} else {
@@ -846,7 +888,7 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 			if c.RetryNotifier != nil {
 				c.RetryNotifier(attempt, maxRetries, delay, lastErr)
 			}
-			if !llmRetryWait(ctx, delay) {
+			if !llmRetryWait(callCtx, delay) {
 				break
 			}
 		}
@@ -1152,7 +1194,7 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 		c.emitDebug("error", msg)
 		return nil, newProviderStatusError("copilot", resp.StatusCode, string(body), resp.Header)
 	}
-	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDeltaContext(ctx), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
@@ -1256,7 +1298,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
-	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDeltaContext(ctx), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
@@ -1368,7 +1410,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
-	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDeltaContext(ctx), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
@@ -1474,7 +1516,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
-	msg, usageRaw, err := parseGoogleInteractionsStream(resp.Body, c.onDelta(), c.onUsage())
+	msg, usageRaw, err := parseGoogleInteractionsStream(resp.Body, c.onDeltaContext(ctx), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
@@ -3204,7 +3246,7 @@ func (c *GenericClient) chatOpenAIResponsesAttempt(ctx context.Context, messages
 	// that final value wins (the API repeats the completed arguments there,
 	// so appending done onto deltas would double them).
 	argDeltas := map[string]string{}
-	onDelta := c.onDelta()
+	onDelta := c.onDeltaContext(ctx)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -3888,7 +3930,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	// chatWithDelta sets them before the call and defer-clears them after.
 	// parseOpenAIChatCompletionsStream follows the same contract via its
 	// function parameters.
-	onDelta := c.onDelta()
+	onDelta := c.onDeltaContext(ctx)
 	rawOnUsage := c.onUsage()
 	// Anthropic's message_start and message_delta events carry CUMULATIVE
 	// input_tokens / output_tokens snapshots. Subscribers (e.g. AgentRun.AddUsage)
@@ -5033,7 +5075,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 		return nil, newProviderStatusError(c.Provider, resp.StatusCode, string(body), resp.Header)
 	}
 
-	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDeltaContext(ctx), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
@@ -5076,7 +5118,7 @@ func (c *GenericClient) receiveWebSocketStream(ctx context.Context, wsClient *We
 				}
 				if err := json.Unmarshal(wsMsg.Payload, &delta); err == nil && delta.Delta != "" {
 					msg.Content += delta.Delta
-					if fn := c.onDelta(); fn != nil {
+					if fn := c.onDeltaContext(ctx); fn != nil {
 						fn("text", delta.Delta)
 					}
 				}

@@ -17,6 +17,25 @@ export interface Message {
   user_seq?: number;
 }
 
+export type PendingRewindStatus = "armed" | "committed" | "stale";
+
+/** Client-safe durable rewind resource returned by prepare/status. */
+export interface PendingRewind {
+  token: string;
+  session_id: string;
+  status: PendingRewindStatus;
+  expires_at: string;
+  target_index: number;
+  user_seq?: number;
+  committed_user_seq: number;
+}
+
+export interface PreparePendingRewindRequest {
+  targetIndex: number;
+  targetContent: string;
+  userSeq?: number;
+}
+
 // A part of the in-progress turn, streamed live before the authoritative
 // snapshot lands at turn_done. Ordered as produced by the agent.
 export type LivePart =
@@ -46,11 +65,14 @@ export interface ChatRequest {
   content: string;
   sessionId?: string;
   model?: string;
+  rewindToken?: string;
+  async?: boolean;
 }
 
 export interface ChatResponse {
   content: string;
   sessionId: string;
+  /** Backend-resolved model used for this accepted dispatch. */
   model: string;
 }
 
@@ -507,6 +529,37 @@ export interface GitOperation {
   label: string;
   step: number;
   total: number;
+}
+
+/** Body of POST /api/git/conflict/resolve. */
+export interface GitConflictResolveRequest {
+  /** Repo-relative path of the conflicted file. The server re-validates it. */
+  path: string;
+  /**
+   * "ours" / "theirs" keep that side wholesale; "mark" stages the file as the
+   * user edited it and is REFUSED by the server while conflict markers remain.
+   *
+   * During a rebase these names are inverted relative to intuition: git's
+   * "ours" is the upstream branch and "theirs" is the commit being replayed.
+   * The UI relabels them accordingly — see GitConflictSideLabels.
+   */
+  resolution: "ours" | "theirs" | "mark";
+}
+
+/** Body of POST /api/git/operation. */
+export interface GitOperationRequest {
+  action: "continue" | "abort" | "skip" | "good" | "bad" | "reset";
+  /** The operation the panel believes is running. The server re-detects and
+   *  answers 409 on a mismatch, so this is a guard, never an instruction. */
+  kind: GitOperation["kind"];
+}
+
+/** Response of POST /api/git/operation. */
+export interface GitOperationResult {
+  workspace: GitWorkspace;
+  /** Combined git output. Continue/skip run commit hooks, so their output is
+   *  meaningful and is shown rather than dropped. */
+  output?: string;
 }
 
 export interface GitStatus {

@@ -4315,29 +4315,46 @@ func TestStreamedToolOutputLateDeltaNotAppendedAfterFinal(t *testing.T) {
 	}
 }
 
-func TestMouseWheelScrollsTranscriptOnlyWhenOverMessages(t *testing.T) {
-	lines := strings.Repeat("message line\n", 20)
+func TestMouseWheelScrollsTranscriptOverMessagesAndComposer(t *testing.T) {
 	m := model{
-		width:       80,
-		height:      24,
-		input:       newTestTextarea(),
-		viewport:    fastviewport.New(40, 3),
-		styles:      ApplyThemeColors("tokyonight"),
+		ready:     true,
+		width:     80,
+		height:    24,
+		activeTab: tabChat,
+		input:     newTestTextarea(),
+		viewport:  fastviewport.New(40, 3),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages: []message{{
+			role: roleAssistant,
+			text: strings.Repeat("message line\n", 40),
+		}},
 		scrollSpeed: 3,
 	}
-	m.viewport.SetContent(lines)
+	m.input.SetValue("draft input")
+	m.layout()
+	m.viewport.GotoTop()
 
-	updated, _ := m.Update(tea.MouseWheelMsg{X: 2, Y: 2, Button: tea.MouseWheelDown})
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: m.viewportContentTopY(), Button: tea.MouseWheelDown})
 	got := derefTestModel(t, updated)
 	if got.viewport.YOffset() == 0 {
 		t.Fatal("expected mouse wheel over transcript to scroll messages")
 	}
 
+	got.viewport.GotoTop()
+	updated, _ = got.Update(tea.MouseWheelMsg{X: 5, Y: got.inputAreaTopY() + 1, Button: tea.MouseWheelDown})
+	got = derefTestModel(t, updated)
+	if got.viewport.YOffset() == 0 {
+		t.Fatal("expected mouse wheel over chat composer to scroll messages")
+	}
+	if value := got.input.Value(); value != "draft input" {
+		t.Fatalf("expected mouse wheel to leave composer text unchanged, got %q", value)
+	}
+
 	before := got.viewport.YOffset()
-	updated, _ = got.Update(tea.MouseWheelMsg{X: 2, Y: 8, Button: tea.MouseWheelDown})
+	updated, _ = got.Update(tea.MouseWheelMsg{X: 5, Y: got.height - 1, Button: tea.MouseWheelDown})
 	got = derefTestModel(t, updated)
 	if got.viewport.YOffset() != before {
-		t.Fatalf("expected wheel outside transcript to leave messages offset at %d, got %d", before, got.viewport.YOffset())
+		t.Fatalf("expected wheel outside the chat scroll region to leave messages offset at %d, got %d", before, got.viewport.YOffset())
 	}
 }
 

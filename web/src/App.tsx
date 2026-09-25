@@ -69,6 +69,7 @@ import SessionPage from "./pages/SessionPage";
 import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty, rekeyDraft } from "./lib/tabDrafts";
+import { rekeyPendingRewind } from "./lib/pendingRewindStore";
 import { rekeyQueue, clearQueue } from "./lib/tabQueue";
 import { rekeyInputHistory, clearInputHistory } from "./lib/tabInputHistory";
 import { rekeySidePaneState, sideChatKey, sideTermKey } from "./lib/sidePaneState";
@@ -177,7 +178,16 @@ function HomeApp() {
     const sessionTitle = activeTab?.title?.trim() || projectState.activeProject?.path?.split("/").pop() || "";
     document.title = sessionTitle ? "ocode - " + sessionTitle : ("ocode - " + (pkg.version || ""));
   }, [activeTabId, projectState.activeProject, tabs, projectState.tabsByProject]);
-  const { resolvePermission, pendingPermission, pendingQuestion, askContext, submitQuestionAnswers, cancelQuestion } = useChat(activeTabId);
+  const {
+    resolvePermission,
+    pendingPermission,
+    pendingQuestion,
+    hiddenQuestionRequestId,
+    askContext,
+    submitQuestionAnswers,
+    cancelQuestion,
+    hideQuestion,
+  } = useChat(activeTabId);
   // Host of the active session's project. The model dialog and the command
   // context route their session-scoped calls there so a remote session's model
   // list and context come from that host's server, never the local one.
@@ -844,6 +854,9 @@ function HomeApp() {
     // session's authoritative title is fetched from its own server, not the
     // local one (which would 404 and leave the tab titled "New session").
     const host = resolveSessionHost(projectState, tempTabId, { fallbackToActive: true });
+    // Move any pending rewind with the tab id so a restored draft/banner
+    // survives the temp-tab -> real-session and /reset-id transitions.
+    rekeyPendingRewind(host, tempTabId, host, sessionId);
     // Replace the placeholder with the authoritative session title once the
     // server has persisted it (auto title from first message). This covers
     // the race where the api.chat() 202 response wins before the
@@ -871,9 +884,17 @@ function HomeApp() {
         const host = resolveSessionHost(projectState, sessionId, { fallbackToActive: true });
         const result = await api.chat(content, undefined, undefined, sessionId, projectPath, host);
         rekeySession(sessionId, result.sessionId, "New session");
+        const dispatchedModel = typeof result?.model === "string" ? result.model.trim() : "";
+        if (dispatchedModel) {
+          dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId: result.sessionId, model: dispatchedModel });
+        }
       } else {
         const host = resolveSessionHost(projectState, sessionId);
-        await api.sendMessage(sessionId, content, host);
+        const result = await api.sendMessage(sessionId, content, host);
+        const dispatchedModel = typeof result?.model === "string" ? result.model.trim() : "";
+        if (dispatchedModel) {
+          dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model: dispatchedModel });
+        }
       }
       return true;
     } catch (err) {
@@ -1170,9 +1191,10 @@ function HomeApp() {
   // session-scoped prompt) may only mount while this session's Chat sub-tab is
   // actually on screen. Otherwise they render a full-screen Radix modal over a
   // view the user is not working in — blocking the whole app for a session they
-  // cannot see. The pending ask stays in its per-session store slice, so it
-  // re-opens on return; the sidebar Bell badge and attention chime cover the
-  // out-of-sight case. See lib/dialogScope.
+  // cannot see. The pending ask stays in its per-session store slice, so an
+  // unhidden ask re-opens on return; a locally hidden question stays hidden
+  // until its transcript "Open question" action is used. The sidebar Bell badge
+  // and attention chime cover the out-of-sight case. See lib/dialogScope.
   const sessionAskVisible = sessionAskSurfaceVisible({
     activeView,
     focusedKind,
@@ -1511,7 +1533,11 @@ function HomeApp() {
               </TabsContent>
               <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0" aria-busy={assetsBusy}>
                 <div className="relative h-full">
-                  <AssetsPanel loadingKey={assetsLoadingKey} onLoadingEvent={handleTabLoadingEvent} />
+                  <AssetsPanel
+                    loadingKey={assetsLoadingKey}
+                    onLoadingEvent={handleTabLoadingEvent}
+                    projectHost={projectState.activeProject?.host}
+                  />
                   <TabLoadingOverlay
                     active={assetsLoading?.phase === "initial"}
                     label="Loading Assets"
@@ -1874,14 +1900,17 @@ function HomeApp() {
       )}
 
       {/* Question Dialog (agent `question` tool prompt) — same surface gate as
-          the permission dialog above. */}
-      {pendingQuestion && sessionAskVisible && (
+          the permission dialog above, plus the request-scoped local hide. */}
+      {pendingQuestion &&
+        hiddenQuestionRequestId !== pendingQuestion.request_id &&
+        sessionAskVisible && (
         <QuestionDialog
           key={pendingQuestion.request_id}
           open={true}
           requestId={pendingQuestion.request_id}
           questions={pendingQuestion.questions}
           onSubmit={submitQuestionAnswers}
+          onHide={hideQuestion}
           onCancel={cancelQuestion}
           context={askContext}
         />

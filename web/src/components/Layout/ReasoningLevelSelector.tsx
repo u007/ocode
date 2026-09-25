@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useListNavigation } from "../../hooks/useListNavigation";
 import { api } from "../../api/client";
 import { Brain } from "lucide-react";
 
@@ -28,6 +29,7 @@ interface Props {
 export default function ReasoningLevelSelector({ thinkingBudget, disabled, sessionId, host }: Props) {
   const [isOpen, setIsOpen] = useState(false);
   const [currentLevel, setCurrentLevel] = useState<ReasoningLevel>("off");
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   // Derive level from thinking budget (0 = off, 1024 = low, etc.)
   useEffect(() => {
@@ -55,6 +57,7 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled, sessi
     const prevLevel = currentLevel;
     setCurrentLevel(level);
     setIsOpen(false);
+    triggerRef.current?.focus({ preventScroll: true });
     try {
       if (sessionId && !sessionId.startsWith("new-")) {
         await api.setSessionThinkingBudget(sessionId, level, host);
@@ -69,6 +72,33 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled, sessi
   };
 
   // Get color for level display
+  const navigation = useListNavigation({
+    itemIds: REASONING_LEVELS,
+    initialActiveId: currentLevel,
+    resetKey: String(isOpen),
+    returnFocusRef: triggerRef,
+    onActivate: (index) => {
+      const level = REASONING_LEVELS[index];
+      if (level) void handleLevelChange(level);
+    },
+    onReturnFocus: () => setIsOpen(false),
+  });
+
+  const handleListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setIsOpen(false);
+      triggerRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (event.key === "Tab") {
+      setIsOpen(false);
+      return;
+    }
+    navigation.onKeyDown(event);
+  };
+
   const getLevelColor = (level: ReasoningLevel): string => {
     switch (level) {
       case "off":
@@ -91,6 +121,7 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled, sessi
   return (
     <div className="relative mt-2">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => !disabled && setIsOpen(!isOpen)}
         disabled={disabled}
@@ -104,15 +135,19 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled, sessi
       </button>
 
       {isOpen && !disabled && (
-        <div className="absolute left-0 top-full mt-1 w-32 bg-muted border border-border rounded-md shadow-lg z-50">
-          {REASONING_LEVELS.map((level) => (
+        <div
+          className="absolute left-0 top-full mt-1 w-32 bg-muted border border-border rounded-md shadow-lg z-50"
+          onKeyDown={handleListKeyDown}
+        >
+          {REASONING_LEVELS.map((level, index) => (
             <button
               key={level}
+              {...navigation.getItemProps(index)}
               type="button"
               onClick={() => handleLevelChange(level)}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent hover:text-accent-foreground ${
                 level === currentLevel ? "bg-accent text-accent-foreground" : ""
-              }`}
+              } ${navigation.isActive(index) ? "ring-2 ring-inset ring-accent-foreground/60" : ""}`}
             >
               <Brain className={`w-3 h-3 ${getLevelColor(level)}`} />
               <span className={level === currentLevel ? "font-medium text-foreground" : "text-muted-foreground"}>

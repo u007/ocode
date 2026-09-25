@@ -146,7 +146,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const spendingUSD = useChatSelector((s) => s.spendingUSD);
   // Scoped to the active tab's session: other tabs' streamed tokens don't
   // re-render this always-mounted status bar.
-  const { isStreaming, error, live, tuiStatus, turnActive } = useChatSelector((s) => getSessionSlice(s, activeTabId));
+  const { isStreaming, error, live, tuiStatus, turnActive, lastDispatchedModel } = useChatSelector((s) => getSessionSlice(s, activeTabId));
   const isRunning = isStreaming || turnActive;
 
   // Live tick for elapsed counters — updates once per second while a turn is
@@ -193,7 +193,10 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const lspCount = snap?.lsp_servers?.length ?? 0;
   const extraPathsCount = snap?.extra_allowed_paths?.length ?? 0;
   const subagent = snap?.subagent_model || "";
-  const mainModel = snap?.main_model || "";
+  // This is deliberately independent of snap.main_model. The latter is the
+  // sidebar's current configured/effective selection; this row reports the
+  // model that was actually dispatched for the most recent accepted send.
+  const dispatchedModel = lastDispatchedModel || "";
   const reasoningLevel = snap?.thinking_budget ?? null;
 
   // Elapsed timers — mirror the TUI's stream timing.
@@ -282,9 +285,9 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
               · subagent: {subagent}
             </span>
           )}
-          {mainModel && (
-            <span className="text-foreground" title="Active model">
-              · model: {mainModel}{reasoningLevel !== null ? ` (reasoning=${reasoningLevel})` : ""}
+          {dispatchedModel && (
+            <span className="text-foreground" title="Last dispatched model">
+              · last model: {dispatchedModel}{reasoningLevel !== null ? ` (reasoning=${reasoningLevel})` : ""}
             </span>
           )}
           {runningIndicator}

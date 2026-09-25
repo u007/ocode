@@ -3232,7 +3232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		if !m.mouseOverTranscriptViewport(msg) {
+		if !m.mouseOverChatWheelRegion(msg.Mouse()) {
 			return m, nil
 		}
 		if msg.Button == tea.MouseWheelUp {
@@ -4742,8 +4742,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case rcRequestMsg:
-		// Append the user message from the web UI to TUI messages
-		m.messages = append(m.messages, message{role: roleUser, text: msg.req.Content})
+		committedUserSeq := 0
+		if msg.req.RewindToken != "" {
+			seq, err := m.commitRCRequestRewind(msg.req)
+			if err != nil {
+				if errors.Is(err, session.ErrPendingRewindAlreadyCommitted) {
+					// Response-loss recovery: the first request already committed
+					// and ran the turn. Acknowledge as accepted (the handler
+					// answers 202) but do not append or start another turn —
+					// mirrors the headless commitPendingRewindTurn path.
+					log.Printf("tui: pending rewind commit for %s already committed; acknowledging without a new turn", m.sessionID)
+					if msg.req.AckCh != nil {
+						select {
+						case msg.req.AckCh <- nil:
+						default:
+						}
+					}
+					if m.rcCh != nil {
+						return m, waitForRCRequest(m.rcCh)
+					}
+					return m, nil
+				}
+				log.Printf("tui: pending rewind commit for %s failed: %v", m.sessionID, err)
+				if msg.req.AckCh != nil {
+					select {
+					case msg.req.AckCh <- err:
+					default:
+					}
+				}
+				if m.rcCh != nil {
+					return m, waitForRCRequest(m.rcCh)
+				}
+				return m, nil
+			}
+			committedUserSeq = seq
+			if msg.req.AckCh != nil {
+				select {
+				case msg.req.AckCh <- nil:
+				default:
+				}
+			}
+		}
+		// Append the user message from the web UI to TUI messages. A committed
+		// rewind already persisted this row with a durable UserSeq; carry it on
+		// raw so the next live snapshot byte-matches disk instead of tripping the
+		// overlap conflict.
+		userMsg := message{role: roleUser, text: msg.req.Content}
+		if committedUserSeq > 0 {
+			raw := agent.Message{Role: "user", Content: msg.req.Content, UserSeq: committedUserSeq}
+			userMsg.raw = &raw
+		}
+		m.messages = append(m.messages, userMsg)
 		if m.activeTab != tabChat {
 			m.chatUnread = true
 		}
@@ -8608,18 +8657,23 @@ func (m model) handleDetailClick(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	return m, nil, true
 }
 
-func (m model) mouseOverTranscriptViewport(msg tea.MouseWheelMsg) bool {
+// mouseOverChatWheelRegion reports whether a wheel event is over the main
+// chat panel, from the top of the transcript through the bottom of the input
+// area. The composer is part of the same scroll surface as the messages: a
+// wheel over the draft must scroll the transcript, not disappear into the
+// focused textarea. Dialog-specific wheel branches (permission, /btw), the
+// sidebar, the detail view, and non-chat tabs are handled before this
+// fallback runs.
+func (m model) mouseOverChatWheelRegion(mouse tea.Mouse) bool {
 	if m.activeTab != tabChat {
 		return false
 	}
-	mouse := msg.Mouse()
 	if mouse.X < 0 || mouse.X >= m.panelWidth() {
 		return false
 	}
-	headerHeight := appHeaderHeight
-	transcriptTop := headerHeight
-	transcriptBottom := transcriptTop + m.viewport.Height() + 2
-	return mouse.Y >= transcriptTop && mouse.Y < transcriptBottom
+	regionTop := appHeaderHeight
+	regionBottom := max(regionTop, m.inputAreaTopY()+m.inputAreaHeight())
+	return mouse.Y >= regionTop && mouse.Y < regionBottom
 }
 
 // findSkillByName returns the skill whose name matches name (case-insensitive),
@@ -15552,6 +15606,45 @@ func (m *model) broadcastRC(event string, data interface{}) {
 	if m.rcBridge != nil {
 		m.rcBridge.Broadcast(server.SSEEvent{Event: event, Data: data})
 	}
+}
+
+// commitRCRequestRewind performs the one durable tokenized-send operation for a
+// web/desktop /rc client. The TUI owns the bridged session's in-memory
+// transcript, so it must commit the same transaction the headless server would
+// (agent_session.go commitPendingRewindTurn) before rendering or starting the
+// turn: truncate the durable store to the kept prefix and append exactly one
+// replacement user row. It mirrors only KeptPrefix into m.messages and the
+// `messages` broadcast — the caller appends the new user row once via the
+// normal rc path (and echoes it as `user_message`), so broadcasting the row
+// here too would double it in the browser, which has no user_seq to dedupe on.
+func (m *model) commitRCRequestRewind(req server.RCRequest) (int, error) {
+	result, err := session.CommitPendingRewindForDir(m.workDir, m.sessionID, req.RewindToken, req.Content)
+	if err != nil {
+		return 0, err
+	}
+	// Rebuild the visible transcript from the authoritative kept prefix, using
+	// the same side-effect-free mapping as session load (tuiRoleForAgentMessage
+	// / displayTextForAgentMessage). This mirrors the headless server's
+	// `as.messages = KeptPrefix` and is robust to the in-memory view being a
+	// filtered view of disk (loadFromDir drops unanswered tool rounds): slicing
+	// by row count would truncate too little. It deliberately avoids
+	// appendAgentMessage, which would double-record usage and may re-request a
+	// title for already-seen rows.
+	m.messages = nil
+	for _, am := range result.KeptPrefix {
+		copyMsg := am
+		m.messages = append(m.messages, message{
+			role: tuiRoleForAgentMessage(am),
+			text: displayTextForAgentMessage(am),
+			raw:  &copyMsg,
+		})
+	}
+	kept := append([]agent.Message(nil), result.KeptPrefix...)
+	if m.rcBridge != nil {
+		m.rcBridge.SetMessages(kept)
+	}
+	m.broadcastRC("messages", kept)
+	return result.Rewind.CommittedUserSeq, nil
 }
 
 // broadcastTUIStatus snapshots the live TUI state (model, advisor, IDE, session

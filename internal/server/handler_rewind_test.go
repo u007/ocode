@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -244,6 +245,13 @@ func TestRewindPrepareRejectsActiveTurnAndInvalidTarget(t *testing.T) {
 		t.Fatalf("active prepare status = %d, want 409: %s", active.Code, active.Body.String())
 	}
 	f.handler.sessions.setTurnActive(f.id, false)
+	cancelToken := f.arm(2, "replace me", 2)
+	f.handler.sessions.setTurnActive(f.id, true)
+	activeCancel := f.request(http.MethodDelete, "/api/sessions/"+f.id+"/rewinds/"+cancelToken, nil, true)
+	if activeCancel.Code != http.StatusConflict {
+		t.Fatalf("active cancel status = %d, want 409: %s", activeCancel.Code, activeCancel.Body.String())
+	}
+	f.handler.sessions.setTurnActive(f.id, false)
 
 	invalid := f.request(http.MethodPost, "/api/sessions/"+f.id+"/rewinds", map[string]any{
 		"targetIndex":   2,
@@ -271,6 +279,14 @@ func TestRewindStatusCommittedAndExpired(t *testing.T) {
 		if body["status"] != "committed" || body["committed_user_seq"] != float64(commit.Rewind.CommittedUserSeq) {
 			t.Fatalf("committed status body = %+v, want seq %d", body, commit.Rewind.CommittedUserSeq)
 		}
+		prepareAgain := f.request(http.MethodPost, "/api/sessions/"+f.id+"/rewinds", map[string]any{
+			"targetIndex":   2,
+			"targetContent": "edited replacement",
+			"userSeq":       2,
+		}, true)
+		if prepareAgain.Code != http.StatusGone {
+			t.Fatalf("prepare after commit = %d, want 410: %s", prepareAgain.Code, prepareAgain.Body.String())
+		}
 	})
 
 	t.Run("expired", func(t *testing.T) {
@@ -284,10 +300,37 @@ func TestRewindStatusCommittedAndExpired(t *testing.T) {
 	})
 }
 
+func TestRewindStatusDoesNotWaitForTurnLock(t *testing.T) {
+	f := newRewindFixture(t, rewindMessages())
+	token := f.arm(2, "replace me", 2)
+	lock := f.handler.sessionTurnLock(f.id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+f.id+"/rewinds/"+token, nil)
+	req.SetBasicAuth("user", "pass")
+	done := make(chan struct{})
+	go func() {
+		f.server.mux.ServeHTTP(rec, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status while turn lock held = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("rewind status waited for the per-session turn lock")
+	}
+}
+
 func TestRewindTokenizedAsyncSendCommitsBeforeAckAndReconciles(t *testing.T) {
 	f := newRewindFixture(t, rewindMessages())
 	client := newBlockingClient()
-	as := f.resident(client, rewindMessages())
+	f.resident(client, rewindMessages())
+	f.handler.sessions.PushPending(f.id, "stale pending one")
+	f.handler.sessions.PushPending(f.id, "stale pending two")
 	token := f.arm(2, "replace me", 2)
 	sub := f.handler.bus.Subscribe(nil)
 	defer f.handler.bus.Unsubscribe(sub)
@@ -304,24 +347,6 @@ func TestRewindTokenizedAsyncSendCommitsBeforeAckAndReconciles(t *testing.T) {
 	select {
 	case <-client.started:
 	case <-time.After(5 * time.Second):
-		as.mu.Lock()
-		stuckMessages := append([]agent.Message(nil), as.messages...)
-		as.mu.Unlock()
-		t.Logf("rewind job stalled: pending=%d front=%q resident=%p active=%v", f.handler.sessions.PendingCount(f.id), func() string {
-			content, ok := f.handler.sessions.PendingFront(f.id)
-			if !ok {
-				return ""
-			}
-			return content
-		}(), as, f.handler.sessions.IsTurnActive(f.id))
-		t.Logf("stuck resident messages: %+v", stuckMessages)
-		current := f.handler.lookupAgentSession(f.id)
-		t.Logf("current resident=%p model=%q agent=%v", current, func() string {
-			if current == nil {
-				return ""
-			}
-			return current.model
-		}(), current != nil && current.agent != nil)
 		close(client.release)
 		f.handler.turnJobsWG.Wait()
 		t.Fatal("rewind turn never reached the blocking LLM call")
@@ -342,13 +367,6 @@ func TestRewindTokenizedAsyncSendCommitsBeforeAckAndReconciles(t *testing.T) {
 		t.Fatalf("committed user row = %+v", loaded.Messages[len(loaded.Messages)-1])
 	}
 
-	as.mu.Lock()
-	residentMessages := append([]agent.Message(nil), as.messages...)
-	as.mu.Unlock()
-	if len(residentMessages) != len(wantPrefix)+1 || residentMessages[len(residentMessages)-1].Content != "edited replacement" {
-		close(client.release)
-		t.Fatalf("resident messages = %+v, want kept prefix plus replacement", residentMessages)
-	}
 	if got := f.handler.sessions.PendingCount(f.id); got != 1 {
 		close(client.release)
 		t.Fatalf("pending count while turn is blocked = %d, want 1", got)
@@ -386,6 +404,52 @@ func TestRewindTokenizedAsyncSendCommitsBeforeAckAndReconciles(t *testing.T) {
 
 	close(client.release)
 	f.handler.turnJobsWG.Wait()
+	resident := f.handler.lookupAgentSession(f.id)
+	if resident == nil {
+		t.Fatal("resident agent disappeared after rewind turn")
+	}
+	resident.mu.Lock()
+	residentMessages := append([]agent.Message(nil), resident.messages...)
+	resident.mu.Unlock()
+	if len(residentMessages) < len(wantPrefix)+1 {
+		t.Fatalf("resident messages = %+v, want kept prefix plus replacement", residentMessages)
+	}
+	for i, want := range wantPrefix {
+		if residentMessages[i].Content != want.Content {
+			t.Fatalf("resident prefix[%d] = %+v, want %+v", i, residentMessages[i], want)
+		}
+	}
+	if residentMessages[len(wantPrefix)].Content != "edited replacement" {
+		t.Fatalf("resident replacement row = %+v", residentMessages[len(wantPrefix)])
+	}
+}
+
+func TestRewindTokenizedAsyncSendWithoutResidentKeepsOneDurableRow(t *testing.T) {
+	f := newRewindFixture(t, rewindMessages())
+	// With no model configuration, bootstrap fails after the durable commit.
+	// That still exercises the no-resident path: bootstrap must see exactly one
+	// pending row, and the failed bootstrap must not append a duplicate.
+	f.handler.cfg = nil
+	token := f.arm(2, "replace me", 2)
+	rec := f.request(http.MethodPost, "/api/sessions/"+f.id+"/message", map[string]any{
+		"content":     "edited without resident",
+		"async":       true,
+		"rewindToken": token,
+	}, true)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("no-resident tokenized send status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	f.handler.turnJobsWG.Wait()
+	loaded, err := session.LoadForDir(f.root, f.id)
+	if err != nil {
+		t.Fatalf("load no-resident committed transcript: %v", err)
+	}
+	if len(loaded.Messages) != 3 || loaded.Messages[2].Content != "edited without resident" {
+		t.Fatalf("no-resident transcript = %+v, want kept prefix plus one replacement", loaded.Messages)
+	}
+	if got := f.handler.sessions.PendingCount(f.id); got != 1 {
+		t.Fatalf("no-resident pending count = %d, want 1 after bootstrap failure", got)
+	}
 }
 
 func TestRewindTokenizedAsyncSendFailuresDoNotAppend(t *testing.T) {
@@ -576,5 +640,76 @@ func TestRewindFixtureUsesAbsoluteProjectRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(f.root); err != nil {
 		t.Fatalf("fixture project root: %v", err)
+	}
+}
+
+func TestRewindBridgedSendAcksAfterTUICommit(t *testing.T) {
+	f := newRewindFixture(t, rewindMessages())
+	token := f.arm(2, "replace me", 2)
+	rcCh := make(chan RCRequest, 1)
+	f.handler.rc = &RCBridge{RcCh: rcCh, SessionID: f.id, Model: "bridged-model"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := <-rcCh
+		if req.RewindToken != token {
+			t.Errorf("bridged rewind token = %q, want %q", req.RewindToken, token)
+		}
+		if _, err := session.CommitPendingRewindForDir(f.root, f.id, req.RewindToken, req.Content); err != nil {
+			req.AckCh <- err
+			return
+		}
+		req.AckCh <- nil
+	}()
+
+	rec := f.request(http.MethodPost, "/api/sessions/"+f.id+"/message", map[string]any{
+		"content":     "edited bridge",
+		"rewindToken": token,
+		"async":       true,
+	}, true)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("bridged rewind status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	<-done
+
+	loaded, err := session.LoadForDir(f.root, f.id)
+	if err != nil {
+		t.Fatalf("load bridged transcript: %v", err)
+	}
+	if got := messageContents(loaded.Messages); !reflect.DeepEqual(got, []string{"keep me", "answer before target", "edited bridge"}) {
+		t.Fatalf("bridged transcript contents = %v", got)
+	}
+}
+
+func TestRewindBridgedSendFailureDoesNotStartTurn(t *testing.T) {
+	f := newRewindFixture(t, rewindMessages())
+	token := f.arm(2, "replace me", 2)
+	rcCh := make(chan RCRequest, 1)
+	f.handler.rc = &RCBridge{RcCh: rcCh, SessionID: f.id, Model: "bridged-model"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := <-rcCh
+		req.AckCh <- session.ErrPendingRewindExpired
+	}()
+
+	rec := f.request(http.MethodPost, "/api/sessions/"+f.id+"/message", map[string]any{
+		"content":     "must not append",
+		"rewindToken": token,
+		"async":       true,
+	}, true)
+	if rec.Code != http.StatusGone {
+		t.Fatalf("bridged rewind failure status = %d, want 410: %s", rec.Code, rec.Body.String())
+	}
+	<-done
+
+	loaded, err := session.LoadForDir(f.root, f.id)
+	if err != nil {
+		t.Fatalf("load bridged transcript after failure: %v", err)
+	}
+	if got := messageContents(loaded.Messages); !reflect.DeepEqual(got, []string{"keep me", "answer before target", "replace me", "discard me"}) {
+		t.Fatalf("failed bridged rewind changed transcript: %v", got)
 	}
 }

@@ -11,6 +11,8 @@ const projectApi = vi.hoisted(() => ({
   renameProject: vi.fn(),
   reorderProjects: vi.fn(),
   setProjectGroup: vi.fn(),
+  removeProject: vi.fn(),
+  deleteGroup: vi.fn(),
   removeRemoteProject: vi.fn(),
   getTabs: vi.fn(),
   setTabs: vi.fn(),
@@ -28,6 +30,8 @@ vi.mock("../api/client", () => ({
     renameProject: projectApi.renameProject,
     reorderProjects: projectApi.reorderProjects,
     setProjectGroup: projectApi.setProjectGroup,
+    removeProject: projectApi.removeProject,
+    deleteGroup: projectApi.deleteGroup,
     removeRemoteProject: projectApi.removeRemoteProject,
     getTabs: projectApi.getTabs,
     setTabs: projectApi.setTabs,
@@ -358,6 +362,50 @@ describe("projectStore remote mutations stay host-scoped", () => {
       ).rejects.toThrow("server rejected rename");
     });
     expect(projectApi.renameProject).toHaveBeenCalledWith("/home/user/app", "renamed", "devbox");
+  });
+});
+
+// A failed removal used to be logged and swallowed, so the sidebar's confirm
+// dialog closed as if the project were gone. Both destructive list mutations
+// must reject like renameProject does, and must still log the attempt.
+describe("projectStore destructive mutations propagate failures", () => {
+  it("removeProject propagates a local failure", async () => {
+    projectApi.removeProject.mockRejectedValueOnce(new Error("remove project: 404"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { result } = setup();
+    await act(async () => {
+      await expect(result.current.removeProject("/proj-a")).rejects.toThrow("404");
+    });
+    // Logged at the boundary, not only rendered.
+    expect(errSpy).toHaveBeenCalledWith("Failed to remove project:", expect.any(Error));
+    errSpy.mockRestore();
+  });
+
+  it("removeProject propagates a remote failure without touching the local call", async () => {
+    // Mocks are not auto-cleared between tests in this file.
+    projectApi.removeProject.mockClear();
+    projectApi.removeRemoteProject.mockRejectedValueOnce(new Error("remote connect failed"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { result } = setup();
+    await act(async () => {
+      await expect(
+        result.current.removeProject("/remote", "dev@example.com"),
+      ).rejects.toThrow("remote connect failed");
+    });
+    expect(projectApi.removeRemoteProject).toHaveBeenCalledWith("/remote", "dev@example.com");
+    expect(projectApi.removeProject).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("deleteGroup propagates a failure", async () => {
+    projectApi.deleteGroup.mockRejectedValueOnce(new Error("delete group: 404"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { result } = setup();
+    await act(async () => {
+      await expect(result.current.deleteGroup("g")).rejects.toThrow("404");
+    });
+    expect(errSpy).toHaveBeenCalledWith("Failed to delete group:", expect.any(Error));
+    errSpy.mockRestore();
   });
 });
 

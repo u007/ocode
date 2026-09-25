@@ -2198,7 +2198,9 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
 
 Plan: `.opencode/plans/2026-09-25-git-conflicts-and-operations/` (INDEX.md
 plus parts `01-op-state-parser.md` … `08-docs.md`). Phases 1–8 are planned
-and being implemented phase by phase. Phases 01 and 02 are done; 03-08 are not.
+and being implemented phase by phase. Phases 01–08 are implemented and
+verified; the explicitly listed remote-path and follow-up limitations remain
+open below.
 
 - [x] **Phase 01 — operation-state parser.** Shared, transport-neutral
   parser over git's state files (`rebase-merge/`, `rebase-apply/`,
@@ -2260,54 +2262,191 @@ and being implemented phase by phase. Phases 01 and 02 are done; 03-08 are not.
   build. It is a single event, not a poll loop — the dedup only fires again if
   the value changes.
   Commit note: `handler_git_conflicts.go` and both
-  `handler_git_conflicts*_test.go` files are NEW and currently untracked
-  (`??`); they must be added, or the feature and its tests ship without their
-  implementation.
-- [ ] **Phase 03 — `POST /api/git/conflict/resolve`.** ours/theirs/mark, with
+  `handler_git_conflicts*_test.go` files are committed (4fc0a1e7).
+- [x] **Phase 03 — `POST /api/git/conflict/resolve`.** ours/theirs/mark, with
   `git rm` instead of `checkout` when the chosen side is a deletion, and a
   marker check that matches only the opening/closing markers (NOT the
-  separator run, which is a Markdown setext underline).
-  **BLOCKED — implementation written, VERIFICATION BLOCKED (2026-09-25).**
-  `HandleGitResolveConflict` + `gitRunInDirLiteral` live in
-  `internal/server/handler_git_conflicts.go`; route registered at
+  separator run, which is a Markdown setext underline or an ASCII rule).
+  **DONE + VERIFIED 2026-09-25.** `HandleGitResolveConflict` +
+  `gitRunInDirLiteral` in `internal/server/handler_git_conflicts.go`; route at
   `internal/server/server.go`; tests in
-  `internal/server/handler_git_conflict_resolve_test.go`. `go build
-  ./internal/server/` and `gofmt` are clean, but the test package CANNOT be
-  compiled or run because another session's uncommitted
-  `internal/server/handler_chat_verbosity_test.go:50` references
-  `config.ChatVerbosityOverrides.Thinking`, which does not exist yet. That one
-  file fails `go test -c ./internal/server/`, so EVERY test in the package
-  (mine included) is unverified. `Plan`-phase cross-check: the
-  `git mv`-on-a-conflicted-path fixture bug and the wrong `ours`/`theirs`
-  staging expectation were both found and fixed by reading git's actual
-  behavior (materialize one stage, `git add`, then inspect both
-  `diff --name-only` forms: ours matches HEAD → neither list; theirs differs →
-  `staged_files`).
-  **Ask the user to ping when that refactor lands, then run
-  `go test ./internal/server -run ResolveConflict` and then the full package.**
-  Do NOT modify or move the other session's file, and do NOT create a
-  worktree to route around it.
-  Remote branch answers 501 (Phase 05) rather than falling through to the
-  local implementation, which would resolve a same-named path on the wrong
-  machine.
-- [ ] **Phase 04 — `POST /api/git/operation`.** continue/abort/skip across
+  `handler_git_conflict_resolve_test.go`. The earlier verification blocker
+  (another session's `handler_chat_verbosity_test.go` referencing a
+  `ChatVerbosityOverrides.Thinking` field that did not exist yet) CLEARED when
+  that session landed; `go test ./internal/server -run ResolveConflict` and
+  the full `./internal/server/` suite now pass. No other session's file was
+  touched in the meantime.
+  Two fixture bugs were found and fixed before the tests could run:
+  (a) `git mv` on an already-conflicted path is refused by git, so awkward
+  names are now built in from the base commit via `gitConflictedMergeFile`;
+  (b) the ours/theirs staging expectation was wrong, not the handler —
+  `StagedFiles` comes from `diff --name-only --cached` (index vs HEAD,
+  `handler_git.go:229-233`), so resolving OURS matches HEAD and lands in
+  NEITHER list, while THEIRS differs and MUST appear in `staged_files`.
+  Hardening: `GIT_LITERAL_PATHSPECS=1` scoped to this feature (not
+  `gitexec.Env()`, which would change pathspec interpretation product-wide);
+  path containment reused from `resolveRepoPath`; `slog.Error` on all six 500
+  paths; fixtures pin `-b main`, `commit.gpgsign=false` and `LC_ALL=C`.
+  Phase 05 adds the remote ports for these actions; see the remote parity
+  entry below for the current behavior and path-safety limitation.
+- [x] **Phase 04 — `POST /api/git/operation`.** continue/abort/skip across
   merge, rebase, rebase-interactive, am, cherry-pick, revert; good/bad/
   skip/reset for bisect. Re-detects server-side and 409s on a stale kind.
-- [ ] **Phase 05 — remote parity** for phases 1–4 over SSH/WSL, reusing the
+  **DONE + VERIFIED 2026-09-25.** `HandleGitOperation` +
+  `gitOperationCommand` + `gitOperationEnv` + `runGitOperation` in
+  `internal/server/handler_git_conflicts.go`; route at `server.go`; tests in
+  `handler_git_operation_test.go`. `go test ./internal/server -run
+  'GitOperation|GitConflict'`, the full `./internal/server/` suite, `gofmt`,
+  and `go build ./...` all pass.
+  Three deviations from the plan, recorded in `04-operation-endpoint.md`:
+  a git refusal returns **409 not 500** (the request was legitimate and git
+  gave a legitimate answer; body is git's output verbatim); the command is
+  bounded by a **60s timeout** under the request context, because `--continue`
+  runs hooks that could hang forever; and the **continue-with-conflicts
+  pre-check is kept** as the single intentional reinterpretation, since the
+  web UI disables Continue in that state anyway.
+  Bisect tests use a REAL `git bisect start` (verified to work here, unlike
+  the denied `git rebase`/`git checkout`).
+  **Remote parity is now implemented in Phase 05**; the previous local-only
+  safety stubs were replaced by ports that share the local decision helpers and
+  never fall through to the wrong machine.
+  Three mutations confirmed the tests bite: removing the merge/abort matrix
+  row (caught by two tests), removing the stale-kind guard, and setting
+  `GIT_EDITOR=vi` — which made the suite HANG rather than fail, which is the
+  exact production failure mode that test exists to prevent.
+- [x] **Phase 05 — remote parity** for phases 1–4 over SSH/WSL, reusing the
   batched `remoteGitStatus` script and the phase 01 parser.
-- [ ] **Phase 06 — web UI.** Conflicts section + operation banner, and
+  **DONE + VERIFIED 2026-09-25.** `handler_remote_git_state.go` (new: the
+  state probe + its parser) and `handler_remote_git_conflicts.go` (new: the
+  two mutation ports); `remoteGitStatus` in `handler_remote_git.go` gained two
+  batched sections; the two phase-04 501 stubs in `handler_git_conflicts.go`
+  are gone. Tests: `handler_remote_git_conflicts_test.go` (16, driving the real
+  remote path through the existing fake-SSH harness). `go test -run 'RemoteGit|
+  GitConflict|GitOperation'`, the full `./internal/server/` suite, `gofmt -l`,
+  `go vet` and `go build ./...` all pass.
+  Both new probes ride INSIDE the existing batched script — a test counts ssh
+  round trips and pins the baseline at 3, so a regression that issues them as
+  separate calls goes red. The baseline was 3 BEFORE this phase too.
+  State-file content and the `-z` conflict payload are both **base64**-encoded
+  in the shell: MERGE_MSG holds a commit message that can contain tabs and
+  newlines, and a raw `-z` path can contain the 0x1e section separator, either
+  of which would otherwise forge entries or shift every later field.
+  Four mutations confirmed the tests bite: fixed-"merge" instead of reading the
+  state files, dropping `remoteSafeSpec`, dropping `GIT_EDITOR`, and swapping
+  the `gitOperationCommand(kind, action)` arguments — the last is a real bug
+  this phase actually had, and it failed 3 tests.
+- [ ] **Remote conflict-resolution limitation (real, by design, not a bug).**
+  `remoteSafeSpec` rejects the characters `'";` + backtick + `$&|<>\!*?[](){}#:`
+  and control chars, so a remote conflict on a file whose name contains any of
+  them **cannot be resolved** through the web UI, even though the same file
+  resolves fine locally (the local path uses `GIT_LITERAL_PATHSPECS=1` plus
+  `resolveRepoPath`). This blocks common paths such as `app/[slug]/page.tsx`,
+  `(group)/layout.tsx` and any name with a colon.
+  **The validator is deliberately NOT relaxed here:** it is shared by every
+  remote git mutation, so loosening it for conflicts would widen the
+  shell-injection guard for unrelated endpoints. The current behavior is a
+  clear 400 carrying the validator's reason, with the file left untouched —
+  pinned by `TestRemoteGitResolveConflictRefusesPathspecMagicName`.
+  To actually fix this, the right change is a *transport* that passes the path
+  via stdin or argv rather than interpolating it into a shell string (as
+  `remoteGitHunk` already does for its patch), not a weaker character filter.
+  Until then the honest options for a user are to resolve that one file in a
+  terminal on the host, or to rename it.
+- [x] **Phase 06 — web UI.** Conflicts section + operation banner, and
   rebase-aware button labels (ours/theirs are swapped during a rebase).
-- [ ] **Phase 07 — badge parity** across GitPanel, TopTabs and
+  **DONE + VERIFIED 2026-09-25.** `api.gitResolveConflict` + `api.gitOperation`
+  in `web/src/api/client.ts` (host threaded as a `?host=` query param, matching
+  every other git call); `GitConflictResolveRequest` / `GitOperationRequest` /
+  `GitOperationResult` in `types.ts`; the banner, the conflicts section, the
+  abort-confirmation dialog, `conflictSideLabels` and `OPERATION_ACTIONS` in
+  `GitPanel.tsx`. Tests: `client.gitConflicts.test.ts` (4) +
+  `GitPanel.conflicts.test.tsx` (19). Full web suite 2121 passing (the only 3
+  failures are another session's untracked `useListNavigation.test.tsx`, whose
+  module they are still writing); `npm run build` and typecheck clean for every
+  file this phase touched.
+  Three things worth keeping:
+  (a) **The rebase label inversion is pinned by wording, not presence.** During
+  a rebase git's "ours" is the UPSTREAM branch and "theirs" is the user's own
+  commit, so the buttons read "Keep upstream" / "Keep my commit" and a mutation
+  that reverts them to ours/theirs turns the test red. Getting this wrong would
+  silently discard a user's commit.
+  (b) **The stale-error clearing is a deliberate narrow edge.** Only the
+  idle -> operation transition clears an error (the old "git pull failed:
+  CONFLICT …" is superseded by the banner). A background poll with no operation
+  must NOT clear it, or the sticky-error contract regresses; there is a test for
+  exactly that, and a mutation that clears on every reload fails it.
+  (c) **A robustness fix the tests forced:** `status.conflicts` is guaranteed by
+  the Go struct, but a server OLDER than this feature omits it from the JSON.
+  It is read during render, so `undefined.length` crashed the whole Git panel
+  against a mixed-version deployment. `conflicts`/`operation` are now
+  normalized once where `status` is derived, with a regression test
+  ("renders without crashing when the server omits conflicts and operation").
+- [x] **Phase 07 — badge parity** across GitPanel, TopTabs and
   `projectGitCounts`, which all sum `staged_files + changed_files`.
-- [ ] **Phase 08 — docs** via the context agent + CHANGES.md.
+  **DONE + VERIFIED 2026-09-25.** The Git tab, top-tab badge, and project
+  sidebar badge all include the conflict count and exclude conflicted paths
+  from ordinary staged/unstaged totals; focused UI and store tests cover the
+  older-server shape. Completed in a later pass: the GitPanel header summary
+  itself now counts conflicts (it read "0 staged · 0 unstaged" beside a
+  "Conflicts 3" section), the `editorDiffSource` behavior was decided and
+  pinned, and two client/server contract defects were fixed — the client sent
+  action `"reset"` for a bisect Reset that the server spells `"abort"` (a real
+  400 on every click), and `am` was label-flipped like a rebase although
+  `git am -3` keeps cherry-pick side semantics. A drift guard now pins every
+  kind's wire action against the server table.
+- [x] **Phase 08 — docs** via the context agent + CHANGES.md.
+  **DONE 2026-09-25.** `docs/concepts/git-conflicts-and-operations.md` records
+  the shipped local/remote policy and limitations; `docs/index.md` and
+  `docs/log.md` link the concept, and `CHANGES.md`, README, TESTING, and TODO
+  reflect the user-facing behavior.
 
-- **Remote conflicted paths containing `:` cannot be resolved.**
-  `remoteSafeSpec` (`internal/server/handler_remote_work.go:409`) rejects
-  `:` among many other characters, but a colon is legal in a git path. The
-  resolve endpoint must surface the validator's error rather than silently
-  skipping the file; relaxing the validator is a separate change because it
-  exists to stop shell injection through a path. Fixing it properly would
-  mean allowing a strict allowlist instead of a broad denylist.
+- [ ] **`parseUnifiedDiff` silently drops combined (`diff --cc`) diffs, so a
+  conflicted file gets no editor decorations** (found 2026-09-25 during Phase
+  07). For an unmerged path `git diff` emits a combined diff — a `diff --cc`
+  header and a three-way `@@@` hunk — but the parser only recognizes
+  `diff --git`, so the section never opens a file entry and every line is
+  dropped. `diffFilesForDir` feeds it `git diff --no-color -u` directly, so a
+  conflicted path yields NO `GitDiffFile` and the editor falls back to an empty
+  git patch. This is OLDER than the conflict feature (it is not a Phase-02
+  regression) and is currently accepted: the Git tab lists the conflict with
+  resolution actions and the file tree badges it. Fixing it means teaching the
+  parser combined diffs AND converting `@@@` hunk headers into something the
+  web's `parseDiffPatch` can decorate, across **seven call sites** (the local
+  and remote diff/workspace endpoints, `handler_git.go:383,430,616,769` and
+  `handler_remote_git.go:224,333,404`) — its own change, with its own tests.
+  Pinned by `TestParseUnifiedDiffDropsCombinedConflictDiffs`; that test's
+  comment says to UPDATE it, never delete it, if this is fixed.
+- [ ] **The file tree's conflicted badge is neutral `UU`, not a red
+  "Conflicted"** (found 2026-09-25 during Phase 07). `FileTree.tsx`'s
+  `GitBadge` has no `U`/`UU` entry, so a conflicted file falls through to the
+  default accent badge whose title is the raw `"UU"`, while the Git tab marks
+  the same file with a red `!`. Deliberately left out of the parity phase: the
+  tree is fed a per-node `git_status` string, never the two status lists, so
+  nothing is broken — it is a cosmetic inconsistency worth aligning.
+- [ ] **The operation action table is hand-copied between client and server**
+  (found 2026-09-25 during Phase 07). `OPERATION_ACTIONS` in `GitPanel.tsx`
+  duplicates the `table` map in `gitOperationCommand`
+  (`handler_git_conflicts.go`), and it HAD drifted: the client sent `"reset"`
+  where the server accepts `"abort"`, so bisect Reset 400'd. A test now pins
+  every kind's wire action, but the durable fix is for the server to return
+  the valid actions in the status payload so the client cannot keep a stale
+  copy. Deferred as its own change.
+
+- [ ] **Remote git probe failure is reported as "no operation", not a transport
+  error (found 2026-09-25 during Phase 05 review).** `remoteGitStatus` swallows
+  the transport error and returns a zero-value status
+  (`handler_remote_git.go:56-58`: `if err != nil { return status }`), so when ssh
+  or the batched script fails, `remoteGitOperation` sees `Operation == nil` and
+  returns **409 "no git operation is in progress"** — a confident claim about a
+  repository whose state was never actually read. Same shape in
+  `remoteGitResolveConflict`, which then reports the path is not conflicted.
+  The user is told their repo is clean when the truth is "we could not ask".
+  The fix is to give `remoteGitStatus` an error return, but it has ~12 callers
+  and is deliberately error-free for the status endpoint (a transport failure
+  there degrades to `is_repo:false`, which is a reasonable read-only
+  fallback). Preferred shape: a separate `remoteGitStatusErr` used by the two
+  MUTATION paths only, leaving the read path untouched. Until then, a failed
+  probe is indistinguishable from a clean repo on these two endpoints.
 
 - **`git checkout` and `git rebase` are denied by this environment's
   permission rules**, so rebase-specific behavior cannot be driven end to
@@ -2344,3 +2483,58 @@ and being implemented phase by phase. Phases 01 and 02 are done; 03-08 are not.
   the local side, but PRE-EXISTING and deliberately not fixed here. Phase 05
   adds remote probes through this path, so the new operation-state probe must
   not be the third silent fallback: log the remote failure there.
+
+- [ ] **Large-context compaction recovery after client disconnect/reload.** The synchronous 2026-09-25 `/compact` fix surfaces timeouts and keeps the transcript unchanged, but its in-memory web status is lost if the page reloads or a long request outlives the tab. Follow up with a durable/async compaction job (or equivalent server-side operation state) and progress/retry controls; do not add this to the minimal timeout fix.
+
+- [ ] **Cross-process compaction indicator.** The 2026-09-25 cross-client
+  sync is live for browsers/devices on the same ocode server (and its
+  remote-host bus). Two separate server processes sharing a project still
+  converge only the completed transcript through revision revalidation; a
+  durable shared operation marker would be needed for a live indicator across
+  processes, and the TUI's own compaction status was left unchanged.
+- [ ] **Fine-grained compaction generation reset.** The current reconnect
+  handler clears generation watermarks for a `seq-gap` as well as a true
+  reconnect, and for every host; this is safe in practice but a future
+  reconnect-reason/host-scoped reset would narrow the theoretical stale-event
+  window.
+
+- [ ] **Compaction timeout coverage for non-`GenericClient` implementations.** The current `LLMClient` interface exposes context only through `GenericClient.ChatWithContext`; custom/fake clients still use `Chat`, so their summary goroutine cannot be cancelled or reset by a streamed delta. Revisit the interface or document the limitation before relying on the 30-minute cap for those clients.
+- [ ] **Avoid holding a session lock for a 30-minute manual compaction.** `HandleCompactSession` intentionally holds `as.mu` across the synchronous LLM work to serialize transcript mutation; the new overall cap makes that maximum stall longer. A future async job/state model should release the session lock while summarising and apply the result under a short compare-and-swap lock.
+
+- [ ] **Decide request-cancellation semantics for synchronous `/compact`.** The current handler starts compaction from `context.Background()` and only checks `r.Context()` after the LLM call returns, so a disconnected client does not cancel the server-side summary; the handler then skips the response write. If cancellation should stop provider work, pass a request-derived parent context (and preserve the 504-vs-cancellation distinction); otherwise document that server work intentionally continues.
+
+## Deferred durable rewind — legacy `/truncate` retirement & live E2E (2026-09-25)
+
+The deferred, durable message rewind is implemented end-to-end for Web/Desktop
+(headless resident and no-resident), the TUI `/rc` bridge, remote hosts, and
+`/reset-id` rekey. Two follow-ups remain, both explicitly outside the shipped
+scope:
+
+- **Legacy `POST /api/sessions/{id}/truncate` retirement.** The spec
+  (`docs/superpowers/specs/2026-09-25-deferred-session-rewind-design.md` §2.7)
+  says the immediate endpoint "may remain for compatibility"; the web
+  `TRUNCATE_MESSAGES` listener and `api.truncateSession` call are already
+  replaced by the deferred flow, so the endpoint is now dead client code.
+  Remove `internal/server/handler_truncate.go`, its route in `server.go`, the
+  `api.truncateSession` client method, and the `TRUNCATE_MESSAGES` store
+  action once no external caller depends on it.
+- **Live `/rc` rewind verification.** The bridged commit/ack path
+  (`RCRequest.RewindToken`/`AckCh`, `commitRCRequestRewind`) is unit-tested
+  (`internal/tui/rc_rewind_test.go`, `rc_rewind_update_test.go`,
+  `internal/server/handler_rewind_test.go`), but a real TUI+browser session
+  has not been exercised. Confirm the browser drops the discarded tail and
+  shows exactly one new user row after a tokenized send, and that an
+  expired/already-committed token surfaces the loud error without starting a
+  turn.
+
+
+## Web: Manual smoke for list-dialog keyboard navigation (2026-09-25)
+
+- [ ] In a built web/desktop window, open Select Model and verify ArrowDown/ArrowUp,
+  Home/End, Enter selection, favorite-star focus, and search-to-list focus.
+- [ ] In All sessions, verify ArrowDown load-more focuses the first newly rendered
+  session and nested close controls remain independent.
+- [ ] Verify DirectoryBrowser Enter confirms while double-click navigates, and
+  QuestionDialog multi-select Space/Enter never submits implicitly.
+- [ ] Verify ReasoningLevelSelector and ProfileSwitcher Escape restores trigger
+  focus and Tab closes the popover.

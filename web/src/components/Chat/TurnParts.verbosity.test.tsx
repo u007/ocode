@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { ChatDisplayPolicy, ChatVerbosityConfig, ChatDisplayOverride } from "../../api/types";
 import {
@@ -7,6 +7,7 @@ import {
   type ChatDisclosureStore,
 } from "./chatDisplayContext";
 import { NoticeGroupBlock, ThinkingBlock, ToolBlock } from "./TurnParts";
+import { ChatDisplayTestProvider } from "./chatDisplayTestUtils";
 
 function makeStore(): ChatDisclosureStore {
   const values = new Map<string, boolean>();
@@ -38,7 +39,7 @@ function displayValue(
   const withOverride = (value: ChatDisplayOverride | undefined) => value ?? "preset";
   const base = {
     full: { older_thinking: "expanded", tool_calls: "expanded", tool_output: "expanded", notices: "expanded" },
-    balanced: { older_thinking: "collapsed", tool_calls: "expanded", tool_output: "expanded", notices: "expanded" },
+    balanced: { older_thinking: "collapsed", tool_calls: "collapsed", tool_output: "expanded", notices: "expanded" },
     quiet: { older_thinking: "collapsed", tool_calls: "collapsed", tool_output: "collapsed", notices: "collapsed" },
   }[preset];
   const policy: ChatDisplayPolicy = {
@@ -95,6 +96,29 @@ describe("controlled thinking disclosure", () => {
     }
   });
 
+  it("keeps a manual collapse of the latest block until a policy revision clears it", () => {
+    const store = makeStore();
+    const value = displayValue("quiet", {}, store);
+    const { rerender } = render(
+      <ChatDisplayContext.Provider value={value}>
+        <ThinkingBlock text="latest manual reasoning" blockKey="m-latest-manual" isLatest />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.getByText("latest manual reasoning")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /🧠 Thinking/ }));
+    expect(screen.queryByText("latest manual reasoning")).not.toBeInTheDocument();
+
+    rerender(
+      <ChatDisplayContext.Provider value={value}>
+        <ThinkingBlock text="latest manual reasoning" blockKey="m-latest-manual" isLatest />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.queryByText("latest manual reasoning")).not.toBeInTheDocument();
+
+    act(() => store.clear());
+    expect(screen.getByText("latest manual reasoning")).toBeInTheDocument();
+  });
+
   it("keeps a manual disclosure choice across an unmount/remount", () => {
     const store = makeStore();
     const value = displayValue("quiet", {}, store);
@@ -117,6 +141,40 @@ describe("controlled thinking disclosure", () => {
 });
 
 describe("controlled tool disclosure", () => {
+  it("collapses tool call details under the balanced preset but keeps the tool output", () => {
+    // Uses the REAL resolver (not the local base-map fixture) so this pins the
+    // shipped §9 matrix: balanced collapses tool_calls and expands tool_output.
+    render(
+      <ChatDisplayTestProvider preset="balanced">
+        <ToolBlock
+          tool="bash"
+          // Longer than BASH_COMMAND_INLINE_BUDGET so the command gets its own
+          // code block, which renders only while the call gate is open. (A short
+          // command is shown in the header hint either way, so it cannot prove
+          // the gate state.)
+          command={JSON.stringify({
+            command:
+              "echo hello && echo world && echo again && echo more && echo yet-another-long-line",
+          })}
+          output={"one\ntwo"}
+          callKey="call-balanced"
+          outputKey="output-balanced"
+        />
+      </ChatDisplayTestProvider>,
+    );
+
+    // The command code block only renders while the call gate is open, so its
+    // absence IS the collapsed assertion.
+    const commandBlock = () => screen.queryByText(/^\$ echo hello/, { selector: "pre" });
+    expect(commandBlock()).not.toBeInTheDocument();
+    // …while the separate output gate stays open.
+    expect(screen.getByText(/one/)).toBeInTheDocument();
+
+    // Disclosure is still user-controlled: opening the call reveals it.
+    fireEvent.click(screen.getByRole("button", { name: /🔧/ }));
+    expect(commandBlock()).toBeInTheDocument();
+  });
+
   it("keeps tool call details and tool output as independent gates", () => {
     const store = makeStore();
     render(
