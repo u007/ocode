@@ -526,6 +526,37 @@ func TestRemoteClientStaticOAuthDoesNotUseMismatchedUpstreamCredential(t *testin
 	}
 }
 
+func TestRemoteClientFallsBackToRootMetadataWithoutChallenge(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resource":              server.URL + "/mcp",
+				"authorization_servers": []string{server.URL},
+			})
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"issuer":         server.URL,
+				"token_endpoint": server.URL + "/token",
+			})
+		case "/.well-known/oauth-protected-resource/mcp":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewRemoteClient("metadata-root-fallback", config.MCPConfig{URL: server.URL + "/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.discoverTokenEndpoint(""); err != nil {
+		t.Fatalf("root metadata fallback failed: %v", err)
+	}
+}
+
 func TestRemoteClientDoesNotFollowMetadataRedirect(t *testing.T) {
 	var receiverHits atomic.Int32
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

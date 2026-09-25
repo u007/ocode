@@ -471,13 +471,28 @@ func (c *MCPClient) refreshAfterUnauthorized(challenge string) error {
 }
 
 func (c *MCPClient) discoverTokenEndpoint(challenge string) (string, error) {
-	resourceURL, err := c.resourceMetadataURL(challenge)
+	resourceURLs, err := c.resourceMetadataURLs(challenge)
 	if err != nil {
 		return "", err
 	}
 	var resource protectedResourceMetadata
-	if err := c.fetchJSONMetadata(resourceURL, &resource); err != nil {
-		return "", err
+	var metadataErr error
+	resourceFound := false
+	for _, resourceURL := range resourceURLs {
+		var candidate protectedResourceMetadata
+		if err := c.fetchJSONMetadata(resourceURL, &candidate); err != nil {
+			metadataErr = err
+			continue
+		}
+		resource = candidate
+		resourceFound = true
+		break
+	}
+	if !resourceFound {
+		if metadataErr != nil {
+			return "", metadataErr
+		}
+		return "", fmt.Errorf("OAuth protected-resource metadata is unavailable")
 	}
 	if !sameMCPURL(c.url, resource.Resource) {
 		return "", fmt.Errorf("OAuth protected-resource identity does not match the MCP server")
@@ -520,6 +535,14 @@ func (c *MCPClient) discoverTokenEndpoint(challenge string) (string, error) {
 }
 
 func (c *MCPClient) resourceMetadataURL(challenge string) (string, error) {
+	urls, err := c.resourceMetadataURLs(challenge)
+	if err != nil {
+		return "", err
+	}
+	return urls[0], nil
+}
+
+func (c *MCPClient) resourceMetadataURLs(challenge string) ([]string, error) {
 	if match := resourceMetadataChallengePattern.FindStringSubmatch(challenge); len(match) > 0 {
 		value := match[1]
 		if value == "" {
@@ -527,27 +550,39 @@ func (c *MCPClient) resourceMetadataURL(challenge string) (string, error) {
 		}
 		metadataURL, err := url.Parse(value)
 		if err != nil {
-			return "", fmt.Errorf("OAuth protected-resource metadata URL is invalid")
+			return nil, fmt.Errorf("OAuth protected-resource metadata URL is invalid")
 		}
 		if err := validateOAuthMetadataURL(metadataURL); err != nil {
-			return "", err
+			return nil, err
 		}
-		return metadataURL.String(), nil
+		return []string{metadataURL.String()}, nil
 	}
 
 	base, err := url.Parse(c.url)
 	if err != nil {
-		return "", fmt.Errorf("remote MCP server URL is invalid")
+		return nil, fmt.Errorf("remote MCP server URL is invalid")
 	}
+	root := *base
+	root.Path = "/.well-known/oauth-protected-resource"
+	root.RawQuery = ""
+	root.RawPath = ""
+	root.Fragment = ""
 	resourcePath := strings.TrimSuffix(base.Path, "/")
-	base.Path = "/.well-known/oauth-protected-resource" + resourcePath
-	base.RawQuery = ""
-	base.RawPath = ""
-	base.Fragment = ""
-	if err := validateOAuthMetadataURL(base); err != nil {
-		return "", err
+	pathAware := *base
+	pathAware.Path = "/.well-known/oauth-protected-resource" + resourcePath
+	pathAware.RawQuery = ""
+	pathAware.RawPath = ""
+	pathAware.Fragment = ""
+	if err := validateOAuthMetadataURL(&root); err != nil {
+		return nil, err
 	}
-	return base.String(), nil
+	if err := validateOAuthMetadataURL(&pathAware); err != nil {
+		return nil, err
+	}
+	if pathAware.String() == root.String() {
+		return []string{root.String()}, nil
+	}
+	return []string{pathAware.String(), root.String()}, nil
 }
 
 func sameMCPURL(left, right string) bool {
