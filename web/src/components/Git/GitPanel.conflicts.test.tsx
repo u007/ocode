@@ -550,3 +550,39 @@ describe("client table matches the server action table", () => {
     });
   }
 });
+
+describe("an operation kind this build does not know", () => {
+  // Version skew: the server may be NEWER than this web bundle and report an
+  // operation kind added after the build shipped. The old code did
+  // `OPERATION_ACTIONS[operation.kind] ?? []`, which rendered the banner with
+  // an EMPTY action row — the user is told a rebase is in progress and handed
+  // no way to continue, abort or skip out of it. A silent empty list reads as
+  // a rendering bug and sends the user to the terminal to find out why.
+  //
+  // The banner must still name what git is doing, must say plainly that this
+  // build cannot drive it, and must render NO action buttons at all. Scoping
+  // the button assertion to the banner via `within` keeps it honest: naming
+  // the known verbs (continue/abort/skip) would miss bisect's good/bad and
+  // any verb added later.
+  it("says the operation is unsupported instead of rendering no actions", async () => {
+    const unknown = "rebase-merge-quilt" as unknown as OperationKind;
+    mocks.getGitWorkspace.mockResolvedValue(
+      ws({
+        conflicts: [],
+        operation: { kind: unknown, label: "Rebase in progress", step: 1, total: 3 },
+      }),
+    );
+    await renderPanel();
+
+    const banner = await screen.findByTestId("git-operation-banner");
+    // It still tells the user what git is doing...
+    expect(within(banner).getByText("Rebase in progress")).toBeInTheDocument();
+    // ...but it refuses to pretend it can drive it, and says where to go.
+    expect(
+      within(banner).getByText(/can't be continued here/i),
+    ).toBeInTheDocument();
+    expect(within(banner).getByText(/terminal/i)).toBeInTheDocument();
+    // No action row at all — not an empty one, and not a partial one.
+    expect(within(banner).queryAllByRole("button")).toHaveLength(0);
+  });
+});

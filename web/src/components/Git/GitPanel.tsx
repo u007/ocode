@@ -29,6 +29,7 @@ import type {
   GitCommit,
   GitDiffFile,
   GitHunkAction,
+  GitOperation,
   GitStash,
   GitWorkspace,
 } from "@/api/types";
@@ -88,8 +89,17 @@ const STATUS_BADGES: Record<string, { label: string; color: string }> = {
  *  button the server will refuse (a merge has no "skip") or hiding one it
  *  accepts (a bisect advances via good/bad, never "continue") makes the panel
  *  lie about what the user can do. A merge deliberately has no skip: skipping
- *  has no meaning when there is no sequence of commits to step through. */
-const OPERATION_ACTIONS: Record<string, { action: string; label: string; destructive?: boolean }[]> = {
+ *  has no meaning when there is no sequence of commits to step through.
+ *
+ *  Typed over GitOperation["kind"] rather than `Record<string, ...>` so the
+ *  table is EXHAUSTIVE: adding a kind to the server's vocabulary and forgetting
+ *  this file is a compile error, not a runtime banner with no buttons. The
+ *  runtime `hasOwnProperty` branch below covers the one case a type cannot —
+ *  a server NEWER than this bundle. */
+const OPERATION_ACTIONS: Record<
+  GitOperation["kind"],
+  { action: string; label: string; destructive?: boolean }[]
+> = {
   merge: [
     { action: "continue", label: "Continue" },
     { action: "abort", label: "Abort", destructive: true },
@@ -1098,7 +1108,26 @@ export default function GitPanel({
       {/* Operation banner — shown whenever git has stopped mid-operation.
           Sits directly under the header, above the conflicts section, because
           it is the reason the conflicts exist and it holds the way out. */}
-      {operation && (
+      {operation && (() => {
+        // A kind this bundle has no entry for means the SERVER is newer than
+        // this build. It is not a reason to render an empty action row: that
+        // tells the user a rebase is in progress and hands them no way out, so
+        // the only honest move is to name the operation, refuse to drive it,
+        // and point at the terminal. Logged because it is a real version skew
+        // someone must fix, not a condition to swallow.
+        const actions = Object.prototype.hasOwnProperty.call(
+          OPERATION_ACTIONS,
+          operation.kind,
+        )
+          ? OPERATION_ACTIONS[operation.kind]
+          : undefined;
+        if (!actions) {
+          console.warn(
+            "[git] unknown operation kind from server; cannot drive it from this build",
+            { kind: operation.kind, label: operation.label },
+          );
+        }
+        return (
         <div
           data-testid="git-operation-banner"
           className="px-3 py-2 border-b border-border bg-amber-500/10 flex flex-wrap items-center gap-2"
@@ -1107,8 +1136,9 @@ export default function GitPanel({
           <span className="text-xs font-medium text-amber-400 mr-auto">
             {operation.label}
           </span>
+          {actions ? (
           <div className="flex flex-wrap items-center gap-1">
-            {(OPERATION_ACTIONS[operation.kind] ?? []).map((a) => {
+            {actions.map((a) => {
               // Continue is blocked while any conflict is unresolved. Git
               // refuses anyway; a disabled button with this tooltip explains
               // why instead of relaying "you have unmerged files" afterwards.
@@ -1133,8 +1163,17 @@ export default function GitPanel({
               );
             })}
           </div>
+          ) : (
+            // No action row at all, and no pretend buttons: this build cannot
+            // drive an operation it does not know. The terminal can.
+            <span className="text-xs text-amber-400/90">
+              This operation can&apos;t be continued here — finish it in the
+              terminal.
+            </span>
+          )}
         </div>
-      )}
+        );
+      })()}
 
       {/* Conflicts section — only rendered when something is conflicted, so a
           clean repository's layout is unchanged. Above staged, because a

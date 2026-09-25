@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-09-26 — Git operation banner fails loudly on an unknown operation kind
+
+- The web Git tab's operation banner no longer renders an empty action row when
+  the server reports an operation kind this build does not know. The old
+  `OPERATION_ACTIONS[operation.kind] ?? []` told the user a rebase was in
+  progress and then offered no Continue, Abort or Skip — no way out of the
+  repository from the UI, and no indication that anything was wrong. The banner
+  now names the operation, states that it cannot be continued here, and points
+  at the terminal, plus a `console.warn` carrying the unknown kind.
+- `OPERATION_ACTIONS` is typed `Record<GitOperation["kind"], ...>` instead of
+  `Record<string, ...>`, so adding an operation kind on the server without
+  updating the client table is now a TypeScript compile error rather than a
+  silent runtime gap. The runtime branch is left only for the case a type
+  cannot cover: a server newer than the shipped web bundle.
+
 ## 2026-09-26 — Cold-cache discovery keeps the MCP surface small
 
 - A cold discovery corpus no longer fails open by exposing every registered MCP
