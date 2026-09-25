@@ -48,6 +48,12 @@ type discoveryState struct {
 	// effect on the next ResetDiscovery (/discovery toggle) or restart.
 	judgeOnce sync.Once
 	judge     *TypesafeClient
+	// tail is a bounded snapshot of the turn's messages, recorded by
+	// runDiscovery so the ON-DEMAND discover_more judge sees the same
+	// conversation the per-turn judge saw. Guarded by tailMu because Step
+	// writes it while /api status reads run on another goroutine.
+	tailMu sync.Mutex
+	tail   []Message
 }
 
 // discoveryWarmTimeout bounds a background corpus warm. Generous because a local
@@ -337,6 +343,11 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 		return
 	}
 	a.ensureDiscovery()
+	// Record the turn's messages for the discover_more judge BEFORE any early
+	// return below. The cold-cache deferral is precisely the turn where nothing
+	// is attached and the model must fall back to discover_more, so that is
+	// exactly when the judge needs the conversation.
+	a.noteDiscoveryTail(tail)
 	if a.disco == nil || !a.disco.enabled || strings.TrimSpace(query) == "" {
 		return
 	}
@@ -351,8 +362,9 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	// tight budget to attach skills on the same turn. On a COLD cache a local
 	// embedder needs seconds — far more than any per-turn budget — so we defer to
 	// a background warm (generous deadline) that actually completes and persists
-	// the cache. This turn stays fail-open (corpus nil → everything attached);
-	// once the background warm lands, every later turn hits the fast path.
+	// the cache. This turn attaches nothing (the gate holds — see
+	// discoveryAllows); the names-only index plus discover_more cover the gap, and
+	// every later turn hits the fast path.
 	//
 	// The all-or-nothing cache (BuildCorpusCached persists only on full success)
 	// is why a too-tight synchronous budget could never make progress on a local
@@ -567,10 +579,23 @@ func (a *Agent) markMCPFrom(parent *Agent) {
 }
 
 // discoveryAllows gates MCP tools by the sticky set. Built-ins are never gated.
-// If the corpus warm failed this turn (corpus is nil → Ready() == false), attach
-// everything to avoid a zero-tool state. Warm is now called synchronously in
-// RunDiscovery, so Ready() == false here means the warm call returned an error,
-// not that warming is still in progress.
+//
+// There is deliberately NO warm check here. A cold corpus is the NORMAL
+// first-turn state for the local backend — runDiscovery defers the warm to the
+// background when the 500ms synchronous budget is not enough — and the old
+// "warm failed → don't gate" escape therefore fired on exactly the turns
+// discovery exists to shrink, exposing the entire MCP corpus (274 zoho-books
+// schemas plus the built-ins, "exposing 322 tools"). Failing open was never
+// necessary: the names-only index still advertises every tool by name and
+// discover_more warms, ranks and attaches on demand, so a cold turn legitimately
+// starts with zero MCP tool definitions. A nil session (an invariant violation
+// — ensureDiscovery always sets one when enabled) gates rather than fails open,
+// so it can never panic IsAttached.
+//
+// The one fail-open that survives is disco == nil / !disco.enabled above: when
+// discovery never initialized (embedder unresolved), the feature is OFF and
+// gating would strand every MCP tool behind a discover_more call that cannot
+// work.
 func (a *Agent) discoveryAllows(name string) bool {
 	if a.disco == nil || !a.disco.enabled {
 		return true
@@ -578,8 +603,8 @@ func (a *Agent) discoveryAllows(name string) bool {
 	if _, isMCP := a.mcpTools[name]; !isMCP {
 		return true
 	}
-	if a.disco.engine == nil || !a.disco.engine.Ready() {
-		return true // warm failed → don't gate
+	if a.disco.session == nil {
+		return false
 	}
 	return a.disco.session.IsAttached("mcp:" + name)
 }
@@ -855,6 +880,38 @@ func (t discoverMoreTool) Definition() map[string]interface{} {
 	}
 }
 
+// noteDiscoveryTail records a bounded copy of the turn's messages for the
+// on-demand discover_more judge. It runs on every turn before runDiscovery's
+// early returns, so a cold turn (nothing attached) still gives the judge the
+// conversation. The copy matters: callers append to and reuse the backing array,
+// while the judge reads this snapshot on a later tool call.
+func (a *Agent) noteDiscoveryTail(messages []Message) {
+	if a.disco == nil || len(messages) == 0 {
+		return
+	}
+	tail := messages
+	if len(tail) > discoveryJudgeTailN {
+		tail = tail[len(tail)-discoveryJudgeTailN:]
+	}
+	snapshot := make([]Message, len(tail))
+	copy(snapshot, tail)
+	a.disco.tailMu.Lock()
+	a.disco.tail = snapshot
+	a.disco.tailMu.Unlock()
+}
+
+// discoveryTail returns the last recorded turn snapshot. The returned slice is
+// immutable (noteDiscoveryTail always replaces it, never mutates in place), so
+// the judge can read it without holding the lock.
+func (a *Agent) discoveryTail() []Message {
+	if a.disco == nil {
+		return nil
+	}
+	a.disco.tailMu.Lock()
+	defer a.disco.tailMu.Unlock()
+	return a.disco.tail
+}
+
 func (t discoverMoreTool) Execute(args json.RawMessage) (string, error) {
 	var p struct {
 		Need string `json:"need"`
@@ -869,16 +926,46 @@ func (t discoverMoreTool) Execute(args json.RawMessage) (string, error) {
 	if err := a.disco.engine.Warm(context.Background(), a.discoveryDocs()); err != nil {
 		return "", fmt.Errorf("discover_more warm: %w", err)
 	}
-	added, err := a.disco.session.Discover(context.Background(), p.Need)
+	// Select/Seed instead of Discover: the on-demand attach path is the one the
+	// model reaches for when per-turn ranking attached nothing, so it must clear
+	// the SAME relevance judge as runDiscovery — otherwise a model that names a
+	// need would bypass the judge entirely and attach anything the embedder
+	// liked. Discover (Select+Seed) stays the no-judge wrapper.
+	candidates, err := a.disco.session.Select(context.Background(), p.Need)
 	if err != nil {
 		return "", fmt.Errorf("discover_more rank: %w", err)
 	}
-	emitDebug("DISCOVERY", fmt.Sprintf("discover_more(%.40q) → +%d tools", p.Need, len(added)))
-	if len(added) == 0 {
+	keep := candidates
+	if client := a.discoveryJudgeClient(); client != nil && len(candidates) > 0 {
+		judged, jerr := a.judgeDiscoveryCandidates(client, a.discoveryTail(), p.Need, candidates)
+		if jerr != nil {
+			// Fail-open, and say so: a judge failure must never attach fewer
+			// tools than the pre-judge behavior.
+			emitDebug("DISCOVERY", fmt.Sprintf("discover_more judge failed (fail-open, all attached): %v", jerr))
+		} else {
+			keep = judged
+			if vetoed := len(candidates) - len(keep); vetoed > 0 {
+				a.disco.judgeVetoed.Add(int64(vetoed))
+			}
+		}
+	}
+	ids := make([]string, 0, len(keep))
+	for _, d := range keep {
+		ids = append(ids, d.ID)
+	}
+	a.disco.session.Seed(ids)
+	emitDebug("DISCOVERY", fmt.Sprintf("discover_more(%.40q) → +%d tools (judge kept %d/%d)", p.Need, len(keep), len(keep), len(candidates)))
+	if len(keep) == 0 {
+		// Distinguish "nothing matched" from "everything matched was judged out
+		// of scope" — the model should retry with a different need rather than
+		// conclude the capability is missing.
+		if len(candidates) > 0 {
+			return fmt.Sprintf("%d tool(s) matched that need but were judged out of scope for this request. Try a different need, or continue without them.", len(candidates)), nil
+		}
 		return "No additional tools matched that need. Available tools are listed in the discovery index.", nil
 	}
-	names := make([]string, 0, len(added))
-	for _, d := range added {
+	names := make([]string, 0, len(keep))
+	for _, d := range keep {
 		names = append(names, d.Name)
 	}
 	sort.Strings(names)

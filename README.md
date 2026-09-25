@@ -207,7 +207,7 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 
 ### 🎯 Skills
 
-- **On-demand skill loading** — skills are lightweight `SKILL.md` definitions loaded when relevant; backed by a retrieval corpus (discovery)
+- **On-demand skill loading** — skills are lightweight `SKILL.md` definitions loaded when relevant; backed by a retrieval corpus (discovery). Cold first turns keep the MCP surface name-only while the corpus warms, and `discover_more` applies the same relevance judge before attaching tools.
 - **`/skills`** to browse and activate; **`/learn`** to list project-root skills and guide skill creation/update
 - **Skill-as-command** — any installed skill is also available directly as a slash command: `/<skill-name>` (e.g. `/agent-browser`, `/pdf`) loads its `SKILL.md` as the run prompt (extra words become context)
 - **`/discover`** — toggle retrieval-based skill/MCP discovery, pick the query-embedding model, manage ignored paths

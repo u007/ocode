@@ -44,6 +44,7 @@ Track tested features, provider integrations, and known issues.
 - [x] Last-dispatched model status (backend response + turn-event fallback, 2026-09-25)
 - [x] Reopen locally hidden question dialog (X/Escape vs Don't answer, 2026-09-25)
 - [x] List-dialog keyboard navigation (shared real-focus hook across custom popups, 2026-09-25)
+- [x] Cold-cache discovery gating + judged `discover_more` attachment (2026-09-26)
 - [x] Project removal confirmation across sidebar entry points (2026-09-25)
 - [x] TUI mouse-wheel scrolling from transcript over composer (2026-09-25)
 

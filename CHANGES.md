@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-09-26 — Cold-cache discovery keeps the MCP surface small
+
+- A cold discovery corpus no longer fails open by exposing every registered MCP
+  tool on the first turn. The normal local first-turn path now leaves the
+  name-only index in place while the background warm completes, so a large MCP
+  catalog cannot flood the model's tool list before retrieval has ranked it.
+- `discover_more` now runs the same relevance judge as the per-turn path. It
+  selects candidates, judges them against a bounded snapshot of the current
+  turn, and seeds only the kept set; a judge failure remains explicitly
+  fail-open, while an all-vetoed result tells the model to retry with a
+  different need instead of claiming the capability is missing.
+- `runDiscovery` records the bounded transcript tail before its early returns,
+  so the on-demand judge has conversation context even on the cold-cache turn
+  where no candidates were attached. The gate is closed when discovery is
+  enabled, and only the genuinely uninitialized/disabled case remains fail-open.
+- Tests cover cold-turn tail delivery, judge-backed `discover_more` selection,
+  and the MCP gating behavior.
+
 ## 2026-09-26 — Remote SSH Assets tab: `list failed: 500 Internal Server Error`
 
 - The **Assets** tab on a remote SSH project now lists (and uploads, deletes,

@@ -995,7 +995,12 @@ func TestDiscoverMoreJudgeSeesTurnTailOnColdTurn(t *testing.T) {
 	if h.requestCount() == 0 {
 		t.Fatal("discover_more must consult the judge on a cold turn")
 	}
-	tail, _ := h.body["transcript_tail"].([]any)
+	tail := []any{}
+	if state, ok := h.body["state"].(map[string]any); ok {
+		if got, ok := state["transcript_tail"].([]any); ok {
+			tail = got
+		}
+	}
 	if len(tail) == 0 {
 		t.Fatalf("judge state must carry the turn's transcript tail; body=%v", h.body)
 	}
