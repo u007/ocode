@@ -142,13 +142,16 @@ export function loadEditorDraft(tabId: string): EditorDraft | null {
   }
 }
 
-/** Persists unsaved content. Can hit the localStorage quota on very large
- *  files — logged, and the tab simply restores as clean server content. */
-export function saveEditorDraft(tabId: string, draft: EditorDraft) {
+/** Persists unsaved content. Returns false when the write failed (typically the
+ *  localStorage quota on a very large file). The caller reports the failure to
+ *  the user and blocks quit rather than silently dropping the draft. */
+export function saveEditorDraft(tabId: string, draft: EditorDraft): boolean {
   try {
     window.localStorage.setItem(DRAFT_KEY_PREFIX + tabId, JSON.stringify(draft));
+    return true;
   } catch (err) {
     console.error("Failed to persist editor draft:", err);
+    return false;
   }
 }
 

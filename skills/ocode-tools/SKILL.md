@@ -130,7 +130,7 @@ lspMgr := lsp.NewManager(".")   // created once per session
 // shared by LSPTool, LSPDiagnosticsTool, and AstTool
 ```
 
-All three tools receive `Mgr: lspMgr` at registration. The manager owns the language-server processes. When the session/agent is torn down, `lspMgr.Close()` must be called — failing to do so leaks server processes.
+All three tools receive `Mgr: lspMgr` at registration. The manager owns the language-server processes. When the session/agent is torn down, `lspMgr.Close()` must be called — failing to do so leaks server processes. `Manager.Statuses()` also retains `starting`/`running`/`failed` lifecycle rows for headless status consumers; `ActiveServers()` remains the running-only view used by the TUI.
 
 ## 4. How tools run (dispatch chain in `agent.go:executeToolCall`)
 

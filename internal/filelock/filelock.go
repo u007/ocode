@@ -29,6 +29,12 @@ const (
 // lock cannot be acquired within Timeout, an error is returned. The lock is
 // released when fn returns, even if fn panics.
 func WithFileLock(lockPath string, fn func() error) (err error) {
+	return WithFileLockTimeout(lockPath, Timeout, fn)
+}
+
+// WithFileLockTimeout is WithFileLock with a caller-provided acquisition
+// bound. A non-positive timeout falls back to the package default.
+func WithFileLockTimeout(lockPath string, timeout time.Duration, fn func() error) (err error) {
 	// Open (or create) the lock file.
 	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -40,8 +46,11 @@ func WithFileLock(lockPath string, fn func() error) (err error) {
 		}
 	}()
 
+	if timeout <= 0 {
+		timeout = Timeout
+	}
 	// Try to acquire the exclusive lock with a bounded wait.
-	deadline := time.Now().Add(Timeout)
+	deadline := time.Now().Add(timeout)
 	for {
 		lockErr := tryLockFile(f)
 		if lockErr == nil {

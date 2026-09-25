@@ -59,7 +59,7 @@ func TestReproPermissionResolveHeadless(t *testing.T) {
 	req2 := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(string(body2)))
 	rec2 := httptest.NewRecorder()
 	h.HandleResolvePermission(rec2, req2)
-	if rec2.Code != 200 {
+	if rec2.Code != http.StatusAccepted {
 		t.Fatalf("resolve failed: %d %s", rec2.Code, rec2.Body.String())
 	}
 	t.Logf("headless resolve OK")

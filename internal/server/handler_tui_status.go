@@ -161,9 +161,11 @@ func (h *Handler) HandleGetSpending(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleGetLSPStatuses returns the current set of running LSP servers, derived
-// from the TUI's bridge snapshot (when attached) or from the handler's own
-// shared LSP manager (headless web/desktop).
+// HandleGetLSPStatuses returns the current lifecycle states of discovered LSP
+// servers, derived from the TUI's bridge snapshot (when attached) or from the
+// handler's own shared LSP manager (headless web/desktop). The inventory is
+// bounded by the static server table and active manager count, so pagination
+// is intentionally not applied here.
 func (h *Handler) HandleGetLSPStatuses(w http.ResponseWriter, r *http.Request, rc *RCBridge) {
 	var servers []LSPStatus
 	if rc == nil {
@@ -175,9 +177,10 @@ func (h *Handler) HandleGetLSPStatuses(w http.ResponseWriter, r *http.Request, r
 		servers = []LSPStatus{}
 	}
 	if filterRoot := r.URL.Query().Get("root"); filterRoot != "" {
+		want := lspProjectRootKey(filterRoot)
 		filtered := make([]LSPStatus, 0, len(servers))
 		for _, s := range servers {
-			if s.Root == filterRoot {
+			if lspProjectRootKey(s.Root) == want {
 				filtered = append(filtered, s)
 			}
 		}

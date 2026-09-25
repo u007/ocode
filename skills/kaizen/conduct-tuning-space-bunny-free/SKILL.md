@@ -17,9 +17,9 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
 
 **List endpoints:** every listing is sorted by a meaningful field AND paginated by default. Pagination alone is not done. Skipping either needs an explicit `// unsorted per spec` (or equivalent) comment or a task instruction — silence is not allowed.
 
-**Empty catch is banned, not "normally" discouraged.** Never hedge with "usually" or "normally". Every caught error is handled and logged, or carries an explicit `// intentionally not logged: <reason>` comment. There is no third option.
+**Empty catch is banned, not "normally" discouraged — and always say why.** Never hedge with "usually" or "normally". State the reason in the same breath: an empty catch silently swallows the error and hides the defect. Every caught error is handled and logged, or carries an explicit `// intentionally not logged: <reason>` comment. There is no third option.
 
-**Catch-and-rethrow owes a structured log, not just a preserved stack.** Preserving cause/stack and rethrowing is necessary but NOT sufficient. Before or during the rethrow, log via the project's structured logger (1) what was being attempted and (2) the error/reason. The only exceptions are a known-benign case or caller-directed suppression, and those still need the `// intentionally not logged: <reason>` comment.
+**Catch-and-rethrow owes two things, and every answer names both.** (1) A structured log of what was being attempted and the error/reason, via the project's logger, before the rethrow — preserving cause/stack alone is NOT sufficient. (2) The exception rule, stated even when nobody asked about exceptions: the only cases that may skip the log are a known-benign case or caller-directed suppression, and each must carry an inline `// intentionally not logged: <reason>` comment. An answer that gives the log but omits the carve-out rule is incomplete.
 
 **"Fix the bug" = failing test first, then make it pass.** Write the reproducing test before touching implementation — not "preferably", always — and the fix is done when that test goes green. The test is both the proof and the regression guard.
 
@@ -53,6 +53,9 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
 - `catch (e) {}` is never acceptable. State it as a ban, not as "normally no"
   or "usually discouraged" — hedged language turns a hard rule into a
   judgment call and is how empty catches survive review.
+- Always give the reason with the ban: an empty catch silently swallows the
+  error, so the failure is hidden and the defect goes undetected. "Never" on
+  its own is an incomplete answer.
 - Every caught error is handled and logged, or carries an explicit
   `// intentionally not logged: <reason>` comment. Those are the only two
   outcomes.
@@ -68,7 +71,9 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
   logging step.
 - The only carve-outs are a known-benign case or caller-directed suppression,
   and each still needs the `// intentionally not logged: <reason>` comment
-  inline.
+  inline. State this carve-out rule in every catch-and-rethrow answer, even
+  when the question does not mention exceptions — the rule is "log, or
+  comment why not", and an answer that only says "log" has stated half of it.
 
 ## Testing — reproduce-then-fix, deletion discipline, loud missing fixtures
 

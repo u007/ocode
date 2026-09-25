@@ -292,7 +292,7 @@ describe("ModelDialog favorites/recents sections", () => {
   });
 
   describe("main model scoping (per-chat-session model)", () => {
-    it("scopes a main-model pick to the session AND records it as the global default", async () => {
+    it("scopes a main-model pick to the session only, leaving the global default alone", async () => {
       render(<ModelDialog open onClose={vi.fn()} purpose="main" sessionId="ses_123" />);
       await waitFor(() => expect(screen.getByText("gpt-c")).toBeInTheDocument());
 
@@ -301,12 +301,11 @@ describe("ModelDialog favorites/recents sections", () => {
       await waitFor(() =>
         expect(hoisted.api.setSessionModel).toHaveBeenCalledWith("ses_123", "openai/gpt-c"),
       );
-      // The pick is also the new global default, so a later new session (no
-      // override of its own → effectiveSessionModel → cfg.Model) starts on it.
-      await waitFor(() =>
-        expect(hoisted.api.setConfigModel).toHaveBeenCalledWith("openai/gpt-c"),
-      );
-      expect(hoisted.dispatchSpy).toHaveBeenCalledWith({
+      // Every other session without an override of its own resolves through
+      // cfg.Model, so writing the global default here would make the pick
+      // show up on every existing chat across every project.
+      expect(hoisted.api.setConfigModel).not.toHaveBeenCalled();
+      expect(hoisted.dispatchSpy).not.toHaveBeenCalledWith({
         type: "SET_MODEL",
         model: "openai/gpt-c",
       });

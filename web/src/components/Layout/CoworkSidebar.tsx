@@ -955,6 +955,7 @@ export default function CoworkSidebar({
           <ReasoningLevelSelector
             thinkingBudget={tuiStatus?.thinking_budget ?? config.thinkingBudget}
             disabled={!onModelClick}
+            sessionId={sessionId ?? undefined}
             host={sessionHost}
           />
         </div>

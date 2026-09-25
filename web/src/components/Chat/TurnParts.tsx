@@ -1,9 +1,12 @@
-import { memo, useState } from "react";
+import { memo, useRef, useSyncExternalStore } from "react";
 import { CheckCircle2, Volume2 } from "lucide-react";
 import type { QuestionAnswerPayload } from "@/api/types";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 import { bashCommandFromArgs, formatToolArgsHint } from "./toolHint";
+import { useChatDisplay } from "./chatDisplayContext";
+import { renderedCopyText } from "../../lib/copyText";
+import { BlockCopyControl } from "./BlockCopyControl";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 20;
 
@@ -52,12 +55,26 @@ export function ThinkingBlock({
   text,
   highlight = "",
   onSpeak,
+  blockKey = "thinking",
+  isLatest = false,
+  forceOpen = false,
 }: {
   text: string;
   highlight?: string;
   onSpeak?: () => void;
+  blockKey?: string;
+  isLatest?: boolean;
+  forceOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(true);
+  const { policy, disclosure } = useChatDisplay();
+  const policyDefault = isLatest
+    ? policy.latest_thinking === "expanded"
+    : policy.older_thinking === "expanded";
+  const open = useSyncExternalStore(
+    (onStoreChange) => disclosure.subscribe(blockKey, onStoreChange),
+    () => forceOpen || disclosure.get(blockKey, policyDefault),
+    () => forceOpen || policyDefault,
+  );
   if (!text) return null;
   return (
     <div className="mb-3 flex justify-start">
@@ -65,23 +82,32 @@ export function ThinkingBlock({
         <div className="flex items-center justify-between">
           <button
             type="button"
-            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            onClick={() => disclosure.set(blockKey, !open)}
             className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
           >
             <span>{open ? "▾" : "▸"}</span>
             <span>🧠 Thinking</span>
           </button>
-          {onSpeak && (
-            <button
-              type="button"
-              aria-label="Speak thinking"
-              title="Speak thinking"
-              onClick={onSpeak}
-              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
-            >
-              <Volume2 className="h-3.5 w-3.5" /> Speak
-            </button>
-          )}
+          <div className="flex items-center gap-1">
+            {onSpeak && (
+              <button
+                type="button"
+                aria-label="Speak thinking"
+                title="Speak thinking"
+                onClick={onSpeak}
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
+              >
+                <Volume2 className="h-3.5 w-3.5" /> Speak
+              </button>
+            )}
+            <BlockCopyControl
+              rawText={text}
+              getRenderedText={() => text}
+              rawLabel="Copy as raw source"
+              ariaLabel="Copy thinking"
+            />
+          </div>
         </div>
         {open && (
           <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">
@@ -103,6 +129,12 @@ export function StatusBlock({ text }: { text: string }) {
       <div className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/40 px-3 py-2 text-xs text-muted-foreground">
         <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-muted" />
         <span>{text}</span>
+        <BlockCopyControl
+          rawText={text}
+          getRenderedText={() => text}
+          rawLabel="Copy as raw source"
+          ariaLabel="Copy status"
+        />
       </div>
     </div>
   );
@@ -117,9 +149,59 @@ export function NoticeBlock({ text }: { text: string }) {
   if (!text) return null;
   return (
     <div className="mb-3 flex justify-start">
-      <div className="rounded-lg border border-border/40 bg-card/30 px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="mr-1 opacity-70">~</span>
-        {text}
+      <div className="flex items-center gap-1.5 rounded-lg border border-border/40 bg-card/30 px-3 py-1.5 text-xs text-muted-foreground">
+        <span className="opacity-70">~</span>
+        <span>{text}</span>
+        <BlockCopyControl
+          rawText={text}
+          getRenderedText={() => text}
+          rawLabel="Copy as raw source"
+          ariaLabel="Copy notice"
+        />
+      </div>
+    </div>
+  );
+}
+
+// NoticeGroupBlock collapses consecutive transient notices under one control
+// while retaining the original NoticeBlock for the expanded state.
+export function NoticeGroupBlock({ notices, groupKey }: { notices: string[]; groupKey: string }) {
+  const { disclosure } = useChatDisplay();
+  const open = useSyncExternalStore(
+    (onStoreChange) => disclosure.subscribe(groupKey, onStoreChange),
+    () => disclosure.get(groupKey, false),
+    () => false,
+  );
+  if (notices.length === 0) return null;
+  const label = notices.length === 1 ? "1 activity notice" : `${notices.length} activity notices`;
+  const rawText = notices.join("\n");
+  return (
+    <div className="mb-3 flex justify-start">
+      <div className="w-full max-w-[95%] rounded-lg border border-border/40 bg-card/30 px-3 py-1.5 text-xs text-muted-foreground md:max-w-[80%]">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => disclosure.set(groupKey, !open)}
+            className="flex min-w-0 flex-1 items-center gap-1 text-left"
+          >
+            <span aria-hidden="true">~</span>
+            <span>{open ? "Hide activity notices" : label}</span>
+          </button>
+          <BlockCopyControl
+            rawText={rawText}
+            getRenderedText={() => rawText}
+            rawLabel="Copy as raw source"
+            ariaLabel="Copy activity notices"
+          />
+        </div>
+        {open && (
+          <div className="mt-1 space-y-1 pl-3">
+            {notices.map((text, index) => (
+              <NoticeBlock key={`${groupKey}:${index}`} text={text} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -163,14 +245,27 @@ export function QuestionAnswerBlock({
 }: {
   answers: QuestionAnswerPayload[];
 }) {
+  const blockRef = useRef<HTMLDivElement>(null);
+  const rawText = JSON.stringify(answers, null, 2);
   return (
     <div className="mb-3 flex justify-start">
-      <div className="w-full max-w-[95%] rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-3 py-2 md:max-w-[80%]">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-300/90">
-          <CheckCircle2 className="h-3.5 w-3.5" />
-          Answered question prompt
+      <div
+        ref={blockRef}
+        className="w-full max-w-[95%] rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-3 py-2 md:max-w-[80%]"
+      >
+        <div className="flex items-center gap-2">
+          <div className="flex flex-1 items-center gap-1.5 text-xs font-medium text-emerald-300/90">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Answered question prompt
+          </div>
+          <BlockCopyControl
+            rawText={rawText}
+            getRenderedText={() => renderedCopyText(blockRef.current)}
+            rawLabel="Copy as raw source"
+            ariaLabel="Copy tool result"
+          />
         </div>
-        <div className="mt-2 space-y-2">
+        <div className="mt-2 space-y-2" data-copy-content="">
           {answers.map((entry, i) => (
             <div key={i} className="text-xs">
               {entry.header ? (
@@ -210,6 +305,9 @@ export const ToolBlock = memo(function ToolBlock({
   stream,
   highlight = "",
   onOpenQuestion,
+  callKey = "tool-call",
+  outputKey = "tool-output",
+  forceOpen = false,
 }: {
   tool: string;
   command?: string;
@@ -221,7 +319,14 @@ export const ToolBlock = memo(function ToolBlock({
   /** Set for a `question` call still waiting on the user: re-opens its dialog
    *  (the dialog can be lost to a reload/reconcile while the ask is pending). */
   onOpenQuestion?: () => void;
+  /** Stable transcript identity plus region. Manual disclosure survives remounts. */
+  callKey?: string;
+  outputKey?: string;
+  /** Search selection temporarily opens both regions without overwriting choices. */
+  forceOpen?: boolean;
 }) {
+  const { config, policy, disclosure } = useChatDisplay();
+  const blockRef = useRef<HTMLDivElement>(null);
   // Never render the raw QUESTION_PROMPT sentinel. The grouped transcript path
   // already filters the sentinel tool message, but the live stream can carry it
   // as the tool output until the authoritative snapshot lands.
@@ -232,9 +337,47 @@ export const ToolBlock = memo(function ToolBlock({
       ? stripTruncationFooter(output)
       : undefined;
   const lineCount = displayOutput ? displayOutput.split("\n").length : 0;
-  const [open, setOpen] = useState(lineCount <= 50);
-  const [expanded, setExpanded] = useState(false);
+  // The long-output "expand earlier lines" choice is disclosure state too, so
+  // it lives in the ChatPanel-owned store (a virtualized remount must not lose
+  // it) rather than component-local useState.
+  const previewKey = `${outputKey}:preview`;
+  const expanded = useSyncExternalStore(
+    (onStoreChange) => disclosure.subscribe(previewKey, onStoreChange),
+    () => disclosure.get(previewKey, false),
+    () => false,
+  );
   const pending = output === undefined;
+  const copyableOutput = displayOutput ?? (pending ? stream : undefined);
+  const copyText = [command, copyableOutput]
+    .filter((value): value is string => !!value && value.trim() !== "")
+    .join("\n\n");
+  const callIsExplicit = config.overrides.tool_calls !== "preset";
+  const outputIsExplicit = config.overrides.tool_output !== "preset";
+  const preserveFullHeuristic = config.preset === "full" && !callIsExplicit && !outputIsExplicit;
+  const callDefault = policy.tool_calls === "collapsed"
+    ? false
+    : callIsExplicit
+      ? true
+      : preserveFullHeuristic
+        ? lineCount <= 50
+        : true;
+  const outputDefault = policy.tool_output === "collapsed"
+    ? false
+    : outputIsExplicit
+      ? true
+      : preserveFullHeuristic
+        ? lineCount <= 50
+        : true;
+  const open = useSyncExternalStore(
+    (onStoreChange) => disclosure.subscribe(callKey, onStoreChange),
+    () => forceOpen || disclosure.get(callKey, callDefault),
+    () => forceOpen || callDefault,
+  );
+  const outputOpen = useSyncExternalStore(
+    (onStoreChange) => disclosure.subscribe(outputKey, onStoreChange),
+    () => forceOpen || disclosure.get(outputKey, outputDefault),
+    () => forceOpen || outputDefault,
+  );
   const outputLines = displayOutput ? displayOutput.split("\n") : [];
   const collapsible = outputLines.length > TOOL_OUTPUT_PREVIEW_LINES;
   const visibleOutput =
@@ -273,17 +416,31 @@ export const ToolBlock = memo(function ToolBlock({
     : "whitespace-pre-wrap break-words";
   return (
     <div className="mb-3 flex justify-start">
-      <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-center gap-1.5 text-xs font-medium text-amber-300/90 hover:text-amber-200"
-        >
-          <span>{open ? "▾" : "▸"}</span>
-          <span className="min-w-0 truncate" title={argsHint || undefined}>🔧 {argsHint || tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
-          {pending && !onOpenQuestion && <span className="ml-1 animate-pulse text-amber-400/70">running…</span>}
-          {onOpenQuestion && <span className="ml-1 text-amber-400/70">awaiting your answer</span>}
-        </button>
+      <div
+        ref={blockRef}
+        className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2"
+      >
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => disclosure.set(callKey, !open)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-xs font-medium text-amber-300/90 hover:text-amber-200"
+          >
+            <span>{open ? "▾" : "▸"}</span>
+            <span className="min-w-0 truncate" data-copy-content="" title={argsHint || undefined}>🔧 {argsHint || tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
+            {pending && !onOpenQuestion && <span className="ml-1 animate-pulse text-amber-400/70">running…</span>}
+            {onOpenQuestion && <span className="ml-1 text-amber-400/70">awaiting your answer</span>}
+          </button>
+          {copyText !== "" && (
+            <BlockCopyControl
+              rawText={copyText}
+              getRenderedText={() => renderedCopyText(blockRef.current)}
+              rawLabel="Copy as raw source"
+              ariaLabel="Copy tool call"
+            />
+          )}
+        </div>
         {onOpenQuestion && (
           <button
             type="button"
@@ -294,7 +451,7 @@ export const ToolBlock = memo(function ToolBlock({
           </button>
         )}
         {open && (
-          <div className="mt-2 space-y-2">
+          <div className="mt-2 space-y-2" data-copy-content="">
             {showCommandBlock && (
               <pre className={`${codeBoxClass} rounded bg-card/70 p-2 font-mono text-[11px] text-foreground`}>
                 {highlight.trim()
@@ -318,40 +475,50 @@ export const ToolBlock = memo(function ToolBlock({
                 </pre>
               </div>
             )}
-            {output !== undefined && output !== "" && (
-              <div className="rounded bg-card/70 p-2">
-                <div className={`font-mono text-[11px] text-muted-foreground ${noWrapCode ? "overflow-x-auto" : "whitespace-pre"}`}>
-                  <div className={noWrapCode ? "w-max min-w-full" : undefined}>
-                  {(visibleOutput ?? "").split("\n").map((line, i) => {
-                    const colorClass = !isDiffOutput
-                      ? "text-muted-foreground"
-                      : line.startsWith("+") && !line.startsWith("+++") ? "text-green-400"
-                      : line.startsWith("-") && !line.startsWith("---") ? "text-red-400"
-                      : line.startsWith("@@") ? "text-blue-400"
-                      : line.startsWith("DIFF:") ? "text-amber-400 font-bold"
-                      : "text-muted-foreground";
-                    return (
-                      <div key={i} className={`flex ${colorClass}`}>
-                        <span className="select-none text-neutral-600 w-10 text-right pr-2 shrink-0 text-[10px] leading-4">{isDiffOutput ? String(i + 1) : ""}</span>
-                        <span className={noWrapCode ? "whitespace-pre" : "whitespace-pre-wrap break-words"}>{highlight.trim() ? highlightMatches(line, highlight) : line}</span>
-                      </div>
-                    );
-                  })
-                }
+
+          </div>
+        )}
+        {output !== undefined && output !== "" && (
+          <button
+            type="button"
+            aria-expanded={outputOpen}
+            onClick={() => disclosure.set(outputKey, !outputOpen)}
+            className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            {outputOpen ? "Hide output" : `Show output${lineCount > 0 ? ` (${lineCount} lines)` : ""}`}
+          </button>
+        )}
+        {output !== undefined && output !== "" && outputOpen && (
+          <div className="rounded bg-card/70 p-2" data-copy-content="">
+            <div className={`font-mono text-[11px] text-muted-foreground ${noWrapCode ? "overflow-x-auto" : "whitespace-pre"}`}>
+              <div className={noWrapCode ? "w-max min-w-full" : undefined}>
+              {(visibleOutput ?? "").split("\n").map((line, i) => {
+                const colorClass = !isDiffOutput
+                  ? "text-muted-foreground"
+                  : line.startsWith("+") && !line.startsWith("+++") ? "text-green-400"
+                  : line.startsWith("-") && !line.startsWith("---") ? "text-red-400"
+                  : line.startsWith("@@") ? "text-blue-400"
+                  : line.startsWith("DIFF:") ? "text-amber-400 font-bold"
+                  : "text-muted-foreground";
+                return (
+                  <div key={i} className={`flex ${colorClass}`}>
+                    <span className="select-none text-neutral-600 w-10 text-right pr-2 shrink-0 text-[10px] leading-4">{isDiffOutput ? String(i + 1) : ""}</span>
+                    <span className={noWrapCode ? "whitespace-pre" : "whitespace-pre-wrap break-words"}>{highlight.trim() ? highlightMatches(line, highlight) : line}</span>
                   </div>
-                </div>
-                {collapsible && (
-                  <button
-                    type="button"
-                    onClick={() => setExpanded((v) => !v)}
-                    className="mt-1 text-[11px] text-muted-foreground hover:text-foreground"
-                  >
-                    {expanded
-                      ? "▲ click to collapse"
-                      : `… ${hiddenLineCount} earlier lines · click to expand`}
-                  </button>
-                )}
+                );
+              })}
               </div>
+            </div>
+            {collapsible && (
+              <button
+                type="button"
+                onClick={() => disclosure.set(previewKey, !expanded)}
+                className="mt-1 text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                {expanded
+                  ? "▲ click to collapse"
+                  : `… ${hiddenLineCount} earlier lines · click to expand`}
+              </button>
             )}
           </div>
         )}

@@ -215,9 +215,12 @@ func TestHandleAnswerQuestionResolvesAndContinues(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleAnswerQuestion(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	// The endpoint acknowledges the answer with 202 immediately; the
+	// continuation runs in the background.
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
+	waitForAskContinuation(t, as)
 
 	// The pending ask must have been replaced with the answer JSON (no sentinel).
 	answered := as.messages[2]
@@ -276,6 +279,118 @@ func waitForBusEvent(sub chan Envelope, event string, timeout time.Duration) boo
 	}
 }
 
+// TestHandleAnswerQuestionReturns202BeforeContinuation is the regression guard
+// for the ask-dialog submit hang: the answer endpoint used to run the whole
+// continuation Step inline on the request goroutine, so the POST stayed open
+// (and the browser's await + local echo + dialog dismissal never settled) for
+// the entire model round. It must now acknowledge with 202 and return while
+// the background continuation is still blocked in its Step.
+func TestHandleAnswerQuestionReturns202BeforeContinuation(t *testing.T) {
+	h := NewHandler()
+	client := &blockingStepClient{release: make(chan struct{})}
+	as := &agentSession{
+		agent: agent.NewAgent(client, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "deploy"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: questionAskContent(t, sampleQuestion())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.HandleAnswerQuestion(rec, req)
+	}()
+
+	// The continuation is blocked; the handler must still return promptly.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleAnswerQuestion blocked while the continuation Step was still running")
+	}
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	// The continuation is genuinely still in flight (as.mu held by its goroutine).
+	if as.mu.TryLock() {
+		as.mu.Unlock()
+		t.Fatal("continuation finished before the Step was released — test did not exercise the hang")
+	}
+	close(client.release)
+	waitForAskContinuation(t, as)
+}
+
+// TestHandleResolvePermissionReturns202BeforeContinuation is the permission-side
+// twin of TestHandleAnswerQuestionReturns202BeforeContinuation. The resolve
+// endpoint runs the approved tool + continuation, both of which can be slow;
+// the POST must acknowledge with 202 before either runs.
+func TestHandleResolvePermissionReturns202BeforeContinuation(t *testing.T) {
+	h := NewHandler()
+	client := &blockingStepClient{release: make(chan struct{})}
+	as := &agentSession{
+		agent: agent.NewAgent(client, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "clean the build"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: permissionAskContent(t, samplePermissionRequest())},
+		},
+	}
+	h.agents["sess-1"] = as
+	h.sessions.Register("sess-1", t.TempDir())
+
+	body := `{"request_id":"call-1","approved":false}`
+	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.HandleResolvePermission(rec, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleResolvePermission blocked while the continuation Step was still running")
+	}
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if as.mu.TryLock() {
+		as.mu.Unlock()
+		t.Fatal("continuation finished before the Step was released — test did not exercise the hang")
+	}
+	close(client.release)
+	waitForAskContinuation(t, as)
+}
+
+// waitForAskContinuation blocks until the background continuation started by
+// HandleAnswerQuestion / HandleResolvePermission has finished and released
+// as.mu. The lock is held continuously from findPendingSession through the
+// continuation, so a successful TryLock means the goroutine is done (or no
+// continuation was ever dispatched). Fails the test on timeout.
+func waitForAskContinuation(t *testing.T, as *agentSession) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if as.mu.TryLock() {
+			as.mu.Unlock()
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("ask continuation did not finish within 3s")
+}
+
 // TestHandleAnswerQuestionContinuationEmitsHeartbeats is the regression guard
 // for the false "stalled" project badge. The question-answer continuation holds
 // turnActive=true while its Step runs, so it must publish turn_heartbeat for the
@@ -302,22 +417,18 @@ func TestHandleAnswerQuestionContinuationEmitsHeartbeats(t *testing.T) {
 	defer h.bus.Unsubscribe(sub)
 
 	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
-		h.HandleAnswerQuestion(httptest.NewRecorder(), req)
-	}()
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
 
 	if !waitForBusEvent(sub, "turn_heartbeat", 2*time.Second) {
 		t.Fatal("question continuation published no turn_heartbeat while its Step was running")
 	}
 	close(client.release)
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("question continuation did not return after the Step was released")
-	}
+	waitForAskContinuation(t, as)
 }
 
 // TestHandleAnswerQuestionForwardsMultipleSelection verifies the RC bridge keeps
@@ -485,12 +596,10 @@ func TestHandleAnswerQuestionBroadcastsResolvedBeforeContinuation(t *testing.T) 
 	body := `{"request_id":"call-1","answers":[{"header":"Deploy target","question":"Where should I deploy?","answers":[{"label":"Staging"}]}]}`
 	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.HandleAnswerQuestion(rec, req)
-	}()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
 
 	// The model round is blocked; question_resolved must still arrive now.
 	deadline := time.After(2 * time.Second)
@@ -506,10 +615,7 @@ func TestHandleAnswerQuestionBroadcastsResolvedBeforeContinuation(t *testing.T) 
 	}
 released:
 	close(release)
-	<-done
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
-	}
+	waitForAskContinuation(t, as)
 }
 
 // Regression for ses_2026-09-10-153254-b55bec37: answering a question rewrote
@@ -542,9 +648,10 @@ func TestHandleAnswerQuestionPersistsContinuationToDisk(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.HandleAnswerQuestion(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
+	waitForAskContinuation(t, as)
 
 	loaded, err := session.LoadForDir(projectRoot, id)
 	if err != nil {

@@ -197,9 +197,13 @@ func TestHandleResolvePermissionDeniesAndContinues(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleResolvePermission(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	// The endpoint acknowledges the decision with 202 immediately; the
+	// continuation (with no tool execution on the deny path) runs in the
+	// background.
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
+	waitForAskContinuation(t, as)
 
 	// The pending ask must have been replaced with a denied tool result.
 	resolved := as.messages[2]
@@ -255,22 +259,18 @@ func TestHandleResolvePermissionContinuationEmitsHeartbeats(t *testing.T) {
 	defer h.bus.Unsubscribe(sub)
 
 	body := `{"request_id":"call-1","approved":false}`
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
-		h.HandleResolvePermission(httptest.NewRecorder(), req)
-	}()
+	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResolvePermission(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
 
 	if !waitForBusEvent(sub, "turn_heartbeat", 2*time.Second) {
 		t.Fatal("permission continuation published no turn_heartbeat while its Step was running")
 	}
 	close(client.release)
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("permission continuation did not return after the Step was released")
-	}
+	waitForAskContinuation(t, as)
 }
 
 // TestHandleResolvePermissionAlreadyResolved verifies the under-lock re-check:
@@ -339,6 +339,7 @@ func resolveBody(t *testing.T, h *Handler, as *agentSession, body string) *httpt
 	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.HandleResolvePermission(rec, req)
+	waitForAskContinuation(t, as)
 	return rec
 }
 
@@ -365,8 +366,8 @@ func TestHandleResolvePermissionAlwaysRulePersistsBashPrefix(t *testing.T) {
 	}
 
 	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
 
 	// The prefix rule must be persisted to config.
@@ -410,8 +411,8 @@ func TestHandleResolvePermissionAlwaysRuleWebfetchDomainIsSessionScoped(t *testi
 	}
 
 	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
 
 	// Same domain → allowed from the session cache; no tool rule persisted.
@@ -447,8 +448,8 @@ func TestHandleResolvePermissionAlwaysToolPersistsUserConfirmedRule(t *testing.T
 	}
 
 	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_tool"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
 
 	cfg, ok := savedOcodeConfig(t)
@@ -699,8 +700,8 @@ func TestHandleResolvePermissionLegacyApprovedStillResolves(t *testing.T) {
 		},
 	}
 	rec := resolveBody(t, h, as, `{"request_id":"call-1","approved":true}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
 	}
 	if tailIsPermissionAsk(as.messages) {
 		t.Fatalf("legacy approved=true must resolve the pending ask")

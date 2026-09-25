@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -83,20 +82,46 @@ func TestWithFileLockSerializesConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestWithFileLockBoundedWait(t *testing.T) {
+func TestWithFileLockTimeoutUsesProvidedBound(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "test.lock")
-
-	f, err := os.OpenFile(lockPath, os.O_RDONLY|os.O_CREATE, 0644)
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	t.Cleanup(func() { _ = f.Close() })
+	release, err := TryLock(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
 
-	// Acquire an exclusive flock on the external fd, then verify the helper
-	// times out rather than proceeding.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	started := time.Now()
+	err = WithFileLockTimeout(lockPath, 50*time.Millisecond, func() error {
+		t.Fatal("locked callback unexpectedly ran")
+		return nil
+	})
+	if err == nil {
+		t.Fatal("WithFileLockTimeout succeeded while the lock was held")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("custom timeout took %s", elapsed)
+	}
+}
+
+func TestWithFileLockBoundedWait(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "test.lock")
+
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+
+	release, err := TryLock(f)
+	if err != nil {
 		t.Fatalf("failed to acquire external lock: %v", err)
 	}
+	t.Cleanup(release)
 	start := time.Now()
 	err = WithFileLock(lockPath, func() error {
 		t.Error("fn should not be executed when lock is held")
@@ -108,5 +133,4 @@ func TestWithFileLockBoundedWait(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < Timeout-2*time.Second {
 		t.Errorf("bounded wait returned after %v, expected to hold near %v", elapsed, Timeout)
 	}
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

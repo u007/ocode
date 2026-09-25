@@ -219,7 +219,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/search", s.authMiddleware(s.handleSearchSession))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
+	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleClearSessionThinkingBudget))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
+	s.mux.HandleFunc("POST /api/sessions/{id}/rewinds", s.authMiddleware(s.handler.HandlePreparePendingRewind))
+	s.mux.HandleFunc("GET /api/sessions/{id}/rewinds/{token}", s.authMiddleware(s.handler.HandlePendingRewindStatus))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}/rewinds/{token}", s.authMiddleware(s.handler.HandleCancelPendingRewind))
 	s.mux.HandleFunc("GET /api/models", s.authMiddleware(s.handleListModels))
 	// Model favorites toggle (web/desktop parity with the TUI's ctrl+f). The
 	// model id rides in the JSON body because "provider/model" ids contain "/".
@@ -255,6 +260,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/stage", s.authMiddleware(s.handler.HandleGitStage))
 	s.mux.HandleFunc("POST /api/git/unstage", s.authMiddleware(s.handler.HandleGitUnstage))
 	s.mux.HandleFunc("POST /api/git/discard", s.authMiddleware(s.handler.HandleGitDiscard))
+	s.mux.HandleFunc("POST /api/git/conflict/resolve", s.authMiddleware(s.handler.HandleGitResolveConflict))
 	s.mux.HandleFunc("POST /api/git/stash", s.authMiddleware(s.handler.HandleGitStash))
 	s.mux.HandleFunc("GET /api/git/stash/list", s.authMiddleware(s.handler.HandleGitStashList))
 	s.mux.HandleFunc("GET /api/git/stash/show", s.authMiddleware(s.handler.HandleGitStashShow))
@@ -411,6 +417,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/config/ocode/htr/tabs", s.authMiddleware(s.handleListHTRTabs))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/chat-verbosity", s.authMiddleware(s.handler.HandleGetChatVerbosityConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/chat-verbosity", s.authMiddleware(s.handler.HandleSetChatVerbosityConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/profile-debug", s.authMiddleware(s.handleGetProfileDebugConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/profile-debug", s.authMiddleware(s.handleSetProfileDebugConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleGetPluginsEnabledConfig))
@@ -1232,6 +1240,16 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClearSessionModel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleClearSessionModel(w, r, id)
+}
+
+func (s *Server) handleSetSessionThinkingBudget(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSetSessionThinkingBudget(w, r, id)
+}
+
+func (s *Server) handleClearSessionThinkingBudget(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleClearSessionThinkingBudget(w, r, id)
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {

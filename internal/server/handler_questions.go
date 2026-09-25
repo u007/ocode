@@ -244,7 +244,9 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// Locate the session whose pending question matches request_id. Prefer the
 	// explicit session_id; otherwise scan (tool-call IDs are unique). The
 	// session comes back with its lock held, so the tail cannot be answered out
-	// from under us by a racing request.
+	// from under us by a racing request. On success the lock is handed to the
+	// background continuation (dispatchAskContinuation); every error path below
+	// must therefore unlock as.mu explicitly.
 	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, func(m agent.Message) bool {
 		return m.Role == "tool" && isQuestionAsk(m.Content)
 	})
@@ -252,15 +254,16 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no pending question found for request_id")
 		return
 	}
-	defer as.mu.Unlock()
 
 	answerJSON, err := json.Marshal(req.Answers)
 	if err != nil {
+		as.mu.Unlock()
 		writeError(w, http.StatusBadRequest, "answers are not serializable")
 		return
 	}
 	working := append([]agent.Message(nil), as.messages...)
 	if !applyQuestionAnswer(working, req.RequestID, string(answerJSON)) {
+		as.mu.Unlock()
 		writeError(w, http.StatusConflict, "question already answered or superseded")
 		return
 	}
@@ -269,69 +272,66 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	// this transcript (see rewriteAskResult).
 	h.rewriteAskResult(sessID, working, len(working)-1)
 
-	h.wireHeadlessAgentCallbacks(sessID, as.agent)
-	h.wireLivePersist(sessID, as, working)
-	// Mirrors runTurn: turnActive true only while Step actually runs, so a
-	// reload during this continuation's streaming can buffer/replay it too
-	// (see appendLiveFrame) instead of only covering the turn's first Step.
-	h.sessions.setTurnActive(sessID, true)
-	// Step can run for minutes. Publish heartbeats for its duration or the
-	// web client's stall watchdog marks the still-running continuation
-	// "stalled" (see startTurnHeartbeat). The stop defer is declared last so it
-	// runs first, keeping the existing drain/setTurnActive(false) order intact.
-	stopHeartbeat := h.startTurnHeartbeat(sessID)
-	defer h.sessions.setTurnActive(sessID, false)
-	// A close that arrived while this continuation was running (turnActive
-	// true) could not release the agent mid-Step; drain the marker once the
-	// continuation unwinds, exactly like the permission-resolve path.
-	defer h.drainPendingClose(sessID)
-	defer stopHeartbeat()
-	// Live agent-loop activity for the web/desktop status bar, same as runTurn
-	// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
-	stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
-	defer stopActivity()
+	// The continuation runs off the request goroutine so the endpoint can
+	// acknowledge with 202 immediately. Step can run for minutes; holding the
+	// connection (and the browser's await) for its whole duration is what made
+	// the ask dialog's submit look hung with no result. The dialog already
+	// dismisses on the question_resolved frame broadcast first; the local
+	// answer echo no longer waits for the turn to finish either.
+	model := as.model
+	h.dispatchAskContinuation(sessID, as, func() {
+		h.wireHeadlessAgentCallbacks(sessID, as.agent)
+		h.wireLivePersist(sessID, as, working)
+		// Mirrors runTurn: turnActive true only while Step actually runs, so a
+		// reload during this continuation's streaming can buffer/replay it too
+		// (see appendLiveFrame) instead of only covering the turn's first Step.
+		h.sessions.setTurnActive(sessID, true)
+		// Step can run for minutes. Publish heartbeats for its duration or the
+		// web client's stall watchdog marks the still-running continuation
+		// "stalled" (see startTurnHeartbeat). The stop defer is declared last so it
+		// runs first, keeping the existing drain/setTurnActive(false) order intact.
+		stopHeartbeat := h.startTurnHeartbeat(sessID)
+		defer h.sessions.setTurnActive(sessID, false)
+		// A close that arrived while this continuation was running (turnActive
+		// true) could not release the agent mid-Step; drain the marker once the
+		// continuation unwinds, exactly like the permission-resolve path.
+		defer h.drainPendingClose(sessID)
+		defer stopHeartbeat()
+		// Live agent-loop activity for the web/desktop status bar, same as runTurn
+		// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
+		stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
+		defer stopActivity()
 
-	// Tell every watcher the dialog can be dismissed NOW — before the
-	// continuation round. The answer is already applied in `working`; a slow
-	// model round-trip must not keep the web/desktop dialog on screen (same
-	// ordering as HandleResolvePermission).
-	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
+		// Tell every watcher the dialog can be dismissed NOW — before the
+		// continuation round. The answer is already applied in `working`; a slow
+		// model round-trip must not keep the web/desktop dialog on screen (same
+		// ordering as HandleResolvePermission).
+		h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
 
-	resp, err := as.agent.Step(working)
-	if err != nil {
-		log.Printf("serve error: question answer step: %v", err)
-		// The answer is already in `working`; keep it (plus any rounds Step
-		// completed) so a failed continuation does not discard the exchange.
-		h.commitPartialTranscript(sessID, as, working, resp, true)
-		h.broadcastEvent(SSEEvent{
-			SessionID: sessID,
-			Event:     "error",
-			Data:      map[string]string{"error": err.Error()},
-		})
-		writeError(w, http.StatusInternalServerError, "agent error: "+err.Error())
-		return
-	}
-
-	as.messages = append(append([]agent.Message(nil), working...), resp...)
-
-	var content strings.Builder
-	for _, m := range resp {
-		if m.Role == "assistant" && m.Content != "" {
-			content.WriteString(m.Content)
+		resp, err := as.agent.Step(working)
+		if err != nil {
+			log.Printf("serve error: question answer step: %v", err)
+			// The answer is already in `working`; keep it (plus any rounds Step
+			// completed) so a failed continuation does not discard the exchange.
+			h.commitPartialTranscript(sessID, as, working, resp, true)
+			h.broadcastEvent(SSEEvent{
+				SessionID: sessID,
+				Event:     "error",
+				Data:      map[string]string{"error": err.Error()},
+			})
+			return
 		}
-	}
 
-	h.persistTurnTranscript(sessID, as, len(working), "question-continuation")
+		as.messages = append(append([]agent.Message(nil), working...), resp...)
 
-	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
-	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
+		h.persistTurnTranscript(sessID, as, len(working), "question-continuation")
 
-	// Post-turn auto-compaction check (mirrors runTurn).
-	as.agent.MaybeCompactAsync(as.messages)
+		h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+		h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
 
-	writeJSON(w, http.StatusOK, ChatResponse{
-		Content:   content.String(),
-		SessionID: sessID,
-		Model:     as.model,
+		// Post-turn auto-compaction check (mirrors runTurn).
+		as.agent.MaybeCompactAsync(as.messages)
 	})
+
+	writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: sessID, Model: model})
 }

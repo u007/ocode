@@ -15,3 +15,19 @@ export function notifyWailsRuntimeReady(target: Window = window): boolean {
   invoke("wails:runtime:ready");
   return true;
 }
+
+/**
+ * Send a raw message to the desktop shell. Messages that do not start with
+ * "wails:" reach application.Options.RawMessageHandler on the Go side; this is
+ * how the SPA talks to native code without loading the full runtime module.
+ *
+ * Returns false in a plain browser (no bridge), so callers can no-op.
+ */
+export function invokeWails(message: string, target: Window = window): boolean {
+  const invoke = (target as WailsWindow)._wails?.invoke;
+  if (!invoke) {
+    return false;
+  }
+  invoke(message);
+  return true;
+}

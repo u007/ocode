@@ -671,6 +671,17 @@ func (m *SessionManager) PushPending(sessionID, content string) {
 	}
 }
 
+// ReplacePending atomically replaces the persisted-but-unturned queue for a
+// session. Rewind uses it to discard any stale queue left by an earlier turn
+// and retain exactly the newly committed user content, in order.
+func (m *SessionManager) ReplacePending(sessionID string, contents []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		e.pending = append([]string(nil), contents...)
+	}
+}
+
 // PendingFront returns the oldest persisted-but-unturned message content.
 func (m *SessionManager) PendingFront(sessionID string) (string, bool) {
 	m.mu.Lock()

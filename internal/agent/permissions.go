@@ -1969,11 +1969,21 @@ func isWithinWorkDir(pm *PermissionManager, rawPath string) bool {
 	if pm.workDir == "" {
 		return true
 	}
-	resolved, ok := resolveForScopeCheck(rawPath)
+	resolved, ok := resolveForScopeCheck(pm.anchorToWorkDir(rawPath))
 	if !ok {
 		return false
 	}
 	return pathUnderRoot(resolved, pm.workDir)
+}
+
+// anchorToWorkDir joins a relative path onto the session workdir. Tools resolve
+// relative paths against the session workdir, and web/desktop sessions never
+// chdir the process, so filepath.Abs (process cwd) would misplace them.
+func (pm *PermissionManager) anchorToWorkDir(rawPath string) string {
+	if filepath.IsAbs(rawPath) {
+		return rawPath
+	}
+	return filepath.Join(pm.effectiveWorkDir(), rawPath)
 }
 
 // isWithinAllowedScope reports whether resolved is in-scope for bash auto-allow:
@@ -2236,7 +2246,7 @@ func (pm *PermissionManager) AllowedRootsClassified() []sandbox.RootSpec {
 // returned by AllowedRoots. Used by the interpreter effect verifier to confirm
 // that inferred read/write/delete targets stay within policy.
 func (pm *PermissionManager) IsPathWithinAllowedRoots(rawPath string) bool {
-	resolved, ok := resolveForScopeCheck(rawPath)
+	resolved, ok := resolveForScopeCheck(pm.anchorToWorkDir(rawPath))
 	if !ok {
 		return false
 	}

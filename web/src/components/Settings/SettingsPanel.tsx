@@ -27,6 +27,7 @@ import BackendForm from "./BackendForm";
 import BrowserForm from "./BrowserForm";
 import VaultForm from "./VaultForm";
 import TTSForm from "./TTSForm";
+import ChatDisplayForm from "./ChatDisplayForm";
 
 export type SettingsGroupId =
   | "backend"
@@ -38,6 +39,7 @@ export type SettingsGroupId =
   | "model-defaults"
   | "commit-msg"
   | "compact"
+  | "chat-display"
   | "advisor"
   | "permissions"
   | "system-permissions"
@@ -74,6 +76,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "model-defaults", label: "Model Defaults & Recap" },
   { id: "commit-msg", label: "Commit Message" },
   { id: "compact", label: "Compact" },
+  { id: "chat-display", label: "Chat display" },
   { id: "advisor", label: "Advisor" },
   { id: "permissions", label: "Permissions" },
   { id: "system-permissions", label: "System Permissions" },
@@ -122,6 +125,8 @@ function renderGroup(id: SettingsGroupId) {
       return <CommitMsgForm />;
     case "compact":
       return <CompactForm />;
+    case "chat-display":
+      return <ChatDisplayForm />;
     case "advisor":
       return <AdvisorForm />;
     case "permissions":

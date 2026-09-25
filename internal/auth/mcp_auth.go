@@ -1,18 +1,23 @@
 package auth
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/u007/ocode/internal/filelock"
 )
 
 type MCPAuthToken struct {
@@ -21,15 +26,20 @@ type MCPAuthToken struct {
 	TokenType    string   `json:"token_type"`
 	Expiry       int64    `json:"expiry"`
 	Scopes       []string `json:"scopes,omitempty"`
+	ClientID     string   `json:"-"`
+	ServerURL    string   `json:"-"`
 }
 
-type mcpAuthFile struct {
-	Tokens map[string]MCPAuthToken `json:"tokens"`
-}
+type mcpAuthFile map[string]json.RawMessage
 
 var (
 	mcpAuthMu sync.Mutex
-	mcpCache  *mcpAuthFile
+	mcpCache  mcpAuthFile
+)
+
+const (
+	mcpAuthLockTimeout      = 30 * time.Second
+	nativeMCPAuthStorageKey = "tokens"
 )
 
 func mcpAuthPath() (string, error) {
@@ -58,24 +68,33 @@ func loadMCPAuthLocked() error {
 	if err != nil {
 		return fmt.Errorf("resolve mcp auth path: %w", err)
 	}
-	mcpCache = &mcpAuthFile{Tokens: map[string]MCPAuthToken{}}
-	data, err := os.ReadFile(path)
+	loaded, err := readMCPAuthFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read %s: %w", path, err)
+		return err
 	}
-	if err := json.Unmarshal(data, mcpCache); err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
-	}
-	if mcpCache.Tokens == nil {
-		mcpCache.Tokens = map[string]MCPAuthToken{}
-	}
+	mcpCache = loaded
 	return nil
 }
 
-func persistMCPAuthLocked() error {
+func readMCPAuthFile(path string) (mcpAuthFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(mcpAuthFile), nil
+		}
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var authFile mcpAuthFile
+	if err := json.Unmarshal(data, &authFile); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if authFile == nil {
+		authFile = make(mcpAuthFile)
+	}
+	return authFile, nil
+}
+
+func updateMCPAuthFileLocked(update func(mcpAuthFile) error) error {
 	path, err := mcpAuthPath()
 	if err != nil {
 		return fmt.Errorf("resolve mcp auth path: %w", err)
@@ -83,15 +102,56 @@ func persistMCPAuthLocked() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create mcp auth dir: %w", err)
 	}
-	data, err := json.MarshalIndent(mcpCache, "", "  ")
+	if err := withMCPAuthFileLock(path, func() error {
+		latest, err := readMCPAuthFile(path)
+		if err != nil {
+			return err
+		}
+		if err := update(latest); err != nil {
+			return err
+		}
+		if err := writeMCPAuthFile(path, latest); err != nil {
+			return err
+		}
+		mcpCache = latest
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func withMCPAuthFileLock(path string, fn func() error) error {
+	return filelock.WithFileLockTimeout(path+".lock", mcpAuthLockTimeout, fn)
+}
+
+func writeMCPAuthFile(path string, authFile mcpAuthFile) error {
+	data, err := json.MarshalIndent(authFile, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal mcp auth: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write mcp auth tmp: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".mcp-auth-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create mcp auth temp file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod mcp auth temp file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write mcp auth temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync mcp auth temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close mcp auth temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename mcp auth file: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
@@ -106,28 +166,247 @@ func GetMCPAuth(name string) (MCPAuthToken, bool) {
 	if err := loadMCPAuthLocked(); err != nil {
 		return MCPAuthToken{}, false
 	}
-	t, ok := mcpCache.Tokens[name]
-	return t, ok
+	if token, ok := upstreamMCPAuthToken(mcpCache[name]); ok {
+		return token, true
+	}
+	nativeTokens, ok := rawObject(mcpCache[nativeMCPAuthStorageKey])
+	if !ok {
+		return MCPAuthToken{}, false
+	}
+	return nativeMCPAuthToken(nativeTokens[name])
+}
+
+// GetNativeMCPAuth reads only ocode's legacy native token schema. Callers that
+// have a configured remote URL use this instead of GetMCPAuth so an upstream
+// OpenCode credential bound to a different server can never be sent as a
+// static-OAuth fallback.
+func GetNativeMCPAuth(name string) (MCPAuthToken, bool) {
+	mcpAuthMu.Lock()
+	defer mcpAuthMu.Unlock()
+	if err := loadMCPAuthLocked(); err != nil {
+		return MCPAuthToken{}, false
+	}
+	nativeTokens, ok := rawObject(mcpCache[nativeMCPAuthStorageKey])
+	if !ok {
+		return MCPAuthToken{}, false
+	}
+	return nativeMCPAuthToken(nativeTokens[name])
 }
 
 func SetMCPAuth(name string, token MCPAuthToken) error {
 	mcpAuthMu.Lock()
 	defer mcpAuthMu.Unlock()
-	if err := loadMCPAuthLocked(); err != nil {
-		return err
+	return updateMCPAuthFileLocked(func(latest mcpAuthFile) error {
+		return setNativeMCPAuthToken(latest, name, token)
+	})
+}
+
+// GetMCPAuthForServer loads an upstream OpenCode credential only when its
+// saved server URL exactly matches the configured remote MCP URL.
+func GetMCPAuthForServer(name, serverURL string) (MCPAuthToken, bool) {
+	if serverURL == "" || name == nativeMCPAuthStorageKey {
+		return MCPAuthToken{}, false
 	}
-	mcpCache.Tokens[name] = token
-	return persistMCPAuthLocked()
+
+	mcpAuthMu.Lock()
+	defer mcpAuthMu.Unlock()
+	if err := loadMCPAuthLocked(); err != nil {
+		return MCPAuthToken{}, false
+	}
+	token, ok := upstreamMCPAuthToken(mcpCache[name])
+	return token, ok && token.ServerURL == serverURL
+}
+
+// SetMCPAuthForServer stores a credential in the upstream OpenCode schema,
+// preserving unrelated top-level entries and unknown metadata in the entry.
+func SetMCPAuthForServer(name, serverURL string, token MCPAuthToken) error {
+	if name == "" || serverURL == "" {
+		return fmt.Errorf("MCP auth server name and URL are required")
+	}
+	if name == nativeMCPAuthStorageKey {
+		return fmt.Errorf("MCP auth server name %q is reserved", name)
+	}
+
+	mcpAuthMu.Lock()
+	defer mcpAuthMu.Unlock()
+	return updateMCPAuthFileLocked(func(latest mcpAuthFile) error {
+		return setUpstreamMCPAuthToken(latest, name, serverURL, token)
+	})
 }
 
 func DeleteMCPAuth(name string) error {
 	mcpAuthMu.Lock()
 	defer mcpAuthMu.Unlock()
-	if err := loadMCPAuthLocked(); err != nil {
+	return updateMCPAuthFileLocked(func(latest mcpAuthFile) error {
+		if name != nativeMCPAuthStorageKey {
+			delete(latest, name)
+		}
+		nativeTokens, ok := rawObject(latest[nativeMCPAuthStorageKey])
+		if !ok {
+			return nil
+		}
+		delete(nativeTokens, name)
+		if len(nativeTokens) == 0 {
+			delete(latest, nativeMCPAuthStorageKey)
+			return nil
+		}
+		return setRawJSON(latest, nativeMCPAuthStorageKey, nativeTokens)
+	})
+}
+
+func setNativeMCPAuthToken(authFile mcpAuthFile, name string, token MCPAuthToken) error {
+	nativeTokens, ok := rawObject(authFile[nativeMCPAuthStorageKey])
+	if !ok {
+		nativeTokens = make(map[string]json.RawMessage)
+	}
+	encoded, err := json.Marshal(token)
+	if err != nil {
+		return fmt.Errorf("marshal native MCP auth token: %w", err)
+	}
+	nativeTokens[name] = encoded
+	encodedTokens, err := json.Marshal(nativeTokens)
+	if err != nil {
+		return fmt.Errorf("marshal native MCP auth tokens: %w", err)
+	}
+	authFile[nativeMCPAuthStorageKey] = encodedTokens
+	return nil
+}
+
+func setUpstreamMCPAuthToken(authFile mcpAuthFile, name, serverURL string, token MCPAuthToken) error {
+	if name == nativeMCPAuthStorageKey {
+		return fmt.Errorf("MCP auth server name %q is reserved", name)
+	}
+	entry, ok := rawObject(authFile[name])
+	if !ok {
+		entry = make(map[string]json.RawMessage)
+	}
+	tokens, ok := rawObject(entry[nativeMCPAuthStorageKey])
+	if !ok {
+		tokens = make(map[string]json.RawMessage)
+	}
+	if err := setRawJSON(tokens, "accessToken", token.AccessToken); err != nil {
 		return err
 	}
-	delete(mcpCache.Tokens, name)
-	return persistMCPAuthLocked()
+	if err := setRawJSON(tokens, "refreshToken", token.RefreshToken); err != nil {
+		return err
+	}
+	if err := setRawJSON(tokens, "tokenType", cmp.Or(token.TokenType, "Bearer")); err != nil {
+		return err
+	}
+	if err := setRawJSON(tokens, "expiresAt", token.Expiry); err != nil {
+		return err
+	}
+	if err := setRawJSON(tokens, "scope", strings.Join(token.Scopes, " ")); err != nil {
+		return err
+	}
+
+	clientInfo, ok := rawObject(entry["clientInfo"])
+	if !ok {
+		clientInfo = make(map[string]json.RawMessage)
+	}
+	if err := setRawJSON(clientInfo, "clientId", token.ClientID); err != nil {
+		return err
+	}
+	if err := setRawJSON(entry, nativeMCPAuthStorageKey, tokens); err != nil {
+		return err
+	}
+	if err := setRawJSON(entry, "clientInfo", clientInfo); err != nil {
+		return err
+	}
+	if err := setRawJSON(entry, "serverUrl", serverURL); err != nil {
+		return err
+	}
+	return setRawJSON(authFile, name, entry)
+}
+
+func rawObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, false
+	}
+	return object, true
+}
+
+func setRawJSON[T any](object map[string]json.RawMessage, key string, value T) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal MCP auth field %q: %w", key, err)
+	}
+	object[key] = encoded
+	return nil
+}
+
+func upstreamMCPAuthToken(entryRaw json.RawMessage) (MCPAuthToken, bool) {
+	entry, ok := rawObject(entryRaw)
+	if !ok {
+		return MCPAuthToken{}, false
+	}
+	tokens, ok := rawObject(entry["tokens"])
+	if !ok {
+		return MCPAuthToken{}, false
+	}
+	token, ok := upstreamTokenFromJSON(tokens)
+	if !ok {
+		return MCPAuthToken{}, false
+	}
+	if clientInfo, ok := rawObject(entry["clientInfo"]); ok {
+		token.ClientID = rawString(clientInfo["clientId"])
+	}
+	token.ServerURL = rawString(entry["serverUrl"])
+	return token, true
+}
+
+func nativeMCPAuthToken(raw json.RawMessage) (MCPAuthToken, bool) {
+	if _, ok := rawObject(raw); !ok {
+		return MCPAuthToken{}, false
+	}
+	var token MCPAuthToken
+	if err := json.Unmarshal(raw, &token); err != nil {
+		return MCPAuthToken{}, false
+	}
+	return token, true
+}
+
+func upstreamTokenFromJSON(tokens map[string]json.RawMessage) (MCPAuthToken, bool) {
+	accessToken := rawString(tokens["accessToken"])
+	refreshToken := rawString(tokens["refreshToken"])
+	if accessToken == "" && refreshToken == "" {
+		return MCPAuthToken{}, false
+	}
+	scopes := strings.Fields(rawString(tokens["scope"]))
+	return MCPAuthToken{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenType:    cmp.Or(rawString(tokens["tokenType"]), "Bearer"),
+		Expiry:       rawInt64(tokens["expiresAt"]),
+		Scopes:       scopes,
+	}, true
+}
+
+func rawString(raw json.RawMessage) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func rawInt64(raw json.RawMessage) int64 {
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	if text == "" {
+		return 0
+	}
+	if value, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return value
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0
+	}
+	return int64(value)
 }
 
 func (t MCPAuthToken) IsExpired() bool {
@@ -135,6 +414,9 @@ func (t MCPAuthToken) IsExpired() bool {
 }
 
 func (t MCPAuthToken) AuthorizationHeader() string {
+	if t.AccessToken == "" {
+		return ""
+	}
 	tokenType := t.TokenType
 	if tokenType == "" {
 		tokenType = "Bearer"
@@ -143,6 +425,12 @@ func (t MCPAuthToken) AuthorizationHeader() string {
 }
 
 func MCPAuthFlow(serverName, authURL, tokenURL, clientID string, scopes []string) error {
+	if err := validateMCPOAuthEndpoint(authURL); err != nil {
+		return fmt.Errorf("mcp authorization endpoint is invalid: %w", err)
+	}
+	if err := validateMCPOAuthEndpoint(tokenURL); err != nil {
+		return fmt.Errorf("mcp token endpoint is invalid: %w", err)
+	}
 	pkce, err := NewPKCE()
 	if err != nil {
 		return fmt.Errorf("generate pkce: %w", err)
@@ -229,6 +517,9 @@ func MCPAuthFlow(serverName, authURL, tokenURL, clientID string, scopes []string
 }
 
 func exchangeMCPCodeForToken(clientID, code, verifier, redirectURL, tokenURL string) (MCPAuthToken, error) {
+	if err := validateMCPOAuthEndpoint(tokenURL); err != nil {
+		return MCPAuthToken{}, fmt.Errorf("token endpoint is invalid: %w", err)
+	}
 	form := url.Values{}
 	form.Set("client_id", clientID)
 	form.Set("code", code)
@@ -236,9 +527,22 @@ func exchangeMCPCodeForToken(clientID, code, verifier, redirectURL, tokenURL str
 	form.Set("grant_type", "authorization_code")
 	form.Set("redirect_uri", redirectURL)
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
-	resp, err := httpClient.PostForm(tokenURL, form)
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
+		return MCPAuthToken{}, fmt.Errorf("create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpClient := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return fmt.Errorf("redirects are not allowed for MCP OAuth code exchange")
+		},
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		return MCPAuthToken{}, fmt.Errorf("token request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -278,58 +582,188 @@ func exchangeMCPCodeForToken(clientID, code, verifier, redirectURL, tokenURL str
 }
 
 func RefreshMCPAuthToken(serverName, tokenURL, clientID string, token MCPAuthToken) (MCPAuthToken, error) {
-	if token.RefreshToken == "" {
-		return MCPAuthToken{}, fmt.Errorf("no refresh token available")
+	newToken, err := requestMCPRefresh(tokenURL, clientID, token)
+	if err != nil {
+		return MCPAuthToken{}, err
+	}
+	if err := SetMCPAuth(serverName, newToken); err != nil {
+		return MCPAuthToken{}, fmt.Errorf("save refreshed token: %w", err)
+	}
+	return newToken, nil
+}
+
+// MCPRefreshError reports a refresh failure without including the endpoint,
+// client identifier, or any credential material in its message.
+type MCPRefreshError struct {
+	StatusCode int
+	Reason     string
+}
+
+func (e *MCPRefreshError) Error() string {
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("MCP token refresh failed (HTTP %d): %s", e.StatusCode, e.Reason)
+	}
+	return "MCP token refresh failed: " + e.Reason
+}
+
+// RefreshMCPAuthTokenForServer refreshes and persists a URL-bound upstream
+// credential without replacing unrelated mcp-auth.json entries.
+func RefreshMCPAuthTokenForServer(serverName, serverURL, tokenURL, clientID string, token MCPAuthToken) (MCPAuthToken, error) {
+	if token.ServerURL != serverURL {
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "stored server binding does not match configured URL"}
 	}
 
+	mcpAuthMu.Lock()
+	defer mcpAuthMu.Unlock()
+	path, err := mcpAuthPath()
+	if err != nil {
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "auth storage path is unavailable"}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "auth storage directory is unavailable"}
+	}
+
+	var refreshed MCPAuthToken
+	err = withMCPAuthFileLock(path, func() error {
+		latest, err := readMCPAuthFile(path)
+		if err != nil {
+			return &MCPRefreshError{Reason: "latest auth storage could not be read"}
+		}
+		current, hasCurrent := upstreamMCPAuthToken(latest[serverName])
+		if !hasCurrent || current.ServerURL != serverURL {
+			return &MCPRefreshError{Reason: "stored server binding changed or was removed"}
+		}
+		if !current.IsExpired() {
+			refreshed = current
+			mcpCache = latest
+			return nil
+		}
+		token = current
+		clientID = cmp.Or(current.ClientID, clientID)
+		if token.RefreshToken == "" {
+			return &MCPRefreshError{Reason: "stored refresh token is unavailable"}
+		}
+		if clientID == "" {
+			return &MCPRefreshError{Reason: "stored client identity is unavailable"}
+		}
+
+		newToken, err := requestMCPRefresh(tokenURL, clientID, token)
+		if err != nil {
+			return err
+		}
+		newToken.ClientID = clientID
+		newToken.ServerURL = serverURL
+		if err := setUpstreamMCPAuthToken(latest, serverName, serverURL, newToken); err != nil {
+			return fmt.Errorf("save refreshed token: %w", err)
+		}
+		if err := writeMCPAuthFile(path, latest); err != nil {
+			return fmt.Errorf("save refreshed token: %w", err)
+		}
+		mcpCache = latest
+		refreshed = newToken
+		return nil
+	})
+	if err != nil {
+		return MCPAuthToken{}, err
+	}
+	return refreshed, nil
+}
+
+func requestMCPRefresh(tokenURL, clientID string, previous MCPAuthToken) (MCPAuthToken, error) {
+	if previous.RefreshToken == "" {
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "stored refresh token is unavailable"}
+	}
+	if err := validateMCPOAuthEndpoint(tokenURL); err != nil {
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "refresh endpoint must use HTTPS unless it targets loopback"}
+	}
 	form := url.Values{}
 	form.Set("client_id", clientID)
-	form.Set("refresh_token", token.RefreshToken)
+	form.Set("refresh_token", previous.RefreshToken)
 	form.Set("grant_type", "refresh_token")
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
-	resp, err := httpClient.PostForm(tokenURL, form)
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return MCPAuthToken{}, fmt.Errorf("refresh request failed: %w", err)
+		// intentionally not logged: the underlying URL may contain credentials.
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "refresh endpoint is invalid"}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpClient := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return fmt.Errorf("redirects are not allowed for MCP OAuth refresh")
+		},
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		// intentionally not logged: transport errors include the full endpoint URL.
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "refresh request failed"}
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return MCPAuthToken{}, fmt.Errorf("token refresh endpoint returned %d", resp.StatusCode)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return MCPAuthToken{}, &MCPRefreshError{StatusCode: resp.StatusCode, Reason: "refresh credentials were rejected"}
 	}
 
-	var tokenResp struct {
+	var response struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		TokenType    string `json:"token_type"`
 		ExpiresIn    int64  `json:"expires_in"`
 		Scope        string `json:"scope"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return MCPAuthToken{}, fmt.Errorf("parse refresh token response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "refresh response was not valid JSON"}
 	}
-
-	var scopes []string
-	if tokenResp.Scope != "" {
-		scopes = strings.Split(tokenResp.Scope, " ")
+	if response.AccessToken == "" {
+		return MCPAuthToken{}, &MCPRefreshError{Reason: "refresh response contained no access token"}
 	}
-
-	expiresIn := tokenResp.ExpiresIn
-	if expiresIn == 0 {
+	refreshToken := response.RefreshToken
+	if refreshToken == "" {
+		refreshToken = previous.RefreshToken
+	}
+	scopes := strings.Fields(response.Scope)
+	if len(scopes) == 0 {
+		scopes = previous.Scopes
+	}
+	tokenType := response.TokenType
+	if tokenType == "" {
+		tokenType = previous.TokenType
+	}
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	expiresIn := response.ExpiresIn
+	if expiresIn <= 0 {
 		expiresIn = 3600
 	}
-
-	newToken := MCPAuthToken{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		TokenType:    tokenResp.TokenType,
+	return MCPAuthToken{
+		AccessToken:  response.AccessToken,
+		RefreshToken: refreshToken,
+		TokenType:    tokenType,
 		Expiry:       time.Now().Unix() + expiresIn,
 		Scopes:       scopes,
-	}
+	}, nil
+}
 
-	if err := SetMCPAuth(serverName, newToken); err != nil {
-		return MCPAuthToken{}, fmt.Errorf("save refreshed token: %w", err)
+func validateMCPOAuthEndpoint(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || !parsed.IsAbs() || parsed.Hostname() == "" {
+		return fmt.Errorf("OAuth endpoint URL is invalid")
 	}
-
-	return newToken, nil
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme == "http" {
+		host := strings.ToLower(parsed.Hostname())
+		if host == "localhost" {
+			return nil
+		}
+		ip := net.ParseIP(parsed.Hostname())
+		if ip != nil && ip.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf("OAuth endpoint must use HTTPS unless it targets loopback")
 }

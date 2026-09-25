@@ -122,11 +122,12 @@ func (h *Handler) HandleGetThinkingBudget(w http.ResponseWriter, r *http.Request
 // model. Accepts either {"level": "med"} or {"budget": 8000}; the budget must
 // be one of the canonical config.ThinkingBudgetLevels values. It persists the
 // choice (config.SaveLastThinkingBudget) and pushes a fresh status snapshot so
-// the web sidebar/status bar update immediately. In headless/desktop mode the
-// budget takes effect for subsequently built agent sessions; when a TUI is
-// bridged the running TUI keeps its own level until the user changes it there
-// (mirroring the model-switch limitation — see
-// docs/architecture/sidebar-tui-parity-gaps.md).
+// the web sidebar/status bar update immediately. This is the process-wide
+// DEFAULT: a session with its own override (HandleSetSessionThinkingBudget,
+// metadata key thinking_budget) keeps it. Sessions without an override pick
+// the new default up on their next turn via reconcileProfileAgent. When a
+// TUI is bridged the running TUI keeps its own level until the user changes
+// it there (see docs/architecture/sidebar-tui-parity-gaps.md).
 func (h *Handler) HandleSetThinkingBudget(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Level  string `json:"level"`
@@ -2106,6 +2107,64 @@ func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"memory_enabled":     req.MemoryEnabled,
 		"doc_prompt_enabled": req.DocPromptEnabled,
+	})
+}
+
+type chatVerbosityResponse struct {
+	Preset    string                        `json:"preset"`
+	Overrides config.ChatVerbosityOverrides `json:"overrides"`
+}
+
+// HandleGetChatVerbosityConfig reports the shared web/desktop presentation
+// policy and its effective renderer modes.
+func (h *Handler) HandleGetChatVerbosityConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.ChatVerbosityConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.ChatVerbosity
+	}
+	h.mu.Unlock()
+
+	normalized := config.NormalizeChatVerbosityConfig(cfg)
+	if err := normalized.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, chatVerbosityResponse{
+		Preset:    normalized.Preset,
+		Overrides: normalized.Overrides,
+	})
+}
+
+// HandleSetChatVerbosityConfig validates and persists the shared presentation
+// policy. The event payload is diagnostic only; clients re-fetch the local
+// config because the unified bus envelope has no host identity.
+func (h *Handler) HandleSetChatVerbosityConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.ChatVerbosityConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	normalized := config.NormalizeChatVerbosityConfig(req)
+	if err := normalized.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := config.SaveOcodeChatVerbosity(normalized); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save chat verbosity config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.ChatVerbosity = normalized
+	}
+	h.mu.Unlock()
+	h.bus.Publish("chat_verbosity_changed", "", "", map[string]any{
+		"config": normalized,
+	})
+	writeJSON(w, http.StatusOK, chatVerbosityResponse{
+		Preset:    normalized.Preset,
+		Overrides: normalized.Overrides,
 	})
 }
 

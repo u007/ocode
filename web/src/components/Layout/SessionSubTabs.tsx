@@ -2,6 +2,9 @@ import { useRef } from "react";
 import { MessageSquare, Bot, History, ScrollText, Activity, Eye } from "lucide-react";
 import { useProjectState, type SessionSubTabId } from "../../stores/projectStore";
 import { getSessionSlice, useChatSelector } from "../../stores/chatStore";
+import { resolveSessionHost } from "@/hooks/useSessionHost";
+import { tabLoadKey, type TabLoadingSnapshot } from "@/hooks/useKeyedLoad";
+import { TabLoadingIndicator } from "@/components/common/TabLoadingIndicator";
 
 const subTabs: { id: SessionSubTabId; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
@@ -12,8 +15,12 @@ const subTabs: { id: SessionSubTabId; label: string; icon: typeof MessageSquare 
   { id: "preview", label: "Preview", icon: Eye },
 ];
 
-export default function SessionSubTabs() {
-  const { tabs, activeTabId, dispatch } = useProjectState();
+interface Props {
+  loadingStates?: ReadonlyMap<string, TabLoadingSnapshot>;
+}
+
+export default function SessionSubTabs({ loadingStates }: Props) {
+  const { state: projectState, tabs, activeTabId, dispatch } = useProjectState();
   // Selector must run unconditionally (before the early return below), so
   // it's keyed on activeTabId directly rather than activeSessionTab.id.
   const chatSlice = useChatSelector((s) => getSessionSlice(s, activeTabId));
@@ -34,6 +41,15 @@ export default function SessionSubTabs() {
   };
 
   if (!activeSessionTab) return null;
+
+  const changesKey = tabLoadKey(
+    resolveSessionHost(projectState, activeSessionTab.id),
+    activeSessionTab.projectPath,
+    `${activeSessionTab.id}:changes`,
+  );
+  const changesState = loadingStates?.get(changesKey);
+  const changesLoading = changesState?.phase === "refresh";
+  const changesError = changesState?.phase === "error";
 
   const contextCurrent = chatSlice.tuiStatus?.context_current_tokens ?? 0;
   const contextMax = chatSlice.tuiStatus?.context_max_tokens ?? 0;
@@ -77,6 +93,8 @@ export default function SessionSubTabs() {
         const Icon = tab.icon;
         const isActive = activeSessionTab.activeSubTab === tab.id;
         const isChat = tab.id === "chat";
+        const tabLoading = tab.id === "changes" ? changesLoading : false;
+        const tabLoadError = tab.id === "changes" ? changesError : false;
         const badgeLabel = isChat ? chatMemoryLabel : undefined;
         const badgeTooltip = isChat ? chatMemoryTooltip : undefined;
         // Color-code memory pressure similar to CoworkSidebar: green <65%, yellow <85%, red >=85%
@@ -100,6 +118,7 @@ export default function SessionSubTabs() {
           <button
             key={tab.id}
             onClick={() => dispatch({ type: "SET_TAB_SUB_TAB", id: activeSessionTab.id, subTab: tab.id })}
+            aria-busy={tabLoading || undefined}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs leading-4 transition-colors whitespace-nowrap shrink-0 ${
               isActive
                 ? "text-foreground font-medium border-b-2 border-accent bg-accent/10"
@@ -108,6 +127,9 @@ export default function SessionSubTabs() {
           >
             <Icon className="w-3.5 h-3.5" />
             {tab.label}
+            {tab.id === "changes" && (
+              <TabLoadingIndicator active={tabLoading} error={tabLoadError} label="Loading Changes" />
+            )}
             {badgeLabel !== undefined && badgeLabel !== null && (
               <span
                 className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${memoryBadgeColor}`}

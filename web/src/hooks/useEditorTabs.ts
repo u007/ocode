@@ -9,6 +9,7 @@ import {
   saveEditorTabs,
 } from "../components/Files/editorTabsPersistence";
 import { isLegacyOfficePath, previewOnlyKindForPath } from "../lib/previewKind";
+import { noteDraftPersistFailure, noteDraftPersistPending, noteDraftPersistSuccess, reconcileDraftGuard } from "../lib/editorDraftGuard";
 
 export interface EditorTab {
   id: string;
@@ -279,35 +280,82 @@ export function useEditorTabs(): UseEditorTabsResult {
     editorTabsRef.current = editorTabs;
   }, [editorTabs]);
 
+  // Keep the quit guard in sync with which tabs are still dirty: closing,
+  // discarding, reloading, or saving a tab clears its guard entry (and the
+  // native block once none remain).
+  useEffect(() => {
+    reconcileDraftGuard(editorTabs.filter((t) => t.isDirty).map((t) => t.id));
+  }, [editorTabs]);
+
+  // Draft writes are debounced per tab so a localStorage write doesn't run on
+  // every keystroke. A trailing debounce alone can be pushed out forever by
+  // continuous typing (every keystroke resets the timer), leaving the whole
+  // tail of edits in memory — and the quit guard none the wiser. These bound
+  // it: a write lands at most DRAFT_WRITE_MAX_WAIT_MS after the first
+  // unpersisted keystroke, and at least DRAFT_WRITE_MIN_DELAY_MS after the last
+  // one, so the flush always reads a committed buffer.
+  const DRAFT_WRITE_DEBOUNCE_MS = 500;
+  const DRAFT_WRITE_MAX_WAIT_MS = 1000;
+  const DRAFT_WRITE_MIN_DELAY_MS = 50;
+
   // Debounced draft persistence per tab (localStorage write per keystroke
   // would be wasteful on large files).
   const draftTimers = useRef<Map<string, number>>(new Map());
+  // When the current unpersisted batch for a tab started (Date.now()), used to
+  // clamp the debounce into an absolute deadline.
+  const draftPendingSince = useRef<Map<string, number>>(new Map());
 
   const flushDraft = useCallback((id: string) => {
     const tab = editorTabsRef.current.find((t) => t.id === id);
     if (!tab) return;
     if (tab.isDirty) {
-      saveEditorDraft(id, { content: tab.content, baseHash: tab.baseHash });
+      const ok = saveEditorDraft(id, { content: tab.content, baseHash: tab.baseHash });
+      if (ok) noteDraftPersistSuccess(id);
+      else noteDraftPersistFailure(id, tab.path);
     } else {
       clearEditorDraft(id);
+      noteDraftPersistSuccess(id);
     }
   }, []);
 
-  const handleEditorChange = useCallback((id: string, content: string) => {
-    setEditorTabs((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, content, isDirty: content !== t.originalContent } : t)),
-    );
-    const timers = draftTimers.current;
-    const pending = timers.get(id);
-    if (pending !== undefined) window.clearTimeout(pending);
-    timers.set(
-      id,
-      window.setTimeout(() => {
-        timers.delete(id);
-        flushDraft(id);
-      }, 500),
-    );
-  }, [flushDraft]);
+  const handleEditorChange = useCallback(
+    (id: string, content: string) => {
+      const applyEdit = (t: EditorTab) =>
+        t.id === id ? { ...t, content, isDirty: content !== t.originalContent } : t;
+      // Mirror the new content into the synchronous ref immediately: a max-wait
+      // flush can fire ~50ms from now, before the effect that syncs
+      // editorTabsRef has run, and writing a stale draft would drop the newest
+      // keystrokes.
+      editorTabsRef.current = editorTabsRef.current.map(applyEdit);
+      setEditorTabs((prev) => prev.map(applyEdit));
+
+      // Arm the quit guard right away: until the draft is written these edits
+      // exist only in memory, so quitting would drop them silently.
+      noteDraftPersistPending(id, editorTabsRef.current.find((t) => t.id === id)?.path ?? "");
+
+      const timers = draftTimers.current;
+      const pendingTimer = timers.get(id);
+      if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
+
+      const now = Date.now();
+      const startedAt = draftPendingSince.current.get(id);
+      if (startedAt === undefined) draftPendingSince.current.set(id, now);
+      const elapsed = startedAt === undefined ? 0 : now - startedAt;
+      const delay = Math.max(
+        DRAFT_WRITE_MIN_DELAY_MS,
+        Math.min(DRAFT_WRITE_DEBOUNCE_MS, DRAFT_WRITE_MAX_WAIT_MS - elapsed),
+      );
+      timers.set(
+        id,
+        window.setTimeout(() => {
+          timers.delete(id);
+          draftPendingSince.current.delete(id);
+          flushDraft(id);
+        }, delay),
+      );
+    },
+    [flushDraft],
+  );
 
   // A reload/quit inside the debounce window would drop the last keystrokes —
   // flush every pending draft synchronously on the way out.
@@ -315,6 +363,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     const flushAll = () => {
       for (const [id, timer] of draftTimers.current) {
         window.clearTimeout(timer);
+        draftPendingSince.current.delete(id);
         flushDraft(id);
       }
       draftTimers.current.clear();
@@ -399,6 +448,7 @@ export function useEditorTabs(): UseEditorTabsResult {
         await api.saveFileContent(tab.path, tab.content, tab.projectRoot, expectedHash, opts?.force, tab.projectHost);
         setSaveError(null);
         clearEditorDraft(id);
+        noteDraftPersistSuccess(id);
         setEditorTabs((prev) =>
           prev.map((t) =>
             t.id === id
@@ -459,6 +509,7 @@ export function useEditorTabs(): UseEditorTabsResult {
       try {
         const disk = await fetchFileContent(tab.path, tab.projectRoot, tab.projectHost);
         clearEditorDraft(id);
+        noteDraftPersistSuccess(id);
         setEditorTabs((prev) =>
           prev.map((t) =>
             t.id === id

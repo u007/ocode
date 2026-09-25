@@ -1,7 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { render as rtlRender, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
 import MessageBubble, { AssistantText } from "./MessageBubble";
 import { ToolBlock } from "./TurnParts";
+import { ChatDisplayTestProvider } from "./chatDisplayTestUtils";
+
+function render(ui: ReactElement) {
+  return rtlRender(<ChatDisplayTestProvider>{ui}</ChatDisplayTestProvider>);
+}
 
 describe("syntax highlighting", () => {
   it("colors a fenced ts block in assistant markdown", async () => {

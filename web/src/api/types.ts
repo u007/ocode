@@ -141,6 +141,32 @@ export interface TTSConfig {
   model_voice?: Record<string, string>;
 }
 
+export type ChatVerbosityPreset = "full" | "balanced" | "quiet";
+export type ChatDisplayOverride = "preset" | "expanded" | "collapsed";
+
+export interface ChatVerbosityOverrides {
+  older_thinking: ChatDisplayOverride;
+  tool_calls: ChatDisplayOverride;
+  tool_output: ChatDisplayOverride;
+  activity_notices: ChatDisplayOverride;
+}
+
+export interface ChatVerbosityConfig {
+  preset: ChatVerbosityPreset;
+  overrides: ChatVerbosityOverrides;
+}
+
+export interface ChatDisplayPolicy {
+  older_thinking: "expanded" | "collapsed";
+  latest_thinking: "expanded";
+  tool_calls: "expanded" | "collapsed";
+  tool_output: "expanded" | "collapsed";
+  notices: "expanded" | "collapsed";
+  status: "expanded";
+}
+
+export type ChatVerbosityResponse = ChatVerbosityConfig;
+
 export interface TTSPlayback {
   generation: number;
   engine: TTSEngineId;
@@ -456,10 +482,43 @@ export interface ChangeDiff {
   patch: string;
 }
 
+/** One unmerged path: git could not merge it and the user must choose a side. */
+export interface GitConflict {
+  path: string;
+  /** Git's two-character porcelain XY for an unmerged entry (UU, AA, UD, ...). */
+  code: string;
+  /** Whether the stage-2 (ours) index entry exists. False means that side is
+   *  a deletion, which the resolver must handle with `git rm`, not checkout. */
+  ours: boolean;
+  /** Whether the stage-3 (theirs) index entry exists. See `ours`. */
+  theirs: boolean;
+}
+
+/** A git operation that stopped before completing and is waiting for the user. */
+export interface GitOperation {
+  kind:
+    | "merge"
+    | "rebase"
+    | "rebase-interactive"
+    | "am"
+    | "cherry-pick"
+    | "revert"
+    | "bisect";
+  label: string;
+  step: number;
+  total: number;
+}
+
 export interface GitStatus {
   branch: string;
   staged_files: string[];
   changed_files: string[];
+  /** Unmerged paths. Deliberately NOT also listed in staged_files or
+   *  changed_files — a conflicted path used to be counted three times across
+   *  those two lists. Always present (never null). */
+  conflicts: GitConflict[];
+  /** Present only while an operation is in progress; absent when idle. */
+  operation?: GitOperation;
   has_changes: boolean;
   /** True when the directory is inside a git repo — even a clean one. The web
    *  editor uses this to distinguish "no unstaged changes" (repo, show no

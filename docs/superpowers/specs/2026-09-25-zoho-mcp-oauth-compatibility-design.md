@@ -8,13 +8,12 @@ tags:
   - zoho
   - design-spec
   - auth
-timestamp: 2026-09-25T04:07:24Z
+timestamp: 2026-09-25T06:25:34Z
 ---
-# Zoho MCP OAuth Compatibility — Design Spec
-
-**Status:** Approved
+**Status:** Approved — implemented 2026-09-25
 **Date:** 2026-09-25
 **Scope:** Compatibility fix for remote MCP servers that arrive with authorization already stored by upstream OpenCode (exemplar: `zoho-books`).
+**Implementation:** Shipped behavior is documented in `docs/concepts/remote-mcp-oauth-compat.md` (dual-schema auth storage, URL binding, discovery refresh, safe HTTP errors, unchanged per-chat toggle/cache semantics).
 
 ## 1. Purpose
 
@@ -138,8 +137,8 @@ Required coverage:
 
 - **Working tree:** the main tree has extensive unrelated WIP. Modify **only** auth/MCP/CLI source files touched by this fix and this spec file. Do not disturb, stage, or revert unrelated changes.
 - **Documentation alignment:**
-  - Existing per-chat MCP cache/toggle behavior is documented and unchanged by this patch — no doc edit needed for it beyond confirming no conflict (there is none).
-  - The later implementation PR must update the relevant MCP documentation and `CHANGES.md` if appropriate (auth-storage format compatibility, refresh behavior, error surfacing).
+  - Existing per-chat MCP cache/toggle behavior is documented and unchanged by this patch — no doc edit needed for it beyond confirming no conflict (there is none). *(Confirmed: no conflict; a cross-reference was added to `docs/concepts/per-chat-mcp-toggle.md` pointing at the implementation doc.)*
+  - The later implementation PR must update the relevant MCP documentation and `CHANGES.md` if appropriate (auth-storage format compatibility, refresh behavior, error surfacing). *(MCP documentation update: `docs/concepts/remote-mcp-oauth-compat.md`.)*
 
 ## 9. Acceptance Criteria
 

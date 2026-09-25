@@ -67,8 +67,13 @@ describe("useChat.resolvePermission", () => {
     expect(result.current.chat.pendingPermission).toBeNull();
   });
 
-  it("keeps the dialog open on a retryable failure (network / 5xx)", async () => {
+  it("re-hydrates the dialog on a retryable failure (network / 5xx)", async () => {
+    // The dialog dismisses optimistically the moment the user submits, so a
+    // resolve the server never recorded must bring the live ask back rather
+    // than leaving the user without a dialog. getSessionState returns the
+    // still-pending ask; hydratePendingAsks re-dispatches PERMISSION_REQUEST.
     mockResolvePermission.mockRejectedValueOnce(new ApiError("agent error: upstream", 500));
+    mockGetSessionState.mockResolvedValueOnce({ pending_asks: { permissions: [ask] } });
     const { result } = setup();
     act(() => result.current.dispatch({ type: "PERMISSION_REQUEST", sessionId: "sess-1", permission: ask }));
 
@@ -77,6 +82,8 @@ describe("useChat.resolvePermission", () => {
       outcome = await result.current.chat.resolvePermission("call-1", "allow");
     });
     expect(outcome).toEqual({ ok: false, error: "agent error: upstream" });
+    // The optimistic dismissal is undone by the hydration.
+    expect(mockGetSessionState).toHaveBeenCalledWith("sess-1", undefined);
     expect(result.current.chat.pendingPermission?.request_id).toBe("call-1");
   });
 

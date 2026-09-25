@@ -1,7 +1,9 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import { api } from "../api/client";
 import { useEditorTabs } from "./useEditorTabs";
+import { __resetDraftGuardForTests, draftPersistenceBlocked } from "../lib/editorDraftGuard";
 
 vi.mock("../api/client", () => ({
   api: { saveFileContent: vi.fn() },
@@ -395,5 +397,131 @@ describe("useEditorTabs", () => {
       } catch {}
     });
     expect(second.result.current.editorTabs[0].externalChange).toBe(true);
+  });
+});
+
+// The desktop quit guard: a dirty tab whose localStorage draft write fails must
+// be reported to the user and must block quit, until the file is saved (which
+// clears the draft and re-enables quit).
+describe("useEditorTabs draft-persistence guard", () => {
+  let invoke: Mock<(m: string) => void>;
+
+  beforeEach(() => {
+    __resetDraftGuardForTests();
+    invoke = vi.fn<(m: string) => void>();
+    (window as unknown as { _wails?: { invoke: (m: string) => void } })._wails = { invoke };
+  });
+
+  afterEach(() => {
+    delete (window as unknown as { _wails?: unknown })._wails;
+    __resetDraftGuardForTests();
+  });
+
+  it("blocks quit when a dirty draft cannot be persisted, and clears on save", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/a/big.txt");
+    });
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+
+    act(() => {
+      result.current.handleEditorChange("editor-/a/big.txt", "x".repeat(64));
+    });
+
+    // Simulate a full localStorage quota on the draft write. `beforeunload`
+    // flushes the debounced draft synchronously (same as a reload/quit).
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    try {
+      act(() => {
+        window.dispatchEvent(new Event("beforeunload"));
+      });
+      expect(draftPersistenceBlocked()).toBe(true);
+      expect(invoke).toHaveBeenCalledWith(expect.stringMatching(/^ocode:quit-guard:blocked:/));
+    } finally {
+      setItem.mockRestore();
+    }
+
+    (api.saveFileContent as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+    await act(async () => {
+      await result.current.saveEditorTab("editor-/a/big.txt");
+    });
+    expect(draftPersistenceBlocked()).toBe(false);
+    expect(invoke).toHaveBeenCalledWith("ocode:quit-guard:clear");
+  });
+});
+
+// The quit guard must arm while edits are still IN MEMORY (before the debounced
+// write lands), and the write must not be deferrable indefinitely by
+// continuous typing.
+describe("useEditorTabs in-memory draft guard", () => {
+  let invoke: Mock<(m: string) => void>;
+
+  beforeEach(() => {
+    __resetDraftGuardForTests();
+    invoke = vi.fn<(m: string) => void>();
+    (window as unknown as { _wails?: { invoke: (m: string) => void } })._wails = { invoke };
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (window as unknown as { _wails?: unknown })._wails;
+    __resetDraftGuardForTests();
+  });
+
+  it("blocks quit while edits are in memory, and clears once the draft is written", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/a/b.txt");
+    });
+
+    act(() => {
+      result.current.handleEditorChange("editor-/a/b.txt", "typed");
+    });
+
+    // Nothing has been written yet — the guard must already be armed, or a quit
+    // inside the debounce window drops the edit with nobody noticing.
+    expect(draftPersistenceBlocked()).toBe(true);
+    expect(invoke).toHaveBeenCalledWith(expect.stringMatching(/^ocode:quit-guard:blocked:/));
+    expect(window.localStorage.getItem("ocode.editor.draft.editor-/a/b.txt")).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(draftPersistenceBlocked()).toBe(false);
+    expect(invoke).toHaveBeenCalledWith("ocode:quit-guard:clear");
+    expect(window.localStorage.getItem("ocode.editor.draft.editor-/a/b.txt")).not.toBeNull();
+  });
+
+  it("caps how long continuous typing can defer the draft write", async () => {
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await result.current.handleOpenFile("/a/b.txt");
+    });
+
+    // Edit every 400ms for 2s: under the 500ms debounce, so a plain trailing
+    // debounce would be pushed out forever and never write anything.
+    for (let i = 1; i <= 5; i++) {
+      act(() => {
+        result.current.handleEditorChange("editor-/a/b.txt", `edit ${i}`);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+    }
+
+    // A write landed mid-stream despite the never-ending typing.
+    expect(window.localStorage.getItem("ocode.editor.draft.editor-/a/b.txt")).not.toBeNull();
+
+    // ...and the final write carries the newest content (the flush path never
+    // reads a stale snapshot).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    const raw = window.localStorage.getItem("ocode.editor.draft.editor-/a/b.txt");
+    expect(JSON.parse(raw!).content).toBe("edit 5");
   });
 });

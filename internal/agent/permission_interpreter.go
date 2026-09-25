@@ -132,26 +132,39 @@ func sanitizeSource(s string) (string, bool) {
 // source file, remote, or bare REPL). ok=false means the flow must fall back to
 // human Ask.
 func (a *Agent) acquireInterpreterSource(ie *InterpreterExec) (source, sha string, truncated, ok bool) {
+	// Surface the outcome on the Log tab so a human-ask on an interpreter call
+	// shows whether the judge saw the script, and which bytes.
+	unavailable := func(reason string) (string, string, bool, bool) {
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_source_unavailable mode=%s path=%s reason=%s", ie.SourceMode, ie.Entrypoint, reason))
+		return "", "", false, false
+	}
+	read := func(clean, sha string, truncated bool) (string, string, bool, bool) {
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_source_read mode=%s language=%s path=%s bytes=%d sha256=%s truncated=%t", ie.SourceMode, ie.Language, ie.Entrypoint, len(clean), sha, truncated))
+		return clean, sha, truncated, true
+	}
 	switch ie.SourceMode {
 	case "heredoc", "inline_eval":
 		if ie.SourceMode == "heredoc" && !ie.Terminated {
-			return "", "", false, false
+			return unavailable("unterminated_heredoc")
 		}
 		if ie.EmbeddedBody == "" {
-			return "", "", false, false
+			return unavailable("empty_body")
 		}
 		clean, valid := sanitizeSource(ie.EmbeddedBody)
 		if !valid {
-			return "", "", false, false
+			return unavailable("binary_or_invalid_utf8")
 		}
 		if len(clean) > maxInterpreterSourceBytes {
 			clean = clean[:maxInterpreterSourceBytes]
 			truncated = true
 		}
-		return clean, hashBytes([]byte(ie.EmbeddedBody)), truncated, true
+		return read(clean, hashBytes([]byte(ie.EmbeddedBody)), truncated)
 	case "script_file", "stdin_pipe":
-		if ie.Entrypoint == "" || !a.permissions.IsPathWithinAllowedRoots(ie.Entrypoint) {
-			return "", "", false, false
+		if ie.Entrypoint == "" {
+			return unavailable("no_entrypoint")
+		}
+		if !a.permissions.IsPathWithinAllowedRoots(ie.Entrypoint) {
+			return unavailable("outside_allowed_roots")
 		}
 		full := ie.Entrypoint
 		if !filepath.IsAbs(full) {
@@ -164,16 +177,16 @@ func (a *Agent) acquireInterpreterSource(ie *InterpreterExec) (source, sha strin
 		}
 		clean, valid := sanitizeSource(string(data))
 		if !valid {
-			return "", "", false, false
+			return unavailable("binary_or_invalid_utf8")
 		}
 		if len(clean) > maxInterpreterSourceBytes {
 			clean = clean[:maxInterpreterSourceBytes]
 			truncated = true
 		}
-		return clean, hashBytes(data), truncated, true
+		return read(clean, hashBytes(data), truncated)
 	default:
 		// remote / unknown_source — nothing to analyze.
-		return "", "", false, false
+		return unavailable("no_local_source")
 	}
 }
 

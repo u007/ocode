@@ -1,6 +1,14 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render as rtlRender, screen, fireEvent } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ThinkingBlock, ToolBlock, parseQuestionAnswers } from "./TurnParts";
+import { ChatDisplayTestProvider } from "./chatDisplayTestUtils";
+
+// Every rendered block reads the controlled ChatDisplayContext; production
+// throws without a provider, so direct component tests supply a Full one.
+function render(ui: ReactElement) {
+  return rtlRender(<ChatDisplayTestProvider>{ui}</ChatDisplayTestProvider>);
+}
 
 describe("ThinkingBlock", () => {
   it("renders the Speak button when onSpeak is provided", () => {

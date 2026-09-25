@@ -23,6 +23,15 @@ const hoisted = vi.hoisted(() => ({
   resolve: { current: (() => {}) as (v: unknown) => void },
   projectDispatch: vi.fn(),
 }));
+// ChatPanel's shared chat-display policy hook subscribes to the event bus; the
+// real singleton would start an SSE fetch in jsdom.
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: () => () => {},
+    onReconnect: () => () => {},
+  },
+}));
+
 vi.mock("../../api/client", () => ({
   api: {
     getSession: vi.fn(
@@ -31,6 +40,18 @@ vi.mock("../../api/client", () => ({
           hoisted.resolve.current = res as (v: unknown) => void;
         }),
     ),
+    // The chat display policy hook mounted by ChatPanel fetches this on mount;
+    // without it the suite reports an unhandled rejection unrelated to the
+    // assertions.
+    getChatVerbosityConfig: vi.fn(async () => ({
+      preset: "full",
+      overrides: {
+        older_thinking: "preset",
+        tool_calls: "preset",
+        tool_output: "preset",
+        activity_notices: "preset",
+      },
+    })),
     // Default: never resolves, so the find bar keeps using its instant local
     // matches (the pre-existing tests' behaviour). Tests that exercise the
     // full-transcript path override this with mockResolvedValue.
@@ -781,6 +802,39 @@ describe("ChatPanel", () => {
       );
       await tick();
       expect(screen.queryByRole("button", { name: /speak message/i })).not.toBeInTheDocument();
+    });
+  });
+
+  describe("per-message Copy", () => {
+    it("offers the copy control on committed assistant text", async () => {
+      const msgs: Message[] = [
+        mk("user", "hello"),
+        mk("assistant", "All done here."),
+      ];
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-copy-committed" messages={msgs} />
+          <ChatPanel sessionId="sess-copy-committed" />
+        </ChatProvider>,
+      );
+      await tick();
+      expect(screen.getByText("All done here.")).toBeInTheDocument();
+      expect(screen.getAllByRole("button", { name: /copy message/i }).length).toBeGreaterThan(0);
+      expect(screen.getAllByTestId("block-copy-menu").length).toBeGreaterThan(0);
+    });
+
+    it("offers the copy control on the live streamed text while streaming", async () => {
+      render(
+        <ChatProvider>
+          <LiveSeed sessionId="sess-copy-live" messages={[mk("user", "hi")]} live={["partial answer"]} />
+          <ChatPanel sessionId="sess-copy-live" />
+        </ChatProvider>,
+      );
+      await tick();
+      expect(screen.getByText(/partial answer/)).toBeInTheDocument();
+      expect(
+        screen.getAllByRole("button", { name: /copy message/i }).length,
+      ).toBeGreaterThan(0);
     });
   });
 

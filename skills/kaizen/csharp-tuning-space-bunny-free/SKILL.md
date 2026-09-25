@@ -42,8 +42,10 @@ revalidate_when: model_version changes
   dropped.
 - Say the defensive-copy behavior plainly, not hedged: mutating a struct held
   in a `readonly` field mutates a defensive copy and silently does nothing;
-  `foreach (var s in list) s.X = ...` and `list[i].X = ...` act on a copy of
-  the element, not the element itself.
+  `foreach (var s in list) s.X = ...` is a compile error because the loop
+  variable is read-only, and `list[i].X = ...` on a `List<T>` of structs is
+  compile error CS1612 because the indexer returns a copy (an array element
+  `arr[i].X = ...` mutates in place).
 
 ## types-nullability: `!!` parameter-null-check was proposed for C# 11 and never shipped
 

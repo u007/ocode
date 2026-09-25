@@ -4,7 +4,9 @@ import { useChatSelector, useChatDispatch, getSessionSlice, parseQuestionFromMes
 import { useProjectDispatch } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import MessageBubble, { AssistantText, hasRenderableText } from "./MessageBubble";
-import { StatusBlock, ThinkingBlock, ToolBlock, NoticeBlock } from "./TurnParts";
+import { StatusBlock, ThinkingBlock, ToolBlock, NoticeBlock, NoticeGroupBlock } from "./TurnParts";
+import { ChatDisplayContext, type ChatDisclosureStore } from "./chatDisplayContext";
+import { useChatVerbosity } from "../../lib/chatVerbosity";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
 import { RESTORE_EVENT } from "../../lib/inputRestore";
@@ -65,6 +67,37 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   // slice — never because a sibling tab became active.
   const projectDispatch = useProjectDispatch();
   const { messages, live, hasMore, loadingMore, windowStartServerIndex, totalMessages } = slice;
+  const { config: chatVerbosityConfig, policy: chatDisplayPolicy, revision: chatPolicyRevision } = useChatVerbosity();
+  const disclosureValuesRef = useRef(new Map<string, boolean>());
+  const disclosureListenersRef = useRef(new Map<string, Set<() => void>>());
+  const disclosure = useMemo<ChatDisclosureStore>(() => ({
+    get: (key, fallback) => disclosureValuesRef.current.get(key) ?? fallback,
+    set: (key, open) => {
+      if (disclosureValuesRef.current.get(key) === open) return;
+      disclosureValuesRef.current.set(key, open);
+      disclosureListenersRef.current.get(key)?.forEach((listener) => listener());
+    },
+    subscribe: (key, listener) => {
+      const listeners = disclosureListenersRef.current.get(key) ?? new Set<() => void>();
+      listeners.add(listener);
+      disclosureListenersRef.current.set(key, listeners);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) disclosureListenersRef.current.delete(key);
+      };
+    },
+    clear: () => {
+      disclosureValuesRef.current.clear();
+      disclosureListenersRef.current.forEach((listeners) => {
+        listeners.forEach((listener) => listener());
+      });
+    },
+  }), []);
+  const chatDisplayValue = useMemo(() => ({
+    config: chatVerbosityConfig,
+    policy: chatDisplayPolicy,
+    disclosure,
+  }), [chatVerbosityConfig, chatDisplayPolicy, disclosure]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
@@ -247,11 +280,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   const msgKeyMap = useRef(new WeakMap<object, number>());
   const msgKeyCounter = useRef(0);
   const renderEntriesRef = useRef<RenderEntry[]>([]);
-  const getItemKey = useCallback((index: number): number => {
-    const entry = renderEntriesRef.current[index] as RenderEntry | undefined;
-    if (!entry) return index;
-    const keyObj: object =
-      entry.kind === "single" ? (entry.msg as object) : (entry.assistant as object);
+  const getObjectKey = useCallback((keyObj: object): number => {
     let id = msgKeyMap.current.get(keyObj);
     if (id === undefined) {
       id = msgKeyCounter.current++;
@@ -259,6 +288,17 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     }
     return id;
   }, []);
+  const getItemKey = useCallback((index: number): number => {
+    const entry = renderEntriesRef.current[index] as RenderEntry | undefined;
+    if (!entry) return index;
+    const keyObj: object =
+      entry.kind === "single" ? (entry.msg as object) : (entry.assistant as object);
+    return getObjectKey(keyObj);
+  }, [getObjectKey]);
+  const getEntryKey = useCallback((entry: RenderEntry): string => {
+    const keyObj: object = entry.kind === "single" ? entry.msg : entry.assistant;
+    return `message:${getObjectKey(keyObj)}`;
+  }, [getObjectKey]);
 
   // Group tool results into their parent assistant turn so the web transcript
   // matches the TUI and the user can tell which result belongs to which
@@ -333,6 +373,68 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   }, [messages]);
   renderEntriesRef.current = renderEntries;
 
+  // The last thinking block in the latest assistant turn is always expanded,
+  // including while a newer turn is still streaming. Live parts take precedence
+  // over committed history because they represent the current turn's tail.
+  const latestThinkingKey = useMemo(() => {
+    // Live parts are the current turn's tail: a thinking part there always wins.
+    for (let i = live.length - 1; i >= 0; i--) {
+      if (live[i].kind === "thinking") return `live:${i}:thinking`;
+    }
+    // Otherwise scope to the latest assistant turn: entries after the last
+    // committed user message. A newer turn therefore makes the previous
+    // thinking block "older" even before the new turn emits reasoning.
+    let lastUserIndex = -1;
+    for (let i = renderEntries.length - 1; i >= 0; i--) {
+      const entry = renderEntries[i];
+      if (entry.kind === "single" && entry.msg.role === "user") {
+        lastUserIndex = i;
+        break;
+      }
+    }
+    for (let i = renderEntries.length - 1; i > lastUserIndex; i--) {
+      const entry = renderEntries[i];
+      if (entry.kind === "single" && entry.msg.role === "assistant" && entry.msg.reasoning_content) {
+        return `${getEntryKey(entry)}:thinking`;
+      }
+      if (entry.kind === "tool-group" && entry.assistant.reasoning_content) {
+        return `${getEntryKey(entry)}:thinking`;
+      }
+    }
+    return null;
+  }, [live, renderEntries, getEntryKey]);
+
+  // Consecutive live `notice` parts collapse into one disclosure when the
+  // activity-notices policy is collapsed. A non-notice part ends the run, and
+  // the group key is the first notice's stable live index so a manual
+  // expand/collapse survives later streamed tokens.
+  type AnyLivePart = (typeof live)[number];
+  type LivePart = Exclude<AnyLivePart, { kind: "notice" }>;
+  const liveRenderParts = useMemo(() => {
+    const parts: Array<
+      | { kind: "part"; part: LivePart; index: number }
+      | { kind: "notices"; notices: string[]; start: number }
+    > = [];
+    for (let i = 0; i < live.length; i++) {
+      const part = live[i];
+      if (part.kind === "notice") {
+        const notices = [part.text];
+        let j = i + 1;
+        while (j < live.length) {
+          const next = live[j];
+          if (next.kind !== "notice") break;
+          notices.push(next.text);
+          j++;
+        }
+        parts.push({ kind: "notices", notices, start: i });
+        i = j - 1;
+        continue;
+      }
+      parts.push({ kind: "part", part, index: i });
+    }
+    return parts;
+  }, [live]);
+
   // Only committed messages are virtualized — a long session's history is
   // what was growing the DOM (and retained JS heap: fiber nodes, markdown/
   // syntax-highlighter output) unboundedly, since nothing ever unmounted as
@@ -353,6 +455,42 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     scrollMargin: listMargin,
     getItemKey,
   });
+
+  const lastPolicyRevisionRef = useRef(chatPolicyRevision);
+  useEffect(() => {
+    if (lastPolicyRevisionRef.current === chatPolicyRevision) return;
+    lastPolicyRevisionRef.current = chatPolicyRevision;
+    disclosure.clear();
+    const el = scrollRef.current;
+    const firstVisible = virtualizer.getVirtualItems()[0];
+    // Capture the anchor BEFORE measure(): a row collapsing changes item
+    // heights, so the reader must be restored to the same pixel inside the
+    // same row, not merely the same row. `getOffsetForIndex` is in the
+    // installed @tanstack/virtual-core (3.17.x).
+    let anchor: { index: number; offset: number } | null = null;
+    if (firstVisible && el) {
+      const resolved = virtualizer.getOffsetForIndex(firstVisible.index);
+      if (resolved) anchor = { index: firstVisible.index, offset: el.scrollTop - resolved[0] };
+    }
+    const pinned = atBottomRef.current;
+    virtualizer.measure();
+    if (pinned) {
+      requestAnimationFrame(() => scrollToBottom(false));
+      return;
+    }
+    if (!anchor) return;
+    requestAnimationFrame(() => {
+      const scroller = scrollRef.current;
+      if (!scroller) return;
+      // Keep the row at the top, then restore the pixel offset within it. A
+      // search jump runs after this effect, so an active find still wins.
+      virtualizer.scrollToIndex(anchor.index, { align: "start" });
+      const resolved = virtualizer.getOffsetForIndex(anchor.index);
+      if (!resolved) return;
+      scroller.scrollTop = resolved[0] + anchor.offset;
+      lastScrollTopRef.current = scroller.scrollTop;
+    });
+  }, [chatPolicyRevision, disclosure, virtualizer]);
 
   // Keep `scrollMargin` in sync with the real offset of the virtualized list
   // (the variable-height status/loading header at topRef). Only the header's
@@ -1014,7 +1152,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   }, [messages]);
 
   return (
-    <div className="relative h-full min-h-0 flex flex-col">
+    <ChatDisplayContext.Provider value={chatDisplayValue}>
+      <div className="relative h-full min-h-0 flex flex-col">
       {searchOpen && (
         <div className="absolute inset-x-0 top-0 z-20">
           <ChatSearchBar
@@ -1130,7 +1269,10 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           >
             {virtualizer.getVirtualItems().map((virtualItem) => {
               const entry = renderEntries[virtualItem.index];
+              const entryKey = getEntryKey(entry);
               const isCurrentMatch = virtualItem.index === currentMatchEntryPos;
+              const forceOpen = isCurrentMatch;
+              const isLatestThinking = latestThinkingKey === `${entryKey}:thinking`;
               const highlight = searchOpen ? searchQuery : "";
               return (
                 <div
@@ -1164,11 +1306,21 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                         }
                         sessionId={sessionId}
                         messageIndex={entry.originalIndex}
+                        entryKey={entryKey}
+                        isLatestThinking={isLatestThinking}
+                        forceOpen={forceOpen}
                       />
                     ) : (
                       <>
                         {entry.assistant.reasoning_content ? (
-                          <ThinkingBlock text={entry.assistant.reasoning_content} highlight={highlight} onSpeak={() => requestSpeech(entry.assistant.reasoning_content || "")} />
+                          <ThinkingBlock
+                            text={entry.assistant.reasoning_content}
+                            highlight={highlight}
+                            onSpeak={() => requestSpeech(entry.assistant.reasoning_content || "")}
+                            blockKey={`${entryKey}:thinking`}
+                            isLatest={isLatestThinking}
+                            forceOpen={forceOpen}
+                          />
                         ) : null}
                         {entry.calls.map(({ tc, resultContent, pendingQuestion }) => (
                           <ToolBlock
@@ -1182,6 +1334,9 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                                 ? () => dispatch({ type: "QUESTION_REQUEST", sessionId, question: pendingQuestion })
                                 : undefined
                             }
+                            callKey={`${entryKey}:call:${tc.id}`}
+                            outputKey={`${entryKey}:output:${tc.id}`}
+                            forceOpen={forceOpen}
                           />
                         ))}
                         {hasRenderableText(entry.assistant.content) ? (
@@ -1202,26 +1357,51 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           </div>
         )}
 
-        {live.length > 0 && (
+        {liveRenderParts.length > 0 && (
           <div>
-            {live.map((part, i) => {
+            {liveRenderParts.map((entry) => {
+              if (entry.kind === "notices") {
+                const groupKey = `live:${entry.start}:notices`;
+                if (chatDisplayPolicy.notices === "expanded") {
+                  return entry.notices.map((text, noticeIndex) => (
+                    <NoticeBlock key={`${groupKey}:${noticeIndex}`} text={text} />
+                  ));
+                }
+                return (
+                  <NoticeGroupBlock
+                    key={groupKey}
+                    notices={entry.notices}
+                    groupKey={groupKey}
+                  />
+                );
+              }
+              const { part, index: i } = entry;
+              const liveKey = `live:${i}`;
               if (part.kind === "thinking")
-                return <ThinkingBlock key={`live-${i}`} text={part.text} onSpeak={() => requestSpeech(part.text || "")} />;
+                return (
+                  <ThinkingBlock
+                    key={liveKey}
+                    text={part.text}
+                    onSpeak={() => requestSpeech(part.text || "")}
+                    blockKey={`${liveKey}:thinking`}
+                    isLatest={latestThinkingKey === `${liveKey}:thinking`}
+                  />
+                );
               if (part.kind === "text")
                 return hasRenderableText(part.text) ? (
                   <AssistantText key={`live-${i}`} content={part.text} onSpeak={requestSpeech} />
                 ) : null;
               if (part.kind === "status")
                 return <StatusBlock key={`live-${i}`} text={part.text} />;
-              if (part.kind === "notice")
-                return <NoticeBlock key={`live-${i}`} text={part.text} />;
               return (
                 <ToolBlock
-                  key={`live-${i}`}
+                  key={liveKey}
                   tool={part.tool}
                   command={part.command}
                   stream={part.stream}
                   output={part.output}
+                  callKey={`${liveKey}:call:${part.callId ?? "tool"}`}
+                  outputKey={`${liveKey}:output:${part.callId ?? "tool"}`}
                 />
               );
             })}
@@ -1271,7 +1451,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           </button>
         </div>
       )}
-    </div>
+      </div>
+    </ChatDisplayContext.Provider>
   );
 }
 

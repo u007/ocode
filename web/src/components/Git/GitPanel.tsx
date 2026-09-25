@@ -20,6 +20,7 @@ import { eventBus } from "@/lib/eventBus";
 import { cn } from "@/lib/utils";
 import { useResizableSidebar } from "@/hooks/useResizableSidebar";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
 import { ContextMenu } from "@/components/Layout/ContextMenu";
 import type { ContextMenuItem } from "@/components/Layout/ContextMenu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -90,6 +91,8 @@ interface Props {
    *  DOM survives view switches; without this gate it polls and refetches the
    *  whole workspace every 10s forever, even while the user is chatting. */
   active?: boolean;
+  loadingKey?: string;
+  onLoadingEvent?: LoadingEventHandler;
 }
 
 type Selection =
@@ -150,7 +153,15 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-export default function GitPanel({ onOpenFile, projectPath, projectHost, active = true }: Props) {
+export default function GitPanel({
+  onOpenFile,
+  projectPath,
+  projectHost,
+  active = true,
+  loadingKey,
+  onLoadingEvent,
+}: Props) {
+  const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [workspace, setWorkspace] = useState<GitWorkspace | null>(null);
   const [commits, setCommits] = useState<GitCommit[]>([]);
   const [commitDiff, setCommitDiff] = useState<GitDiffFile[] | null>(null);
@@ -241,11 +252,11 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
   // and eventBus-driven refreshes: those must NOT clear an error or notice
   // left by an explicit user action, otherwise a failed push would vanish
   // within 10 seconds ("git push error disappears by itself").
-  const load = useCallback(async (opts?: { background?: boolean }) => {
+  const load = useCallback((opts?: { background?: boolean }) => {
     const background = opts?.background ?? false;
     if (!background) setError(null);
     setRefreshing(true);
-    try {
+    return runKeyedLoad(async () => {
       const [ws, log, stashList] = await Promise.all([
         api.getGitWorkspace(projectPath, projectHost),
         api.gitLog(projectPath, 50, projectHost),
@@ -253,39 +264,45 @@ export default function GitPanel({ onOpenFile, projectPath, projectHost, active 
         // take down the whole workspace refresh.
         api.gitStashList(projectPath, projectHost).catch(() => [] as GitStash[]),
       ]);
-      setWorkspace(ws);
-      setCommits(log);
-      setStashes(stashList);
-      // Selection may no longer exist after a mutation/drop: re-resolve it
-      // against the fresh snapshots. A selected file can move between panes;
-      // a selected stash can be dropped (possibly by index shift).
-      setSelection((sel) => {
-        if (!sel) return sel;
-        if (sel.kind === "commit") return sel;
-        if (sel.kind === "stash") {
-          return stashList.some((s) => s.index === sel.index) ? sel : null;
-        }
-        const inStaged = ws.staged.some((f) => f.path === sel.path);
-        const inUnstaged = ws.unstaged.some((f) => f.path === sel.path);
-        if (!inStaged && !inUnstaged) return null;
-        return {
-          kind: "file",
-          path: sel.path,
-          staged: sel.staged ? inStaged : !inUnstaged ? inStaged : false,
-        };
-      });
-    } catch (e) {
-      // A background refresh failing is not the user's action — don't let a
-      // transient poll error overwrite the outcome of what they just did.
-      if (!background) {
-        setError(
-          e instanceof Error ? e.message : "Failed to load git workspace",
-        );
+      return { ws, log, stashList };
+    }, {
+      retry: () => {
+        void load(opts);
+      },
+    }).then((result) => {
+      if (result.status === "success" || result.status === "empty") {
+        const { ws, log, stashList } = result.value;
+        setWorkspace(ws);
+        setCommits(log);
+        setStashes(stashList);
+        if (!background) setError(null);
+        // Selection may no longer exist after a mutation/drop: re-resolve it
+        // against the fresh snapshots. A selected file can move between panes;
+        // a selected stash can be dropped (possibly by index shift).
+        setSelection((sel) => {
+          if (!sel) return sel;
+          if (sel.kind === "commit") return sel;
+          if (sel.kind === "stash") {
+            return stashList.some((s) => s.index === sel.index) ? sel : null;
+          }
+          const inStaged = ws.staged.some((f) => f.path === sel.path);
+          const inUnstaged = ws.unstaged.some((f) => f.path === sel.path);
+          if (!inStaged && !inUnstaged) return null;
+          return {
+            kind: "file",
+            path: sel.path,
+            staged: sel.staged ? inStaged : !inUnstaged ? inStaged : false,
+          };
+        });
+      } else if (result.status === "error") {
+        // A background refresh failing is not the user's action — don't let a
+        // transient poll error overwrite the outcome of what they just did.
+        console.error("Git workspace load failed:", result.error);
+        if (!background) setError(result.message);
       }
-    } finally {
-      setRefreshing(false);
-    }
-  }, [projectPath, projectHost]);
+      if (result.status !== "stale" && result.status !== "aborted") setRefreshing(false);
+    });
+  }, [projectPath, projectHost, runKeyedLoad]);
 
   useEffect(() => {
     load();

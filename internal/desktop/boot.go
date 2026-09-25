@@ -71,19 +71,22 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace)
 		return startRemoteServer(webFS, workspace, token)
 	}
 
+	savedPort := loadSavedPort()
 	bindAddr := "0.0.0.0:0"
-	if p := loadSavedPort(); p > 0 {
-		bindAddr = fmt.Sprintf("0.0.0.0:%d", p)
+	if savedPort > 0 {
+		bindAddr = fmt.Sprintf("0.0.0.0:%d", savedPort)
 	}
 
 	srv := server.New(bindAddr, "ocode", token, webFS)
 	srv.SetWorkDir(workDir)
 
 	ln, err := srv.Listen()
-	if err != nil && bindAddr != "0.0.0.0:0" {
-		// Saved port unavailable (another process grabbed it, or a second
-		// desktop instance) — persisted UI state won't be visible this run.
-		log.Printf("desktop: saved port %s unavailable, falling back to a random port: %v", bindAddr, err)
+	if err != nil && savedPort > 0 {
+		// The saved port and the 19 after it are all taken. Fall back to a
+		// random port for this run only; desktop-port is deliberately left
+		// untouched below because a drifted origin cannot see the previous
+		// origin's persisted UI state.
+		log.Printf("desktop: saved port range %d+ unavailable, falling back to a random port for this run only: %v", savedPort, err)
 		srv = server.New("0.0.0.0:0", "ocode", token, webFS)
 		srv.SetWorkDir(workDir)
 		ln, err = srv.Listen()
@@ -101,7 +104,14 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace)
 	}
 	addr := ln.Addr().String()
 	url := fmt.Sprintf("http://127.0.0.1:%s", portStr)
-	saveBoundPort(addr)
+	// Persist the bound port only when it is the saved port (or there was no
+	// saved port yet). server.Listen walks forward up to 20 ports on
+	// EADDRINUSE, so a conflict yields savedPort+1: saving that would move the
+	// webview's localStorage origin and permanently orphan the previous
+	// origin's UI state (terminal/editor tabs, unsaved editor drafts).
+	if boundPort, perr := strconv.Atoi(portStr); perr == nil && (savedPort == 0 || boundPort == savedPort) {
+		saveBoundPort(addr)
+	}
 	saveDebugHandle(url, token)
 
 	// Browse origin: a second loopback listener, isolated from the SPA

@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -57,6 +59,17 @@ type GitStatus struct {
 	StagedFiles  []string `json:"staged_files"`
 	ChangedFiles []string `json:"changed_files"`
 	HasChanges   bool     `json:"has_changes"`
+	// Conflicts lists the repository's unmerged paths. A conflicted path is
+	// deliberately NOT also listed in StagedFiles or ChangedFiles: git's diff
+	// listings report it in both, and `git diff --name-only` reports it twice,
+	// so it used to be counted three times across the two lists and inflate
+	// every badge. Always an empty slice, never null.
+	Conflicts []GitConflict `json:"conflicts"`
+	// Operation reports a halted git operation (merge, rebase, cherry-pick,
+	// revert, am, bisect), or nil when none is in progress. It is a pointer
+	// with omitempty so an idle repository marshals identically on every poll
+	// and the emitter's change-dedup does not publish spuriously.
+	Operation *GitOperation `json:"operation,omitempty"`
 	// IsRepo distinguishes "clean repository" from "not a repository": both
 	// yield empty StagedFiles/ChangedFiles and no changes, but the web editor's
 	// unstaged-change decorations must NOT fall back to session diffs in a
@@ -170,7 +183,10 @@ var gitStatusTimeout = 10 * time.Second
 func gitStatusForDir(dir string) GitStatus {
 	ctx, cancel := context.WithTimeout(context.Background(), gitStatusTimeout)
 	defer cancel()
-	run := func(args ...string) string {
+	// runRaw returns stdout verbatim; run trims it for the line-oriented
+	// probes. The `-z` probe must not be trimmed, because its records are
+	// NUL-separated and a path is allowed to end in whitespace.
+	runRaw := func(args ...string) string {
 		cmd := exec.CommandContext(ctx, gitBinary, args...)
 		if dir != "" {
 			cmd.Dir = dir
@@ -182,7 +198,10 @@ func gitStatusForDir(dir string) GitStatus {
 		// a probe SIGKILLed by gitStatusTimeout mid-write could strand the lock.
 		cmd.Env = gitexec.Env()
 		out, _ := cmd.Output()
-		return strings.TrimSpace(string(out))
+		return string(out)
+	}
+	run := func(args ...string) string {
+		return strings.TrimSpace(runRaw(args...))
 	}
 
 	// Initialize slices so JSON serializes [] (not null) — the web UI reads
@@ -191,14 +210,29 @@ func gitStatusForDir(dir string) GitStatus {
 		Branch:       run("rev-parse", "--abbrev-ref", "HEAD"),
 		StagedFiles:  []string{},
 		ChangedFiles: []string{},
+		Conflicts:    []GitConflict{},
 	}
-	for _, f := range strings.Split(run("diff", "--name-only", "--cached"), "\n") {
-		if f != "" {
+
+	// Unmerged paths, with their status code and which index stages exist. One
+	// `-z` probe supplies all of it: the record carries an object id per stage
+	// and an all-zero id marks a deleted side. The non-`-z` porcelain v2 probe
+	// further down cannot be reused, because changing its record separator
+	// would break the branch-header parse.
+	status.Conflicts = parseUnmergedPorcelain(runRaw("status", "--porcelain=v2", "-z"))
+
+	// A conflicted path is reported by both diff listings (and twice within
+	// one of them), so divert it: it belongs to the conflicts list alone.
+	conflicted := make(map[string]bool, len(status.Conflicts))
+	for _, c := range status.Conflicts {
+		conflicted[c.Path] = true
+	}
+	for _, f := range dedupePaths(strings.Split(run("diff", "--name-only", "--cached"), "\n")) {
+		if !conflicted[f] {
 			status.StagedFiles = append(status.StagedFiles, f)
 		}
 	}
-	for _, f := range strings.Split(run("diff", "--name-only"), "\n") {
-		if f != "" {
+	for _, f := range dedupePaths(strings.Split(run("diff", "--name-only"), "\n")) {
+		if !conflicted[f] {
 			status.ChangedFiles = append(status.ChangedFiles, f)
 		}
 	}
@@ -228,7 +262,7 @@ func gitStatusForDir(dir string) GitStatus {
 		seen[f] = true
 		status.ChangedFiles = append(status.ChangedFiles, f)
 	}
-	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0
+	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0 || len(status.Conflicts) > 0
 
 	// Divergence from upstream using --branch (works for detached HEAD too).
 	branchLine := run("status", "--porcelain=v2", "--branch")
@@ -273,7 +307,46 @@ func gitStatusForDir(dir string) GitStatus {
 	repoCmd.Env = gitexec.Env()
 	_, err := repoCmd.Output()
 	status.IsRepo = err == nil
+
+	// A halted operation is a state of the repository, so it is reported
+	// alongside IsRepo. Detection spends one more git process, still inside the
+	// shared deadline above.
+	if op, opErr := gitOperationStateForDir(ctx, dir); opErr != nil {
+		// Three outcomes are handled here. Two are expected and deliberately
+		// not logged: a directory that is not a repository (the normal answer
+		// for the many saved non-repo directories), and the shared probe
+		// budget expiring, which is the documented degradation mode — the
+		// remaining probes fail fast and the next poll retries. Logging the
+		// latter would spam a slow repository on every poll.
+		//
+		// Everything else is a real failure and IS logged, so a broken
+		// repository can never masquerade as a clean, idle one.
+		expected := errors.Is(opErr, errGitNotARepository) ||
+			errors.Is(opErr, context.DeadlineExceeded) ||
+			ctx.Err() != nil
+		if !expected {
+			log.Printf("git status: detect operation state for %s: %v", dir, opErr)
+		}
+	} else {
+		status.Operation = op
+	}
 	return status
+}
+
+// dedupePaths drops empty entries and duplicates while preserving order. Git
+// can emit the same path more than once (an unmerged path appears twice in
+// `git diff --name-only`), and the web renders these lists in order.
+func dedupePaths(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	seen := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		if line == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		out = append(out, line)
+	}
+	return out
 }
 
 // HandleGitDiff returns the unified diff for the working tree.

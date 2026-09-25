@@ -1,11 +1,249 @@
 # Changelog
 
+## 2026-09-25 — Ask dialogs no longer hang on submit
+
+- `POST /api/questions` and `POST /api/permissions/resolve` used to run the
+  whole continuation `Step` (and, for permissions, the approved tool itself)
+  inline on the request goroutine, holding the HTTP connection open for the
+  entire model round-trip. The browser's `await`, the local answer echo, and
+  the dialog dismissal were all gated on that response, so submitting often
+  looked hung with no result — and the held request ate one of the browser's
+  ~6 connections per origin the whole time. Both endpoints now record the
+  decision, broadcast `question_resolved` / `permission_resolved`, and return
+  `202` immediately; the continuation runs on a background goroutine tracked in
+  `turnInFlight` / `turnJobsWG` (shutdown admission + Stop parity with
+  `dispatchTurn`). `as.mu` ownership is handed to the goroutine so a racing
+  resolve/send still cannot interleave.
+- Web: `resolvePermission` / `submitQuestionAnswers` now echo and dismiss
+  locally before the `await` (matching the TUI, whose modal closes the instant
+  a choice is made), and re-hydrate the live ask from `GET …/state` on a
+  retryable failure so the user is never left without a dialog.
+- Tests: new `TestHandleAnswerQuestionReturns202BeforeContinuation` /
+  `TestHandleResolvePermissionReturns202BeforeContinuation` (mutation-verified:
+  reverting to inline Step fails both), updated resolve/answer suites for the
+  202 contract, and web tests for the optimistic echo + failure re-hydration.
+
+## 2026-09-25 — Web: shared chat display settings
+
+- Settings → Chat display stores Full, Balanced, and Quiet presentation presets
+  with per-category overrides in the shared server config. The latest thinking
+  block remains expanded in every preset; the setting changes rendering only,
+  never the stored transcript, search index, or model context.
+- `ChatPanel` and `TurnParts` use controlled disclosure state so collapsed
+  thinking, tool details, output, and activity notices remain expandable across
+  virtualization, while running tools, status, questions, permissions, and
+  actionable errors stay visible. Config-change events invalidate the local
+  policy and reconnect recovery re-fetches it.
+- Tests cover the Go config/API contract, policy resolution, renderer behavior,
+  Settings integration, and live client updates.
+
+## 2026-09-25 — Web: conflict-aware Git status and resolution
+
+- Git status now reports unmerged paths and halted repository operations from
+  worktree-local Git state. Conflicted paths are removed from the staged and
+  unstaged file lists so each path is counted once, including in project and
+  tab badges.
+- Added the authenticated conflict-resolution endpoint and the corresponding
+  status/operation regression coverage; existing Git actions continue to use
+  the same status shape with defensive handling for older servers.
+
+## 2026-09-25 — MCP: OAuth metadata discovery and safe credential persistence
+
+- MCP credential storage now preserves server-bound token metadata, updates the
+  auth file under a cross-process lock, and remains compatible with existing
+  token files. Remote clients discover protected-resource OAuth metadata and
+  refresh URL-bound credentials after an authorization challenge.
+- MCP transport and refresh errors avoid exposing endpoint URLs or credentials,
+  with focused tests for metadata parsing, challenge handling, token rotation,
+  and concurrent file updates.
+
+## 2026-09-25 — Server: observable ask continuations and rewind storage
+
+- Permission and question answers now acknowledge immediately while the
+  approved tool call and follow-up agent step continue asynchronously. Session
+  lock ownership is explicit across every success and error path, and active
+  continuations publish turn heartbeats for watchdog/status clients.
+- Session storage adds transactional, single-use pending-rewind resources with
+  transcript fingerprint validation and armed/committed/stale lifecycle states,
+  including the session-rekey path. Focused tests cover expiry, cancellation,
+  stale targets, idempotent commit, and cross-session isolation.
+
+## 2026-09-25 — Release: reproducible patch and minor version bumps
+
+- `make up-patch` and `make up-minor` validate and update the canonical version,
+  refresh the changelog's version-bump entry, then run CLI installation and macOS
+  desktop packaging sequentially. `scripts/test-version-bump.sh` covers decimal
+  arithmetic, malformed versions, changelog structure, and ordering.
+
+## 2026-09-25 — Web chat: per-block Copy with a raw-source dropdown
+
+- Every visible web-chat block now carries a split Copy control
+  (`web/src/components/Chat/BlockCopyControl.tsx`): the main button copies the
+  **rendered** text ("as it is"), and the chevron opens a Radix `Popover` with
+  a raw-source item. It is embedded in the reusable blocks (`AssistantText`,
+  `UserBubble`, `ThinkingBlock`, `ToolBlock`/`QuestionAnswerBlock`,
+  `StatusBlock`, `NoticeBlock`, `NoticeGroupBlock`), so committed transcript
+  rows and the live streaming tail both get it with no call-site duplication.
+- The raw item is labelled per block ("Copy as raw Markdown" for
+  assistant/user markdown, "Copy as raw source" for thinking/tool/status/
+  notice) so it never claims Markdown where there is none.
+- Rendered copy uses `renderedCopyText` (`web/src/lib/copyText.ts`), which
+  extracts `[data-copy-content]` regions and therefore skips disclosure
+  toggles and "Show output" controls; it falls back to the source when
+  extraction is empty. The clipboard write goes through the extracted
+  `copyTextToClipboard` helper (`web/src/lib/clipboard.ts`, now shared with
+  `ShareDialog`), preserving its focus-safe `execCommand` fallback for
+  WKWebView and insecure LAN origins. A failed write shows an inline
+  "Copy failed" instead of a false "Copied".
+- Tests: `web/src/lib/clipboard.test.ts`, `web/src/lib/copyText.test.ts`,
+  `web/src/components/Chat/BlockCopyControl.test.tsx`,
+  `MessageBubble.copy.test.tsx`, `TurnParts.copy.test.tsx`, and the
+  `per-message Copy` describe in `ChatPanel.test.tsx`. Mutation-verified
+  (rendering from the raw prop, trusting an unfocused `execCommand`, and
+  dropping a `data-copy-content` marker each fail). Verified end-to-end in a
+  real Chromium against a fake tab: default copied `code` while the raw item
+  copied `` `code` `` and `**bold**`.
+
+## 2026-09-25 — Auto-permission: log interpreter source reads
+
+- `acquireInterpreterSource` (`internal/agent/permission_interpreter.go`) now
+  emits `PERMISSION` Log-tab entries: `tier=auto_interp_source_read` (mode,
+  language, path, bytes, sha256, truncated) when the judge gets the script
+  source, and `tier=auto_interp_source_unavailable reason=...`
+  (outside_allowed_roots, unterminated_heredoc, binary_or_invalid_utf8, …)
+  when it cannot. A human-ask on `python3 script.py` now shows whether the
+  judge actually saw the script.
+
+## 2026-09-25 — Desktop: hydrate GUI PATH for reliable LSP discovery
+
+- Finder/Dock-launched desktop processes inherit a minimal system PATH, so
+  `exec.LookPath` could not see user-installed LSPs such as `gopls` even though
+  they worked in a terminal. `internal/desktop/executable_path.go` now merges
+  a bounded Unix login-shell PATH probe and conventional Go/Cargo/NVM/pnpm
+  directories; Windows adds its standard user tool directories without invoking
+  a Unix shell. The inherited PATH is retained and deduplicated.
+- `cmd/ocode-desktop/main.go` hydrates PATH before booting the embedded server,
+  so the server's LSP manager, detached language-server processes, and other
+  children share the same effective executable environment.
+- Cold headless session status now creates the project LSP manager and starts
+  its warmup; lifecycle rows also expose `starting` and `failed` states instead
+  of hiding a missing binary behind "No LSP servers". Server-side project roots
+  are canonicalized before the per-session sidebar filter, so unrelated project
+  rows cannot be mixed into the active chat.
+- Tests: `internal/desktop/executable_path_test.go`,
+  `internal/lsp/status_test.go`, and `internal/server/handler_lsp_status_test.go`.
+
+## 2026-09-25 — Desktop: unsaved editor drafts block quit; sticky-port fallback no longer re-saves
+
+- A failed editor-draft write (`localStorage` quota/availability) was only
+  logged; quitting then lost the unsaved edits silently. `saveEditorDraft` now
+  returns a `boolean`, and `web/src/lib/editorDraftGuard.ts` raises the sticky
+  error toast and reports `ocode:quit-guard:blocked` / `clear` to the desktop
+  shell over the minimal `window._wails.invoke` bridge
+  (`application.Options.RawMessageHandler`).
+- New `internal/desktop/quit_guard.go` (`QuitGuard`). While blocked,
+  `ShouldQuit` returns `false` and a `window.RegisterHook(WindowClosing)`
+  `event.Cancel()`s a user window close — hooks run before Wails' internal
+  destroy listener, so the window stays open. `confirmQuit` offers
+  "Keep editing" / "Quit anyway" (clears the guard, then quits) and the rapid
+  double-⌘Q bypass is disabled. `notifyQuitBlocked` re-raises the reason in the
+  web UI.
+- The guard means "edits are in memory and not written yet", not just "a write
+  failed": it also arms while the debounced write is still in flight, so quitting
+  inside the debounce window can no longer drop the edit silently. The sticky
+  toast still only appears on a real failure.
+- The draft write was a plain trailing 500 ms debounce, which continuous typing
+  pushes out forever — an entire tail of edits could sit unpersisted with the
+  guard none the wiser. `useEditorTabs` clamps the delay into an absolute
+  deadline (write ≤1 s after the first unpersisted keystroke, ≥50 ms after the
+  last), and mirrors edits into `editorTabsRef` synchronously so a short-delay
+  flush can never write a stale draft.
+- `useEditorTabs` also wires the flush/save/reload paths and a reconcile effect
+  so close/discard/reload/file-delete can't leave a stale block.
+  `EditorHelpDialog` documents the new behaviour.
+- Sticky-port fix: `server.Listen()` walks forward up to 20 ports on
+  `EADDRINUSE`, and `StartServer` used to re-save the bound port, moving the
+  webview's `http://127.0.0.1:PORT` localStorage origin and permanently orphaning
+  the previous origin's drafts/tabs. It now saves only when the bound port
+  equals the saved port (or there was none), so a drifted run leaves
+  `desktop-port` untouched.
+- Tests: `internal/desktop/quit_guard_test.go`,
+  `TestStartServerFallbackDoesNotOverwriteSavedPort`,
+  `web/src/lib/editorDraftGuard.test.ts`, and two `useEditorTabs` guard tests
+  (failure blocks quit; in-memory arming + bounded debounce) — all
+  mutation-verified; skill `ocode-desktop` gotchas 5 and 16 updated.
+
+## 2026-09-25 — Web: sidebar model and reasoning picks stay on their own chat
+
+- Picking a model on a real session also wrote the global `cfg.Model`
+  (`ModelDialog.tsx` "main" case). Every session without an override of its
+  own resolves through `effectiveSessionModel` → `cfg.Model`, so the pick
+  showed up on every existing chat across every project. The global default
+  now moves only from a draft tab or with no session in context.
+- The reasoning level had no per-session state at all: `PUT
+  /api/config/thinking-budget` wrote `cfg.ThinkingBudget` for the whole
+  process. New `PUT|DELETE /api/sessions/{id}/thinking-budget` persists a
+  `thinking_budget` override in the session's transcript metadata (same
+  pattern as `model` / `permission_mode`). Session-tagged status snapshots
+  stamp the effective budget (`applySessionThinkingBudget`), `buildAgentSession`
+  builds the client from a per-session config copy, and
+  `reconcileProfileAgent` rebuilds a live agent on the next turn when its
+  effective budget changed. The sidebar `ReasoningLevelSelector` calls the
+  session endpoint for a real session and the global one otherwise.
+
+## 2026-09-24 — Web: inactive/background session tabs keep their authoritative title
+
+- The `status` SSE title broadcast already relabels any OPEN tab (routing is per
+  open tab, not per active tab), but a tab that was never the active one never
+  mounts `ChatPanel`, and `ChatPanel`'s detail fetch was the only path that
+  applied `detail.title`. A title generated before this client connected, or
+  written by ANOTHER ocode process sharing the project, therefore left the tab
+  on its stale placeholder.
+- `reconcileOpenSessions` (page load / reconnect) and `revalidateSession`
+  (cross-process revision poll) already fetch the session detail, so they now
+  apply `detail.title` through a shared `applySessionTabTitle` helper. Manual
+  renames are preserved and `"New session"` / id placeholders are skipped.
+- `UPDATE_TAB_TITLE` gained a no-op guard: re-sending an unchanged auto title
+  returns the same state instead of a fresh `tabsByProject`, so a background
+  title pass can no longer re-render the tab bar or re-trigger the debounced
+  `PUT /api/tabs` persistence write.
+- Tests: `sessionEvents.test.ts` (live `status` title for an open/inactive tab;
+  reconcile + revalidate title application; placeholder skip) and
+  `projectStore.test.tsx` (unchanged auto title keeps the tab object identity) —
+  all mutation-verified.
+
+## 2026-09-24 — Permissions: relative paths resolve against session workdir
+
+- Auto-permission scope checks (`IsPathWithinAllowedRoots`, `isWithinWorkDir`)
+  now anchor relative tool paths (e.g. `.github/workflows/ci.yml`) to the
+  session workdir instead of the process cwd. Web/desktop sessions never chdir,
+  so in-project edits were auto-denied as "target path outside allowed roots".
+
+## 2026-09-24 — Web: honest tab loading indicators
+
+- Added a shared host/project/tab-keyed loading store with generation-guarded
+  requests, abort-on-switch/unmount cleanup, a 300 ms delayed refresh gate,
+  initial retry overlays, and stable external-store snapshots.
+- Wired Files, Git, Cron, Assets, and session Changes panels to the store;
+  initial failures now offer Retry, slow refreshes show a non-blocking tab
+  indicator, and refresh failures retain existing content. Main-tab overflow
+  items and the Changes sub-tab expose the same state, including portal-safe
+  indicators and accessible live regions.
+- Added regression coverage for host/path isolation, stale generations,
+  project resets, retry data application, delayed polls, overflow portals, and
+  trigger accessibility.
+- Cron keeps jobs, outbox, and targets on one latest-wins request after its
+  initial load is ready; project-switch cleanup is scoped to the previous
+  host/project so newly claimed child-panel requests are not canceled.
+
 ## 2026-09-24 — Kaizen: space-bunny-free baseline across all 15 stacks
 
 - New closed-book eval for **`space-bunny-free`** (`opencode-go`, version recorded as `"alpha"` — the provider publishes no version string) on every corpus. Answered through `ocode run -m opencode-go/space-bunny-free -effort med`, one headless session per stack sheet, cwd = an empty scratch dir holding only the `_prompts/<stack>.md` sheet (attached with `-f`). Every answerer session was audited in the sqlite store afterwards: 16/16 are exactly one user turn + one assistant turn, **zero tool calls**, so no repo file or answer key was reachable. Graders were separate agents per stack.
 - Stack scores: python 99.3, php 98.2, ruby 98, react 97, nextjs 97, ror 96.6, golang 95.9, rust 94.6, nestjs 94.0, dotnet 93, tanstack 92.6, csharp 91.1, elixir 89, vbnet 88, conduct 86.1. No flat sweep; every stack has own-wording answers with the model's own errors (contamination check clean on all 15).
 - Below threshold → **4 derived skills**: conduct (validation 0.64, error-handling 0.73, testing 0.67 — hedged "normally no" on empty catch, no always-log-on-rethrow, failing-test-first not stated as the rule), csharp (types-nullability 0.73 — record init-only default, value-vs-reference defaults, `!!` never shipped), elixir (pipe-with 0.69 — failed `with` returns the non-matching value, `IO.inspect` returns its argument), rust (async 0.71, low-n — std ships no executor, cooperative yield only at `.await`). Synced into `skills/kaizen/*-tuning-space-bunny-free/` via `sync-derived-skills.py`; `go build` + `internal/skill` tests pass.
 - Answer-sheet hygiene fixed by hand before grading, all id-only: nestjs emitted a hallucinated `validation-placeholder` record (dropped), nextjs/tanstack/dotnet mislabeled one id each (renamed after confirming the answer body matched the question), rust skipped `rust-ownership-03` (re-asked alone, closed-book, appended), dotnet's first run returned empty (re-run whole sheet).
+- **Derived skills validated** (re-answered closed-book with each skill prepended, re-graded by separate agents; `<stack>/answers/space-bunny-free.with-skill.md` + `<stack>/scores/space-bunny-free.with-skill.md`): every target tag crosses 0.75 — conduct validation 0.64→1.00, error-handling 0.73→0.79→**1.00** after a second iteration that sharpened two directives (state *why* empty catch is banned — it silently swallows the error; always state the `// intentionally not logged: <reason>` carve-out on rethrow, even unasked), testing 0.67→1.00 (stack 86.1→91.2→93.3); csharp types-nullability 0.73→1.00; elixir pipe-with 0.69→0.88; rust async 0.71→1.00. Non-target drift left alone per the HOW-TO noise rule. One skill bug caught by the re-grade: the csharp skill claimed `list[i].X = ...` on a struct list "acts on a copy" — it is compile error CS1612 — corrected in the SKILL.md and resynced. The conduct with-skill sheet (50 questions + skill body) exceeded the model's output budget and truncated at 28 answers; the remaining 22 were re-asked as a second closed-book sheet with the same skill prepended.
+- Live tool-discipline spot check (not part of the scorecards): two `-yolo` edit tasks in scratch repos — a 3-file edit and a 7-file rename — both went through `apply_patch` / `multi_file_edit`; `bash` was used only for `rg`, `go test`, `gofmt`, `git diff` and a read-only python `ast.parse`. No sed/python file writes observed.
 - Runner gotcha: `ocode run` launched from a backgrounded shell job inherits an open stdin socket and blocks forever in `read(0)` before creating the client — 15 parallel runs sat idle for 30 min with empty stderr. Redirect `< /dev/null`.
 - Files: `docs/okf/<stack>/answers/space-bunny-free.md` and `docs/okf/<stack>/scores/space-bunny-free.md` for all 15 stacks, `docs/okf/{conduct,csharp,elixir,rust}/derived/*.space-bunny-free.SKILL.md`, `skills/kaizen/{conduct,csharp,elixir,rust}-tuning-space-bunny-free/SKILL.md`, `docs/index.md`, `CHANGES.md`.
 - Version: `internal/version/version.go` 0.8.108 → 0.8.110 for this batch.
@@ -3125,7 +3363,8 @@ Two follow-ups to the session-switch work.
 ## [Unreleased]
 
 - **Remote web session routing (2026-09-17)** — open tabs register their remote hosts with the event bus; session model selection, command context, and agent-run seed requests follow the session host. Agent-run caches are host-scoped, unresolved project snapshots defer seed requests, and clearing the active project clears the event bus's active host. Regression coverage includes host inventory, model-dialog routing, command context, project-store state, and agent-run loading.
-- **Version Bump** — 0.8.97 → 0.8.110
+- **Version workflow** — added `make up-patch` and `make up-minor` to update the canonical version and changelog entry, then install the CLI and build the macOS desktop app with the new version.
+- **Version Bump** — 0.8.110 → 0.8.111
 - **Web/Desktop: Computer Use settings group** (`web/src/components/Settings/`) — new `ComputerUseForm.tsx` (enable checkbox + Save, loads `GET /api/config/computer-use`, saves `PUT /api/config/computer-use`) registered as its own `computer-use` nav entry in `SettingsPanel.tsx` (`OCODE_GROUPS` after OCR + `renderGroup` case). Renders the shared `computer.StatusLines` block, so the panel shows the platform backend and the macOS permission reminder without probing the desktop. Regression suite: `ComputerUseForm.test.tsx` (nav registration verified to fail without the `OCODE_GROUPS` entry). `docs/computer-use.md` updated to document the panel as the third toggle surface.
 - **Agent: remove state reflection feature** (`internal/agent/`) — deleted `state_reflect.go`, `state_reflect_test.go`, `agent_state_reflect_methods.go` and the `reflectState` field / `reflectTail` call from `agent.go`; the reflection hook that appended user messages on preview/browser snapshot changes is removed entirely
 - **LSP diagnostics: fingerprint only emitted diagnostics** (`internal/agent/lsp_inject.go`) — `injectLSPDelta` now records `a.lspSeen[uri]` after the line-cap check and rendering, so diagnostics that were skipped or never delivered are not permanently marked as reported

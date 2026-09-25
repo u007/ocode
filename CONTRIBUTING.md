@@ -47,6 +47,23 @@ make build-windows    # Windows only
 make release          # Versioned builds + sha256sums in release/
 ```
 
+### Version bumps
+
+The canonical version lives in `internal/version/version.go`. These targets
+update that file and the first `## [Unreleased]` changelog entry, then run the
+normal CLI install and macOS desktop packaging steps in that order:
+
+```bash
+make up-patch         # increment patch (e.g. 0.8.111 -> 0.8.112)
+make up-minor         # increment minor/reset patch (e.g. 0.8.111 -> 0.9.0)
+```
+
+These are release/build operations, not metadata-only commands: `up-patch` and
+`up-minor` both run `make install` followed by `make desktop-app`. The desktop
+step requires the existing macOS/Wails and HTR build prerequisites. The version
+and changelog are updated before those builds; if a build fails, rerun the
+individual build targets rather than invoking the bump target again.
+
 ### Web UI
 
 ```bash

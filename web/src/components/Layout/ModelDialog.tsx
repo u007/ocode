@@ -346,13 +346,12 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         }
         break;
       case "main": {
-        // A main-model pick sets BOTH this session's model and the process-wide
-        // default. A later new session has no override of its own and resolves
-        // through effectiveSessionModel → cfg.Model, so without the global
-        // write it would silently revert to the previous default. This mirrors
-        // the TUI, whose model pick sets cfg.Model + last_model
-        // (finishModelSwitch). Other open tabs are unaffected: each keeps its
-        // own per-session override, which still wins over the global default.
+        // A main-model pick on a real session is scoped to that session ONLY.
+        // Every session without an override resolves through
+        // effectiveSessionModel → cfg.Model, so also writing the global
+        // default here made the pick show up on every existing chat across
+        // every project. The global default moves only from a draft tab or
+        // when no session is in context.
         if (sessionId && sessionId.startsWith("new-")) {
           // Draft tab — the session doesn't exist server-side yet. Keep the
           // pick local to this tab's slice; the first message sends it as the
@@ -374,10 +373,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
               .then((st) => dispatch({ type: "SET_TUI_STATUS", sessionId, status: st }))
               .catch(console.error);
           });
+          break;
         }
-        // Persist the global default for EVERY main pick — including a
-        // session-scoped one — so the next new session starts on it. Routed to
-        // the session's host like every other session-scoped call, so a remote
+        // Draft tab or no session: move the global default so the next new
+        // session starts on it. Routed to the session's host so a remote
         // project's new sessions pick it up from that host's config.
         dispatch({ type: "SET_MODEL", model: modelId });
         persist("Changing the default model", () => api.setConfigModel(modelId, ...hostArgs));

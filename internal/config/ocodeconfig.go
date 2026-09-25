@@ -306,6 +306,206 @@ type CompactConfig struct {
 	MaxSummaryInputTokens int     `json:"max_summary_input_tokens"`
 }
 
+const (
+	ChatVerbosityFull     = "full"
+	ChatVerbosityBalanced = "balanced"
+	ChatVerbosityQuiet    = "quiet"
+
+	ChatDisplayPreset    = "preset"
+	ChatDisplayExpanded  = "expanded"
+	ChatDisplayCollapsed = "collapsed"
+)
+
+// ChatVerbosityOverrides controls individual rendered message categories. An
+// empty value is treated as ChatDisplayPreset for in-memory configs created by
+// older callers; the on-disk decoder distinguishes an omitted field from an
+// explicitly invalid value before applying it.
+type ChatVerbosityOverrides struct {
+	OlderThinking   string `json:"older_thinking"`
+	ToolCalls       string `json:"tool_calls"`
+	ToolOutput      string `json:"tool_output"`
+	ActivityNotices string `json:"activity_notices"`
+}
+
+// ChatVerbosityConfig stores the user's presentation intent. It never changes
+// the persisted transcript or the model-facing conversation context.
+type ChatVerbosityConfig struct {
+	Preset    string                 `json:"preset"`
+	Overrides ChatVerbosityOverrides `json:"overrides"`
+}
+
+// UnmarshalJSON rejects an unknown override category instead of silently
+// dropping it. Omitted categories stay empty so withDefaults can apply
+// "preset"; an explicit null leaves the category at its default too.
+func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
+	var raw map[string]*string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	next := ChatVerbosityOverrides{}
+	for name, value := range raw {
+		dst := chatVerbosityOverrideField(&next, name)
+		if dst == nil {
+			return fmt.Errorf("unknown override category: %s", name)
+		}
+		if value != nil {
+			*dst = *value
+		}
+	}
+	*o = next
+	return nil
+}
+
+// ChatDisplayPolicy is the effective, renderer-facing form of a verbosity
+// config. LatestThinking is intentionally always expanded: users must be able
+// to follow the model's current reasoning in every preset.
+type ChatDisplayPolicy struct {
+	OlderThinking  string `json:"older_thinking"`
+	LatestThinking string `json:"latest_thinking"`
+	ToolCalls      string `json:"tool_calls"`
+	ToolOutput     string `json:"tool_output"`
+	Notices        string `json:"notices"`
+	Status         string `json:"status"`
+}
+
+func defaultChatVerbosityConfig() ChatVerbosityConfig {
+	return ChatVerbosityConfig{
+		Preset: ChatVerbosityFull,
+		Overrides: ChatVerbosityOverrides{
+			OlderThinking:   ChatDisplayPreset,
+			ToolCalls:       ChatDisplayPreset,
+			ToolOutput:      ChatDisplayPreset,
+			ActivityNotices: ChatDisplayPreset,
+		},
+	}
+}
+
+// NormalizeChatVerbosityConfig fills omitted in-memory fields with their
+// documented defaults. Explicit values are left untouched so Validate can
+// reject them.
+func NormalizeChatVerbosityConfig(cfg ChatVerbosityConfig) ChatVerbosityConfig {
+	return cfg.withDefaults()
+}
+
+func (c ChatVerbosityConfig) withDefaults() ChatVerbosityConfig {
+	if c.Preset == "" {
+		c.Preset = ChatVerbosityFull
+	}
+	if c.Overrides.OlderThinking == "" {
+		c.Overrides.OlderThinking = ChatDisplayPreset
+	}
+	if c.Overrides.ToolCalls == "" {
+		c.Overrides.ToolCalls = ChatDisplayPreset
+	}
+	if c.Overrides.ToolOutput == "" {
+		c.Overrides.ToolOutput = ChatDisplayPreset
+	}
+	if c.Overrides.ActivityNotices == "" {
+		c.Overrides.ActivityNotices = ChatDisplayPreset
+	}
+	return c
+}
+
+func validChatVerbosityPreset(value string) bool {
+	switch value {
+	case ChatVerbosityFull, ChatVerbosityBalanced, ChatVerbosityQuiet:
+		return true
+	default:
+		return false
+	}
+}
+
+func validChatDisplayOverride(value string) bool {
+	switch value {
+	case ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed:
+		return true
+	default:
+		return false
+	}
+}
+
+// chatVerbosityOverrideField resolves a wire category name to the in-memory
+// field it controls. It returns nil for an unknown category so the decoder can
+// reject it instead of silently dropping the value.
+func chatVerbosityOverrideField(dst *ChatVerbosityOverrides, name string) *string {
+	switch name {
+	case "older_thinking":
+		return &dst.OlderThinking
+	case "tool_calls":
+		return &dst.ToolCalls
+	case "tool_output":
+		return &dst.ToolOutput
+	case "activity_notices":
+		return &dst.ActivityNotices
+	default:
+		return nil
+	}
+}
+
+// Validate checks a config after applying defaults for omitted in-memory
+// fields. Explicit invalid values are rejected before any save is attempted.
+func (c ChatVerbosityConfig) Validate() error {
+	c = c.withDefaults()
+	if !validChatVerbosityPreset(c.Preset) {
+		return fmt.Errorf("chat_verbosity.preset must be one of %q, %q, or %q", ChatVerbosityFull, ChatVerbosityBalanced, ChatVerbosityQuiet)
+	}
+	overrides := []struct {
+		name  string
+		value string
+	}{
+		{"older_thinking", c.Overrides.OlderThinking},
+		{"tool_calls", c.Overrides.ToolCalls},
+		{"tool_output", c.Overrides.ToolOutput},
+		{"activity_notices", c.Overrides.ActivityNotices},
+	}
+	for _, override := range overrides {
+		if !validChatDisplayOverride(override.value) {
+			return fmt.Errorf("chat_verbosity.overrides.%s must be one of %q, %q, or %q", override.name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+		}
+	}
+	return nil
+}
+
+func resolveChatDisplayOverride(value, presetValue string) string {
+	if value == "" || value == ChatDisplayPreset {
+		return presetValue
+	}
+	return value
+}
+
+// ResolveChatVerbosityPolicy converts persisted intent into the effective
+// renderer policy. The latest thinking block is a deliberate invariant across
+// all presets, including Quiet.
+func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, error) {
+	cfg = cfg.withDefaults()
+	if err := cfg.Validate(); err != nil {
+		return ChatDisplayPolicy{}, err
+	}
+
+	olderThinking := ChatDisplayExpanded
+	toolCalls := ChatDisplayExpanded
+	toolOutput := ChatDisplayExpanded
+	notices := ChatDisplayExpanded
+	switch cfg.Preset {
+	case ChatVerbosityBalanced:
+		olderThinking = ChatDisplayCollapsed
+	case ChatVerbosityQuiet:
+		olderThinking = ChatDisplayCollapsed
+		toolCalls = ChatDisplayCollapsed
+		toolOutput = ChatDisplayCollapsed
+		notices = ChatDisplayCollapsed
+	}
+
+	return ChatDisplayPolicy{
+		OlderThinking:  resolveChatDisplayOverride(cfg.Overrides.OlderThinking, olderThinking),
+		LatestThinking: ChatDisplayExpanded,
+		ToolCalls:      resolveChatDisplayOverride(cfg.Overrides.ToolCalls, toolCalls),
+		ToolOutput:     resolveChatDisplayOverride(cfg.Overrides.ToolOutput, toolOutput),
+		Notices:        resolveChatDisplayOverride(cfg.Overrides.ActivityNotices, notices),
+		Status:         ChatDisplayExpanded,
+	}, nil
+}
+
 // BrowserConfig configures the embedded headless-Chrome browser mode
 // (internal/browse/cdp). ChromePath is an optional explicit path to the Chrome
 // binary; IdleTimeoutMinutes is how long the shared Chrome process stays
@@ -479,12 +679,13 @@ type RedactionConfig struct {
 }
 
 type OcodeConfig struct {
-	Compact     CompactConfig
-	Advisor     AdvisorConfig
-	Permissions PermissionConfig
-	Plugins     PluginsConfig
-	Browser     BrowserConfig
-	TTS         TTSConfig
+	Compact       CompactConfig
+	Advisor       AdvisorConfig
+	Permissions   PermissionConfig
+	Plugins       PluginsConfig
+	Browser       BrowserConfig
+	TTS           TTSConfig
+	ChatVerbosity ChatVerbosityConfig
 	// Wallpaper holds the chat background wallpaper selection
 	// (enabled, light/dark image IDs, auto/manual mode).
 	Wallpaper wallpaper.WallpaperConfig
@@ -756,6 +957,11 @@ type compactConfigFile struct {
 	MaxSummaryInputTokens *int     `json:"max_summary_input_tokens"`
 }
 
+type chatVerbosityConfigFile struct {
+	Preset    *string                 `json:"preset"`
+	Overrides *ChatVerbosityOverrides `json:"overrides"`
+}
+
 type tuiConfigFile struct {
 	Theme         string            `json:"theme"`
 	Mouse         *bool             `json:"mouse"`
@@ -825,6 +1031,7 @@ type ocodeConfigFile struct {
 	Plugins                 pluginsConfigFile           `json:"plugins"`
 	Browser                 browserConfigFile           `json:"browser"`
 	TTS                     TTSConfig                   `json:"tts,omitempty"`
+	ChatVerbosity           *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
 	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
 	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
 	Security                securityConfigFile          `json:"security"`
@@ -915,6 +1122,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Permissions:             defaultPermissionConfig(),
 		Browser:                 BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", NoSandbox: true},
 		TTS:                     TTSConfig{Engine: "browser-native", Mode: "manual"},
+		ChatVerbosity:           defaultChatVerbosityConfig(),
 		MemoryEnabled:           true,
 		SmallModelEnabled:       true,
 		RecapModelEnabled:       false,
@@ -1239,6 +1447,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			}
 		}
 		delete(raw, "tts")
+	}
+
+	if _, ok := raw["chat_verbosity"]; ok {
+		if err := applyChatVerbosityConfig(&cfg.ChatVerbosity, file.ChatVerbosity); err != nil {
+			return fmt.Errorf("chat_verbosity: %w", err)
+		}
+		delete(raw, "chat_verbosity")
 	}
 
 	if _, ok := raw["extra_allowed_paths"]; ok {
@@ -1594,6 +1809,27 @@ func applyPermissionConfig(dst *PermissionConfig, src permissionConfigFile) {
 	if src.Auto != nil {
 		applyAutoPermissionConfig(dst.Auto, src.Auto)
 	}
+}
+
+func applyChatVerbosityConfig(dst *ChatVerbosityConfig, src *chatVerbosityConfigFile) error {
+	if src == nil {
+		return nil
+	}
+	next := dst.withDefaults()
+	if src.Preset != nil {
+		if !validChatVerbosityPreset(*src.Preset) {
+			return fmt.Errorf("chat_verbosity.preset must be one of %q, %q, or %q", ChatVerbosityFull, ChatVerbosityBalanced, ChatVerbosityQuiet)
+		}
+		next.Preset = *src.Preset
+	}
+	if src.Overrides != nil {
+		next.Overrides = *src.Overrides
+	}
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	*dst = next
+	return nil
 }
 
 func applyAutoPermissionConfig(dst *AutoPermissionConfig, src *autoPermissionConfigFile) {
@@ -1960,14 +2196,16 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.Discovery.LocalServerURL != "" {
 		discoveryMap["local_server_url"] = cfg.Discovery.LocalServerURL
 	}
+	chatVerbosity := cfg.ChatVerbosity.withDefaults()
 	payload := map[string]interface{}{
-		"compact":     cfg.Compact,
-		"advisor":     cfg.Advisor,
-		"permissions": cfg.Permissions,
-		"security":    cfg.Security,
-		"discovery":   discoveryMap,
-		"browser":     cfg.Browser,
-		"tts":         cfg.TTS,
+		"compact":        cfg.Compact,
+		"advisor":        cfg.Advisor,
+		"permissions":    cfg.Permissions,
+		"security":       cfg.Security,
+		"discovery":      discoveryMap,
+		"browser":        cfg.Browser,
+		"tts":            cfg.TTS,
+		"chat_verbosity": chatVerbosity,
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
@@ -2069,7 +2307,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" {
 			continue
 		}
 		payload[k] = v
@@ -3306,6 +3544,20 @@ func SaveOcodeCommitMsgConfig(model, prompt string) error {
 func SaveOcodeCompactConfig(cfg CompactConfig) error {
 	return withOcodeConfigLock(func(c *OcodeConfig) error {
 		c.Compact = cfg
+		return nil
+	})
+}
+
+// SaveOcodeChatVerbosity persists the shared web/desktop presentation policy.
+// Validation happens before taking the lock so an invalid request cannot
+// rewrite an existing config file.
+func SaveOcodeChatVerbosity(cfg ChatVerbosityConfig) error {
+	cfg = cfg.withDefaults()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.ChatVerbosity = cfg
 		return nil
 	})
 }

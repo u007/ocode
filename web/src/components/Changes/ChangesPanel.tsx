@@ -5,6 +5,7 @@ import ChangesFileList from "./ChangesFileList";
 import ChangesDiffView from "./ChangesDiffView";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
 
 const REFRESH_INTERVAL = 10_000;
 
@@ -18,28 +19,42 @@ interface Props {
    *  these is mounted per open session tab (hidden via CSS), so background
    *  instances must not poll — N hidden tabs would hammer /api/changes. */
   active?: boolean;
+  loadingKey?: string;
+  onLoadingEvent?: LoadingEventHandler;
 }
 
 type PendingUndo = { path: string; kind: "file" | "block" } | null;
 
-function ChangesPanel({ session, host, active = true }: Props) {
+function ChangesPanel({ session, host, active = true, loadingKey, onLoadingEvent }: Props) {
+  const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [files, setFiles] = useState<FileChange[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingUndo, setPendingUndo] = useState<PendingUndo>(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      const res = await api.listChanges(session, host);
-      setFiles(res);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load changes");
-    } finally {
-      setLoading(false);
-    }
-  }, [session, host]);
+  const refresh = useCallback(() => {
+    setLoading(true);
+    return runKeyedLoad(
+      () => api.listChanges(session, host),
+      {
+        empty: (files) => files.length === 0,
+        retry: () => {
+          void refresh();
+        },
+      },
+    ).then((result) => {
+      if (result.status === "success" || result.status === "empty") {
+        setFiles(result.value);
+        setError(null);
+        setLoading(false);
+      } else if (result.status === "error") {
+        console.error("Changes load failed:", result.error);
+        setError(result.message);
+        setLoading(false);
+      }
+    });
+  }, [session, host, loadingKey, runKeyedLoad]);
 
   useEffect(() => {
     refresh();
@@ -117,6 +132,7 @@ function ChangesPanel({ session, host, active = true }: Props) {
   );
 }
 
-/** Props are primitives (`session`, `active`), so a parent re-render — e.g.
- *  another tab becoming active — never re-renders a hidden ChangesPanel. */
+/** Session/key props are primitives and the event callback is stable, so a
+ *  parent re-render — e.g. another tab becoming active — does not re-render a
+ *  hidden ChangesPanel. */
 export default memo(ChangesPanel);

@@ -455,6 +455,14 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			effCfg = cfg
 		}
 	}
+	// Per-session reasoning level: copy the config so the override never
+	// leaks into the shared h.cfg / profile cache.
+	thinkingBudget := h.effectiveSessionThinkingBudget(sessionID)
+	if effCfg != nil && effCfg.ThinkingBudget != thinkingBudget {
+		c := *effCfg
+		c.ThinkingBudget = thinkingBudget
+		effCfg = &c
+	}
 	// Stage "model": LLM client + agent shell.
 	h.publishBootstrapStage(sessionID, "model")
 	client := agent.NewClientWithProfile(effCfg, model, prof)
@@ -577,7 +585,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// leak into another chat, and a resume/restart re-seeds from metadata.
 	ag.SetAdvisorEnabled(h.advisorSeed(sessionID, h.advisorFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
-	as := &agentSession{agent: ag, messages: messages, model: model, profile: prof, credVersion: auth.ProfileCredentialVersion()}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.ProfileCredentialVersion()}
 	// Restore this session's spend and token history before anything reads the
 	// gauge. The totals live in transcript metadata (the same keys the TUI
 	// writes) and a freshly built agent starts at zero, so without this seed the
@@ -651,6 +659,9 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// even when the profile is unbound to a window — the cached agentSession
 	// otherwise keeps talking to whatever model it was originally built with.
 	modelChanged := model != "" && model != as.model
+	// A reasoning-level change (per-session override or the global default)
+	// lands on the next turn the same way a model switch does.
+	budgetChanged := h.effectiveSessionThinkingBudget(id) != as.thinkingBudget
 	// The credential version is global, not per-profile: an in-place edit must
 	// invalidate the cached client for window-unbound sessions too, so it is
 	// read unconditionally rather than only on the window-bound path.
@@ -659,7 +670,7 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	if entry.WindowID != "" {
 		cur = h.resolveSessionProfile(entry)
 	}
-	if !modelChanged && cur == as.profile && curCredVersion == as.credVersion {
+	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion {
 		return as, nil
 	}
 	newAs, stage, err := h.buildAgentSession(id, model, as.messages, entry.ProjectRoot)
@@ -1552,11 +1563,12 @@ func (h *Handler) startAgentActivityBroadcast(sessionID string, ag *agent.Agent)
 // handler return 202 without racing the agent build; err is set when the
 // persist itself failed.
 type turnJob struct {
-	content    string
-	model      string
-	opts       turnOptions
-	persistAck chan struct{}
-	err        error
+	content     string
+	model       string
+	opts        turnOptions
+	rewindToken string
+	persistAck  chan struct{}
+	err         error
 }
 
 // sessionTurnLock returns the per-session mutex that serializes turn jobs
@@ -1602,7 +1614,11 @@ func (h *Handler) saveLockFor(path string) *sync.Mutex {
 // goroutine finishes — executing, erroring, or cancelled — so a queued
 // second job keeps the session visible as in-flight while the first drains.
 func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*turnJob, error) {
-	job := &turnJob{content: content, model: model, opts: opts, persistAck: make(chan struct{})}
+	return h.dispatchTurnWithRewind(id, model, content, opts, "")
+}
+
+func (h *Handler) dispatchTurnWithRewind(id, model, content string, opts turnOptions, rewindToken string) (*turnJob, error) {
+	job := &turnJob{content: content, model: model, opts: opts, rewindToken: rewindToken, persistAck: make(chan struct{})}
 	// Refuse new turns once shutdown has begun: shutdown joins a bounded job
 	// set, so a turn dispatched after the join starts could create plugin/model
 	// processes, register an agent, and write after shutdown began.
@@ -1633,6 +1649,51 @@ func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*tu
 	return job, nil
 }
 
+// commitPendingRewindTurn performs the one durable tokenized-send operation
+// while executeTurnJob owns the session turn lock. The ordinary append path
+// must not run for this job: the replacement user row is already in the store.
+func (h *Handler) commitPendingRewindTurn(id string, entry *sessionEntry, job *turnJob) bool {
+	result, err := commitPendingRewindForDir(entry.ProjectRoot, id, job.rewindToken, job.content)
+	if err != nil {
+		if errors.Is(err, session.ErrPendingRewindAlreadyCommitted) {
+			// Response-loss recovery: the first request already committed this
+			// token. Treat the duplicate as accepted, but do not append or start
+			// another turn.
+			close(job.persistAck)
+			return false
+		}
+		log.Printf("serve error: pending rewind commit session_id=%q error=%v", id, err)
+		job.err = err
+		close(job.persistAck)
+		return false
+	}
+
+	committedMessages, err := pendingRewindCommittedMessages(result, job.content)
+	if err != nil {
+		log.Printf("serve error: pending rewind commit session_id=%q error=%v", id, err)
+		job.err = err
+		close(job.persistAck)
+		return false
+	}
+
+	// The resident transcript is memory state, not a second durable write. Set
+	// it to the kept prefix only; runTurn appends the already-persisted user row
+	// exactly once when the turn starts.
+	if as := h.lookupAgentSession(id); as != nil {
+		as.mu.Lock()
+		as.messages = append([]agent.Message(nil), result.KeptPrefix...)
+		as.mu.Unlock()
+	}
+	h.sessions.ReplacePending(id, []string{job.content})
+
+	// Publish the authoritative shortened transcript before acknowledging the
+	// HTTP request. This event is the same critical `messages` snapshot used by
+	// ordinary turn completion.
+	h.broadcastEvent(SSEEvent{SessionID: id, Event: "messages", Data: committedMessages})
+	close(job.persistAck)
+	return true
+}
+
 // executeTurnJob runs one queued turn end to end, under the session's turn
 // lock so persist and turn ordering never interleave:
 //
@@ -1661,7 +1722,11 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 
 	entry := h.sessions.Lookup(id)
 	if entry == nil {
-		job.err = fmt.Errorf("session not found")
+		if job.rewindToken != "" {
+			job.err = session.ErrNoStoredSession
+		} else {
+			job.err = fmt.Errorf("session not found")
+		}
 		close(job.persistAck)
 		return
 	}
@@ -1670,7 +1735,11 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	// to persist — its message is already the transcript tail — so skip the
 	// write and the pending queue entirely; appending it again would duplicate
 	// the user's message in the transcript.
-	if job.opts.retryLast {
+	if job.rewindToken != "" {
+		if !h.commitPendingRewindTurn(id, entry, job) {
+			return
+		}
+	} else if job.opts.retryLast {
 		close(job.persistAck)
 	} else {
 		if err := h.persistUserMessage(entry, job.content); err != nil {

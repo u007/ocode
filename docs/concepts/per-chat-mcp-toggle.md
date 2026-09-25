@@ -11,7 +11,7 @@ tags:
   - agent-rebuild
   - caching
   - gotcha
-timestamp: 2026-09-24T06:03:53Z
+timestamp: 2026-09-25T06:23:58Z
 ---
 # Per-Chat MCP Toggle
 
@@ -72,6 +72,10 @@ Overrides are **in-memory only** (the durable record is the process-wide `openco
 
 The web chat `/mcp` command now passes the active session id, and its message points at the sidebar MCP toggle. It previously advertised `enable`/`disable` subcommands that did not exist.
 
+## Unaffected by the remote MCP OAuth compatibility fix (2026-09-25)
+
+The remote MCP OAuth compatibility work — dual-schema `mcp-auth.json` reads, URL-bound token attachment, RFC 9728/8414 discovery refresh, status-before-decode HTTP errors — lives entirely below this feature: it changes *how a remote request is authenticated*, not which servers are enabled or how tools are cached. `handler_mcp.go` and `mcp_cache.go` were not touched; the design's non-goals explicitly preserve "enabled" semantics and this toggle/cache behavior. The only observable interaction is benign: an upstream-authorized remote server now enumerates successfully during `mcpCache` warm where it previously failed with 401. See `docs/concepts/remote-mcp-oauth-compat.md`.
+
 ## Tests
 
 All mutation-verified (each fix reverted → test fails):
@@ -89,3 +93,4 @@ With process-wide `alpha` enabled, a session that toggles it off reports `disabl
 - `docs/architecture/sidebar-tui-parity-gaps.md` — sidebar section inventory (its "Tools/MCP" row predates per-chat scoping).
 - `docs/superpowers/specs/2026-09-18-per-session-sidebar-settings-design.md` — the broader design spec for per-session sidebar settings (MCP is one instance of the pattern: session-scoped copy of config + next-turn rebuild, not runtime atomics).
 - `skills/ocode-web/SKILL.md` item 32 — web-side rules for this toggle.
+- `docs/concepts/remote-mcp-oauth-compat.md` — remote MCP OAuth compatibility (dual-schema auth, URL binding, discovery refresh); confirms this page's toggle/cache semantics are unchanged.

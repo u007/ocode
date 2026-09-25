@@ -3,14 +3,7 @@ package mcpcli
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -201,13 +194,11 @@ func runList() error {
 	wg.Wait()
 
 	for _, r := range results {
-		symbol := "ok"
+		symbol := "fail"
 		if r.status == "off" {
 			symbol = "off"
-		} else if !strings.HasPrefix(r.tools, "fail") && !strings.HasPrefix(r.tools, "connection") {
+		} else if r.status == "ok" {
 			symbol = "ok"
-		} else {
-			symbol = "fail"
 		}
 		fmt.Printf("%-16s %-8s %-8s %s\n", r.name, r.typ, symbol, r.tools)
 	}
@@ -281,16 +272,9 @@ func runAuth(args []string) error {
 	}
 
 	oauth := mcpCfg.OAuth
-	token, err := runOAuthFlow(oauth)
-	if err != nil {
+	if err := auth.MCPAuthFlow(name, oauth.AuthorizationURL, oauth.TokenURL, oauth.ClientID, oauth.Scopes); err != nil {
 		return fmt.Errorf("OAuth flow failed: %w", err)
 	}
-
-	auth.SetMCPAuth(name, auth.MCPAuthToken{
-		AccessToken: token,
-		TokenType:   "Bearer",
-		Expiry:      time.Now().Add(time.Hour).Unix(),
-	})
 
 	fmt.Printf("OAuth token saved for server %q\n", name)
 	return nil
@@ -322,6 +306,9 @@ func runAuthList() error {
 		if mcpCfg.Headers != nil && mcpCfg.Headers["Authorization"] != "" {
 			oauthStatus += " (token stored)"
 		}
+		if _, ok := auth.GetMCPAuth(name); ok {
+			oauthStatus += " (token stored)"
+		}
 		fmt.Printf("%-16s %-8s %s\n", name, typ, oauthStatus)
 	}
 
@@ -344,21 +331,30 @@ func runLogout(args []string) error {
 		return fmt.Errorf("MCP server %q not found", name)
 	}
 
-	if mcpCfg.Headers == nil || mcpCfg.Headers["Authorization"] == "" {
+	_, authStored := auth.GetMCPAuth(name)
+	headerStored := mcpCfg.Headers != nil && mcpCfg.Headers["Authorization"] != ""
+	if !authStored && !headerStored {
 		fmt.Printf("No stored token for server %q\n", name)
 		return nil
 	}
 
-	cleared, err := config.ClearMCPAuthorization(name)
-	if err != nil {
-		return fmt.Errorf("save config: %w", err)
+	cleared := false
+	if authStored {
+		if err := auth.DeleteMCPAuth(name); err != nil {
+			return fmt.Errorf("delete stored token: %w", err)
+		}
+		cleared = true
 	}
-	if !cleared {
-		fmt.Printf("No stored token for server %q\n", name)
-		return nil
+	if headerStored {
+		headerCleared, err := config.ClearMCPAuthorization(name)
+		if err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+		cleared = cleared || headerCleared
 	}
-
-	fmt.Printf("Cleared OAuth token for server %q\n", name)
+	if cleared {
+		fmt.Printf("Cleared OAuth token for server %q\n", name)
+	}
 	return nil
 }
 
@@ -393,30 +389,28 @@ func runDebug(args []string) error {
 			}
 		}
 	} else {
-		fmt.Printf("URL: %s\n", mcpCfg.URL)
 		parsed, err := url.Parse(mcpCfg.URL)
 		if err != nil {
-			fmt.Printf("URL valid: no (%v)\n", err)
+			fmt.Println("URL valid: no")
 		} else {
 			fmt.Printf("URL valid: yes (scheme=%s, host=%s)\n", parsed.Scheme, parsed.Host)
 		}
 	}
 
+	_, storedToken := auth.GetMCPAuth(name)
 	if mcpCfg.OAuth != nil && isOAuthEnabled(mcpCfg.OAuth) {
 		fmt.Println("OAuth: configured")
-		fmt.Printf("  Authorization URL: %s\n", mcpCfg.OAuth.AuthorizationURL)
-		fmt.Printf("  Token URL: %s\n", mcpCfg.OAuth.TokenURL)
-		fmt.Printf("  Client ID: %s\n", mcpCfg.OAuth.ClientID)
-		if len(mcpCfg.OAuth.Scopes) > 0 {
-			fmt.Printf("  Scopes: %s\n", strings.Join(mcpCfg.OAuth.Scopes, ", "))
-		}
-		if mcpCfg.Headers != nil && mcpCfg.Headers["Authorization"] != "" {
+		if storedToken || (mcpCfg.Headers != nil && mcpCfg.Headers["Authorization"] != "") {
 			fmt.Println("  Token: stored")
 		} else {
 			fmt.Println("  Token: not stored")
 		}
 	} else {
-		fmt.Println("OAuth: not configured")
+		if storedToken {
+			fmt.Println("OAuth: not configured (stored credential available)")
+		} else {
+			fmt.Println("OAuth: not configured")
+		}
 	}
 
 	if !mcpCfg.Enabled {
@@ -460,155 +454,4 @@ func resolveConfigPath() (string, error) {
 		return filepath.Join(os.Getenv("APPDATA"), "opencode", "opencode.json"), nil
 	}
 	return filepath.Join(home, ".config", "opencode", "opencode.json"), nil
-}
-
-func runOAuthFlow(oauth *config.MCPOAuthConfig) (string, error) {
-	verifier, challenge := generatePKCE()
-	state, err := randomState()
-	if err != nil {
-		return "", fmt.Errorf("generate state: %w", err)
-	}
-
-	redirectURI := "http://localhost:9876/oauth/callback"
-	authURL := buildAuthorizeURL(oauth, challenge, state, redirectURI)
-
-	fmt.Printf("Opening browser for authorization...\n")
-	openBrowser(authURL)
-
-	codeCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-
-	listener, err := net.Listen("tcp", "127.0.0.1:9876")
-	if err != nil {
-		return "", fmt.Errorf("bind localhost:9876: %w", err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		if errParam := q.Get("error"); errParam != "" {
-			errCh <- fmt.Errorf("auth error: %s — %s", errParam, q.Get("error_description"))
-			http.Error(w, "auth failed", http.StatusBadRequest)
-			return
-		}
-		if q.Get("state") != state {
-			errCh <- fmt.Errorf("state mismatch")
-			http.Error(w, "state mismatch", http.StatusBadRequest)
-			return
-		}
-		code := q.Get("code")
-		if code == "" {
-			errCh <- fmt.Errorf("missing authorization code")
-			http.Error(w, "missing code", http.StatusBadRequest)
-			return
-		}
-		_, _ = w.Write([]byte(`<!doctype html><html><body style="font-family:system-ui;padding:40px"><h2>Authorized for ocode</h2><p>You can close this tab.</p></body></html>`))
-		codeCh <- code
-	})
-
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = srv.Serve(listener) }()
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	}()
-
-	select {
-	case <-time.After(5 * time.Minute):
-		return "", fmt.Errorf("OAuth timed out")
-	case err := <-errCh:
-		return "", err
-	case code := <-codeCh:
-		return exchangeToken(oauth, code, verifier, redirectURI)
-	}
-}
-
-func generatePKCE() (verifier, challenge string) {
-	buf := make([]byte, 32)
-	rand.Read(buf)
-	verifier = base64.RawURLEncoding.EncodeToString(buf)
-	sum := sha256.Sum256([]byte(verifier))
-	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
-	return
-}
-
-func randomState() (string, error) {
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
-}
-
-func buildAuthorizeURL(oauth *config.MCPOAuthConfig, challenge, state, redirectURI string) string {
-	u, _ := url.Parse(oauth.AuthorizationURL)
-	q := u.Query()
-	q.Set("response_type", "code")
-	q.Set("client_id", oauth.ClientID)
-	q.Set("redirect_uri", redirectURI)
-	q.Set("code_challenge", challenge)
-	q.Set("code_challenge_method", "S256")
-	q.Set("state", state)
-	if len(oauth.Scopes) > 0 {
-		q.Set("scope", strings.Join(oauth.Scopes, " "))
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
-func exchangeToken(oauth *config.MCPOAuthConfig, code, verifier, redirectURI string) (string, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("client_id", oauth.ClientID)
-	form.Set("code", code)
-	form.Set("code_verifier", verifier)
-	form.Set("redirect_uri", redirectURI)
-
-	req, err := http.NewRequest("POST", oauth.TokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("build token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("token request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token exchange failed: %d %s", resp.StatusCode, string(body))
-	}
-
-	var parsed struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", fmt.Errorf("decode token response: %w", err)
-	}
-	if parsed.AccessToken == "" {
-		return "", fmt.Errorf("token response missing access_token")
-	}
-
-	return parsed.AccessToken, nil
-}
-
-func openBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		cmd = exec.Command("xdg-open", url)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		return
-	}
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	_ = cmd.Start()
 }

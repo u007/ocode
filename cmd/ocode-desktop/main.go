@@ -63,6 +63,21 @@ func showQuittingIndicator(win *application.WebviewWindow) {
 	win.ExecJS(`(function(){if(window.__ocodeQuittingOverlay)return;var d=document.createElement('div');d.id='ocode-quitting';d.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:#0a0a0aff;color:#e8e8e8;font-family:system-ui,sans-serif;z-index:2147483646;display:flex;align-items:center;justify-content:center;flex-direction:column;font-size:20px;letter-spacing:0.5px;pointer-events:none;';d.innerHTML='<div style="font-size:28px;margin-bottom:12px;">ocode</div><div>Quitting — finishing active tasks</div><div style="margin-top:18px;font-size:13px;color:#999;">Please wait a moment</div>';document.body.appendChild(d);window.__ocodeQuittingOverlay=true;})();`)
 }
 
+// notifyQuitBlocked tells the web UI that a quit attempt was refused, so it
+// can re-surface the persistence error the user may have dismissed. reason may
+// be empty. Uses ExecJS with a plain DOM CustomEvent (same mechanism as the
+// Settings…/Share menu items) because this SPA never loads the full Wails
+// runtime, so window.EmitEvent is unavailable.
+func notifyQuitBlocked(win *application.WebviewWindow, reason string) {
+	if win == nil {
+		return
+	}
+	win.ExecJS(fmt.Sprintf(
+		`window.dispatchEvent(new CustomEvent("ocode:quit-blocked",{detail:{reason:%s}}))`,
+		strconv.Quote(reason),
+	))
+}
+
 // configureLoginShell points the agent bash tool at the user's login shell
 // (tool.SetLoginShell). A Finder/Dock-launched .app inherits launchd's minimal
 // PATH (/usr/bin:/bin:/usr/sbin:/sbin) and no $SHELL, so the default
@@ -147,6 +162,14 @@ func main() {
 	// Finder/Dock-launched processes still see the user's full PATH.
 	configureLoginShell()
 
+	// Hydrate the process PATH before the in-process server starts. Finder/Dock
+	// launches inherit a minimal PATH, so exec.LookPath in the server's LSP
+	// manager otherwise cannot see user toolchains such as ~/go/bin, Homebrew,
+	// Cargo, or version-manager installations. This is platform-aware: Unix
+	// probes the supported login shell, while Windows adds conventional user
+	// tool directories without invoking a shell.
+	desktop.EnsureExecutablePath()
+
 	// The pin above makes agent commands run via `<shell> -l -c`, which sources
 	// the login profiles (/etc/zprofile, ~/.zprofile) but NOT the interactive
 	// ~/.zshrc where ~/.local/bin is added. Prepend the user's bin dirs to the
@@ -173,6 +196,11 @@ func main() {
 	// exist yet, so it reads the window through an atomic set after creation;
 	// nil means a second launch raced our own startup and is simply dropped.
 	var mainWin atomic.Pointer[desktopWindow]
+	// quitGuard lets the web UI veto a quit while it holds unsaved work it
+	// could not persist (see desktop.QuitGuard). The web reports failures
+	// through the minimal _wails.invoke bridge, which lands in
+	// RawMessageHandler below.
+	quitGuard := desktop.NewQuitGuard()
 	dockSvc := dock.New()
 	services := []application.Service{application.NewService(dockSvc)}
 	var notifier *notifications.NotificationService
@@ -186,6 +214,12 @@ func main() {
 		Icon:        appIcon,
 		Services:    services,
 		ShouldQuit: func() bool {
+			// Refuse to quit while the web UI reports unsaved work it could not
+			// persist; the user resolves it in the UI (retry the save) or uses
+			// the native "Quit anyway" action, which clears the guard first.
+			if blocked, _ := quitGuard.Blocked(); blocked {
+				return false
+			}
 			// Show the quitting indicator synchronously (before any block in OnShutdown)
 			// and return true so Wails proceeds with Quit(). The indicator uses the
 			// atomic pointer set after window creation; it may be nil on very early
@@ -195,6 +229,12 @@ func main() {
 				showQuittingIndicator(dw.window)
 			}
 			return true
+		},
+		// RawMessageHandler receives every webview message that does not start
+		// with "wails:". The SPA sends quit-guard transitions here through the
+		// minimal _wails.invoke bridge (the full Wails runtime is never loaded).
+		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
+			quitGuard.HandleRawMessage(message)
 		},
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "com.ocode.desktop",
@@ -382,7 +422,20 @@ func main() {
 	// which closes the active session tab — and Cmd/Ctrl+Q asks for
 	// confirmation before quitting. The menu needs the window reference for
 	// the confirmation dialog, so it is built after window creation.
-	app.Menu.SetApplicationMenu(buildAppMenu(app, window, handle))
+	app.Menu.SetApplicationMenu(buildAppMenu(app, window, handle, quitGuard))
+
+	// Refuse a user-initiated window close while the web UI reports unsaved
+	// editor drafts it could not persist. RegisterHook runs BEFORE Wails'
+	// internal WindowClosing listener (which destroys the window); a hook
+	// Cancel() skips that listener, so the window stays open. An
+	// OnWindowEvent listener runs too late — it would only run after the
+	// window was already destroyed.
+	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		if blocked, reason := quitGuard.Blocked(); blocked {
+			event.Cancel()
+			notifyQuitBlocked(window, reason)
+		}
+	})
 
 	// Closing the window quits the app. Without this, the system tray below
 	// keeps the process (and its in-process server) alive after the window
@@ -457,7 +510,7 @@ func main() {
 		}),
 		application.NewMenuItemSeparator(),
 		application.NewMenuItem("Quit").OnClick(func(ctx *application.Context) {
-			confirmQuit(app, window, handle)
+			confirmQuit(app, window, handle, quitGuard)
 		}),
 	))
 
@@ -548,9 +601,9 @@ func desktopShutdownTimeout() time.Duration {
 //
 // The standard Edit/View/Window menus are kept for text editing (Cmd+C/V),
 // reload/devtools, and window management.
-func buildAppMenu(app *application.App, window *application.WebviewWindow, handle *desktop.Handle) *application.Menu {
+func buildAppMenu(app *application.App, window *application.WebviewWindow, handle *desktop.Handle, quitGuard *desktop.QuitGuard) *application.Menu {
 	menu := application.NewMenu()
-	quitHandler := rapidQuitHandler(app, window, handle)
+	quitHandler := rapidQuitHandler(app, window, handle, quitGuard)
 
 	// macOS application menu (first menu, named after the app).
 	if runtime.GOOS == "darwin" {
@@ -652,7 +705,7 @@ const rapidQuitThreshold = 1500 * time.Millisecond
 // rapidQuitHandler returns a quit handler that quits immediately if invoked
 // twice within rapidQuitThreshold, and otherwise shows the confirmation
 // dialog (see confirmQuit).
-func rapidQuitHandler(app *application.App, window *application.WebviewWindow, handle *desktop.Handle) func() {
+func rapidQuitHandler(app *application.App, window *application.WebviewWindow, handle *desktop.Handle, quitGuard *desktop.QuitGuard) func() {
 	var mu sync.Mutex
 	var lastPress time.Time
 	return func() {
@@ -662,19 +715,54 @@ func rapidQuitHandler(app *application.App, window *application.WebviewWindow, h
 		lastPress = now
 		mu.Unlock()
 
+		// The rapid double-⌘Q bypass must not defeat the unsaved-work guard:
+		// route it through the confirmation dialog so the user is told why and
+		// can still cancel.
+		if blocked, _ := quitGuard.Blocked(); blocked {
+			confirmQuit(app, window, handle, quitGuard)
+			return
+		}
+
 		if rapid {
 			showQuittingIndicator(window)
 			app.Quit()
 			return
 		}
-		confirmQuit(app, window, handle)
+		confirmQuit(app, window, handle, quitGuard)
 	}
 }
 
 // confirmQuit asks for explicit confirmation before quitting. Quit is
 // cancelled by default (Enter/Escape dismisses safely); the app only exits
 // when the user clicks the "Quit" button.
-func confirmQuit(app *application.App, window *application.WebviewWindow, handle *desktop.Handle) {
+func confirmQuit(app *application.App, window *application.WebviewWindow, handle *desktop.Handle, quitGuard *desktop.QuitGuard) {
+	// The web UI is holding editor edits that are not in its local draft yet
+	// (a write still in flight, or a write that failed), so quit is refused
+	// (ShouldQuit / the WindowClosing hook). Give the user an explicit escape
+	// hatch that discards them, matching the editor's own Discard affordance.
+	// The preamble stays state-neutral because Go cannot tell the two apart —
+	// the web appends the specific reason.
+	if blocked, reason := quitGuard.Blocked(); blocked {
+		message := "Some editor changes aren't in the local draft yet, so ocode won't quit. Wait a moment for them to be written, or save the file(s) to disk."
+		if reason != "" {
+			message += "\n\n" + reason
+		}
+		dlg := app.Dialog.Question().
+			SetTitle("Unsaved changes — can't quit").
+			SetMessage(message).
+			AttachToWindow(window)
+		keep := dlg.AddButton("Keep editing")
+		keep.SetAsCancel()
+		keep.SetAsDefault()
+		dlg.AddButton("Quit anyway").OnClick(func() {
+			quitGuard.Clear()
+			showQuittingIndicator(window)
+			app.Quit()
+		})
+		dlg.Show()
+		return
+	}
+
 	message := "Are you sure you want to quit ocode?"
 	title := "Quit ocode?"
 	buttonLabel := "Quit"

@@ -274,15 +274,32 @@ func TestGitDiffUsesRegisteredProject(t *testing.T) {
 
 func initGitRepo(t *testing.T, dir string) {
 	t.Helper()
-	run(t, dir, "git", "init")
+	// -b main pins the default branch so the fixture does not depend on the
+	// host's init.defaultBranch, and gpgsign is disabled because a developer
+	// with signing configured would otherwise stall or fail every commit.
+	run(t, dir, "git", "init", "-b", "main")
 	run(t, dir, "git", "config", "user.email", "test@test.com")
 	run(t, dir, "git", "config", "user.name", "Test")
+	run(t, dir, "git", "config", "commit.gpgsign", "false")
 }
 
 func run(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	runEnv(t, dir, nil, args...)
+}
+
+// runEnv is run() with extra environment entries. Used where a command's
+// interpretation depends on env (e.g. staging a file whose name looks like
+// pathspec magic needs GIT_LITERAL_PATHSPECS=1).
+func runEnv(t *testing.T, dir string, extraEnv []string, args ...string) {
+	t.Helper()
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = dir
+	// LC_ALL=C keeps git's diagnostics in English: several tests in this
+	// package match git's message text (e.g. "CONFLICT", "not a git
+	// repository"), and a translated git would break those matches.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command %v failed: %v\n%s", args, err, out)

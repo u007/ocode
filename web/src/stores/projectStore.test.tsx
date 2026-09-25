@@ -190,6 +190,27 @@ describe("projectStore tab actions across projects", () => {
     );
   });
 
+  it("re-applying an unchanged auto title leaves the tab object untouched (no render/persist churn)", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-a", projectPath: "/proj-a", title: "Generated", activeSubTab: "chat" },
+      });
+    });
+    await act(async () => {});
+    const before = result.current.state.tabsByProject["/proj-a"][0];
+    act(() => {
+      // Reconcile / cross-process revalidation re-sends the same title.
+      result.current.dispatch({ type: "UPDATE_TAB_TITLE", id: "sess-a", title: "Generated" });
+    });
+    const after = result.current.state.tabsByProject["/proj-a"][0];
+    expect(after).toBe(before);
+    expect(after.title).toBe("Generated");
+  });
+
+
   it("UPDATE_TAB_ID preserves a manually-renamed temp tab's title instead of the rekey's newTitle", async () => {
     const { result } = setup();
     await act(async () => {

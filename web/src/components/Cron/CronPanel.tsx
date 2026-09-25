@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { CronDelivery, CronJob, CronJobWriteRequest } from "@/api/types";
 import { api } from "@/api/client";
@@ -8,76 +8,110 @@ import CronOutboxPanel from "./CronOutboxPanel";
 import CronTargetsPanel from "./CronTargetsPanel";
 import CronHistoryPanel from "./CronHistoryPanel";
 import { CalendarClock, PencilLine, Pause, Play, Plus, RefreshCcw, Trash2, History } from "lucide-react";
+import {
+  useKeyedLoad,
+  type KeyedLoadResult,
+  type LoadingEventHandler,
+} from "@/hooks/useKeyedLoad";
 
 const REFRESH_INTERVAL = 10_000;
 
-export default function CronPanel({ active = true }: { active?: boolean }) {
+interface Props {
+  active?: boolean;
+  loadingKey?: string;
+  onLoadingEvent?: LoadingEventHandler;
+}
+
+type CronLoadData = {
+  jobs: CronJob[];
+  outbox: CronDelivery[];
+  targets: Record<string, number>;
+};
+
+export default function CronPanel({ active = true, loadingKey, onLoadingEvent }: Props) {
+  const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [outbox, setOutbox] = useState<CronDelivery[]>([]);
   const [targets, setTargets] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
+  const [initialReady, setInitialReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [historyJob, setHistoryJob] = useState<CronJob | null>(null);
+  const initialReadyRef = useRef(false);
+  const refreshAllRef = useRef<(() => Promise<KeyedLoadResult<CronLoadData>>) | null>(null);
 
-  const loadJobs = useCallback(async () => {
-    const [jobsRes, outboxRes] = await Promise.all([api.listCronJobs(), api.getCronOutbox()]);
-    setJobs(jobsRes.jobs ?? []);
-    setOutbox(outboxRes.entries ?? []);
+  const loadAll = useCallback(async (): Promise<CronLoadData> => {
+    const [jobsRes, outboxRes, targetsRes] = await Promise.all([
+      api.listCronJobs(),
+      api.getCronOutbox(),
+      api.getCronTargets(),
+    ]);
+    return {
+      jobs: jobsRes.jobs ?? [],
+      outbox: outboxRes.entries ?? [],
+      targets: targetsRes.targets,
+    };
   }, []);
 
-  const loadTargets = useCallback(async () => {
-    const res = await api.getCronTargets();
-    setTargets(res.targets);
-  }, []);
-
-  const refreshJobs = useCallback(async () => {
-    try {
-      await loadJobs();
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load cron jobs");
+  // Every path — initial load, manual refresh, mutations, and polling — uses
+  // this one latest-wins request. A poll therefore cannot leave a half-loaded
+  // jobs/targets snapshot, and the hook remains the single concurrency guard.
+  const refreshAll = useCallback((): Promise<KeyedLoadResult<CronLoadData>> => {
+    const wasReady = initialReadyRef.current;
+    if (!wasReady) {
+      setLoading(true);
+      setInitialReady(false);
     }
-  }, [loadJobs]);
-
-  const refreshTargets = useCallback(async () => {
-    try {
-      await loadTargets();
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load cron targets");
-    }
-  }, [loadTargets]);
+    return runKeyedLoad(loadAll, {
+      empty: (data) =>
+        data.jobs.length === 0 && data.outbox.length === 0 && Object.keys(data.targets).length === 0,
+      retry: () => {
+        void refreshAllRef.current?.();
+      },
+    }).then((result) => {
+      if (result.status === "success" || result.status === "empty") {
+        setJobs(result.value.jobs);
+        setOutbox(result.value.outbox);
+        setTargets(result.value.targets);
+        setError(null);
+        setLoading(false);
+        initialReadyRef.current = true;
+        setInitialReady(true);
+      } else if (result.status === "error") {
+        console.error("Cron data load failed:", result.error);
+        setError(result.message);
+        if (!wasReady) {
+          setLoading(false);
+          initialReadyRef.current = false;
+          setInitialReady(false);
+        }
+      }
+      return result;
+    });
+  }, [loadAll, runKeyedLoad]);
+  refreshAllRef.current = refreshAll;
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        await Promise.all([loadJobs(), loadTargets()]);
-        if (!cancelled) setError(null);
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load cron data");
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [loadJobs, loadTargets]);
+    initialReadyRef.current = false;
+    setInitialReady(false);
+    setLoading(true);
+  }, [loadingKey]);
+
+  useEffect(() => {
+    void refreshAll();
+  }, [loadingKey, refreshAll]);
 
   useEffect(() => {
     // Poll only while the Cron view is frontmost — the panel is force-mounted
     // so its DOM survives view switches, and background polling was pure churn.
-    if (!active) return;
+    if (!active || !initialReady) return;
     const interval = window.setInterval(() => {
-      void refreshJobs();
+      void refreshAll();
     }, REFRESH_INTERVAL);
     return () => window.clearInterval(interval);
-  }, [refreshJobs, active]);
+  }, [refreshAll, active, initialReady]);
 
   const openAddDialog = () => {
     setEditingJob(null);
@@ -96,15 +130,15 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
       } else {
         await api.addCronJob(request);
       }
-      await refreshJobs();
+      await refreshAll();
     },
-    [editingJob, refreshJobs],
+    [editingJob, refreshAll],
   );
 
   const toggleEnabled = async (job: CronJob) => {
     try {
       await api.updateCronJob(job.id, { enabled: !job.enabled });
-      await refreshJobs();
+      await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to toggle job");
     }
@@ -114,7 +148,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
     if (!window.confirm(`Delete cron job \"${job.name}\"?`)) return;
     try {
       await api.deleteCronJob(job.id);
-      await refreshJobs();
+      await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete job");
     }
@@ -123,7 +157,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
   const clearOutbox = async () => {
     try {
       await api.drainCronOutbox();
-      await refreshJobs();
+      await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to clear outbox");
     }
@@ -143,7 +177,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
       }
     }
     await Promise.all(ops);
-    await refreshTargets();
+    await refreshAll();
   };
 
   return (
@@ -157,7 +191,7 @@ export default function CronPanel({ active = true }: { active?: boolean }) {
           <div className="text-xs text-muted-foreground">Schedule jobs, manage delivery history, and map Telegram targets.</div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void refreshJobs()}>
+          <Button variant="outline" size="sm" onClick={() => void refreshAll()}>
             <RefreshCcw className="mr-2 h-4 w-4" />
             Refresh
           </Button>

@@ -167,6 +167,29 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	rc := h.RCBridge()
+	bridged := rc != nil && rc.SessionID == id
+	// Create the project LSP manager during status hydration, not only when a
+	// turn is dispatched. Restored/cold headless sessions otherwise have no
+	// manager or warmup goroutine, so the desktop sidebar can show an empty
+	// list until the user sends another message. A bridged TUI already owns its
+	// manager and must not get a duplicate local one.
+	lspRoot := entry.ProjectRoot
+	if bridged {
+		if liveRoot := rc.TUIStatus().CWD; liveRoot != "" {
+			lspRoot = liveRoot
+		}
+	}
+	if lspRoot == "" {
+		lspRoot = h.workDir
+	}
+	if lspRoot == "" {
+		lspRoot = "."
+	}
+	if !bridged {
+		h.lspManagerFor(lspRoot)
+	}
+
 	snap := h.buildStatusSnapshot()
 	baseModel, baseCWD := snap.MainModel, snap.CWD
 	// Per-session model override takes precedence over the process-wide config
@@ -185,6 +208,32 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	if entry.ProjectRoot != "" {
 		snap.CWD = entry.ProjectRoot
 	}
+	// The manager key and LSPStatus.Root are canonicalized for headless
+	// sessions; compare canonically, but preserve the session's established CWD
+	// spelling for the status contract and sidebar filter. A bridged TUI
+	// remains the authority for its own status.
+	if bridged {
+		live := rc.TUIStatus()
+		if live.CWD != "" {
+			snap.CWD = live.CWD
+		}
+		// TUI managers historically report "." as their root. Copy before
+		// normalizing so the bridge's published snapshot is not mutated, and
+		// translate that relative identity to the session's displayed cwd for
+		// the web root filter.
+		liveServers := append([]LSPStatus(nil), live.LSPServers...)
+		if live.CWD != "" {
+			canonicalRoot := lspProjectRootKey(live.CWD)
+			for i := range liveServers {
+				if liveServers[i].Root == "" || liveServers[i].Root == "." || lspProjectRootKey(liveServers[i].Root) == canonicalRoot {
+					liveServers[i].Root = live.CWD
+				}
+			}
+		}
+		snap.LSPServers = liveServers
+	} else {
+		snap.LSPServers = h.lspStatusesForRoot(snap.CWD)
+	}
 	applySessionModelPrompt(&snap, baseModel, baseCWD)
 	// Populate persisted session title so the web tab bar shows the
 	// authoritative title (auto fallback or LLM-generated) immediately,
@@ -202,6 +251,7 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	// the process-wide config default and a chat's yolo/sandbox toggle would
 	// look global in the sidebar again.
 	h.applySessionPermissionFields(&snap, id)
+	h.applySessionThinkingBudget(&snap, id)
 	// Advisor gate is per session too: stamp the chat's own value so one tab's
 	// toggle does not render on every other tab's sidebar.
 	h.applySessionAdvisorFields(&snap, id)
@@ -486,6 +536,7 @@ func (h *Handler) publishTurnStatusSnapshot(sessionID string) {
 	h.applySessionActivity(&snap, sessionID)
 	// Per-session permission mode (see applySessionPermissionFields).
 	h.applySessionPermissionFields(&snap, sessionID)
+	h.applySessionThinkingBudget(&snap, sessionID)
 	// Per-session advisor gate (see applySessionAdvisorFields).
 	h.applySessionAdvisorFields(&snap, sessionID)
 	// Reflect the session's effective (override-or-default) model so the
@@ -577,6 +628,7 @@ func (h *Handler) pushSessionStatusSnapshot(id string) {
 	h.applySessionUsage(&snap, id)
 	h.applyTurnTiming(&snap, id)
 	h.applySessionPermissionFields(&snap, id)
+	h.applySessionThinkingBudget(&snap, id)
 	h.applySessionAdvisorFields(&snap, id)
 	if snap.SessionCreatedAt == "" {
 		if entry, err := h.sessions.Resolve(id); err == nil {

@@ -152,6 +152,7 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 	applySessionModelPrompt(&snap, baseModel, baseCWD)
 	h.applySessionContext(&snap, sessionID)
 	h.applySessionPermissionFields(&snap, sessionID)
+	h.applySessionThinkingBudget(&snap, sessionID)
 	h.applySessionAdvisorFields(&snap, sessionID)
 	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
 }

@@ -11,6 +11,9 @@ interface Props {
   thinkingBudget?: number;
   /** Disabled state when model selection is not available */
   disabled?: boolean;
+  /** Active chat session. A real session id scopes the pick to that session;
+   *  a draft ("new-…") tab or no session writes the global default instead. */
+  sessionId?: string;
   /** SSH/WSL host of the active session; routes the write to the server that
    *  runs that session. Without it a remote tab's level change wrote the local
    *  server's config and the remote session kept its old effort. */
@@ -22,7 +25,7 @@ interface Props {
  * Shows the current level as a clickable dropdown to cycle through
  * reasoning effort levels (off → low → med → high → xhigh → max).
  */
-export default function ReasoningLevelSelector({ thinkingBudget, disabled, host }: Props) {
+export default function ReasoningLevelSelector({ thinkingBudget, disabled, sessionId, host }: Props) {
   const [isOpen, setIsOpen] = useState(false);
   const [currentLevel, setCurrentLevel] = useState<ReasoningLevel>("off");
 
@@ -53,7 +56,11 @@ export default function ReasoningLevelSelector({ thinkingBudget, disabled, host 
     setCurrentLevel(level);
     setIsOpen(false);
     try {
-      await api.setThinkingBudget(level, host);
+      if (sessionId && !sessionId.startsWith("new-")) {
+        await api.setSessionThinkingBudget(sessionId, level, host);
+      } else {
+        await api.setThinkingBudget(level, host);
+      }
     } catch (err) {
       console.error("Failed to set reasoning level:", err);
       // Revert on failure so the user sees the actual state.

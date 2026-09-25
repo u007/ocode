@@ -382,6 +382,27 @@ func TestAllowedRootsAndMembership(t *testing.T) {
 	}
 }
 
+// Web/desktop sessions never chdir the process, so a relative tool path such as
+// ".github/workflows/ci.yml" must resolve against the session workdir, not the
+// process cwd — otherwise in-project writes are auto-denied as out of roots.
+func TestAllowedRootsRelativePathResolvesAgainstWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolved)
+	t.Chdir("/") // process cwd deliberately outside the workdir
+
+	if !pm.IsPathWithinAllowedRoots(".github/workflows/ci.yml") {
+		t.Fatal("expected relative path to resolve inside session workdir")
+	}
+	if pm.IsPathWithinAllowedRoots("../../../definitely-not-a-root/x") {
+		t.Fatal("unexpected: relative escape reported in scope")
+	}
+}
+
 // --- Verifier ---------------------------------------------------------------
 
 func newVerifierAgent(t *testing.T) (*Agent, string) {

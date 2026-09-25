@@ -25,6 +25,8 @@ import {
 import { Button } from "../ui/button";
 import { openExternalURL } from "../../lib/externalLinks";
 import { requestSpeech } from "../Speech/SpeechProvider";
+import { renderedCopyText } from "../../lib/copyText";
+import { BlockCopyControl } from "./BlockCopyControl";
 
 interface Props {
   message: Message;
@@ -39,6 +41,12 @@ interface Props {
   sessionId?: string;
   /** Absolute index in the messages array for restore-to-input truncation (messages[:index]). */
   messageIndex?: number;
+  /** Stable identity supplied by the virtualized transcript renderer. */
+  entryKey?: string;
+  /** The last thinking block in the latest assistant turn stays expanded. */
+  isLatestThinking?: boolean;
+  /** Search selection temporarily opens disclosure regions. */
+  forceOpen?: boolean;
 }
 
 // hasRenderableText reports whether an assistant content string will actually
@@ -66,6 +74,7 @@ export function AssistantText({ content, onSpeak }: { content: string; onSpeak?:
         <div
           ref={speechRef}
           data-speech-content=""
+          data-copy-content=""
           className="relative prose prose-invert prose-sm max-w-none text-sm"
         >
           <ReactMarkdown
@@ -183,17 +192,35 @@ export function AssistantText({ content, onSpeak }: { content: string; onSpeak?:
               const text = renderedSpeechText(speechRef.current);
               if (text) onSpeak(text);
             }}
-            className="mt-2 inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
+            className="mt-2 mr-2 inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
           >
             <Volume2 className="h-3.5 w-3.5" /> Speak
           </button>
         )}
+        <BlockCopyControl
+          rawText={content}
+          getRenderedText={() => renderedCopyText(speechRef.current)}
+          className="mt-2"
+        />
       </div>
     </div>
   );
 }
 
-function MessageBubble({ message, highlight = "", toolName = "", sessionId, messageIndex }: Props) {
+function MessageBubble({
+  message,
+  highlight = "",
+  toolName = "",
+  sessionId,
+  messageIndex,
+  entryKey,
+  isLatestThinking = false,
+  forceOpen = false,
+}: Props) {
+  // ChatPanel supplies a stable object identity. The fallback keeps isolated
+  // component tests and legacy callers deterministic without using a row index
+  // in the production transcript path.
+  const baseKey = entryKey ?? `${message.role}:${messageIndex ?? 0}:${message.content.slice(0, 32)}`;
   // Synthetic compaction summary (spliced by the agent): render it as a
   // dedicated inline notice rather than the raw `[ocode:compaction-summary]`
   // marker. This is the durable "compact notice" — the composer's transient
@@ -210,6 +237,9 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
         tool={toolName || "result"}
         output={message.content}
         highlight={highlight}
+        callKey={`${baseKey}:call:${message.tool_call_id ?? "result"}`}
+        outputKey={`${baseKey}:output:${message.tool_call_id ?? "result"}`}
+        forceOpen={forceOpen}
       />
     );
   }
@@ -222,15 +252,25 @@ function MessageBubble({ message, highlight = "", toolName = "", sessionId, mess
     return (
       <>
         {message.reasoning_content ? (
-          <ThinkingBlock text={message.reasoning_content} highlight={highlight} onSpeak={() => requestSpeech(message.reasoning_content || "")} />
+          <ThinkingBlock
+            text={message.reasoning_content}
+            highlight={highlight}
+            onSpeak={() => requestSpeech(message.reasoning_content || "")}
+            blockKey={`${baseKey}:thinking`}
+            isLatest={isLatestThinking}
+            forceOpen={forceOpen}
+          />
         ) : null}
-        {message.tool_calls?.map((tc, i) => (
+        {message.tool_calls?.map((tc) => (
           <ToolBlock
-            key={i}
+            key={tc.id}
             tool={tc.function.name}
             command={tc.function.arguments}
             output=""
             highlight={highlight}
+            callKey={`${baseKey}:call:${tc.id}`}
+            outputKey={`${baseKey}:output:${tc.id}`}
+            forceOpen={forceOpen}
           />
         ))}
         {hasRenderableText(message.content) ? (
@@ -290,6 +330,11 @@ function UserBubble({
               : linkifyPlainText(message.content)}
           </pre>
         </div>
+        <BlockCopyControl
+          rawText={message.content}
+          getRenderedText={() => message.content}
+          className="mt-1 shrink-0"
+        />
       </div>
 
       <Dialog open={confirmOpen} onOpenChange={(o) => !o && setConfirmOpen(false)}>

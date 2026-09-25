@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -29,6 +29,21 @@ build: web-build
 install: web-build prepare-htr-assets
 	go build $(LDFLAGS) -o bin/$(APP) .
 	go install $(LDFLAGS) .
+
+# ── Version bumps ────────────────────────────────────────────────────────────
+# Update the canonical Go version and [Unreleased] changelog entry, then install
+# the CLI and package the macOS app with that version. The recursive makes are
+# deliberately sequential: prerequisites do not guarantee ordering under -j.
+
+up-patch:
+	./scripts/bump-version.sh patch
+	$(MAKE) install
+	$(MAKE) desktop-app
+
+up-minor:
+	./scripts/bump-version.sh minor
+	$(MAKE) install
+	$(MAKE) desktop-app
 
 # ── Desktop (Wails v3 shell) ────────────────────────────────────────────────
 # Build the ocode-desktop binary. Requires cgo and native platform SDKs:

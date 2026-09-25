@@ -1,9 +1,12 @@
 package desktop
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +51,46 @@ func TestPortStickinessRoundTrip(t *testing.T) {
 	saveBoundPort("127.0.0.1:45678")
 	if p := loadSavedPort(); p != 45678 {
 		t.Fatalf("expected saved port 45678, got %d", p)
+	}
+}
+
+// A saved port that is already taken must fall back to a random port for this
+// run WITHOUT overwriting desktop-port: that file anchors the webview's
+// localStorage origin, so persisting the temporary port would permanently
+// orphan the previous origin's UI state (editor drafts, tabs).
+func TestStartServerFallbackDoesNotOverwriteSavedPort(t *testing.T) {
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+
+	blocker, err := net.Listen("tcp", ":0") // all interfaces, matching StartServer's bind
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer blocker.Close()
+	_, portStr, err := net.SplitHostPort(blocker.Addr().String())
+	if err != nil {
+		t.Fatalf("split blocker addr: %v", err)
+	}
+	saveBoundPort("0.0.0.0:" + portStr)
+	saved, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse blocker port: %v", err)
+	}
+
+	h, err := StartServer(nil, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("StartServer with occupied saved port: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h.Srv.Shutdown(ctx)
+	})
+
+	if p := loadSavedPort(); p != saved {
+		t.Fatalf("fallback overwrote the saved port: got %d, want %d", p, saved)
+	}
+	if strings.HasSuffix(h.URL, ":"+portStr) {
+		t.Fatalf("expected a random port different from the occupied saved one, got %s", h.URL)
 	}
 }
 

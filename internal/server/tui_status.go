@@ -175,7 +175,7 @@ type AgentActivityEvent struct {
 	ActiveAgents []string             `json:"active_agents,omitempty"`
 }
 
-// LSPStatus mirrors lsp.ServerStatus plus a coarse state string the web can
+// LSPStatus mirrors lsp.ServerStatus plus a coarse lifecycle state the web can
 // render without knowing LSP internals.
 type LSPStatus struct {
 	Cmd    string `json:"cmd"`

@@ -30,8 +30,31 @@
 
 
 
+
+## 2026-09-25
+
+* **Update**: Zoho MCP OAuth Compatibility — Design Spec ([superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md](/superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md))
+* **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+* **Creation**: Remote MCP OAuth Compatibility ([concepts/remote-mcp-oauth-compat.md](/concepts/remote-mcp-oauth-compat.md))
+* **Update**: Web ask dialogs: 202 + background continuation (broadcast *_resolved before Step) ([gotchas/web-ask-dialog-resolved-before-continuation.md](/gotchas/web-ask-dialog-resolved-before-continuation.md))
+* **Update**: Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints ([superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md](/superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md))
+* **Update**: Web ask dialogs: 202 + background continuation (broadcast *_resolved before Step) ([gotchas/web-ask-dialog-resolved-before-continuation.md](/gotchas/web-ask-dialog-resolved-before-continuation.md))
+* **Creation**: TUI wheel scroll over chat composer design ([superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md](/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md))
+* **Creation**: Web Chat Message Copy Menu — Design ([superpowers/specs/2026-09-25-web-chat-message-copy-design.md](/superpowers/specs/2026-09-25-web-chat-message-copy-design.md))
+* **Update**: Deferred, durable message rewind for ocode Web/Desktop ([superpowers/specs/2026-09-25-deferred-session-rewind-design.md](/superpowers/specs/2026-09-25-deferred-session-rewind-design.md))
+* **Creation**: Deferred, durable message rewind for ocode Web/Desktop ([superpowers/specs/2026-09-25-deferred-session-rewind-design.md](/superpowers/specs/2026-09-25-deferred-session-rewind-design.md))
+* **Update**: Zoho MCP OAuth Compatibility — Design Spec ([superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md](/superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md))
+* **Creation**: Zoho MCP OAuth Compatibility — Design Spec ([superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md](/superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md))
+* **Creation**: List Dialog Keyboard Navigation — Design Spec ([superpowers/specs/2026-09-25-list-dialog-keyboard-navigation-design.md](/superpowers/specs/2026-09-25-list-dialog-keyboard-navigation-design.md))
+* **Update**: Desktop quit guard for unsaved drafts (pending + failed) + sticky-port fallback no longer re-saves ([gotchas/desktop-quit-guard-and-sticky-port-fallback.md](/gotchas/desktop-quit-guard-and-sticky-port-fallback.md))
+* **Creation**: Desktop quit guard for unsaved drafts + sticky-port fallback no longer re-saves ([gotchas/desktop-quit-guard-and-sticky-port-fallback.md](/gotchas/desktop-quit-guard-and-sticky-port-fallback.md))
 ## 2026-09-24
 
+* **Creation**: Makefile Version Bump Targets (up-patch / up-minor) — Design Spec ([superpowers/specs/2026-09-24-make-version-bump-targets-design.md](/superpowers/specs/2026-09-24-make-version-bump-targets-design.md))
+* **Update**: Plan: Tab Loading Indicators ([superpowers/plans/2026-09-24-tab-loading-indicators.md](/superpowers/plans/2026-09-24-tab-loading-indicators.md))
+* **Update**: Web tab loading indicators ([concepts/web-tab-loading-indicators.md](/concepts/web-tab-loading-indicators.md))
+* **Update**: Chat Verbosity Display — Design Spec ([superpowers/specs/2026-09-24-chat-verbosity-display-design.md](/superpowers/specs/2026-09-24-chat-verbosity-display-design.md))
+* **Creation**: Web tab loading indicators ([concepts/web-tab-loading-indicators.md](/concepts/web-tab-loading-indicators.md))
 * **Update**: Chat Verbosity Display — Design Spec ([superpowers/specs/2026-09-24-chat-verbosity-display-design.md](/superpowers/specs/2026-09-24-chat-verbosity-display-design.md))
 * **Creation**: Plan: Tab Loading Indicators ([superpowers/plans/2026-09-24-tab-loading-indicators.md](/superpowers/plans/2026-09-24-tab-loading-indicators.md))
 * **Creation**: Chat Verbosity Display — Design Spec ([superpowers/specs/2026-09-24-chat-verbosity-display-design.md](/superpowers/specs/2026-09-24-chat-verbosity-display-design.md))

@@ -19,6 +19,7 @@ import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/cl
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ActionErrorToast from "./components/common/ActionErrorToast";
 import { reportActionError } from "./lib/actionErrors";
+import { installQuitBlockedListener } from "./lib/editorDraftGuard";
 import AttentionSoundBridge from "./components/common/AttentionSoundBridge";
 import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -87,6 +88,14 @@ import { getTrustedTerminalProject } from "./lib/trustedProject";
 import { resolveSessionHost, useSessionHost } from "./hooks/useSessionHost";
 import { SpeechProvider } from "./components/Speech/SpeechProvider";
 import SpeechToolbar from "./components/Speech/SpeechToolbar";
+import { TabLoadingOverlay } from "./components/common/TabLoadingOverlay";
+import {
+  clearTabLoadingForProject,
+  emitTabLoadEvent,
+  tabLoadKey,
+  useTabLoadingStore,
+  type LoadRequestEvent,
+} from "./hooks/useKeyedLoad";
 
 /** Shared frozen empty array. Used as the default for props that would
  *  otherwise be a fresh `[]` on every render, which would defeat `memo` on the
@@ -252,6 +261,34 @@ function HomeApp() {
   // shown. Restored from per-project persistence on project switch.
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
   const activeProjectPath = projectState.activeProject?.path ?? "";
+  const activeProjectHost = projectState.activeProject?.host;
+  const loadingStates = useTabLoadingStore();
+  const handleTabLoadingEvent = useCallback((event: LoadRequestEvent, owner?: symbol) => {
+    emitTabLoadEvent(event, owner);
+  }, []);
+  const previousLoadingProject = useRef<{ host?: string; path: string } | null>(null);
+  useEffect(() => {
+    const previous = previousLoadingProject.current;
+    if (previous && (previous.host !== activeProjectHost || previous.path !== activeProjectPath)) {
+      // Clear only the previous project's scope. Child effects have already
+      // claimed the new project's keys by the time this parent effect runs;
+      // clearing the whole map here would cancel those fresh requests.
+      clearTabLoadingForProject(previous.host, previous.path);
+    }
+    previousLoadingProject.current = { host: activeProjectHost, path: activeProjectPath };
+  }, [activeProjectHost, activeProjectPath]);
+  const filesLoadingKey = tabLoadKey(activeProjectHost, activeProjectPath, "files");
+  const gitLoadingKey = tabLoadKey(activeProjectHost, activeProjectPath, "git");
+  const cronLoadingKey = tabLoadKey(activeProjectHost, activeProjectPath, "cron");
+  const assetsLoadingKey = tabLoadKey(activeProjectHost, activeProjectPath, "assets");
+  const filesLoading = loadingStates.get(filesLoadingKey);
+  const gitLoading = loadingStates.get(gitLoadingKey);
+  const cronLoading = loadingStates.get(cronLoadingKey);
+  const assetsLoading = loadingStates.get(assetsLoadingKey);
+  const filesBusy = filesLoading?.phase === "initial" || filesLoading?.phase === "refresh";
+  const gitBusy = gitLoading?.phase === "initial" || gitLoading?.phase === "refresh";
+  const cronBusy = cronLoading?.phase === "initial" || cronLoading?.phase === "refresh";
+  const assetsBusy = assetsLoading?.phase === "initial" || assetsLoading?.phase === "refresh";
   // Every open session tab (any project) + whether the chat half of the
   // Sessions view is actually on screen — feeds AttentionSoundBridge so a
   // backgrounded chat can chime when it finishes / stalls / waits on a dialog.
@@ -694,6 +731,11 @@ function HomeApp() {
     window.addEventListener("ocode:open-settings", handler);
     return () => window.removeEventListener("ocode:open-settings", handler);
   }, []);
+
+  // The desktop shell refuses to quit while unsaved editor drafts could not be
+  // persisted and dispatches this event so the reason is re-surfaced (the user
+  // may have dismissed the original toast). No-op in a plain browser.
+  useEffect(() => installQuitBlockedListener(), []);
 
   const [filePickerOpen, setFilePickerOpen] = useState(false);
 
@@ -1224,6 +1266,7 @@ function HomeApp() {
                   activeTab={activeView}
                   onTabSelect={(v) => setActiveView(v as typeof activeView)}
                   onMenuToggle={isMobile ? () => setSidebarOpen((open) => !open) : undefined}
+                  loadingStates={loadingStates}
                 />
               </div>
               <ProfileSwitcher />
@@ -1320,14 +1363,28 @@ function HomeApp() {
               })()}
 
               <div className={activeView === "sessions" && focusedKind === "terminal" ? "hidden" : "flex flex-1 overflow-hidden flex-col"}>
-              <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex">
+              <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex" aria-busy={filesBusy}>
+                <div className="relative flex min-h-0 flex-1 overflow-hidden">
                 <div
                   className="relative shrink-0 h-full overflow-hidden border-r border-border transition-[width] duration-100"
                   style={{ width: fileTreePane.collapsed ? 0 : fileTreePane.width }}
                 >
                   <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
-                    <FileTree onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} projectHost={projectState.activeProject?.host} includedPaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (projectState.activeProject?.path ?? "")).map((e) => e.path)} />
+                    <FileTree
+                      onOpenFile={openFileAndShow}
+                      projectPath={projectState.activeProject?.path}
+                      projectHost={projectState.activeProject?.host}
+                      includedPaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (projectState.activeProject?.path ?? "")).map((e) => e.path)}
+                      loadingKey={filesLoadingKey}
+                      onLoadingEvent={handleTabLoadingEvent}
+                    />
                   </div>
+                  <TabLoadingOverlay
+                    active={filesLoading?.phase === "initial"}
+                    label="Loading Files"
+                    error={filesLoading?.phase === "error" ? filesLoading.error : undefined}
+                    onRetry={filesLoading?.retry}
+                  />
                 </div>
                 {!fileTreePane.collapsed && (
                   <div
@@ -1416,16 +1473,52 @@ function HomeApp() {
                     })}
                   </div>
                 </div>
+                </div>
               </TabsContent>
 
-              <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0">
-                <GitPanel onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} projectHost={projectState.activeProject?.host} active={activeView === "git"} />
+              <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0" aria-busy={gitBusy}>
+                <div className="relative h-full">
+                  <GitPanel
+                    onOpenFile={openFileAndShow}
+                    projectPath={projectState.activeProject?.path}
+                    projectHost={projectState.activeProject?.host}
+                    active={activeView === "git"}
+                    loadingKey={gitLoadingKey}
+                    onLoadingEvent={handleTabLoadingEvent}
+                  />
+                  <TabLoadingOverlay
+                    active={gitLoading?.phase === "initial"}
+                    label="Loading Git"
+                    error={gitLoading?.phase === "error" ? gitLoading.error : undefined}
+                    onRetry={gitLoading?.retry}
+                  />
+                </div>
               </TabsContent>
-              <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0">
-                <CronPanel active={activeView === "cron"} />
+              <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0" aria-busy={cronBusy}>
+                <div className="relative h-full">
+                  <CronPanel
+                    active={activeView === "cron"}
+                    loadingKey={cronLoadingKey}
+                    onLoadingEvent={handleTabLoadingEvent}
+                  />
+                  <TabLoadingOverlay
+                    active={cronLoading?.phase === "initial"}
+                    label="Loading Cron"
+                    error={cronLoading?.phase === "error" ? cronLoading.error : undefined}
+                    onRetry={cronLoading?.retry}
+                  />
+                </div>
               </TabsContent>
-              <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
-                <AssetsPanel />
+              <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0" aria-busy={assetsBusy}>
+                <div className="relative h-full">
+                  <AssetsPanel loadingKey={assetsLoadingKey} onLoadingEvent={handleTabLoadingEvent} />
+                  <TabLoadingOverlay
+                    active={assetsLoading?.phase === "initial"}
+                    label="Loading Assets"
+                    error={assetsLoading?.phase === "error" ? assetsLoading.error : undefined}
+                    onRetry={assetsLoading?.retry}
+                  />
+                </div>
               </TabsContent>
               <TabsContent value="settings" forceMount className="relative flex-1 min-h-0 overflow-hidden m-0">
                 <SettingsPanel />
@@ -1434,7 +1527,7 @@ function HomeApp() {
               <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
                 <div className="relative flex flex-col h-full">
                   <div className={focusedKind === "chat" ? "flex flex-col flex-1 min-h-0" : "hidden"}>
-                  <SessionSubTabs />
+                  <SessionSubTabs loadingStates={loadingStates} />
                   <div className="relative flex-1 min-h-0 overflow-hidden">
                     {tabs.length === 0 && (
                       <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -1502,10 +1595,35 @@ function HomeApp() {
                     {allChatTabs.map((tab) => {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "changes";
                       const key = `${tab.id}:changes`;
+                      const changesLoadingKey = tabLoadKey(
+                        resolveSessionHost(projectState, tab.id),
+                        tab.projectPath,
+                        `${tab.id}:changes`,
+                      );
+                      const changesLoading = loadingStates.get(changesLoadingKey);
+                      const changesBusy = changesLoading?.phase === "initial" || changesLoading?.phase === "refresh";
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
-                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                          <ChangesPanel session={tab.id} host={resolveSessionHost(projectState, tab.id)} active={isActive} />
+                        <div
+                          key={key}
+                          className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}
+                          aria-busy={changesBusy || undefined}
+                        >
+                          <div className="relative h-full">
+                            <ChangesPanel
+                              session={tab.id}
+                              host={resolveSessionHost(projectState, tab.id)}
+                              active={isActive}
+                              loadingKey={changesLoadingKey}
+                              onLoadingEvent={handleTabLoadingEvent}
+                            />
+                            <TabLoadingOverlay
+                              active={changesLoading?.phase === "initial"}
+                              label="Loading Changes"
+                              error={changesLoading?.phase === "error" ? changesLoading.error : undefined}
+                              onRetry={changesLoading?.retry}
+                            />
+                          </div>
                         </div>
                       );
                     })}

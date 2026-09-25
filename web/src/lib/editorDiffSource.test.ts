@@ -6,6 +6,7 @@ const gitStatus = (over: Partial<GitStatus> = {}): GitStatus => ({
   branch: "main",
   staged_files: [],
   changed_files: [],
+  conflicts: [],
   has_changes: false,
   is_repo: true,
   ahead: 0,

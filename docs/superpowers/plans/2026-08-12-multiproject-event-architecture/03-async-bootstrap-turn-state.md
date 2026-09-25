@@ -1,8 +1,8 @@
 ---
 type: Guide
 title: Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints
-description: 'Updated Task 4 and constraint: turn_heartbeat must fire for ALL turnActive=true states (runTurn, permission-resolve, question-answer continuations), not just main runTurn turns.'
-timestamp: 2026-09-20T10:44:16Z
+description: 'Updated Task 4 and constraint: turn_heartbeat must fire for ALL turnActive=true states (runTurn, permission-resolve, question-answer continuations), not just main runTurn turns. Shipped follow-up: ask resolve endpoints now follow the same persist-then-202 async contract via dispatchAskContinuation.'
+timestamp: 2026-09-25T05:58:36Z
 ---
 # Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints
 
@@ -90,3 +90,12 @@ status endpoints give the frontend server truth to derive state from.
   session message → 202 is immediate, `curl -N /api/events` shows bootstrap
   stages then turn events; kill the model provider mid-turn → `turn_error`
   arrives, `state` shows `turn_active: false`. Old UI still works. Commit.
+
+**Shipped follow-up (2026-09-25):** the answered-ask endpoints now follow this
+same async contract. `HandleAnswerQuestion` and `HandleResolvePermission`
+apply + persist the answer, return `202 Accepted`, and run the continuation
+(approved-tool execution + `agent.Step`) on a background goroutine via
+`dispatchAskContinuation` (`internal/server/handler_ask_continuation.go`),
+which mirrors `dispatchTurn`'s shutdown admission (`turnJobsWG` +
+`turnInFlight`) and inherits the Task 4 heartbeat/turnActive obligations. See
+`gotchas/web-ask-dialog-resolved-before-continuation.md`.

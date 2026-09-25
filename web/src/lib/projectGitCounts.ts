@@ -49,8 +49,12 @@ export const GIT_COUNTS_NON_REPO_BACKOFF_MS = 5 * 60_000;
 export type ProjectGitCounts = {
   staged: number;
   unstaged: number;
-  /** staged + unstaged — the same total the Git tab badge shows, so the two
-   *  surfaces can never disagree about the working tree. */
+  /** Unmerged paths, counted from the status's own conflicts list. They are
+   *  not part of staged/unstaged any more, so they must be added here or the
+   *  badge silently undercounts a conflicted repository. */
+  conflicted: number;
+  /** staged + unstaged + conflicted — the same total the Git tab badge shows,
+   *  so the two surfaces can never disagree about the working tree. */
   total: number;
   isRepo: boolean;
 };
@@ -61,6 +65,7 @@ export type ProjectGitCounts = {
 export const NO_GIT_COUNTS: ProjectGitCounts = {
   staged: 0,
   unstaged: 0,
+  conflicted: 0,
   total: 0,
   isRepo: false,
 };
@@ -91,11 +96,29 @@ function keyOf(project: string, host?: string): string {
 function countsOf(status: GitStatus): ProjectGitCounts {
   const staged = status.staged_files?.length ?? 0;
   const unstaged = status.changed_files?.length ?? 0;
-  return { staged, unstaged, total: staged + unstaged, isRepo: !!status.is_repo };
+  // `conflicts` was added to the status after this store shipped. A desktop
+  // web bundle can outlive the server it talks to (and a remote host can be
+  // older than the local client), so a response without the field must read as
+  // "no conflicts" rather than throw on `.length` of undefined. This is a
+  // deliberate version-skew default, not a swallowed error — the value is
+  // absent, not wrong. Same reason the two lines above use `?.`.
+  const conflicted = status.conflicts?.length ?? 0;
+  return {
+    staged,
+    unstaged,
+    conflicted,
+    total: staged + unstaged + conflicted,
+    isRepo: !!status.is_repo,
+  };
 }
 
 function sameCounts(a: ProjectGitCounts, b: ProjectGitCounts): boolean {
-  return a.staged === b.staged && a.unstaged === b.unstaged && a.isRepo === b.isRepo;
+  return (
+    a.staged === b.staged &&
+    a.unstaged === b.unstaged &&
+    a.conflicted === b.conflicted &&
+    a.isRepo === b.isRepo
+  );
 }
 
 function notify(entry: Entry): void {

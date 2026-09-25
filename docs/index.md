@@ -41,6 +41,7 @@ okf_version: 0.1
 - [PDF viewer zoom, Space navigation, and find](concepts/pdf-viewer-zoom-find.md) - PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas.
 - [Per-Chat MCP Toggle](concepts/per-chat-mcp-toggle.md) - Per-chat MCP server on/off toggle in the web/desktop chat sidebar: session-scoped list/toggle, process-wide persist + per-session override, and the mcpCache rebuild gotcha.
 - [Persistent per-session shell for exclamation-mark commands](concepts/persistent-shell-session.md) - How the web/desktop composer's exclamation-mark commands run in a persistent pty-backed interactive shell per chat tab, with prompt-hook marker framing, pty cleanliness, lifecycle, and the one-shot fallback.
+- [Remote MCP OAuth Compatibility](concepts/remote-mcp-oauth-compat.md) - Implemented remote MCP OAuth compatibility: dual-schema mcp-auth.json reads with merge-safe writes, URL-bound token attachment, RFC 9728/8414 discovery refresh with a single retry, status-before-decode HTTP errors, CLI list status fix; per-chat toggle/cache semantics unchanged.
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI and tab reveal, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
 - [Server-Side Auto-Continue Loop](concepts/server-auto-continue.md) - Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, typesafe/chat judge dispatch, the decisive awaiting_user stop, and visible end-of-turn status.
@@ -49,6 +50,7 @@ okf_version: 0.1
 - [Web Ask Dialog LLM Context Preview](concepts/web-ask-dialog-llm-context.md) - Permission/question ask dialogs now show the LLM's last message and thinking for user context
 - [Web Chat Composer Input History (↑/↓ Navigation)](concepts/web-chat-input-history.md) - Per-tab ↑/↓ history navigation in the web/desktop chat composer, parity with the TUI's Up/Down : Navigate input history. Local per-tab list, append-on-submit, caret-gated walk, queue precedence, rekey/clear lifecycle.
 - [Web Composer Quick-Actions Strip](concepts/web-composer-quick-actions.md) - Quick-action pills below the web/desktop chat composer send row: Compact, Continue/Resume, Recap. Hidden when the session has no conversation content yet.
+- [Web tab loading indicators](concepts/web-tab-loading-indicators.md) - Concept: keyed tab loading indicators in the web UI — identity, store, guards, wiring, and the independent Git badge poll.
 - [Web UI Global Keyboard Shortcuts](concepts/web-keyboard-shortcuts.md) - Concept: web UI keyboard shortcuts
 
 # docs
@@ -85,6 +87,7 @@ okf_version: 0.1
 - [Concurrent File Editing Risk — Multiple Writers in Same Checkout](gotchas/concurrent-file-editing-risk.md) - Gotcha: multiple writers (agents + manual edits) on the same files within a single checkout can corrupt both streams. Covers the concurrent modification problem, affected scenarios, mitigation strategies, and recovery.
 - [Concurrent session writers — conflict semantics and recovery](gotchas/session-writers-conflict-recovery.md) - Concurrent session writers — conflict semantics and recovery (updated with 2026-09-20 incident)
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
+- [Desktop quit guard for unsaved drafts (pending + failed) + sticky-port fallback no longer re-saves](gotchas/desktop-quit-guard-and-sticky-port-fallback.md) - Desktop unsaved-draft quit guard (two-state pending/failed, bounded debounce) and sticky-port drift no longer re-saves — 2026-09-25 fixes, follow-up hardening.
 - [Desktop subprocess PATH trap — bare CLI names fail under Finder/Dock-launched .app](gotchas/desktop-subprocess-path-trap.md) - Desktop .app processes inherit launchd's minimal PATH; bare argv[0] resolves via exec.LookPath against the process PATH before cmd.Env is consulted, so cmd.Env cannot fix it. Absolute path alone is not enough — the child's PATH must resolve its own runtime. A second, complementary trap: interactive rc files (~/.zshrc) are not sourced by login shells, so directories only on ~/.zshrc (e.g. ~/.local/bin) are invisible to every shell ocode spawns.
 tags:
   - gotcha
@@ -164,6 +167,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions](gotchas/tui-skipllm-is-not-a-render-gate.md) - Gotcha: renderTranscript in internal/tui/model.go used skipLLM as a "should this render?" predicate, hiding assistant output (fake-agent replies, cron deliveries, LLM errors) on fresh sessions where every message was transient or a user echo. Fix: gate on transient + isCommandHistoryMessage only; skipLLM must never drive rendering.
 - [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes –– **Version Bump** — 0.8.82 → 0.8.83 entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
 - [Web "All sessions" dialog slow to open (render bottleneck, child filtering + pagination)](gotchas/web-all-sessions-dialog-slow.md) - Get-rid of All-sessions dialog 0.73s popup: render-of-6650-rows root cause, child-session filter + 50/page client window, measured numbers, legacy-scan follow-up.
+- [Web ask dialogs: 202 + background continuation (broadcast *_resolved before Step)](gotchas/web-ask-dialog-resolved-before-continuation.md) - Ask resolve endpoints now return 202 and run the agent continuation on a background goroutine via dispatchAskContinuation (lock-ownership handoff + dispatchTurn shutdown parity); web client echoes optimistically and re-hydrates pending_asks on retryable failure; historical broadcast-before-Step note retained.
 - [Web model picker must open from the cached model list, not a live refresh](gotchas/web-model-picker-cached-not-live.md) - Gotcha: web model picker slowness — cached open, batch scan, render cap, gzip, configured filter
 - [Web UI Mobile Layout Breakage (≤767px)"](gotchas/web-ui-mobile-layout-breakage.md) - "Gotcha: web UI mobile layout broke because sidebar CSS reserved space on phones, default-open sidebars never closed, a CSS grid collapsed the tab strip, and the floating bottom bar overflowed the viewport edge. Five root causes, eight responsive fixes, and regression tests. Rule 7 now documents per-session side-pane scoping."
 - [Web/Desktop Chat Went Stale Because a Dead SSE Body Never Errors](gotchas/web-sse-stream-silent-death-liveness.md) - Added a note about a second failure mode: turn_active:true with no heartbeat during permission/question continuations causes a false "stalled" badge; continuations must publish heartbeats.
@@ -182,6 +186,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
 - [okf/conduct/scores/muse-spark-1.2.md](okf/conduct/scores/muse-spark-1.2.md)
 - [okf/conduct/scores/space-bunny-free.md](okf/conduct/scores/space-bunny-free.md)
+- [okf/conduct/scores/space-bunny-free.with-skill.md](okf/conduct/scores/space-bunny-free.with-skill.md)
 - [okf/conduct/scores/tencent__hy3.md](okf/conduct/scores/tencent__hy3.md)
 - [okf/conduct/scores/tencent__hy3.with-skill.md](okf/conduct/scores/tencent__hy3.with-skill.md)
 - [okf/csharp/derived/csharp.mimo-v2.5.SKILL.md](okf/csharp/derived/csharp.mimo-v2.5.SKILL.md) - Corrective C# knowledge for mimo-v2.5, targeting the nullable-reference/ record-equality and pattern-matching gaps this model showed on the closed-book csharp benchmark (record class mutability, switch expression exhaustiveness, property-pattern syntax, `is` binding scope).
@@ -192,6 +197,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
 - [okf/csharp/scores/muse-spark-1.2.md](okf/csharp/scores/muse-spark-1.2.md)
 - [okf/csharp/scores/space-bunny-free.md](okf/csharp/scores/space-bunny-free.md)
+- [okf/csharp/scores/space-bunny-free.with-skill.md](okf/csharp/scores/space-bunny-free.with-skill.md)
 - [okf/csharp/scores/tencent__hy3.md](okf/csharp/scores/tencent__hy3.md)
 - [okf/dotnet/scores/glm-5.3-flash.md](okf/dotnet/scores/glm-5.3-flash.md)
 - [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
@@ -206,6 +212,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/elixir/scores/mimo-v2.5.md](okf/elixir/scores/mimo-v2.5.md)
 - [okf/elixir/scores/muse-spark-1.2.md](okf/elixir/scores/muse-spark-1.2.md)
 - [okf/elixir/scores/space-bunny-free.md](okf/elixir/scores/space-bunny-free.md)
+- [okf/elixir/scores/space-bunny-free.with-skill.md](okf/elixir/scores/space-bunny-free.with-skill.md)
 - [okf/elixir/scores/tencent__hy3.md](okf/elixir/scores/tencent__hy3.md)
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
 - [okf/golang/scores/glm-5.3-flash.md](okf/golang/scores/glm-5.3-flash.md)
@@ -261,6 +268,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
 - [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
 - [okf/rust/scores/space-bunny-free.md](okf/rust/scores/space-bunny-free.md)
+- [okf/rust/scores/space-bunny-free.with-skill.md](okf/rust/scores/space-bunny-free.with-skill.md)
 - [okf/rust/scores/tencent__hy3.md](okf/rust/scores/tencent__hy3.md)
 - [okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md](okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md) - Corrective TanStack Router knowledge for mimo-v2.5, targeting the router-search gaps this model showed on the closed-book tanstack benchmark (reading search params via useSearch(), loaderDeps for search-driven loaders, and the type-safety surface useSearch() gets from validateSearch).
 
@@ -280,24 +288,27 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 # superpowers
 
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/04-url-match.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/05-generator.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
 - [Browser Password Vault — Phase 1 Implementation Plan](superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md) - Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).
-- [Chat Verbosity Display — Design Spec](superpowers/specs/2026-09-24-chat-verbosity-display-design.md) - Approved design spec: chat_verbosity config block (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed event, Settings → Chat display form, and a pure frontend resolver so the web/desktop chat can render with less verbosity while the latest thinking block stays expanded.
+- [Chat Verbosity Display — Design Spec](superpowers/specs/2026-09-24-chat-verbosity-display-design.md) - Approved design spec for chat verbosity display: chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Specification only — not implemented.
+- [Deferred, durable message rewind for ocode Web/Desktop](superpowers/specs/2026-09-25-deferred-session-rewind-design.md) - Approved design spec for deferred, durable message rewind in ocode Web/Desktop.
 - [Delayed Chat Input Consolidation](superpowers/specs/2026-09-09-chat-input-consolidation-design.md)
 - [Embedded Browser Password Vault — Design](superpowers/specs/2026-09-24-browser-password-vault-design.md) - Approved-for-planning design for a Bitwarden-like password vault in ocode's embedded browser (full browser tab + sidebar). Server-side Go crypto: Argon2id-derived KEK wrapping a random AES-256-GCM data key; per-item blobs sealed whole with the item id as AAD; file at <GlobalDataDir>/browse/vault.json (0600). Per-surface unlock (UX-only, not a security boundary). Autofill in local iframe mode via capture.js and in Chrome/CDP mode via vaultFill/vaultCollect + Page.addScriptToEvaluateOnNewDocument observer + Runtime.addBinding. New Settings > Passwords page. Phased: vault core+API+settings, then local autofill, then Chrome autofill.
 - [Laya as a local permission / auto-continue judge — evaluation](superpowers/specs/2026-09-22-laya-local-judge-evaluation.md) - Measured evaluation (2026-09-22) of the Laya System-1 model (3 checkpoints) as a local replacement for typesafe/jev-latest in the auto-permission and auto-continue judges: memory/latency per checkpoint, context budgets, and accuracy on 16 real bash tool calls + 13 real transcript tails pulled from ocode sessions. Verdict: not usable zero-shot; fine-tune or cascade required.
+- [List Dialog Keyboard Navigation — Design Spec](superpowers/specs/2026-09-25-list-dialog-keyboard-navigation-design.md) - Approved design spec for shared Up/Down keyboard navigation across web list-based popup dialogs (ModelDialog and friends): shared reducer/hook, per-dialog contracts, a11y, testing, docs impact.
 - [Local Speech-to-Text (In-App Dictation) — Design](superpowers/specs/2026-09-21-speech-to-text-design.md) - Design spec for adding local, offline speech-to-text dictation to ocode: mic button in chat composer, Settings surface for engine/model selection, reusing internal/tts machinery.
+- [Makefile Version Bump Targets (up-patch / up-minor) — Design Spec](superpowers/specs/2026-09-24-make-version-bump-targets-design.md) - Approved design spec for Makefile up-patch/up-minor version bump targets with POSIX-shell helper.
 - [Multi-Use Preview — Design Spec (Draft, 2026-09-10)](superpowers/specs/2026-09-10-preview-multipurpose-design.md) - Decision: Historical draft for sidebar PreviewHost + session Preview sub-tab, updated 2026-09-21 for .mdx support in extension lists.
-- [Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints](superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md) - Updated Task 4 and constraint: turn_heartbeat must fire for ALL turnActive=true states (runTurn, permission-resolve, question-answer continuations), not just main runTurn turns.
+- [Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints](superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md) - Updated Task 4 and constraint: turn_heartbeat must fire for ALL turnActive=true states (runTurn, permission-resolve, question-answer continuations), not just main runTurn turns. Shipped follow-up: ask resolve endpoints now follow the same persist-then-202 async contract via dispatchAskContinuation.
 - [Part 05 — Frontend Status on Activation + Streaming Watchdog](superpowers/plans/2026-08-12-multiproject-event-architecture/05-frontend-status-streaming.md) - Clarified that turn-active for the 30s stall watchdog includes permission-resolve and question-answer continuation Steps, not just runTurn.
 - [Per-Session Sidebar Models and Toggles](superpowers/specs/2026-09-18-per-session-sidebar-settings-design.md) - Design spec for making every chat-session sidebar model pick and on/off toggle per session (durable, server-side, full TUI parity), instead of one process-global config value shared by every chat.
 - [Plan: Tab Loading Indicators](superpowers/plans/2026-09-24-tab-loading-indicators.md) - Implementation plan for keyed tab loading indicators (Files/Git/Cron/Assets + session Changes).
@@ -307,13 +318,15 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Tab Loading Indicators — Design Spec](superpowers/specs/2026-09-24-tab-loading-indicators-design.md) - Design spec: accessible blocking initial-load overlays and non-blocking refresh spinners for web tab shells, keyed by (host, project, tab) with generation/abort stale-response rejection.
 - [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
 - [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence.
+- [TUI wheel scroll over chat composer design](superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md) - Design spec: treat transcript + chat composer as one wheel-scrolling surface on the TUI chat tab.
+- [Web Chat Message Copy Menu — Design](superpowers/specs/2026-09-25-web-chat-message-copy-design.md) - Design spec for the web chat per-block copy menu: split Copy control, rendered-vs-raw clipboard paths, shared clipboard helper.
 - [Web Compact Feedback Design](superpowers/specs/2026-09-18-web-compact-feedback-design.md) - Approved design for web/desktop /compact feedback beside composer: queued/running/complete/error states, queue semantics, test plan. Implementation complete. (deprecated)
 - [Web Compact Feedback — Final Implementation](superpowers/specs/2026-09-19-web-compact-feedback-final.md) - Superseding spec for the web compact feedback design — final implementation with backend status snapshot, transcript-persisted notice, and simplified composer states
+- [Zoho MCP OAuth Compatibility — Design Spec](superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md) - Approved design spec for Zoho MCP OAuth compatibility: dual-schema auth storage, token attachment, RFC 9728 refresh, error surfacing, CLI status fix.
 
 # Unclassified
 
 - [desktop-single-instance.md](architecture/desktop-single-instance.md)
-- [web-ask-dialog-resolved-before-continuation.md](gotchas/web-ask-dialog-resolved-before-continuation.md)
 - [HOW-TO-EVALUATE.md](okf/HOW-TO-EVALUATE.md)
 - [README.md](okf/README.md)
 - [conduct.md](okf/_prompts/conduct.md)
@@ -341,6 +354,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/conduct/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/conduct/answers/space-bunny-free.md)
+- [space-bunny-free.with-skill.md](okf/conduct/answers/space-bunny-free.with-skill.md)
 - [tencent__hy3.digest-spotcheck.md](okf/conduct/answers/tencent__hy3.digest-spotcheck.md)
 - [tencent__hy3.md](okf/conduct/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/conduct/answers/tencent__hy3.with-skill.md)
@@ -356,6 +370,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/csharp/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/csharp/answers/space-bunny-free.md)
+- [space-bunny-free.with-skill.md](okf/csharp/answers/space-bunny-free.with-skill.md)
 - [tencent__hy3.md](okf/csharp/answers/tencent__hy3.md)
 - [questions.md](okf/csharp/questions.md)
 - [glm-5.3-flash.md](okf/dotnet/answers/glm-5.3-flash.md)
@@ -368,6 +383,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/elixir/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/elixir/answers/space-bunny-free.md)
+- [space-bunny-free.with-skill.md](okf/elixir/answers/space-bunny-free.with-skill.md)
 - [tencent__hy3.md](okf/elixir/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/elixir/answers/tencent__hy3.with-skill.md)
 - [questions.md](okf/elixir/questions.md)
@@ -424,6 +440,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/rust/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/rust/answers/space-bunny-free.md)
+- [space-bunny-free.with-skill.md](okf/rust/answers/space-bunny-free.with-skill.md)
 - [tencent__hy3.md](okf/rust/answers/tencent__hy3.md)
 - [questions.md](okf/rust/questions.md)
 - [glm-5.3-flash.md](okf/tanstack/answers/glm-5.3-flash.md)
@@ -555,6 +572,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [2026-09-21-interrupted-turn-notice-design.md](superpowers/specs/2026-09-21-interrupted-turn-notice-design.md)
 - [2026-09-21-persistent-shell-session-design.md](superpowers/specs/2026-09-21-persistent-shell-session-design.md)
 - [2026-09-24-pulse-dashboard-design.md](superpowers/specs/2026-09-24-pulse-dashboard-design.md)
+- [2026-09-25-desktop-quit-guard-design.md](superpowers/specs/2026-09-25-desktop-quit-guard-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)
 

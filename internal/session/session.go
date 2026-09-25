@@ -1616,7 +1616,9 @@ func Delete(id string) error {
 //
 // The stored transcript is copied RAW (without the loader's
 // removeIncompleteToolRequests filtering) so orphan tool results and ask
-// sentinels survive the move, exactly like a metadata-only write.
+// sentinels survive the move, exactly like a metadata-only write. A pending
+// rewind resource moves with the per-session database and retains its token,
+// target, fingerprint, and lifecycle timestamps under the new session id.
 func RekeyForDir(projectRoot, oldID string) (string, error) {
 	if oldID == "" {
 		return "", ErrNoStoredSession
@@ -1625,6 +1627,10 @@ func RekeyForDir(projectRoot, oldID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	mu := lockFor(dir, oldID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	old, err := loadRawSessionFromDir(dir, oldID)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1657,6 +1663,9 @@ func RekeyForDir(projectRoot, oldID string) (string, error) {
 	}
 	if err := writeSqliteSessionFull(dir, moved); err != nil {
 		return "", err
+	}
+	if err := movePendingRewindForRekey(dir, oldID, newID); err != nil {
+		return newID, fmt.Errorf("session: rekey wrote %s but moving pending rewind failed: %w", newID, err)
 	}
 	if err := refreshIndexRow(dir, newID); err != nil {
 		return "", err

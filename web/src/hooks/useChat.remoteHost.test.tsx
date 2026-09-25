@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { ProjectProvider, useProjectState } from "../stores/projectStore";
-import { ChatProvider } from "../stores/chatStore";
+import { ChatProvider, useChatDispatch } from "../stores/chatStore";
 import { useChat } from "./useChat";
 
 const mockSendMessage = vi.fn().mockResolvedValue({ status: "ok" });
@@ -66,7 +66,7 @@ function Wrapper({ children }: { children: React.ReactNode }) {
 /** Render useChat with a specific sessionId alongside the project store's dispatch. */
 function renderWithSession(sessionId: string) {
   return renderHook(
-    () => ({ chat: useChat(sessionId), project: useProjectState() }),
+    () => ({ chat: useChat(sessionId), project: useProjectState(), dispatch: useChatDispatch() }),
     { wrapper: Wrapper },
   );
 }
@@ -267,5 +267,70 @@ describe("useChat remote host routing", () => {
     });
 
     expect(mockRetrySession).toHaveBeenCalledWith("sess-remote", "devbox");
+  });
+});
+
+describe("useChat.submitQuestionAnswers optimistic echo", () => {
+  beforeEach(() => {
+    mockAnswerQuestion.mockClear();
+    mockGetSessionState.mockClear();
+    mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 0 });
+  });
+
+  // The answer endpoint acknowledges with 202 and runs the continuation in the
+  // background, so the dialog must dismiss WITHOUT waiting for the POST — the
+  // submit used to look hung because the local echo was gated on the response.
+  it("dismisses and echoes before the answer POST settles", async () => {
+    let resolvePost: (v: unknown) => void = () => {};
+    mockAnswerQuestion.mockImplementationOnce(() => new Promise((r) => (resolvePost = r)));
+    const { result } = renderWithSession("sess-q");
+
+    act(() => {
+      result.current.dispatch({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-q",
+        question: { request_id: "q-1", questions: [] },
+      });
+    });
+    expect(result.current.chat.pendingQuestion?.request_id).toBe("q-1");
+
+    let pending: Promise<boolean> | undefined;
+    await act(async () => {
+      pending = result.current.chat.submitQuestionAnswers("q-1", []);
+      // The POST is still unresolved here; the dialog must already be gone.
+      await Promise.resolve();
+    });
+    expect(result.current.chat.pendingQuestion).toBeNull();
+
+    await act(async () => {
+      resolvePost({ status: "ok" });
+      expect(await pending).toBe(true);
+    });
+  });
+
+  // A retryable failure re-hydrates the live ask so the user is not left
+  // without a dialog (the continuation never ran).
+  it("re-hydrates the question on a retryable failure", async () => {
+    mockAnswerQuestion.mockRejectedValueOnce(new Error("agent error: upstream"));
+    mockGetSessionState.mockResolvedValueOnce({
+      bootstrap_stage: "ready",
+      turn_active: false,
+      last_seq: 0,
+      pending_asks: { questions: [{ request_id: "q-1", questions: [] }] },
+    });
+    const { result } = renderWithSession("sess-q2");
+
+    act(() => {
+      result.current.dispatch({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-q2",
+        question: { request_id: "q-1", questions: [] },
+      });
+    });
+
+    await act(async () => {
+      expect(await result.current.chat.submitQuestionAnswers("q-1", [])).toBe(false);
+    });
+    expect(result.current.chat.pendingQuestion?.request_id).toBe("q-1");
   });
 });

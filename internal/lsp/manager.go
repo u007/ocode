@@ -79,10 +79,12 @@ type ServerStartedEvent struct {
 	Detail string // optional error detail for "failed" phase
 }
 
-// ServerStatus describes a running language server.
+// ServerStatus describes a language server lifecycle state.
 type ServerStatus struct {
 	Cmd    string // binary name, e.g. "gopls"
 	LangID string // primary language ID
+	State  string // "starting" | "running" | "failed"
+	Detail string // failure detail, when State is "failed"
 }
 
 // Manager owns one initialised Client per language extension, lazily started
@@ -97,6 +99,9 @@ type Manager struct {
 	sharedBroker bool
 	brokerMeta   map[string]broker.Metadata
 	clients      map[string]*Client
+	// states records lifecycle entries for servers discovered by warmup or a
+	// lazy tool call, including starting/failed servers that have no Client yet.
+	states map[string]ServerStatus
 	// openByURI maps file:// URI -> server extension (e.g. ".go"). The watcher
 	// calls back into handleFileChange, which uses this map to dispatch to
 	// the right client. The map's keys are file URIs, not paths, so they
@@ -148,6 +153,7 @@ func newManager(root string, sharedBroker bool) *Manager {
 		sharedBroker: sharedBroker,
 		brokerMeta:   make(map[string]broker.Metadata),
 		clients:      make(map[string]*Client),
+		states:       make(map[string]ServerStatus),
 		openByURI:    make(map[string]string),
 		diagnostics:  newDiagnosticStore(),
 	}
@@ -242,11 +248,19 @@ func (m *Manager) installDiagnosticsHandler(ext string, c *Client) {
 // ClientForExt returns an initialised client for the given file extension,
 // starting the server on first use. It returns a descriptive error (never a
 // silent fallback) when no server is configured or the binary is missing.
-func (m *Manager) ClientForExt(ext string) (*Client, error) {
+func (m *Manager) ClientForExt(ext string) (client *Client, err error) {
 	spec, ok := serversByExt[ext]
 	if !ok {
 		return nil, fmt.Errorf("no language server configured for %q files (supported: %s)", ext, SupportedExtensions())
 	}
+	m.setServerState(spec, "starting", "")
+	defer func() {
+		if err != nil {
+			m.setServerState(spec, "failed", err.Error())
+			return
+		}
+		m.setServerState(spec, "running", "")
+	}()
 	m.mu.Lock()
 	if c, ok := m.clients[ext]; ok {
 		m.mu.Unlock()
@@ -535,6 +549,9 @@ func (m *Manager) Restart(ext string) {
 		c.Close()
 		delete(m.clients, ext)
 	}
+	if spec, ok := serversByExt[ext]; ok {
+		delete(m.states, spec.cmd)
+	}
 }
 
 // Close shuts down every running server, the file watcher, and clears all
@@ -552,6 +569,7 @@ func (m *Manager) Close() {
 		clients = append(clients, c)
 		delete(m.clients, ext)
 	}
+	m.states = make(map[string]ServerStatus)
 	m.openByURI = make(map[string]string)
 	m.mu.Unlock()
 	for _, c := range clients {
@@ -612,6 +630,54 @@ func KnownServers() []string {
 	return out
 }
 
+// setServerState records the latest lifecycle state for a server binary.
+// A concurrent duplicate startup must not replace a healthy running state
+// with its own failed result.
+func (m *Manager) setServerState(spec serverSpec, state, detail string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.states == nil {
+		m.states = make(map[string]ServerStatus)
+	}
+	if current, ok := m.states[spec.cmd]; ok {
+		if current.State == "running" && state != "running" {
+			return
+		}
+	}
+	m.states[spec.cmd] = ServerStatus{Cmd: spec.cmd, LangID: spec.langID, State: state, Detail: detail}
+}
+
+// Statuses returns one lifecycle row per unique server binary, including
+// starting and failed servers that do not have a Client yet. Active clients
+// always win over a stale state entry. Results are sorted by Cmd.
+func (m *Manager) Statuses() []ServerStatus {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]ServerStatus, len(m.states))
+	for cmd, status := range m.states {
+		seen[cmd] = status
+	}
+	for ext, client := range m.clients {
+		if client == nil {
+			continue
+		}
+		spec := serversByExt[ext]
+		seen[spec.cmd] = ServerStatus{Cmd: spec.cmd, LangID: spec.langID, State: "running"}
+	}
+	out := make([]ServerStatus, 0, len(seen))
+	for _, status := range seen {
+		out = append(out, status)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Cmd < out[j].Cmd })
+	return out
+}
+
 // ActiveServers returns one ServerStatus per unique binary that has a
 // running (non-closed) client. Multiple extensions mapping to the same
 // binary (e.g. .ts/.tsx/.js/.jsx → typescript-language-server) produce
@@ -626,7 +692,7 @@ func (m *Manager) ActiveServers() []ServerStatus {
 		}
 		spec := serversByExt[ext]
 		if _, ok := seen[spec.cmd]; !ok {
-			seen[spec.cmd] = ServerStatus{Cmd: spec.cmd, LangID: spec.langID}
+			seen[spec.cmd] = ServerStatus{Cmd: spec.cmd, LangID: spec.langID, State: "running"}
 		}
 	}
 	out := make([]ServerStatus, 0, len(seen))
@@ -649,8 +715,8 @@ func (m *Manager) SetEventChan(ch chan ServerStartedEvent) {
 
 // WarmUp eagerly starts language servers for every extension found under root
 // without blocking the caller. Each unique server binary is started in its own
-// goroutine; errors (missing binary, init failure) are logged and silently
-// skipped so a missing server never delays startup.
+// goroutine; failures are logged and retained as failed lifecycle states so a
+// headless status consumer can explain why a server is unavailable.
 func (m *Manager) WarmUp(root string) {
 	// Collect the set of extensions present in the project (depth-limited to
 	// avoid scanning huge vendor trees).
@@ -686,6 +752,7 @@ func (m *Manager) WarmUp(root string) {
 			continue
 		}
 		launched[spec.cmd] = true
+		m.setServerState(spec, "starting", "")
 
 		// Signal "starting" immediately so the sidebar can show a spinner
 		// before the blocking initialize handshake completes.

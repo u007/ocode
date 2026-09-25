@@ -51,7 +51,7 @@ export default function EditorHelpDialog({ open, onOpenChange }: Props) {
                   <span className="text-foreground font-medium">Open files</span> — click a file in the file tree on the left. Each file opens in its own tab above the editor; click tabs to switch, <Kbd>×</Kbd> to close.
                 </li>
                 <li>
-                  <span className="text-foreground font-medium">Unsaved changes</span> — a dot on the tab means the file is dirty. Press <Kbd>⌘</Kbd> + <Kbd>S</Kbd> (or <Kbd>Ctrl</Kbd> + <Kbd>S</Kbd> on Windows/Linux) to save. A draft is also kept locally so switching tabs never loses edits.
+                  <span className="text-foreground font-medium">Unsaved changes</span> — a dot on the tab means the file is dirty. Press <Kbd>⌘</Kbd> + <Kbd>S</Kbd> (or <Kbd>Ctrl</Kbd> + <Kbd>S</Kbd> on Windows/Linux) to save. A draft is also kept locally so switching tabs never loses edits; if that local draft can't be saved (storage full), ocode shows an error and refuses to quit until you save the file.
                 </li>
                 <li>
                   <span className="text-foreground font-medium">Saving & session</span> — saving writes to disk immediately. If the agent is running, changes are tracked per-session so the <em>Changes</em> tab can show a diff.

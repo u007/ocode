@@ -55,6 +55,8 @@ import type {
 	VaultItemMeta,
 	VaultStatus,
 	VaultGenOptions,
+	ChatVerbosityConfig,
+	ChatVerbosityResponse,
 } from "./types";
 
 import { noteSessionRevision } from "../lib/sessionRevision";
@@ -704,6 +706,15 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ level }) },
       host,
     ),
+  // Per-session reasoning level: persisted in that session's transcript
+  // metadata and reflected in its status snapshot, without touching the
+  // global config budget or any other session.
+  setSessionThinkingBudget: (sessionId: string, level: string, host?: string) =>
+    fetchJSON<{ budget: number; level: string; session_id: string }>(
+      `/api/sessions/${sessionId}/thinking-budget`,
+      { method: "PUT", body: JSON.stringify({ level }) },
+      host,
+    ),
   getSmallModel: (host?: string) =>
     fetchJSON<{ model: string; priority: string }>("/api/config/small-model", undefined, host),
   setSmallModel: (model: string, host?: string) =>
@@ -905,6 +916,13 @@ export const api = {
     fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features", {
       method: "PUT",
       body: JSON.stringify({ memory_enabled, doc_prompt_enabled }),
+    }),
+  getChatVerbosityConfig: () =>
+    fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity"),
+  setChatVerbosityConfig: (cfg: ChatVerbosityConfig) =>
+    fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
     }),
 
   getProfileDebugConfig: () => fetchJSON<{ profile_debug: boolean }>("/api/config/ocode/profile-debug"),
@@ -1953,8 +1971,10 @@ export const api = {
     ),
 
   // ── Agent question prompts ──
-  // Answer a pending `question` prompt raised by the agent. Throws on 404/409
-  // so callers can surface the failure and dismiss the dialog.
+  // Answer a pending `question` prompt raised by the agent. Resolves with 202
+  // as soon as the answer is recorded — the continuation turn runs in the
+  // background — so callers must NOT gate the visible result on this promise.
+  // Throws on 404/409 so callers can dismiss a stale dialog.
   answerQuestion: (
     requestId: string,
     sessionId: string | null,
@@ -1988,8 +2008,11 @@ export const api = {
   // Resolve a pending PERMISSION_ASK raised by the agent (headless serve mode).
   // Distinct from the config POST /api/permissions (which sets a tool rule).
   // `decision` is allow | deny | always_rule | always_tool; the legacy boolean
-  // `approved` is still accepted by the server for old clients. Throws on
-  // 404/409 so callers can surface the failure and dismiss the dialog.
+  // `approved` is still accepted by the server for old clients. Resolves with
+  // 202 as soon as the decision is recorded — the approved tool execution and
+  // the continuation round run in the background — so callers must NOT gate the
+  // visible result on this promise. Throws on 404/409 so callers can dismiss a
+  // stale dialog.
   resolvePermission: (
     requestId: string,
     sessionId: string | null,

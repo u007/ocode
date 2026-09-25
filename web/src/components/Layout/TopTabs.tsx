@@ -9,6 +9,8 @@ import { loadProjectTerminals } from "../Terminal/terminalPersistence";
 import { basename } from "@/lib/utils";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
+import { tabLoadKey, type TabLoadingSnapshot } from "@/hooks/useKeyedLoad";
+import { TabLoadingIndicator } from "@/components/common/TabLoadingIndicator";
 
 interface Props {
   activeTab: string;
@@ -19,6 +21,7 @@ interface Props {
    * back to the project list once it is dismissed.
    */
   onMenuToggle?: () => void;
+  loadingStates?: ReadonlyMap<string, TabLoadingSnapshot>;
 }
 
 const mainTabs = [
@@ -30,7 +33,7 @@ const mainTabs = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props) {
+export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingStates }: Props) {
   const { state: projectState } = useProjectState();
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const activeProjectHost = projectState.activeProject?.host;
@@ -75,6 +78,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
   // "N staged · M unstaged" header so the tab badge always matches.
   const [gitStaged, setGitStaged] = useState(0);
   const [gitUnstaged, setGitUnstaged] = useState(0);
+  const [gitConflicted, setGitConflicted] = useState(0);
   const [gitAhead, setGitAhead] = useState(0);
   const [gitBehind, setGitBehind] = useState(0);
   const [gitHasUpstream, setGitHasUpstream] = useState(false);
@@ -82,6 +86,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
     if (!activeProjectPath) {
       setGitStaged(0);
       setGitUnstaged(0);
+      setGitConflicted(0);
       setGitAhead(0);
       setGitBehind(0);
       setGitHasUpstream(false);
@@ -94,6 +99,9 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
         if (cancelled) return;
         setGitStaged(status.staged_files?.length ?? 0);
         setGitUnstaged(status.changed_files?.length ?? 0);
+        // A conflicted path is no longer in either list, so add it here or
+        // the badge would undercount exactly when the user most needs it.
+        setGitConflicted(status.conflicts?.length ?? 0);
         setGitAhead(status.ahead ?? 0);
         setGitBehind(status.behind ?? 0);
         setGitHasUpstream(status.has_upstream ?? false);
@@ -101,6 +109,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
         if (!cancelled) {
           setGitStaged(0);
           setGitUnstaged(0);
+          setGitConflicted(0);
           setGitAhead(0);
           setGitBehind(0);
           setGitHasUpstream(false);
@@ -118,8 +127,11 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
       off();
     };
   }, [activeProjectPath, activeProjectHost]);
-  const gitTotal = gitStaged + gitUnstaged;
-  const gitTitle = `${gitStaged} staged · ${gitUnstaged} unstaged`;
+  const gitTotal = gitStaged + gitUnstaged + gitConflicted;
+  const gitTitle =
+    gitConflicted > 0
+      ? `${gitConflicted} conflicted · ${gitStaged} staged · ${gitUnstaged} unstaged`
+      : `${gitStaged} staged · ${gitUnstaged} unstaged`;
 
   // Detect whether the tab strip overflows its container so the "More" menu
   // can be shown. Re-measured on resize.
@@ -198,6 +210,9 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
         {mainTabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
+          const loadingState = loadingStates?.get(tabLoadKey(activeProjectHost, activeProjectPath, tab.id));
+          const loading = loadingState?.phase === "refresh";
+          const loadError = loadingState?.phase === "error";
           const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
           const gitCount = tab.id === "git" && gitTotal > 0 ? gitTotal : undefined;
           return (
@@ -205,10 +220,12 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
               key={tab.id}
               value={tab.id}
               ref={isActive ? activeRef : undefined}
+              aria-busy={loading || undefined}
               className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-semibold transition-colors whitespace-nowrap data-[state=active]:bg-accent data-[state=active]:text-accent-foreground data-[state=active]:shadow-none text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
             >
               <Icon className="w-4 h-4" />
               <span className="hidden sm:inline">{tab.label}</span>
+              <TabLoadingIndicator active={loading} error={loadError} label={`Loading ${tab.label}`} />
               {count !== undefined && (
                 <span
                   className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${
@@ -256,13 +273,17 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle }: Props)
             <SelectContent align="end" className="max-h-80">
               {mainTabs.map((tab) => {
                 const Icon = tab.icon;
+                const loadingState = loadingStates?.get(tabLoadKey(activeProjectHost, activeProjectPath, tab.id));
+                const loading = loadingState?.phase === "refresh";
+                const loadError = loadingState?.phase === "error";
                 const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
                 const gitCount = tab.id === "git" && gitTotal > 0 ? gitTotal : undefined;
                 return (
-                  <SelectItem key={tab.id} value={tab.id}>
+                  <SelectItem key={tab.id} value={tab.id} aria-busy={loading || undefined}>
                     <span className="flex items-center gap-2">
                       <Icon className="w-3.5 h-3.5" />
                       {tab.label}
+                      <TabLoadingIndicator active={loading} error={loadError} label={`Loading ${tab.label}`} />
                       {count !== undefined && (
                         <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-accent-foreground">
                           {count}

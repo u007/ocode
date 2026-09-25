@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { apiPath, authHeaders } from "@/api/client";
 import { useProjectState } from "../../stores/projectStore";
 import { parseKeywords, matchesKeywords } from "@/lib/keywordFilter";
+import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
 
 interface UploadedFile {
   name: string;
@@ -97,7 +98,13 @@ async function copyToClipboard(text: string): Promise<void> {
   }
 }
 
-export default function AssetsPanel() {
+interface Props {
+  loadingKey?: string;
+  onLoadingEvent?: LoadingEventHandler;
+}
+
+export default function AssetsPanel({ loadingKey, onLoadingEvent }: Props = {}) {
+  const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [selected, setSelected] = useState<UploadedFile | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -110,7 +117,6 @@ export default function AssetsPanel() {
   const [filter, setFilter] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const loadGeneration = useRef(0);
   const blobGeneration = useRef(0);
   const previewAbortRef = useRef<AbortController | null>(null);
 
@@ -136,26 +142,34 @@ export default function AssetsPanel() {
     };
   }, []);
 
-  const loadFiles = useCallback(async () => {
-    const generation = ++loadGeneration.current;
+  const loadFiles = useCallback(() => {
     setLoading(true);
     setError(null);
-    try {
+    return runKeyedLoad(async ({ signal }) => {
       const r = await fetch(apiPath(`/api/uploads${projectOnlyQuery}`), {
         headers: authHeaders(),
+        signal,
       });
       if (!r.ok) {
         throw new Error(`list failed: ${r.status} ${r.statusText}`);
       }
-      const data: UploadedFile[] = await r.json();
-      if (generation === loadGeneration.current) setFiles(data);
-    } catch (e) {
-      console.error("Failed to load uploads:", e);
-      if (generation === loadGeneration.current) setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (generation === loadGeneration.current) setLoading(false);
-    }
-  }, [projectOnlyQuery]);
+      return (await r.json()) as UploadedFile[];
+    }, {
+      empty: (data) => data.length === 0,
+      retry: () => {
+        void loadFiles();
+      },
+    }).then((result) => {
+      if (result.status === "success" || result.status === "empty") {
+        setFiles(result.value);
+        setLoading(false);
+      } else if (result.status === "error") {
+        console.error("Failed to load uploads:", result.error);
+        setError(result.message);
+        setLoading(false);
+      }
+    });
+  }, [projectOnlyQuery, runKeyedLoad]);
 
   useEffect(() => {
     void loadFiles();

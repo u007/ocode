@@ -288,12 +288,43 @@ func (h *Handler) SetTerminalDetachTTL(d time.Duration) {
 	h.terminalSessions.mu.Unlock()
 }
 
+// canonicalLSPProjectRoot normalizes roots before they become LSP manager
+// keys or status identities. Project entries may arrive as "~", relative
+// paths, or symlink aliases; all of those should resolve to one manager and
+// one sidebar row rather than creating duplicate language-server processes.
+func canonicalLSPProjectRoot(root string) string {
+	if root == "" {
+		root = "."
+	}
+	if expanded, err := projects.ExpandHome(root); err != nil {
+		log.Printf("server: expand LSP project root %q: %v", root, err)
+	} else {
+		root = expanded
+	}
+	if absolute, err := filepath.Abs(root); err != nil {
+		log.Printf("server: make LSP project root absolute %q: %v", root, err)
+	} else {
+		root = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	} // intentionally not logged: a project root may not exist yet during setup.
+	return filepath.Clean(root)
+}
+
+func lspProjectRootKey(root string) string {
+	root = canonicalLSPProjectRoot(root)
+	if os.PathSeparator == '\\' {
+		return strings.ToLower(root)
+	}
+	return root
+}
+
 // lspManagerFor returns the LSP manager rooted at the given project root,
-// creating it on first use. Sessions on the same project share a manager so
-// multiple tabs don't spawn redundant language-server processes; sessions on
-// different registered projects get managers rooted at their own repo. An
-// empty root falls back to the server's workdir (single-project servers, TUI
-// RC bridge) and then to ".".
+// creating it on first use. Sessions on the same canonical project share a
+// manager so multiple tabs don't spawn redundant language-server processes;
+// sessions on different registered projects get managers rooted at their own
+// repo. An empty root falls back to the server's workdir and then to ".".
 func (h *Handler) lspManagerFor(root string) *lsp.Manager {
 	if root == "" {
 		root = h.workDir
@@ -301,6 +332,7 @@ func (h *Handler) lspManagerFor(root string) *lsp.Manager {
 	if root == "" {
 		root = "."
 	}
+	root = canonicalLSPProjectRoot(root)
 	h.lspMu.Lock()
 	defer h.lspMu.Unlock()
 	if h.lspMgrs == nil {
@@ -326,9 +358,10 @@ func (h *Handler) lspManagerFor(root string) *lsp.Manager {
 	return mgr
 }
 
-// collectLSPStatuses reports the servers active across every per-project LSP
-// manager, in the same shape the TUI's collectLSPStatuses builds from its own
-// manager — used for the headless (no RC bridge) web/desktop status path.
+// collectLSPStatuses reports the servers discovered across every per-project
+// LSP manager, in the same shape the TUI's collectLSPStatuses builds from its
+// own manager, plus headless lifecycle states for starting/failed servers — used
+// for the web/desktop status path.
 func (h *Handler) collectLSPStatuses() []LSPStatus {
 	h.lspMu.Lock()
 	mgrs := make([]*lsp.Manager, 0, len(h.lspMgrs))
@@ -339,8 +372,8 @@ func (h *Handler) collectLSPStatuses() []LSPStatus {
 
 	out := []LSPStatus{}
 	for _, mgr := range mgrs {
-		active := mgr.ActiveServers()
-		if len(active) == 0 {
+		statuses := mgr.Statuses()
+		if len(statuses) == 0 {
 			continue
 		}
 
@@ -358,15 +391,51 @@ func (h *Handler) collectLSPStatuses() []LSPStatus {
 			}
 		}
 
-		for _, s := range active {
+		for _, s := range statuses {
+			state := s.State
+			if state == "" {
+				state = "running"
+			}
 			out = append(out, LSPStatus{
 				Cmd:                 s.Cmd,
 				LangID:              s.LangID,
 				Root:                mgr.Root(),
-				State:               "running",
+				State:               state,
+				Detail:              s.Detail,
 				DiagnosticsErrors:   errByCmd[s.Cmd],
 				DiagnosticsWarnings: warnByCmd[s.Cmd],
 			})
+		}
+	}
+	// Keep the multi-project inventory deterministic; map iteration order must
+	// not make the sidebar flicker between projects or server rows.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Root != out[j].Root {
+			return out[i].Root < out[j].Root
+		}
+		return out[i].Cmd < out[j].Cmd
+	})
+	return out
+}
+
+// lspStatusesForRoot limits the process-wide status list to one canonical
+// project. Session status is consumed by the per-chat CoworkSidebar; returning
+// rows from other projects there makes the root filter look like a false
+// "No LSP servers" result and can mix diagnostics across tabs. The returned
+// Root is rewritten to the caller's display spelling (for example "~" or a
+// symlink path) so existing status consumers keep their established CWD
+// contract while comparison itself remains canonical.
+func (h *Handler) lspStatusesForRoot(root string) []LSPStatus {
+	return filterLSPStatusesByRoot(h.collectLSPStatuses(), root)
+}
+
+func filterLSPStatusesByRoot(servers []LSPStatus, root string) []LSPStatus {
+	want := lspProjectRootKey(root)
+	out := make([]LSPStatus, 0, len(servers))
+	for _, status := range servers {
+		if lspProjectRootKey(status.Root) == want {
+			status.Root = root
+			out = append(out, status)
 		}
 	}
 	return out
@@ -376,6 +445,10 @@ type agentSession struct {
 	agent    *agent.Agent
 	messages []agent.Message
 	model    string
+	// thinkingBudget is the extended-thinking budget the client was built
+	// with (per-session override or global default); compared in
+	// reconcileProfileAgent so a reasoning-level change rebuilds the client.
+	thinkingBudget int
 	// profile is the effective profile name the agent was built with ("" = base).
 	// Compared against the window's current active profile on each turn so a
 	// profile switch takes effect on the next turn without an app restart.
@@ -1171,8 +1244,9 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 
 func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id string) {
 	var req struct {
-		Content  string `json:"content"`
-		WindowID string `json:"windowId,omitempty"`
+		Content     string `json:"content"`
+		WindowID    string `json:"windowId,omitempty"`
+		RewindToken string `json:"rewindToken,omitempty"`
 		// Async: see ChatRequest.Async.
 		Async bool `json:"async,omitempty"`
 	}
@@ -1215,6 +1289,44 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	// profile; apply it before the reconcile below rebuilds the resident agent
 	// so this turn (and later ones) use the desktop's selected profile.
 	h.applyProxiedActiveProfile(r, windowID)
+
+	// A tokenized rewind is a separate durable transaction, not a normal send.
+	// Branch before resident-agent lookup, profile reconciliation, or mid-turn
+	// injection so no rewind error can fall back to the ordinary append path.
+	if req.RewindToken != "" {
+		if !validPendingRewindToken(req.RewindToken) {
+			writeError(w, http.StatusBadRequest, "invalid pending rewind token")
+			return
+		}
+		if !req.Async {
+			writeError(w, http.StatusBadRequest, "rewindToken requires async send")
+			return
+		}
+		if rc := h.RCBridge(); rc != nil && id == rc.SessionID {
+			writeError(w, http.StatusConflict, "rewind is not supported for a bridged session")
+			return
+		}
+		model := h.effectiveSessionModel(id)
+		job, err := h.dispatchTurnWithRewind(id, model, req.Content, turnOptions{}, req.RewindToken)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		select {
+		case <-job.persistAck:
+			if job.err != nil {
+				writePendingRewindError(w, "send", id, job.err)
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+		if as := h.lookupAgentSession(id); as != nil {
+			model = as.model
+		}
+		writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: model})
+		return
+	}
 
 	if rc := h.RCBridge(); rc != nil && id == rc.SessionID {
 		if req.Async {

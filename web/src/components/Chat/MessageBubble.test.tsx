@@ -1,8 +1,15 @@
-import { useState } from "react";
-import { render, screen, act } from "@testing-library/react";
+import { useState, type ReactElement } from "react";
+import { render as rtlRender, screen, act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import MessageBubble from "./MessageBubble";
 import type { Message } from "../../api/types";
+import { ChatDisplayTestProvider } from "./chatDisplayTestUtils";
+
+// MessageBubble's tool/assistant-with-tools paths read the controlled
+// ChatDisplayContext; wrap every render so the throwing hook has a provider.
+function render(ui: ReactElement) {
+  return rtlRender(<ChatDisplayTestProvider>{ui}</ChatDisplayTestProvider>);
+}
 
 // Guards the fix for the desktop-app CPU spike: every streamed "thinking"
 // delta replaced the `live` array reference, re-rendering ChatPanel and (pre

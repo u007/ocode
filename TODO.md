@@ -2188,3 +2188,159 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
   `Page.addScriptToEvaluateOnNewDocument` field observer and
   `Runtime.addBinding`; guard the observer with an `executionContextId` frame
   check so it only acts on the main frame.
+
+
+## Planning tool path bug (from advisor checkpoint: 2026-09-24)
+
+- [ ] **`plan_enter` writes outside the repository.** In this checkout, `plan_enter` attempted to create `/.opencode/plans/2026-09-24.md` (filesystem root) instead of the repository's `.opencode/plans/` directory, then failed because that root path does not exist. The chat-verbosity plan was written manually to `.opencode/plans/2026-09-24-chat-verbosity-display.md` as a workaround. Investigate and fix the plan path separately; do not change it as part of the chat-verbosity feature.
+
+## Web Git tab: conflict detection + operation recovery (2026-09-25)
+
+Plan: `.opencode/plans/2026-09-25-git-conflicts-and-operations/` (INDEX.md
+plus parts `01-op-state-parser.md` … `08-docs.md`). Phases 1–8 are planned
+and being implemented phase by phase. Phases 01 and 02 are done; 03-08 are not.
+
+- [x] **Phase 01 — operation-state parser.** Shared, transport-neutral
+  parser over git's state files (`rebase-merge/`, `rebase-apply/`,
+  `sequencer/`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`,
+  `BISECT_START`) into an optional operation on `GitStatus`. Must cover a
+  linked worktree, where all of these are per-worktree.
+  **DONE 2026-09-25** — `internal/server/handler_git_conflicts.go`:
+  `gitStateEntry` (transport-neutral), `gitOperationStateFor` (pure parser),
+  `gitStateEntriesInDir` (os.Stat sweep), `gitOperationStateForDir` (one git
+  process: `rev-parse --absolute-git-dir`). `GitStatus` is NOT wired yet —
+  that is Phase 02. Verified: `gofmt` clean, `go vet ./internal/server/`,
+  `go build ./...`, targeted tests x20 green (catches map-order
+  non-determinism), full `go test ./internal/server/` green.
+  Two mutations confirmed the tests bite: dropping the `rebase-apply/applying`
+  check (am misreported as rebase), and inverting head-vs-sequencer
+  precedence. NOTE: the sequencer precedence tests assert the *label*, not
+  just the kind — both branches classify as "cherry-pick", so a kind-only
+  assertion did not notice the mutation.
+- [x] **Phase 02 — status surface.** New `status --porcelain=v2 -z` probe
+  gives conflicted paths with their code and ours/theirs stage presence.
+  Filter conflicted paths out of `staged_files`/`changed_files` and widen
+  `HasChanges`. **Today a conflicted file is counted three times** (verified:
+  `git diff --name-only` emits it twice, `--cached` once) — this fixes that.
+  **CALLER CONTRACT (do not fold the error back into a nil operation):**
+  `gitOperationStateForDir(dir) (*GitOperation, error)`. Phase 02 must do
+  `if errors.Is(err, errGitNotARepository) { /* no operation, do not log */ }`
+  and log or surface every other error. Returning a bare nil operation for a
+  failed probe would make a broken repo look clean and hide a halted merge.
+  **DONE 2026-09-25.** `GitConflict` + `parseUnmergedPorcelain` in
+  `handler_git_conflicts.go`; `GitStatus.Conflicts []GitConflict` and
+  `GitStatus.Operation *GitOperation` (`omitempty`, so an idle repo marshals
+  byte-identically and the emitter's change-dedup does not fire) in
+  `handler_git.go`. `gitStatusForDir` now runs the `-z` probe, filters
+  conflicted paths out of both file lists, dedupes them, widens `HasChanges`,
+  and wires the operation detector under the shared 10s deadline. The caller
+  honours the contract above (expected = not-a-repo OR deadline-expiry, both
+  unlogged; everything else logged).
+  **Signature change:** `gitOperationStateForDir(ctx, dir)` — the ctx is
+  load-bearing. Without it the new probe escaped the shared budget and
+  `TestGitStatusForDirBoundedWhenGitHangs` failed (a real regression caught by
+  the existing suite).
+  Badge coupling landed in the SAME change (otherwise totals silently shrink):
+  `web/src/api/types.ts` (`GitConflict`, `GitOperation`),
+  `projectGitCounts.ts` (`conflicted` + total, defensive `?.` for an older
+  server), `TopTabs.tsx` (badge total + "N conflicted" title).
+  Verified: gofmt/vet clean, `go build ./...`, targeted Go tests x20,
+  full `go test ./internal/server/` green, `vite build` clean, and all 61
+  tests in the touched web files green. Two mutations caught: skipping the
+  conflicted-path filter (the old triple count) and inverting an ours/theirs
+  boolean. Pre-existing web-suite failures (ChatPanel/TurnParts/
+  MessageBubble/HighlightedCode, `useChatDisplay must be used within
+  ChatDisplayContext.Provider`) are concurrent WIP, not this change.
+  Still ASSUMED: the all-zero-stage rule for codes other than `UD` is pinned
+  by the parser table test, not by a live repo per code.
+  Upgrade note (harmless, but expected): the idle-stability test proves two
+  polls marshal identically AFTER the change, not that the shape matches the
+  OLD format. Adding `"conflicts":[]` changes the marshaled status, so each
+  viewed project emits one `git_status` event when a server first runs this
+  build. It is a single event, not a poll loop — the dedup only fires again if
+  the value changes.
+  Commit note: `handler_git_conflicts.go` and both
+  `handler_git_conflicts*_test.go` files are NEW and currently untracked
+  (`??`); they must be added, or the feature and its tests ship without their
+  implementation.
+- [ ] **Phase 03 — `POST /api/git/conflict/resolve`.** ours/theirs/mark, with
+  `git rm` instead of `checkout` when the chosen side is a deletion, and a
+  marker check that matches only the opening/closing markers (NOT the
+  separator run, which is a Markdown setext underline).
+  **BLOCKED — implementation written, VERIFICATION BLOCKED (2026-09-25).**
+  `HandleGitResolveConflict` + `gitRunInDirLiteral` live in
+  `internal/server/handler_git_conflicts.go`; route registered at
+  `internal/server/server.go`; tests in
+  `internal/server/handler_git_conflict_resolve_test.go`. `go build
+  ./internal/server/` and `gofmt` are clean, but the test package CANNOT be
+  compiled or run because another session's uncommitted
+  `internal/server/handler_chat_verbosity_test.go:50` references
+  `config.ChatVerbosityOverrides.Thinking`, which does not exist yet. That one
+  file fails `go test -c ./internal/server/`, so EVERY test in the package
+  (mine included) is unverified. `Plan`-phase cross-check: the
+  `git mv`-on-a-conflicted-path fixture bug and the wrong `ours`/`theirs`
+  staging expectation were both found and fixed by reading git's actual
+  behavior (materialize one stage, `git add`, then inspect both
+  `diff --name-only` forms: ours matches HEAD → neither list; theirs differs →
+  `staged_files`).
+  **Ask the user to ping when that refactor lands, then run
+  `go test ./internal/server -run ResolveConflict` and then the full package.**
+  Do NOT modify or move the other session's file, and do NOT create a
+  worktree to route around it.
+  Remote branch answers 501 (Phase 05) rather than falling through to the
+  local implementation, which would resolve a same-named path on the wrong
+  machine.
+- [ ] **Phase 04 — `POST /api/git/operation`.** continue/abort/skip across
+  merge, rebase, rebase-interactive, am, cherry-pick, revert; good/bad/
+  skip/reset for bisect. Re-detects server-side and 409s on a stale kind.
+- [ ] **Phase 05 — remote parity** for phases 1–4 over SSH/WSL, reusing the
+  batched `remoteGitStatus` script and the phase 01 parser.
+- [ ] **Phase 06 — web UI.** Conflicts section + operation banner, and
+  rebase-aware button labels (ours/theirs are swapped during a rebase).
+- [ ] **Phase 07 — badge parity** across GitPanel, TopTabs and
+  `projectGitCounts`, which all sum `staged_files + changed_files`.
+- [ ] **Phase 08 — docs** via the context agent + CHANGES.md.
+
+- **Remote conflicted paths containing `:` cannot be resolved.**
+  `remoteSafeSpec` (`internal/server/handler_remote_work.go:409`) rejects
+  `:` among many other characters, but a colon is legal in a git path. The
+  resolve endpoint must surface the validator's error rather than silently
+  skipping the file; relaxing the validator is a separate change because it
+  exists to stop shell injection through a path. Fixing it properly would
+  mean allowing a strict allowlist instead of a broad denylist.
+
+- **`git checkout` and `git rebase` are denied by this environment's
+  permission rules**, so rebase-specific behavior cannot be driven end to
+  end here. Cover it with synthesized rebase state (a hand-built
+  `rebase-merge/` directory works and is what phase 01's worktree test uses)
+  plus a table test asserting the exact git argv per kind and action. Do not
+  let a test *skip* when a fixture cannot be built — that is a false-green.
+
+- **`parseUnifiedDiff` cannot read a combined diff.** An unmerged path's
+  `git diff` output starts with `diff --cc`, which the parser does not match
+  (verified), so a conflicted file contributes no patch to the staged/unstaged
+  panes. The UI opens the file in the editor instead of previewing a
+  half-renderable combined diff. If a real preview is ever wanted, that
+  parser needs `diff --cc` and `@@@` support first.
+
+- **`gitexec.LockHeld` matches English git text, but no locale is pinned.**
+  `gitexec.Env()` sets `GIT_OPTIONAL_LOCKS=0` only, so a user running a
+  localized git makes the "another git process seems to be running" match fail
+  silently — a genuine index-lock race is then reported as a hard error instead
+  of being retried. Do NOT fix this by setting `LC_ALL=C` in `gitexec.Env()`:
+  that env is also used for mutating commands (commit, stash, add), where
+  `LC_ALL` overrides every `LC_*` category and would change how the user's
+  hooks, `GIT_EDITOR`, gpg/pinentry signing and credential helpers behave,
+  including on UTF-8 paths and commit messages. A locale pin belongs either on
+  the individual read-only probes that classify git's text output (the pattern
+  `internal/server/handler_git_conflicts.go` now uses for its
+  `rev-parse --absolute-git-dir` probe) or in a separate opt-in env helper that
+  only call sites choose. Needs a user decision before it lands.
+
+- **`remoteRunTrimOrEmpty` swallows every remote error.**
+  `internal/server/handler_remote_git.go:205` returns `""` on any `remoteRun`
+  failure with no log, and `remoteGitStatus` (line ~40) returns an empty
+  status on any error. Same error-handling class the phase 01 fix addressed on
+  the local side, but PRE-EXISTING and deliberately not fixed here. Phase 05
+  adds remote probes through this path, so the new operation-state probe must
+  not be the third silent fallback: log the remote failure there.

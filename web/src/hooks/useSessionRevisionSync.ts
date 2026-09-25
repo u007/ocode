@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useChatDispatch, useChatStateRef } from "../stores/chatStore";
+import { useProjectDispatch } from "../stores/projectStore";
 import { revalidateSession, type SessionEventRouter } from "../lib/sessionEvents";
 import { onWake } from "../lib/wakeSignal";
 
@@ -32,6 +33,7 @@ export function useSessionRevisionSync(
   hostById?: ReadonlyMap<string, string | undefined>,
 ): void {
   const dispatch = useChatDispatch();
+  const projectDispatch = useProjectDispatch();
   // Read through refs so the interval/wake closures always see the current
   // tabs without re-subscribing on every tab change. Both are purely
   // imperative (read inside the tick, not JSX), so they must not re-render
@@ -43,10 +45,14 @@ export function useSessionRevisionSync(
   hostsRef.current = hostById;
 
   useEffect(() => {
-    const router: Pick<SessionEventRouter, "dispatch" | "getState" | "hostFor"> = {
+    const router: Pick<SessionEventRouter, "dispatch" | "getState" | "hostFor" | "projectDispatch"> = {
       dispatch,
       getState: () => stateRef.current,
       hostFor: (sessionId) => hostsRef.current?.get(sessionId),
+      // The authoritative title from the refetched detail is applied to the tab
+      // strip here too, so a title written by another ocode process relabels
+      // background/inactive tabs (see revalidateSession / applySessionTabTitle).
+      projectDispatch,
     };
     // One pass over all open sessions, deduped per session so a slow /state
     // can't stack up if the interval and a wake fire close together.
@@ -68,5 +74,5 @@ export function useSessionRevisionSync(
       clearInterval(interval);
       offWake();
     };
-  }, [dispatch]);
+  }, [dispatch, projectDispatch]);
 }

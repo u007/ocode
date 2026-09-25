@@ -65,6 +65,7 @@ function statusOf(over: Partial<GitStatus> = {}): GitStatus {
     branch: "main",
     staged_files: [],
     changed_files: [],
+    conflicts: [],
     has_changes: true,
     is_repo: true,
     ahead: 0,
@@ -127,6 +128,38 @@ describe("useProjectGitCounts", () => {
     await waitFor(() => expect(rail.result.current.total).toBe(1));
     expect(row.result.current.total).toBe(1);
     expect(apiFake.calls.length).toBe(1);
+  });
+
+  it("counts conflicted files in the total, and reports them separately", async () => {
+    // A conflicted path is deliberately absent from staged_files and
+    // changed_files (git listed it three times across those two lists), so the
+    // badge must add the conflicts list or it silently undercounts exactly
+    // when the user most needs to know something needs resolving.
+    apiFake.status = statusOf({
+      staged_files: ["a.ts"],
+      changed_files: ["b.ts"],
+      conflicts: [
+        { path: "c.ts", code: "UU", ours: true, theirs: true },
+        { path: "d.ts", code: "UD", ours: true, theirs: false },
+      ],
+    });
+    const { result } = renderHook(() => useProjectGitCounts("/proj"));
+
+    await waitFor(() => expect(result.current.total).toBe(4));
+    expect(result.current.staged).toBe(1);
+    expect(result.current.unstaged).toBe(1);
+    expect(result.current.conflicted).toBe(2);
+  });
+
+  it("treats a status from a server without the conflicts field as zero, not a crash", async () => {
+    // An older server omits the field entirely. The badge must keep working.
+    const legacy = statusOf({ changed_files: ["b.ts"] });
+    delete (legacy as { conflicts?: unknown }).conflicts;
+    apiFake.status = legacy;
+
+    const { result } = renderHook(() => useProjectGitCounts("/proj"));
+    await waitFor(() => expect(result.current.total).toBe(1));
+    expect(result.current.conflicted).toBe(0);
   });
 
   it("keeps entries separate per host, so one path on two machines never shares counts", async () => {

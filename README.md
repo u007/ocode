@@ -87,6 +87,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | **In-Chat Find Bar** | `Ctrl+F` / `/search` / `/find` on the chat tab — server-side over the **whole transcript**, not just the loaded window ("N total, M in view"), with prefix backfill when jumping to an older match |
 | **Auto-Continue** | `/autocontinue` auto-resumes a turn cut off by `/max-step` (optionally judged by a small model); persists across TUI and web turns |
 | **Interrupted-Turn Notice** | A turn cut off after an answered ask surfaces a Continue action in the transcript |
+| **Chat Display Controls** | Web/desktop Settings → Chat display offers Full, Balanced, and Quiet presets plus per-category expand/collapse overrides; display changes never alter the transcript or model context |
 
 ### 🔧 Tool System — 40 Built-ins
 
@@ -132,7 +133,9 @@ Full git capability built into the TUI — no context-switching to a separate to
 Web parity: the **Git** tab (`GET /api/git/*`) renders the same diff with file status
 and provides Fetch, Pull, Push, and confirmed destructive actions. Force push uses
 `--force-with-lease`; the explicit **Reset to remote** action fetches and hard-resets
-to the current branch's upstream.
+to the current branch's upstream. Status also reports conflicted paths and halted
+Git operations separately from ordinary staged/unstaged changes, so badges and
+resolution actions do not double-count a conflicted file.
 
 ### 📁 File Browser
 

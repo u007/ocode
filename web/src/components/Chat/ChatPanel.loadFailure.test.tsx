@@ -19,9 +19,27 @@ import { dropPrefetchedSession } from "../../lib/sessionPrefetch";
 import type { Message } from "../../api/types";
 
 const hoisted = vi.hoisted(() => ({ projectDispatch: vi.fn() }));
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: () => () => {},
+    onReconnect: () => () => {},
+  },
+}));
+
 vi.mock("../../api/client", () => ({
   api: {
     getSession: vi.fn(),
+    // ChatPanel mounts the shared chat-display policy hook; without this the
+    // store rejects with "not a function" as an unhandled rejection.
+    getChatVerbosityConfig: vi.fn(async () => ({
+      preset: "full",
+      overrides: {
+        older_thinking: "preset",
+        tool_calls: "preset",
+        tool_output: "preset",
+        activity_notices: "preset",
+      },
+    })),
     searchSession: vi.fn(() => new Promise<unknown>(() => {})),
   },
 }));

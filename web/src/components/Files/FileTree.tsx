@@ -59,6 +59,7 @@ import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fil
 import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFiltersPersistence";
 import { fileTreeRootKey, loadExpandedDirs, saveExpandedDirs } from "./fileTreeExpansionPersistence";
 import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
+import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
 
 // Suppress unused-import errors for in-progress secret/file-tree work (dirty
 // working tree from parallel feature). The build is strict (`noUnusedLocals`).
@@ -132,6 +133,9 @@ interface FileTreeProps {
   projectHost?: string;
   /** Paths currently included in the chat/LLM context (opened editor tabs with includeInContext). Shown as a subtle indicator, separate from the bulk-selection checkbox. */
   includedPaths?: string[];
+  /** Stable host/project/tab key used by the shared tab loading store. */
+  loadingKey?: string;
+  onLoadingEvent?: LoadingEventHandler;
 }
 
 const langIcons: Record<string, string> = {
@@ -794,7 +798,15 @@ function PromptDialog({ state, onCancel }: { state: PromptState | null; onCancel
 }
 
 
-export default function FileTree({ onOpenFile, projectPath, projectHost, includedPaths }: FileTreeProps) {
+export default function FileTree({
+  onOpenFile,
+  projectPath,
+  projectHost,
+  includedPaths,
+  loadingKey,
+  onLoadingEvent,
+}: FileTreeProps) {
+  const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const includedSet = new Set(includedPaths ?? []);
   const [tree, setTree] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
@@ -977,23 +989,26 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
   const loadRoot = useCallback(
     (root: string) => {
       setLoading(true);
-      const controller = new AbortController();
-      (async () => {
-        try {
-          const data = await fetchRootChildren(root, controller.signal);
-          if (!controller.signal.aborted) {
-            setTree(data.children);
-            setIsGitRepo(!!data.is_git_repo);
-          }
-        } catch (err) {
-          if ((err as Error).name !== "AbortError") console.error("File tree error:", err);
-        } finally {
-          if (!controller.signal.aborted) setLoading(false);
+      void runKeyedLoad(
+        ({ signal }) => fetchRootChildren(root, signal),
+        {
+          empty: (data) => data.children.length === 0,
+          retry: () => {
+            void loadRoot(root);
+          },
+        },
+      ).then((result) => {
+        if (result.status === "success" || result.status === "empty") {
+          setTree(result.value.children);
+          setIsGitRepo(!!result.value.is_git_repo);
+          setLoading(false);
+        } else if (result.status === "error") {
+          console.error("File tree error:", result.error);
+          setLoading(false);
         }
-      })();
-      return () => controller.abort();
+      });
     },
-    [fetchRootChildren],
+    [fetchRootChildren, runKeyedLoad],
   );
 
   // Re-fetches the root listing and bumps `refreshKey` (which each TreeNode
@@ -1004,19 +1019,18 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
     const root = activeRoot ?? projectPath;
     setRefreshKey((k) => k + 1);
     if (!root) return;
-    const controller = new AbortController();
-    (async () => {
-      try {
-        const data = await fetchRootChildren(root, controller.signal);
-        if (!controller.signal.aborted) {
-          setTree(data.children);
-          setIsGitRepo(!!data.is_git_repo);
-        }
-      } catch (err) {
-        if ((err as Error).name !== "AbortError") console.error("File tree refresh error:", err);
+    void runKeyedLoad(
+      ({ signal }) => fetchRootChildren(root, signal),
+      { empty: (data) => data.children.length === 0 },
+    ).then((result) => {
+      if (result.status === "success" || result.status === "empty") {
+        setTree(result.value.children);
+        setIsGitRepo(!!result.value.is_git_repo);
+      } else if (result.status === "error") {
+        console.error("File tree refresh error:", result.error);
       }
-    })();
-  }, [activeRoot, projectPath, projectHost, fetchRootChildren]);
+    });
+  }, [activeRoot, projectPath, runKeyedLoad, fetchRootChildren]);
 
   useEffect(() => {
     const root = activeRoot ?? projectPath;
@@ -1026,7 +1040,7 @@ export default function FileTree({ onOpenFile, projectPath, projectHost, include
       setIsGitRepo(false);
       return;
     }
-    return loadRoot(root);
+    void loadRoot(root);
   }, [activeRoot, projectPath, projectHost, loadRoot]);
 
   useEffect(() => {

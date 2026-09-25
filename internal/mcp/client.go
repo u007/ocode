@@ -5,11 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +32,8 @@ type MCPTool struct {
 
 func (t MCPTool) Name() string        { return t.name }
 func (t MCPTool) Description() string { return t.desc }
-func (t MCPTool) Definition() map[string]interface{} {
-	return map[string]interface{}{
+func (t MCPTool) Definition() map[string]any {
+	return map[string]any{
 		"name":        t.name,
 		"description": t.desc,
 		"parameters":  t.schema,
@@ -64,9 +68,56 @@ type MCPClient struct {
 	id int
 }
 
+// RemoteHTTPError reports an HTTP failure before attempting to decode an MCP
+// response. It intentionally excludes the response body and endpoint URL,
+// which may contain credentials or secret-bearing path segments.
+type RemoteHTTPError struct {
+	ServerName             string
+	StatusCode             int
+	Status                 string
+	AuthenticationRequired bool
+}
+
+func (e *RemoteHTTPError) Error() string {
+	if e.AuthenticationRequired {
+		return fmt.Sprintf("remote MCP server %q requires authorization (HTTP %d)", e.ServerName, e.StatusCode)
+	}
+	return fmt.Sprintf("remote MCP server %q returned HTTP %d", e.ServerName, e.StatusCode)
+}
+
+// ReauthorizationRequiredError tells callers that the stored credential can
+// no longer be used and that a new authorization is required. It never
+// includes OAuth client IDs, tokens, or endpoint URLs.
+type ReauthorizationRequiredError struct {
+	ServerName string
+	Reason     string
+}
+
+func (e *ReauthorizationRequiredError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("remote MCP server %q requires reauthorization", e.ServerName)
+	}
+	return fmt.Sprintf("remote MCP server %q requires reauthorization: %s", e.ServerName, e.Reason)
+}
+
+type protectedResourceMetadata struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers"`
+}
+
+type authorizationServerMetadata struct {
+	Issuer        string `json:"issuer"`
+	TokenEndpoint string `json:"token_endpoint"`
+}
+
+var resourceMetadataChallengePattern = regexp.MustCompile(`(?i)\bresource_metadata\s*=\s*(?:"([^"]*)"|([^,\s]+))`)
+
 func NewRemoteClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("no URL specified for remote MCP server %s", name)
+	}
+	if err := validateRemoteServerURL(cfg.URL); err != nil {
+		return nil, fmt.Errorf("remote MCP server %q has an invalid URL", name)
 	}
 
 	timeout := time.Duration(cfg.Timeout) * time.Millisecond
@@ -79,7 +130,12 @@ func NewRemoteClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 		client.Headers[k] = v
 	}
 
-	httpCli := &http.Client{Timeout: timeout}
+	httpCli := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return fmt.Errorf("redirects are not allowed for remote MCP requests")
+		},
+	}
 
 	mc := &MCPClient{
 		name:     name,
@@ -92,14 +148,12 @@ func NewRemoteClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 		oauthCfg: cfg.OAuth,
 	}
 
-	if mc.needsOAuth() {
-		token, err := mc.loadOrRefreshToken()
-		if err != nil {
-			return nil, err
-		}
-		if token != nil {
-			mc.token = token
-		}
+	token, err := mc.loadOrRefreshToken()
+	if err != nil {
+		return nil, err
+	}
+	if token != nil {
+		mc.token = token
 	}
 
 	return mc, nil
@@ -146,7 +200,7 @@ func NewLocalClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 	}, nil
 }
 
-func (c *MCPClient) request(method string, params interface{}) (json.RawMessage, error) {
+func (c *MCPClient) request(method string, params any) (json.RawMessage, error) {
 	if c.isLocal {
 		return c.requestLocal(method, params)
 	}
@@ -163,49 +217,60 @@ func (c *MCPClient) needsOAuth() bool {
 	return c.oauthCfg.AuthorizationURL != "" && c.oauthCfg.TokenURL != "" && c.oauthCfg.ClientID != ""
 }
 
+func (c *MCPClient) loadStoredToken() (*auth.MCPAuthToken, bool) {
+	if token, ok := auth.GetMCPAuthForServer(c.name, c.url); ok {
+		return &token, true
+	}
+	if c.needsOAuth() {
+		if token, ok := auth.GetNativeMCPAuth(c.name); ok {
+			return &token, true
+		}
+	}
+	return nil, false
+}
+
 func (c *MCPClient) loadOrRefreshToken() (*auth.MCPAuthToken, error) {
-	token, ok := auth.GetMCPAuth(c.name)
+	token, ok := c.loadStoredToken()
 	if !ok {
 		return nil, nil
 	}
-	if token.IsExpired() {
-		if c.oauthCfg.TokenURL == "" || c.oauthCfg.ClientID == "" {
-			return nil, fmt.Errorf("mcp server %s token expired and no refresh config available", c.name)
-		}
-		refreshed, err := auth.RefreshMCPAuthToken(c.name, c.oauthCfg.TokenURL, c.oauthCfg.ClientID, token)
-		if err != nil {
-			return nil, fmt.Errorf("refresh mcp token for %s: %w", c.name, err)
-		}
-		return &refreshed, nil
+	if !token.IsExpired() || token.ServerURL != "" || !c.needsOAuth() {
+		return token, nil
 	}
-	return &token, nil
+	if c.oauthCfg.TokenURL == "" || c.oauthCfg.ClientID == "" {
+		return nil, &ReauthorizationRequiredError{
+			ServerName: c.name,
+			Reason:     "stored credential expired and static refresh configuration is incomplete",
+		}
+	}
+	refreshed, err := c.refreshToken(*token)
+	if err != nil {
+		return nil, err
+	}
+	return &refreshed, nil
 }
 
 func (c *MCPClient) ensureValidToken() error {
-	if !c.needsOAuth() {
-		return nil
-	}
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 	if c.token == nil {
-		token, err := c.loadOrRefreshToken()
+		token, ok := c.loadStoredToken()
+		if ok {
+			c.token = token
+		}
+	}
+	if c.needsOAuth() && c.token == nil {
+		return &ReauthorizationRequiredError{
+			ServerName: c.name,
+			Reason:     "no stored credential is available",
+		}
+	}
+	if c.needsOAuth() && c.token != nil && c.token.ServerURL == "" && c.token.IsExpired() {
+		refreshed, err := c.refreshToken(*c.token)
 		if err != nil {
 			return err
 		}
-		c.token = token
-	}
-	if c.token != nil && c.token.IsExpired() {
-		if c.oauthCfg.TokenURL == "" || c.oauthCfg.ClientID == "" {
-			return fmt.Errorf("mcp server %s token expired and no refresh config available", c.name)
-		}
-		refreshed, err := auth.RefreshMCPAuthToken(c.name, c.oauthCfg.TokenURL, c.oauthCfg.ClientID, *c.token)
-		if err != nil {
-			return fmt.Errorf("refresh mcp token for %s: %w", c.name, err)
-		}
 		c.token = &refreshed
-	}
-	if c.token == nil {
-		return fmt.Errorf("mcp server %s requires authentication: run /mcp-auth %s", c.name, c.name)
 	}
 	return nil
 }
@@ -219,7 +284,41 @@ func (c *MCPClient) AuthHeader() string {
 	return c.token.AuthorizationHeader()
 }
 
-func (c *MCPClient) requestRemote(method string, params interface{}) (json.RawMessage, error) {
+func (c *MCPClient) refreshToken(token auth.MCPAuthToken) (auth.MCPAuthToken, error) {
+	if token.ServerURL != "" {
+		return auth.MCPAuthToken{}, &ReauthorizationRequiredError{
+			ServerName: c.name,
+			Reason:     "URL-bound credentials require discovered OAuth metadata",
+		}
+	}
+	if c.oauthCfg != nil && c.oauthCfg.TokenURL != "" && c.oauthCfg.ClientID != "" {
+		refreshed, err := auth.RefreshMCPAuthToken(c.name, c.oauthCfg.TokenURL, c.oauthCfg.ClientID, token)
+		if err != nil {
+			return auth.MCPAuthToken{}, c.safeRefreshError(err)
+		}
+		return refreshed, nil
+	}
+	return auth.MCPAuthToken{}, &ReauthorizationRequiredError{
+		ServerName: c.name,
+		Reason:     "OAuth refresh configuration is unavailable",
+	}
+}
+
+func (c *MCPClient) safeRefreshError(err error) error {
+	// intentionally not logged: auth refresh errors can contain endpoint details.
+	if _, ok := errors.AsType[*auth.MCPRefreshError](err); ok {
+		return &ReauthorizationRequiredError{
+			ServerName: c.name,
+			Reason:     "stored credentials were rejected or could not be refreshed",
+		}
+	}
+	return &ReauthorizationRequiredError{
+		ServerName: c.name,
+		Reason:     "stored credentials could not be refreshed",
+	}
+}
+
+func (c *MCPClient) requestRemote(method string, params any) (json.RawMessage, error) {
 	if err := c.ensureValidToken(); err != nil {
 		return nil, err
 	}
@@ -228,7 +327,7 @@ func (c *MCPClient) requestRemote(method string, params interface{}) (json.RawMe
 	defer c.mu.Unlock()
 	c.id++
 
-	reqBody := map[string]interface{}{
+	reqBody := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      c.id,
 		"method":  method,
@@ -240,11 +339,38 @@ func (c *MCPClient) requestRemote(method string, params interface{}) (json.RawMe
 		return nil, fmt.Errorf("failed to marshal MCP request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.url, bytes.NewBuffer(data))
+	resp, err := c.sendRemoteRequest(data)
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		return decodeRemoteResponse(c.name, resp)
+	}
+	challenge := strings.Join(resp.Header.Values("WWW-Authenticate"), ", ")
+	_ = resp.Body.Close()
 
+	if err := c.refreshAfterUnauthorized(challenge); err != nil {
+		return nil, err
+	}
+	retry, err := c.sendRemoteRequest(data)
+	if err != nil {
+		return nil, err
+	}
+	if retry.StatusCode == http.StatusUnauthorized {
+		_ = retry.Body.Close()
+		return nil, &ReauthorizationRequiredError{
+			ServerName: c.name,
+			Reason:     "the refreshed credential was rejected",
+		}
+	}
+	return decodeRemoteResponse(c.name, retry)
+}
+
+func (c *MCPClient) sendRemoteRequest(data []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, c.url, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("remote MCP server %q could not create a request", c.name)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
@@ -252,33 +378,265 @@ func (c *MCPClient) requestRemote(method string, params interface{}) (json.RawMe
 	if authHdr := c.AuthHeader(); authHdr != "" {
 		req.Header.Set("Authorization", authHdr)
 	}
-
 	resp, err := c.httpCli.Do(req)
 	if err != nil {
-		return nil, err
+		// intentionally not logged: transport errors include the full endpoint URL.
+		return nil, fmt.Errorf("remote MCP server %q request failed", c.name)
 	}
-	defer resp.Body.Close()
-
-	var r struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return nil, err
-	}
-
-	if r.Error != nil {
-		return nil, fmt.Errorf("remote MCP error (%d): %s", r.Error.Code, r.Error.Message)
-	}
-
-	return r.Result, nil
+	return resp, nil
 }
 
-func (c *MCPClient) requestLocal(method string, params interface{}) (json.RawMessage, error) {
+func decodeRemoteResponse(serverName string, resp *http.Response) (json.RawMessage, error) {
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, &RemoteHTTPError{
+			ServerName:             serverName,
+			StatusCode:             resp.StatusCode,
+			Status:                 http.StatusText(resp.StatusCode),
+			AuthenticationRequired: resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden,
+		}
+	}
+
+	var response struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("remote MCP server %q returned invalid JSON", serverName)
+	}
+	if response.Error != nil {
+		return nil, fmt.Errorf("remote MCP server %q returned protocol error %d", serverName, response.Error.Code)
+	}
+	return response.Result, nil
+}
+
+func (c *MCPClient) refreshAfterUnauthorized(challenge string) error {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+
+	if c.token == nil {
+		if token, ok := c.loadStoredToken(); ok {
+			c.token = token
+		}
+	}
+	if c.token == nil || c.token.RefreshToken == "" {
+		return &RemoteHTTPError{
+			ServerName:             c.name,
+			StatusCode:             http.StatusUnauthorized,
+			Status:                 http.StatusText(http.StatusUnauthorized),
+			AuthenticationRequired: true,
+		}
+	}
+
+	token := *c.token
+	tokenURL := ""
+	clientID := token.ClientID
+	if token.ServerURL == "" && c.oauthCfg != nil && c.needsOAuth() {
+		tokenURL = c.oauthCfg.TokenURL
+		if c.oauthCfg.ClientID != "" {
+			clientID = c.oauthCfg.ClientID
+		}
+	}
+	if tokenURL == "" {
+		discovered, err := c.discoverTokenEndpoint(challenge)
+		if err != nil {
+			return &ReauthorizationRequiredError{
+				ServerName: c.name,
+				Reason:     "OAuth metadata could not be discovered",
+			}
+		}
+		tokenURL = discovered
+	}
+	if clientID == "" {
+		return &ReauthorizationRequiredError{
+			ServerName: c.name,
+			Reason:     "stored client identity is unavailable",
+		}
+	}
+
+	var refreshed auth.MCPAuthToken
+	var err error
+	if token.ServerURL != "" {
+		refreshed, err = auth.RefreshMCPAuthTokenForServer(c.name, c.url, tokenURL, clientID, token)
+	} else {
+		refreshed, err = auth.RefreshMCPAuthToken(c.name, tokenURL, clientID, token)
+	}
+	if err != nil {
+		return c.safeRefreshError(err)
+	}
+	c.token = &refreshed
+	return nil
+}
+
+func (c *MCPClient) discoverTokenEndpoint(challenge string) (string, error) {
+	resourceURL, err := c.resourceMetadataURL(challenge)
+	if err != nil {
+		return "", err
+	}
+	var resource protectedResourceMetadata
+	if err := c.fetchJSONMetadata(resourceURL, &resource); err != nil {
+		return "", err
+	}
+	if !sameMCPURL(c.url, resource.Resource) {
+		return "", fmt.Errorf("OAuth protected-resource identity does not match the MCP server")
+	}
+	if len(resource.AuthorizationServers) == 0 {
+		return "", fmt.Errorf("OAuth protected-resource metadata did not advertise an authorization server")
+	}
+	authorizationURL, err := url.Parse(resource.AuthorizationServers[0])
+	if err != nil {
+		return "", fmt.Errorf("OAuth authorization-server metadata URL is invalid")
+	}
+	if err := validateOAuthMetadataURL(authorizationURL); err != nil {
+		return "", err
+	}
+	metadataURL, err := authorizationServerMetadataURL(authorizationURL)
+	if err != nil {
+		return "", err
+	}
+	var authorization authorizationServerMetadata
+	if err := c.fetchJSONMetadata(metadataURL.String(), &authorization); err != nil {
+		return "", err
+	}
+	if !sameMCPURL(authorizationURL.String(), authorization.Issuer) {
+		return "", fmt.Errorf("OAuth authorization-server issuer does not match metadata")
+	}
+	if strings.TrimSpace(authorization.TokenEndpoint) == "" {
+		return "", fmt.Errorf("OAuth authorization-server metadata did not advertise a token endpoint")
+	}
+	tokenURL, err := url.Parse(authorization.TokenEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("OAuth token endpoint metadata is invalid")
+	}
+	if !tokenURL.IsAbs() {
+		tokenURL = authorizationURL.ResolveReference(tokenURL)
+	}
+	if err := validateOAuthMetadataURL(tokenURL); err != nil {
+		return "", err
+	}
+	return tokenURL.String(), nil
+}
+
+func (c *MCPClient) resourceMetadataURL(challenge string) (string, error) {
+	if match := resourceMetadataChallengePattern.FindStringSubmatch(challenge); len(match) > 0 {
+		value := match[1]
+		if value == "" {
+			value = match[2]
+		}
+		metadataURL, err := url.Parse(value)
+		if err != nil {
+			return "", fmt.Errorf("OAuth protected-resource metadata URL is invalid")
+		}
+		if err := validateOAuthMetadataURL(metadataURL); err != nil {
+			return "", err
+		}
+		return metadataURL.String(), nil
+	}
+
+	base, err := url.Parse(c.url)
+	if err != nil {
+		return "", fmt.Errorf("remote MCP server URL is invalid")
+	}
+	resourcePath := strings.TrimSuffix(base.Path, "/")
+	base.Path = "/.well-known/oauth-protected-resource" + resourcePath
+	base.RawQuery = ""
+	base.RawPath = ""
+	base.Fragment = ""
+	if err := validateOAuthMetadataURL(base); err != nil {
+		return "", err
+	}
+	return base.String(), nil
+}
+
+func sameMCPURL(left, right string) bool {
+	leftURL, leftErr := url.Parse(left)
+	rightURL, rightErr := url.Parse(right)
+	if leftErr != nil || rightErr != nil || !leftURL.IsAbs() || !rightURL.IsAbs() {
+		return false
+	}
+	leftURL.Fragment = ""
+	rightURL.Fragment = ""
+	return leftURL.String() == rightURL.String()
+}
+
+func (c *MCPClient) fetchJSONMetadata(endpoint string, destination any) error {
+	if c.httpCli == nil {
+		return fmt.Errorf("OAuth metadata client is unavailable")
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("OAuth metadata request could not be created")
+	}
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		// intentionally not logged: transport errors include the full metadata URL.
+		return fmt.Errorf("OAuth metadata request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("OAuth metadata endpoint returned HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(destination); err != nil {
+		return fmt.Errorf("OAuth metadata response was not valid JSON")
+	}
+	return nil
+}
+
+func authorizationServerMetadataURL(issuer *url.URL) (*url.URL, error) {
+	if issuer == nil {
+		return nil, fmt.Errorf("OAuth authorization-server metadata URL is invalid")
+	}
+	if err := validateOAuthMetadataURL(issuer); err != nil {
+		return nil, err
+	}
+
+	metadataURL := *issuer
+	issuerPath := strings.TrimSuffix(metadataURL.Path, "/")
+	metadataURL.Path = "/.well-known/oauth-authorization-server" + issuerPath
+	metadataURL.RawPath = ""
+	metadataURL.RawQuery = ""
+	metadataURL.Fragment = ""
+	return &metadataURL, nil
+}
+
+func validateOAuthMetadataURL(metadataURL *url.URL) error {
+	if metadataURL == nil || !metadataURL.IsAbs() || metadataURL.Hostname() == "" {
+		return fmt.Errorf("OAuth metadata URL is invalid")
+	}
+	if metadataURL.Scheme == "https" {
+		return nil
+	}
+	if metadataURL.Scheme == "http" && isLoopbackHost(metadataURL.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("OAuth metadata URL must use HTTPS")
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	return parsed != nil && parsed.IsLoopback()
+}
+
+func validateRemoteServerURL(serverURL string) error {
+	parsed, err := url.Parse(serverURL)
+	if err != nil || !parsed.IsAbs() || parsed.Hostname() == "" {
+		return fmt.Errorf("invalid remote MCP URL")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("remote MCP URL must use HTTPS unless it targets loopback")
+}
+
+func (c *MCPClient) requestLocal(method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.id++

@@ -202,12 +202,20 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// trailing tool-call round, not just the literal last message — a round
 	// that dispatched several tool calls needing approval pauses with more
 	// than one unresolved sentinel at once.
+	// Locate the session whose pending permission ask matches request_id. Prefer
+	// the explicit session_id; otherwise scan (tool-call IDs are unique). The
+	// session comes back with its lock held, so the tail cannot be resolved out
+	// from under us by a racing request. The match can be anywhere in the
+	// trailing tool-call round, not just the literal last message — a round
+	// that dispatched several tool calls needing approval pauses with more
+	// than one unresolved sentinel at once. On success the lock is handed to the
+	// background continuation (dispatchAskContinuation); every error path below
+	// must therefore unlock as.mu explicitly.
 	as, sessID := h.findPendingSession(bodyReq.SessionID, bodyReq.RequestID, isPermissionAskMsg)
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending permission found for request_id")
 		return
 	}
-	defer as.mu.Unlock()
 
 	askIdx := -1
 	for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
@@ -217,11 +225,13 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if askIdx < 0 {
+		as.mu.Unlock()
 		writeError(w, http.StatusConflict, "pending permission is not a valid ask")
 		return
 	}
 	permReq, ok := parsePermissionAsk(as.messages[askIdx].Content)
 	if !ok {
+		as.mu.Unlock()
 		writeError(w, http.StatusConflict, "pending permission is not a valid ask")
 		return
 	}
@@ -230,17 +240,20 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// server-side too so a hand-crafted request cannot bypass them.
 	if decision == PermDecisionAlwaysRule || decision == PermDecisionAlwaysTool {
 		if decision == PermDecisionAlwaysRule && !agent.AlwaysRuleChoiceAvailable(permReq) {
+			as.mu.Unlock()
 			writeError(w, http.StatusConflict,
 				"always-allow rule is not available for this request — it must be approved individually")
 			return
 		}
 		if decision == PermDecisionAlwaysTool && !agent.AlwaysToolChoiceAvailable(permReq) {
+			as.mu.Unlock()
 			writeError(w, http.StatusConflict,
 				"always-allow tool is not available for this request — it must be approved individually")
 			return
 		}
 		if agent.IsHarmfulRequest(permReq) {
 			log.Printf("serve: always-allow refused (harmful): session=%s tool=%s", sessID, permReq.ToolName)
+			as.mu.Unlock()
 			writeError(w, http.StatusConflict,
 				"cannot always allow this operation — it is considered harmful and always requires human approval")
 			return
@@ -260,107 +273,102 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		Data:      map[string]string{"request_id": bodyReq.RequestID},
 	})
 
-	if decision != PermDecisionDeny {
-		pathRoot := agent.OutOfScopePathRoot(permReq)
-		result, err := executeApprovedWithTempPath(as.agent, permReq.ToolName, permReq.Args, bodyReq.RequestID, pathRoot)
-		if err != nil {
-			result = "Error: " + err.Error()
-		}
-		working[askIdx].Content = agent.TruncateToolResult(bodyReq.RequestID, result)
-	} else {
-		working[askIdx].Content = "denied: tool " + permReq.ToolName + " denied by user"
-	}
-
-	// The round that raised this ask may have dispatched several tool calls
-	// needing approval at once, each pausing with its own sentinel before the
-	// user answered any of them. Re-Stepping now would feed the model a
-	// mid-transcript tool result that is still raw PERMISSION_ASK: JSON — a
-	// malformed tool-call/tool-result pairing that the model has no good way
-	// to recover from (typically it retries the call, which raises a brand
-	// new ask that looks to the user like the same dialog popping right back
-	// up). Instead, persist just this one resolution and wait for the
-	// remaining ask(s) — the client already has them queued from the earlier
-	// `permission` SSE frames.
-	// Mirror the answered sentinel onto disk before anything else persists
-	// this transcript (see rewriteAskResult).
-	h.rewriteAskResult(sessID, working, askIdx)
-
-	for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
-		if i != askIdx && isPermissionAskMsg(working[i]) {
-			as.messages = working
-			if err := h.saveSession(sessID, "", as.messages, nil); err != nil {
-				log.Printf("serve: save after permission resolve for %s: %v", sessID, err)
+	// The approved tool execution and the re-Step run off the request goroutine
+	// so the endpoint can acknowledge with 202 immediately: the tool can run for
+	// a long time and Step can take minutes, and holding the connection (and the
+	// browser's await) for their whole duration is what made the ask dialog's
+	// submit look hung with no result.
+	model := as.model
+	h.dispatchAskContinuation(sessID, as, func() {
+		if decision != PermDecisionDeny {
+			pathRoot := agent.OutOfScopePathRoot(permReq)
+			result, err := executeApprovedWithTempPath(as.agent, permReq.ToolName, permReq.Args, bodyReq.RequestID, pathRoot)
+			if err != nil {
+				result = "Error: " + err.Error()
 			}
-			h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
-			writeJSON(w, http.StatusOK, ChatResponse{SessionID: sessID, Model: as.model})
+			working[askIdx].Content = agent.TruncateToolResult(bodyReq.RequestID, result)
+		} else {
+			working[askIdx].Content = "denied: tool " + permReq.ToolName + " denied by user"
+		}
+
+		// The round that raised this ask may have dispatched several tool calls
+		// needing approval at once, each pausing with its own sentinel before the
+		// user answered any of them. Re-Stepping now would feed the model a
+		// mid-transcript tool result that is still raw PERMISSION_ASK: JSON — a
+		// malformed tool-call/tool-result pairing that the model has no good way
+		// to recover from (typically it retries the call, which raises a brand
+		// new ask that looks to the user like the same dialog popping right back
+		// up). Instead, persist just this one resolution and wait for the
+		// remaining ask(s) — the client already has them queued from the earlier
+		// `permission` SSE frames.
+		// Mirror the answered sentinel onto disk before anything else persists
+		// this transcript (see rewriteAskResult).
+		h.rewriteAskResult(sessID, working, askIdx)
+
+		for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
+			if i != askIdx && isPermissionAskMsg(working[i]) {
+				as.messages = working
+				if err := h.saveSession(sessID, "", as.messages, nil); err != nil {
+					log.Printf("serve: save after permission resolve for %s: %v", sessID, err)
+				}
+				h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+				return
+			}
+		}
+
+		h.wireHeadlessAgentCallbacks(sessID, as.agent)
+		h.wireLivePersist(sessID, as, working)
+		// Mirrors runTurn: turnActive true only while Step actually runs, so a
+		// reload during this continuation's streaming can buffer/replay it too
+		// (see appendLiveFrame) instead of only covering the turn's first Step.
+		h.sessions.setTurnActive(sessID, true)
+		// Step can run for minutes. Publish heartbeats for its duration or the
+		// web client's stall watchdog marks the still-running continuation
+		// "stalled" (see startTurnHeartbeat). The stop defer is declared last so it
+		// runs first, keeping the existing drain/setTurnActive(false) order intact.
+		stopHeartbeat := h.startTurnHeartbeat(sessID)
+		defer h.sessions.setTurnActive(sessID, false)
+		// A close that arrived while this continuation was running (turnActive
+		// true) could not release the agent mid-Step; drain the marker once the
+		// continuation unwinds, exactly like the async-job and sync-turn paths.
+		defer h.drainPendingClose(sessID)
+		defer stopHeartbeat()
+		// Live agent-loop activity for the web/desktop status bar, same as runTurn
+		// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
+		stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
+		defer stopActivity()
+
+		resp, err := as.agent.Step(working)
+		if err != nil {
+			log.Printf("serve error: permission resolve step: %v", err)
+			// The approved tool already ran and its result is in `working`; keep it
+			// (plus any rounds Step completed) instead of leaving the session on the
+			// unresolved sentinel.
+			h.commitPartialTranscript(sessID, as, working, resp, true)
+			h.broadcastEvent(SSEEvent{
+				SessionID: sessID,
+				Event:     "error",
+				Data:      map[string]string{"error": err.Error()},
+			})
 			return
 		}
-	}
 
-	h.wireHeadlessAgentCallbacks(sessID, as.agent)
-	h.wireLivePersist(sessID, as, working)
-	// Mirrors runTurn: turnActive true only while Step actually runs, so a
-	// reload during this continuation's streaming can buffer/replay it too
-	// (see appendLiveFrame) instead of only covering the turn's first Step.
-	h.sessions.setTurnActive(sessID, true)
-	// Step can run for minutes. Publish heartbeats for its duration or the
-	// web client's stall watchdog marks the still-running continuation
-	// "stalled" (see startTurnHeartbeat). The stop defer is declared last so it
-	// runs first, keeping the existing drain/setTurnActive(false) order intact.
-	stopHeartbeat := h.startTurnHeartbeat(sessID)
-	defer h.sessions.setTurnActive(sessID, false)
-	// A close that arrived while this continuation was running (turnActive
-	// true) could not release the agent mid-Step; drain the marker once the
-	// continuation unwinds, exactly like the async-job and sync-turn paths.
-	defer h.drainPendingClose(sessID)
-	defer stopHeartbeat()
-	// Live agent-loop activity for the web/desktop status bar, same as runTurn
-	// (a no-op when a TUI bridge owns the feed). Declared last so it runs first.
-	stopActivity := h.startAgentActivityBroadcast(sessID, as.agent)
-	defer stopActivity()
+		as.messages = append(append([]agent.Message(nil), working...), resp...)
 
-	resp, err := as.agent.Step(working)
-	if err != nil {
-		log.Printf("serve error: permission resolve step: %v", err)
-		// The approved tool already ran and its result is in `working`; keep it
-		// (plus any rounds Step completed) instead of leaving the session on the
-		// unresolved sentinel.
-		h.commitPartialTranscript(sessID, as, working, resp, true)
-		h.broadcastEvent(SSEEvent{
-			SessionID: sessID,
-			Event:     "error",
-			Data:      map[string]string{"error": err.Error()},
-		})
-		writeError(w, http.StatusInternalServerError, "agent error: "+err.Error())
-		return
-	}
+		h.persistTurnTranscript(sessID, as, len(working), "permission-continuation")
 
-	as.messages = append(append([]agent.Message(nil), working...), resp...)
+		// Stream the continuation.
+		h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+		h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
+		// Refresh the sidebar's Context gauge after the continuation turn grew the
+		// transcript (no-op when a TUI bridge owns the status feed).
+		h.publishTurnStatusSnapshot(sessID)
 
-	var content strings.Builder
-	for _, m := range resp {
-		if m.Role == "assistant" && m.Content != "" {
-			content.WriteString(m.Content)
-		}
-	}
-
-	h.persistTurnTranscript(sessID, as, len(working), "permission-continuation")
-
-	// Stream the continuation.
-	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
-	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
-	// Refresh the sidebar's Context gauge after the continuation turn grew the
-	// transcript (no-op when a TUI bridge owns the status feed).
-	h.publishTurnStatusSnapshot(sessID)
-
-	// Post-turn auto-compaction check (mirrors runTurn).
-	as.agent.MaybeCompactAsync(as.messages)
-
-	writeJSON(w, http.StatusOK, ChatResponse{
-		Content:   content.String(),
-		SessionID: sessID,
-		Model:     as.model,
+		// Post-turn auto-compaction check (mirrors runTurn).
+		as.agent.MaybeCompactAsync(as.messages)
 	})
+
+	writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: sessID, Model: model})
 }
 
 // executeApprovedWithTempPath wraps HandleApprovedToolCall exactly like the

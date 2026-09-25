@@ -237,14 +237,22 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     case "UPDATE_TAB_TITLE": {
       const ownerPath = findProjectPathForTab(state, action.id);
       if (!ownerPath) return state;
+      const target = state.tabsByProject[ownerPath].find((t) => t.id === action.id);
+      if (!target) return state;
+      const manual = !!action.manual;
       // An auto title (e.g. the generated-title status broadcast) must not
       // clobber a title the user explicitly set — only an explicit rename
       // (action.manual) may overwrite another manual title.
-      const list = state.tabsByProject[ownerPath].map((t) => {
-        if (t.id !== action.id) return t;
-        if (t.titleManual && !action.manual) return t;
-        return { ...t, title: action.title, titleManual: !!action.manual };
-      });
+      if (target.titleManual && !manual) return state;
+      // No-op guard: background title application (reconcile / cross-process
+      // revalidation) re-sends the same authoritative title on every pass. A
+      // fresh tabsByProject object would re-render the tab bar and re-trigger
+      // the debounced server persistence write for no change — return the same
+      // state when the title and manual flag already match.
+      if (target.title === action.title && !!target.titleManual === manual) return state;
+      const list = state.tabsByProject[ownerPath].map((t) =>
+        t.id === action.id ? { ...t, title: action.title, titleManual: manual } : t
+      );
       return { ...state, tabsByProject: { ...state.tabsByProject, [ownerPath]: list } };
     }
     case "UPDATE_TAB_ID": {

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -87,7 +88,10 @@ func TestE2EWebPermissionFlow(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	h.HandleResolvePermission(rec2, req2)
 	t.Logf("resolve status=%d body=%s", rec2.Code, rec2.Body.String())
-	if rec2.Code != 200 {
+	// The resolve endpoint acknowledges with 202 and runs the approved tool +
+	// continuation in the background; the dialog dismissal is the
+	// permission_resolved frame asserted below, not the response body.
+	if rec2.Code != http.StatusAccepted {
 		t.Fatalf("resolve failed: %d %s", rec2.Code, rec2.Body.String())
 	}
 

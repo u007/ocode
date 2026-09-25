@@ -237,54 +237,68 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   }, [sessionId, dispatch, projectHost]);
 
   // Resolve a pending agent permission ask via the dedicated resolve endpoint
-  // (NOT the config POST /api/permissions, which sets a tool rule). A confirmed
-  // success dismisses the dialog; a retryable failure (network, 5xx) keeps it
-  // open with the error shown so the user can retry. A 404/409 means the
-  // server no longer holds this ask (the agent was released or the server
-  // restarted — the persisted transcript drops the sentinel on reload — or
-  // the ask was already answered elsewhere): retrying can never succeed, so
-  // the dialog is dismissed instead of staying stuck open. Note: the server
-  // also broadcasts a permission_resolved SSE frame as soon as the decision is
-  // applied (before the continuation round), so the dialog closes promptly
-  // even while this request is still in flight.
+  // (NOT the config POST /api/permissions, which sets a tool rule).
+  //
+  // The dialog dismisses locally on dispatch, BEFORE the POST: the endpoint
+  // now acknowledges with 202 as soon as the decision is recorded and runs the
+  // approved tool + continuation in the background, but even that 202 can be
+  // delayed (an unresponsive server, a slow network). Optimistic dismissal
+  // matches the TUI (its modal closes the instant a choice is made) and makes
+  // the dialog's own SSE frame a belt-and-braces signal rather than the only
+  // one. A retryable failure (network, 5xx) re-hydrates the ask from the
+  // server's live state so the user is not left without a dialog (the
+  // continuation never ran). A 404/409 means the server no longer holds the
+  // ask, so staying dismissed is correct.
   const resolvePermission = useCallback(
     async (requestId: string, decision: PermissionDecision): Promise<PermissionDecideResult> => {
       if (!sessionId) return { ok: false, error: "no active session" };
+      dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
       try {
         await api.resolvePermission(requestId, sessionId, decision, projectHost);
-        dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
         return { ok: true };
       } catch (err) {
         console.error("Failed to resolve permission:", err);
         const message = err instanceof Error ? err.message : "permission resolve failed";
         const stale = err instanceof ApiError && (err.status === 404 || err.status === 409);
-        if (stale) {
-          dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
+        if (!stale) {
+          // Dismissed optimistically but the server never recorded it: recover
+          // the live ask so the dialog reappears and the user can retry.
+          void hydratePendingAsks();
         }
         dispatch({ type: "SET_ERROR", sessionId, error: message });
         return { ok: false, error: message };
       }
     },
-    [dispatch, sessionId, projectHost],
+    [dispatch, sessionId, projectHost, hydratePendingAsks],
   );
 
   // Submit answers to a pending agent question prompt. Mirrors the TUI's
-  // submitQuestionAnswers: all answers go in one POST, and only a confirmed
-  // success dismisses the dialog. Failures keep it open and surface an error.
+  // submitQuestionAnswers: all answers go in one POST. The local echo (a
+  // QUESTION_ANSWERED + QUESTION_RESOLVED dispatch) and the dialog dismissal
+  // happen BEFORE the await: the endpoint acknowledges with 202 immediately
+  // and runs the continuation in the background, so gating the visible result
+  // on the response is what made the submit look hung. A retryable failure
+  // re-hydrates the live ask so the user can retry (the continuation never
+  // ran); a 404/409 means the server already moved past it, so staying
+  // dismissed is correct.
   const submitQuestionAnswers = useCallback(
     async (requestId: string, answers: QuestionAnswerPayload[]) => {
       if (!sessionId) return false;
+      // Echo the answers locally before dismissing the dialog so the chat
+      // shows the questions + the selections that were sent to the LLM
+      // immediately, without waiting for the continuation turn's snapshot
+      // (see QUESTION_ANSWERED in chatStore).
+      dispatch({ type: "QUESTION_ANSWERED", sessionId, requestId, answers });
+      dispatch({ type: "QUESTION_RESOLVED", sessionId });
       try {
         await api.answerQuestion(requestId, sessionId, answers, projectHost);
-        // Echo the answers locally before dismissing the dialog so the chat
-        // shows the questions + the selections that were sent to the LLM
-        // immediately, without waiting for the continuation turn's snapshot
-        // (see QUESTION_ANSWERED in chatStore).
-        dispatch({ type: "QUESTION_ANSWERED", sessionId, requestId, answers });
-        dispatch({ type: "QUESTION_RESOLVED", sessionId });
         return true;
       } catch (err) {
         console.error("Failed to answer question:", err);
+        const stale = err instanceof ApiError && (err.status === 404 || err.status === 409);
+        if (!stale) {
+          void hydratePendingAsks();
+        }
         dispatch({
           type: "SET_ERROR",
           sessionId,
@@ -293,7 +307,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         return false;
       }
     },
-    [dispatch, sessionId, projectHost],
+    [dispatch, sessionId, projectHost, hydratePendingAsks],
   );
 
   // Cancel a pending agent question prompt without answering it (the web
