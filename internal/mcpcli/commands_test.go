@@ -64,6 +64,21 @@ func TestRunListClassifiesFailedProbeAsFail(t *testing.T) {
 	t.Fatalf("list output = %q, want broken server row", output)
 }
 
+func TestRunDebugRedactsRemoteCredentialDetails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"mcp":{"server":{"type":"remote","url":"https://secret.example/mcp/private-token","enabled":false,"oauth":{"enabled":true,"authorization_url":"https://auth.example/authorize","token_url":"https://auth.example/token","client_id":"private-client","scopes":["private.scope"]}}}}`)
+
+	output := captureMCPListStdout(t, func() error { return runDebug([]string{"server"}) })
+	for _, secret := range []string{"private-token", "private-client", "private.scope", "https://auth.example/token"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("debug output leaked %q: %s", secret, output)
+		}
+	}
+}
+
 func TestRunLogoutDeletesStoredAuthCredential(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

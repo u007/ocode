@@ -9,7 +9,7 @@ tags:
   - remote
   - credentials
   - errors
-timestamp: 2026-09-25T06:23:10Z
+timestamp: 2026-09-25T06:31:15Z
 ---
 # Remote MCP OAuth Compatibility
 
@@ -70,12 +70,12 @@ This fix sits entirely below the enable/toggle layer. Per-session overrides, the
 
 ## Tests
 
-All green in `go test ./internal/auth/ ./internal/mcp/ ./internal/mcpcli/ ./internal/filelock/` (2026-09-25):
+All green in `go test ./internal/auth/ ./internal/mcp/ ./internal/mcpcli/ ./internal/filelock/` (2026-09-25). Representative cases (the suites are still growing with the fix — read the files for the current inventory):
 
-- `internal/auth/mcp_auth_test.go` — 10 tests: dual-schema read (both directions), merge-safe native/upstream writes (foreign entries and unknown metadata preserved), exact-URL binding, upstream-schema persist, write reloads the latest file before merging, refresh reuses a newer persisted credential, refresh rejects a changed/deleted binding, no redirect forwarding on refresh.
-- `internal/mcp/client_test.go` — 14 tests: token attached without static `oauth`, plain-text status reported before decode, discovery → refresh → single retry, refresh rejection ⇒ reauthorization without a loop, static-OAuth attachment stays compatible, a mismatched upstream credential is not consumed as a static-OAuth fallback, URL-bound credentials do not use static refresh, concurrent refresh serialization with unrotated fields preserved, no metadata redirect, resource/issuer identity mismatches rejected, empty discovered token endpoint rejected, challenge-less resource-metadata path, HTTPS-only metadata outside loopback.
-- `internal/mcpcli/commands_test.go` — `TestRunListClassifiesFailedProbeAsFail`.
-- `internal/filelock/filelock_test.go` — `WithFileLockTimeout` honors the caller's bound.
+- `internal/auth/mcp_auth_test.go` — dual-schema read in both directions; merge-safe native/upstream writes preserving foreign entries and unknown metadata; `TestMCPAuthRejectsUpstreamServerNamedTokens` (an upstream *server* entry named `tokens` is never mistaken for the native container); exact-URL binding (`TestGetMCPAuthForServerRequiresExactServerURL`); upstream-schema persist with metadata preserved; `TestMCPAuthWriteReloadsLatestFileBeforeMerge`; `TestRefreshMCPAuthTokenForServerReusesNewerPersistedCredential`; `TestRefreshMCPAuthTokenForServerRejectsChangedOrDeletedBinding`; no body forwarding on redirect (refresh + code exchange); cleartext non-loopback refresh endpoints rejected.
+- `internal/mcp/client_test.go` — token attached without static `oauth` (`TestRemoteClientAttachesStoredTokenWithoutStaticOAuth`); plain-text status reported before decode; discovery → refresh → single retry; refresh rejection ⇒ reauthorization without a loop; static-OAuth attachment stays compatible; a mismatched upstream credential is not consumed as a static-OAuth fallback; URL-bound credentials do not use static refresh; concurrent refresh serialization with unrotated fields preserved; no metadata redirect; resource/issuer identity mismatches rejected; empty discovered token endpoint rejected; challenge-less resource-metadata path; HTTPS-only metadata outside loopback.
+- `internal/mcpcli/commands_test.go` — `TestRunListClassifiesFailedProbeAsFail` (a failing probe renders `fail`, never `ok`) and `TestRunLogoutDeletesStoredAuthCredential`.
+- `internal/filelock/filelock_test.go` — `TestWithFileLockTimeoutUsesProvidedBound` pins the caller-provided acquisition bound the auth file lock relies on.
 
 ## Related
 

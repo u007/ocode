@@ -8,8 +8,10 @@ tags:
   - zoho
   - design-spec
   - auth
-timestamp: 2026-09-25T06:25:34Z
+timestamp: 2026-09-25T06:32:04Z
 ---
+# Zoho MCP OAuth Compatibility — Design Spec
+
 **Status:** Approved — implemented 2026-09-25
 **Date:** 2026-09-25
 **Scope:** Compatibility fix for remote MCP servers that arrive with authorization already stored by upstream OpenCode (exemplar: `zoho-books`).

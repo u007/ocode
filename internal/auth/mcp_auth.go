@@ -135,16 +135,23 @@ func writeMCPAuthFile(path string, authFile mcpAuthFile) error {
 		return fmt.Errorf("create mcp auth temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
+	defer func() {
+		// intentionally not logged: cleanup is best-effort after the primary
+		// write error, and the temp path may contain sensitive context.
+		_ = os.Remove(tmpPath)
+	}()
 	if err := tmp.Chmod(0o600); err != nil {
+		// intentionally not logged: preserve the chmod failure as the primary error.
 		_ = tmp.Close()
 		return fmt.Errorf("chmod mcp auth temp file: %w", err)
 	}
 	if _, err := tmp.Write(data); err != nil {
+		// intentionally not logged: preserve the write failure as the primary error.
 		_ = tmp.Close()
 		return fmt.Errorf("write mcp auth temp file: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
+		// intentionally not logged: preserve the sync failure as the primary error.
 		_ = tmp.Close()
 		return fmt.Errorf("sync mcp auth temp file: %w", err)
 	}
@@ -627,6 +634,8 @@ func RefreshMCPAuthTokenForServer(serverName, serverURL, tokenURL, clientID stri
 	err = withMCPAuthFileLock(path, func() error {
 		latest, err := readMCPAuthFile(path)
 		if err != nil {
+			// intentionally not logged: the underlying parse/path detail can expose
+			// auth-file locations or credential-adjacent data.
 			return &MCPRefreshError{Reason: "latest auth storage could not be read"}
 		}
 		current, hasCurrent := upstreamMCPAuthToken(latest[serverName])

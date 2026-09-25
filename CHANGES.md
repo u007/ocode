@@ -56,6 +56,10 @@
 - MCP transport and refresh errors avoid exposing endpoint URLs or credentials,
   with focused tests for metadata parsing, challenge handling, token rotation,
   and concurrent file updates.
+- Static OAuth fallback cannot consume a credential bound to another server;
+  cleartext non-loopback endpoints and redirects are rejected. `mcp list`,
+  `mcp logout`, and `mcp debug` now report and remove stored credentials
+  without printing secret-bearing URL paths or client details.
 
 ## 2026-09-25 — Server: observable ask continuations and rewind storage
 

@@ -33,6 +33,11 @@
 
 ## 2026-09-25
 
+* **Update**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
+* **Update**: Zoho MCP OAuth Compatibility — Design Spec ([superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md](/superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md))
+* **Creation**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Remote MCP OAuth Compatibility ([concepts/remote-mcp-oauth-compat.md](/concepts/remote-mcp-oauth-compat.md))
 * **Update**: Zoho MCP OAuth Compatibility — Design Spec ([superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md](/superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md))
 * **Update**: Per-Chat MCP Toggle ([concepts/per-chat-mcp-toggle.md](/concepts/per-chat-mcp-toggle.md))
 * **Creation**: Remote MCP OAuth Compatibility ([concepts/remote-mcp-oauth-compat.md](/concepts/remote-mcp-oauth-compat.md))

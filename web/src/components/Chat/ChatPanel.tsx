@@ -6,6 +6,10 @@ import { api } from "../../api/client";
 import MessageBubble, { AssistantText, hasRenderableText } from "./MessageBubble";
 import { StatusBlock, ThinkingBlock, ToolBlock, NoticeBlock, NoticeGroupBlock } from "./TurnParts";
 import { ChatDisplayContext, type ChatDisclosureStore } from "./chatDisplayContext";
+import {
+  captureChatDisplayAnchor,
+  restoreChatDisplayAnchor,
+} from "./chatDisplayScroll";
 import { useChatVerbosity } from "../../lib/chatVerbosity";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
@@ -467,11 +471,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     // heights, so the reader must be restored to the same pixel inside the
     // same row, not merely the same row. `getOffsetForIndex` is in the
     // installed @tanstack/virtual-core (3.17.x).
-    let anchor: { index: number; offset: number } | null = null;
-    if (firstVisible && el) {
-      const resolved = virtualizer.getOffsetForIndex(firstVisible.index);
-      if (resolved) anchor = { index: firstVisible.index, offset: el.scrollTop - resolved[0] };
-    }
+    const anchor = el
+      ? captureChatDisplayAnchor(
+          el.scrollTop,
+          firstVisible?.index,
+          (index) => virtualizer.getOffsetForIndex(index),
+        )
+      : null;
     const pinned = atBottomRef.current;
     virtualizer.measure();
     if (pinned) {
@@ -484,10 +490,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       if (!scroller) return;
       // Keep the row at the top, then restore the pixel offset within it. A
       // search jump runs after this effect, so an active find still wins.
-      virtualizer.scrollToIndex(anchor.index, { align: "start" });
-      const resolved = virtualizer.getOffsetForIndex(anchor.index);
-      if (!resolved) return;
-      scroller.scrollTop = resolved[0] + anchor.offset;
+      restoreChatDisplayAnchor(scroller, anchor, virtualizer);
       lastScrollTopRef.current = scroller.scrollTop;
     });
   }, [chatPolicyRevision, disclosure, virtualizer]);

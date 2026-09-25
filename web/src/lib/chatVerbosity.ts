@@ -144,7 +144,31 @@ export function chatPolicyRevision(policy: ChatDisplayPolicy): string {
   ].join("|");
 }
 
-function stateFromResponse(response: ChatVerbosityResponse): ChatVerbosityState {
+const CHAT_OVERRIDE_KEYS = new Set<keyof ChatVerbosityConfig["overrides"]>([
+  "older_thinking",
+  "tool_calls",
+  "tool_output",
+  "activity_notices",
+]);
+
+function assertResponseShape(value: unknown): asserts value is ChatVerbosityResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("chat verbosity response is not an object");
+  }
+  const rawOverrides = (value as { overrides?: unknown }).overrides;
+  if (rawOverrides === undefined) return;
+  if (!rawOverrides || typeof rawOverrides !== "object" || Array.isArray(rawOverrides)) {
+    throw new Error("chat verbosity response overrides must be an object");
+  }
+  for (const key of Object.keys(rawOverrides)) {
+    if (!CHAT_OVERRIDE_KEYS.has(key as keyof ChatVerbosityConfig["overrides"])) {
+      throw new Error(`Unknown chat display override category: ${key}`);
+    }
+  }
+}
+
+function stateFromResponse(response: unknown): ChatVerbosityState {
+  assertResponseShape(response);
   return stateFromConfig(response);
 }
 
@@ -157,10 +181,10 @@ export async function refreshChatVerbosity(): Promise<ChatVerbosityState> {
     .catch((error: unknown) => {
       const message = errorMessage(error);
       if (cached) {
-        console.error("chat verbosity config request failed; retaining cached policy", error);
+        console.warn("[chat-verbosity] config request failed; retaining cached policy", { error });
         return publish({ ...cached, loading: false, error: message });
       }
-      console.error("chat verbosity config request failed; using Full compatibility default", {
+      console.warn("[chat-verbosity] config request failed; using Full compatibility default", {
         error,
         reason: "no-cached-policy",
       });

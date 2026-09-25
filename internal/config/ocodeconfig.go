@@ -336,7 +336,7 @@ type ChatVerbosityConfig struct {
 
 // UnmarshalJSON rejects an unknown override category instead of silently
 // dropping it. Omitted categories stay empty so withDefaults can apply
-// "preset"; an explicit null leaves the category at its default too.
+// "preset"; an explicit null is rejected as an invalid value.
 func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
 	var raw map[string]*string
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -348,9 +348,10 @@ func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
 		if dst == nil {
 			return fmt.Errorf("unknown override category: %s", name)
 		}
-		if value != nil {
-			*dst = *value
+		if value == nil {
+			return fmt.Errorf("override category %s must be one of %q, %q, or %q", name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
 		}
+		*dst = *value
 	}
 	*o = next
 	return nil

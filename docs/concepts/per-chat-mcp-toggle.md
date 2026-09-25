@@ -11,7 +11,7 @@ tags:
   - agent-rebuild
   - caching
   - gotcha
-timestamp: 2026-09-25T06:23:58Z
+timestamp: 2026-09-25T06:32:57Z
 ---
 # Per-Chat MCP Toggle
 
