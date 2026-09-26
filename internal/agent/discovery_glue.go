@@ -370,7 +370,7 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	// is why a too-tight synchronous budget could never make progress on a local
 	// embedder — the background warm breaks that deadlock.
 	if a.disco.warming.Load() {
-		return // a background warm is in flight; stay fail-open until it lands
+		return // a background warm is in flight; attach nothing until it lands
 	}
 	warmCtx, warmCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	err := a.disco.engine.Warm(warmCtx, docs)
@@ -383,14 +383,19 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	// Select embeds the query against a (now-warm) corpus. On a hot cache this is
 	// normally fast, but nothing bounded it before: any embedder slowness
 	// (network latency, a local model server serializing this behind other work)
-	// stalled the whole turn before the first streamed token, with no timeout to
-	// fail open like Warm has. Give it the same tight per-turn budget.
+	// stalled the whole turn before the first streamed token. Give it the same
+	// tight per-turn budget Warm gets.
 	rankCtx, rankCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	candidates, err := a.disco.session.Select(rankCtx, query)
 	rankCancel()
 	if err != nil {
-		a.emitDebug("DISCOVERY", fmt.Sprintf("rank failed (fail-open, all attached): %v", err))
-		a.disco.enabled = false
+		// A failed rank costs this turn its attachments, NOT the gate. Setting
+		// disco.enabled = false here used to re-expose the whole MCP corpus for
+		// the rest of the session — the same leak as the cold-corpus fail-open,
+		// reachable whenever the embedder blew the 500ms budget. Stay active: the
+		// names-only index still advertises every tool, discover_more retries the
+		// rank with no timeout, and the next turn ranks again.
+		a.emitDebug("DISCOVERY", fmt.Sprintf("rank failed (attaching nothing this turn): %v", err))
 		return
 	}
 	if len(candidates) == 0 {

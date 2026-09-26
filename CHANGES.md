@@ -15,6 +15,25 @@
   silent runtime gap. The runtime branch is left only for the case a type
   cannot cover: a server newer than the shipped web bundle.
 
+## 2026-09-26 — A failed discovery rank no longer re-opens the MCP tool list
+
+- When `Session.Select` errored, `runDiscovery` set `disco.enabled = false` and
+  logged it as a fail-open. That is the opposite of what it looks like: turning
+  the gate **off** removes the name-only index and re-advertises every registered
+  MCP tool for the rest of the session — the same leak as the cold-corpus
+  fail-open, reachable whenever the embedder blew the new 500 ms rank budget (a
+  slow local model server, network latency). One slow embedder was enough to
+  flood the model's tool list.
+- A failed rank now costs that turn its attachments and nothing else. Discovery
+  stays active: the names-only index keeps advertising every tool, `discover_more`
+  retries the rank with no timeout, and the next turn ranks again. The debug line
+  says so explicitly ("rank failed (attaching nothing this turn)") instead of
+  claiming a fail-open that never happened.
+- Covered by `TestRankFailureKeepsTheGateClosed` in
+  `internal/agent/discovery_glue_test.go`: an embedder that fails only the query
+  embed must leave the gate closed (tool definitions stay at the seeded set)
+  and `disco.enabled` true.
+
 ## 2026-09-26 — Cold-cache discovery keeps the MCP surface small
 
 - A cold discovery corpus no longer fails open by exposing every registered MCP

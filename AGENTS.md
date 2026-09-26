@@ -1128,6 +1128,23 @@ Rules for any change that touches tools or the base prompt:
   `sync.Once`) so the factory's no-key refusal log fires once, not every turn.
   See `internal/agent/discovery_typesafe.go` and
   `docs/concepts/discovery-typesafe-judge.md`.
+- **Discovery must never fail open the MCP tool gate.** `discoveryAllows`
+  (`internal/agent/discovery_glue.go`) gates MCP tools to the sticky attached
+  set and deliberately consults NO warm/corpus state: a cold embedder cache is
+  the normal first turn (the 500ms synchronous warm defers to a background
+  warm), so a "warm failed → don't gate" escape exposed the entire MCP corpus
+  exactly when discovery exists to shrink it (one real session: `exposing 322
+  tools`, 274 of them `zoho-books_*`). The only surviving fail-open is
+  `disco == nil || !disco.enabled` — discovery never initialized, so the feature
+  is off and a gate would strand every tool behind a `discover_more` that cannot
+  work. A cold turn therefore legitimately starts with **zero** MCP tool
+  definitions; the names-only index plus `discover_more` (which warms with no
+  timeout) is the recovery path. A failed `Session.Select` must likewise attach
+  nothing for that turn, never set `disco.enabled = false` (that re-opens the
+  whole corpus for the rest of the session). **Every** attach path is judged —
+  the per-turn `runDiscovery` and the on-demand `discover_more` both run
+  `judgeDiscoveryCandidates` before `Seed`; a second unjudged attach path is a
+  bypass. See `docs/concepts/discovery-mcp-tool-gating.md`.
 - **doc_search results pass through the same TypeSafe relevance judge before
   the context subagent sees them.** The context subagent's doc tools are built
   via `newDocToolsWithJudge` with `Agent.docSearchJudge()` (nil when TypeSafe is

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1007,5 +1008,40 @@ func TestDiscoverMoreJudgeSeesTurnTailOnColdTurn(t *testing.T) {
 	blob, _ := json.Marshal(tail)
 	if !strings.Contains(string(blob), "onboarding") {
 		t.Fatalf("judge tail must contain the user's turn, got %s", blob)
+	}
+}
+
+// queryErrorEmbedder embeds documents fine but fails the QUERY embed, so
+// Session.Select errors after a successful warm.
+type queryErrorEmbedder struct{ discovery.FakeEmbedder }
+
+func (q queryErrorEmbedder) Embed(ctx context.Context, texts []string, kind discovery.EmbedKind) ([][]float32, error) {
+	if kind == discovery.Query {
+		return nil, errors.New("query embed failed")
+	}
+	return q.FakeEmbedder.Embed(ctx, texts, kind)
+}
+
+func TestRankFailureKeepsTheGateClosed(t *testing.T) {
+	// Same defect class as the cold-corpus leak on a different trigger: the old
+	// code set disco.enabled = false when Select errored (a slow local embedder
+	// blowing the 500ms budget is enough), which is a fail-open — it re-exposed
+	// the whole MCP corpus for the rest of the session. A failed rank must cost
+	// this turn its attachments, not the gate.
+	a := newDiscoveryGlueAgent(t)
+	eng := discovery.NewEngine(queryErrorEmbedder{FakeEmbedder: discovery.FakeEmbedder{Dimension: 64}}, t.TempDir())
+	a.disco = &discoveryState{enabled: true, engine: eng, session: discovery.NewSession(eng)}
+
+	a.RunDiscovery(discoveryGlueQuery)
+
+	if !a.disco.enabled {
+		t.Fatal("a rank failure must not turn discovery off (that re-exposes the whole MCP corpus)")
+	}
+	var names []string
+	for _, d := range a.GetToolDefinitions() {
+		names = append(names, d["name"].(string))
+	}
+	if want := []string{"read"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("a rank failure must leave the gate closed: got %v want %v", names, want)
 	}
 }
