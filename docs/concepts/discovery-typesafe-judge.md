@@ -1,9 +1,9 @@
 ---
 type: Concept
 title: "Discovery TypeSafe Relevance Judge"
-description: Added turn-rank judge token to the "How to observe" section of the Discovery TypeSafe Relevance Judge concept doc.
+description: Amended to record discover_more as a second judged attach path (identical fail-open matrix, shared veto counter, turn-tail snapshot, veto-all reply) and to separate the corpus-warm gate from the judge's fail-open.
 tags: [discovery, typesafe, skills, architecture, observability]
-timestamp: 2026-09-18T17:44:13Z
+timestamp: 2026-09-26T05:31:14Z
 resource: internal/agent/discovery_glue.go
 ---
 ---
@@ -61,7 +61,7 @@ The floor is resolved by `resolveRelevanceJudgeMinConfidence()` (`internal/agent
 
 `Discover` (`internal/discovery/engine.go:134`) is exactly `Select` + `Seed` — the plain attach-everything wrapper used when no judge is active.
 
-The judge path in `runDiscovery` (`internal/agent/discovery_glue.go:322`) calls `Select`, feeds the candidates to `judgeDiscoveryCandidates`, and only calls `Seed` with the kept IDs.
+The judge path in `runDiscovery` (`internal/agent/discovery_glue.go:337`) calls `Select`, feeds the candidates to `judgeDiscoveryCandidates`, and only calls `Seed` with the kept IDs.
 
 ## Fail-open matrix
 
@@ -72,11 +72,32 @@ The judge path in `runDiscovery` (`internal/agent/discovery_glue.go:322`) calls 
 | Candidate answer missing or not `type:"noul"` | That candidate is kept (fail-open per candidate) |
 | Real below-threshold noul (Noul < 0.5) | Vetoes only that candidate |
 
-The judge can only ever **veto** — a failure never attaches fewer docs than the pre-judge behavior. A vetoed doc stays unattached and is re-judged on a later turn when the query or transcript changes. The judge never changes `renderDiscoveryContext` (`internal/agent/discovery_glue.go:734`); the names-index is a function of the doc set, not of which ids are attached.
+The judge can only ever **veto** — a failure never attaches fewer docs than the pre-judge behavior. A vetoed doc stays unattached and is re-judged on a later turn when the query or transcript changes. The judge never changes `renderDiscoveryContext` (`internal/agent/discovery_glue.go:782`); the names-index is a function of the doc set, not of which ids are attached.
+
+## Amendment (2026-09-26): `discover_more` is a second judged attach path — and the warm gate is NOT the judge
+
+The sections above describe the judge as a per-turn `runDiscovery` mechanism. That was accurate when written; the on-demand attach path has since been brought under the same gate. (Line references in this amendment are current as of 2026-09-26: `runDiscovery` now lives at `internal/agent/discovery_glue.go:337`, `renderDiscoveryContext` at `:782`, `DiscoveryStatusInfo.Judge`/`JudgeVetoed` at `:485-503`.)
+
+**Every retrieval attach path is now judged.** `discover_more` (`discoverMoreTool.Execute`, `internal/agent/discovery_glue.go:920`) used to call `Session.Discover` (Select+Seed, no judge), so a model that named a need bypassed Jev entirely — the exact guard-bypass class where a fallback path skips the gate the primary path runs. It now calls `Session.Select` (`:939`), then `judgeDiscoveryCandidates` when `discoveryJudgeClient()` resolves (`:944`), then `Seed`s only the survivors (`:961`).
+
+**Its fail-open matrix is identical to the table above.** Same four rows: TypeSafe not connected → seed all candidates; `Decide` transport/decode failure → seed all (logged as `discover_more judge failed (fail-open, all attached): ...`, `:949`); missing or non-`noul` answer → keep that candidate; below-threshold noul → veto that candidate. Real vetoes increment the **same** `discoveryState.judgeVetoed` counter the per-turn path uses (`:953` vs. `:424`), so `/discovery status`'s `vetoed N` totals both paths. The path's own debug line is `discover_more("<need>") → +N tools (judge kept N/M)` (`:962`).
+
+**The on-demand judge sees the conversation too.** `noteDiscoveryTail` / `discoveryTail` (`:893` / `:911`) record a bounded copy of the turn's last `discoveryJudgeTailN` (6) messages on `discoveryState.tail`, guarded by `tailMu`. `runDiscovery` records it right after `ensureDiscovery()` and **before** its early returns (`:345-350`) — the cold-cache deferral is precisely the turn where nothing is attached and the model must fall back to `discover_more`.
+
+**The reply distinguishes veto-all from no-match.** When candidates matched but the judge vetoed all of them, `discover_more` now returns `N tool(s) matched that need but were judged out of scope for this request. Try a different need, or continue without them.` instead of the old `No additional tools matched that need.` — so the model can distinguish "nothing matched" from "matched but out of scope" and retry rather than conclude the capability is missing.
+
+**The corpus-warm gate is a SEPARATE mechanism — do not conflate it with the judge's fail-open.** The fail-open matrix above governs *which retrieval candidates* get seeded; the warm gate governs *whether any MCP tool schemas are callable at all*:
+
+| Mechanism | Location | Failure it handles | Effect |
+|---|---|---|---|
+| Judge fail-open (matrix above) | `runDiscovery` `:414-428`, `discover_more` `:944-955` | TypeSafe transport/decode failure, or TypeSafe not connected | **Attaches everything the embedder proposed** — the judge only ever filters retrieval results; it never gates the tool list |
+| Corpus-warm / rank gate (`discoveryAllows`) | `internal/agent/discovery_glue.go:604-615` | Cold embedder cache or failed rank — deliberately **no fail-open** for these (the only surviving fail-open is discovery-off) | **Attaches nothing** — hides unattached MCP tool *schemas* from the model's callable tool list; the names-only index still advertises every name |
+
+A warm failure and a judge failure therefore have **opposite** effects on attach volume: warm-fail → zero MCP tool definitions this turn (recover via `discover_more`, which warms with no timeout); judge-fail → every candidate attached. The warm gate's history and rules are documented in [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md).
 
 ## How to observe
 
-`/discovery` status shows `judge: typesafe/jev-latest (vetoed N this session)` only when TypeSafe is connected (`DiscoveryStatusInfo.Judge` / `JudgeVetoed` in `internal/agent/discovery_glue.go:432-451`).
+`/discovery` status shows `judge: typesafe/jev-latest (vetoed N this session)` only when TypeSafe is connected (`DiscoveryStatusInfo.Judge` / `JudgeVetoed` in `internal/agent/discovery_glue.go:485-503`).
 
 **Turn-rank line (primary entry point).** Every turn that selects new candidates emits one line to the debug log (kind `DISCOVERY`):
 
@@ -107,3 +128,4 @@ At most one `Decide` per turn that has new candidates, with at most `SelectCap` 
 
 - [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md) — the doc_search judge that shares the same lenient core and floor.
 - [Discovery Web Surfaces](concepts/discovery-web-surfaces.md) — how discovery status and live notices are surfaced in the web/desktop UI, including the runtime status endpoint and the map-race safety rule for reading agent state.
+- [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md) — the names-only index vs. callable definitions split, the strict no-warm-fail-open gate, and the `discover_more` recovery path this amendment's judge path serves.
