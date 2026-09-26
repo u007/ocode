@@ -194,3 +194,82 @@ Four mutations were confirmed to fail the suite: a fixed `"merge"` string
 instead of reading the state files; dropping `remoteSafeSpec`; dropping
 `GIT_EDITOR`; and swapping the `gitOperationCommand(kind, action)` arguments —
 the last was a real defect this phase introduced and three tests caught it.
+
+
+## Independent re-verification (2026-09-26)
+
+This phase was implemented and committed by a **different session** (it landed
+in `5a857e0b`, a bulk "don't leave main dirty" commit that swept up several
+concurrent efforts), so it was audited rather than written. Audit result: the
+implementation is sound and the 501 stubs are genuinely gone, but **one of the
+four mutation claims above is weaker than stated, and the test that appeared to
+cover it could not fail.** Both are now fixed.
+
+### The editor-suppression claim was only half true
+
+The note above says a "dropping `GIT_EDITOR`" mutation was confirmed to fail
+the suite. That is true for *removing* the assignment — the behavioural test
+sets an inherited `GIT_EDITOR=false`, which then applies and the commit fails.
+It is **not** true for *corrupting* it. Re-running that mutation as
+`GIT_EDITOR=vi` left the whole remote suite **green**.
+
+Two empirical facts explain it, both established with a throwaway probe (since
+deleted) rather than assumed:
+
+1. `git merge --continue` **does** invoke `GIT_EDITOR` with no controlling TTY.
+   Proved with a sentinel editor that records that it ran and exits 1: the
+   sentinel was created, and the merge did **not** commit. So the setting is
+   load-bearing and `GIT_EDITOR=true` genuinely prevents a real hang.
+2. Under the fake-SSH shim an editor like `vi` reads EOF and exits **0**, so the
+   commit still succeeds. The old test therefore could not distinguish a
+   correct `GIT_EDITOR=true` from a wrong one — it only ever detected removal.
+
+The old test's own comment claimed the opposite ("Make an editor invocation
+fail loudly rather than silently succeed, so dropping GIT_EDITOR=true turns
+this test red instead of hanging CI"). That comment was **false**, which is
+worse than the gap itself: it told a future reader the property was guarded.
+
+### Fix
+
+- `TestRemoteGitOperationCommandSuppressesTheEditor` — a pure string assertion
+  on the generated command, checking `GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`
+  and `GIT_LITERAL_PATHSPECS=1`, and that they sit in the env prefix of the
+  `git` invocation rather than on the `cd` (a prefix on the `cd` would never
+  reach the git process). Verified: it fails in **0.9s** on the `vi` mutation
+  that the behavioural test could not catch.
+- `TestRemoteGitOperationOverridesInheritedFailingEditor` — a behavioural guard
+  using an inherited editor that always exits 1, proving the command's own
+  assignment actually wins over the environment.
+- Both misleading comments corrected to state what each test does and does not
+  prove, so neither is mistaken for the other's guard.
+
+### A mutation hazard worth knowing
+
+A corrupted `GIT_EDITOR` (e.g. `vi`) makes git invoke an editor that **blocks
+on the inherited TTY**, so the behavioural test HANGS rather than fails — it
+wedged a 5-minute run. Two consequences, now documented in the test:
+
+- Always pass an explicit `-timeout` when running it directly.
+- Prefer the string-assertion test for mutation checks; it is instant.
+
+A related trap: killing the direct child is not enough to end such a run, since
+a detached grandchild can hold the output pipe open and wedge `CombinedOutput`
+even after the context deadline fires. Use a sentinel editor that exits on its
+own when probing this behaviour, not a timeout as the signal.
+
+### Audit of the rest
+
+- **Stale-kind guard: genuinely load-bearing.** Removing it turns
+  `TestRemoteGitOperationRejectsStaleKind` red (409 expected, got 200) — the
+  request was allowed to act on a merge while claiming to be a rebase.
+- The status half (`remoteGitConflictsProbe`, `remoteGitOperationStateProbe`,
+  `handler_remote_git_state.go`) is wired into `remoteGitStatus` and reuses the
+  shared phase-01 parser, so there is genuinely no second implementation of
+  "what does a rebase look like".
+- Base64-encoding the `-z` conflicts section is load-bearing, not defensive
+  flourish: a filename may contain any byte except NUL and `/`, including the
+  `0x1e` section separator, which would otherwise split the batched output and
+  corrupt every field after it.
+
+Verified: `go test -run TestRemoteGit` 34 tests pass, 0 skips;
+`go build ./...` clean; `gofmt -l` clean.

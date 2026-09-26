@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Git conflicts and halted-operation recovery (web Git tab)
-description: 'Shipped server behavior for conflicted files and halted git operations (phases 01-05): shared transport-neutral state parser/probe, ours/theirs stage semantics and the rebase relabel rule, per-file resolve + operation action matrix, HTTP status-code contract, literal-pathspec + editor suppression, 60s operation timeout, remote SSH/WSL parity, and the still-open Git-tab UI (phase 06) and badge sweep (phase 07).'
+description: 'Shipped server behavior for conflicted files and halted git operations (phases 01-05): shared transport-neutral state parser/probe, ours/theirs stage semantics and the rebase relabel rule, per-file resolve + operation action matrix, HTTP status-code contract, literal-pathspec + editor suppression, 60s operation timeout, remote SSH/WSL parity, the shipped Git-tab UI (phase 06) and badge sweep (phase 07), and the still-open phase 07 consumer sweep.'
 tags:
   - git
   - conflicts
@@ -11,26 +11,11 @@ tags:
   - web
   - remote
   - status
-timestamp: 2026-09-25T15:19:58Z
----
----
-type: Concept
-title: Git conflicts and halted-operation recovery (web Git tab)
-description: 'Shipped server behavior for conflicted files and halted git operations (phases 01-05): shared transport-neutral state parser/probe, ours/theirs stage semantics and the rebase relabel rule, per-file resolve + operation action matrix, HTTP status-code contract, literal-pathspec + editor suppression, 60s operation timeout, remote SSH/WSL parity, and the still-open Git-tab UI (phase 06) and badge sweep (phase 07).'
-tags:
-  - git
-  - conflicts
-  - rebase
-  - merge
-  - bisect
-  - web
-  - remote
-  - status
-timestamp: 2026-09-25T12:00:00Z
+timestamp: 2026-09-25T17:33:10Z
 ---
 # Git conflicts and halted-operation recovery
 
-- **Status:** Server + API implemented for **local and remote (SSH/WSL)** projects — phases 01–05 of `.opencode/plans/2026-09-25-git-conflicts-and-operations/`, plus the web API client/types and the badge counting. **Not yet shipped:** the Git-tab conflicts section and operation banner (phase 06 UI) and the phase 07 consumer sweep — see *Current limits*.
+- **Status:** Server + API implemented for **local and remote (SSH/WSL)** projects — phases 01–05 of `.opencode/plans/2026-09-25-git-conflicts-and-operations/`, plus the web API client/types and the badge counting. **Phase 06 UI shipped:** `GitPanel.tsx` renders the conflicts section and the operation banner, calling `api.gitResolveConflict` / `api.gitOperation`. **Not yet complete:** the phase 07 consumer sweep — see *Current limits*.
 - **Where:** `internal/server/handler_git_conflicts.go` (shared parser, both endpoints, local paths), `handler_remote_git_state.go` (remote probes), `handler_remote_git_conflicts.go` (remote resolve/operation), `handler_git.go` (status surface), `web/src/api/client.ts` + `types.ts` (client wrappers), `web/src/lib/projectGitCounts.ts`, `web/src/components/Layout/TopTabs.tsx` (badge counting).
 
 ## 1. User-facing model
@@ -40,7 +25,7 @@ timestamp: 2026-09-25T12:00:00Z
 - `conflicts: [{ path, code, ours, theirs }]` — one entry per unmerged path, `code` being git's porcelain `XY` (`DD`, `AU`, `UD`, `UA`, `DU`, `AA`, `UU`), `ours`/`theirs` reporting whether stage 2 / stage 3 exists (a false side is a deletion on that side).
 - `operation?: { kind, label, step, total }` — present only while an operation is halted; `kind` is one of `merge`, `rebase`, `rebase-interactive`, `am`, `cherry-pick`, `revert`, `bisect`; `label` is human text (e.g. `Rebasing feature/login onto 1a2b3c4 (3/7)`), with `step`/`total` only where progress exists.
 
-A conflicted path is reported **once**: both transports strip it from `staged_files` and `changed_files` so nothing is double-counted (`internal/server/handler_git.go:221-226`, mirrored in `handler_remote_git.go`). The intended UI — a conflicts section above the staged list with per-file actions, and an operation banner under the header with the valid buttons — is phase 06 and is **not rendered in `GitPanel.tsx` yet**.
+A conflicted path is reported **once**: both transports strip it from `staged_files` and `changed_files` so nothing is double-counted (`internal/server/handler_git.go:221-226`, mirrored in `handler_remote_git.go`). The UI — a conflicts section above the staged list with per-file actions, and an operation banner under the header with the valid buttons — **now ships in `GitPanel.tsx`** (phase 06): the banner drives `api.gitOperation` and each conflict row drives `api.gitResolveConflict`.
 
 ## 2. One parser, two transports
 
@@ -58,7 +43,7 @@ The inversion is in the *meaning*: during a rebase, git's "ours" is the **upstre
 
 `am` deliberately stays in that "otherwise" bucket, and must not be folded into the relabel by analogy with rebase: during `git am --3way` (and `git am -3`), an unmerged path has stage 2 = the current HEAD (the branch you are on) and stage 3 = the incoming patch, so `am` has **cherry-pick side semantics** — "ours" is your branch, "theirs" is the patch being applied — not rebase semantics, where "ours" is the upstream branch being replayed onto. This was confirmed empirically in a scratch repository by reading the index stages (`git show :2:<file>` and `git show :3:<file>`) during a real `git am -3` conflict. A regression test pins it: the case "labels am's conflict sides with git's own ours/theirs, not the rebase wording" in `web/src/components/Git/GitPanel.conflicts.test.tsx` asserts that the rebase wording does not appear during an `am`.
 
-This is the single highest-consequence detail of the feature: the wrong label makes a user discard their own commit while believing they kept it. The wording is asserted in `web/src/components/Git/GitPanel.conflicts.test.tsx`, which exists but cannot pass until the section is rendered.
+This is the single highest-consequence detail of the feature: the wrong label makes a user discard their own commit while believing they kept it. The wording is asserted in `web/src/components/Git/GitPanel.conflicts.test.tsx`, which passes now that the section is rendered (32 of 32 cases).
 
 A chosen side that does not exist is a deletion, and `git checkout --ours/--theirs` cannot materialize one: the resolver runs `git rm -f -- <path>` instead, then `git add -- <path>` for the checkout case (both under literal pathspecs).
 
@@ -76,6 +61,13 @@ A chosen side that does not exist is a deletion, and `git checkout --ours/--thei
 | bisect | *not supported* | `bisect reset` | `bisect skip` | `good` → `bisect good`, `bad` → `bisect bad` |
 
 A merge genuinely has no skip. A bisect genuinely has no continue — it advances by marking the current commit good or bad, which is why `good`/`bad` exist. The request also carries the `kind` the client last saw; the server **re-detects** and answers 409 if it differs (or if no operation is in progress), so a panel left open across operations can never abort a *different* operation. `continue` is refused with 409 while conflicts remain (skip stays allowed — skipping a conflicted step is its purpose); git's own refusal (a hook veto, a moved state) is returned as **409 with git's verbatim output**, not 500.
+
+### 4.1 The client's copy of the action matrix (version-skew fallback)
+
+The web operation banner does not fetch this table — it renders from a hand copy, `OPERATION_ACTIONS` in `web/src/components/Git/GitPanel.tsx`, mirroring the server's `gitOperationCommand`. The copy is typed `Record<GitOperation["kind"], …>` rather than `Record<string, …>`, so it is **exhaustive**: adding a kind to the server's vocabulary without updating that file is a TypeScript compile error, not a silent runtime gap. The one case a type cannot cover is **version skew** — a server *newer* than the shipped bundle reporting a kind this build has no entry for. The banner then still names the operation but renders **no action buttons**, saying it cannot be continued from here and must be finished in the terminal, and it emits a `console.warn` naming the unknown kind — a real skew someone must fix, not a condition to swallow.
+
+- **When adding an operation kind, both tables must move together:** the client `OPERATION_ACTIONS` and the server `gitOperationCommand` — neither is generated from the other.
+- The parity test `SERVER_ACTION_TABLE` in `web/src/components/Git/GitPanel.conflicts.test.tsx` exists precisely because the copy once rotted silently: a bisect "Reset" button sent the wire verb `"reset"` and the server answered 400 to every click.
 
 ## 5. Environment hardening
 
@@ -114,10 +106,10 @@ The same two endpoints serve remote projects — they dispatch on `hostParam(r)`
 
 Because conflicted paths leave the staged/changed lists, consumers add them back: `web/src/lib/projectGitCounts.ts` includes a `conflicted` count in the sidebar total (with a version-skew default of 0 for a server that predates the field), and `web/src/components/Layout/TopTabs.tsx` adds it into the session Git-tab badge, whose title reads `N conflicted · N staged · N unstaged` when conflicts exist. Both landed with phase 02.
 
-## 9. Current limits (what is *not* shipped)
+## 9. Current limits and status
 
-- **Git-tab UI (phase 06) is open.** `web/src/components/Git/GitPanel.tsx` renders neither the conflicts section nor the operation banner, and nothing in the SPA calls `api.gitResolveConflict` / `api.gitOperation` yet — only the client wrappers and `GitConflict`/`GitOperation` types exist. The TDD suite `web/src/components/Git/GitPanel.conflicts.test.tsx` is in the tree and currently fails (10 of 12 cases), which is the intended red state for the pending UI work; it also pins the rebase relabel wording from §3.
-- **Phase 07 sweep is incomplete:** the `editorDiffSource` decision and the repo-wide audit of remaining `staged_files`/`changed_files` readers are still open (the badge consumers themselves are done).
+- **Git-tab UI (phase 06) has shipped:** `web/src/components/Git/GitPanel.tsx` renders the conflicts section and the operation banner and calls `api.gitResolveConflict` / `api.gitOperation`, built on the client wrappers and the `GitConflict`/`GitOperation` types in `web/src/api/types.ts`. The TDD suite `web/src/components/Git/GitPanel.conflicts.test.tsx` exists and passes (32 of 32 cases); it also pins the rebase relabel wording from §3.
+- **Phase 07 sweep is incomplete:** the `editorDiffSource` decision is made and shipped — `resolveEditorDiffSource` lives in `web/src/lib/editorDiffSource.ts`, has a live consumer in `web/src/components/Files/FileEditor.tsx`, and is covered by `web/src/lib/editorDiffSource.test.ts` — while the repo-wide audit of remaining `staged_files`/`changed_files` readers is still open (the badge consumers themselves are done).
 - **No TUI surface, no conflict-marker editor, no stash/reset/force-push changes** — all explicit non-goals of the plan.
 - Cross-links: `concepts/git-stash-ui.md` (the neighbouring stash surface), `gotchas/git-action-errors-disappear.md` (the sticky-error contract the new operation banner deliberately supersedes in exactly one narrow case: a stale pull error is cleared on the idle→operation transition, and only then), `gotchas/git-index-lock-contention.md`, `gotchas/remote-git-shell-quoting.md`.
 

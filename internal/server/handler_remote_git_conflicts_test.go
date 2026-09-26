@@ -449,17 +449,23 @@ func TestRemoteGitOperationAbort(t *testing.T) {
 }
 
 // Continuing a remote merge after the conflict is resolved must complete the
-// merge, and must NOT invoke an editor (the ssh session has no TTY, so a real
-// editor would hang the request). GIT_EDITOR is cleared in the test
-// environment so an unsuppressed editor would be observable.
+// merge.
+//
+// NOTE: this test proves the merge COMPLETES, not that the editor is
+// suppressed. Setting GIT_EDITOR=false in the test environment only catches
+// the prefix being REMOVED; if the prefix is corrupted to a different editor
+// (GIT_EDITOR=vi), that editor wins over the inherited value and, with no
+// controlling TTY, vi reads EOF and exits 0, so the commit still succeeds and
+// this test stays green. TestRemoteGitOperationCommandSuppressesTheEditor is
+// what actually pins the setting; do not treat this one as its guard.
 func TestRemoteGitOperationContinueSuppressesEditor(t *testing.T) {
 	installFakeSSH(t)
 	repo := gitConflictedMergeFile(t, "conflicted.txt")
 	h := newTestHandlerWithRemote(t, "ci.local", repo)
 	url := "/api/git/conflict/resolve?host=ci.local&project=" + repo
 	remotePostJSON(t, h, url, GitConflictResolveRequest{Path: "conflicted.txt", Resolution: "ours"}, nil)
-	// Make an editor invocation fail loudly rather than silently succeed, so
-	// dropping GIT_EDITOR=true turns this test red instead of hanging CI.
+	// An editor that exits non-zero would catch a REMOVED prefix. It cannot
+	// catch a wrong one; see the note above.
 	t.Setenv("GIT_EDITOR", "false")
 	t.Setenv("EDITOR", "false")
 
@@ -475,6 +481,87 @@ func TestRemoteGitOperationContinueSuppressesEditor(t *testing.T) {
 	// The merge must have actually committed. `rev-parse --verify` writes
 	// its fatal diagnostic to stderr, which gitCombined captures, so the
 	// check must be on the ERROR, not on empty output.
+	if _, err := gitCombined(t, repo, "git", "rev-parse", "--verify", "MERGE_HEAD"); err == nil {
+		t.Error("MERGE_HEAD still present after continue: the merge did not commit")
+	}
+}
+
+// The generated remote command must pin both editor variables, and it must
+// pin them as ASSIGNMENTS in the command string rather than relying on the
+// inherited environment.
+//
+// This is the assertion that actually guards the editor suppression. An
+// end-to-end test cannot: with no controlling TTY (the real remote condition,
+// reproduced here by the fake-SSH shim) an editor such as vi reads EOF and
+// exits 0, so a corrupted GIT_EDITOR still lets the merge commit and the
+// behavioural test passes. Empirically confirmed: `git merge --continue` DOES
+// invoke GIT_EDITOR with no TTY, and a non-zero-exiting editor stops the
+// commit — so the setting is load-bearing, and only a direct assertion on the
+// built command can catch it being wrong.
+//
+// A behavioral guard is added too, using an editor that exits non-zero
+// unconditionally, to prove the assignment actually takes precedence over an
+// inherited editor.
+func TestRemoteGitOperationCommandSuppressesTheEditor(t *testing.T) {
+	rw := remoteWork{Path: "/tmp/repo"}
+	cmd := remoteGitMutationCommand(rw, "merge", "--continue")
+	for _, want := range []string{
+		"GIT_EDITOR=true",
+		"GIT_SEQUENCE_EDITOR=true",
+		"GIT_LITERAL_PATHSPECS=1",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command %q does not pin %s", cmd, want)
+		}
+	}
+	// The assignments must sit immediately before `git`, not before the `cd`:
+	// a prefix on the cd would not reach the git process at all.
+	gitAt := strings.Index(cmd, " GIT_OPTIONAL_LOCKS=0 git")
+	if gitAt < 0 {
+		t.Fatalf("command %q lost the GIT_OPTIONAL_LOCKS=0 git invocation", cmd)
+	}
+	prefix := cmd[:gitAt]
+	if !strings.Contains(prefix, "GIT_EDITOR=true") {
+		t.Errorf("GIT_EDITOR=true is not in the env prefix of the git invocation: %q", prefix)
+	}
+}
+
+// Behavioral half: an inherited editor that always fails must NOT be able to
+// stop the merge, because the command's own assignment overrides it.
+//
+// CAUTION when mutation-testing this one: a corrupted GIT_EDITOR (e.g. `vi`)
+// makes git invoke a real editor that BLOCKS on the inherited TTY, so the run
+// HANGS instead of failing. Always pass an explicit -timeout when running this
+// test directly, and prefer
+// TestRemoteGitOperationCommandSuppressesTheEditor for mutation checks: it is
+// a pure string assertion and fails in under a second.
+func TestRemoteGitOperationOverridesInheritedFailingEditor(t *testing.T) {
+	installFakeSSH(t)
+	repo := gitConflictedMergeFile(t, "conflicted.txt")
+	h := newTestHandlerWithRemote(t, "ci.local", repo)
+	remotePostJSON(t, h, "/api/git/conflict/resolve?host=ci.local&project="+repo,
+		GitConflictResolveRequest{Path: "conflicted.txt", Resolution: "ours"}, nil)
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "ran")
+	editor := filepath.Join(dir, "fail_editor.sh")
+	if err := os.WriteFile(editor, []byte("#!/bin/sh\ntouch "+sentinel+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write failing editor: %v", err)
+	}
+	t.Setenv("GIT_EDITOR", editor)
+	t.Setenv("EDITOR", editor)
+
+	var res GitOperationResult
+	w := remotePostJSON(t, h, "/api/git/operation?host=ci.local&project="+repo,
+		GitOperationRequest{Action: "continue", Kind: "merge"}, &res)
+	if w.Code != http.StatusOK {
+		t.Fatalf("continue: status %d: %s", w.Code, w.Body.String())
+	}
+	// If the command's own GIT_EDITOR=true had not won, this sentinel would
+	// exist and the commit would have failed.
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Error("the inherited failing editor was invoked: GIT_EDITOR=true did not take precedence")
+	}
 	if _, err := gitCombined(t, repo, "git", "rev-parse", "--verify", "MERGE_HEAD"); err == nil {
 		t.Error("MERGE_HEAD still present after continue: the merge did not commit")
 	}
