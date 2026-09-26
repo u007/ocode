@@ -34,6 +34,7 @@
 
 ## 2026-09-26
 
+* **Update**: Git conflicts and halted-operation recovery (web Git tab) ([concepts/git-conflicts-and-operations.md](/concepts/git-conflicts-and-operations.md))
 * **Update**: Discovery MCP Tool Gating ([concepts/discovery-mcp-tool-gating.md](/concepts/discovery-mcp-tool-gating.md))
 * **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
 * **Creation**: Discovery MCP Tool Gating ([concepts/discovery-mcp-tool-gating.md](/concepts/discovery-mcp-tool-gating.md))

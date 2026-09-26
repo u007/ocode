@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-09-26 — Git badge-parity consumer sweep closed (phase 07)
+
+- The last open item of `.opencode/plans/2026-09-25-git-conflicts-and-operations/`
+  is closed. The repo-wide audit of `staged_files` / `changed_files` consumers
+  found **no parity gaps**, so this is a documentation-only change: every
+  non-test web reader is one of the two badge consumers
+  (`web/src/components/Layout/TopTabs.tsx`, which sets `gitConflicted` from
+  `status.conflicts?.length ?? 0` and folds it into the tab badge total, and
+  `web/src/lib/projectGitCounts.ts`, whose total is
+  `staged + unstaged + conflicted`), and both already account for conflicted
+  paths, which leave the staged/changed lists.
+- Two non-changes are now written down so a later reader does not "fix" them.
+  `web/src/components/Git/GitPanel.tsx` deliberately does **not** fold conflicts
+  into a total — it shows a separate red `N conflicted` beside
+  `N staged · M unstaged`, because the panel is the breakdown view while the two
+  *badge* totals are the surfaces that must agree. On the Go side there are no
+  other readers of `GitStatus.StagedFiles` / `GitStatus.ChangedFiles`; the
+  `ChangedFiles()` hits in `internal/snapshot`, `internal/agent` and
+  `internal/changes` are the Changes-tab journal, a different concept that a
+  grep appears to conflate.
+- The phase-07 `editorDiffSource` premise turned out to be factually wrong: the
+  2026-08-31 refactor had already moved the editor off the status lists (it
+  reads `is_repo` plus a separately fetched `gitFiles` array). No change was
+  required and none was made; only the plan's status moved from
+  `PARTLY DONE` to `DONE`.
+- Recorded why the remote editor suppression can only be guarded by a string
+  assertion. `git merge --continue` really does invoke `GIT_EDITOR` with no
+  controlling TTY and a non-zero-exiting editor stops the commit — but under the
+  fake-SSH harness an editor such as `vi` reads EOF and exits 0, so the merge
+  still commits and an end-to-end test stays **green with a corrupted
+  `GIT_EDITOR`**. `TestRemoteGitOperationCommandSuppressesTheEditor` (in
+  `internal/server/handler_remote_git_conflicts_test.go`) is the guard that
+  works: it asserts the assignments sit in the env prefix of the `git`
+  invocation rather than on the `cd`. Mutation-testing that path **hangs** rather
+  than failing (git invokes an editor that blocks on an inherited TTY), so pass
+  an explicit `-timeout`.
+- `skills/ocode-web` item 36 no longer claims the web UI is unwired, and now
+  lists the remote suite (`handler_remote_git_conflicts_test.go`, 34 cases
+  through the fake-SSH harness against real temp repos with no mocked
+  transport) plus the editor-suppression trap above.
+
 ## 2026-09-26 — Git operation banner fails loudly on an unknown operation kind
 
 - The web Git tab's operation banner no longer renders an empty action row when

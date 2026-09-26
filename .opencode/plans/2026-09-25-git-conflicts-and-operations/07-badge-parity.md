@@ -3,7 +3,40 @@
 Phase 7 of the web Git tab conflict/operation-recovery work, tracked from
 `.opencode/plans/2026-09-25-git-conflicts-and-operations/INDEX.md`.
 
-## STATUS: PARTLY DONE — read this before starting
+## STATUS: DONE — sweep completed 2026-09-26
+
+The badge work itself landed in **Phase 02** (see below). The two remaining
+items were closed on 2026-09-26:
+
+- **The `editorDiffSource` decision** was already resolved on 2026-09-25 — the
+  plan's premise was factually wrong, since the 2026-08-31 refactor moved the
+  editor off the status lists entirely (it reads `is_repo` plus a separately
+  fetched `gitFiles` array). No change was required, and none was made.
+- **The repo-wide sweep is now complete. It found no parity gaps.**
+
+### Sweep results (2026-09-26)
+
+Every non-test web reader of `staged_files` / `changed_files` is one of the two
+badge consumers, and both already fold conflicts in:
+
+| Site | Conflicts handling |
+| --- | --- |
+| `web/src/components/Layout/TopTabs.tsx` | `setGitConflicted(status.conflicts?.length ?? 0)`, added into the tab badge total and its "N conflicted · N staged · N unstaged" title |
+| `web/src/lib/projectGitCounts.ts` | `total: staged + unstaged + conflicted`, with a documented version-skew default so a server omitting the field reads as "no conflicts" rather than throwing on `.length` |
+
+Two deliberate non-changes, recorded so a later reader does not "fix" them:
+
+- **`GitPanel.tsx` does not fold conflicts into a total.** It renders them as a
+  separate red `N conflicted` span beside `N staged · M unstaged`. That is the
+  breakdown view; the two surfaces that must *agree* are the tab badge and the
+  sidebar badge, and they do. The same file also disables the Continue action
+  when `conflicts.length > 0`, which is the client-side counterpart of the
+  server's continue-with-conflicts 409.
+- **The Go side has no other readers of `GitStatus.StagedFiles` /
+  `GitStatus.ChangedFiles`.** The `ChangedFiles()` symbols in
+  `internal/snapshot`, `internal/agent` and `internal/changes` are a different
+  concept (the Changes-tab journal) and are unrelated to the git status lists.
+  A grep that appears to show leftover consumers is matching these.
 
 The `TopTabs.tsx` and `projectGitCounts.ts` work below was completed as part of
 **Phase 02**, not deferred to this phase. It could not wait: Phase 02 changes

@@ -46,7 +46,7 @@ rebase or merge and halted on a conflict.
 | `04-operation-endpoint.md` | Operation recovery | **DONE** | `POST /api/git/operation` for continue / abort / skip, plus bisect good / bad / abort (which runs `git bisect reset`). |
 | `05-remote-parity.md` | Remote projects | **DONE** | Mirror every new server behavior across the SSH/WSL transport. |
 | `06-web-api-and-conflicts-ui.md` | Web types + Git tab UI | **DONE** | Conflicts section and operation banner, with destructive actions disabled mid-operation. |
-| `07-badge-parity.md` | Badge totals | **DONE** | Keep the session Git tab and project sidebar badges equal to the Git tab's totals. Partly landed in phase 02. |
+| `07-badge-parity.md` | Badge totals | **DONE** | Keep the session Git tab and project sidebar badges equal to the Git tab's totals. Badge work landed in phase 02; the consumer sweep closed 2026-09-26 with no gaps. |
 | `08-docs.md` | Documentation | **DONE** | Concept page through the context agent, plus a CHANGES.md entry. |
 
 ## Why the phases are ordered this way
