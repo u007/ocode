@@ -548,7 +548,7 @@ export interface GitConflictResolveRequest {
 
 /** Body of POST /api/git/operation. */
 export interface GitOperationRequest {
-  action: "continue" | "abort" | "skip" | "good" | "bad" | "reset";
+  action: "continue" | "abort" | "skip" | "good" | "bad";
   /** The operation the panel believes is running. The server re-detects and
    *  answers 409 on a mismatch, so this is a guard, never an instruction. */
   kind: GitOperation["kind"];

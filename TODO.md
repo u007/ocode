@@ -2195,6 +2195,33 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
 - [ ] **`plan_enter` writes outside the repository.** In this checkout, `plan_enter` attempted to create `/.opencode/plans/2026-09-24.md` (filesystem root) instead of the repository's `.opencode/plans/` directory, then failed because that root path does not exist. The chat-verbosity plan was written manually to `.opencode/plans/2026-09-24-chat-verbosity-display.md` as a workaround. Investigate and fix the plan path separately; do not change it as part of the chat-verbosity feature.
 
 ## Web Git tab: conflict detection + operation recovery (2026-09-25)
+### Open decisions (git-conflicts feature)
+
+- [x] **DECIDED 2026-09-27 (user): KEEP the continue-with-conflicts 409
+  pre-check, in BOTH handlers.** `handler_git_conflicts.go` (local) and
+  `handler_remote_git_conflicts.go` (remote SSH/WSL) pre-check "conflicts
+  still present" and answer 409 with "resolve the remaining conflicts before
+  continuing", rather than letting git fail with "Committing is not possible
+  because you have unmerged files". Rationale: the message names the action to
+  take, and the web UI already disables Continue in exactly this state. This is
+  the single intentional reinterpretation of git's wording in the feature —
+  **every other failure is still surfaced verbatim**. Recorded in
+  `.opencode/plans/2026-09-25-git-conflicts-and-operations/04-operation-endpoint.md`
+  ("Implementation decisions"). Do not "fix" this back into a passthrough: it
+  is pinned by `TestGitOperationContinueRefusesWhileConflictsRemain`
+  (local) and `TestRemoteGitOperationReusesOneStatusProbe` (remote, which
+  drives `continue` WITH conflicts because that is the only path consulting
+  both the operation state and the conflict list), so a revert is a deliberate
+  act rather than a cleanup.
+
+- [ ] **Remote conflicted paths containing `:` cannot be resolved.**
+  `remoteSafeSpec` (`internal/server/handler_remote_work.go:409`) rejects `:`
+  among many other characters, but a colon is legal in a git path, so such a
+  file is unresolvable on a remote project. The endpoint surfaces the
+  validator's error rather than skipping the file silently. Fixing it means
+  replacing the broad denylist with a strict allowlist — a deliberate security
+  change, not a drive-by edit.
+
 
 Plan: `.opencode/plans/2026-09-25-git-conflicts-and-operations/` (INDEX.md
 plus parts `01-op-state-parser.md` … `08-docs.md`). Phases 1–8 are planned

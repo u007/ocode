@@ -852,13 +852,9 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 		case <-ctx.Done():
 			return "", fmt.Errorf("compact: summary timed out: %w", contextCause(ctx))
 		case r := <-done:
-			if cause := contextCause(ctx); cause != nil {
-				if errors.Is(cause, ErrCompactionTimeout) {
-					return "", fmt.Errorf("compact: summary timed out: %w", cause)
-				}
-				return "", fmt.Errorf("compact: summary cancelled: %w", cause)
-			}
 			if r.err == nil && strings.TrimSpace(r.content) != "" {
+				// A summary that completed before a racing cancel is still a
+				// good summary; only failures consult the cancellation cause.
 				if verr := validateSummary(r.content); verr != nil {
 					emitDebug("COMPACT", fmt.Sprintf("attempt %d: %v; retrying", attempt+1, verr))
 					malformed = r.content
@@ -866,6 +862,12 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 					continue
 				}
 				return r.content, nil
+			}
+			if cause := contextCause(ctx); cause != nil {
+				if errors.Is(cause, ErrCompactionTimeout) {
+					return "", fmt.Errorf("compact: summary timed out: %w", cause)
+				}
+				return "", fmt.Errorf("compact: summary cancelled: %w", cause)
 			}
 			if r.err != nil {
 				lastErr = r.err

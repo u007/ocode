@@ -632,7 +632,8 @@ func KnownServers() []string {
 
 // setServerState records the latest lifecycle state for a server binary.
 // A concurrent duplicate startup must not replace a healthy running state
-// with its own failed result.
+// with its own failed result, so a running row is only kept while a live
+// client for that binary still exists; otherwise the new state wins.
 func (m *Manager) setServerState(spec serverSpec, state, detail string) {
 	if m == nil {
 		return
@@ -643,11 +644,22 @@ func (m *Manager) setServerState(spec serverSpec, state, detail string) {
 		m.states = make(map[string]ServerStatus)
 	}
 	if current, ok := m.states[spec.cmd]; ok {
-		if current.State == "running" && state != "running" {
+		if current.State == "running" && state != "running" && m.hasClientForCmdLocked(spec.cmd) {
 			return
 		}
 	}
 	m.states[spec.cmd] = ServerStatus{Cmd: spec.cmd, LangID: spec.langID, State: state, Detail: detail}
+}
+
+// hasClientForCmdLocked reports whether any extension mapped to cmd has a
+// client. Caller must hold m.mu.
+func (m *Manager) hasClientForCmdLocked(cmd string) bool {
+	for ext, c := range m.clients {
+		if c != nil && serversByExt[ext].cmd == cmd {
+			return true
+		}
+	}
+	return false
 }
 
 // Statuses returns one lifecycle row per unique server binary, including

@@ -303,10 +303,8 @@ func runAuthList() error {
 		if mcpCfg.OAuth != nil && isOAuthEnabled(mcpCfg.OAuth) {
 			oauthStatus = "yes"
 		}
-		if mcpCfg.Headers != nil && mcpCfg.Headers["Authorization"] != "" {
-			oauthStatus += " (token stored)"
-		}
-		if _, ok := auth.GetMCPAuth(name); ok {
+		_, stored := auth.GetMCPAuth(name)
+		if stored || (mcpCfg.Headers != nil && mcpCfg.Headers["Authorization"] != "") {
 			oauthStatus += " (token stored)"
 		}
 		fmt.Printf("%-16s %-8s %s\n", name, typ, oauthStatus)

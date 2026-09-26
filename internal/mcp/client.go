@@ -534,14 +534,6 @@ func (c *MCPClient) discoverTokenEndpoint(challenge string) (string, error) {
 	return tokenURL.String(), nil
 }
 
-func (c *MCPClient) resourceMetadataURL(challenge string) (string, error) {
-	urls, err := c.resourceMetadataURLs(challenge)
-	if err != nil {
-		return "", err
-	}
-	return urls[0], nil
-}
-
 func (c *MCPClient) resourceMetadataURLs(challenge string) ([]string, error) {
 	if match := resourceMetadataChallengePattern.FindStringSubmatch(challenge); len(match) > 0 {
 		value := match[1]

@@ -30,6 +30,7 @@ import type {
   GitDiffFile,
   GitHunkAction,
   GitOperation,
+  GitOperationRequest,
   GitStash,
   GitWorkspace,
 } from "@/api/types";
@@ -98,46 +99,55 @@ const STATUS_BADGES: Record<string, { label: string; color: string }> = {
  *  a server NEWER than this bundle. */
 const OPERATION_ACTIONS: Record<
   GitOperation["kind"],
-  { action: string; label: string; destructive?: boolean }[]
+  {
+    action: GitOperationRequest["action"];
+    label: string;
+    /** Success-notice text, kept BESIDE the button it describes. A bisect's
+     *  wire action is "abort" (the server runs `git bisect reset`) but the
+     *  button says "Reset", so keying the notice off the action would read
+     *  "aborted" under a Reset button. */
+    done: string;
+    destructive?: boolean;
+  }[]
 > = {
   merge: [
-    { action: "continue", label: "Continue" },
-    { action: "abort", label: "Abort", destructive: true },
+    { action: "continue", label: "Continue", done: "continued" },
+    { action: "abort", label: "Abort", done: "aborted", destructive: true },
   ],
   rebase: [
-    { action: "continue", label: "Continue" },
-    { action: "abort", label: "Abort", destructive: true },
-    { action: "skip", label: "Skip" },
+    { action: "continue", label: "Continue", done: "continued" },
+    { action: "abort", label: "Abort", done: "aborted", destructive: true },
+    { action: "skip", label: "Skip", done: "skipped" },
   ],
   "rebase-interactive": [
-    { action: "continue", label: "Continue" },
-    { action: "abort", label: "Abort", destructive: true },
-    { action: "skip", label: "Skip" },
+    { action: "continue", label: "Continue", done: "continued" },
+    { action: "abort", label: "Abort", done: "aborted", destructive: true },
+    { action: "skip", label: "Skip", done: "skipped" },
   ],
   am: [
-    { action: "continue", label: "Continue" },
-    { action: "abort", label: "Abort", destructive: true },
-    { action: "skip", label: "Skip" },
+    { action: "continue", label: "Continue", done: "continued" },
+    { action: "abort", label: "Abort", done: "aborted", destructive: true },
+    { action: "skip", label: "Skip", done: "skipped" },
   ],
   "cherry-pick": [
-    { action: "continue", label: "Continue" },
-    { action: "abort", label: "Abort", destructive: true },
-    { action: "skip", label: "Skip" },
+    { action: "continue", label: "Continue", done: "continued" },
+    { action: "abort", label: "Abort", done: "aborted", destructive: true },
+    { action: "skip", label: "Skip", done: "skipped" },
   ],
   revert: [
-    { action: "continue", label: "Continue" },
-    { action: "abort", label: "Abort", destructive: true },
-    { action: "skip", label: "Skip" },
+    { action: "continue", label: "Continue", done: "continued" },
+    { action: "abort", label: "Abort", done: "aborted", destructive: true },
+    { action: "skip", label: "Skip", done: "skipped" },
   ],
   // A bisect advances by classifying commits; there is no "continue". The
   // button is LABELLED "Reset" because that is what git calls it, but the wire
   // action is "abort" — the server's table maps that to `git bisect reset`.
   // Sending "reset" here was a real 400 (caught 2026-09-25).
   bisect: [
-    { action: "good", label: "Good" },
-    { action: "bad", label: "Bad" },
-    { action: "skip", label: "Skip" },
-    { action: "abort", label: "Reset", destructive: true },
+    { action: "good", label: "Good", done: "marked good" },
+    { action: "bad", label: "Bad", done: "marked bad" },
+    { action: "skip", label: "Skip", done: "skipped" },
+    { action: "abort", label: "Reset", done: "reset the bisect", destructive: true },
   ],
 };
 
@@ -488,32 +498,43 @@ export default function GitPanel({
       resolution === "mark" ? "marked " + path + " resolved" : "resolved " + path,
     );
 
-  const runOperation = (action: string, kind: string) =>
+  const runOperation = (
+    action: GitOperationRequest["action"],
+    kind: GitOperation["kind"],
+    done: string,
+  ) =>
     runMutation(async () => {
       // The server returns the git command's combined output; commit hooks
       // run during continue/skip, so that output is shown rather than dropped.
-      const res = (await api.gitOperation(
-        { action: action as "continue", kind: kind as "rebase" },
-        projectPath,
-        projectHost,
-      )) as { output?: string } | undefined;
+      const res = await api.gitOperation({ action, kind }, projectPath, projectHost);
       const out = res?.output?.trim();
       if (out) showNotice(out);
-    }, `${action}d`);
+    }, done);
 
   // Destructive operation actions (abort, and a bisect's reset) discard the
   // in-progress work, so they go through the same confirmation-dialog pattern
   // as the existing discard/force-push flows rather than firing directly.
-  const [pendingOperation, setPendingOperation] = useState<{ action: string; kind: string; label: string } | null>(null);
-  const requestOperation = (action: string, kind: string, destructive: boolean, label: string) => {
-    if (destructive) setPendingOperation({ action, kind, label });
-    else void runOperation(action, kind);
+  const [pendingOperation, setPendingOperation] = useState<{
+    action: GitOperationRequest["action"];
+    kind: GitOperation["kind"];
+    label: string;
+    done: string;
+  } | null>(null);
+  const requestOperation = (
+    action: GitOperationRequest["action"],
+    kind: GitOperation["kind"],
+    destructive: boolean,
+    label: string,
+    done: string,
+  ) => {
+    if (destructive) setPendingOperation({ action, kind, label, done });
+    else void runOperation(action, kind, done);
   };
   const doPendingOperation = () => {
     if (!pendingOperation) return;
     const p = pendingOperation;
     setPendingOperation(null);
-    void runOperation(p.action, p.kind);
+    void runOperation(p.action, p.kind, p.done);
   };
 
   const stageFile = (path: string) =>
@@ -1148,7 +1169,7 @@ export default function GitPanel({
                 <button
                   key={a.action}
                   onClick={() =>
-                    requestOperation(a.action, operation.kind, !!a.destructive, a.label)
+                    requestOperation(a.action, operation.kind, !!a.destructive, a.label, a.done)
                   }
                   disabled={busy || blockedByConflicts}
                   title={

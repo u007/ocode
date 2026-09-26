@@ -673,13 +673,13 @@ func TestResourceMetadataURLIncludesResourcePathWithoutChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := client.resourceMetadataURL("")
+	urls, err := client.resourceMetadataURLs("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := "https://mcp.example.test/.well-known/oauth-protected-resource/mcp/secret"
-	if got != want {
-		t.Fatalf("resourceMetadataURL = %q, want %q", got, want)
+	if len(urls) == 0 || urls[0] != want {
+		t.Fatalf("resourceMetadataURLs = %q, want first %q", urls, want)
 	}
 }
 

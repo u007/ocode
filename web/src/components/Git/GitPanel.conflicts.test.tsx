@@ -249,6 +249,70 @@ describe("operation banner", () => {
     });
   });
 
+  // REGRESSION: the success notice used to be built as `${action}d`, which
+  // renders "abortd" and "skipd" — only "continue" happened to read correctly.
+  // No test asserted the notice text, so it shipped. These assert the exact
+  // wording for every action the banner can fire.
+  describe("operation success notices", () => {
+    const withOperation = (kind: OperationKind) =>
+      mocks.getGitWorkspace.mockResolvedValue(
+        ws({ conflicts: [], operation: { kind, label: "Working", step: 0, total: 0 } }),
+      );
+
+    // Click a destructive action and confirm, then wait for the notice.
+    const runDestructive = async (name: RegExp) => {
+      fireEvent.click(await screen.findByRole("button", { name }));
+      fireEvent.click(await screen.findByRole("button", { name: /^(confirm|abort|reset|ok)$/i, hidden: false }));
+    };
+
+    it('says "continued", never "continuedd"', async () => {
+      withOperation("merge");
+      await renderPanel();
+      fireEvent.click(await screen.findByRole("button", { name: /^continue$/i }));
+      await waitFor(() => expect(screen.getByText(/continued/i)).toBeInTheDocument());
+      expect(screen.queryByText(/continuedd/i)).not.toBeInTheDocument();
+    });
+
+    it('says "aborted", not "abortd", after confirming', async () => {
+      withOperation("merge");
+      await renderPanel();
+      await runDestructive(/^abort$/i);
+      await waitFor(() => expect(screen.getByText(/aborted/i)).toBeInTheDocument());
+      expect(screen.queryByText(/abortd/i)).not.toBeInTheDocument();
+    });
+
+    it('says "skipped", not "skipd"', async () => {
+      withOperation("rebase");
+      await renderPanel();
+      fireEvent.click(await screen.findByRole("button", { name: /^skip$/i }));
+      await waitFor(() => expect(screen.getByText(/skipped/i)).toBeInTheDocument());
+      expect(screen.queryByText(/skipd/i)).not.toBeInTheDocument();
+    });
+
+    it("says 'marked good' for a bisect Good", async () => {
+      withOperation("bisect");
+      await renderPanel();
+      fireEvent.click(await screen.findByRole("button", { name: /^good$/i }));
+      await waitFor(() => expect(screen.getByText(/marked good/i)).toBeInTheDocument());
+    });
+
+    it("says 'marked bad' for a bisect Bad", async () => {
+      withOperation("bisect");
+      await renderPanel();
+      fireEvent.click(await screen.findByRole("button", { name: /^bad$/i }));
+      await waitFor(() => expect(screen.getByText(/marked bad/i)).toBeInTheDocument());
+    });
+
+    // The wire action is "abort" but the BUTTON says Reset, so the notice must
+    // follow the button rather than claiming a generic abort.
+    it('describes a bisect Reset as a reset, not a bare "aborted"', async () => {
+      withOperation("bisect");
+      await renderPanel();
+      await runDestructive(/^reset$/i);
+      await waitFor(() => expect(screen.getByText(/reset the bisect/i)).toBeInTheDocument());
+    });
+  });
+
   it("does not fire a destructive operation when the dialog is cancelled", async () => {
     mocks.getGitWorkspace.mockResolvedValue(
       ws({ conflicts: [], operation: { kind: "merge", label: "Merging", step: 0, total: 0 } }),

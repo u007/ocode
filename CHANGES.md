@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-09-27 — Git operation notices, LSP state race, MCP cleanups, compact race
+
+- **Git operation success notices use correct English.** The web Git tab's
+  operation banner built its success text as `` `${action}d` ``, which renders
+  "abortd" and "skipd" — only "continue" happened to read correctly. Each
+  `OPERATION_ACTIONS` entry now carries an explicit `done` string
+  ("continued", "aborted", "skipped", "marked good", "marked bad",
+  "reset the bisect") kept beside the button it describes. A bisect's Reset
+  button sends wire action "abort" (the server runs `git bisect reset`) but
+  the notice now says "reset the bisect", matching the button label.
+- **Removed `"reset"` from the git-operation wire union.** Sending
+  `action: "reset"` was a real 400 caught 2026-09-25; the bisect Reset path
+  already uses "abort". The type is now `"continue" | "abort" | "skip" |
+  "good" | "bad"`. Regression tests pin the exact notice wording for every
+  action (`GitPanel.conflicts.test.tsx`).
+- **LSP server-state race fixed.** `setServerState` used to refuse to replace
+  a "running" row with a non-running state, so a stale "running" entry could
+  persist after its client disconnected. A "running" row is now kept only
+  while a live client for that binary still exists; otherwise the new state
+  wins. Added `hasClientForCmdLocked` to check client liveness under the
+  manager lock.
+- **Removed unused `MCPClient.resourceMetadataURL`.** The singular wrapper
+  around `resourceMetadataURLs` had no callers; the test now asserts against
+  the plural directly.
+- **MCP CLI auth list detects stored tokens without a header.** `runAuthList`
+  previously nested the `auth.GetMCPAuth(name)` check under the
+  Authorization-header check, so a token in the auth store without a header
+  was missed. The two conditions are now OR'd.
+- **Compact accepts a summary that beat a racing cancel.** `runSummary` used
+  to consult `contextCause(ctx)` before checking whether the summary
+  content was valid, so a cancel/timeout arriving just after a successful
+  LLM response could discard a good summary. The cancellation check now
+  runs only when there is no usable content.
+
 ## 2026-09-26 — Git badge-parity consumer sweep closed (phase 07)
 
 - The last open item of `.opencode/plans/2026-09-25-git-conflicts-and-operations/`
