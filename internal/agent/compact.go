@@ -817,14 +817,11 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 			}
 			select {
 			case <-ctx.Done():
-				return "", fmt.Errorf("compact: context cancelled during retry: %w", contextCause(ctx))
+				return "", summaryContextErr(ctx)
 			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
 			}
 		}
-		done := make(chan struct {
-			content string
-			err     error
-		}, 1)
+		done := make(chan summaryResult, 1)
 		crashguard.Go(func() {
 			var resp *Message
 			var err error
@@ -834,23 +831,17 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 				resp, err = client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
 			}
 			if err != nil {
-				done <- struct {
-					content string
-					err     error
-				}{"", err}
+				done <- summaryResult{"", err}
 				return
 			}
 			if recordUsage != nil {
 				recordUsage(resp)
 			}
-			done <- struct {
-				content string
-				err     error
-			}{resp.Content, nil}
+			done <- summaryResult{resp.Content, nil}
 		})
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("compact: summary timed out: %w", contextCause(ctx))
+			return drainBufferedSummary(done, ctx)
 		case r := <-done:
 			if r.err == nil && strings.TrimSpace(r.content) != "" {
 				// A summary that completed before a racing cancel is still a
@@ -863,11 +854,8 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 				}
 				return r.content, nil
 			}
-			if cause := contextCause(ctx); cause != nil {
-				if errors.Is(cause, ErrCompactionTimeout) {
-					return "", fmt.Errorf("compact: summary timed out: %w", cause)
-				}
-				return "", fmt.Errorf("compact: summary cancelled: %w", cause)
+			if err := summaryContextErr(ctx); err != nil {
+				return "", err
 			}
 			if r.err != nil {
 				lastErr = r.err
@@ -876,11 +864,8 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 			}
 		}
 	}
-	if cause := contextCause(ctx); cause != nil {
-		if errors.Is(cause, ErrCompactionTimeout) {
-			return "", fmt.Errorf("compact: summary timed out: %w", cause)
-		}
-		return "", fmt.Errorf("compact: summary cancelled: %w", cause)
+	if err := summaryContextErr(ctx); err != nil {
+		return "", err
 	}
 	if malformed != "" {
 		// A summary that misses sections still beats failing the compaction
@@ -889,6 +874,73 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 		return malformed, nil
 	}
 	return "", lastErr
+}
+
+// summaryResult is one attempt's outcome, delivered on runSummary's buffered
+// channel so the producing goroutine never blocks.
+type summaryResult struct {
+	content string
+	err     error
+}
+
+// usableSummary reports whether a delivered result is a summary worth keeping.
+// It is deliberately conservative — a template-invalid summary is not usable
+// here, because returning it from the cancellation drain would bypass the
+// retry that the normal path would have performed for a malformed summary.
+func usableSummary(r summaryResult) (string, bool) {
+	if r.err != nil {
+		return "", false
+	}
+	if validateSummary(r.content) != nil {
+		return "", false
+	}
+	return r.content, true
+}
+
+// drainBufferedSummary rescues a summary that was already delivered when the
+// compaction context ended. runSummary parks on the result channel and on
+// ctx.Done() in one select, and Go picks uniformly at random when both cases
+// are ready, so a summary that lands in the same instant the deadline fires
+// would otherwise be discarded roughly half the time.
+//
+// A summary that has not landed yet is genuinely unavailable, and a buffered
+// transport error loses to the cancellation cause, which explains more. Either
+// way the caller gets summaryContextErr(ctx), so every cause in runSummary is
+// labelled by exactly one rule.
+//
+// Call this only once ctx.Done() has already fired, which is the only place
+// runSummary uses it. With a still-live context and an empty channel it returns
+// ("", nil) — summaryContextErr reports nothing to cancel — so a caller that
+// reached it on a live context would mistake "no summary yet" for "no
+// cancellation", and would treat an empty string as a successful summary.
+func drainBufferedSummary(done <-chan summaryResult, ctx context.Context) (string, error) {
+	select {
+	case r := <-done:
+		if s, ok := usableSummary(r); ok {
+			return s, nil
+		}
+	default:
+	}
+	return "", summaryContextErr(ctx)
+}
+
+// summaryContextErr classifies a failed compaction context by cause and
+// returns nil while the context is still live. A deadline owned by compaction
+// reports as a timeout; any other cancellation reports as a cancellation.
+// The distinction is load-bearing: the remedies differ (raise the deadline vs
+// find whatever cancelled the pass), and labelling every cancellation
+// "timed out" is what produced the self-contradicting
+// "compact: summary timed out: context canceled" that sent a real session's
+// failure down the wrong diagnostic path.
+func summaryContextErr(ctx context.Context) error {
+	cause := contextCause(ctx)
+	if cause == nil {
+		return nil
+	}
+	if errors.Is(cause, ErrCompactionTimeout) {
+		return fmt.Errorf("compact: summary timed out: %w", cause)
+	}
+	return fmt.Errorf("compact: summary cancelled: %w", cause)
 }
 
 // latestCompactionSummaryIndex returns the index of the most recent synthetic

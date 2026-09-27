@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-09-27 — Compaction: keep a summary that beat the deadline, and stop
+calling every cancellation a timeout
+
+- **A completed summary is no longer thrown away by a racing deadline.**
+  `runSummary` parks on the result channel and `ctx.Done()` in a single
+  `select`, and Go picks uniformly at random when both are ready — so a
+  summary that landed in the same instant the inactivity timer fired was
+  discarded on roughly half of those attempts, failing an otherwise
+  successful compaction. The cancellation branch now drains the result
+  channel once and keeps the summary when one is already buffered and
+  template-valid. The 2026-09-25 fix covered the mirror case (result chosen,
+  cancel already visible); this closes the other side of the same race.
+- **Cancellation causes are labelled by class instead of always as a
+  timeout.** A context that ended for any reason other than compaction's own
+  `ErrCompactionTimeout` now reports `compact: summary cancelled: …`; only
+  compaction's deadline reports `compact: summary timed out: …`. The
+  distinction matters because the remedies differ (raise the deadline vs
+  find whatever cancelled the pass). This is what produced the
+  self-contradicting `compact: summary timed out: context canceled` seen in
+  session `ses_2026-09-24-145135-98fed7b1`, where a shared cross-batch
+  inactivity context (since fixed) was mislabelled as a timeout and sent the
+  diagnosis down the wrong path.
+- **The duplicated cause-classification block is now one helper.**
+  `summaryContextErr` replaces three copies of the same `errors.Is(cause,
+  ErrCompactionTimeout)` branch, and the drain's usability check is
+  `usableSummary` over a named `summaryResult` — so a fourth call site cannot
+  reintroduce either the mislabelling or a laxer check.
+- **The retry-backoff wait no longer labels causes on its own.** It was the
+  fourth and last site that wrapped a context cause directly, reporting
+  `compact: context cancelled during retry` even when the cause *was*
+  `ErrCompactionTimeout`. It now goes through `summaryContextErr` too, so all
+  four cause-labelling sites in `runSummary` share one rule and the message
+  agrees with the class in both directions. `HandleCompactSession` still
+  decides 504 via `errors.Is(err, ErrCompactionTimeout)` — the sentinel, not
+  the text, remains the contract.
+- **The drain moved into `drainBufferedSummary`** so it can be tested
+  directly: the `ctx.Done()` branch is now one line. The helper documents that
+  it must only be called once `ctx.Done()` has fired — with a still-live
+  context and an empty channel it returns `("", nil)`, so a caller reaching it
+  on a live context would read "no summary yet" as "no cancellation".
+- **Tests.** `TestDrainBufferedSummary` (6 sub-cases) pins the drain by
+  handing it an already-filled channel and an already-cancelled context — the
+  exact state the racing select would have seen. `TestUsableSummary` (6
+  sub-cases) pins the accept/reject contract. `TestRunSummaryLabelsNonTimeoutCancelAsCancelled`,
+  `TestRunSummaryLabelsCompactionDeadlineAsTimeout` and
+  `TestRunSummaryLabelsRetryBackoffCancellation` pin all three labelling
+  sites. The select-level simultaneity remains non-reproducible from outside
+  `runSummary`, so the invariant is enforced structurally and the untested
+  residual is the drain's *call site* — documented on the test.
+  `TestRunSummaryLabelsRetryBackoffCancellation` has to defer its cancel until
+  after attempt 0 is served from the result channel: cancelling during the
+  first call would leave the context already-done at attempt 0, where the
+  drain produces the label and masks the retry site entirely.
+- **All three label paths and the drain are mutation-verified.** Reverting the
+  cancellation label, deleting the drain, and restoring the old retry-backoff
+  label each fail a test. The retry test originally did *not* catch its
+  mutation because it asserted `Contains(err, "timed out")` and the sentinel's
+  own message is `"compaction timed out"` — it now pins the canonical
+  `compact: summary timed out:` prefix instead.
+
 ## 2026-09-27 — Git operation notices, LSP state race, MCP cleanups, compact race
 
 - **Git operation success notices use correct English.** The web Git tab's

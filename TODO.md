@@ -1,5 +1,49 @@
 # TODO
 
+## Compaction: local config is tight for large sessions (2026-09-27, needs a user decision)
+
+`~/.config/opencode/ocodeconfig.json` currently has `summary_timeout_seconds:
+90` and `max_summary_input_tokens: 50000`. For a session whose middle is ~300k
+tokens that is ~6 sequential 50k-token summarization calls, and 90s is the
+mid-stream stall allowance for each. On 2026-09-25 a session in exactly this
+shape failed compaction 5× in a row (see the shared-context bug, since fixed —
+but the config was never revisited).
+
+- **Not changed deliberately:** this is the user's own config file, so the call
+  is theirs. Raising `summary_timeout_seconds` to ~300 is the obvious first
+  move; it costs nothing when summaries stream normally, because the deadline
+  only resets on a delta and the 30-minute overall cap still bounds the pass.
+- `max_summary_input_tokens` is the other lever: a larger value means fewer
+  batches (less total first-token latency) but a bigger per-call prompt, which
+  some OpenAI-compatible routers reject once the computed default exceeds the
+  model's real completion cap — that is why `runSummary` caps `max_tokens`
+  explicitly from the registry.
+- Related: a failed compaction re-fires on every subsequent step
+  (`MaybeCompactAsync` is called from four places) and each failure appends a
+  "Compaction failed" message to the transcript it was trying to shrink, which
+  is why the 2026-09-25 failure repeated 4× in a row. Worth bounding that retry
+  storm independently of the timeout config.
+
+## Compaction: a non-GenericClient summary client ignores the compaction deadline (2026-09-27)
+
+`runSummary` calls `gc.ChatWithContext(summaryCtx, ...)` for a `*GenericClient`
+but plain `client.Chat(...)` for every other `LLMClient`
+(`internal/agent/compact.go`). `Chat` starts from `context.Background()`, so
+when the inactivity timer or the 30-minute cap fires, the in-flight request is
+NOT cancelled — it keeps running, keeps streaming to the provider, and keeps
+billing tokens after `runSummary` has already returned an error and the
+compaction has been reported as failed.
+
+- The returned summary then lands on the buffered `done` channel and is
+  discarded with the context. `drainBufferedSummary` rescues it only if it was
+  already buffered at the moment the cancellation was observed, so a late
+  summary is silently lost.
+- Fix direction: extend the `LLMClient` interface (or add an optional
+  `ChatWithContext` assertion) so every client honours the deadline. The test
+  doubles in `compact_reliability_test.go` and `compact_cancel_test.go` would
+  need the new method.
+- Worth checking which real clients are non-`GenericClient` before sizing this.
+
 ## Web: React Compiler trial (deferred from the React 19 upgrade, 2026-09-24)
 
 React 19 itself gave no measurable runtime speedup. The reported production

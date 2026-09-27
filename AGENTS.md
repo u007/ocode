@@ -301,6 +301,28 @@ A post-job doc maintenance worker mirrors memory maintenance:
 3. All mutations go through `knowledge.WithBundleLock` (`docs/.okf.lock`, flock-style).
 4. Worker drains on `Agent.Shutdown()` — drops queued items, finishes the current one.
 
+### Code line anchors in bundle pages drift silently
+Bundle pages cite code as `file.go:123`. **Adding or removing any line ABOVE
+such a citation invalidates it**, and nothing detects this — the page still
+reads as authoritative while pointing at the wrong statement.
+
+- When a change adds/removes lines in a file the bundle cites, **re-derive
+  EVERY anchor on that page**, not just the ones in the section you are editing.
+  A context-agent amendment asked to fix section N will typically re-derive only
+  section N; on 2026-09-27 the same `inactivityContextWithParent` anchor needed
+  fixing twice in one session (1008 → 1045 → 1058) as helpers were added.
+- Verify mechanically rather than by reading: extract every `\w+\.go:\d+` from
+  the page and print the actual source line at each one, then eyeball the whole
+  list. Do not trust a sub-agent's "anchors corrected" list — that is how
+  `compact.go:854-856` and `compact.go:872-874` shipped pointing at the success
+  path and the malformed fallback instead of the two intended sites.
+- Ranges (`820-830`) are as fragile as single lines, and easier to get wrong,
+  because the start line can look plausible while the range covers the wrong
+  block. Check both endpoints.
+- If the context sub-agent wanders (it has been observed drifting into reading
+  `doc_tools.go`'s own source for 40+ minutes without writing), cancel it and do
+  the mechanical correction directly with a verified replace.
+
 ### Relationships
 - **`docs` primary agent** (ModeDocs) has the `task` tool so it can dispatch `context` for knowledge lookups, but has no direct doc tools.
 - **`/doc-sync`** (rules/skills sync) is unrelated — its scope is `AGENTS.md`, rules, skills, never `docs/`.
