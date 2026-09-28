@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -83,7 +84,7 @@ func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message,
 		}
 	}
 
-	keepSet, err := a.judgeRelevanceQuestions(client, "DISCOVERY", "discovery_typesafe", ids, state, questions)
+	keepSet, err := a.judgeRelevanceQuestions(context.Background(), client, "DISCOVERY", "discovery_typesafe", ids, state, questions)
 	if err != nil {
 		return nil, err
 	}

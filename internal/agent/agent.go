@@ -4887,6 +4887,17 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	// Tools that would otherwise return an unbounded result (bash) cap their
 	// output unless this is set. See Agent.RetainFullToolOutput.
 	toolCtx = tool.WithFullOutputRetained(toolCtx, a.RetainFullToolOutput)
+	// Carry the per-agent code-search relevance judge so grep/rgrep/glob filter
+	// their result sets against the caller's intent before rendering. Attached
+	// per call (never on the tool struct) so a sub-agent's judge cannot clobber
+	// the parent's; nil when TypeSafe is not connected, in which case the tools
+	// render unfiltered exactly as before. Gated to the three search tools so
+	// dispatch of any other tool never touches the judge client factory.
+	if name == "grep" || name == "rgrep" || name == "glob" {
+		if judge := a.searchResultJudge(); judge != nil {
+			toolCtx = tool.WithSearchResultJudge(toolCtx, judge)
+		}
+	}
 
 	if err := a.waitToolBatchDelay(toolCtx); err != nil {
 		return "", err

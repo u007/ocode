@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -34,15 +35,20 @@ func (a *Agent) resolveRelevanceJudgeMinConfidence() float64 {
 // Decide call, side-usage recording, the confidence floor, per-candidate
 // fail-open handling, and the debug lines.
 //
+// ctx bounds the round trip. A caller that supplies its own deadline gets that
+// budget (the code-search judge passes searchJudgeTimeout); a caller that passes
+// context.Background() keeps DecideCtx's typesafeRequestTimeout fallback, which
+// is what the discovery and doc_search judges rely on.
+//
 // Fail-open contract (mirrors the pre-existing discovery judge): a
 // transport/decode error returns (nil, err) so the caller keeps every
 // candidate; a missing or non-noul answer keeps that candidate; only a real
 // below-floor noul vetoes. The judge can therefore only ever veto.
-func (a *Agent) judgeRelevanceQuestions(client *TypesafeClient, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, error) {
+func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client *TypesafeClient, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, error) {
 	if len(candidateIDs) == 0 {
 		return map[string]bool{}, nil
 	}
-	resp, err := client.Decide(state, questions)
+	resp, err := client.DecideCtx(ctx, state, questions)
 	if err != nil {
 		return nil, err
 	}
