@@ -68,8 +68,8 @@ func TestRgrepTool_NameAndDefinition(t *testing.T) {
 	}
 	params, _ := def["parameters"].(map[string]any)
 	required, _ := params["required"].([]string)
-	if len(required) != 1 || required[0] != "pattern" {
-		t.Fatalf("expected required [pattern], got %v", required)
+	if len(required) != 2 || required[0] != "pattern" || required[1] != "intent" {
+		t.Fatalf("expected required [pattern intent], got %v", required)
 	}
 }
 

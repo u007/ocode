@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // searchJudgeMaxCandidates is the cost cap on one judge request. Results past
@@ -96,6 +97,24 @@ func runSearchJudge(ctx context.Context, toolName, intent string, query map[stri
 	}
 	kept = append(kept, results[len(send):]...)
 	return searchJudgeOutcome{Kept: kept, Vetoed: vetoed, Judged: len(send), Unjudged: unjudged}
+}
+
+// writeSearchResultBlock renders one file's result in the given output_mode,
+// writing no inter-file separator (the caller owns separators, because grep
+// separates blocks with a blank line and rgrep does not). Content lines are the
+// already-normalized "<line>:<text>" entries; list modes write a single line.
+// grep and rgrep share this so the per-mode shape cannot drift between them.
+func writeSearchResultBlock(b *strings.Builder, mode, path string, count int, lines []string) {
+	switch mode {
+	case "files_with_matches":
+		b.WriteString(path)
+	case "count":
+		b.WriteString(fmt.Sprintf("%s: %d", path, count))
+	case "content":
+		for _, line := range lines {
+			b.WriteString(fmt.Sprintf("%s:%s\n", path, line))
+		}
+	}
 }
 
 // searchJudgeAllVetoedMessage is rendered when every judged result was vetoed.

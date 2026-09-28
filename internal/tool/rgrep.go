@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -118,6 +119,10 @@ func (t *RgrepTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "Optional glob to filter searched files (e.g. *.go, **/*.tsx)",
 				},
+				"intent": map[string]interface{}{
+					"type":        "string",
+					"description": "Required. One sentence stating what you are looking for and why. A relevance judge scores each matching file against this intent and omits files that are clearly out of scope; an empty intent skips that filtering.",
+				},
 				"output_mode": map[string]interface{}{
 					"type":        "string",
 					"enum":        []string{"files_with_matches", "content", "count"},
@@ -128,7 +133,7 @@ func (t *RgrepTool) Definition() map[string]interface{} {
 					"description": "Enable multiline matching where . matches newlines (default: false)",
 				},
 			},
-			"required": []string{"pattern"},
+			"required": []string{"pattern", "intent"},
 		},
 	}
 }
@@ -248,14 +253,48 @@ func (t *RgrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("rgrep failed: %s", rgFirstLines(msg))
 	}
 
-	out := t.format(p, runDir, stdout)
+	// Group rg's output into per-file results, then run the relevance judge
+	// between grouping and formatting. A nil judge leaves the output
+	// byte-identical to before; a failure is disclosed in a footer.
+	results := t.groupResults(p, runDir, stdout)
+
+	judgeResults := make([]SearchResult, len(results))
+	for i, r := range results {
+		judgeResults[i] = SearchResult{Path: r.path, Count: r.count, Summary: strings.Join(r.sample, "\n")}
+	}
+	outcome := runSearchJudge(ctx, "rgrep", p.Intent, map[string]string{
+		"pattern": p.Pattern,
+		"path":    p.Path,
+		"include": p.Include,
+	}, judgeResults)
+
+	if outcome.AllVetoed() {
+		return searchJudgeAllVetoedMessage(outcome.Judged, `"pattern"/"include"`), nil
+	}
+
+	kept := outcome.KeptPaths()
+	var b strings.Builder
+	for _, r := range results {
+		if !kept[r.path] {
+			continue
+		}
+		writeSearchResultBlock(&b, p.OutputMode, r.path, r.count, r.lines)
+		// Content blocks already end with a newline per match; the list modes
+		// need one appended per file (rgrep has no blank-line separator
+		// between files — unlike grep).
+		if p.OutputMode != "content" {
+			b.WriteString("\n")
+		}
+	}
+	out := b.String()
+
 	if stdout.truncated {
 		out += "\n\n[output capped — narrow with \"path\"/\"include\" or a more specific pattern]"
 	}
 	if strings.TrimSpace(out) == "" {
 		return "No matches found", nil
 	}
-	return truncateOutput(strings.TrimRight(out, "\n")), nil
+	return truncateOutput(strings.TrimRight(out, "\n")) + outcome.Footer(), nil
 }
 
 // rgSearchTarget maps a resolved search root to the (cmd.Dir, rg target)
@@ -300,9 +339,39 @@ type rgJSONRecord struct {
 	} `json:"data"`
 }
 
-// format turns rg's output into the shared search-tool display format.
-func (t *RgrepTool) format(p grepParams, runDir string, stdout *cappedBuffer) string {
-	var b strings.Builder
+// rgrepResult is one file's grouped rg output.
+type rgrepResult struct {
+	path  string
+	count int
+	// lines holds content-mode entries as "<line>:<text>" (already truncated to
+	// rgMaxLineLen).
+	lines []string
+	// sample is the first few entries in "L<line>:<text>" form for the judge.
+	sample []string
+}
+
+// groupResults turns rg's raw output into per-file results. It replaces the
+// former per-mode raw re-decode: one pass produces the structured set for the
+// judge, and the shared formatter renders it. Because rg runs with
+// `--sort path`, records for one path are contiguous, so first-appearance order
+// preserves rg's path ordering.
+//
+// It preserves exactly: content-mode per-line truncation at rgMaxLineLen,
+// path ordering, files_with_matches deduplication, and the cappedBuffer
+// truncated-tail behaviour (a content run cut mid-record ignores the
+// incomplete trailing record; a list-mode run keeps a partial trailing line).
+func (t *RgrepTool) groupResults(p grepParams, runDir string, stdout *cappedBuffer) []rgrepResult {
+	var results []rgrepResult
+	index := make(map[string]int)
+	add := func(display string) *rgrepResult {
+		if i, ok := index[display]; ok {
+			return &results[i]
+		}
+		index[display] = len(results)
+		results = append(results, rgrepResult{path: display})
+		return &results[len(results)-1]
+	}
+
 	switch p.OutputMode {
 	case "content":
 		dec := json.NewDecoder(bytes.NewReader(stdout.buf.Bytes()))
@@ -318,7 +387,12 @@ func (t *RgrepTool) format(p grepParams, runDir string, stdout *cappedBuffer) st
 			if len(line) > rgMaxLineLen {
 				line = line[:rgMaxLineLen] + " …[line truncated]"
 			}
-			fmt.Fprintf(&b, "%s:%d:%s\n", rgDisplayPath(rec.Data.Path.Text, p.Path, runDir), rec.Data.LineNumber, line)
+			r := add(rgDisplayPath(rec.Data.Path.Text, p.Path, runDir))
+			r.count++
+			r.lines = append(r.lines, fmt.Sprintf("%d:%s", rec.Data.LineNumber, line))
+			if len(r.sample) < searchJudgeSampleLines {
+				r.sample = append(r.sample, fmt.Sprintf("L%d:%s", rec.Data.LineNumber, line))
+			}
 		}
 	case "count":
 		// rg prints "path:N" per file; reformat to the shared "path: N".
@@ -331,7 +405,10 @@ func (t *RgrepTool) format(p grepParams, runDir string, stdout *cappedBuffer) st
 			if idx < 0 {
 				continue
 			}
-			fmt.Fprintf(&b, "%s: %s\n", rgDisplayPath(line[:idx], p.Path, runDir), line[idx+1:])
+			r := add(rgDisplayPath(line[:idx], p.Path, runDir))
+			if n, convErr := strconv.Atoi(strings.TrimSpace(line[idx+1:])); convErr == nil {
+				r.count = n
+			}
 		}
 	case "files_with_matches":
 		for _, line := range strings.Split(string(stdout.buf.Bytes()), "\n") {
@@ -339,10 +416,10 @@ func (t *RgrepTool) format(p grepParams, runDir string, stdout *cappedBuffer) st
 			if line == "" {
 				continue
 			}
-			b.WriteString(rgDisplayPath(line, p.Path, runDir) + "\n")
+			add(rgDisplayPath(line, p.Path, runDir))
 		}
 	}
-	return b.String()
+	return results
 }
 
 // rgFirstLines bounds an rg stderr blob surfaced in an error.

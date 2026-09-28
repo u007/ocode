@@ -667,16 +667,7 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 			b.WriteString("\n")
 		}
 		first = false
-		switch params.OutputMode {
-		case "files_with_matches":
-			b.WriteString(fr.path)
-		case "count":
-			b.WriteString(fmt.Sprintf("%s: %d", fr.path, fr.count))
-		case "content":
-			for _, line := range fr.lines {
-				b.WriteString(fmt.Sprintf("%s:%s\n", fr.path, line))
-			}
-		}
+		writeSearchResultBlock(&b, params.OutputMode, fr.path, fr.count, fr.lines)
 	}
 
 	if truncated {
