@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,11 +68,34 @@ type TypesafeResponse struct {
 	Usage   TypesafeUsage             `json:"usage"`
 }
 
-// Decide sends state plus typed questions and returns the typed answers.
+// Decide sends state plus typed questions and returns the typed answers, under
+// the fixed typesafeRequestTimeout budget. It is DecideCtx with a Background
+// context, kept for the three high-stakes callers (the permission,
+// auto-continue and relevance judges) whose stakes justify the 30s wait.
 // state may be a string, a JSON object/array, or nil.
 func (c *TypesafeClient) Decide(state any, questions map[string]TypesafeQuestion) (*TypesafeResponse, error) {
+	return c.DecideCtx(context.Background(), state, questions)
+}
+
+// DecideCtx is Decide with a caller-supplied context. The request is built with
+// ctx, so a cancelled context aborts before or while sending, and a context
+// deadline bounds the round trip — the relevance judge's short
+// searchJudgeTimeout budget relies on this. When ctx carries no deadline,
+// typesafeRequestTimeout is applied so a Background caller cannot hang forever;
+// a caller that supplies its own deadline is never extended beyond it.
+//
+// state may be a string, a JSON object/array, or nil.
+func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map[string]TypesafeQuestion) (*TypesafeResponse, error) {
 	if len(questions) == 0 {
 		return nil, errors.New("typesafe: at least one question is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, typesafeRequestTimeout)
+		defer cancel()
 	}
 	body, err := json.Marshal(map[string]any{
 		"state":     state,
@@ -81,7 +105,7 @@ func (c *TypesafeClient) Decide(state any, questions map[string]TypesafeQuestion
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: marshal request: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/systemone", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/systemone", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: build request: %w", err)
 	}
@@ -89,7 +113,10 @@ func (c *TypesafeClient) Decide(state any, questions map[string]TypesafeQuestion
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{Timeout: typesafeRequestTimeout}
+	// No http.Client.Timeout: the request context governs the deadline (with
+	// the fallback applied above), so a per-call budget can shorten it and a
+	// cancelled context aborts the in-flight request.
+	httpClient := &http.Client{}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("typesafe: request failed: %w", err)
