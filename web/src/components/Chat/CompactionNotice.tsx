@@ -2,6 +2,7 @@ import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Archive, ChevronDown, ChevronRight } from "lucide-react";
+import MarkdownLink from "../common/MarkdownLink";
 
 /**
  * Marker prefix for the synthetic system message the agent splices into the
@@ -59,7 +60,7 @@ export default function CompactionNotice({ content }: { content: string }) {
         </button>
         {expanded && body && (
           <div className="mt-2 prose prose-invert prose-sm max-w-none text-sm text-foreground">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{body}</ReactMarkdown>
           </div>
         )}
       </div>

@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Speech playback
-description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction. Updated with espeak-ng data-path length gotcha (2026-09-18).
+description: Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write).
 tags:
   - speech
   - tts
@@ -10,16 +10,10 @@ tags:
   - desktop
   - user-facing
   - DOM-extraction
-timestamp: 2026-09-18T11:27:27Z
+  - speech-summary
+  - fail-open
+timestamp: 2026-09-28T12:57:56Z
 ---
----
-type: Guide
-description: Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction. Updated with espeak-ng data-path length gotcha (2026-09-18).
-tags: [speech, tts, playback, web, desktop, user-facing, DOM-extraction]
-status: active
-okf_version: "0.1"
----
-
 # Speech playback
 
 Speech playback is shared by the web UI and the desktop app because desktop
@@ -54,7 +48,7 @@ embeds the same React application.
   **Supported Python range:**
 
   | Host | Kokoro range | Binding constraint |
-  |------|--------------|---------------------|
+  |------|-------------|---------------------|
   | darwin/arm64, linux/amd64, linux/arm64, windows/amd64 | 3.11–3.13 | kokoro-onnx 0.6.1 declares `Requires-Python <3.14,>=3.10`; onnxruntime 1.30.0 requires >=3.11 |
   | darwin/amd64 | 3.10–3.13 | onnxruntime 1.22.0 ships cp310–cp313 wheels only |
 
@@ -191,6 +185,49 @@ Auto-play applies only to newly completed assistant messages while the chat is
 at the bottom. Browser Native pause, resume, stop, and replay are local to the
 browser tab; duration and seek are intentionally best-effort because browser
 speech implementations do not expose a reliable audio timeline.
+
+## Spoken summaries (fail-open) — updated 2026-09-28
+
+Optional prose rewriting sits between text extraction and synthesis. When the
+speech-summary gate is on (`SpeechSummaryEnabled`, reported by
+`GET /api/config/ocode/speech-summary`), the web layer first asks
+`POST /api/sessions/{id}/speech-summary` to rewrite the extracted text into
+spoken prose using that session's own agent — same credentials, active
+profile and usage attribution as its turns. Settings surfaces: the sidebar
+on/off checkbox, the model picker (`SpeechSummaryModel`) and the speak
+toolbar checkbox; `PUT /api/config/ocode/speech-summary` writes the pair.
+
+**The contract is fail-open: a summary is an optimisation, never a
+prerequisite for speech.** Concretely, since the 2026-09-28 fix:
+
+- **`200 {"summary": ""}` is the "no summary, speak the full text" signal**,
+  not an error. `resolveSpeechText` (`web/src/components/Speech/SpeechProvider.tsx`)
+  returns the original text for an empty or whitespace-only summary *and* for
+  a failed request — a side task failing must never silence speech.
+- **The endpoint degrades immediately while that session's turn is running.**
+  `runTurn` holds the session's `as.mu` for the entire turn, so the handler
+  checks `h.sessions.IsTurnActive(id)` on the (non-blocking) registry first
+  and returns the empty summary instead of queueing behind the turn
+  (`internal/server/handler_speech_summary.go`). Regression:
+  `TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive` — empty summary
+  and zero summariser calls mid-turn, normal summarising afterwards.
+- **The summariser's LLM call is cancellable.** `SummarizeForSpeech` issues
+  the call through `chatWithOptionalContext` so the 60s
+  `speechSummaryTimeout` cancels the in-flight provider request rather than
+  abandoning the wait (`internal/agent/speech_summary.go`). Pinned by
+  `TestSummarizeForSpeechCancelsTheProviderCallOnTimeout`; contextless
+  clients still fall back to `Chat`
+  (`TestSummarizeForSpeechFallsBackToChatForContextlessClients`).
+- **The config PUT does not hold `h.mu` across the disk write.** It reads the
+  pair under `h.mu`, releases it, saves via the cross-process config lock
+  (~5s bound), then re-locks only to update `h.cfg` — `h.mu` is a short-lived
+  map lock, never a work lock.
+
+These are per-request/per-session scopes only: there is **no server-global
+lock** anywhere in the speech path, so a Speak click never stalls other
+sessions or the config/run-state endpoints. Full detail:
+`gotchas/speech-summary-turn-lock-wait.md` and
+`superpowers/specs/2026-09-09-tts-speech-playback-design.md` §10.2.
 
 ## Local-engine rollout requirements (remaining engines)
 

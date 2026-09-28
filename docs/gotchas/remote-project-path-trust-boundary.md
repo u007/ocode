@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary
-description: 'Gotcha: saved remote project paths can enter the local filesystem allowlist — keep host-aware and out of local root validation'
+description: 'Gotcha: remote project paths must not enter the local filesystem trust boundary — now marked Fixed 2026-09-28 with verified anchors.'
 resource: ""
 tags:
   - security
@@ -9,17 +9,28 @@ tags:
   - filesystem
   - trust-boundary
   - server
-timestamp: 2026-09-17T11:02:16Z
+timestamp: 2026-09-28T05:24:48Z
 ---
 # Remote project paths must not enter the local filesystem trust boundary
 
 A saved remote project has two identity components: `(host, path)`. Its `path` is interpreted on the remote machine and must never be treated as a local filesystem root by the local server.
 
-## Confirmed failure mode and exploit chain
+## Status: fixed 2026-09-28
 
-The review confirmed a concrete trust-boundary vulnerability in the current implementation. `internal/server/handler.go:416-430` builds `allowedProjectRoots` from the server workdir and every saved project's `Path`, but does not filter out saved projects whose `Host` is non-empty.
+The exploit chain described below **no longer applies**. The fix:
 
-An attacker or untrusted web client can exploit that by:
+- `allowedProjectRoots` (`internal/server/handler.go:626`) now **skips every saved project with `Host != ""`**, so the local allowlist contains only the server workdir and local (`Host == ""`) project roots.
+- The second path-only allowlist, `isRegisteredProjectRoot` (`internal/server/handler_git.go:156`), had the same bug and was fixed at the same time — it now `continue`s on `proj.Host != ""`, so git/fs-mutation admission (`mutationProjectDir`) ignores remote records too.
+- Regression coverage: `internal/server/remote_project_trust_boundary_test.go` (6 tests, all mutation-verified to fail against the pre-fix code). See "Regression coverage" below.
+- CHANGES.md: "2026-09-28 — Security: a remote project's path is no longer a local filesystem root".
+
+The analysis below is retained as the historical record of the failure mode and the reasoning behind the invariant.
+
+## Confirmed failure mode and exploit chain (historical — fixed 2026-09-28)
+
+The review confirmed a concrete trust-boundary vulnerability in the implementation as it stood at the time. `allowedProjectRoots` (`internal/server/handler.go:626`) builds the allowlist from the server workdir and every saved project's `Path`, but did not filter out saved projects whose `Host` is non-empty — that gap is closed (see "Status: fixed 2026-09-28" above).
+
+An attacker or untrusted web client could exploit that by:
 
 1. Saving or causing a remote project record such as `{host: "example.com", path: "/"}` to exist in the project store.
 2. Letting the shared local-root builder add the remote `/` path to `allowedProjectRoots`.
@@ -37,6 +48,7 @@ The shared `allowedProjectRoots` result is consumed by local filesystem and term
 - `internal/server/handler_open.go`: local file opening through `fileContentRootFor`.
 - `internal/server/handler_secret.go`: directory-wide secret operations through `fileTreeRootFor`.
 - `internal/server/handler_terminal.go`: local `HandleTerminalWS` admission, `resolveTerminalProject`, and project-scoped terminal-process filtering. The no-host branches must never accept a remote record's path as a local root.
+- `internal/server/handler_git.go`: git/fs-mutation admission through `isRegisteredProjectRoot` (`mutationProjectDir`) — the second path-only allowlist, fixed alongside `allowedProjectRoots` on 2026-09-28.
 - `internal/server/handler_remote_proxy.go`: the `/api/remote/{host}/api/{rest...}` reverse proxy route that proxies chat/agent/session traffic to a remote host's `ocode serve --remote`.
 
 Remote project records are created and managed by `internal/server/handler_projects.go`; their identity is `(host, path)`, not `path` alone.
@@ -60,4 +72,11 @@ Keep tests for all of these cases:
 3. The same remote project succeeds only through the registered remote `(host, path)` route, with the expected port/target validation.
 4. A local project and a remote project sharing the same path do not grant or reuse each other's access.
 
-When changing project-root resolution or adding a project-scoped endpoint, review this invariant before reusing `allowedProjectRoots`.
+All four required cases now have tests in `internal/server/remote_project_trust_boundary_test.go` (6 tests, all mutation-verified against the pre-fix code):
+
+- Case 1 → `TestAllowedProjectRootsExcludesRemoteEntries` (remote `/` and `/srv/remote` excluded from the allowlist) and `TestLocalFileTreeRejectsRemoteProjectPath` (host-less file-tree request for a remote-only path → 400).
+- Case 2 → `TestLocalTerminalRejectsRemoteProjectPath` (host-less terminal-history request for a remote-only path → 403; this exercises the same check the websocket path mirrors) and `TestLocalGitStatusRejectsRemoteProjectPath` (host-less git-status → 400).
+- Case 3 → `TestLocalTerminalRejectsRemoteProjectPath` also asserts the registered `host=devbox` `(host, path)` pair is admitted, and `TestIsRegisteredProjectRootExcludesRemote` covers the path-only git/fs gate.
+- Case 4 → `TestSharedPathLocalAndRemoteStayDistinct`.
+
+When changing project-root resolution or adding a project-scoped endpoint, review this invariant before reusing `allowedProjectRoots` or any other path-only allowlist.

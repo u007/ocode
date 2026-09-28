@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:16:43Z
+---
 # Part 06 — `jumpToSession` helper
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
@@ -38,17 +42,17 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 
 ## Steps
 
-- [ ] **Failing tests** with mocked project store:
+- [x] **Failing tests** with mocked project store:
   - cross-project jump calls `selectProject` strictly before
     `openSessionTab`, with host passed;
   - same-project jump still calls both (idempotent) and ends in sessions
     view;
   - `useJumpToPendingAsk` opens the side pane for that session id after the
     tab opens.
-- [ ] Run `cd web && pnpm vitest run src/lib/jumpToSession.test.tsx` → FAIL.
-- [ ] **Implement.**
-- [ ] Run → PASS; `pnpm test && pnpm typecheck`.
-- [ ] **Manual check**: two projects each with a terminal and a browser tab;
+- [x] Run `cd web && pnpm vitest run src/lib/jumpToSession.test.tsx` → FAIL.
+- [x] **Implement.**
+- [x] Run → PASS; `pnpm test && pnpm typecheck`.
+- [x] **Manual check**: two projects each with a terminal and a browser tab;
   jump between their sessions; confirm terminals, browser tabs and side
   pane restore. If any do not, stop and report which store needs a hook.
 - [ ] Commit: `feat(web): add jumpToSession helper for cross-project session jumps`.

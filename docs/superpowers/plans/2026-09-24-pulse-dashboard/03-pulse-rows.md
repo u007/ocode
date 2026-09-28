@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:16:32Z
+---
 # Part 03 — Pure Pulse row builder
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
@@ -45,19 +49,19 @@ running server. The handler (a later part) gathers inputs and calls these.
 
 ## Steps
 
-- [ ] **Write failing table tests** for `derivePulseStatus`, including
+- [x] **Write failing table tests** for `derivePulseStatus`, including
   precedence: pending permission + `Running` → `needs_permission`;
   question + error → `needs_question`.
-- [ ] **Write failing tests** for `derivePulseTask`: each fallback tier,
+- [x] **Write failing tests** for `derivePulseTask`: each fallback tier,
   tool-args truncation at 80 runes (multibyte-safe), needs-you → nil.
-- [ ] **Write failing tests** for `buildPulseRows`: child excluded and
+- [x] **Write failing tests** for `buildPulseRows`: child excluded and
   counted; 23h-old idle included in live, 25h-old idle excluded from live
   but included in all; 8-day-old idle excluded from all; sort order with
   equal `UpdatedAt` tiebroken by id.
-- [ ] **Write failing tests** for `pagePulseRows`: 120 rows at limit 50 →
+- [x] **Write failing tests** for `pagePulseRows`: 120 rows at limit 50 →
   three pages, no duplicates or gaps, last `next` = ""; garbage cursor →
   error.
-- [ ] Run `go test ./internal/server -run TestPulse` → FAIL.
-- [ ] **Implement** the file.
-- [ ] Run → PASS.
+- [x] Run `go test ./internal/server -run TestPulse` → FAIL.
+- [x] **Implement** the file.
+- [x] Run → PASS.
 - [ ] Commit: `feat(server): add pure Pulse row derivation, sort and cursor paging`.

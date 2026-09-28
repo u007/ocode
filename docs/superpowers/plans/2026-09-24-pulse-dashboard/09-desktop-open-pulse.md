@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:15:12Z
+---
 # Part 09 — Desktop: open Pulse from dock / tray
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`

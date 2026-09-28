@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:16:36Z
+---
 # Part 04 — `GET /api/pulse` handler
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
@@ -44,24 +48,24 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 
 ## Steps
 
-- [ ] **Write failing handler tests** (httptest against the handler with a
+- [x] **Write failing handler tests** (httptest against the handler with a
   seeded `SessionManager`): one running, one pending permission, one idle
   errored, one idle 30h old, one child of the running session →
   `scope=live` returns permission first, running with `child_count=1`,
   errored; excludes 30h idle and the child.
-- [ ] Tests for `scope=all` including the 30h session; for `scope=bogus`,
+- [x] Tests for `scope=all` including the 30h session; for `scope=bogus`,
   `limit=0`, `limit=101`, `limit=abc`, bad cursor → 400.
-- [ ] Test: todo file unparsable for one session → still 200, that row has
+- [x] Test: todo file unparsable for one session → still 200, that row has
   `todo: null`, warn logged (assert via the debuglog test hook the package
   already uses, or the log buffer pattern in existing handler tests).
-- [ ] Test: `next_cursor` is JSON `null` on the final page.
-- [ ] Run `go test ./internal/server -run TestHandlePulse` → FAIL.
-- [ ] **Implement**: parse/validate query; gather `PulseInput` per live
+- [x] Test: `next_cursor` is JSON `null` on the final page.
+- [x] Run `go test ./internal/server -run TestHandlePulse` → FAIL.
+- [x] **Implement**: parse/validate query; gather `PulseInput` per live
   entry (reading only the message tail needed for ask detection and last
   assistant line); for `all`, merge disk sessions within 7 days by
   `session_id` with live data winning; call `buildPulseRows` then
   `pagePulseRows`; encode.
-- [ ] Run → PASS; run `go test ./internal/server/...`.
+- [x] Run → PASS; run `go test ./internal/server/...`.
 - [ ] **Measure**: add a benchmark `BenchmarkHandlePulseLive` with ~50 live
   entries; confirm well under 200ms. Time `scope=all` against the real
   local session store once (manual `curl -w '%{time_total}'`) and record

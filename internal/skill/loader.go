@@ -319,6 +319,22 @@ func skillSearchPaths() []string {
 
 // SkillSearchPathsForRoot returns the ordered list of directories searched for
 // skills, using root as the project root (may be empty).
+//
+// Precedence is first-wins-on-directory-name (see loadSkillsFromPaths), so the
+// order below decides which copy of a duplicated skill is served:
+//
+//  1. ~/.config/opencode/skills — ocode's native global dir, and the installer's
+//     write target (see globalSkillsDir), so it must stay first.
+//  2. ~/.agents/skills — shared agent skills tree.
+//  3. ~/.claude/skills — Claude Code's user-global skills dir. Listed after the
+//     two above so an ocode-native copy still wins, but scanned so skills
+//     installed only by Claude Code are discoverable. Project-local
+//     <root>/.claude/skills was already supported (ProjectLocalSkillDirs), so
+//     omitting the user-global counterpart was an asymmetry, not a policy.
+//  4. Project-local dirs, then bundled.
+//
+// Each base root also gets a "<root>/kaizen" entry appended, because
+// loadSkillsFromPaths descends only a single level (<path>/<name>/SKILL.md).
 func SkillSearchPathsForRoot(root string) []string {
 	var paths []string
 
@@ -326,6 +342,7 @@ func SkillSearchPathsForRoot(root string) []string {
 	if err == nil {
 		paths = append(paths, filepath.Join(home, ".config", "opencode", "skills"))
 		paths = append(paths, filepath.Join(home, ".agents", "skills"))
+		paths = append(paths, filepath.Join(home, ".claude", "skills"))
 	}
 
 	if root != "" {

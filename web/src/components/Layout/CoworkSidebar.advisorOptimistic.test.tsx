@@ -3,6 +3,10 @@ import { fireEvent, render, cleanup, screen, waitFor } from "@testing-library/re
 import CoworkSidebar from "./CoworkSidebar";
 import { ChatProvider } from "../../stores/chatStore";
 import { api } from "../../api/client";
+import { EMPTY_COMPACT_CONFIG } from "../../lib/compactConfig";
+import { DEFAULT_SPEECH_SUMMARY_CONFIG } from "../../lib/speechSummaryConfig";
+import type { CompactConfig } from "../../api/client";
+import type { SpeechSummaryConfig } from "../../api/client";
 import { getActionError, resetActionErrors } from "../../lib/actionErrors";
 
 // The advisor toggle must feel instant and must target the ACTIVE chat's
@@ -46,6 +50,17 @@ vi.mock("../../api/client", () => ({
     getDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
     setDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
     // The server still reports the OLD value while the PUT is in flight.
+    // The compaction summary row (CoworkSidebar's "Summary" pair) reads/writes
+    // this block; without it the mount Promise.all throws on the missing method.
+    getCompactConfig: vi.fn(() => Promise.resolve(EMPTY_COMPACT_CONFIG)),
+    setCompactConfig: vi.fn((patch: Partial<CompactConfig>) =>
+      Promise.resolve({ ...EMPTY_COMPACT_CONFIG, ...patch })),
+    // The Summary row reads/writes the speech-summary block; without it the
+    // mount Promise.all throws on the missing method and the effect dies.
+    getSpeechSummaryConfig: vi.fn(() =>
+      Promise.resolve(DEFAULT_SPEECH_SUMMARY_CONFIG)),
+    setSpeechSummaryConfig: vi.fn((patch: Partial<SpeechSummaryConfig>) =>
+      Promise.resolve({ ...DEFAULT_SPEECH_SUMMARY_CONFIG, ...patch })),
     getSessionStatus: vi.fn(() => Promise.resolve({ advisor_enabled: false })),
   },
   apiPath: (p: string) => p,

@@ -290,3 +290,113 @@ func TestHandleAddProjectRemoteTildeNotExpanded(t *testing.T) {
 		t.Errorf("stored path = %q, want ~/webapp", got.Path)
 	}
 }
+
+// Duplicating a local project as remote creates a new (host, path) entry that
+// inherits the display name and group, leaving the local source untouched.
+func TestHandleDuplicateProjectAsRemoteInheritsNameAndGroup(t *testing.T) {
+	h := testProjectHandler(t)
+	if err := h.projects.Add("/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.projects.RenameRef(projects.ProjectRef{Path: "/home/user/app"}, "My App"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.projects.SetGroupRef(projects.ProjectRef{Path: "/home/user/app"}, "work"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := postJSON(t, h, h.HandleDuplicateProjectAsRemote, `{"host":"devbox","path":"/home/user/app","name":"My App","group":"work"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rr.Code, rr.Body.String())
+	}
+	var created projects.Project
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode response: %v (body %s)", err, rr.Body.String())
+	}
+	if created.Host != "devbox" || created.Path != "/home/user/app" {
+		t.Fatalf("created identity = %q:%q, want devbox:/home/user/app", created.Host, created.Path)
+	}
+	if created.Name != "My App" || created.Group != "work" {
+		t.Fatalf("created name/group = %q/%q, want My App/work", created.Name, created.Group)
+	}
+
+	got := projectByRef(t, h, "devbox", "/home/user/app")
+	if got.Name != "My App" || got.Group != "work" {
+		t.Fatalf("stored duplicate = %+v, want name My App in group work", got)
+	}
+	if local := projectByRef(t, h, "", "/home/user/app"); local.Host != "" {
+		t.Fatalf("local source changed: %+v", local)
+	}
+}
+
+// Duplicating onto a target that is already saved is a 409 conflict rather
+// than an upsert (that is HandleAddProject's behavior).
+func TestHandleDuplicateProjectAsRemoteConflict(t *testing.T) {
+	h := testProjectHandler(t)
+	if err := h.projects.AddRemote("devbox", "/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := postJSON(t, h, h.HandleDuplicateProjectAsRemote, `{"host":"devbox","path":"/home/user/app"}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s, want 409", rr.Code, rr.Body.String())
+	}
+	if got := len(h.projects.List()); got != 1 {
+		t.Fatalf("list length = %d, want 1 (no entry added on conflict)", got)
+	}
+}
+
+// Missing host/path and malformed targets are rejected before any write.
+func TestHandleDuplicateProjectAsRemoteValidation(t *testing.T) {
+	h := testProjectHandler(t)
+
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"missing host", `{"path":"/p"}`, http.StatusBadRequest},
+		{"missing path", `{"host":"devbox"}`, http.StatusBadRequest},
+		{"invalid target", `{"host":"bad/host","path":"/p"}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := postJSON(t, h, h.HandleDuplicateProjectAsRemote, tc.body)
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, body = %s, want %d", rr.Code, rr.Body.String(), tc.want)
+			}
+		})
+	}
+	if got := len(h.projects.List()); got != 0 {
+		t.Fatalf("list length = %d, want 0 (no entry added on validation failure)", got)
+	}
+}
+
+// The duplicate endpoint must resolve through the server mux, not only the
+// handler method: a handler that exists but was never registered in
+// registerRoutes would 404/405 the client (the models-favorite routes had
+// exactly that bug).
+func TestDuplicateProjectAsRemoteRouteRegistered(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	s := New("localhost:0", "", "", nil)
+	store, err := projects.NewStoreAt(t.TempDir() + "/projects.json")
+	if err != nil {
+		t.Fatalf("projects.NewStoreAt: %v", err)
+	}
+	s.handler.projects = store
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		http.MethodPost,
+		"/api/projects/duplicate",
+		strings.NewReader(`{"host":"devbox","path":"/home/user/app","name":"My App","group":"work"}`),
+	)
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/projects/duplicate status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	if got := len(store.List()); got != 1 {
+		t.Fatalf("list length = %d, want 1 (route did not reach the handler)", got)
+	}
+}

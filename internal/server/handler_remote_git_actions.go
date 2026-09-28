@@ -182,7 +182,7 @@ func (h *Handler) remoteGitHunk(w http.ResponseWriter, r *http.Request, host str
 			writeError(w, http.StatusBadRequest, "cannot "+req.Action+" an untracked file")
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitWorkspace(ctx, rw))
+		writeRemoteGitWorkspace(w, ctx, rw)
 		return
 	}
 
@@ -229,7 +229,7 @@ func (h *Handler) remoteGitHunk(w http.ResponseWriter, r *http.Request, host str
 		writeError(w, http.StatusBadRequest, "git apply failed (the file may have changed): "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, remoteGitWorkspace(ctx, rw))
+	writeRemoteGitWorkspace(w, ctx, rw)
 }
 
 // remoteIsUntrackedPath is isUntrackedPath over the transport.
@@ -260,7 +260,7 @@ func remoteGitApply(ctx context.Context, rw remoteWork, opts []string, patch str
 		cmd.Stdin = strings.NewReader(patch)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
-		if err := runWithContext(ctx, cmd); err != nil {
+		if err := runWithContext(ctx, rw.Target, cmd); err != nil {
 			msg := strings.TrimSpace(stderr.String())
 			if msg == "" {
 				msg = err.Error()
@@ -302,7 +302,7 @@ func (h *Handler) remoteGitStashApply(w http.ResponseWriter, r *http.Request, ho
 		writeError(w, http.StatusInternalServerError, "git stash restore failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, remoteGitWorkspace(r.Context(), rw))
+	writeRemoteGitWorkspace(w, r.Context(), rw)
 }
 
 // remoteRestoreStashPaths is restoreStashPaths over the transport: untracked

@@ -237,3 +237,34 @@ func TestConsultPermissionModelTypesafeOutgoingNetworkRule(t *testing.T) {
 		}
 	}
 }
+
+// TestConsultPermissionModelTypesafeAllowedPrefixesInState proves the user's
+// bash allow rules travel to Jev (so a path-qualified call to a trusted tool,
+// which the literal static matcher misses, is judged with that trust in view)
+// and that the rubric tells Jev what the field means. Deny rules stay in
+// banned_command_prefixes only.
+func TestConsultPermissionModelTypesafeAllowedPrefixesInState(t *testing.T) {
+	a, h := newTypesafeJudge(t, typesafeChoiceReply("allow", 0.95))
+	a.permissions.SetBashPrefixRule("vp", PermissionAllow)
+	a.permissions.SetBashPrefixRule("git push", PermissionAllow)
+	a.permissions.SetBashPrefixRule("git rebase", PermissionDeny)
+	a.consultPermissionModel("bash", json.RawMessage(`{"command":"./node_modules/.bin/vp test run"}`), nil)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.body["state"].(map[string]any)
+	got, _ := state["allowed_command_prefixes"].([]any)
+	if len(got) != 2 || got[0] != "git push" || got[1] != "vp" {
+		t.Fatalf("allowed_command_prefixes = %v, want sorted [git push vp]", state["allowed_command_prefixes"])
+	}
+	instr, _ := h.body["questions"].(map[string]any)["verdict"].(map[string]any)["instructions"].(string)
+	if !strings.Contains(instr, "allowed_command_prefixes") {
+		t.Fatalf("verdict instructions do not explain allowed_command_prefixes")
+	}
+	// Trusted path forms are resolved in code (trustedToolBasename) before the
+	// judge runs; only untrusted paths reach Jev, so the rubric must not extend
+	// the trust to them.
+	if !strings.Contains(instr, "called by a path (e.g. /tmp/x/vp) is NOT covered") {
+		t.Fatalf("verdict instructions must exclude path-qualified binaries from allowed_command_prefixes trust")
+	}
+}

@@ -5,6 +5,7 @@ import { api } from "../../api/client";
 import MermaidViewer from "./MermaidViewer";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
 import FileEditor from "../Files/FileEditor";
+import MarkdownLink from "../common/MarkdownLink";
 
 function extractMermaid(md: string): string | null {
   const m = md.match(/```mermaid\s+([\s\S]*?)```/);
@@ -206,7 +207,7 @@ export default function MarkdownViewer({
         </div>
       )}
       <div ref={ref} onScroll={handleScroll} className="prose prose-sm prose-invert max-w-none min-h-0 flex-1 overflow-auto p-3 select-text">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{md}</ReactMarkdown>
       </div>
       {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}
     </div>

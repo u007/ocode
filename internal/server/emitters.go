@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"log"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -119,7 +120,7 @@ func (h *Handler) startWatchEmitters() {
 var gitStatusFn = gitStatusForDir
 
 // forEachGitStatusConcurrently computes a status for every project in
-// projects in its own goroutine, invoking yield(project, status) on the
+// projects in its own goroutine, invoking yield(project, status, err) on the
 // CALLER's goroutine as each result arrives. It deliberately does not collect
 // all results first and return: a project whose git is slow — gitStatusForDir
 // is bounded by gitStatusTimeout, but that can still be seconds — must not
@@ -130,23 +131,25 @@ var gitStatusFn = gitStatusForDir
 // unsynchronised state (the emitter's lastGit map) without a lock. The result
 // channel is buffered to len(projects), so a producer never blocks even if the
 // consumer returns early and no goroutine is stranded.
-func forEachGitStatusConcurrently(projects []string, yield func(project string, status GitStatus)) {
+func forEachGitStatusConcurrently(projects []string, yield func(project string, status GitStatus, err error)) {
 	if len(projects) == 0 {
 		return
 	}
 	type gitResult struct {
 		project string
 		status  GitStatus
+		err     error
 	}
 	results := make(chan gitResult, len(projects))
 	for _, p := range projects {
 		go func(p string) {
-			results <- gitResult{project: p, status: gitStatusFn(p)}
+			status, err := gitStatusFn(p)
+			results <- gitResult{project: p, status: status, err: err}
 		}(p)
 	}
 	for range projects {
 		r := <-results
-		yield(r.project, r.status)
+		yield(r.project, r.status, r.err)
 	}
 }
 
@@ -158,7 +161,8 @@ func forEachGitStatusConcurrently(projects []string, yield func(project string, 
 func (h *Handler) watchEmittersLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	lastGit := make(map[string]string) // project -> serialised GitStatus
+	lastGit := make(map[string]string)    // project -> serialised GitStatus
+	lastGitErr := make(map[string]string) // project -> last logged status error
 	lastSpending := ""
 	idleFor := time.Duration(0)
 	ticks := 0
@@ -185,7 +189,23 @@ func (h *Handler) watchEmittersLoop() {
 		// Recompute the due projects in parallel: yield runs on this goroutine,
 		// so lastGit and the bus keep single-writer semantics, while one slow
 		// project can no longer delay every other project's git_status.
-		forEachGitStatusConcurrently(due, func(p string, status GitStatus) {
+		forEachGitStatusConcurrently(due, func(p string, status GitStatus, err error) {
+			// A failed probe publishes nothing: an empty status would tell
+			// every viewer the repo is clean. Logged once per distinct error
+			// (this runs every 10s per viewed project), not every poll.
+			if err != nil {
+				if lastGitErr[p] != err.Error() {
+					lastGitErr[p] = err.Error()
+					slog.Warn("git status emitter: status failed", "project", p, "err", err)
+				}
+				// Mark the project known so it is retried on the 10s cadence,
+				// not re-probed every 1s tick as a never-seen project.
+				if _, known := lastGit[p]; !known {
+					lastGit[p] = ""
+				}
+				return
+			}
+			delete(lastGitErr, p)
 			data, _ := json.Marshal(status)
 			if string(data) != lastGit[p] {
 				lastGit[p] = string(data)
@@ -197,6 +217,11 @@ func (h *Handler) watchEmittersLoop() {
 		for p := range lastGit {
 			if !seen[p] {
 				delete(lastGit, p)
+			}
+		}
+		for p := range lastGitErr {
+			if !seen[p] {
+				delete(lastGitErr, p)
 			}
 		}
 

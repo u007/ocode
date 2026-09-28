@@ -163,6 +163,31 @@ var registry = []stack{
 			{kind: markerFile, glob: "*/*/*.pdf"},
 		},
 	},
+	{
+		// Word documents to edit: OOXML .docx and legacy binary .doc (edited
+		// after conversion). Same depth limit as pdf.
+		id: "docx",
+		markers: []marker{
+			{kind: markerFile, glob: "*.docx"},
+			{kind: markerFile, glob: "*/*.docx"},
+			{kind: markerFile, glob: "*/*/*.docx"},
+			{kind: markerFile, glob: "*.doc"},
+			{kind: markerFile, glob: "*/*.doc"},
+			{kind: markerFile, glob: "*/*/*.doc"},
+		},
+	},
+	{
+		// PowerPoint decks to edit: .pptx and legacy binary .ppt.
+		id: "pptx",
+		markers: []marker{
+			{kind: markerFile, glob: "*.pptx"},
+			{kind: markerFile, glob: "*/*.pptx"},
+			{kind: markerFile, glob: "*/*/*.pptx"},
+			{kind: markerFile, glob: "*.ppt"},
+			{kind: markerFile, glob: "*/*.ppt"},
+			{kind: markerFile, glob: "*/*/*.ppt"},
+		},
+	},
 }
 
 // Detect returns the sorted ids of every known stack the repo at root uses.

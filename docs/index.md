@@ -11,7 +11,7 @@ okf_version: 0.1
 - [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
 - [Scheduled Jobs / Cron Dispatch](scheduled-jobs.md) - Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics.
 - [Session Title Generation & UI Update Root Cause Analysis](title-generation-analysis.md) - Root cause analysis of session title delay/mismatch between generation and UI rendering, covering regex anchoring, Anthropic thinking blocks, and rendering cycle timing.
-- [Speech playback](tts-speech-playback.md) - Speech playback — user-facing doc covering engine availability, installation, playback controls, and DOM-based rendered-text extraction. Updated with espeak-ng data-path length gotcha (2026-09-18).
+- [Speech playback](tts-speech-playback.md) - Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write).
 - [Terminal History Persistence and Restore](terminal-history-persistence-and-restore.md) - Accurate guide to ocode's terminal history persistence and restore mechanism, aligning with source implementation
 - [Using ocode with Zed](zed.md) - Setup guide and feature matrix for integrating ocode with the Zed editor via ACP (Agent Client Protocol).
 - [Zed-compatible ACP Mode Specification](acp-zed-spec.md) - Approved architecture spec for implementing 'ocode acp' using the Agent Client Protocol, enabling ocode as a Zed editor agent.
@@ -30,8 +30,10 @@ okf_version: 0.1
 
 - [Advisor Claude Code CLI backend on web/desktop](concepts/advisor-claude-code-backend.md) - How the web/desktop advisor model picker exposes Claude Code CLI models via a sentinel provider, how claude_code is derived from the provider on PUT /api/advisor, and the picker parity with the TUI.
 - [Auto-Permission Enforced Categories](concepts/auto-permission-enforced-categories.md) - Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, and the opaque-floor override for truncated_or_unknown.
+- [Code-Search Relevance Judge](concepts/code-search-relevance-judge.md) - TypeSafe/Jev relevance judge for grep/rgrep/glob — per-file judging against a required intent, carried on the tool-execution context, fail-open with disclosed footers. As-built record (v1 landed 2026-09-28); `list` deferred.
 - [Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification](concepts/compaction-config.md) - Amended 2026-09-27: runSummary cancel-vs-timeout label split (summaryContextErr), completed-summary drain race (usableSummary), rewritten §4 classification + strengthened §7 sentinel invariant.
 - [Cross-process session activity sync (revision revalidation)](concepts/cross-process-session-sync.md) - How the web/desktop UI converges on session transcript changes made by another ocode server process (desktop + make dev + TUI) via an opaque stored-transcript revision token and a 15s revalidation poll.
+- [Discovery Corpus Cache](concepts/discovery-corpus-cache.md) - BuildCorpusCached persists the per-model discovery corpus to corpus-<model>.json with a cross-instance filelock: why a machine-global corpus needs one (process-local warming cannot coordinate), lock-free fast probe, re-check+write in one critical section, ErrCorpusLocked skip with zero edits outside internal/discovery, corpusLockWaitFor deadline clamp + 1ms floor, the pidlock fixed-port asymmetry, and the five cache_lock_test.go pins.
 - [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md) - Why the MCP tool gate (discoveryAllows) never fails open: the names-only index vs. callable schema split, the single surviving escape, the cold-turn zero-tools contract, the failed-Select rules, the judged attach paths, turn-tail capture, and the debug lines to check.
 - [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) - Amended to record discover_more as a second judged attach path (identical fail-open matrix, shared veto counter, turn-tail snapshot, veto-all reply) and to separate the corpus-warm gate from the judge's fail-open.
 - [Discovery Web Surfaces](concepts/discovery-web-surfaces.md) - Discovery visibility in the web UI: live transient notices via SSE and runtime status endpoint, with map-race safety rule.
@@ -44,6 +46,7 @@ okf_version: 0.1
 - [PDF viewer zoom, Space navigation, and find](concepts/pdf-viewer-zoom-find.md) - PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas.
 - [Per-Chat MCP Toggle](concepts/per-chat-mcp-toggle.md) - Per-chat MCP server on/off toggle in the web/desktop chat sidebar: session-scoped list/toggle, process-wide persist + per-session override, and the mcpCache rebuild gotcha.
 - [Persistent per-session shell for exclamation-mark commands](concepts/persistent-shell-session.md) - How the web/desktop composer's exclamation-mark commands run in a persistent pty-backed interactive shell per chat tab, with prompt-hook marker framing, pty cleanliness, lifecycle, and the one-shot fallback.
+- [Pulse — cross-project live-sessions dashboard](concepts/pulse-dashboard.md) - Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, jump sequence, entry points (no client router), desktop wiring, and known limits.
 - [Remote MCP OAuth Compatibility](concepts/remote-mcp-oauth-compat.md) - Implemented remote MCP OAuth compatibility: dual-schema mcp-auth.json reads with merge-safe writes, URL-bound token attachment, RFC 9728/8414 discovery refresh with a single retry, status-before-decode HTTP errors, CLI list status fix; per-chat toggle/cache semantics unchanged.
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI and tab reveal, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
@@ -56,11 +59,6 @@ okf_version: 0.1
 - [Web List-Dialog Keyboard Navigation](concepts/web-list-dialog-keyboard-navigation.md) - Shipped shared list-navigation helper/hook and its six web dialog integrations: keys, focus contract, per-surface preservation, deferred surfaces, tests.
 - [Web tab loading indicators](concepts/web-tab-loading-indicators.md) - Concept: keyed tab loading indicators in the web UI — identity, store, guards, wiring, and the independent Git badge poll.
 - [Web UI Global Keyboard Shortcuts](concepts/web-keyboard-shortcuts.md) - Concept: web UI keyboard shortcuts
-
-# docs
-
-- [Embedded HTR Extension and Managed Daemon Design](docs/superpowers/specs/2026-09-09-embedded-htr-extension-design.md) - Design for embedding the HTR NControl extension and a platform-matched htrcli daemon in ocode's managed Chrome flow, including the HTTP lifecycle API exposed from Settings > Browser.
-- [Session-tagged snapshot: override base fields but recompute ALL derived fields](docs/gotchas/session-snapshot-stale-derived-fields.md) - Durable rule: every session-tagged TUIStatus snapshot must pin MainModel/CWD AND recompute derived fields (ModelPrompt) — overriding without recomputing leaves stale .OCODE.md/Kaizen banner in the web sidebar. (deprecated)
 
 # gotchas
 
@@ -105,12 +103,14 @@ tags:
   - zshrc
   - login shell
 resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_build.go; internal/config/user_path.go; main.go; cmd/ocode-desktop/main.go
+- [Desktop webview has no Wails event system — shell→page signals must use ExecJS + DOM CustomEvent](gotchas/desktop-shell-webview-no-wails-events.md) - Desktop webview is served over plain http:// (embed.FS), so Wails window._wails/EmitEvent never exist — shell→page signals must use win.ExecJS + DOM CustomEvent with a React receiver.
+- [Desktop webview uses HTTPS + HTTP/2 to escape the six-connection cap](gotchas/desktop-webview-http2.md) - Gotcha: the desktop webview loads https://127.0.0.1:PORT (per-launch self-signed cert pinned in-app) so it negotiates HTTP/2; plain HTTP stays on the same port via first-byte TLS sniffing; one-time localStorage migration from the old http origin.
 - [Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures)](gotchas/terminal-wheel-scroll-chaining.md) - Wheel gestures over the terminal that xterm.js cannot use (scrollback at an edge, deltaY===0) escape to the browser and scroll the whole app window instead of the terminal. Fixed with a container-level non-passive wheel guard + overscroll-contain on the terminal container and overscroll-behavior:none on html/body.
 - [Embedded Browser — WebSocket Proxy 404](gotchas/embedded-browser-websocket-proxy-404.md) - Gotcha: WebSocket connections through the embedded browser proxy fail with 404 during handshake due to missing or unreachable upgrade path in the browse server.
 - [espeak-ng N_PATH_HOME buffer truncates long data paths → exit(1)](gotchas/kokoro-espeak-ng-path-limit.md) - espeak-ng N_PATH_HOME buffer truncates long data paths, causing silent fallback to CI-baked path and exit(1) — Kokoro speech fails on deep cache layouts
 - [FilePicker.test.tsx Stale Build Status — Corrected](gotchas/filepicker-stale-todo.md) - Stale TODO item: FilePicker.test.tsx now has no user-event import and build passes
 - [Files Tab Auto-Previews Binary/Office Formats (Preview-Only Routing)](gotchas/files-tab-preview-only-routing copy.md) - The web Files-tab editor auto-routes PDF, Word/PowerPoint/Excel, and image files to the shared preview surface instead of Monaco; preview-only paths also skip the /api/files/content fetch, and the external-change watchers must stay in sync with that skip. Includes the .doc/.ppt OS-open fallback and divergence from the 2026-09-10 preview design spec. (deprecated)
-- [Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)](gotchas/files-tab-preview-only-routing.md) - 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus MD/MDX, HTML, SVG, CSV/TSV, and Mermaid Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary.'
+- [Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)](gotchas/files-tab-preview-only-routing.md) - 'Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary.'
 - [Files tab: directory expansion persists across project switches — but only after the fix](gotchas/files-tab-tree-expansion-persistence.md) - Why tree expansion was lost on project switch/restart and how it is now persisted (and why missing folders no longer break it).
 - [Files-Tab OS-Native Reveal (Open/Show in Finder/Explorer/File Manager)](gotchas/files-tab-os-native-reveal.md) - Gotcha: OS-native reveal for Files-tab — per-platform argv, the remote-project guard, Linux DBus path, and the directory-mode status-code gotcha (404 vs 400).
 - [Foreground Bash Commands — Parent-Death Protection Before Start](gotchas/foreground-bash-parent-death-protection.md) - Foreground POSIX Bash commands must be wrapped with WrapWithParentMonitor before cmd.Start() to ensure promotion to background does not orphan processes; the monitor must be applied at spawn time, not at promotion time.
@@ -126,6 +126,9 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [macOS Headless Chrome Freezes on Page-Unhandled Keys (nativeVirtualKeyCode)](gotchas/chrome-headless-mac-key-redispatch-freeze.md) - Gotcha: in the embedded Chrome tab, a second Escape/Tab/Enter or a letter typed outside an input froze the whole browser process (all tabs, screencast, every CDP call) until a real mouse move. Cause: Input.dispatchKeyEvent with nativeVirtualKeyCode makes Chrome re-dispatch unhandled keys to its hidden AppKit window, which blocks in SLSObscureCursor.
 - [Main model pick also sets the global default](gotchas/main-model-pick-also-sets-global-default.md) - Picking a main model in the sidebar writes it globally; resolution order, persistence, and caveats.
 - [MDX Preview: Rendered as Markdown, Never Evaluated](gotchas/mdx-preview-not-evaluated.md) - Gotcha: MDX preview renders as Markdown (never evaluates JS for security); editor uses Monaco mdx grammar, preview uses markdown kind.
+- [Monaco's WebKit clipboard workaround spams NotAllowedError and lags every keystroke](gotchas/monaco-webkit-clipboard-workaround.md) - In the Wails/WKWebView desktop shell, Monaco installs a click+keydown document.body listener that calls navigator.clipboard.write on every event. The write is denied, so every click and keystroke logs NotAllowedError (editor.api-*.js) and pays a pasteboard IPC round-trip — console spam plus input lag that makes chat feel like it hangs.
+- [Mutation-check false verdicts: compile-broken mutants and equivalent mutants](gotchas/mutation-check-false-caught.md) - Two mutation-check verdict traps: compile-broken mutants misreported as CAUGHT (gate on go build, classify INVALID) and equivalent mutants misreported as coverage misses (replace with genuine semantic mutations); plus the expired-context regression test for corpusLockWaitFor.
+- [Mutation-check: mutants must compile; filelock non-positive timeout = 10s default](gotchas/mutation-check-mutants-must-compile.md) - Two mutation-check findings: a mutant that only breaks compilation is a false-positive kill (compile-check before tests, classify non-compiling mutants INVALID), and filelock treats non-positive timeouts as the 10s package default, so corpusLockWaitFor must floor at a positive wait. Cross-references concepts/discovery-corpus-cache.md for the underlying lock design.
 - [ONNX Runtime POSIX telemetry writes `:memory:.ses` into process cwd](gotchas/onnx-runtime-telemetry-memory-ses.md) - ONNX Runtime POSIX telemetry writes `:memory:.ses` device-id sidecar into process cwd
 - [opencode-go per-model protocol routing & Anthropic tool schema flatness](gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md) - Retry policy updated: 500 and thinking-mode 400 now retried
 - [PATH Shadowing Can Bypass Sandbox Discovery](gotchas/shell-sandbox-path-shadowing.md) - Gotcha: PATH-based sandbox-exec/bwrap discovery can be shadowed by user-writable executables, requiring hardening to prevent security bypasses.
@@ -137,7 +140,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Updated gotcha: blanket OS temp auto-permission is now a deliberate v1.8.0 policy, not an unresolved regression. Historical v1.5.0 tightening preserved.
 - [Plugin Install Rollback Bug](gotchas/plugin-install-rollback-bug.md) - Security gotcha: failed plugin installs leave stale directories and orphaned MCP registrations due to incorrect path handling in deferred cleanup.
 - [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
-- [Port forwards Disable/Enable: URL composed past query + supervisor retained-terminal collision](gotchas/port-forwards-url-composition-and-supervisor-restart.md) - Two bugs broke Port forwards Disable/Enable: URL helper returned query-terminated string callers appended path segments onto (port landed inside project param), and process supervisor retained terminal records blocking stable-ID restart. Includes the test blind spot where widget API mocks can never catch malformed URLs.
+- [Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor](gotchas/port-forwards-url-composition-and-supervisor-restart.md) - Three defects broke the Port forwards panel: a URL helper returned a query-terminated string that callers appended path segments onto (the port landed inside the project param); the process supervisor retained terminal records, blocking stable-ID restart; and — added 2026-09-28 — a dead `ssh -N -L` child stayed reported live forever because nobody performed its Wait, so Disable→Enable could not revive it. Documents the forwardProcess reaper + SetOnExit hook, the portMapWatchdog restart policy (15s→60s exponential backoff, 30s settle window, give-up after 8 failures, event-driven wake + 10s safety tick), and the deliberate limitation that "live" only means the ssh child is running, not that the service behind the forward answers. Includes the test blind spot where widget API mocks can never catch malformed URLs.
 - [Profile switch does not affect an already-open chat session (window-id divergence)](gotchas/profile-switch-window-id-divergence.md) - Selecting a profile in the ProfileSwitcher did not reflect on an already-open chat session — the session kept using base credentials. Root cause: the window id was re-derived independently per API call after SPA navigation stripped the URL param, so the pill targeted `main` while chat requests minted a fresh random window id the server had no profile bound to.
 - [Project scoping is visibility, not mounting — React key remounts](gotchas/project-scope-is-mounting-not-visibility.md) - "Project switching used to reset an open PDF/Office preview because App filtered editor panes by visibility (unmounting them) and PreviewHost was keyed on the active tab id. Fix: keep panes mounted and hide with CSS; persist per-file viewer state across remounts; pane shell state is now per-session (side:chat:<id> / side:term:<id>, v2)."
 - [Project/Endpoint Isolation — one project must never halt another](gotchas/project-endpoint-isolation.md) - Gotcha: one project endpoint must never halt another — Handler.mu map-only invariant, per-item deadlines in shared loops, and the git-status emitter isolation fix.
@@ -146,7 +149,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [React 19 upgrade — act() timing in tests and the skipLibCheck dependency](gotchas/react-19-upgrade-test-timing-and-typings.md) - React 19's async act() can yield to macrotasks, so tests that race an async effect or jsdom's rAF clock go flaky; dnd-kit 6 / monaco-react typings still need skipLibCheck
 - [Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract)](gotchas/remote-git-shell-quoting.md) - Free-form git messages passed to remoteGitCommand must be shell-quoted by the caller; pathspecs from remoteSafeSpec must not be.
-- [Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary](gotchas/remote-project-path-trust-boundary.md) - Gotcha: saved remote project paths can enter the local filesystem allowlist — keep host-aware and out of local root validation
+- [Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary](gotchas/remote-project-path-trust-boundary.md) - Gotcha: remote project paths must not enter the local filesystem trust boundary — now marked Fixed 2026-09-28 with verified anchors.
 - [Remote SSH chat ignored the desktop active profile — proxy silent on window→profile mapping](gotchas/remote-ssh-chat-profile-not-applied.md) - A desktop profile with a custom key (e.g. opencode-go) applied to local chats but ignored on remote SSH projects — the remote kept using the base key despite the profile's key being synced to the host.
 - [Remote SSH terminal 502s from provisioning and path bugs](gotchas/remote-terminal-502-provisioning.md) - Three reproduced root causes of remote SSH terminal 502s: binary not activated after upload, SSH launch command not detached, and tilde project paths not expanded on the host for terminal endpoints. Plus a bonus stale-registration fix.
 - [Remote Terminal Custom Port Omitted from WebSocket](gotchas/remote-terminal-custom-port-omitted.md) - TerminalPanel propagates remotePort for history restoration but omits it from the live WebSocket connection, breaking non-default SSH port routing.
@@ -155,17 +158,21 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Sandbox Writable-Root Must Exist on Disk](gotchas/sandbox-writable-root-must-exist.md) - Gotcha: a writable root that does not exist on disk is silently skipped by the sandbox — but a tool that needs to CREATE that root will hit EPERM unless a parent directory is writable
 - [Seatbelt Profile Test Coverage Gap](gotchas/seatbelt-profile-test-coverage-gap.md) - Seatbelt profile addition for /dev/null and /dev/tty now has test coverage: TestSeatbeltProfileGrantsDeviceNodes, TestSeatbeltAllowsDevNullDiscard, TestSeatbeltDeniesDevTTYFreshOpen added plus pre-existing profile tests in profile_darwin_test.go. Coverage gap closed.
 - [Session Storage Critical Issues](gotchas/session-storage-critical-issues.md) - Critical issues discovered in session storage code review
+- [Session-scoped config helpers must pass the session's remote host](gotchas/remote-session-config-host-routing.md) - Session-scoped config helpers in web/src/api/client.ts must pass the session's remote host so they route to /api/remote/<host>/…; omitting it writes the local server's config and the remote sidebar refetch shows no change.
 - [Session-tagged snapshot: override base fields but recompute ALL derived fields](gotchas/session-snapshot-stale-derived-fields.md) - Durable rule: every session-tagged TUIStatus snapshot must pin MainModel/CWD AND recompute derived fields (ModelPrompt) — overriding without recomputing leaves stale .OCODE.md/Kaizen banner in the web sidebar.
 - [Shared tabs.json is written by every ocode server process — whole-map replace dropped projects](gotchas/shared-tabs-json-multi-writer-clobber.md) - Multiple ocode server processes share one tabs.json. A whole-map PUT on a debounced write clobbered another process's projects; the fix is merge + explicit empty-list deletion under a cross-process file lock.
 - [Shell Execution Must Set cmd.Dir to Agent Workdir](gotchas/shell-sandbox-working-directory-not-set.md) - Gotcha: shell execution must set cmd.Dir to the agent/session workdir for both foreground and background commands, not relying on inherited process cwd.
 - [Side Pane StateKey Convention: Per-Session Scoping](gotchas/side-pane-statekey-convention.md) - "The right-hand Browser/Preview side pane's open state and previewed shell state are keyed per session surface (`side:chat:<id>` / `side:term:<id>`), not per project. Opening the pane in one chat never opens it in another; returning to a session restores its own pane state. When a session id changes (new chat → real ses_ id, or /reset-id), the pane state is rekeyed to follow it."
 - [Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill](gotchas/skill-tool-test-fixture-gap.md) - expectedBuiltinTools in tool_test.go only lists "skill" but InitBuiltinTools also registers "load_skill" as a second alias, causing a stale test failure.
 - [Speech Rendered Text Extraction — DOM, Not Markdown Source](gotchas/speech-rendered-text-extraction.md) - New gotcha: speech text must be extracted from rendered DOM, not markdown source, to avoid audible formatting markers and lost block breaks.
+- [Speech summary is fail-open: skip while the turn holds as.mu, cancellable summariser, unlocked config write](gotchas/speech-summary-turn-lock-wait.md) - Speech-summary endpoint is fail-open: skips summarising while the session's turn holds as.mu (empty summary → web speaks full text), the summariser's LLM call is cancellable by its 60s timeout, and the config PUT releases h.mu around the cross-process config write.
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
 - [Terminal close semantics and OSC title source](gotchas/terminal-close-and-osc-title.md) - Close-vs-detach-vs-app-exit matrix, ghost-socket disposed flag, OSC title parsing and fallback chain for remote terminal rows.
 - [Terminal find bar stuck on "No matches"](gotchas/terminal-find-stuck-no-matches.md) - SearchAddon find() throws because allowProposedApi was unset on the xterm Terminal.
 - [TTS License Acceptance Must Validate the Exact License Text Hash](gotchas/tts-license-acceptance-hash-validation.md) - TTS license acceptance must validate engine and exact license text/hash instead of trusting client-supplied or synthetic metadata.
+- [TUI copy over SSH never reaches the local clipboard — route every copy through OSC 52 (`copyToClipboard`)](gotchas/tui-clipboard-remote-ssh-osc52.md) - A TUI that copies via a local clipboard utility (pbcopy/xclip/xsel/wl-copy) silently fails on a remote SSH host; route every TUI copy through copyToClipboard → tea.SetClipboard (OSC 52) with the local utility as fallback.
+- [TUI Input Queueing Behind a ! Shell Command — Gates That Only Knew About Streaming](gotchas/tui-input-queueing-behind-shell-command.md) - Input-queue gates only checked m.streaming, so text typed during a ! shell command fell into the 1.5s debounce and fired at the LLM while the shell ran; the queue also never drained on shellFinishedMsg. Four fixes (including drainReplacementQueueIfReady) + shellInFlight() helper + an invariant stated as a named-gate checklist.
 - [TUI Leaves Mouse Tracking On After Silent Exit — Diagnose via tui-crash.log](gotchas/tui-mouse-garbage-after-idle-crash-log.md) - After long idle with two TUI instances, the shell prompt appeared under the still-visible frame and every mouse move printed "35;14;1M" garbage. No panic, no zsh job message, no resume summary. Root cause unconfirmed; fd 2 is now mirrored to ~/.local/share/ocode/logs/tui-crash.log with tty job-control state so the next occurrence self-reports.
 - [TUI Selection Context Lost on Double Preparation](gotchas/tui-selection-context-lost-on-double-preparation.md) - Confirmed regression: Agent.Step re-prepares TUI-prepared messages with an empty selection and removes the existing [ocode:selection] context.
 - [TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions](gotchas/tui-skipllm-is-not-a-render-gate.md) - Gotcha: renderTranscript in internal/tui/model.go used skipLLM as a "should this render?" predicate, hiding assistant output (fake-agent replies, cron deliveries, LLM errors) on fresh sessions where every message was transient or a user echo. Fix: gate on transient + isCommandHistoryMessage only; skipLLM must never drive rendering.
@@ -187,6 +194,9 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/conduct/scores/deepseek-v4-flash.md](okf/conduct/scores/deepseek-v4-flash.md)
 - [okf/conduct/scores/deepseek-v4.1-flash.md](okf/conduct/scores/deepseek-v4.1-flash.md)
 - [okf/conduct/scores/glm-5.3-flash.md](okf/conduct/scores/glm-5.3-flash.md)
+- [okf/conduct/scores/longcat-2.5-preview-free.md](okf/conduct/scores/longcat-2.5-preview-free.md)
+- [okf/conduct/scores/longcat-2.5-preview-free.rerun.md](okf/conduct/scores/longcat-2.5-preview-free.rerun.md)
+- [okf/conduct/scores/longcat-2.5-preview-free.with-skill.md](okf/conduct/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
 - [okf/conduct/scores/muse-spark-1.2.md](okf/conduct/scores/muse-spark-1.2.md)
 - [okf/conduct/scores/space-bunny-free.md](okf/conduct/scores/space-bunny-free.md)
@@ -198,21 +208,45 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/csharp/derived/csharp.space-bunny-free.SKILL.md](okf/csharp/derived/csharp.space-bunny-free.SKILL.md) - Corrective C# knowledge for space-bunny-free, targeting the nullable-reference-type / value-vs-reference / record gaps this model showed on the closed-book csharp benchmark (record class positional members are init-only by default, value-type vs reference-type defaults, the `!!` parameter-null-check that never shipped).
 
 - [okf/csharp/scores/glm-5.3-flash.md](okf/csharp/scores/glm-5.3-flash.md)
+- [okf/csharp/scores/longcat-2.5-preview-free.md](okf/csharp/scores/longcat-2.5-preview-free.md)
 - [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
 - [okf/csharp/scores/muse-spark-1.2.md](okf/csharp/scores/muse-spark-1.2.md)
 - [okf/csharp/scores/space-bunny-free.md](okf/csharp/scores/space-bunny-free.md)
 - [okf/csharp/scores/space-bunny-free.with-skill.md](okf/csharp/scores/space-bunny-free.with-skill.md)
 - [okf/csharp/scores/tencent__hy3.md](okf/csharp/scores/tencent__hy3.md)
+- [okf/docx/derived/docx.deepseek-v4.1-flash.SKILL.md](okf/docx/derived/docx.deepseek-v4.1-flash.SKILL.md) - Corrective Word-editing guidance for deepseek-v4.1-flash: what is left to do after removing a table row, and how to replace one picture without touching shared image parts or leaving the old image in the package.
+
+- [okf/docx/derived/docx.glm-5.3-flash.SKILL.md](okf/docx/derived/docx.glm-5.3-flash.SKILL.md) - Corrective Word-editing guidance for glm-5.3-flash: cell.text wipes paragraph formatting too, doc.add_table already sets widths, field totals are cached, carrying a vMerge restart down, and removing the old image relationship after a picture swap.
+
+- [okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md](okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md) - Corrective Word-editing guidance for mimo-v2.6-flash: field results are cached (Word does not recompute SUM(ABOVE) on open), what row deletion and value changes need afterwards, the real python-docx call for replacing one picture and when its old relationship may go, and shading new column cells like their row.
+
+- [okf/docx/derived/docx.space-bunny-free.SKILL.md](okf/docx/derived/docx.space-bunny-free.SKILL.md) - Corrective Word-editing guidance for space-bunny-free: what doc.add_table, add_row and add_column really set for widths, making a new table match an existing one, inserting a column across merged cells, and replacing one picture without touching others that share its image part.
+
+- [okf/docx/scores/deepseek-v4.1-flash.md](okf/docx/scores/deepseek-v4.1-flash.md)
+- [okf/docx/scores/deepseek-v4.1-flash.with-skill.md](okf/docx/scores/deepseek-v4.1-flash.with-skill.md)
+- [okf/docx/scores/glm-5.3-flash.md](okf/docx/scores/glm-5.3-flash.md)
+- [okf/docx/scores/mimo-v2.6-flash.md](okf/docx/scores/mimo-v2.6-flash.md)
+- [okf/docx/scores/mimo-v2.6-flash.with-skill.md](okf/docx/scores/mimo-v2.6-flash.with-skill.md)
+- [okf/docx/scores/space-bunny-free.md](okf/docx/scores/space-bunny-free.md)
+- [okf/docx/scores/space-bunny-free.with-skill.md](okf/docx/scores/space-bunny-free.with-skill.md)
+- [okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md](okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md) - Corrective .NET HttpClient/resilience guidance for longcat-2.5-preview-free: why a single static HttpClient goes stale on DNS, why caching a factory-created client defeats handler rotation, HandlerLifetime vs PooledConnectionLifetime, and the current Microsoft.Extensions.Http.Resilience API (AddStandardResilienceHandler) instead of invented Polly helpers.
+
 - [okf/dotnet/scores/glm-5.3-flash.md](okf/dotnet/scores/glm-5.3-flash.md)
+- [okf/dotnet/scores/longcat-2.5-preview-free.md](okf/dotnet/scores/longcat-2.5-preview-free.md)
+- [okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md](okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
 - [okf/dotnet/scores/muse-spark-1.2.md](okf/dotnet/scores/muse-spark-1.2.md)
 - [okf/dotnet/scores/space-bunny-free.md](okf/dotnet/scores/space-bunny-free.md)
 - [okf/dotnet/scores/tencent__hy3.md](okf/dotnet/scores/tencent__hy3.md)
+- [okf/elixir/derived/elixir.longcat-2.5-preview-free.SKILL.md](okf/elixir/derived/elixir.longcat-2.5-preview-free.SKILL.md) - Corrective Elixir knowledge for longcat-2.5-preview-free, targeting its pattern-matching gaps: `=` as a match (not assignment), what happens when no function clause matches, and what guards may contain.
+
 - [okf/elixir/derived/elixir.space-bunny-free.SKILL.md](okf/elixir/derived/elixir.space-bunny-free.SKILL.md) - Corrective Elixir knowledge for space-bunny-free, targeting the pipe / with gaps this model showed on the closed-book elixir benchmark (why pipelines exist, what a failed `with` clause returns, and how to pipe into a non-first argument).
 
 - [okf/elixir/derived/elixir.tencent__hy3.SKILL.md](okf/elixir/derived/elixir.tencent__hy3.SKILL.md) - Corrective Elixir knowledge for tencent/hy3, targeting the pattern-matching gaps this model showed on the closed-book elixir benchmark (guard restrictions, the FunctionClauseError / MatchError failure modes, and the "match is not assignment" framing).
 
 - [okf/elixir/scores/glm-5.3-flash.md](okf/elixir/scores/glm-5.3-flash.md)
+- [okf/elixir/scores/longcat-2.5-preview-free.md](okf/elixir/scores/longcat-2.5-preview-free.md)
+- [okf/elixir/scores/longcat-2.5-preview-free.with-skill.md](okf/elixir/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/elixir/scores/mimo-v2.5.md](okf/elixir/scores/mimo-v2.5.md)
 - [okf/elixir/scores/muse-spark-1.2.md](okf/elixir/scores/muse-spark-1.2.md)
 - [okf/elixir/scores/space-bunny-free.md](okf/elixir/scores/space-bunny-free.md)
@@ -220,28 +254,66 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/elixir/scores/tencent__hy3.md](okf/elixir/scores/tencent__hy3.md)
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
 - [okf/golang/scores/glm-5.3-flash.md](okf/golang/scores/glm-5.3-flash.md)
+- [okf/golang/scores/longcat-2.5-preview-free.md](okf/golang/scores/longcat-2.5-preview-free.md)
 - [okf/golang/scores/mimo-v2.5.md](okf/golang/scores/mimo-v2.5.md)
 - [okf/golang/scores/muse-spark-1.2.md](okf/golang/scores/muse-spark-1.2.md)
 - [okf/golang/scores/space-bunny-free.md](okf/golang/scores/space-bunny-free.md)
 - [okf/golang/scores/tencent__hy3.md](okf/golang/scores/tencent__hy3.md)
 - [okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md](okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md) - Corrective NestJS guidance for the exact area mimo-v2.5 tests weak on (shutdown/lifecycle hook order and triggers). Loaded only in NestJS repos when this exact model is active.
 - [okf/nestjs/scores/glm-5.3-flash.md](okf/nestjs/scores/glm-5.3-flash.md)
+- [okf/nestjs/scores/longcat-2.5-preview-free.md](okf/nestjs/scores/longcat-2.5-preview-free.md)
 - [okf/nestjs/scores/mimo-v2.5.md](okf/nestjs/scores/mimo-v2.5.md)
 - [okf/nestjs/scores/muse-spark-1.2.md](okf/nestjs/scores/muse-spark-1.2.md)
 - [okf/nestjs/scores/space-bunny-free.md](okf/nestjs/scores/space-bunny-free.md)
 - [okf/nestjs/scores/tencent__hy3.md](okf/nestjs/scores/tencent__hy3.md)
+- [okf/nextjs/derived/nextjs.longcat-2.5-preview-free.SKILL.md](okf/nextjs/derived/nextjs.longcat-2.5-preview-free.SKILL.md) - Corrective Next.js App Router guidance for the exact areas longcat-2.5-preview-free tests weak on (data-fetching, metadata). Loaded only in Next.js repos when this exact model is active.
 - [okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md](okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md) - Corrective Next.js App Router guidance for the exact area mimo-v2.5 tests weak on (metadata). Loaded only in Next.js repos when this exact model is active.
 - [okf/nextjs/scores/glm-5.3-flash.md](okf/nextjs/scores/glm-5.3-flash.md)
+- [okf/nextjs/scores/longcat-2.5-preview-free.md](okf/nextjs/scores/longcat-2.5-preview-free.md)
+- [okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md](okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/nextjs/scores/mimo-v2.5.md](okf/nextjs/scores/mimo-v2.5.md)
 - [okf/nextjs/scores/muse-spark-1.2.md](okf/nextjs/scores/muse-spark-1.2.md)
 - [okf/nextjs/scores/space-bunny-free.md](okf/nextjs/scores/space-bunny-free.md)
 - [okf/nextjs/scores/tencent__hy3.md](okf/nextjs/scores/tencent__hy3.md)
+- [okf/pdf/derived/pdf.deepseek-v4.1-flash.SKILL.md](okf/pdf/derived/pdf.deepseek-v4.1-flash.SKILL.md) - Corrective PDF-editing guidance for deepseek-v4.1-flash: what PyMuPDF's apply_redactions actually removes by default, deleting a table row without duplicating the rows you move, what insert_textbox does when text doesn't fit, removing the old table before a re-layout, paint order for new tables, anchoring inserted images to real content, deduplicating repeated images, and matching header style in new columns.
+
+- [okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md](okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md) - Corrective PDF-editing guidance for glm-5.3-flash: PyMuPDF's apply_redactions removes covered table rules and shading by default, painting boxes is not removal, redact before you move a region, where insert_text puts the baseline, growing and re-laying tables without broken rules, replace_image is global, and scripts must check return values.
+
+- [okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md](okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md) - Corrective PDF-editing guidance for mimo-v2.6-flash: PyMuPDF's real apply_redactions defaults and constants, keeping a cell's rules and shading, moving regions without duplicates, APIs that do not exist, subset fonts, rotated-page coordinates, and image replace/dedup details.
+
+- [okf/pdf/derived/pdf.space-bunny-free.SKILL.md](okf/pdf/derived/pdf.space-bunny-free.SKILL.md) - Corrective PDF-editing guidance for space-bunny-free: move table regions as vectors (show_pdf_page clip), never as rasters; PyMuPDF's real apply_redactions defaults; insert_textbox's negative return; baseline placement; bold flag bits and subset-font glyph coverage; image reuse and overlay; rotated-page coordinates; relayout and make-room procedures.
+
+- [okf/pdf/scores/deepseek-v4.1-flash.md](okf/pdf/scores/deepseek-v4.1-flash.md)
+- [okf/pdf/scores/deepseek-v4.1-flash.with-skill.md](okf/pdf/scores/deepseek-v4.1-flash.with-skill.md)
+- [okf/pdf/scores/glm-5.3-flash.md](okf/pdf/scores/glm-5.3-flash.md)
+- [okf/pdf/scores/glm-5.3-flash.with-skill.md](okf/pdf/scores/glm-5.3-flash.with-skill.md)
+- [okf/pdf/scores/mimo-v2.6-flash.md](okf/pdf/scores/mimo-v2.6-flash.md)
+- [okf/pdf/scores/mimo-v2.6-flash.with-skill.md](okf/pdf/scores/mimo-v2.6-flash.with-skill.md)
+- [okf/pdf/scores/space-bunny-free.md](okf/pdf/scores/space-bunny-free.md)
+- [okf/pdf/scores/space-bunny-free.with-skill.md](okf/pdf/scores/space-bunny-free.with-skill.md)
 - [okf/php/scores/glm-5.3-flash.md](okf/php/scores/glm-5.3-flash.md)
+- [okf/php/scores/longcat-2.5-preview-free.md](okf/php/scores/longcat-2.5-preview-free.md)
 - [okf/php/scores/mimo-v2.5.md](okf/php/scores/mimo-v2.5.md)
 - [okf/php/scores/muse-spark-1.2.md](okf/php/scores/muse-spark-1.2.md)
 - [okf/php/scores/space-bunny-free.md](okf/php/scores/space-bunny-free.md)
 - [okf/php/scores/tencent__hy3.md](okf/php/scores/tencent__hy3.md)
+- [okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md](okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md) - Corrective pptx-editing guidance for deepseek-v4.1-flash: locate tables by header text with a unique-row assert, python-pptx merge and placeholder API facts, XML row add/delete with run-preserving fills, totals and frame height, drop_rel on shared images, verification, and legacy .ppt round-trip.
+
+- [okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md](okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md) - Corrective pptx-editing guidance for glm-5.3-flash: locate tables by header text (searching groups) with a unique-row assert, drop replaced image rels safely (drop_rel does not see r:embed), sync the graphic frame height after XML row edits, and re-band explicit row fills.
+
+- [okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md](okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md) - Corrective pptx-editing guidance for mimo-v2.6-flash: locate tables by header text and assert a unique matching row, python-pptx has no row/column add or delete API (deepcopy/remove the a:tr), sync the frame and totals, content placeholders lack insert_table, drop_rel ignores r:embed, and verify content rather than structure.
+
+- [okf/pptx/derived/pptx.space-bunny-free.SKILL.md](okf/pptx/derived/pptx.space-bunny-free.SKILL.md) - Corrective pptx-editing guidance for space-bunny-free: locate tables by header text with a unique-row assert, python-pptx merge and placeholder model, widening merged cells when inserting a column, and syncing the frame height.
+
+- [okf/pptx/scores/deepseek-v4.1-flash.md](okf/pptx/scores/deepseek-v4.1-flash.md)
+- [okf/pptx/scores/deepseek-v4.1-flash.with-skill.md](okf/pptx/scores/deepseek-v4.1-flash.with-skill.md)
+- [okf/pptx/scores/glm-5.3-flash.md](okf/pptx/scores/glm-5.3-flash.md)
+- [okf/pptx/scores/mimo-v2.6-flash.md](okf/pptx/scores/mimo-v2.6-flash.md)
+- [okf/pptx/scores/mimo-v2.6-flash.with-skill.md](okf/pptx/scores/mimo-v2.6-flash.with-skill.md)
+- [okf/pptx/scores/space-bunny-free.md](okf/pptx/scores/space-bunny-free.md)
+- [okf/pptx/scores/space-bunny-free.with-skill.md](okf/pptx/scores/space-bunny-free.with-skill.md)
 - [okf/python/scores/glm-5.3-flash.md](okf/python/scores/glm-5.3-flash.md)
+- [okf/python/scores/longcat-2.5-preview-free.md](okf/python/scores/longcat-2.5-preview-free.md)
 - [okf/python/scores/mimo-v2.5.md](okf/python/scores/mimo-v2.5.md)
 - [okf/python/scores/muse-spark-1.2.md](okf/python/scores/muse-spark-1.2.md)
 - [okf/python/scores/space-bunny-free.md](okf/python/scores/space-bunny-free.md)
@@ -249,41 +321,56 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/react/derived/react.claude-opus-4-8.SKILL.md](okf/react/derived/react.claude-opus-4-8.SKILL.md) - Corrective React guidance for the exact areas claude-opus-4-8 tests weak on (RSC boundaries, Suspense, refs). Loaded only in React repos when this exact model is active.
 - [okf/react/scores/claude-opus-4-8.md](okf/react/scores/claude-opus-4-8.md)
 - [okf/react/scores/glm-5.3-flash.md](okf/react/scores/glm-5.3-flash.md)
+- [okf/react/scores/longcat-2.5-preview-free.md](okf/react/scores/longcat-2.5-preview-free.md)
 - [okf/react/scores/mimo-v2.5.md](okf/react/scores/mimo-v2.5.md)
 - [okf/react/scores/muse-spark-1.2.md](okf/react/scores/muse-spark-1.2.md)
 - [okf/react/scores/space-bunny-free.md](okf/react/scores/space-bunny-free.md)
 - [okf/react/scores/tencent__hy3.md](okf/react/scores/tencent__hy3.md)
 - [okf/ror/derived/ror.mimo-v2.5.SKILL.md](okf/ror/derived/ror.mimo-v2.5.SKILL.md) - Corrective Rails migrations/schema guidance for the exact gaps mimo-v2.5 tests weak on — the purpose of the schema.rb/structure.sql dump, and the two classic dangerous-migration patterns on large production tables (locking column defaults/NOT NULL, and index builds). Loaded only in Rails repos when this exact model is active.
 - [okf/ror/scores/glm-5.3-flash.md](okf/ror/scores/glm-5.3-flash.md)
+- [okf/ror/scores/longcat-2.5-preview-free.md](okf/ror/scores/longcat-2.5-preview-free.md)
 - [okf/ror/scores/mimo-v2.5.md](okf/ror/scores/mimo-v2.5.md)
 - [okf/ror/scores/muse-spark-1.2.md](okf/ror/scores/muse-spark-1.2.md)
 - [okf/ror/scores/space-bunny-free.md](okf/ror/scores/space-bunny-free.md)
 - [okf/ror/scores/tencent__hy3.md](okf/ror/scores/tencent__hy3.md)
 - [okf/ruby/scores/glm-5.3-flash.md](okf/ruby/scores/glm-5.3-flash.md)
+- [okf/ruby/scores/longcat-2.5-preview-free.md](okf/ruby/scores/longcat-2.5-preview-free.md)
 - [okf/ruby/scores/mimo-v2.5.md](okf/ruby/scores/mimo-v2.5.md)
 - [okf/ruby/scores/muse-spark-1.2.md](okf/ruby/scores/muse-spark-1.2.md)
 - [okf/ruby/scores/space-bunny-free.md](okf/ruby/scores/space-bunny-free.md)
 - [okf/ruby/scores/tencent__hy3.md](okf/ruby/scores/tencent__hy3.md)
 - [okf/rust/derived/rust.glm-5.3-flash.SKILL.md](okf/rust/derived/rust.glm-5.3-flash.SKILL.md) - Corrective Rust async knowledge for glm-5.3-flash, targeting the one gap this model showed on the closed-book rust benchmark: it describes the effects of async (futures need a runtime; blocking starves tasks) without stating the underlying mechanism (std ships no executor; scheduling is cooperative and yields only at `.await`).
 
+- [okf/rust/derived/rust.longcat-2.5-preview-free.SKILL.md](okf/rust/derived/rust.longcat-2.5-preview-free.SKILL.md) - Corrective Rust async knowledge for longcat-2.5-preview-free: state the underlying mechanism of async behavior (std ships no executor; values held across `.await` live in the future's state machine; scheduling is cooperative and yields only at `.await`), not only its effects.
+
 - [okf/rust/derived/rust.space-bunny-free.SKILL.md](okf/rust/derived/rust.space-bunny-free.SKILL.md) - Corrective Rust async knowledge for space-bunny-free, targeting the one gap this model showed on the closed-book rust benchmark: it explains the effects of async (a runtime is needed; a blocking call stalls the worker) without stating the underlying mechanism (std ships no executor; scheduling is cooperative and a task yields only at `.await`).
 
 - [okf/rust/scores/glm-5.3-flash.md](okf/rust/scores/glm-5.3-flash.md)
+- [okf/rust/scores/longcat-2.5-preview-free.md](okf/rust/scores/longcat-2.5-preview-free.md)
+- [okf/rust/scores/longcat-2.5-preview-free.with-skill.md](okf/rust/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
 - [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
 - [okf/rust/scores/space-bunny-free.md](okf/rust/scores/space-bunny-free.md)
 - [okf/rust/scores/space-bunny-free.with-skill.md](okf/rust/scores/space-bunny-free.with-skill.md)
 - [okf/rust/scores/tencent__hy3.md](okf/rust/scores/tencent__hy3.md)
+- [okf/tanstack/derived/tanstack.longcat-2.5-preview-free.SKILL.md](okf/tanstack/derived/tanstack.longcat-2.5-preview-free.SKILL.md) - Corrective TanStack Query + Router knowledge for longcat-2.5-preview-free, targeting query-keys (deterministic key hashing, per-key cache state, hierarchy for broad AND precise invalidation), router-loaders (router context as a typed tree-threaded object carrying the QueryClient, loaderDeps, preload respecting caching) and router-search (loaderDeps vs validateSearch, reading via useSearch(), untrusted-URL rationale, compile-time propagation) and router-typesafety (typed useLoaderData, the full typed navigation surface, refactors surfacing at every call site).
+
 - [okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md](okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md) - Corrective TanStack Router knowledge for mimo-v2.5, targeting the router-search gaps this model showed on the closed-book tanstack benchmark (reading search params via useSearch(), loaderDeps for search-driven loaders, and the type-safety surface useSearch() gets from validateSearch).
 
 - [okf/tanstack/scores/glm-5.3-flash.md](okf/tanstack/scores/glm-5.3-flash.md)
+- [okf/tanstack/scores/longcat-2.5-preview-free.md](okf/tanstack/scores/longcat-2.5-preview-free.md)
+- [okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md](okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/tanstack/scores/mimo-v2.5.md](okf/tanstack/scores/mimo-v2.5.md)
 - [okf/tanstack/scores/muse-spark-1.2.md](okf/tanstack/scores/muse-spark-1.2.md)
 - [okf/tanstack/scores/space-bunny-free.md](okf/tanstack/scores/space-bunny-free.md)
 - [okf/tanstack/scores/tencent__hy3.md](okf/tanstack/scores/tencent__hy3.md)
+- [okf/vbnet/derived/vbnet.longcat-2.5-preview-free.SKILL.md](okf/vbnet/derived/vbnet.longcat-2.5-preview-free.SKILL.md) - Corrective VB.NET guidance for the exact area longcat-2.5-preview-free tests weak on (WithEvents/Handles vs AddHandler/RemoveHandler event wiring). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md](okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md) - Corrective VB.NET guidance for the exact area mimo-v2.5 tests weak on (WithEvents/Handles vs AddHandler/RemoveHandler event wiring). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md](okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md) - Corrective VB.NET guidance for the exact area muse-spark-1.2 tests weak on (WithEvents/Handles and AddHandler/RemoveHandler event-wiring edge cases). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/scores/glm-5.3-flash.md](okf/vbnet/scores/glm-5.3-flash.md)
+- [okf/vbnet/scores/longcat-2.5-preview-free.md](okf/vbnet/scores/longcat-2.5-preview-free.md)
+- [okf/vbnet/scores/longcat-2.5-preview-free.rerun.md](okf/vbnet/scores/longcat-2.5-preview-free.rerun.md)
+- [okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md](okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/vbnet/scores/mimo-v2.5.md](okf/vbnet/scores/mimo-v2.5.md)
 - [okf/vbnet/scores/muse-spark-1.2.md](okf/vbnet/scores/muse-spark-1.2.md)
 - [okf/vbnet/scores/space-bunny-free.md](okf/vbnet/scores/space-bunny-free.md)
@@ -292,8 +379,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 # superpowers
 
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
-- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/03-vault-api.md)
@@ -302,23 +389,38 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/06-handler-api.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/07-web-api.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
+- [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
 - [Browser Password Vault — Phase 1 Implementation Plan](superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md) - Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).
 - [Chat Verbosity Display — Design Spec](superpowers/specs/2026-09-24-chat-verbosity-display-design.md) - Approved design spec for chat verbosity display, implemented 2026-09-25 (local web/desktop SPA only): chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Design record with as-built status notes.
+- [Code-Search Relevance Judge (v1)](superpowers/specs/2026-09-28-code-search-relevance-judge-design.md) - Approved design spec (awaiting implementation): extend the doc_search TypeSafe/Jev relevance judge to the code-search tools grep/rgrep/glob — per-file judging carried on the execution context, required intent argument, 4s DecideCtx budget, 40-candidate cap, vetoes disclosed in output footers. `list` deferred per user decision 2026-09-28.
+- [Code-Search Relevance Judge Implementation Plan](superpowers/plans/2026-09-28-code-search-relevance-judge.md) - Approved implementation plan for extending the TypeSafe/Jev relevance judge to grep/rgrep/glob behind a required intent argument (tasks 1–8).
 - [Cross-Client Compaction Indicator — Design Spec](superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md) - Implemented design spec for server-authoritative, session-scoped compaction indicator visible across clients (SSE events + /state reconcile), rev 3: monotonic compaction_generation on both lifecycle events and /state, client-side stale-done generation guard for out-of-lock publish reordering, compaction_error only for real failure/timeout with a live client (cancellation clears silently), plus overlap-safe counter, stale /state request-version guard, and older-server compatibility.
 - [Deferred, durable message rewind for ocode Web/Desktop](superpowers/specs/2026-09-25-deferred-session-rewind-design.md) - Design spec for deferred, durable message rewind in ocode Web/Desktop — IMPLEMENTED: server pending_rewinds resource + endpoints, commit-before-202 turn path (resident/no-resident/TUI /rc), localStorage recovery and cancel, lost-response probe.
 - [Delayed Chat Input Consolidation](superpowers/specs/2026-09-09-chat-input-consolidation-design.md)
 - [Design Spec: Reliable Large-Context Compaction (web/desktop /compact)](superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md) - Design spec for reliable large-context /compact on web/desktop (2026-09-25); IMPLEMENTED — per-batch first-token/idle windows, fixed 30-min cap, context-scoped delta callback, ErrCompactionTimeout→504, sticky inline + app-wide web errors.
+- [Duplicate Project as Remote (SSH/WSL)](superpowers/specs/2026-09-28-duplicate-project-as-remote-design.md) - Design record: duplicate any project row into a new remote (SSH/WSL) entry via create-only POST /api/projects/duplicate and Store.DuplicateAsRemote.
 - [Embedded Browser Password Vault — Design](superpowers/specs/2026-09-24-browser-password-vault-design.md) - Approved-for-planning design for a Bitwarden-like password vault in ocode's embedded browser (full browser tab + sidebar). Server-side Go crypto: Argon2id-derived KEK wrapping a random AES-256-GCM data key; per-item blobs sealed whole with the item id as AAD; file at <GlobalDataDir>/browse/vault.json (0600). Per-surface unlock (UX-only, not a security boundary). Autofill in local iframe mode via capture.js and in Chrome/CDP mode via vaultFill/vaultCollect + Page.addScriptToEvaluateOnNewDocument observer + Runtime.addBinding. New Settings > Passwords page. Phased: vault core+API+settings, then local autofill, then Chrome autofill.
+- [Embedded HTR Extension and Managed Daemon Design](superpowers/specs/2026-09-09-embedded-htr-extension-design.md) - Design for embedding the HTR NControl extension and a platform-matched htrcli daemon in ocode's managed Chrome flow, including the HTTP lifecycle API exposed from Settings > Browser.
 - [Last-dispatched model in the status bar — design](superpowers/specs/2026-09-25-last-dispatched-model-status-design.md) - Implemented design spec: per-session last-dispatched model shown in the web/desktop bottom status bar, captured from every dispatch-acknowledging 202 (send, command/continue, retry, permission/question continuation, rewind) plus turn_started.model as the headless server-event fallback; all bridged RC response branches report RCBridge.ModelForDispatch (live TUIStatus.MainModel with registration Model fallback) while the browser captures only async 202 dispatch acknowledgements; rewind 202 reports the queued job's model; StatusBar renders only lastDispatchedModel and never falls back to snap.main_model (absent until first dispatch).
 - [Laya as a local permission / auto-continue judge — evaluation](superpowers/specs/2026-09-22-laya-local-judge-evaluation.md) - Measured evaluation (2026-09-22) of the Laya System-1 model (3 checkpoints) as a local replacement for typesafe/jev-latest in the auto-permission and auto-continue judges: memory/latency per checkpoint, context budgets, and accuracy on 16 real bash tool calls + 13 real transcript tails pulled from ocode sessions. Verdict: not usable zero-shot; fine-tune or cascade required.
 - [List Dialog Keyboard Navigation — Design Spec](superpowers/specs/2026-09-25-list-dialog-keyboard-navigation-design.md) - Approved design spec for shared Up/Down keyboard navigation across web list-based popup dialogs (ModelDialog, SessionDialog, DirectoryBrowser, QuestionDialog, and phase-2 selector popovers): shared reducer/hook, per-dialog contracts, a11y, testing, docs impact.
 - [Local Speech-to-Text (In-App Dictation) — Design](superpowers/specs/2026-09-21-speech-to-text-design.md) - Design spec for adding local, offline speech-to-text dictation to ocode: mic button in chat composer, Settings surface for engine/model selection, reusing internal/tts machinery.
 - [Makefile Version Bump Targets (up-patch / up-minor) — Design Spec](superpowers/specs/2026-09-24-make-version-bump-targets-design.md) - Approved design spec for Makefile up-patch/up-minor version bump targets with POSIX-shell helper.
 - [Multi-Use Preview — Design Spec (Draft, 2026-09-10)](superpowers/specs/2026-09-10-preview-multipurpose-design.md) - Decision: Historical draft for sidebar PreviewHost + session Preview sub-tab, updated 2026-09-21 for .mdx support in extension lists.
+- [Part 01 — Per-session todo reader and todo_updated event](superpowers/plans/2026-09-24-pulse-dashboard/01-todo-reader-and-event.md) - Part 01 of the Pulse dashboard implementation plan; TDD steps ticked, commit left unticked (no commit exists yet).
 - [Part 03 — Async Bootstrap, Turn State Machine, Reconcile & Status Endpoints](superpowers/plans/2026-08-12-multiproject-event-architecture/03-async-bootstrap-turn-state.md) - Updated Task 4 and constraint: turn_heartbeat must fire for ALL turnActive=true states (runTurn, permission-resolve, question-answer continuations), not just main runTurn turns. Shipped follow-up: ask resolve endpoints now follow the same persist-then-202 async contract via dispatchAskContinuation.
 - [Part 05 — Frontend Status on Activation + Streaming Watchdog](superpowers/plans/2026-08-12-multiproject-event-architecture/05-frontend-status-streaming.md) - Clarified that turn-active for the 30s stall watchdog includes permission-resolve and question-answer continuation Steps, not just runTurn.
 - [Per-Session Sidebar Models and Toggles](superpowers/specs/2026-09-18-per-session-sidebar-settings-design.md) - Design spec for making every chat-session sidebar model pick and on/off toggle per session (durable, server-side, full TUI parity), instead of one process-global config value shared by every chat.
 - [Plan: Tab Loading Indicators](superpowers/plans/2026-09-24-tab-loading-indicators.md) - Implementation plan for keyed tab loading indicators (Files/Git/Cron/Assets + session Changes).
+- [Pulse — cross-project live sessions dashboard](superpowers/specs/2026-09-24-pulse-dashboard-design.md) - Approved design spec for the Pulse cross-project live-sessions dashboard, implemented 2026-09-28, with as-shipped amendment notes recorded inline: activeView value "pulse" instead of a route (no client router), a ProjectSidebar main menu instead of a pinned tab entry, no dock-badge click (Wails v3 dock service is display-only; gap tracked in TODO.md; shipped entries are a Dashboard app-menu item and a tray Open Pulse), todo_updated published from the server tool-result broadcast and deliberately excluded from live frames, scope=all metadata-only cost with an unmeasured budget, and TitleForDir single-row title reads.
 - [Remote Persistent Sessions and Terminals Design](superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md) - Approved design: remote (SSH/WSL) project terminals run inside the host ocode serve --remote and survive laptop sleep/restart; version-mismatched remote servers are reused, surfaced, and restartable; sidebar lists remote chats and terminals for reattach.
 - [Remote-project port forwards in the web/desktop UI](superpowers/specs/2026-09-16-remote-project-port-forwards-design.md) - Design for restoring the Port forwards button so it works for the active remote SSH project (project-scoped /api/portmaps routes, per-project ssh -L forwards)
 - [Reopen a locally hidden question dialog](superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md) - Implemented design spec: locally hide the QuestionDialog via X/Escape with request-ID-scoped hidden state and reopen it from the transcript's Open question button.
@@ -326,7 +428,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Shared Confirm Dialog Implementation Plan](superpowers/plans/2026-09-25-shared-confirm-dialog.md) - Shared Confirm Dialog implementation plan (tasks 1–8 done, task 9 pending)
 - [System Permissions Settings Section (macOS TCC + cross-platform)](superpowers/specs/2026-09-18-system-permissions-design.md) - Design spec for System Permissions settings section covering macOS TCC grants with cross-platform support, detection/request, API, startup reconcile, and web UI.
 - [Tab Loading Indicators — Design Spec](superpowers/specs/2026-09-24-tab-loading-indicators-design.md) - Design spec: accessible blocking initial-load overlays and non-blocking refresh spinners for web tab shells, keyed by (host, project, tab) with generation/abort stale-response rejection.
-- [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
+- [TTS Speech Playback Design Specification](superpowers/specs/2026-09-09-tts-speech-playback-design.md) - User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2, 2026-09-28).
 - [TUI Sidebar Title Expand/Collapse Design](superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md) - Design for sidebar title expand/collapse behavior, updated to match user decision: transient expansion, reset on session changes, no session JSON persistence.
 - [TUI wheel scroll over chat composer design](superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md) - Design spec: treat transcript + chat composer as one wheel-scrolling surface on the TUI chat tab — implemented as mouseOverChatWheelRegion with renamed regression test.
 - [Web Chat Message Copy Menu — Design](superpowers/specs/2026-09-25-web-chat-message-copy-design.md) - Design spec for the web chat per-block copy menu: split Copy control, rendered-vs-raw clipboard paths, shared clipboard helper.
@@ -341,12 +443,16 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [README.md](okf/README.md)
 - [conduct.md](okf/_prompts/conduct.md)
 - [csharp.md](okf/_prompts/csharp.md)
+- [docx.md](okf/_prompts/docx.md)
 - [dotnet.md](okf/_prompts/dotnet.md)
 - [elixir.md](okf/_prompts/elixir.md)
 - [golang.md](okf/_prompts/golang.md)
+- [hallucination.md](okf/_prompts/hallucination.md)
 - [nestjs.md](okf/_prompts/nestjs.md)
 - [nextjs.md](okf/_prompts/nextjs.md)
+- [pdf.md](okf/_prompts/pdf.md)
 - [php.md](okf/_prompts/php.md)
+- [pptx.md](okf/_prompts/pptx.md)
 - [python.md](okf/_prompts/python.md)
 - [react.md](okf/_prompts/react.md)
 - [ror.md](okf/_prompts/ror.md)
@@ -361,6 +467,9 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4-flash.spotcheck.md](okf/conduct/answers/deepseek-v4-flash.spotcheck.md)
 - [deepseek-v4.1-flash.md](okf/conduct/answers/deepseek-v4.1-flash.md)
 - [glm-5.3-flash.md](okf/conduct/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/conduct/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun.md](okf/conduct/answers/longcat-2.5-preview-free.rerun.md)
+- [longcat-2.5-preview-free.with-skill.md](okf/conduct/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/conduct/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/conduct/answers/space-bunny-free.md)
@@ -371,25 +480,41 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [conduct.deepseek-v4-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4-flash.SKILL.md)
 - [conduct.deepseek-v4.1-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4.1-flash.SKILL.md)
 - [conduct.glm-5.3-flash.SKILL.md](okf/conduct/derived/conduct.glm-5.3-flash.SKILL.md)
+- [conduct.longcat-2.5-preview-free.SKILL.md](okf/conduct/derived/conduct.longcat-2.5-preview-free.SKILL.md)
 - [conduct.mimo-v2.5.SKILL.md](okf/conduct/derived/conduct.mimo-v2.5.SKILL.md)
 - [conduct.muse-spark-1.2.SKILL.md](okf/conduct/derived/conduct.muse-spark-1.2.SKILL.md)
 - [conduct.space-bunny-free.SKILL.md](okf/conduct/derived/conduct.space-bunny-free.SKILL.md)
 - [conduct.tencent__hy3.SKILL.md](okf/conduct/derived/conduct.tencent__hy3.SKILL.md)
 - [questions.md](okf/conduct/questions.md)
 - [glm-5.3-flash.md](okf/csharp/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/csharp/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/csharp/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/csharp/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/csharp/answers/space-bunny-free.with-skill.md)
 - [tencent__hy3.md](okf/csharp/answers/tencent__hy3.md)
 - [questions.md](okf/csharp/questions.md)
+- [deepseek-v4.1-flash.md](okf/docx/answers/deepseek-v4.1-flash.md)
+- [deepseek-v4.1-flash.with-skill.md](okf/docx/answers/deepseek-v4.1-flash.with-skill.md)
+- [glm-5.3-flash.md](okf/docx/answers/glm-5.3-flash.md)
+- [mimo-v2.6-flash.md](okf/docx/answers/mimo-v2.6-flash.md)
+- [mimo-v2.6-flash.with-skill.md](okf/docx/answers/mimo-v2.6-flash.with-skill.md)
+- [space-bunny-free.md](okf/docx/answers/space-bunny-free.md)
+- [space-bunny-free.with-skill.md](okf/docx/answers/space-bunny-free.with-skill.md)
+- [README.md](okf/docx/probe/README.md)
+- [questions.md](okf/docx/questions.md)
 - [glm-5.3-flash.md](okf/dotnet/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/dotnet/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.with-skill.md](okf/dotnet/answers/longcat-2.5-preview-free.with-skill.md)
+- [longcat-2.5-preview-free.with-skill.run2.md](okf/dotnet/answers/longcat-2.5-preview-free.with-skill.run2.md)
 - [mimo-v2.5.md](okf/dotnet/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/dotnet/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/dotnet/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/dotnet/answers/tencent__hy3.md)
 - [questions.md](okf/dotnet/questions.md)
 - [glm-5.3-flash.md](okf/elixir/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/elixir/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.with-skill.md](okf/elixir/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/elixir/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/elixir/answers/space-bunny-free.md)
@@ -398,36 +523,63 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [tencent__hy3.with-skill.md](okf/elixir/answers/tencent__hy3.with-skill.md)
 - [questions.md](okf/elixir/questions.md)
 - [glm-5.3-flash.md](okf/golang/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/golang/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/golang/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/golang/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/golang/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/golang/answers/tencent__hy3.md)
 - [questions.md](okf/golang/questions.md)
+- [questions.md](okf/hallucination/questions.md)
 - [glm-5.3-flash.md](okf/nestjs/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/nestjs/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/nestjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nestjs/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/nestjs/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/nestjs/answers/tencent__hy3.md)
 - [questions.md](okf/nestjs/questions.md)
 - [glm-5.3-flash.md](okf/nextjs/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/nextjs/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.with-skill.md](okf/nextjs/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/nextjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nextjs/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/nextjs/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/nextjs/answers/tencent__hy3.md)
 - [questions.md](okf/nextjs/questions.md)
+- [deepseek-v4.1-flash.md](okf/pdf/answers/deepseek-v4.1-flash.md)
+- [deepseek-v4.1-flash.with-skill.md](okf/pdf/answers/deepseek-v4.1-flash.with-skill.md)
+- [glm-5.3-flash.md](okf/pdf/answers/glm-5.3-flash.md)
+- [glm-5.3-flash.with-skill.md](okf/pdf/answers/glm-5.3-flash.with-skill.md)
+- [mimo-v2.6-flash.md](okf/pdf/answers/mimo-v2.6-flash.md)
+- [mimo-v2.6-flash.with-skill.md](okf/pdf/answers/mimo-v2.6-flash.with-skill.md)
+- [space-bunny-free.md](okf/pdf/answers/space-bunny-free.md)
+- [space-bunny-free.with-skill.md](okf/pdf/answers/space-bunny-free.with-skill.md)
+- [README.md](okf/pdf/probe/README.md)
+- [questions.md](okf/pdf/questions.md)
 - [glm-5.3-flash.md](okf/php/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/php/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/php/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/php/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/php/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/php/answers/tencent__hy3.md)
 - [questions.md](okf/php/questions.md)
+- [deepseek-v4.1-flash.md](okf/pptx/answers/deepseek-v4.1-flash.md)
+- [deepseek-v4.1-flash.with-skill.md](okf/pptx/answers/deepseek-v4.1-flash.with-skill.md)
+- [glm-5.3-flash.md](okf/pptx/answers/glm-5.3-flash.md)
+- [mimo-v2.6-flash.md](okf/pptx/answers/mimo-v2.6-flash.md)
+- [mimo-v2.6-flash.with-skill.md](okf/pptx/answers/mimo-v2.6-flash.with-skill.md)
+- [space-bunny-free.md](okf/pptx/answers/space-bunny-free.md)
+- [space-bunny-free.with-skill.md](okf/pptx/answers/space-bunny-free.with-skill.md)
+- [README.md](okf/pptx/probe/README.md)
+- [questions.md](okf/pptx/questions.md)
 - [glm-5.3-flash.md](okf/python/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/python/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/python/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/python/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/python/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/python/answers/tencent__hy3.md)
 - [questions.md](okf/python/questions.md)
 - [glm-5.3-flash.md](okf/react/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/react/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/react/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/react/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/react/answers/space-bunny-free.md)
@@ -435,18 +587,22 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/react/questions.md)
 - [README.md](okf/react/scores/README.md)
 - [glm-5.3-flash.md](okf/ror/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/ror/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/ror/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ror/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/ror/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/ror/answers/tencent__hy3.md)
 - [questions.md](okf/ror/questions.md)
 - [glm-5.3-flash.md](okf/ruby/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/ruby/answers/longcat-2.5-preview-free.md)
 - [mimo-v2.5.md](okf/ruby/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ruby/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/ruby/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/ruby/answers/tencent__hy3.md)
 - [questions.md](okf/ruby/questions.md)
 - [glm-5.3-flash.md](okf/rust/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/rust/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.with-skill.md](okf/rust/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/rust/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/rust/answers/space-bunny-free.md)
@@ -454,12 +610,17 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [tencent__hy3.md](okf/rust/answers/tencent__hy3.md)
 - [questions.md](okf/rust/questions.md)
 - [glm-5.3-flash.md](okf/tanstack/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/tanstack/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.with-skill.md](okf/tanstack/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/tanstack/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/tanstack/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/tanstack/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/tanstack/answers/tencent__hy3.md)
 - [questions.md](okf/tanstack/questions.md)
 - [glm-5.3-flash.md](okf/vbnet/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.md](okf/vbnet/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun.md](okf/vbnet/answers/longcat-2.5-preview-free.rerun.md)
+- [longcat-2.5-preview-free.with-skill.md](okf/vbnet/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/vbnet/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/vbnet/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/vbnet/answers/space-bunny-free.md)
@@ -551,24 +712,21 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [INDEX.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/INDEX.md)
 - [2026-09-21-interrupted-turn-notice.md](superpowers/plans/2026-09-21-interrupted-turn-notice.md)
 - [2026-09-21-persistent-shell-session.md](superpowers/plans/2026-09-21-persistent-shell-session.md)
-- [01-todo-reader-and-event.md](superpowers/plans/2026-09-24-pulse-dashboard/01-todo-reader-and-event.md)
-- [02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
-- [03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
-- [04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
-- [05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
-- [06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
-- [07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
-- [08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
-- [09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
-- [10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
 - [INDEX.md](superpowers/plans/2026-09-24-pulse-dashboard/INDEX.md)
+- [01-tls-listener.md](superpowers/plans/2026-09-28-desktop-http2/01-tls-listener.md)
+- [02-desktop-boot.md](superpowers/plans/2026-09-28-desktop-http2/02-desktop-boot.md)
+- [03-macos-pin.md](superpowers/plans/2026-09-28-desktop-http2/03-macos-pin.md)
+- [04-windows-pin.md](superpowers/plans/2026-09-28-desktop-http2/04-windows-pin.md)
+- [05-linux-pin.md](superpowers/plans/2026-09-28-desktop-http2/05-linux-pin.md)
+- [06-storage-migration.md](superpowers/plans/2026-09-28-desktop-http2/06-storage-migration.md)
+- [07-docs.md](superpowers/plans/2026-09-28-desktop-http2/07-docs.md)
+- [INDEX.md](superpowers/plans/2026-09-28-desktop-http2/INDEX.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
 - [03-phase2-web.md](superpowers/specs/2026-08-29-remote-ssh/03-phase2-web.md)
 - [04-phase3-wsl.md](superpowers/specs/2026-08-29-remote-ssh/04-phase3-wsl.md)
 - [INDEX.md](superpowers/specs/2026-08-29-remote-ssh/INDEX.md)
-- [2026-09-09-embedded-htr-extension-design.md](superpowers/specs/2026-09-09-embedded-htr-extension-design.md)
 - [2026-09-09-tts-speech-playback-design-update.md](superpowers/specs/2026-09-09-tts-speech-playback-design-update.md)
 - [2026-09-10-chrome-tab-context-menu-design.md](superpowers/specs/2026-09-10-chrome-tab-context-menu-design.md)
 - [2026-09-10-desktop-login-shell-env.md](superpowers/specs/2026-09-10-desktop-login-shell-env.md)
@@ -581,7 +739,6 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [2026-09-21-auto-permission-enforced-categories-design.md](superpowers/specs/2026-09-21-auto-permission-enforced-categories-design.md)
 - [2026-09-21-interrupted-turn-notice-design.md](superpowers/specs/2026-09-21-interrupted-turn-notice-design.md)
 - [2026-09-21-persistent-shell-session-design.md](superpowers/specs/2026-09-21-persistent-shell-session-design.md)
-- [2026-09-24-pulse-dashboard-design.md](superpowers/specs/2026-09-24-pulse-dashboard-design.md)
 - [2026-09-25-desktop-quit-guard-design.md](superpowers/specs/2026-09-25-desktop-quit-guard-design.md)
 - [telegram-bot.md](telegram-bot.md)
 - [web-desktop-parity-todo.md](web-desktop-parity-todo.md)

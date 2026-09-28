@@ -45,6 +45,8 @@ type ProfileDelta struct {
 	ExplorerModelEnabled    *bool                      `json:"explorer_model_enabled,omitempty"`
 	ContextModel            *string                    `json:"context_model,omitempty"`
 	ContextModelEnabled     *bool                      `json:"context_model_enabled,omitempty"`
+	SpeechSummaryModel      *string                    `json:"speech_summary_model,omitempty"`
+	SpeechSummaryEnabled    *bool                      `json:"speech_summary_enabled,omitempty"`
 	Editor                  *string                    `json:"editor,omitempty"`
 	EditorMode              *string                    `json:"editor_mode,omitempty"`
 	IDEMode                 *string                    `json:"ide_mode,omitempty"`
@@ -106,6 +108,12 @@ func ProfileOverrideCount(delta ProfileDelta) int {
 		n++
 	}
 	if delta.ContextModelEnabled != nil {
+		n++
+	}
+	if delta.SpeechSummaryModel != nil {
+		n++
+	}
+	if delta.SpeechSummaryEnabled != nil {
 		n++
 	}
 	if delta.Editor != nil {
@@ -187,6 +195,12 @@ func EffectiveOcodeConfig(base *OcodeConfig, profile string) *OcodeConfig {
 	}
 	if delta.ContextModelEnabled != nil {
 		clone.ContextModelEnabled = *delta.ContextModelEnabled
+	}
+	if delta.SpeechSummaryModel != nil {
+		clone.SpeechSummaryModel = *delta.SpeechSummaryModel
+	}
+	if delta.SpeechSummaryEnabled != nil {
+		clone.SpeechSummaryEnabled = *delta.SpeechSummaryEnabled
 	}
 	if delta.Editor != nil {
 		clone.Editor = *delta.Editor
@@ -311,6 +325,86 @@ type CompactConfig struct {
 	SummaryFirstTokenTimeoutSeconds int `json:"summary_first_token_timeout_seconds"`
 	SummaryMaxRetries               int `json:"summary_max_retries"`
 	MaxSummaryInputTokens           int `json:"max_summary_input_tokens"`
+}
+
+// CompactConfigPatch is a PARTIAL update to CompactConfig. Every field is a
+// pointer so an absent JSON key is distinguishable from an explicit zero:
+// applyTo only writes the keys the caller actually sent.
+//
+// This exists because three independent UI controls write this block (the
+// CoworkSidebar compaction on/off toggle, the model picker's direct persist, and
+// the Settings → Compact form) and the endpoint used to REPLACE the whole
+// struct. A single-field write therefore reset every field it did not mention —
+// and a full body the client had fetched before another control changed lost
+// that control's edit as well. With merge semantics the client sends only what
+// it changed and the server reads the rest fresh from disk.
+type CompactConfigPatch struct {
+	Enabled                         *bool    `json:"enabled"`
+	SummaryProvider                 *string  `json:"summary_provider"`
+	SummaryModel                    *string  `json:"summary_model"`
+	TokenThreshold                  *float64 `json:"token_threshold"`
+	KeepRecentTurns                 *int     `json:"keep_recent_turns"`
+	KeepRecentTokens                *int     `json:"keep_recent_tokens"`
+	MinMessages                     *int     `json:"min_messages"`
+	SummaryTimeoutSeconds           *int     `json:"summary_timeout_seconds"`
+	SummaryFirstTokenTimeoutSeconds *int     `json:"summary_first_token_timeout_seconds"`
+	SummaryMaxRetries               *int     `json:"summary_max_retries"`
+	MaxSummaryInputTokens           *int     `json:"max_summary_input_tokens"`
+}
+
+// IsEmpty reports whether the patch would change nothing. A body carrying no
+// recognised key is rejected by the handler rather than accepted as a no-op
+// write, which would still fire OnConfigSaved and rewrite the config file.
+func (p CompactConfigPatch) IsEmpty() bool {
+	return p.Enabled == nil &&
+		p.SummaryProvider == nil &&
+		p.SummaryModel == nil &&
+		p.TokenThreshold == nil &&
+		p.KeepRecentTurns == nil &&
+		p.KeepRecentTokens == nil &&
+		p.MinMessages == nil &&
+		p.SummaryTimeoutSeconds == nil &&
+		p.SummaryFirstTokenTimeoutSeconds == nil &&
+		p.SummaryMaxRetries == nil &&
+		p.MaxSummaryInputTokens == nil
+}
+
+// applyTo writes the present keys onto dst. A nil field is left alone, so an
+// explicit "" or 0 (the model picker's "Clear", a threshold reset) still lands.
+func (p CompactConfigPatch) applyTo(dst *CompactConfig) {
+	if p.Enabled != nil {
+		dst.Enabled = *p.Enabled
+	}
+	if p.SummaryProvider != nil {
+		dst.SummaryProvider = *p.SummaryProvider
+	}
+	if p.SummaryModel != nil {
+		dst.SummaryModel = *p.SummaryModel
+	}
+	if p.TokenThreshold != nil {
+		dst.TokenThreshold = *p.TokenThreshold
+	}
+	if p.KeepRecentTurns != nil {
+		dst.KeepRecentTurns = *p.KeepRecentTurns
+	}
+	if p.KeepRecentTokens != nil {
+		dst.KeepRecentTokens = *p.KeepRecentTokens
+	}
+	if p.MinMessages != nil {
+		dst.MinMessages = *p.MinMessages
+	}
+	if p.SummaryTimeoutSeconds != nil {
+		dst.SummaryTimeoutSeconds = *p.SummaryTimeoutSeconds
+	}
+	if p.SummaryFirstTokenTimeoutSeconds != nil {
+		dst.SummaryFirstTokenTimeoutSeconds = *p.SummaryFirstTokenTimeoutSeconds
+	}
+	if p.SummaryMaxRetries != nil {
+		dst.SummaryMaxRetries = *p.SummaryMaxRetries
+	}
+	if p.MaxSummaryInputTokens != nil {
+		dst.MaxSummaryInputTokens = *p.MaxSummaryInputTokens
+	}
 }
 
 const (
@@ -757,6 +851,14 @@ type OcodeConfig struct {
 	ExplorerModelEnabled bool
 	ContextModel         string
 	ContextModelEnabled  bool
+	// SpeechSummaryModel is the LLM that rewrites an assistant message into
+	// spoken prose (code described, not read aloud) before TTS synthesises it.
+	// Empty = fall back to the small model, then the main model.
+	SpeechSummaryModel string
+	// SpeechSummaryEnabled gates summarising before speech. Defaults to TRUE
+	// (a fresh install gets spoken summaries); the speak UI's checkbox and the
+	// sidebar row both flip it.
+	SpeechSummaryEnabled bool
 	AutoContinueEnabled  bool
 	AutoContinueModel    string
 	CommitMsgModel       string
@@ -1076,6 +1178,8 @@ type ocodeConfigFile struct {
 	ExplorerModelEnabled    *bool                       `json:"explorer_model_enabled,omitempty"`
 	ContextModel            string                      `json:"context_model,omitempty"`
 	ContextModelEnabled     *bool                       `json:"context_model_enabled,omitempty"`
+	SpeechSummaryModel      string                      `json:"speech_summary_model,omitempty"`
+	SpeechSummaryEnabled    *bool                       `json:"speech_summary_enabled,omitempty"`
 	AutoContinueEnabled     *bool                       `json:"auto_continue_enabled,omitempty"`
 	AutoContinueModel       string                      `json:"auto_continue_model,omitempty"`
 	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
@@ -1139,17 +1243,20 @@ func defaultSecurityConfig() SecurityConfig {
 
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
-		Compact:                 defaultCompactConfig(),
-		Advisor:                 defaultAdvisorConfig(),
-		Permissions:             defaultPermissionConfig(),
-		Browser:                 BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", NoSandbox: true},
-		TTS:                     TTSConfig{Engine: "browser-native", Mode: "manual"},
-		ChatVerbosity:           defaultChatVerbosityConfig(),
-		MemoryEnabled:           true,
-		SmallModelEnabled:       true,
-		RecapModelEnabled:       false,
-		ExplorerModelEnabled:    false,
-		ContextModelEnabled:     false,
+		Compact:              defaultCompactConfig(),
+		Advisor:              defaultAdvisorConfig(),
+		Permissions:          defaultPermissionConfig(),
+		Browser:              BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", NoSandbox: true},
+		TTS:                  TTSConfig{Engine: "browser-native", Mode: "manual"},
+		ChatVerbosity:        defaultChatVerbosityConfig(),
+		MemoryEnabled:        true,
+		SmallModelEnabled:    true,
+		RecapModelEnabled:    false,
+		ExplorerModelEnabled: false,
+		ContextModelEnabled:  false,
+		// Summarising before speech is the DEFAULT experience (listen instead of
+		// reading a wall of code); every sibling gate above defaults false.
+		SpeechSummaryEnabled:    true,
 		Security:                defaultSecurityConfig(),
 		Discovery:               defaultDiscoveryConfig(),
 		RecapTimeoutSeconds:     120,
@@ -1554,6 +1661,22 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.ContextModelEnabled = *file.ContextModelEnabled
 		}
 		delete(raw, "context_model_enabled")
+	}
+
+	if _, ok := raw["speech_summary_model"]; ok {
+		if file.SpeechSummaryModel != "" {
+			cfg.SpeechSummaryModel = file.SpeechSummaryModel
+		}
+		delete(raw, "speech_summary_model")
+	}
+	// Guarded on PRESENCE, not on the value: the default is true, so an explicit
+	// `"speech_summary_enabled": false` in the file must win, while an ABSENT key
+	// leaves the default standing.
+	if _, ok := raw["speech_summary_enabled"]; ok {
+		if file.SpeechSummaryEnabled != nil {
+			cfg.SpeechSummaryEnabled = *file.SpeechSummaryEnabled
+		}
+		delete(raw, "speech_summary_enabled")
 	}
 
 	if _, ok := raw["auto_continue_enabled"]; ok {
@@ -2285,6 +2408,10 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.ContextModel != "" {
 		payload["context_model"] = cfg.ContextModel
 	}
+	if cfg.SpeechSummaryModel != "" {
+		payload["speech_summary_model"] = cfg.SpeechSummaryModel
+	}
+	payload["speech_summary_enabled"] = cfg.SpeechSummaryEnabled
 	payload["context_model_enabled"] = cfg.ContextModelEnabled
 	payload["auto_continue_enabled"] = cfg.AutoContinueEnabled
 	if cfg.AutoContinueModel != "" {
@@ -3387,6 +3514,32 @@ func SaveExplorerModel(model string) error {
 	})
 }
 
+// SaveOcodeSpeechSummary persists the speech-summary settings. A nil field is
+// left at its current on-disk value, so the sidebar's gate checkbox and the
+// model picker can each write only the key they own. The merge is done inside
+// the cross-process lock against the config just re-read from disk — NOT
+// against a caller's in-memory copy — so two quick writes cannot undo each
+// other and a value another process wrote in between survives.
+//
+// It returns the merged pair as actually persisted, so the caller can echo the
+// authoritative block the UI renders from.
+func SaveOcodeSpeechSummary(model *string, enabled *bool) (string, bool, error) {
+	var outModel string
+	var outEnabled bool
+	err := withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if model != nil {
+			cfg.SpeechSummaryModel = strings.TrimSpace(*model)
+		}
+		if enabled != nil {
+			cfg.SpeechSummaryEnabled = *enabled
+		}
+		outModel = cfg.SpeechSummaryModel
+		outEnabled = cfg.SpeechSummaryEnabled
+		return nil
+	})
+	return outModel, outEnabled, err
+}
+
 // SaveExplorerModelEnabled persists the explorer model enabled/disabled state to config.
 func SaveExplorerModelEnabled(enabled bool) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
@@ -3574,12 +3727,44 @@ func SaveOcodeCommitMsgConfig(model, prompt string) error {
 	})
 }
 
-// SaveOcodeCompactConfig persists the auto-compact settings block.
+// SaveOcodeCompactConfig REPLACES the whole auto-compact block.
+//
+// It has no production caller and never had one after PUT
+// /api/config/ocode/compact became a partial write: the Settings → Compact form
+// POSTs its full block through SaveOcodeCompactConfigPatch, and because every
+// key is present that is already an exact replace. This is now a TEST SEEDING
+// helper only (internal/server/handler_config_test.go seedCompactOnDisk), so a
+// production grep finding zero callers is expected rather than a regression.
+// Prefer SaveOcodeCompactConfigPatch for anything new — including a full-block
+// write, which needs no special API.
 func SaveOcodeCompactConfig(cfg CompactConfig) error {
 	return withOcodeConfigLock(func(c *OcodeConfig) error {
 		c.Compact = cfg
 		return nil
 	})
+}
+
+// SaveOcodeCompactConfigPatch merges the keys the patch carries onto the block
+// read FRESH from disk inside the config file lock, and returns the merged
+// result so the caller can refresh its in-memory copy from disk truth rather
+// than from its own (possibly stale) guess.
+//
+// load-modify-write, for the same reason SaveAutoPermissionEnabled is: a
+// control that owns one field must not clobber the fields another control owns,
+// and merging on disk (not on a client-supplied snapshot) is also what keeps a
+// second ocode process from losing this write to the first one's stale copy.
+func SaveOcodeCompactConfigPatch(patch CompactConfigPatch) (CompactConfig, error) {
+	var merged CompactConfig
+	err := withOcodeConfigLock(func(c *OcodeConfig) error {
+		merged = c.Compact
+		patch.applyTo(&merged)
+		c.Compact = merged
+		return nil
+	})
+	if err != nil {
+		return CompactConfig{}, err
+	}
+	return merged, nil
 }
 
 // SaveOcodeChatVerbosity persists the shared web/desktop presentation policy.

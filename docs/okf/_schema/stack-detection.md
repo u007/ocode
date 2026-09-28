@@ -36,6 +36,8 @@ detection:
 | golang   | `file: go.mod`                                    |
 | rust     | `file: Cargo.toml`                                |
 | pdf      | `file: *.pdf`, `*/*.pdf`, `*/*/*.pdf` (no `**` in Go glob) |
+| docx     | `file: *.docx`, `*.doc`, each at root, `*/`, `*/*/` (legacy `.doc` edited after conversion) |
+| pptx     | `file: *.pptx`, `*.ppt`, each at root, `*/`, `*/*/` (legacy `.ppt` edited after conversion) |
 
 ## Activation gate (the whole point)
 

@@ -4,7 +4,7 @@ import { nextSpeechMode } from "./speechUtils";
 import { useSpeech, playbackLabel } from "./SpeechProvider";
 
 export default function SpeechToolbar() {
-  const { config, status, isSpeaking, paused, error, currentText, position, duration, speak, stop, pause, resume, skip, seek, retry, toolbarVisible, setToolbarVisible, setMode } = useSpeech();
+  const { config, status, isSpeaking, paused, error, currentText, position, duration, replay, stop, pause, resume, skip, seek, retry, toolbarVisible, setToolbarVisible, setMode, speakMode, setSpeakMode } = useSpeech();
   // Local mirror of visibility so the X button can hide it; always kept in sync
   // with context so external toggleToolbar() calls (e.g. from StatusBar) also hide it.
   const [visible, setVisible] = useState(toolbarVisible);
@@ -23,6 +23,20 @@ export default function SpeechToolbar() {
       </span>
       <span className="text-muted-foreground">{isSpeaking ? "Playing" : playbackLabel(status?.playback)}</span>
       <button type="button" className="rounded px-2 py-1 text-xs hover:bg-muted border border-border" title={`Mode: ${config?.mode ?? "manual"}. Click to cycle.`} aria-label="Cycle speech mode" onClick={() => setMode(nextSpeechMode(config?.mode))}>{config?.mode === "at-bottom" ? "At Bottom" : "Manual"}</button>
+      {/* Which TEXT gets read, as distinct from WHEN playback happens (the mode
+          button above). The label is the current state, so the control doubles as
+          the indicator. A two-state toggle rather than a dropdown menu: the
+          toolbar already uses click-to-cycle for its other option and a menu
+          with two items adds a click for nothing. */}
+      <button
+        type="button"
+        className="rounded px-2 py-1 text-xs hover:bg-muted border border-border"
+        title="Read text summarised by the summary model. Click to read the full message instead."
+        aria-label="Speech text mode"
+        onClick={() => setSpeakMode(speakMode === "summarised" ? "full" : "summarised")}
+      >
+        {speakMode === "summarised" ? "Summarised" : "Full Text"}
+      </button>
       <button type="button" className="rounded p-1 hover:bg-muted disabled:opacity-40" title="Back approximately 10 seconds" aria-label="Back approximately 10 seconds" disabled={!isSpeaking} onClick={() => skip(-10)}><Rewind className="h-4 w-4" /></button>
       {isSpeaking && !paused ? (
         <button type="button" className="rounded p-1 hover:bg-muted" title="Pause speech" aria-label="Pause speech" onClick={pause}><Pause className="h-4 w-4" /></button>
@@ -44,7 +58,7 @@ export default function SpeechToolbar() {
         onChange={(event) => seek(Number(event.target.value))}
       />
       {activeText && !isSpeaking && (
-        <button type="button" className="rounded p-1 hover:bg-muted" title="Replay speech" aria-label="Replay speech" onClick={() => void speak(activeText)}><RotateCcw className="h-4 w-4" /></button>
+        <button type="button" className="rounded p-1 hover:bg-muted" title="Replay speech" aria-label="Replay speech" onClick={() => void replay(activeText)}><RotateCcw className="h-4 w-4" /></button>
       )}
       {error && <span className="max-w-64 truncate text-destructive" title={error}>{error}</span>}
       {canRetry && <button type="button" className="rounded border border-border px-2 py-1 hover:bg-muted" onClick={() => void retry()}>Retry</button>}

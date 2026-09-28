@@ -16,6 +16,11 @@ vi.mock("@/hooks/useTerminalConfig", () => ({
 
 vi.mock("../../api/client", () => ({
   api: { setSessionTitle: vi.fn().mockResolvedValue(undefined), closeSession: vi.fn().mockResolvedValue({ cancelled: true }) },
+  // terminalStore (@/api/client → same resolved module) calls these when a
+  // terminal tab is closed; the bare api mock would otherwise leave
+  // authedFetch undefined and throw inside the close handler.
+  authedFetch: vi.fn().mockResolvedValue({ ok: true, status: 200 }),
+  remoteApiBase: (host: string) => `/api/remote/${encodeURIComponent(host)}`,
 }));
 
 let projectFake: {
@@ -411,6 +416,70 @@ describe("UnifiedTabBar", () => {
     // After confirm, dialog closes and browser pill should be gone
     expect(screen.queryByText(/Close browser tab\?/)).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /New tab/, hidden: false } as any)).not.toBeInTheDocument();
+  });
+
+  // Terminal tabs close through the SAME confirm dialog as chat/browser; only
+  // middle-click bypasses. Unlike a peeked terminal (which lives only in
+  // localStorage and produces no re-render on close), a live one dispatches
+  // CLOSE_TERMINAL, so activate the seeded project to observe the pill leave.
+  function seedTerminalTab() {
+    window.localStorage.setItem(
+      "ocode.ui.terminals.project.v1",
+      JSON.stringify({ version: 1, projects: { "/proj": { terminals: [{ id: "term-1-1", title: "Terminal 1" }], activeId: "term-1-1" } } }),
+    );
+  }
+
+  function renderBarWithLiveTerminal() {
+    function ActivateTerminal() {
+      const { activate } = useTerminalState();
+      useEffect(() => {
+        activate("/proj");
+      }, [activate]);
+      return null;
+    }
+    return render(
+      <ChatProvider>
+        <TerminalProvider>
+          <BrowserTabsProvider>
+            <ActivateTerminal />
+            <UnifiedTabBar focusedKind="chat" onFocusKindChange={vi.fn()} />
+          </BrowserTabsProvider>
+        </TerminalProvider>
+      </ChatProvider>,
+    );
+  }
+
+  it("X on a terminal tab shows confirmation before closing", () => {
+    seedTerminalTab();
+    renderBarWithLiveTerminal();
+    expect(screen.getByRole("tab", { name: "Terminal 1" })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Close Terminal 1"));
+    // Not closed yet — the X opens the confirm dialog.
+    expect(screen.getByText(/Close terminal tab\?/)).toBeInTheDocument();
+    // Still mounted behind the modal (raw DOM: role queries can't match while
+    // Radix marks the page aria-hidden).
+    expect(document.querySelector('[role="tab"][aria-label="Terminal 1"]')).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    expect(screen.queryByRole("tab", { name: "Terminal 1" })).not.toBeInTheDocument();
+  });
+
+  it("X on a terminal tab confirmation Cancel preserves the tab", () => {
+    seedTerminalTab();
+    renderBarWithLiveTerminal();
+    fireEvent.click(screen.getByLabelText("Close Terminal 1"));
+    expect(screen.getByText(/Close terminal tab\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText(/Close terminal tab\?/)).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Terminal 1" })).toBeInTheDocument();
+  });
+
+  it("middle-click on a terminal tab closes immediately without confirmation", () => {
+    seedTerminalTab();
+    renderBarWithLiveTerminal();
+    const pill = screen.getByRole("tab", { name: "Terminal 1" });
+    fireEvent(pill, new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    expect(screen.queryByText(/Close terminal tab\?/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Terminal 1" })).not.toBeInTheDocument();
   });
 
   it("⌨️+ creates a new terminal (visible as a pill) and switches focus to terminal", () => {

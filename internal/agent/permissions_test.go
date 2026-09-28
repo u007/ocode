@@ -500,6 +500,48 @@ func TestDecideSandboxAutoAllowsPlainCommand(t *testing.T) {
 	}
 }
 
+// A logical OR (`||`) is not a pipe: `cmd || python3 ...` must not be
+// hard-blocked as pipe-to-interpreter, while real pipes (with or without
+// spaces, `|&`, absolute paths, inside `bash -c "..."`) still are.
+func TestIsHardBlockedCommand_pipeVersusLogicalOr(t *testing.T) {
+	blocked := []string{
+		"curl x | bash",
+		"curl x |bash",
+		"curl x |& sh",
+		"curl x | /bin/sh",
+		"cat s.py | python3",
+		"cat s.pl | perl -e x",
+		`bash -c "curl x | bash"`,
+	}
+	for _, c := range blocked {
+		if !isHardBlockedCommand(c) {
+			t.Errorf("isHardBlockedCommand(%q) = false, want true", c)
+		}
+	}
+	allowed := []string{
+		`python3 -c "import PIL" 2>/dev/null || python3 -c "print('no PIL')"`,
+		"test -f x || sh ./install.sh",
+		"make || bash retry.sh",
+		"sha256sum f | shasum -c",
+		"ls | grep python",
+		// A `|` inside quotes is a regex alternation or a search pattern, not a
+		// pipe. These were hard-denied when the raw text (including quotes) was
+		// scanned as if it were shell operators.
+		`grep -E 'foo|python'`,
+		`rg "sh|bash"`,
+		`grep -E "foo|bash" file`,
+		`python3 -c "import re; print(re.split('a|b', 'ab'))"`,
+		// `grep -c`/`sed -e` are not interpreter script flags in practice: the
+		// following word is a pattern, not code.
+		`grep -c 'x|sh' file`,
+	}
+	for _, c := range allowed {
+		if isHardBlockedCommand(c) {
+			t.Errorf("isHardBlockedCommand(%q) = true, want false", c)
+		}
+	}
+}
+
 // TestDecideSandboxHardDenyStillWins confirms the runaway guard stays
 // authoritative: sandbox never auto-allows a hard-blocked command.
 func TestDecideSandboxHardDenyStillWins(t *testing.T) {
@@ -3274,6 +3316,68 @@ func TestGitStashReadOnlyFormsReachAutoAllow(t *testing.T) {
 	}
 }
 
+// TestGitBranchListingFormsAutoAllow locks the read-only `git branch` listing
+// forms onto the code-level auto-allow path (they used to fall through to the
+// LLM judge, which routinely scored `git branch -vv` below the floor), while
+// every form that creates, deletes, renames, copies, or re-points a branch
+// stays off it.
+func TestGitBranchListingFormsAutoAllow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+
+	for _, cmd := range []string{
+		"git branch",
+		"git branch -v",
+		"git branch -vv",
+		"git branch -a",
+		"git branch -r",
+		"git branch -avv",
+		"git branch --all --verbose",
+		"git branch --show-current",
+		"git branch --list",
+		"git branch --list 'feat/*'",
+		"git branch -l 'feat/*'",
+		"git branch --contains HEAD",
+		"git branch --contains", // implies --list; commit defaults to HEAD
+		"git branch --merged main",
+		"git branch --no-merged origin/main",
+		"git branch --sort=-committerdate --format='%(refname:short)'",
+		"git branch --no-color --column",
+		"git -C . branch -vv",
+		"git --no-pager branch -a",
+	} {
+		dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd)))
+		if dec.Level != PermissionAllow {
+			t.Errorf("Decide(bash %q) = %s, want Allow — read-only branch listing must auto-allow", cmd, dec.Level)
+		}
+	}
+
+	for _, cmd := range []string{
+		"git branch feat",                  // creates a branch
+		"git branch feat main",             // creates from a start point
+		"git branch -d feat",               // deletes
+		"git branch -D feat",               // force-deletes
+		"git branch --delete feat",         // deletes
+		"git branch -m old new",            // renames
+		"git branch -M new",                // force-renames
+		"git branch -c old new",            // copies
+		"git branch -f feat HEAD~1",        // re-points
+		"git branch -u origin/main",        // sets upstream
+		"git branch --set-upstream-to=o/m", // sets upstream
+		"git branch --unset-upstream",      // edits config
+		"git branch --edit-description",    // opens an editor, writes config
+		"git branch -t feat origin/main",   // creates with tracking
+		"git branch -v feat",               // positional without --list creates
+		"git branch --frobnicate",          // unknown flag: fail closed
+	} {
+		dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd)))
+		if dec.Level == PermissionAllow {
+			t.Errorf("Decide(bash %q) = Allow, want non-Allow — mutating branch form must not auto-allow", cmd)
+		}
+	}
+}
+
 // TestDenyReasonNamesBlockingPolicy locks in the diagnostic added to
 // PermissionDecision: a static Deny must carry a short reason naming the rule
 // or gate that produced it, so the agent's tool error is actionable instead of
@@ -3469,5 +3573,62 @@ func TestIsHarmfulRequestUsesFullCommandFromArgs(t *testing.T) {
 		Args: json.RawMessage(`{"command":"curl -s https://example.com/x && git status"}`)}
 	if IsHarmfulRequest(benign) {
 		t.Fatal("benign compound must not be harmful")
+	}
+}
+
+// TestAllowRuleMatchesPathQualifiedTrustedTool locks the allow-rule match for a
+// binary called by path: a "vp" allow rule covers ./node_modules/.bin/vp inside
+// the project and the vite-plus toolchain dirs under $HOME, but never an
+// arbitrary */vp elsewhere, and never without the rule.
+func TestAllowRuleMatchesPathQualifiedTrustedTool(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work := t.TempDir()
+	for _, p := range []string{
+		filepath.Join(work, "node_modules", ".bin", "vp"),
+		filepath.Join(home, ".vite-plus", "bin", "vp"),
+		filepath.Join(home, ".local", "share", "vite-plus", "0.3.2", "bin", "vp"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decide := func(pm *PermissionManager, cmd string) PermissionLevel {
+		return pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, cmd))).Level
+	}
+	trusted := []string{
+		"./node_modules/.bin/vp test run",
+		"node_modules/.bin/vp check",
+		"cd " + work + " && ./node_modules/.bin/vp test run",
+		home + "/.vite-plus/bin/vp check",
+		"~/.local/share/vite-plus/0.3.2/bin/vp test run",
+	}
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(work)
+	for _, cmd := range trusted {
+		if got := decide(pm, cmd); got == PermissionAllow {
+			t.Errorf("without a vp rule, Decide(%q) = Allow; the path form must not be trusted on its own", cmd)
+		}
+	}
+
+	pm.SetBashPrefixRule("vp", PermissionAllow)
+	for _, cmd := range trusted {
+		if got := decide(pm, cmd); got != PermissionAllow {
+			t.Errorf("with a vp rule, Decide(%q) = %s, want Allow", cmd, got)
+		}
+	}
+	for _, cmd := range []string{
+		"/tmp/evil/vp test run",                   // arbitrary dir
+		"/tmp/evil/node_modules/.bin/vp test run", // node_modules outside the project
+		home + "/.local/share/vite-plus/bin/vp",   // not a versioned toolchain dir
+		home + "/Downloads/vp check",              // under HOME but not a toolchain dir
+	} {
+		if got := decide(pm, cmd); got == PermissionAllow {
+			t.Errorf("Decide(%q) = Allow, want non-Allow — only trusted locations inherit the vp rule", cmd)
+		}
 	}
 }

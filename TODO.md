@@ -1,5 +1,44 @@
 # TODO
 
+## Desktop HTTPS/HTTP2: unverified on Windows and Linux (2026-09-28)
+
+Verified live on macOS only. Windows (WebView2 `--ignore-certificate-errors-spki-list`)
+and Linux (`webkit_*_allow_tls_certificate_for_host`, `cmd/ocode-desktop/localcert_linux_*.go`)
+were written but not run (Windows cross-builds clean; the Linux cgo files were not
+compiled — needs `Dockerfile.cross`) — run the desktop on each: SPA loads over https,
+terminals (wss) work, embedded browser panel works, `curl -k -w '%{http_version}'` = 2.
+Also unverified on macOS: the embedded browser panel (http browse origin inside the
+https page; mixed-content risk) and terminal WebSockets from the webview.
+
+## Pulse dashboard: deferred scope (2026-09-28, from the 2026-09-24 design)
+
+The dashboard shipped with the v1 scope the spec defined (local server only). Each item below was
+deferred at that time and is still open:
+
+- **Remote-host fan-out.** `GET /api/pulse` lists only local projects (`internal/server/handler_pulse.go`
+  skips entries with a `Host`). A remote project's sessions are not in this process's registry, so
+  the dashboard cannot see them at all — the honest version would fan out to each connected host's
+  `/api/pulse` and merge, which needs a per-host cursor and a partial-failure story.
+- **Inline approve/deny from a card.** A needs-you card currently jumps to the session and opens
+  the side pane. Answering the ask from the card needs a decision endpoint that does not require the
+  session's tab to exist.
+- **Desktop global hotkey.** There is an app-menu item (Cmd/Ctrl+Shift+J) and a tray item, but no
+  system-wide hotkey that works while ocode is unfocused.
+- **Child sessions as cards.** Children are folded into `child_count` on the parent. Surfacing them
+  as their own cards needs a decision about how a subagent's transcript reads without its parent's
+  turn context.
+- **Wire `todo_updated` into the CoworkSidebar TODO stub.** The event is published and the Pulse
+  store consumes it; the CoworkSidebar's TODO panel (`web/src/components/Layout/CoworkSidebar.tsx`,
+  the TODO row) still does not subscribe, so it only updates on a refetch.
+- **Dock-badge click → Pulse: needs a Wails capability that does not exist.** The spec asked for it;
+  Wails v3 beta.12's `dock` service is display-only (`SetBadge`/`RemoveBadge`/`SetCustomBadge`) and
+  `pkg/events` has no application-activated event, so a macOS dock click while ocode is already
+  running is indistinguishable from a plain activation. Landing this needs either a Wails release
+  exposing activation, or hand-rolled ObjC (`applicationDelegate applicationShouldHandleReopen:`)
+  in `cmd/ocode-desktop`. Until then the tray's "Open Pulse" item and Cmd/Ctrl+Shift+J are the
+  reachable entry points. **This is the one spec item deliberately NOT substituted** — the plan
+  said to stop and ask rather than quietly swap in a different mechanism.
+
 ## Split-preview candidates beyond HTML (2026-09-27)
 
 HTML files (`.html`/`.htm`) now have Edit/Preview/Split mode in the Files tab,
@@ -1448,7 +1487,8 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
 - [x] `cmd/ocode-desktop/native.go` (Task 6) — done 2026-07-02: dock badge from RunningCount, notifications for finished/failed runs when unfocused, click-to-focus via OnNotificationResponse, focus tracking (WindowFocus/WindowLostFocus), native error dialog on boot failure. Menu roles: DefaultApplicationMenu already includes App/File/Edit/View/Window/Help roles in alpha2.111 — no change needed (from review-changes: 2026-07-02)
 - [x] Task 7 — done 2026-07-02: `desktop-app` target + `scripts/bundle-macos.sh` (bundle verified), CHANGES.md + README.md updated (desktop section added, "No desktop frontends" removed), spec packaging section updated (from review-changes: 2026-07-02)
 - [x] Permission-prompt badge — done 2026-07-02: `Handler.PendingPermissionAsks()` counts sessions whose transcript tail is an unanswered `PERMISSION_ASK:` sentinel tool message; badge shows running + pending, plus an "Agent needs permission" notification when the count rises while unfocused (from review-changes: 2026-07-02)
-- [ ] Desktop deferred items: Windows installer + Linux packaging (deb/rpm/AppImage — evaluate wails3 tooling once out of alpha), macOS code signing/notarization for ocode.app, verify external links open in the default browser on the pinned alpha (add handling if the webview keeps them internal) (from review-changes: 2026-07-02)
+- [ ] Desktop deferred items: Windows installer + Linux packaging (deb/rpm/AppImage — evaluate wails3 tooling once out of alpha), macOS code signing/notarization for ocode.app (from review-changes: 2026-07-02)
+- [x] External links open in the default browser on the desktop — fixed 2026-09-28 (was a deferred item above). The SPA is served over `http://` by ocode's own server, so `/wails/runtime.js` is unreachable (the SPA fallback returns index.html) and the old `import("/wails/runtime.js") → Browser.OpenURL` path always rejected, falling through to `window.location.assign` — which replaced the whole webview with the target page instead of opening the system browser. Now the SPA sends `ocode:open-external:<url>` over the minimal `window._wails.invoke` bridge and `cmd/ocode-desktop`'s RawMessageHandler calls `app.Browser.OpenURL` (http/https only; the URL is never logged). Tests: `web/src/lib/externalLinks.test.ts`, `cmd/ocode-desktop/main_test.go` `TestIsAllowedExternalURL`.
 - [ ] macOS notifications require a .app bundle: any UNUserNotificationCenter call from a bare binary aborts the process (NSInternalInconsistencyException), so `notificationsSupported()` disables the notifier entirely outside `.app/Contents/MacOS/` (verified by smoke test). Notifications work only via `make desktop-app`; an unsigned bundle may still be denied authorization — full support lands with signing (from plan Part 03: 2026-07-02)
 
 ## Server question-prompt bridge (headless only)
@@ -2638,3 +2678,45 @@ scope:
 - [ ] Verify ReasoningLevelSelector and ProfileSwitcher Escape restores trigger
   focus and Tab closes the popover.
 - [ ] **FileTree auto-refresh misses bash-command file changes (known, not fixed)** — the auto-refresh subscribes to `tool_start` and matches mutating tools by parsed path args. `bash` commands (`rm`, `mv`, `git checkout`, etc.) change files with no parseable path in the tool args, so the tree stays stale until the user clicks refresh or triggers another in-tree op. Fixing this would require either a server-side fsnotify watcher (doesn't exist) or a `tool_result`-based fallback that refreshes after any bash call completes (heuristic — could cause false positives). Tracked as a known limitation.
+
+## Code-search relevance judge (2026-09-28)
+
+- [ ] **`list` deferred from the code-search relevance judge (2026-09-28)** — the Jev judge ships for
+  `grep`/`rgrep`/`glob` only. `list` was considered and deferred by user decision: it is `os.ReadDir` on a
+  *single* directory, so judging sibling filenames is the weakest relevance signal of the code-search tools
+  and the highest false-positive risk (a veto hides a name the model needed) for the least context saved —
+  the bulk the judge targets is `glob`'s 100-result cap and `grep`'s per-line noise. Revisit if the
+  relevance-judge debug logs show it would pay off. Adding it is a `SearchResult` producer plus one call
+  site; the seam and the cap need no change. See `docs/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md` §8.
+
+## Kaizen `docx` / `pptx` stacks — follow-ups (2026-09-28)
+
+- [x] **Bash hard-block false positive on `||`** — fixed 2026-09-28 (`pipesIntoInterpreter`).
+- [ ] **space-bunny-free pptx add-column is flaky live** (2 of 3 with skill): it drops the Total row's covered
+  `hMerge` cells. The rule is in its skill; re-check after the next model version.
+- [ ] **glm-5.3-flash runs blocked by provider quota.** ollama-cloud returned 429 (monthly usage limit) partway
+  through the live baseline, and aihubmix and OpenRouter have no balance. Missing: docx live add-row,
+  add-column, insert-table, rename-item, replace-image and insert-image; pptx live rename-item, replace-image
+  and insert-image; the pptx closed-book with-skill validation; and the live with-skill sweep. Re-run with
+  `docs/okf/{docx,pptx}/probe/sweep.sh` once a provider has credit.
+  At threshold 0.9, glm's pdf, docx and pptx skills are derived but have NOT been validated (no closed-book
+  with-skill run at 0.9). `pdf/scores/glm-5.3-flash.with-skill.md` is from the 0.75-era skill.
+- [ ] **Legacy `.doc` / `.ppt` have no live probe.** Closed-book only (tags legacy-doc and legacy-ppt).
+  A live probe needs LibreOffice (`soffice --headless`), which is not installed. macOS `textutil` drops
+  tables, so it cannot build a `.doc` fixture.
+- [ ] **table-locate (pptx) rests on 2 questions.** All four models pick the table by position instead
+  of by header. Add questions before trusting that subscore, and add a multi-table slide to the probe fixture
+  so the live check can catch it.
+- [ ] **docx/pptx detection has the same depth limit as pdf** (root, `*/`, `*/*/`).
+
+## Kaizen `pdf` stack — follow-ups (2026-09-28)
+
+- [ ] **Re-check earlier `ocode run` live probes.** Before the 2026-09-28 fix, headless `ocode run` never
+  registered the bundled skills FS, so no Kaizen digest was injected outside an ocode checkout. Any earlier
+  "live behavioural probe" run from a scratch dir (for example longcat conduct, 2026-09-28) measured the model
+  WITHOUT its digest. Re-run the probes whose conclusions depend on the digest.
+- [ ] **pdf detection is depth-limited** (`*.pdf`, `*/*.pdf`, `*/*/*.pdf`; Go's `filepath.Glob` has no `**`).
+  A PDF deeper in the tree, or outside the repo, does not activate the pdf tuning skills. Decide whether to
+  walk the tree (with a cap) or make pdf universal like conduct.
+- [ ] **mimo-v2.6-flash has no pdf skill** (no tag < 0.75; live probe 8/8). row-delete sits exactly at 0.75 and
+  the model states wrong `apply_redactions` defaults. Re-baseline once before deciding whether to derive one.

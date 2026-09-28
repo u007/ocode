@@ -3,7 +3,7 @@ type: Concept
 title: "Discovery TypeSafe Relevance Judge"
 description: Amended to record discover_more as a second judged attach path (identical fail-open matrix, shared veto counter, turn-tail snapshot, veto-all reply) and to separate the corpus-warm gate from the judge's fail-open.
 tags: [discovery, typesafe, skills, architecture, observability]
-timestamp: 2026-09-26T05:31:14Z
+timestamp: 2026-09-28T16:18:00Z
 resource: internal/agent/discovery_glue.go
 ---
 ---
@@ -27,7 +27,7 @@ The judge now shares mechanics with the [doc_search relevance judge](concepts/do
 
 ## Activation condition
 
-There is no separate config flag. `discoveryJudgeClient()` in `internal/agent/discovery_typesafe.go:40` returns a `*TypesafeClient` only when `newClientFn(a.config, "typesafe/jev-latest")` yields a client with a non-empty API key. A nil config, a non-TypeSafe factory result, or a keyless client all mean "no judge", and discovery behaves exactly as before (every candidate is seeded).
+There is no separate config flag. `discoveryJudgeClient()` in `internal/agent/discovery_typesafe.go:41` returns a `*TypesafeClient` only when `newClientFn(a.config, "typesafe/jev-latest")` yields a client with a non-empty API key. A nil config, a non-TypeSafe factory result, or a keyless client all mean "no judge", and discovery behaves exactly as before (every candidate is seeded).
 
 `discoveryJudgeClient` is the **shared connected check** for both the discovery relevance judge and the doc_search relevance judge — both use the same factory, model, and caching behaviour.
 
@@ -35,9 +35,9 @@ The resolution is cached once per discovery state (`discoveryState.judge`, guard
 
 ## Confidence floor
 
-The floor is `relevanceJudgeMinConfidenceDefault` = **0.5** (`internal/agent/relevance_typesafe.go:19`), not the high-stakes permission floor (`autoJudgeMinConfidenceDefault` = 0.85). This is deliberate: a relevance veto only hides a retrieval result, it never grants a tool call. 0.5 is TypeSafe's documented "genuinely unsure / do not act" boundary, so anything Jev judges more likely relevant than not is kept.
+The floor is `relevanceJudgeMinConfidenceDefault` = **0.5** (`internal/agent/relevance_typesafe.go:20`), not the high-stakes permission floor (`autoJudgeMinConfidenceDefault` = 0.85). This is deliberate: a relevance veto only hides a retrieval result, it never grants a tool call. 0.5 is TypeSafe's documented "genuinely unsure / do not act" boundary, so anything Jev judges more likely relevant than not is kept.
 
-The floor is resolved by `resolveRelevanceJudgeMinConfidence()` (`internal/agent/relevance_typesafe.go:26`), which is intentionally decoupled from `permissions.auto.min_confidence` — overloading that key would let a strict permission tuning silently suppress slightly-relevant retrieval results.
+The floor is resolved by `resolveRelevanceJudgeMinConfidence()` (`internal/agent/relevance_typesafe.go:27`), which is intentionally decoupled from `permissions.auto.min_confidence` — overloading that key would let a strict permission tuning silently suppress slightly-relevant retrieval results.
 
 ## Rubric
 
@@ -45,13 +45,13 @@ The floor is resolved by `resolveRelevanceJudgeMinConfidence()` (`internal/agent
 
 ## State and question shape
 
-`buildDiscoveryJudgeState` (pure, `internal/agent/discovery_typesafe.go:102`) assembles a structured map with three keys:
+`buildDiscoveryJudgeState` (pure, `internal/agent/discovery_typesafe.go:103`) assembles a structured map with three keys:
 
 - `request` — the discovery query text (the user's message, optionally enriched with project-type signal).
 - `transcript_tail` — the last 6 non-empty messages (`discoveryJudgeTailN`), each capped at 4000 chars (`discoveryJudgeTailCap`). Empty messages are skipped.
 - `candidates` — one `{id, kind, name, summary}` per candidate. Summary is `discovery.Doc.Text` capped at 1000 chars (`discoveryJudgeSummaryCap`).
 
-`judgeDiscoveryCandidates` (`internal/agent/discovery_typesafe.go:71`) delegates to `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:41`), which sends one `noul` (yes-probability) question per candidate in a single `Decide` call, keyed by doc ID. The question text is built by `discoveryJudgeInstructions` and references the candidate by its backticked state path (`candidates[i]`).
+`judgeDiscoveryCandidates` (`internal/agent/discovery_typesafe.go:72`) delegates to `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:47`), which sends one `noul` (yes-probability) question per candidate in a single `Decide` call, keyed by doc ID. The question text is built by `discoveryJudgeInstructions` and references the candidate by its backticked state path (`candidates[i]`).
 
 ## Split Select/Seed
 

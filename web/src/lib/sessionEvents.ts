@@ -1,3 +1,4 @@
+import { pulseEventSink } from "../stores/pulseStore";
 import { api } from "../api/client";
 import { getSessionSlice, extractPendingFromMessages, type ChatAction, type ChatState } from "../stores/chatStore";
 import type { ProjectAction } from "../stores/projectStore";
@@ -191,6 +192,12 @@ const SESSION_SCOPED_EVENTS = new Set([
   // /reset-id: the session id changed; open tabs rebind (see the handler in
   // routeBusEnvelope, which returns before the generic session-scoped path).
   "session_rekeyed",
+  // A session's todo plan after a todowrite. Carries a session id, so it must
+  // be in this set to reach routeSessionScoped at all — without it the Pulse
+  // dashboard's todo progress bars would only ever appear on a full refetch.
+  // Mirrors sessionScopedEvents in internal/server/event_bus.go; the two lists
+  // must stay in step.
+  "todo_updated",
 ]);
 
 /** Every event name `routeBusEnvelope` handles — the two process-global ones
@@ -779,6 +786,12 @@ function routeSessionScoped(
     console.warn(`eventBus: '${event}' event arrived without a session id — cannot route`);
     return;
   }
+  // Pulse (the cross-project dashboard) watches sessions that have NO open tab,
+  // so it must see the event before the tracked-session gate below. The sink is
+  // a no-op when no PulseProvider is mounted, and it never routes into the chat
+  // store — it only patches the dashboard's own row list.
+  pulseEventSink(event, eventSessionId, env.data);
+
   // Tracked-session gate (see the module docstring): maintain slices only
   // for open tabs and already-known sessions — never create one for a
   // never-opened session.

@@ -186,6 +186,38 @@ describe("RemoteProjectStatus", () => {
     });
   });
 
+  it.each([
+    ["another project", { path: "/elsewhere" }],
+    // Same path on ANOTHER host is still a different project — the comparison
+    // must be host-qualified or a local row with this path would unlock a
+    // remote project's kill controls.
+    ["the same path on another host", { path: "/srv", host: "other@box" }],
+  ])("hides the terminal kill X while %s is the selected project", (_label, activeProject) => {
+    projectStoreFake.activeProject = activeProject;
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+
+    // The inventory itself stays browsable from a non-selected project...
+    expect(screen.getByText("Chat one")).toBeTruthy();
+    expect(screen.getByText("shell one")).toBeTruthy();
+    // ...but killing a shell that lives on another machine is destructive, so
+    // the X only appears once the project itself is selected — the same
+    // precondition revealTab enforces before it acts on a non-active project.
+    expect(screen.queryByLabelText("kill terminal t1")).toBeNull();
+    expect(screen.queryByLabelText("kill terminal t2")).toBeNull();
+  });
+
+  it("shows the terminal kill X as soon as the project becomes the selected one", () => {
+    projectStoreFake.activeProject = { path: "/elsewhere" };
+    const { rerender } = render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    expect(screen.queryByLabelText("kill terminal t1")).toBeNull();
+
+    projectStoreFake.activeProject = { path: "/srv", host: "dev@box" };
+    rerender(<RemoteProjectStatus project={project} statusState={state()} />);
+    expect(screen.getByLabelText("kill terminal t1")).toBeTruthy();
+  });
+
   it("kills an inventory terminal through the store and refreshes the inventory", async () => {
     const refresh = vi.fn();
     mockTerminals.mockReturnValue({

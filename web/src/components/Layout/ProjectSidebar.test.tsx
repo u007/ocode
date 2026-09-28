@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
 import type { SessionSlice } from "../../stores/chatStore";
 import type { Project, ProjectGroup } from "../../api/types";
 import ProjectSidebar, { buildProjectSidebarOrder } from "./ProjectSidebar";
@@ -105,6 +105,7 @@ const actionsFake = vi.hoisted(() => ({
   addProject: vi.fn(),
   removeProject: vi.fn(),
   renameProject: vi.fn(),
+  duplicateProjectAsRemote: vi.fn(),
   reorderProjects: vi.fn(),
   setProjectGroup: vi.fn(),
   createGroup: vi.fn(),
@@ -911,5 +912,174 @@ describe("ProjectSidebar mobile drawer", () => {
     const { container } = render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
     expect(container.querySelector(".fixed.inset-y-0.left-0")).toBeNull();
     expect(container.querySelector(".w-10")).not.toBeNull();
+  });
+});
+
+// ── Duplicate as remote ─────────────────────────────────────────────────────
+// Any row (local, SSH or WSL) offers "Duplicate as remote…", which reuses the
+// Add Remote dialog with the source's path prefilled and carries the source's
+// name/group into the new (host, path) entry. A target already in the list is
+// a 409 conflict the dialog surfaces instead of silently reusing the row.
+describe("ProjectSidebar duplicate as remote", () => {
+  const source = (overrides: Partial<Project> = {}): Project => ({
+    path: "/home/user/app",
+    name: "My App",
+    added_at: "",
+    last_used_at: "",
+    order: 0,
+    group: "work",
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    stateFake.projects = [source()];
+    stateFake.groups = [{ name: "work", order: 1, collapsed: false }];
+    stateFake.activeProject = null;
+    stateFake.tabsByProject = {};
+    Object.keys(chatSessionsFake).forEach((k) => delete chatSessionsFake[k]);
+    terminalStateFake.byProject = {};
+    actionsFake.duplicateProjectAsRemote.mockClear();
+    actionsFake.duplicateProjectAsRemote.mockResolvedValue(undefined);
+  });
+
+  it("opens the dialog from a local row with the source path prefilled", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByText("My App"));
+    fireEvent.click(screen.getByText("Duplicate as remote…"));
+
+    // Dialog names the source and prefills its path; nothing submitted yet.
+    expect(screen.getByText(/Duplicate "My App" as remote/)).toBeDefined();
+    const pathInput = screen.getByPlaceholderText(
+      "/home/user/project or ~/project",
+    ) as HTMLInputElement;
+    expect(pathInput.value).toBe("/home/user/app");
+    expect(actionsFake.duplicateProjectAsRemote).not.toHaveBeenCalled();
+  });
+
+  it("submits with the source name and group, using the typed SSH host", async () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByText("My App"));
+    fireEvent.click(screen.getByText("Duplicate as remote…"));
+
+    fireEvent.change(screen.getByPlaceholderText("user@host or wsl:Ubuntu"), {
+      target: { value: "devbox" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
+
+    await waitFor(() =>
+      expect(actionsFake.duplicateProjectAsRemote).toHaveBeenCalledWith({
+        host: "devbox",
+        path: "/home/user/app",
+        name: "My App",
+        group: "work",
+      }),
+    );
+  });
+
+  it("accepts a WSL target and passes an explicit port through", async () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByText("My App"));
+    fireEvent.click(screen.getByText("Duplicate as remote…"));
+
+    fireEvent.change(screen.getByPlaceholderText("user@host or wsl:Ubuntu"), {
+      target: { value: "wsl:Ubuntu" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/SSH port/), { target: { value: "2222" } });
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
+
+    await waitFor(() =>
+      expect(actionsFake.duplicateProjectAsRemote).toHaveBeenCalledWith({
+        host: "wsl:Ubuntu",
+        path: "/home/user/app",
+        port: 2222,
+        name: "My App",
+        group: "work",
+      }),
+    );
+  });
+
+  it("keeps the dialog open and shows the conflict when the target already exists", async () => {
+    actionsFake.duplicateProjectAsRemote.mockRejectedValueOnce(
+      new Error("that project is already in the list for this host"),
+    );
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByText("My App"));
+    fireEvent.click(screen.getByText("Duplicate as remote…"));
+
+    fireEvent.change(screen.getByPlaceholderText("user@host or wsl:Ubuntu"), {
+      target: { value: "devbox" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("that project is already in the list for this host"),
+      ).toBeDefined(),
+    );
+    // Dialog is still up so the user can pick another host.
+    expect(screen.getByText(/Duplicate "My App" as remote/)).toBeDefined();
+  });
+
+  it("offers the action on a remote row too (any row)", () => {
+    stateFake.projects = [remoteProject("/srv/app", "devbox")];
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+
+    const nameNode = document.querySelector(".group.relative .truncate.font-medium")!;
+    fireEvent.contextMenu(nameNode);
+    expect(screen.getByText("Duplicate as remote…")).toBeDefined();
+  });
+
+  it("exposes the action in the collapsed rail", () => {
+    render(<ProjectSidebar isOpen={false} onToggle={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByLabelText("My App"));
+    fireEvent.click(screen.getByText("Duplicate as remote…"));
+
+    const pathInput = screen.getByPlaceholderText(
+      "/home/user/project or ~/project",
+    ) as HTMLInputElement;
+    expect(pathInput.value).toBe("/home/user/app");
+  });
+});
+
+
+// ── Pulse dashboard entry (main menu, top-left of the project list) ─────────
+// The dashboard is GLOBAL (cross-project), so it is reached from the project
+// list's own main menu rather than from any one project row: a row entry point
+// would imply the dashboard is scoped to that project, which it is not.
+describe("Pulse dashboard main-menu entry", () => {
+  it("renders a main menu button in the project list header", () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} onOpenDashboard={vi.fn()} />);
+    expect(screen.getByTestId("project-main-menu")).toBeTruthy();
+  });
+
+  it("opens a menu whose item opens the dashboard", async () => {
+    const onOpenDashboard = vi.fn();
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} onOpenDashboard={onOpenDashboard} />);
+    const trigger = screen.getByTestId("project-main-menu");
+    expect(screen.queryByRole("menuitem", { name: /dashboard/i })).toBeNull();
+    await act(async () => {
+      fireEvent.click(trigger);
+    });
+    const item = await screen.findByRole("menuitem", { name: /dashboard/i });
+    await act(async () => {
+      fireEvent.click(item);
+    });
+    expect(onOpenDashboard).toHaveBeenCalledTimes(1);
+  });
+
+  it("spells the dashboard in the item's text, not just an icon", async () => {
+    render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} onOpenDashboard={vi.fn()} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("project-main-menu"));
+    });
+    const item = await screen.findByRole("menuitem", { name: /dashboard/i });
+    expect(item.textContent?.toLowerCase()).toContain("dashboard");
+  });
+
+  it("omits the menu when no handler is passed, rather than rendering a dead control", () => {
+    // App always passes one; a half-mounted tree must not offer a button that
+    // does nothing when clicked.
+    const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
+    expect(container.querySelector('[data-testid="project-main-menu"]')).toBeNull();
   });
 });

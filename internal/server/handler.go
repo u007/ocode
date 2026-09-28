@@ -609,11 +609,20 @@ func NewHandler() *Handler {
 	return h
 }
 
-// allowedProjectRoots returns the set of project roots this server serves:
-// its own workdir first (backward compat with single-project servers) plus
-// every saved project root. It is the shared trust boundary for anything that
-// binds work to a project directory — session resolution (SessionManager) and
-// the interactive terminal's per-project cwd both validate against it.
+// allowedProjectRoots returns the set of project roots this server serves
+// LOCALLY: its own workdir first (backward compat with single-project
+// servers) plus every saved LOCAL project root. It is the shared trust
+// boundary for anything that binds work to a project directory on this
+// machine — session resolution (SessionManager), the interactive terminal's
+// per-project cwd, the file tree/content/secret/sysperm handlers and /init.
+//
+// Remote (SSH/WSL) entries are deliberately EXCLUDED: their Path is
+// interpreted on the other machine, and a remote record is registered as a
+// local project on ITS server (where projects.Add expands it), never here.
+// Including it would let a local request name a remote record's path and have
+// this server serve/browse/run on THIS filesystem at that path — a saved
+// {host, path:"/"} would expose the whole local disk. See
+// docs/gotchas/remote-project-path-trust-boundary.md.
 func (h *Handler) allowedProjectRoots() []string {
 	roots := make([]string, 0, 4)
 	if h.workDir != "" {
@@ -621,9 +630,10 @@ func (h *Handler) allowedProjectRoots() []string {
 	}
 	if h.projects != nil {
 		for _, p := range h.projects.List() {
-			if p.Path != "" {
-				roots = append(roots, p.Path)
+			if p.Host != "" || p.Path == "" {
+				continue
 			}
+			roots = append(roots, p.Path)
 		}
 	}
 	return roots
@@ -749,6 +759,14 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 // in headless mode), the tool branch emits a `permission` frame so a connected
 // browser can render the approve/deny dialog.
 func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) {
+	// toolNames maps a tool call id to its name for the current turn. A tool
+	// result message carries only ToolID, so this map — built from the
+	// assistant message that declared the calls — is the only way to recognize
+	// a todowrite result and push the updated plan. Entries are consumed when
+	// the matching result arrives; a result for an id never seen here is
+	// ignored rather than guessed at.
+	toolNames := map[string]string{}
+
 	// Map OnDelta kinds to SSE event names matching the TUI RC bridge pattern:
 	// "reasoning" → "thinking", "text" → "text".
 	ag.OnDelta = func(kind, text string) {
@@ -835,7 +853,13 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			return
 		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			// A turn whose calls were interrupted (cancel, ask) leaves ids with
+			// no result behind. Reset rather than grow without bound.
+			if len(toolNames) > todoToolNameMapCap {
+				clear(toolNames)
+			}
 			for _, tc := range m.ToolCalls {
+				toolNames[tc.ID] = tc.Function.Name
 				h.broadcastEvent(SSEEvent{
 					SessionID: sessionID,
 					Event:     "tool_start",
@@ -877,8 +901,56 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 					Data:      newPermissionEvent(m.ToolID, req),
 				})
 			}
+			if tool, declared := toolNames[m.ToolID]; declared {
+				delete(toolNames, m.ToolID)
+				if tool == "todowrite" {
+					h.publishTodoUpdated(sessionID)
+				}
+			}
 		}
 	}
+}
+
+// todoToolNameMapCap bounds the unconsumed tool-id map in
+// wireHeadlessAgentCallbacks. Results consume their entry, so the map only
+// grows for calls that never reported a result; the cap turns a pathological
+// long session into a cheap reset instead of unbounded per-session growth.
+const todoToolNameMapCap = 512
+
+// publishTodoUpdated reads the session's todo plan off disk and publishes it as
+// a todo_updated event. Called right after a todowrite result, so the file is
+// the post-write state and no separate revision tracking is needed.
+func (h *Handler) publishTodoUpdated(sessionID string) {
+	entry, ok := h.sessions.SnapshotEntry(sessionID)
+	if !ok || entry.ProjectRoot == "" {
+		// The session left the registry (it can be released between the tool
+		// result and this callback) or was never bound, so there is no project
+		// root to resolve the plan against. Skipping is correct: the plan is
+		// still on disk, and the dashboard's next fetch reads it directly.
+		return
+	}
+	sum, found, err := tool.ReadTodoSummary(entry.ProjectRoot, sessionID)
+	if err != nil {
+		// A corrupt plan must not fail the turn, but it must be reported —
+		// a silently missing event is indistinguishable on the dashboard from
+		// "this session has no plan", which hides a real defect.
+		log.Printf("serve: read todo plan for %s in %s: %v", sessionID, entry.ProjectRoot, err)
+		return
+	}
+	if !found {
+		return
+	}
+	items := make([]TodoUpdatedItem, 0, len(sum.Items))
+	for _, it := range sum.Items {
+		items = append(items, TodoUpdatedItem{Text: it.Text, State: it.State})
+	}
+	h.publishBusEvent("todo_updated", sessionID, TodoUpdatedEvent{
+		SessionID: sessionID,
+		Done:      sum.Done,
+		Total:     sum.Total,
+		Current:   sum.Current,
+		Items:     items,
+	})
 }
 
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {

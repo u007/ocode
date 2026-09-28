@@ -156,8 +156,16 @@ vi.mock("./hooks/useRemoteHostStatus", () => ({
     restart: vi.fn(),
   }),
 }));
+const terminalFake = vi.hoisted(() => ({
+  terminals: [] as { id: string; title: string; pid: number; started_at: string; attached: boolean }[],
+}));
 vi.mock("./hooks/useRemoteTerminals", () => ({
-  useRemoteTerminals: () => ({ terminals: [], loading: false, error: null, refresh: vi.fn() }),
+  useRemoteTerminals: () => ({
+    terminals: terminalFake.terminals,
+    loading: false,
+    error: null,
+    refresh: vi.fn(),
+  }),
 }));
 
 import { fireEvent } from "@testing-library/react";
@@ -193,6 +201,9 @@ function renderApp() {
 beforeEach(() => {
   window.localStorage.clear();
   hostFake.connected = true;
+  terminalFake.terminals = [
+    { id: "remote-t1", title: "Remote shell", pid: 1, started_at: "", attached: false },
+  ];
   appApi.listProjects.mockReset().mockResolvedValue([remoteProject, localProject]);
   // The LOCAL project is active, so the remote row's inventory is the
   // non-active-project case the binding rule exists for.
@@ -245,6 +256,24 @@ describe("App end-to-end: revealing a tab from a remote project's inventory", ()
     await waitFor(() =>
       expect(screen.getByTestId("chat-panel").getAttribute("data-session-id")).toBe("remote-s1"),
     );
+  });
+
+  it("withholds the terminal kill X until the remote project itself is selected", async () => {
+    renderApp();
+    await waitFor(() => expect(screen.getByText("remote")).toBeTruthy());
+    await act(async () => {});
+
+    // The LOCAL project is active, so the remote inventory is browsable — the
+    // host's shell is listed — but its destructive kill control is withheld:
+    // one stray click must not kill a shell on a project the user is not in.
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    expect(await screen.findByText("Remote shell")).toBeTruthy();
+    expect(screen.queryByLabelText("kill terminal remote-t1")).toBeNull();
+
+    // The real project store's activeProject flip (driven here by one chat
+    // click) is the whole gate — so the X must appear with no reload.
+    fireEvent.pointerUp(screen.getByText("Remote one"));
+    await waitFor(() => expect(screen.getByLabelText("kill terminal remote-t1")).toBeTruthy());
   });
 });
 

@@ -233,9 +233,11 @@ describe("useEditorTabs", () => {
       vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }),
     );
     const { result } = renderHook(() => useEditorTabs());
+    let opened: boolean | undefined;
     await act(async () => {
-      await result.current.handleOpenFile("/missing.txt");
+      opened = await result.current.handleOpenFile("/missing.txt");
     });
+    expect(opened).toBe(false);
     expect(result.current.editorTabs).toHaveLength(0);
 
     // Disk recovers — the same file must be openable again.

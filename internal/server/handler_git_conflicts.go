@@ -601,7 +601,11 @@ func (h *Handler) gitResolveConflictLocal(w http.ResponseWriter, r *http.Request
 	// Re-detect the conflict rather than trusting the request. The per-side
 	// flags decide whether the chosen side can be checked out: a missing stage
 	// means that side is a deletion, which `git checkout` cannot materialize.
-	status := gitStatusForDir(dir)
+	status, err := gitStatusForDir(dir)
+	if err != nil {
+		writeLocalGitError(w, dir, err)
+		return
+	}
 	var conflict *GitConflict
 	for i := range status.Conflicts {
 		if status.Conflicts[i].Path == spec {
@@ -618,7 +622,7 @@ func (h *Handler) gitResolveConflictLocal(w http.ResponseWriter, r *http.Request
 		if err := h.gitMarkResolved(w, dir, spec); err != nil {
 			return
 		}
-		writeJSON(w, http.StatusOK, gitWorkspaceForDir(dir))
+		writeLocalGitWorkspace(w, dir)
 		return
 	}
 
@@ -654,7 +658,7 @@ func (h *Handler) gitResolveConflictLocal(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, gitWorkspaceForDir(dir))
+	writeLocalGitWorkspace(w, dir)
 }
 
 // gitMarkResolved stages a hand-edited file after refusing to stage one that
@@ -846,7 +850,11 @@ func (h *Handler) gitOperationLocal(w http.ResponseWriter, r *http.Request) {
 
 	// Re-detect rather than trusting the request: the command must match the
 	// operation that is ACTUALLY in progress.
-	status := gitStatusForDir(dir)
+	status, err := gitStatusForDir(dir)
+	if err != nil {
+		writeLocalGitError(w, dir, err)
+		return
+	}
 	if status.Operation == nil {
 		writeError(w, http.StatusConflict, "no git operation is in progress")
 		return
@@ -887,8 +895,13 @@ func (h *Handler) gitOperationLocal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ws, err := gitWorkspaceForDir(dir)
+	if err != nil {
+		writeLocalGitError(w, dir, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, GitOperationResult{
-		Workspace: gitWorkspaceForDir(dir),
+		Workspace: ws,
 		Output:    out,
 	})
 }

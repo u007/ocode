@@ -610,6 +610,67 @@ func isReadOnlyGitStashForm(args []string) bool {
 	}
 }
 
+// gitBranchListFlags are `git branch` options that only affect listing output.
+// Anything not here or in the maps below (-d/-D/-m/-M/-c/-C/-f/-u/-t,
+// --set-upstream-to, --unset-upstream, --edit-description, ...) fails closed.
+var gitBranchListFlags = map[string]bool{
+	"-v": true, "-vv": true, "--verbose": true, "-a": true, "--all": true,
+	"-r": true, "--remotes": true, "--show-current": true, "-i": true,
+	"--ignore-case": true, "--color": true, "--no-color": true,
+	"--column": true, "--no-column": true, "--no-abbrev": true, "--omit-empty": true,
+}
+
+// gitBranchListModeFlags put `git branch` in list mode, so positional words
+// are patterns or commits rather than a branch name to create. The
+// commit-taking ones default to HEAD when no value follows.
+var gitBranchListModeFlags = map[string]bool{
+	"-l": true, "--list": true, "--contains": true, "--no-contains": true,
+	"--merged": true, "--no-merged": true, "--points-at": true,
+}
+
+// gitBranchValueFlags take a separate value word (`--sort -committerdate`).
+var gitBranchValueFlags = map[string]bool{"--sort": true, "--format": true}
+
+// isReadOnlyGitBranchForm reports whether the words after "git branch" only
+// list branches: no args, listing flags, or list mode with patterns. A
+// positional outside list mode names a branch to create, so it is refused.
+func isReadOnlyGitBranchForm(args []string) bool {
+	listMode, positional := false, false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case gitBranchListFlags[a]:
+		case gitBranchListModeFlags[a]:
+			listMode = true
+		case gitBranchValueFlags[a]:
+			i++
+		case strings.HasPrefix(a, "--sort="), strings.HasPrefix(a, "--format="),
+			strings.HasPrefix(a, "--color="), strings.HasPrefix(a, "--column="),
+			strings.HasPrefix(a, "--abbrev="):
+		case strings.HasPrefix(a, "--contains="), strings.HasPrefix(a, "--no-contains="),
+			strings.HasPrefix(a, "--merged="), strings.HasPrefix(a, "--no-merged="),
+			strings.HasPrefix(a, "--points-at="):
+			listMode = true
+		case len(a) > 1 && a[0] == '-' && a[1] != '-':
+			// Short-flag cluster such as -avv or -al.
+			for _, c := range a[1:] {
+				switch c {
+				case 'v', 'a', 'r', 'i':
+				case 'l':
+					listMode = true
+				default:
+					return false
+				}
+			}
+		case strings.HasPrefix(a, "-"):
+			return false
+		default:
+			positional = true
+		}
+	}
+	return listMode || !positional
+}
+
 // gitConfigWriteFlagForms are legacy `git config` flags that write config.
 var gitConfigWriteFlagForms = map[string]bool{
 	"--add": true, "--unset": true, "--unset-all": true, "--replace-all": true,
@@ -3468,6 +3529,39 @@ func nodeModulesBinTool(fields []string, workDir string) string {
 	return filepath.Base(slash)
 }
 
+// trustedToolDirPatterns are toolchain bin dirs (relative to $HOME, glob
+// syntax) whose binaries inherit a bare-name allow rule, so a "vp" rule also
+// covers ~/.local/share/vite-plus/0.3.2/bin/vp across toolchain upgrades.
+var trustedToolDirPatterns = []string{
+	".vite-plus/bin",
+	".local/share/vite-plus/*/bin",
+}
+
+// trustedToolBasename returns the binary name of a path-qualified command word
+// that sits in a trusted location — node_modules/.bin inside workDir, or a
+// trustedToolDirPatterns dir — and "" for anything else. Allow rules match
+// literally, so without this a "vp" rule never covers ./node_modules/.bin/vp;
+// restricting it to trusted dirs keeps an arbitrary */vp from inheriting it.
+func trustedToolBasename(word, workDir string) string {
+	if !strings.Contains(word, "/") {
+		return ""
+	}
+	if bin := nodeModulesBinTool([]string{word}, workDir); bin != "" {
+		return bin
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return ""
+	}
+	dir := filepath.Dir(filepath.Clean(resolvePath(word, workDir)))
+	for _, pat := range trustedToolDirPatterns {
+		if ok, err := filepath.Match(filepath.Join(home, pat), dir); err == nil && ok {
+			return filepath.Base(word)
+		}
+	}
+	return ""
+}
+
 // matchSubcommandAllow returns true when the command matches an entry in
 // bashSubcommandAllow at the longest possible token length (3 → 2 → 1).
 // For `git`, leading global wrappers like `-C`, `--no-pager`, etc. are
@@ -3512,6 +3606,10 @@ func matchSubcommandAllow(command, workDir string) bool {
 			n = append(n, fields[idx+1:]...)
 			normalized = n
 		}
+	}
+	// `git branch` both lists and mutates, so only the listing forms pass.
+	if normalized[0] == "git" && len(normalized) >= 2 && normalized[1] == "branch" {
+		return isReadOnlyGitBranchForm(normalized[2:])
 	}
 	// Three-word match (e.g. "docker compose ps").
 	if len(normalized) >= 3 {
@@ -4543,12 +4641,21 @@ func (pm *PermissionManager) matchBashPrefixRuleWords(cmdWords []string, level P
 }
 
 func (pm *PermissionManager) BashBannedPrefixes() []string {
+	return pm.bashPrefixesAt(PermissionDeny)
+}
+
+// BashAllowedPrefixes returns the user's bash allow rules, sorted.
+func (pm *PermissionManager) BashAllowedPrefixes() []string {
+	return pm.bashPrefixesAt(PermissionAllow)
+}
+
+func (pm *PermissionManager) bashPrefixesAt(want PermissionLevel) []string {
 	result := make([]string, 0)
 	for prefix, level := range pm.bashPrefixes {
 		if strings.HasPrefix(prefix, bashInRootPersistPrefix) {
 			continue
 		}
-		if level == PermissionDeny {
+		if level == want {
 			result = append(result, prefix)
 		}
 	}
@@ -5022,14 +5129,170 @@ func isHardBlockedCommand(command string) bool {
 	if compact == "rm -rf /" || compact == "rm -fr /" || strings.Contains(command, ":(){ :|:& };:") {
 		return true
 	}
+	if pipesIntoInterpreter(command) {
+		return true
+	}
 	// Hard-block destructive and exfiltration patterns
 	blockedPatterns := []string{
-		"| bash", "| sh", "| python", "| perl", // pipe to shell
 		"dd if=", "mkfs", // disk/partition write
 		"; sudo", "&& sudo", "| sudo", // privilege escalation chains
 	}
 	for _, p := range blockedPatterns {
 		if strings.Contains(command, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isInterpreterName reports whether name (a command word, possibly an absolute
+// path) invokes a shell or other interpreter whose stdin a pipe would turn into
+// executed code: bash/sh/perl/python*.
+func isInterpreterName(name string) bool {
+	base := filepath.Base(name)
+	switch base {
+	case "bash", "sh", "perl":
+		return true
+	}
+	return strings.HasPrefix(base, "python")
+}
+
+// isInterpreterScriptFlag reports whether flag is a short option that makes an
+// interpreter treat its NEXT argument as code (bash/sh/python `-c`, perl `-e`),
+// including bundled forms such as `-lc`. Long options and unrelated flags
+// (`-n`, `-x`, `-E`) are ignored.
+func isInterpreterScriptFlag(flag string) bool {
+	if len(flag) < 2 || flag[0] != '-' || strings.HasPrefix(flag, "--") {
+		return false
+	}
+	return strings.ContainsRune(flag[1:], 'c') || strings.ContainsRune(flag[1:], 'e')
+}
+
+// pipesIntoInterpreter reports whether command pipes (`|` or `|&`) into bash,
+// sh, perl or any python* — the classic `curl ... | sh` remote-code-execution
+// shape. `||` is a logical OR, not a pipe.
+//
+// The command is tokenized first, so a `|` INSIDE QUOTES is not treated as a
+// pipe: `grep -E 'foo|python'` is a regex alternation and `rg "sh|bash"` is a
+// pattern, not code. Real pipes still match with or without spaces
+// (`curl x |bash`, `curl x |& sh`, `cat s.py | python3`), and an interpreter
+// that re-parses its own script argument (`bash -c "curl x | bash"`) is scanned
+// recursively because that inner pipe really does execute.
+func pipesIntoInterpreter(command string) bool {
+	tokens, err := tokenizeShell(command)
+	if err != nil {
+		// Unbalanced quotes/parens: the shell would reject this too. Fall back
+		// to the raw scan so a malformed pipe chain cannot slip through.
+		return rawPipesIntoInterpreter(command)
+	}
+	return tokensPipeIntoInterpreter(tokens)
+}
+
+func tokensPipeIntoInterpreter(tokens []shellToken) bool {
+	atCommandStart := true
+	for i := 0; i < len(tokens); i++ {
+		t := tokens[i]
+		switch t.typ {
+		case tokRedir:
+			// A redirection operator sits between words without ending the
+			// command that owns them.
+			continue
+		case tokWord:
+			if !atCommandStart {
+				continue
+			}
+			// Leading VAR=VAL assignments are part of the command prefix, not
+			// the command word itself.
+			if isEnvAssignment(t.value) {
+				continue
+			}
+			atCommandStart = false
+			if isInterpreterName(t.value) {
+				if script, ok := interpreterInlineScript(tokens[i+1:]); ok && pipesIntoInterpreter(script) {
+					return true
+				}
+			}
+		case tokSubst, tokArith:
+			// A command substitution is real code: an interpreter pipe inside
+			// it executes.
+			if pipesIntoInterpreter(t.value) {
+				return true
+			}
+		case tokOp, tokLeftParen, tokRightParen:
+			if t.typ == tokOp && t.value == "|" {
+				j := i + 1
+				if j < len(tokens) && tokens[j].typ == tokOp && tokens[j].value == "&" {
+					j++ // `|&` tokenizes as "|" then "&"
+				}
+				if j < len(tokens) && tokens[j].typ == tokWord && isInterpreterName(tokens[j].value) {
+					return true
+				}
+			}
+			atCommandStart = true
+		}
+	}
+	return false
+}
+
+// interpreterInlineScript returns the argument an interpreter re-parses as code
+// (`bash -c`, `sh -c`, `python -c`, `perl -e`, and bundles like `-lc`). It only
+// looks within the current command segment, so a flag after a `|` belongs to the
+// next command and is ignored.
+func interpreterInlineScript(rest []shellToken) (string, bool) {
+	for i := 0; i < len(rest); i++ {
+		switch rest[i].typ {
+		case tokOp, tokLeftParen, tokRightParen:
+			return "", false
+		case tokWord:
+			if isInterpreterScriptFlag(rest[i].value) && i+1 < len(rest) && rest[i+1].typ == tokWord {
+				return rest[i+1].value, true
+			}
+		}
+	}
+	return "", false
+}
+
+// isEnvAssignment reports whether word is a leading `NAME=value` shell
+// assignment (NAME a valid identifier), which prefixes a command rather than
+// being its command word.
+func isEnvAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i, r := range word[:eq] {
+		if r == '_' || unicode.IsLetter(r) || (i > 0 && unicode.IsDigit(r)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// rawPipesIntoInterpreter is the pre-tokenizer scan, kept only as the fallback
+// for input the tokenizer cannot parse. It is deliberately conservative and
+// scans inside quotes.
+func rawPipesIntoInterpreter(command string) bool {
+	for i := 0; i < len(command); i++ {
+		if command[i] != '|' {
+			continue
+		}
+		if i+1 < len(command) && command[i+1] == '|' {
+			i++ // skip the second '|' of "||"
+			continue
+		}
+		j := i + 1
+		if j < len(command) && command[j] == '&' {
+			j++
+		}
+		for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+			j++
+		}
+		k := j
+		for k < len(command) && !strings.ContainsRune(" \t\n;&|()<>'\"`", rune(command[k])) {
+			k++
+		}
+		if isInterpreterName(command[j:k]) {
 			return true
 		}
 	}
@@ -5977,6 +6240,12 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			}
 			return PermissionDecision{Level: level}
 		}
+	}
+	// A path-qualified binary in a trusted location inherits its bare-name
+	// allow rule (./node_modules/.bin/vp under a "vp" rule).
+	if bin := trustedToolBasename(prefix, pm.workDir); bin != "" && pm.bashPrefixes[bin] == PermissionAllow {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (trusted path prefix rule): prefix=%s path=%s", bin, prefix))
+		return PermissionDecision{Level: PermissionAllow}
 	}
 	// Finally a broad single-word ask rule (only reached when rulePrefix differs,
 	// i.e. git; a broad "git" allow cannot persist so only Ask remains here).

@@ -1,5 +1,26 @@
 # Pulse Dashboard Implementation Plan
 
+> **STATUS: IMPLEMENTED 2026-09-28.** All ten parts landed. Two items are
+> genuinely outstanding, and they are the only ones:
+>
+> 1. **No per-part commits.** Each part's final `Commit:` step is unticked on
+>    purpose — the whole feature landed as one change set rather than the ten
+>    commits this plan describes, because the working tree had unrelated
+>    in-flight work that a part-by-part commit would have swept in.
+> 2. **Part 04's performance measurement was not performed.** The plan asked for
+>    a `BenchmarkHandlePulseLive` with ~50 live entries and one
+>    `curl -w '%{time_total}'` of `scope=all` against a populated multi-project
+>    store. No such environment was available, so **the p50 < 200 ms budget for
+>    `scope=live` and the `scope=all` cost are UNMEASURED.** The design work
+>    that should keep them in budget (metadata-only disk scan, one indexed
+>    title row per live session) is in place; the numbers are not claimed.
+>
+> The per-part checkboxes are a partial record — parts 03–07 were ticked as they
+> ran, parts 01–02 retrospectively, and parts 08–10 still show unticked boxes
+> for work that is done. Use this banner, not the checkboxes, as the source of
+> truth. Deviations from the plan are recorded inline in
+> `docs/concepts/pulse-dashboard.md` and in `CHANGES.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan part-by-part. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A full-page "Pulse" view listing every live chat session across all

@@ -20,7 +20,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2/quick"
-	"github.com/atotto/clipboard"
 	"github.com/mattn/go-runewidth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/gitexec"
@@ -773,7 +772,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 	case "ctrl+l":
 		return m.startInlineEdit()
 	case "ctrl+y":
-		m.copySelectedPath()
+		return m, m.copySelectedPath()
 	case "ctrl+o":
 		if m.cursor >= 0 && m.cursor < len(m.nodes) {
 			return m, openInFileExplorer(m.nodes[m.cursor].path)
@@ -1755,21 +1754,18 @@ func (m filesModel) submitPrompt() (filesModel, tea.Cmd) {
 	return m, m.refreshPreviewCmd()
 }
 
-func (m *filesModel) copySelectedPath() {
+func (m *filesModel) copySelectedPath() tea.Cmd {
 	n, ok := m.selectedNode()
 	if !ok {
-		return
+		return nil
 	}
 	rel, err := filepath.Rel(m.workDir, n.path)
 	if err != nil {
 		m.statusMsg = "copy path failed: " + err.Error()
-		return
-	}
-	if err := clipboard.WriteAll(rel); err != nil {
-		m.statusMsg = "copy path failed: " + err.Error()
-		return
+		return nil
 	}
 	m.statusMsg = "copied path: " + rel
+	return copyToClipboard(rel)
 }
 
 func (m filesModel) openInEditor(path string) tea.Cmd {

@@ -4,6 +4,7 @@ import { useBrowserStore, useBrowserActions, type StateKey } from "../../lib/bro
 import { LoadingSpinner } from "./LoadingSpinner";
 import { uploadBrowseFiles } from "../../api/client";
 import { ContextMenu, type ContextMenuItem } from "../Layout/ContextMenu";
+import { openExternalURL } from "../../lib/externalLinks";
 
 /** CDP modifier bitmask (Input.dispatchMouseEvent/KeyEvent convention). */
 const MOD_ALT = 1;
@@ -519,7 +520,7 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
       label: "Open External",
       disabled: status !== "open" || !pageUrl,
       onClick: () => {
-        window.open(pageUrl, "_blank", "noopener");
+        openExternalURL(pageUrl);
       },
     },
   ];
@@ -1090,7 +1091,7 @@ export function ChromeViewport({ stateKey, browseBase, url, navSeq, active = tru
           <button
             data-testid="cdp-open-external"
             className="px-2 py-1 text-xs rounded border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-            onClick={() => window.open(url, "_blank", "noopener")}
+            onClick={() => openExternalURL(url)}
           >
             Open externally ↗
           </button>

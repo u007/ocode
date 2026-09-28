@@ -1207,6 +1207,179 @@ func TestCompactSummaryClientExplicitOverrideBeatsSmallModel(t *testing.T) {
 	}
 }
 
+// TestCompactSummaryClientKeepsProviderQualifiedModel pins the shape the
+// web/desktop model picker persists: ModelDialog hands back ModelInfo.name,
+// which is the canonical "provider/model" id, and both Settings → Compact and
+// the CoworkSidebar row write it straight into compact.summary_model with
+// summary_provider left empty.
+//
+// The main client's provider must NOT be glued onto such an id. With a
+// registered main provider the old resolution produced the id
+// "openai:anthropic/claude-haiku-4-5"; NewClient's slash split rejected the
+// "openai:anthropic" head and its colon fallback then built a perfectly VALID
+// client with provider "openai" and model "anthropic/claude-haiku-4-5" — the
+// worst possible failure: no error, every summary sent to the main backend
+// under a model name it does not serve.
+func TestCompactSummaryClientKeepsProviderQualifiedModel(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	a := &Agent{
+		// A real registered provider, so the old resolution still produced a
+		// usable client and the test fails on the MODEL NAME (the silent-wrong
+		// case) rather than on a type assertion.
+		client: &GenericClient{Provider: "openai", Model: "gpt-5"},
+		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{
+			SummaryModel: "anthropic/claude-haiku-4-5",
+		}}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient for a provider-qualified summary model, got %T", client)
+	}
+	if gc.Provider != "anthropic" || gc.Model != "claude-haiku-4-5" {
+		t.Fatalf("provider-qualified summary_model must be passed through untouched, got provider=%q model=%q", gc.Provider, gc.Model)
+	}
+}
+
+// TestCompactSummaryClientExplicitProviderWinsOverQualifiedModel guards the
+// "explicit summary_provider always wins" arm of the resolution. The model
+// half is itself a ROUTED id — OpenRouter addresses models as
+// "<original-provider>/<name>:<variant>" — so the composite has to be
+// "openrouter/openai/gpt-oss-120b:free" (provider first, slash-joined), not a
+// bare passthrough that would resolve to the wrong backend.
+func TestCompactSummaryClientExplicitProviderWinsOverQualifiedModel(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{
+			SummaryProvider: "openrouter",
+			SummaryModel:    "openai/gpt-oss-120b:free",
+		}}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient, got %T", client)
+	}
+	if gc.Provider != "openrouter" || gc.Model != "openai/gpt-oss-120b:free" {
+		t.Fatalf("explicit summary_provider must win over a routed model id, got provider=%q model=%q", gc.Provider, gc.Model)
+	}
+}
+
+// TestCompactSummaryClientBareModelFallsBackToMainProvider pins the legacy
+// path: no explicit provider and a BARE model name still runs on the main
+// client's provider, exactly as before the picker existed.
+func TestCompactSummaryClientBareModelFallsBackToMainProvider(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &GenericClient{Provider: "openai", Model: "gpt-5"},
+		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{
+			SummaryModel: "gpt-4o-mini",
+		}}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient, got %T", client)
+	}
+	if gc.Provider != "openai" || gc.Model != "gpt-4o-mini" {
+		t.Fatalf("bare summary_model must fall back to the main provider, got provider=%q model=%q", gc.Provider, gc.Model)
+	}
+}
+
+// TestCompactSummaryClientAcceptsColonFormModelID covers the second id format
+// NewClient accepts. A hand-edited summary_model of "anthropic:claude-haiku-4-5"
+// used to be treated as a BARE model name (it has no "/"), so the main
+// provider was glued on: "openai/anthropic:claude-haiku-4-5" resolved to
+// provider openai + model "anthropic:claude-haiku-4-5" — a model openai does
+// not serve. compact.summary_model must accept the same id formats the main
+// model does.
+func TestCompactSummaryClientAcceptsColonFormModelID(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &GenericClient{Provider: "openai", Model: "gpt-5"},
+		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{
+			SummaryModel: "anthropic:claude-haiku-4-5",
+		}}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient, got %T", client)
+	}
+	if gc.Provider != "anthropic" || gc.Model != "claude-haiku-4-5" {
+		t.Fatalf("colon-form summary_model must resolve on its own provider, got provider=%q model=%q", gc.Provider, gc.Model)
+	}
+}
+
+// TestCompactSummaryClientTreatsColonVariantAsPartOfModelName is the negative
+// case for the colon form: ":free" and friends are VARIANT suffixes, not
+// provider separators, so a bare "gpt-4o:free" must still fall back to the
+// main provider rather than being read as provider "gpt-4o".
+func TestCompactSummaryClientTreatsColonVariantAsPartOfModelName(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &GenericClient{Provider: "openai", Model: "gpt-5"},
+		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{
+			SummaryModel: "gpt-4o:free",
+		}}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient, got %T", client)
+	}
+	// Still on the main provider (correct), but the WHOLE name is preserved —
+	// the ":free" suffix must not be split off as a provider.
+	if gc.Provider != "openai" || gc.Model != "gpt-4o:free" {
+		t.Fatalf("a colon variant suffix must stay part of the model name, got provider=%q model=%q", gc.Provider, gc.Model)
+	}
+}
+
+// TestProviderAndModelID pins the three recognition cases shared by
+// NewClientWithProfile and compactSummaryClient, plus the two negative cases
+// (bare name, unknown prefix) that must be reported as NOT qualified so
+// compactSummaryClient knows to apply the main provider instead.
+func TestProviderAndModelID(t *testing.T) {
+	cfg := &config.Config{Provider: map[string]interface{}{"mygw": map[string]interface{}{"baseURL": "https://mygw.test/v1"}}}
+
+	tests := []struct {
+		name         string
+		id           string
+		wantProvider string
+		wantModel    string
+		wantOK       bool
+	}{
+		{name: "registered provider", id: "openai/gpt-4o", wantProvider: "openai", wantModel: "gpt-4o", wantOK: true},
+		{name: "domain alias canonicalized", id: "runinfra.ai/nvidia/x", wantProvider: "runinfra", wantModel: "nvidia/x", wantOK: true},
+		{name: "configured provider block", id: "mygw/some-model", wantProvider: "mygw", wantModel: "some-model", wantOK: true},
+		{name: "routed id keeps nested provider", id: "openrouter/openai/gpt-oss-120b:free", wantProvider: "openrouter", wantModel: "openai/gpt-oss-120b:free", wantOK: true},
+		{name: "bare name is not qualified", id: "gpt-4o-mini", wantProvider: "", wantModel: "gpt-4o-mini", wantOK: false},
+		{name: "unknown prefix is not qualified", id: "mock:anthropic/claude", wantProvider: "", wantModel: "mock:anthropic/claude", wantOK: false},
+		{name: "empty", id: "", wantProvider: "", wantModel: "", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, model, ok := providerAndModelID(cfg, tt.id)
+			if ok != tt.wantOK || provider != tt.wantProvider || model != tt.wantModel {
+				t.Fatalf("providerAndModelID(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tt.id, provider, model, ok, tt.wantProvider, tt.wantModel, tt.wantOK)
+			}
+		})
+	}
+}
+
 // TestCompactSummaryClientThinkingBudgetOff verifies that every client
 // created by compactSummaryClient has ThinkingBudget == 0, regardless of the
 // user's configured reasoning level. This covers three paths:

@@ -2,6 +2,10 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { useEffect } from "react";
 import { render, cleanup, screen } from "@testing-library/react";
 import CoworkSidebar from "./CoworkSidebar";
+import { EMPTY_COMPACT_CONFIG } from "../../lib/compactConfig";
+import { DEFAULT_SPEECH_SUMMARY_CONFIG } from "../../lib/speechSummaryConfig";
+import type { CompactConfig } from "../../api/client";
+import type { SpeechSummaryConfig } from "../../api/client";
 import { ChatProvider, useChatDispatch } from "../../stores/chatStore";
 import type { TUIStatus } from "../../api/types";
 
@@ -31,6 +35,17 @@ vi.mock("../../api/client", () => ({
     setAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
     getDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
     setDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
+    // The compaction summary row (CoworkSidebar's "Summary" pair) reads/writes
+    // this block; without it the mount Promise.all throws on the missing method.
+    getCompactConfig: vi.fn(() => Promise.resolve(EMPTY_COMPACT_CONFIG)),
+    setCompactConfig: vi.fn((patch: Partial<CompactConfig>) =>
+      Promise.resolve({ ...EMPTY_COMPACT_CONFIG, ...patch })),
+    // The Summary row reads/writes the speech-summary block; without it the
+    // mount Promise.all throws on the missing method and the effect dies.
+    getSpeechSummaryConfig: vi.fn(() =>
+      Promise.resolve(DEFAULT_SPEECH_SUMMARY_CONFIG)),
+    setSpeechSummaryConfig: vi.fn((patch: Partial<SpeechSummaryConfig>) =>
+      Promise.resolve({ ...DEFAULT_SPEECH_SUMMARY_CONFIG, ...patch })),
     getSessionStatus: vi.fn(() => Promise.resolve({})),
   },
   apiPath: (p: string) => p,

@@ -854,9 +854,13 @@ Rules for anything in `internal/server`:
   pause and the unlock happen together when the step returns). Follow
   `livePendingAsks`.
 - **Do not pin an HTTP connection for the length of a turn.** A browser allows
-  only six concurrent connections per origin over HTTP/1.1 (the server is plain
-  HTTP, so there is no h2 multiplexing), and the SPA already spends some on the
-  session mirror and the agent-run stream. A request held open per running turn
+  only six concurrent connections per origin over HTTP/1.1 (`ocode serve` and
+  share URLs are plain HTTP, so there is no h2 multiplexing there), and the SPA
+  already spends some on the session mirror and the agent-run stream. The
+  desktop webview is the exception: it loads `https://127.0.0.1:PORT` with a
+  per-launch pinned cert and negotiates HTTP/2 (see
+  `docs/gotchas/desktop-webview-http2.md`) — but the browser path still has the
+  cap, so this rule stands. A request held open per running turn
   starves the other sessions' requests — the same "stuck session" symptom with a
   client-side cause. `POST /api/chat` and `POST /api/sessions/{id}/message`
   therefore take `"async": true` (the web client always sets it) and reply `202`
@@ -925,8 +929,11 @@ the working directory of a session's work. The rules:
   per project root, shared across tabs on the same repo. Never route a
   session-scoped operation through `h.workDir`.
 - **Project-scoped endpoints take an explicit project param**, validated
-  against `allowedProjectRoots()` (workdir + saved projects — the shared trust
-  boundary): git uses `?project=`, terminal uses `?project_path=` (plus
+  against `allowedProjectRoots()` (workdir + saved **local** projects — the
+  shared local trust boundary; saved remote/SSH/WSL entries are excluded
+  because their path is interpreted on the other machine, see
+  `docs/gotchas/remote-project-path-trust-boundary.md`): git uses
+  `?project=`, terminal uses `?project_path=` (plus
   `&host=` for a registered remote project, which spawns ssh/wsl.exe instead
   of a local shell), file tree
   confines `?path=`, command-context and uploads use `?project=` (uploads
@@ -1071,6 +1078,12 @@ resolved by `internal/paths.GlobalDataDir()`:
 Sub-directories:
 - `project/{slug}/sessions/` — chat session JSON files (one per session)
 - `usage/` — LLM token usage records (`records.jsonl`)
+- `logs/` — `internal/paths.LogsDir()`, shared by every ocode process; each
+  uses its own filename: TUI `tui-crash.log` (stderr), `compact.log`,
+  `tokens.log`; desktop app `desktop.log` (the standard `log` + default `slog`
+  output, which a double-clicked `.app` would otherwise send to `/dev/null`;
+  rotates to `.1` at 5 MB via `internal/logfile`). Always resolve the dir via
+  `paths.LogsDir()`, never `filepath.Join(GlobalDataDir(), "logs")`.
 - `auth.json` — provider API keys and OAuth tokens
 - `projects.json` / `project_groups.json` — web sidebar project list
 - `tabs.json` — open session tabs per project for the web/desktop UI

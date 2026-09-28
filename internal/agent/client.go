@@ -4471,6 +4471,70 @@ func maskKey(key string) string {
 	return key[:4] + "…" + key[len(key)-4:]
 }
 
+// providerAndModelID splits a "provider/model" id into its canonical provider
+// id and the remaining model name, recognising exactly the three cases
+// NewClientWithProfile has always accepted:
+//
+//  1. a registered provider id (the `providers` registry),
+//  2. a domain-spelled alias, canonicalised to the registry id
+//     (providerAliases, e.g. "runinfra.ai/nvidia/..." → "runinfra"), so
+//     credentials, base URL and provider-keyed behaviours all key on one id,
+//  3. an explicitly configured provider block (cfg.Provider), which is how a
+//     user-defined gateway is addressed.
+//
+// ok is false for a bare model name and for a prefix that names none of the
+// three; in that case the id is returned UNCHANGED so the caller can decide
+// what to do (NewClient falls through to its "provider:model" colon form;
+// compactSummaryClient substitutes the main client's provider).
+//
+// The slash is split on the FIRST occurrence so a routed id keeps its nested
+// provider segment: "openrouter/openai/gpt-oss-120b:free" resolves to
+// provider "openrouter" and model "openai/gpt-oss-120b:free".
+func providerAndModelID(cfg *config.Config, id string) (provider, model string, ok bool) {
+	head, rest, found := strings.Cut(id, "/")
+	if !found {
+		return "", id, false
+	}
+	if _, known := providers[head]; known {
+		return head, rest, true
+	}
+	if canon, known := providerAliases[head]; known {
+		return canon, rest, true
+	}
+	if cfg != nil {
+		if _, known := cfg.Provider[head]; known {
+			return head, rest, true
+		}
+	}
+	return "", id, false
+}
+
+// modelIDProvider reports the provider NewClient would resolve for a model id
+// that ALREADY names one, or "" when the id is a bare model name that still
+// needs a provider supplying.
+//
+// It covers both id formats NewClient accepts: the "provider/model" form
+// (providerAndModelID) and the "provider:model" last-resort form. The colon
+// head is honoured only when it names a REGISTERED provider, so a variant
+// suffix that merely looks like one — "gpt-4o:free" — is never mistaken for a
+// provider and keeps its full name.
+//
+// compactSummaryClient uses this to decide whether a configured model needs the
+// main provider glued on, which is why compact.summary_model accepts exactly
+// the same id formats as the main model instead of silently mis-routing the
+// colon form.
+func modelIDProvider(cfg *config.Config, id string) string {
+	if provider, _, ok := providerAndModelID(cfg, id); ok {
+		return provider
+	}
+	if head, _, found := strings.Cut(id, ":"); found {
+		if _, known := providers[head]; known {
+			return head
+		}
+	}
+	return ""
+}
+
 func NewClient(cfg *config.Config, model string) LLMClient {
 	return NewClientWithProfile(cfg, model, auth.ActiveProfile())
 }
@@ -4498,23 +4562,11 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	// Check slash first so that OpenRouter models like
 	// "openrouter/openai/gpt-oss-120b:free" parse correctly — the colon
 	// is part of the model name, not a provider separator.
-	if parts := strings.SplitN(model, "/", 2); len(parts) == 2 {
-		if _, ok := providers[parts[0]]; ok {
-			provider = parts[0]
-			model = parts[1]
-		} else if canon, ok := providerAliases[parts[0]]; ok {
-			// Domain-spelled alias for a registered provider (e.g.
-			// "runinfra.ai/nvidia/..."): parse as the canonical id so
-			// credentials, base URL, and provider-keyed behaviors (stream
-			// usage opt-in, retry classification) all apply.
-			provider = canon
-			model = parts[1]
-		} else if cfg != nil {
-			if _, ok := cfg.Provider[parts[0]]; ok {
-				provider = parts[0]
-				model = parts[1]
-			}
-		}
+	// providerAndModelID owns the slash cases; the colon fallback below stays
+	// here because it is NewClient-only (see providerAndModelID's contract).
+	if p, m, ok := providerAndModelID(cfg, model); ok {
+		provider = p
+		model = m
 	}
 	if provider == "" {
 		if parts := strings.SplitN(model, ":", 2); len(parts) == 2 {

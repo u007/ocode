@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:16:44Z
+---
 # Part 07 — `PulseCard`
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
@@ -59,17 +63,17 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 
 ## Steps
 
-- [ ] **Failing `usePulseTail` tests**: running → fetches state once,
+- [x] **Failing `usePulseTail` tests**: running → fetches state once,
   appends `text` events, keeps last 6; disabled → unsubscribes and clears;
   idle → uses last assistant message; fetch failure → `error` set and
   logged with session id.
-- [ ] **Failing `PulseCard` tests** (fake timers): each status renders glyph
+- [x] **Failing `PulseCard` tests** (fake timers): each status renders glyph
   + aria-label; needs-you shows ask summary; hover <150ms no expand, ≥150ms
   expand; focus expands immediately; `Esc` collapses; click calls jump with
   host `""`; double-click with pending ask calls pending-ask jump; expanded
   shows every `todo.items` entry with its state mark; reduced
   motion removes pulse class.
-- [ ] Run `cd web && pnpm vitest run src/components/Pulse` → FAIL.
-- [ ] **Implement.**
-- [ ] Run → PASS; `pnpm test && pnpm typecheck`.
+- [x] Run `cd web && pnpm vitest run src/components/Pulse` → FAIL.
+- [x] **Implement.**
+- [x] Run → PASS; `pnpm test && pnpm typecheck`.
 - [ ] Commit: `feat(web): add PulseCard with hover-expand live tail`.

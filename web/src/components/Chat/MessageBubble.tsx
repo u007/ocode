@@ -23,7 +23,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
-import { openExternalURL } from "../../lib/externalLinks";
+import MarkdownLink from "../common/MarkdownLink";
 import { requestSpeech } from "../Speech/SpeechProvider";
 import { renderedCopyText } from "../../lib/copyText";
 import { BlockCopyControl } from "./BlockCopyControl";
@@ -142,21 +142,7 @@ export function AssistantText({ content, onSpeak }: { content: string; onSpeak?:
                   {children}
                 </blockquote>
               ),
-              a: ({ href, children }) => (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(event) => {
-                    if (!href) return;
-                    event.preventDefault();
-                    openExternalURL(href);
-                  }}
-                  className="text-link hover:underline"
-                >
-                  {children}
-                </a>
-              ),
+              a: (props) => <MarkdownLink className="text-link hover:underline" {...props} />,
               table: ({ children }) => (
                 <div className="overflow-x-auto mb-2">
                   <table className="border-collapse text-xs">{children}</table>

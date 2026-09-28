@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
@@ -34,12 +35,23 @@ type portMapView struct {
 type portMapRegistry struct {
 	sup *tool.ProcessSupervisor
 
+	// wake nudges the watchdog loop when a forward's child is reaped. Buffered
+	// by one because the sender is a reaper goroutine that must not block: a
+	// full channel means a pass is already pending, which is all it signals.
+	wake chan struct{}
+
 	mu    sync.Mutex
 	byKey map[string]*portMapEntry
 }
 
 type portMapEntry struct {
 	fm *remote.ForwardManager
+	// ref is the store identity this entry's forwards are persisted under, so
+	// the watchdog can reconcile them without a request to resolve it.
+	ref projects.ProjectRef
+	// policy holds this project's restart bookkeeping. Non-nil for every
+	// entry created by newPortMapRegistry.
+	policy *portMapPolicy
 	// autoStartOnce runs the persisted-enabled forwards exactly once per
 	// project per process, on the first list (the panel's mount probe). Any
 	// later edits go through the explicit add/enable handlers.
@@ -47,7 +59,7 @@ type portMapEntry struct {
 }
 
 func newPortMapRegistry(sup *tool.ProcessSupervisor) *portMapRegistry {
-	return &portMapRegistry{sup: sup, byKey: make(map[string]*portMapEntry)}
+	return &portMapRegistry{sup: sup, wake: make(chan struct{}, 1), byKey: make(map[string]*portMapEntry)}
 }
 
 // portMapKey is the registry's identity for a remote project. It deliberately
@@ -64,7 +76,19 @@ func (reg *portMapRegistry) entry(target remote.Target, path string) *portMapEnt
 	if e, ok := reg.byKey[key]; ok {
 		return e
 	}
-	e := &portMapEntry{fm: remote.NewForwardManager(reg.sup, target)}
+	fm := remote.NewForwardManager(reg.sup, target)
+	e := &portMapEntry{
+		fm:     fm,
+		ref:    projects.ProjectRef{Host: target.String(), Path: path},
+		policy: newPortMapPolicy(fm.Start, fm.Stop),
+	}
+	// The manager observes each child's exit; the policy decides whether that
+	// earns a restart, and the loop is woken so the common case does not wait
+	// for the safety-net tick.
+	fm.SetOnExit(func(remotePort, exitCode int, uptime time.Duration) {
+		e.policy.noteExit(remotePort, uptime)
+		reg.wakeMonitor()
+	})
 	reg.byKey[key] = e
 	return e
 }
@@ -177,6 +201,9 @@ func (h *Handler) HandleAddPortMap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// An explicit add is a deliberate "try it now", so it clears any give-up
+	// the monitor reached for this port.
+	entry.policy.reset(body.RemotePort)
 	if err := entry.fm.Start(remote.ProjectPortMap{RemotePort: body.RemotePort, LocalPort: body.LocalPort, Enabled: true}); err != nil {
 		writeError(w, http.StatusBadGateway, "saved, but failed to open now: "+err.Error())
 		return
@@ -196,7 +223,17 @@ func (h *Handler) HandleRemovePortMap(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A removal must never be undone by the watchdog. Suppress restarts BEFORE
+	// Stop: a watchdog pass that already read an "enabled" snapshot could
+	// otherwise re-open the forward after Stop but before the store drops the
+	// row, leaving an ssh child nothing tracks. Suppression is kept by forget
+	// (see portMapPolicy), so it still refuses a pass holding the stale snapshot
+	// after the bookkeeping is cleared; a re-add/enable clears it via reset.
+	entry.policy.suppress(port)
 	_ = entry.fm.Stop(port)
+	// The forward is going away, so drop its restart bookkeeping rather than
+	// leaving a stale give-up behind for a port that may be re-added later.
+	entry.policy.forget(port)
 	ref := portMapRef(rw)
 	if err := h.projects.RemovePortMap(ref, port); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -230,8 +267,16 @@ func (h *Handler) setPortMapEnabled(w http.ResponseWriter, r *http.Request, enab
 		return
 	}
 	if !enabled {
+		// Same suppression as removal: a watchdog pass holding a stale "enabled"
+		// snapshot must not re-open a forward the user just switched off.
+		entry.policy.suppress(port)
 		_ = entry.fm.Stop(port)
+		// A disabled forward must never be revived by the watchdog.
+		entry.policy.forget(port)
 	} else {
+		// Re-enabling is the escape hatch from the monitor's give-up state: it
+		// clears the bookkeeping so the forward is tried again right away.
+		entry.policy.reset(port)
 		maps, err := h.projects.PortMaps(ref)
 		if err == nil {
 			for _, m := range maps {

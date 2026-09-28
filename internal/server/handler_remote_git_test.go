@@ -437,3 +437,30 @@ func sliceContains(list []string, s string) bool {
 	}
 	return false
 }
+
+// An unreachable host must surface as an error, never as an empty status —
+// an empty status reads as "clean repository" in every git badge and panel.
+func TestRemoteGitStatusUnreachableHostIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\necho 'ssh: connect to host ci.local port 22: Connection refused' >&2\nexit 255\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write failing ssh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	repo := t.TempDir()
+	h := newTestHandlerWithRemote(t, "ci.local", repo)
+	for _, url := range []string{
+		"/api/git/status?host=ci.local&project=" + repo,
+		"/api/git/workspace?host=ci.local&project=" + repo,
+	} {
+		w := getJSON(t, h, url, nil)
+		if w.Code == http.StatusOK {
+			t.Fatalf("%s: status 200 with body %s, want an error", url, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "Connection refused") {
+			t.Fatalf("%s: body %q does not carry the ssh error", url, w.Body.String())
+		}
+	}
+}

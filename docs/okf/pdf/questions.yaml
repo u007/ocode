@@ -213,10 +213,11 @@
   answer: >
     The defaults are images=PDF_REDACT_IMAGE_PIXELS (2), which blanks the
     overlapping image pixels, graphics=PDF_REDACT_LINE_ART_REMOVE_IF_COVERED
-    (1), which removes line-art covered by the redaction, and
-    text=PDF_REDACT_TEXT_REMOVE (0). So a redaction over a row or cell also
-    deletes the shading rectangles and rule segments it covers, and punches a
-    hole in any image it touches. To change only text, pass
+    (1), which removes vector shapes lying entirely inside the redaction rect
+    (partly covered shapes stay whole, never clipped; 2 removes anything
+    touched), and text=PDF_REDACT_TEXT_REMOVE (0). So a redaction over a row
+    also deletes that row's shading rectangle and any rule fully inside it, and
+    punches a hole in any image it touches. To change only text, pass
     graphics=PDF_REDACT_LINE_ART_NONE (0) and images=PDF_REDACT_IMAGE_NONE (0).
     If you are rebuilding the region anyway, keep the defaults and redraw the
     graphics.
@@ -591,8 +592,8 @@
   answer: >
     insert_image returns the image xref. Insert once from the file and pass
     xref=that_xref on the later pages, so every page references the same image
-    object. Saving with garbage≥3 (deduplication) also merges identical
-    objects. PyMuPDF may already reuse an identical image within one session,
+    object. Saving with garbage=4 also merges identical streams (verified on
+    1.27.1: levels 0-3 keep separate copies). PyMuPDF may already reuse an identical image within one session,
     but pass xref explicitly.
   rubric:
     - { point: "reuse via xref returned by first insert_image (xref= param)", score: 1 }

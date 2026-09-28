@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -349,6 +350,115 @@ func TestUpdateRemoteRejectsWSLPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.UpdateRemote(ProjectRef{Host: "wsl:Ubuntu", Path: "/home/app"}, remote.Target{Kind: remote.KindWSL, Distro: "Debian", Port: 22}, `/home/app`); err == nil {
+		t.Fatal("expected WSL port validation error")
+	}
+}
+
+// DuplicateAsRemote creates a distinct (host, path) entry that carries the
+// source's display name and group, and coexists with the local source.
+func TestDuplicateAsRemoteInheritsNameAndGroup(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if err := store.Add("/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RenameRef(ProjectRef{Path: "/home/user/app"}, "My App"); err != nil {
+		t.Fatalf("RenameRef: %v", err)
+	}
+	if err := store.SetGroupRef(ProjectRef{Path: "/home/user/app"}, "work"); err != nil {
+		t.Fatalf("SetGroupRef: %v", err)
+	}
+
+	dup, err := store.DuplicateAsRemote("devbox", "/home/user/app", 0, "My App", "work")
+	if err != nil {
+		t.Fatalf("DuplicateAsRemote: %v", err)
+	}
+	if dup.Host != "devbox" || dup.Path != "/home/user/app" {
+		t.Fatalf("duplicate identity = %q:%q, want devbox:/home/user/app", dup.Host, dup.Path)
+	}
+	if dup.Name != "My App" || dup.Group != "work" {
+		t.Fatalf("duplicate name/group = %q/%q, want My App/work", dup.Name, dup.Group)
+	}
+	if dup.RemoteKind != "ssh" || dup.RemoteHost != "devbox" {
+		t.Fatalf("duplicate remote fields = %q/%q, want ssh/devbox", dup.RemoteKind, dup.RemoteHost)
+	}
+
+	// The local source is untouched and both entries coexist.
+	list := store.List()
+	if len(list) != 2 {
+		t.Fatalf("list length = %d, want 2 (local + duplicate): %+v", len(list), list)
+	}
+	local := list[0]
+	for _, p := range list {
+		if p.Host == "" {
+			local = p
+		}
+	}
+	if local.Name != "My App" || local.Group != "work" {
+		t.Fatalf("local source mutated: %+v", local)
+	}
+}
+
+// DuplicateAsRemote refuses a target that is already saved (unlike AddRemote,
+// which upserts) and reports the sentinel error.
+func TestDuplicateAsRemoteRejectsExistingTarget(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if err := store.AddRemote("devbox", "/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.DuplicateAsRemote("devbox", "/home/user/app", 0, "", ""); err == nil {
+		t.Fatal("expected ErrProjectExists, got nil")
+	} else if !errors.Is(err, ErrProjectExists) {
+		t.Fatalf("error = %v, want ErrProjectExists", err)
+	}
+	if got := len(store.List()); got != 1 {
+		t.Fatalf("list length = %d, want 1 (no new entry on conflict)", got)
+	}
+}
+
+// DuplicateAsRemote canonicalizes the host before the conflict check, so a
+// duplicate of the same target expressed a different way still conflicts.
+func TestDuplicateAsRemoteCanonicalizesHost(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if err := store.AddRemote("james@devbox", "/home/user/app"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.DuplicateAsRemote("james@devbox", "/home/user/app", 0, "", ""); !errors.Is(err, ErrProjectExists) {
+		t.Fatalf("error = %v, want ErrProjectExists", err)
+	}
+	// A different host is a distinct entry.
+	if _, err := store.DuplicateAsRemote("otherhost", "/home/user/app", 0, "", ""); err != nil {
+		t.Fatalf("DuplicateAsRemote(otherhost): %v", err)
+	}
+	if got := len(store.List()); got != 2 {
+		t.Fatalf("list length = %d, want 2", got)
+	}
+}
+
+// DuplicateAsRemote validates the target and requires a path.
+func TestDuplicateAsRemoteValidatesTarget(t *testing.T) {
+	store, err := NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("NewStoreAt: %v", err)
+	}
+	if _, err := store.DuplicateAsRemote("bad/host", "/p", 0, "", ""); err == nil {
+		t.Fatal("expected invalid target error")
+	}
+	if _, err := store.DuplicateAsRemote("devbox", "", 0, "", ""); err == nil {
+		t.Fatal("expected missing path error")
+	}
+	// WSL rejects an SSH port (Validate), mirroring AddRemote.
+	if _, err := store.DuplicateAsRemote("wsl:Ubuntu", "/home/app", 22, "", ""); err == nil {
 		t.Fatal("expected WSL port validation error")
 	}
 }

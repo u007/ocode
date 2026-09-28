@@ -103,6 +103,17 @@ This is the **only** category that triggers the opaque relaxation. Every other c
 
 `resolveAutoJudgeOpaqueMinConfidence()` (`internal/agent/permissions.go`) returns the configured value when `permissions.auto.min_confidence` is set, and the `autoJudgeOpaqueMinConfidenceDefault = 0.75` constant only when it is unset.
 
+## Shell-variable expansion for the judges
+
+Neither judge can run anything, so a bash command built from variables (`MOD=$(go env GOMODCACHE); grep x "$MOD/y"`) was opaque: the judge could not tell where `"$MOD/y"` points, answered `truncated_or_unknown`, and deferred to the human. `expandBashForJudge` (`internal/agent/permission_shellvars.go`) resolves what it safely can before either judge sees the command:
+
+- **In-command assignments.** Only a statement made purely of `NAME=value` words defines variables for later statements. A `NAME=value cmd` prefix does not (bash expands that command's arguments before the prefix applies). An assignment that cannot be resolved stays opaque and never falls back to the same-named env var.
+- **Environment variables.** Only the ones the command references. A secret-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSW`, `AUTH`, `CREDENTIAL`, `COOKIE`, `SESSION`, `PRIVATE`, `SIGNATURE`) or a value matching `redact.QuickScan` is withheld as `<redacted>` and left as `$NAME`, because Jev is a remote API.
+- **`$(...)` substitutions.** Only this fixed read-only allowlist is ever executed (via `shell.Build`, 3s timeout, stdout only, single-line output required): `pwd` (answered from the working directory, no process), `go env <VAR>`, `git rev-parse --show-toplevel`, `npm root [-g]`, `npm prefix [-g]`, and `python|python3 -c '<snippet>'` where the snippet is one of the exact print-a-path snippets in `pythonSnippetsOK` (`sys.prefix`, `sys.base_prefix`, `sys.executable`, `site.getusersitepackages()`, `site.getsitepackages()[0]`, `sysconfig.get_paths()['purelib'|'platlib']`). Any other substitution, backticks, `${X:-y}`-style forms and `$((...))` are never run and stay verbatim.
+- **`/mask`.** When session redaction is on, every resolved value and the expanded command pass through the session registry (`redactText` + `Registry.Substitute`), so a known secret reaches the judge as its OCSEC token.
+
+Jev gets `expanded_command` and `resolved_variables` in its state plus a rubric line telling it to judge paths from the expanded form. The chat judge gets the same as an "Expanded command" section under `Arguments`. The expansion is judge context only: the command that runs is unchanged, and `verifyAutoGrant` still checks the original.
+
 ## UI
 
 `PermissionsForm.tsx` loads the catalog and the auto-permission config in parallel. Each category is a checkbox with `aria-label="Enforce <key>"`; **ticked = enforced**, and saving writes `relaxed_concerns` = the **unticked** keys. `All` / `None` buttons set the array to `[]` / every key. The block renders a server-unavailable fallback when the catalog is empty.

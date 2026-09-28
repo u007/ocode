@@ -1,0 +1,34 @@
+stack: pptx
+title: PowerPoint editing (existing .pptx / legacy .ppt — tables, images; Python, python-pptx-centric)
+corpus_rev: 1
+# Derivation + validation threshold for this stack (rubric-guide.md default is 0.75).
+threshold: 0.9
+# Version scope: python-pptx >= 1.0 (verified on 1.0.2), lxml for raw DrawingML,
+# LibreOffice headless for legacy .ppt conversion. Answers are graded on technique, not
+# on one library: an equivalent correct approach (Open XML SDK, raw zip+XML) earns the
+# point. API facts in the answer key were verified against python-pptx 1.0.2.
+version_scope: "python-pptx>=1.0"
+
+# Tag vocabulary — each tag is a subscore axis.
+tags:
+  - pptx-model       # zip of parts, slide/layout/master, graphicFrame + a:tbl, EMU, z-order
+  - table-locate     # find the table shape and the row/cell, merges
+  - row-delete       # remove an a:tr, frame height, banding
+  - cell-edit        # replace cell text keeping formatting
+  - table-relayout   # add a row, add a column, width budget within the slide
+  - table-insert     # create a table at a free position, style, placeholders
+  - image-replace    # swap an existing picture (rels, shared parts, layout images)
+  - image-insert     # place a new picture (aspect, placeholders, z-order)
+  - legacy-ppt       # binary .ppt: detect, convert, round-trip
+  - verify-safety    # keep the original, real removal, re-open and check every part
+
+detection:
+  mode: any
+  # Depth-limited: stackdetect uses filepath.Glob, which has no "**".
+  markers:
+    - { type: file, glob: "*.pptx" }
+    - { type: file, glob: "*/*.pptx" }
+    - { type: file, glob: "*/*/*.pptx" }
+    - { type: file, glob: "*.ppt" }
+    - { type: file, glob: "*/*.ppt" }
+    - { type: file, glob: "*/*/*.ppt" }

@@ -175,6 +175,31 @@ type AgentActivityEvent struct {
 	ActiveAgents []string             `json:"active_agents,omitempty"`
 }
 
+// TodoUpdatedItem is one todo line as published on the todo_updated event.
+// State is the normalized word ("pending" | "in_progress" | "done"), never the
+// file's raw status marker.
+type TodoUpdatedItem struct {
+	Text  string `json:"text"`
+	State string `json:"state"`
+}
+
+// TodoUpdatedEvent carries a session's todo plan after a todowrite call
+// rewrote it. It exists because a cross-project dashboard watches sessions it
+// has no tab open for, and re-reading every project's todo file on a poll is
+// both slow and stale-prone; this pushes the authoritative post-write state.
+//
+// It is deliberately NOT in liveFrameEvents: a todo plan is a momentary reading
+// like agent_activity, so replaying a buffered copy into a mid-turn reload
+// would show a plan the session has already moved past. Clients that miss it
+// recover on their next /api/pulse fetch.
+type TodoUpdatedEvent struct {
+	SessionID string            `json:"session_id"`
+	Done      int               `json:"done"`
+	Total     int               `json:"total"`
+	Current   string            `json:"current"`
+	Items     []TodoUpdatedItem `json:"items"`
+}
+
 // LSPStatus mirrors lsp.ServerStatus plus a coarse lifecycle state the web can
 // render without knowing LSP internals.
 type LSPStatus struct {

@@ -86,6 +86,10 @@ var sessionScopedEvents = map[string]bool{
 	"agent_activity":     true,
 	"compaction_started": true,
 	"compaction_done":    true,
+	// Post-todowrite plan state for the cross-project Pulse dashboard. Momentary
+	// like agent_activity, so it is NOT in liveFrameEvents: replaying a buffered
+	// plan into a mid-turn reload would show one the session already moved past.
+	"todo_updated": true,
 }
 
 // EventBus is the single server-side broadcaster. Every published event is

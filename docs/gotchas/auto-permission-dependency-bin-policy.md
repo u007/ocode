@@ -7,7 +7,7 @@ tags:
   - gotcha
   - security
   - policy-decision
-timestamp: 2026-09-05T00:00:00Z
+timestamp: 2026-09-28T00:00:00Z
 ---
 ## 1. THE POLICY
 
@@ -34,3 +34,11 @@ Everyday tooling (`tsc`/`eslint`/`pytest`/`go run`) must not ping the human on e
 - Never auto-allow an unfamiliar binary by path alone in **CODE** (the code layer's basename+containment gate must stay narrow).
 - When tightening, tighten **prose and code in one changelist**; neither should outpace the other.
 - Judge-ALLOW ≠ confinement in any future prose edits — always pair prose changes with code-layer reviews.
+
+## 6. PATH-QUALIFIED BINARIES AND USER ALLOW RULES (2026-09-28)
+
+Allow rules (`permissions.bash.prefixes`) match the command's first word **literally**, so a `vp` rule never covered `./node_modules/.bin/vp` or `~/.local/share/vite-plus/0.3.2/bin/vp`. Those calls fell through to the Jev judge, which scored them 0.75–0.83, below the confidence floor, and a human was asked every time. Deny rules already see through paths (`effectiveCommandWords`).
+
+- **Code:** `trustedToolBasename` (`internal/agent/permissions.go`) lets a path-qualified word inherit its **bare-name allow rule** only when it sits in a trusted location: `node_modules/.bin` inside the project (`nodeModulesBinTool`, canonical containment), or a `trustedToolDirPatterns` dir under `$HOME` (`.vite-plus/bin`, `.local/share/vite-plus/*/bin`). It runs after the harmful check and after the literal rule lookup, and it grants nothing without an existing user rule, so rule 5 above still holds. Test: `TestAllowRuleMatchesPathQualifiedTrustedTool`.
+- **Jev:** the TypeSafe state now carries `allowed_command_prefixes` (the user's bash allow rules, `PermissionManager.BashAllowedPrefixes`), and `typesafeJudgeInstructions` tells Jev that a command invoking one of them **by exact name** is user-trusted, and that a same-named binary called by a path is not covered (trusted paths are already resolved in code before Jev runs, so only untrusted ones reach it). Deny rules stay in `banned_command_prefixes`. Test: `TestConsultPermissionModelTypesafeAllowedPrefixesInState`.
+- **`git branch`:** it both lists and mutates, so it is not in `bashSubcommandAllow`. `isReadOnlyGitBranchForm` auto-allows only listing forms: no args, listing flags (`-v/-vv/-a/-r/--show-current/--color/--column/--sort/--format`), or list mode (`-l/--list/--contains/--merged/--points-at`) with patterns. Unknown flags and a positional outside list mode (branch creation) fail closed. Test: `TestGitBranchListingFormsAutoAllow`.

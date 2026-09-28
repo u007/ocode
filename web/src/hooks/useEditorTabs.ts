@@ -47,7 +47,7 @@ export interface UseEditorTabsResult {
   editorTabs: EditorTab[];
   activeEditorTabId: string | null;
   setActiveEditorTabId: (id: string | null) => void;
-  handleOpenFile: (path: string, projectRoot?: string, host?: string) => Promise<void>;
+  handleOpenFile: (path: string, projectRoot?: string, host?: string) => Promise<boolean>;
   reloadTabFromDisk: (id: string) => Promise<void>;
   dismissExternalChange: (id: string) => void;
   handleEditorChange: (id: string, content: string) => void;
@@ -117,11 +117,11 @@ export function useEditorTabs(): UseEditorTabsResult {
     return { content: data.content as string, isBinary: !!data.is_binary };
   }, []);
 
-  const handleOpenFile = useCallback(async (path: string, projectRoot?: string, host?: string) => {
+  const handleOpenFile = useCallback(async (path: string, projectRoot?: string, host?: string): Promise<boolean> => {
     const id = editorTabId(path, projectRoot, host);
     if (openFileIdsRef.current.has(id)) {
       setActiveEditorTabId(id);
-      return;
+      return true;
     }
     // Claim the id SYNCHRONOUSLY before any await. The fetch below is async;
     // claiming only after it resolved let two rapid open calls (double-click
@@ -158,7 +158,7 @@ export function useEditorTabs(): UseEditorTabsResult {
             ],
       );
       setActiveEditorTabId(id);
-      return;
+      return true;
     }
 
     const draft = loadEditorDraft(id);
@@ -206,10 +206,11 @@ export function useEditorTabs(): UseEditorTabsResult {
     } catch (err) {
       if (!draft) {
         // Release the claim — the tab was never created and must be openable
-        // again once the failure clears.
+        // again once the failure clears. Returning false lets the caller fall
+        // back (e.g. the quick file lookup for an unresolvable file link).
         openFileIdsRef.current.delete(id);
         console.error("Failed to open file:", err);
-        return;
+        return false;
       }
       // The file is gone (deleted/renamed outside the app) but we still hold
       // unsaved edits — open the tab from the draft so the user can inspect
@@ -233,6 +234,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     // through (e.g. a concurrent call that raced ahead of this one).
     setEditorTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, tab]));
     setActiveEditorTabId(id);
+    return true;
   }, [fetchFileContent]);
 
   // Restore the previously open editor tabs once on mount. Content is

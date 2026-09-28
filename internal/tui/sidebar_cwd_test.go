@@ -138,12 +138,19 @@ func TestSidebarCWDDragStillSelects(t *testing.T) {
 	if !mm2.(model).sidebarSel.active {
 		t.Fatal("expected an active selection after dragging within the cwd row")
 	}
-	// Release → selection is copied, the directory is NOT opened.
+	// Release → selection is copied, the directory is NOT opened. Copying now
+	// returns a command (OSC 52 + local fallback), so a non-nil cmd no longer
+	// means "the cwd row was clicked" — assert the command is the clipboard
+	// copy, which is what the drag-release path returns.
+	t.Setenv("PATH", "")
 	_, cmd, handled := mm2.(model).handleMouseAction(tea.Mouse{X: sidebarX + 3, Y: cwdY, Button: tea.MouseLeft}, false)
 	if !handled {
 		t.Fatal("expected the release to be handled")
 	}
-	if cmd != nil {
-		t.Errorf("dragging on the cwd row should not open the directory (got a non-nil cmd)")
+	if cmd == nil {
+		t.Fatal("expected the cwd-row drag release to copy the selection")
+	}
+	if got := collectOSC52(cmd()); len(got) == 0 {
+		t.Errorf("cwd-row drag release did not emit a clipboard copy — the cwd row click handler may have run (cmd %T)", cmd)
 	}
 }

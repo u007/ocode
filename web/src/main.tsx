@@ -1,25 +1,16 @@
-import React from "react";
-import pkg from "../package.json";
-import ReactDOM from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
-import App from "./App";
-import { _basePath, initBackendBase } from "./api/client";
-import "./debug";
-import "./index.css";
+import { runDesktopStorageMigration } from "./lib/desktopStorageMigration";
 
-// Bootstrap backend origin before first render so initial API/SSE calls
-// respect the configured backend_url (same-origin vs hub). Gate the initial
-// render on this promise so the first eventBus connection and initial
-// fetches use the correct origin; failure falls back to same-origin.
-function start() {
-  const titleText = "ocode - " + pkg.version;
-  document.title = titleText;
-  ReactDOM.createRoot(document.getElementById("root")!).render(
-    <React.StrictMode>
-      <BrowserRouter basename={_basePath || undefined}>
-        <App />
-      </BrowserRouter>
-    </React.StrictMode>,
-  );
-}
-initBackendBase().then(start).catch(start);
+// The desktop storage migration must finish before any app module is
+// evaluated: stores read localStorage at import time, so the app is loaded
+// with a dynamic import afterwards (see lib/desktopStorageMigration.ts). A
+// migration crash is logged and the app still loads — it must never leave the
+// window blank.
+runDesktopStorageMigration().then(
+  (render) => {
+    if (render) void import("./bootstrap");
+  },
+  (err) => {
+    console.error("[storage-migration] crashed; loading app without it:", err);
+    void import("./bootstrap");
+  },
+);

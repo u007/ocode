@@ -1,6 +1,8 @@
 stack: pdf
 title: PDF editing (existing documents — tables, images; Python, PyMuPDF-centric)
 corpus_rev: 1
+# Derivation + validation threshold for this stack (rubric-guide.md default is 0.75).
+threshold: 0.9
 # Version scope: PyMuPDF >= 1.24 (import name `pymupdf`; `fitz` is the legacy
 # alias), pdfplumber, pikepdf, pypdf 4+. Answers are graded on technique, not on
 # one library: an equivalent correct approach in another tool earns the point.

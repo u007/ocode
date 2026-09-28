@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -19,15 +20,15 @@ func TestForEachGitStatusConcurrentlyYieldsFastBeforeSlow(t *testing.T) {
 	defer releaseSlow()
 	go func() { time.Sleep(2 * time.Second); releaseSlow() }()
 
-	gitStatusFn = func(project string) GitStatus {
+	gitStatusFn = func(project string) (GitStatus, error) {
 		if project == "slow" {
 			<-release
 		}
-		return GitStatus{Branch: project}
+		return GitStatus{Branch: project}, nil
 	}
 
 	var order []string
-	forEachGitStatusConcurrently([]string{"slow", "fast"}, func(project string, _ GitStatus) {
+	forEachGitStatusConcurrently([]string{"slow", "fast"}, func(project string, _ GitStatus, _ error) {
 		order = append(order, project)
 	})
 
@@ -54,12 +55,12 @@ func TestGitWatcherSlowProjectDoesNotDelayAnother(t *testing.T) {
 
 	const slow = "/proj/slow"
 	const fast = "/proj/fast"
-	gitStatusFn = func(project string) GitStatus {
+	gitStatusFn = func(project string) (GitStatus, error) {
 		if project == slow {
 			<-release
-			return GitStatus{}
+			return GitStatus{}, nil
 		}
-		return GitStatus{Branch: "fast"}
+		return GitStatus{Branch: "fast"}, nil
 	}
 
 	ch := h.bus.Subscribe([]string{slow, fast})
@@ -84,4 +85,47 @@ func TestGitWatcherSlowProjectDoesNotDelayAnother(t *testing.T) {
 		}
 	}
 	t.Fatal("no git_status for the fast project within 5s — a slow project delayed it")
+}
+
+// A project whose status fails (wedged repo, timeout) must publish nothing:
+// an empty git_status would tell every viewer the repository is clean. A
+// healthy project viewed alongside it still gets its event.
+func TestGitWatcherFailedStatusPublishesNothing(t *testing.T) {
+	h := NewHandler()
+
+	old := gitStatusFn
+	defer func() { gitStatusFn = old }()
+	const broken = "/proj/broken"
+	const ok = "/proj/ok"
+	gitStatusFn = func(project string) (GitStatus, error) {
+		if project == broken {
+			return GitStatus{}, errors.New("git status for /proj/broken timed out after 10s")
+		}
+		return GitStatus{Branch: "main", IsRepo: true}, nil
+	}
+
+	ch := h.bus.Subscribe([]string{broken, ok})
+	defer h.bus.Unsubscribe(ch)
+	h.startWatchEmitters()
+
+	sawOK := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case env := <-ch:
+			if env.Event != "git_status" {
+				continue
+			}
+			if env.Project == broken {
+				t.Fatalf("failed project published git_status %+v", env.Data)
+			}
+			if env.Project == ok {
+				sawOK = true
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if !sawOK {
+		t.Fatal("healthy project got no git_status")
+	}
 }

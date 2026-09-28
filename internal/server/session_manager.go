@@ -82,6 +82,14 @@ type sessionEntry struct {
 	// from the pair). These drive the web's current-input and last-took timers.
 	turnStartedAt time.Time
 	turnEndedAt   time.Time
+	// lastTurnErr carries the error text of the most recently failed turn, or
+	// "" when the last turn succeeded / none ran. It is set where turn_error is
+	// published and cleared when a new turn becomes active, so it always
+	// describes the LAST turn rather than any failure in the session's history.
+	// Read by the cross-project Pulse dashboard to render an `error` row;
+	// without it a failed turn is indistinguishable from an idle one once the
+	// turn_active flag drops.
+	lastTurnErr string
 	// lastSeq is the last event-bus sequence observed for this session, the
 	// reconcile watermark returned by GET /api/sessions/:id/state.
 	lastSeq uint64
@@ -400,6 +408,9 @@ func (m *SessionManager) setTurnActive(sessionID string, active bool) {
 		if active {
 			e.turnStartedAt = now
 			e.turnEndedAt = time.Time{}
+			// A new turn supersedes the previous turn's verdict: the dashboard
+			// must stop showing `error` the moment a retry starts.
+			e.lastTurnErr = ""
 		} else {
 			if !e.turnStartedAt.IsZero() {
 				e.turnEndedAt = now
@@ -407,6 +418,18 @@ func (m *SessionManager) setTurnActive(sessionID string, active bool) {
 		}
 	}
 	m.mu.Unlock()
+}
+
+// setTurnError records (or with an empty msg, clears) the error text of the
+// session's most recent turn. An unknown session id is a no-op: the session may
+// have been released between the failure and this call, and creating an entry
+// for it would put a project-less ghost session on the dashboard.
+func (m *SessionManager) setTurnError(sessionID, msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		e.lastTurnErr = msg
+	}
 }
 
 // appendLiveFrame buffers one streaming SSE frame for mid-turn replay if its

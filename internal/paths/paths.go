@@ -240,6 +240,19 @@ func ProjectSessionsDir(slug string) (string, error) {
 	return ensureDir(filepath.Join(base, "project", slug, "sessions"))
 }
 
+// LogsDir returns the log directory shared by every ocode process —
+// <GlobalDataDir>/logs, i.e. ~/.local/share/opencode/logs on macOS,
+// $XDG_DATA_HOME/opencode/logs on Linux, %LOCALAPPDATA%\opencode\logs on
+// Windows. Each process uses its own filename prefix (tui-*, desktop.log). The
+// directory is created if it does not exist.
+func LogsDir() (string, error) {
+	base, err := GlobalDataDir()
+	if err != nil {
+		return "", err
+	}
+	return ensureDir(filepath.Join(base, "logs"))
+}
+
 // UsageDir returns the usage data directory under the global data dir.
 func UsageDir() (string, error) {
 	base, err := GlobalDataDir()

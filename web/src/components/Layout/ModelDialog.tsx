@@ -4,6 +4,9 @@ import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/
 import type { ModelInfo } from "../../api/types";
 import { advisorSelectionPayload, capProviderGroups, claudeCodeAdvisorModelInfos, CLAUDE_CODE_PROVIDER, CLAUDE_CODE_SECTION_TITLE, LOCAL_MODELS_PROVIDER, LOCAL_MODELS_UNCAPPED, partitionModelSections } from "./modelSelection";
 import { reportActionError } from "../../lib/actionErrors";
+import { setCompactConfig, summaryModelPatch } from "../../lib/compactConfig";
+import { setSpeechSummaryConfig } from "../../lib/speechSummaryConfig";
+import { useSpeechOptional } from "../Speech/SpeechProvider";
 import { useListNavigation } from "../../hooks/useListNavigation";
 import { Search, Check, Star, X, RefreshCw } from "lucide-react";
 import {
@@ -15,7 +18,7 @@ import {
 
 /** The single model-selection purpose this dialog is opened for. Each settings
  *  field opens the dialog for exactly one purpose — there are no tabs. */
-export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "permission" | "explorer" | "context" | "autocontinue";
+export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "speechsummary" | "permission" | "explorer" | "context" | "autocontinue";
 
 const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   main: "Select Model",
@@ -26,6 +29,7 @@ const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   mask: "Select Mask Model",
   commit: "Select Commit Message Model",
   summary: "Select Summary Model",
+  speechsummary: "Select Speech Summary Model",
   permission: "Select Permission Model",
   explorer: "Select Explorer Model",
   context: "Select Context Model",
@@ -74,6 +78,11 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   const [explorerModelState, setExplorerModelState] = useState("");
   const [contextModelState, setContextModelState] = useState("");
   const [autoContinueModelState, setAutoContinueModelState] = useState("");
+  // Compaction summary model. Unlike the session-scoped rows above, the compact
+  // block is a persisted global config, so this only seeds the picker; the
+  // sidebar row renders the authoritative value from its own fetch.
+  const [summaryModelState, setSummaryModelState] = useState("");
+  const [speechSummaryModelState, setSpeechSummaryModelState] = useState("");
   const activeModel = useChatSelector((s) => s.model);
   const smallModel = useChatSelector((s) => s.smallModel);
   const advisorModel = useChatSelector((s) => s.advisorModel);
@@ -87,6 +96,11 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     return slice.tuiStatus?.main_model || slice.model || "";
   });
   const dispatch = useChatDispatch();
+  // The speech-summary config is owned at runtime by SpeechProvider (the speak
+  // path reads it). Persist a pick through the provider when it is present so
+  // the provider's copy updates immediately; fall back to the direct endpoint
+  // when this dialog is mounted without one.
+  const speech = useSpeechOptional();
 
   // Fire-and-forget persistence with VISIBLE failure reporting. This dialog
   // closes immediately on pick (handleSelect/handleClear end with onClose), so
@@ -241,7 +255,22 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         setAutoContinueModelState(res.model ?? "");
       }).catch(console.error);
     }
-  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, loadList, hostArgs]);
+    if (purpose === "speechsummary" && !currentValues?.speechsummary) {
+      // Same rationale as the compact block below: a failed read leaves the
+      // "no model / auto" state rather than blocking the list.
+      api.getSpeechSummaryConfig(...hostArgs).then((cfg) => {
+        setSpeechSummaryModelState(cfg?.model ?? "");
+      }).catch(console.error);
+    }
+    if (purpose === "summary" && !currentValues?.summary) {
+      // The compact block is a whole-config PUT, so a failure here is surfaced
+      // by the caller's own error handling; keep the dialog usable and just
+      // leave the "no model" state rather than blocking the list.
+      api.getCompactConfig(...hostArgs).then((cfg) => {
+        setSummaryModelState(cfg?.summary_model ?? "");
+      }).catch(console.error);
+    }
+  }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, currentValues?.summary, currentValues?.speechsummary, loadList, hostArgs]);
 
   const filteredModels = models.filter(
     (m) =>
@@ -261,8 +290,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   //    "autocontinue-model", "image-model". The advisor ("advisor", picker.go
   //    l.21), OCR ("ocr-model") and embedding pickers build their own lists
   //    and show NO sections. The dialog purposes mapping onto a
-  //    sections-bearing kind are main/small/recap/permission/mask (commit and
-  //    summary have no TUI picker at all; image-model lives in ImageGenForm).
+  //    sections-bearing kind are main/small/recap/permission/mask (commit has
+  //    no TUI picker at all; summary and autocontinue are sidebar-owned and
+  //    group with the sections bearers — see supportsSections; image-model
+  //    lives in ImageGenForm).
   // 2. The favorite TOGGLE (star): the ctrl+f handler only acts on
   //    "model" / "permission-model" / "image-model", so the star is offered
   //    on main + permission here.
@@ -276,7 +307,16 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     purpose === "context" ||
     // TUI's autocontinue-model picker reuses openModelPicker (recents +
     // favorites sections render; the ctrl+f star does not act on it).
-    purpose === "autocontinue";
+    purpose === "autocontinue" ||
+    // The TUI has NO summary-model picker at all, so there is no TUI behaviour
+    // to mirror here. Since the CoworkSidebar row started owning this purpose
+    // it behaves like every other sidebar-owned picker (autocontinue included):
+    // the sections-bearing layout, minus the favorite star, which the TUI's
+    // ctrl+f handler also never acts on for a non-"model" kind.
+    purpose === "summary" ||
+    // Speech summary is sidebar-owned for the same reason: the TUI has no
+    // speech-summary picker, so there is no TUI behaviour to mirror.
+    purpose === "speechsummary";
   const supportsFavoriteToggle = purpose === "main" || purpose === "permission";
   const sections = supportsSections ? partitionModelSections(filteredModels) : null;
   // Flat provider grouping for purposes without favorites sections. Must NOT
@@ -338,6 +378,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         return currentValues?.context ?? contextModelState;
       case "autocontinue":
         return currentValues?.autocontinue ?? autoContinueModelState;
+      case "summary":
+        return currentValues?.summary ?? summaryModelState;
+      case "speechsummary":
+        return currentValues?.speechsummary ?? speechSummaryModelState;
       default:
         // "main": when a session is scoped, highlight that session's own
         // effective model (from its per-session status snapshot) rather than
@@ -442,8 +486,35 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           persist("Changing the auto-continue model", () => api.setAutoContinue({ model: modelId }, ...hostArgs));
         }
         break;
+      case "speechsummary":
+        // Sidebar-owned: no owning form, so the dialog persists the pick
+        // itself. Only `model` is sent, so the on/off gate the sidebar row owns
+        // survives the write.
+        onPick?.(purpose, modelId, selectedModel);
+        if (!onPick) {
+          setSpeechSummaryModelState(modelId);
+          persist("Changing the speech summary model", () =>
+            speech ? speech.setSummaryModel(modelId) : setSpeechSummaryConfig({ model: modelId }, host),
+          );
+        }
+        break;
+      case "summary":
+        onPick?.(purpose, modelId, selectedModel);
+        if (!onPick) {
+          // Sidebar direct trigger: persist just these two keys — the endpoint
+          // merges them onto the block read fresh from disk, so the compaction
+          // tuning the Settings form owns survives. summary_provider is cleared
+          // alongside the model (summaryModelPatch) because an explicit
+          // provider outranks the model id's own prefix server-side, so a stale
+          // one would keep routing summaries at the old backend.
+          setSummaryModelState(modelId);
+          persist("Changing the summary model", () =>
+            setCompactConfig(summaryModelPatch(modelId), host),
+          );
+        }
+        break;
       default:
-        // Form-owned purpose (recap/ocr/mask/commit/summary): hand the pick to
+        // Form-owned purpose (recap/ocr/mask/commit): hand the pick to
         // the owning form, which persists it via its own Save.
         onPick?.(purpose, modelId, selectedModel);
         break;
@@ -548,6 +619,30 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // "none" clears the model, meaning StepLimitHit-only resumes).
           setAutoContinueModelState("");
           persist("Clearing the auto-continue model", () => api.setAutoContinue({ clear: true }, ...hostArgs));
+        }
+        break;
+      case "speechsummary":
+        // Clear = back to the auto fallback (small model, then main). An
+        // explicit empty string, not an absent key: JSON.stringify would drop
+        // undefined and the stored model would survive the write.
+        onPick?.(purpose, "");
+        if (!onPick) {
+          setSpeechSummaryModelState("");
+          persist("Clearing the speech summary model", () =>
+            speech ? speech.setSummaryModel("") : setSpeechSummaryConfig({ model: "" }, host),
+          );
+        }
+        break;
+      case "summary":
+        onPick?.(purpose, "");
+        if (!onPick) {
+          // Clear = back to the auto fallback (small model when its gate is on,
+          // else the main model). summary_provider is cleared too: a provider
+          // with no model would otherwise be joined onto the main model's name.
+          setSummaryModelState("");
+          persist("Clearing the summary model", () =>
+            setCompactConfig(summaryModelPatch(""), host),
+          );
         }
         break;
       default:

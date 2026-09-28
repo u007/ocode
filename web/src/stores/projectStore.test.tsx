@@ -14,6 +14,7 @@ const projectApi = vi.hoisted(() => ({
   removeProject: vi.fn(),
   deleteGroup: vi.fn(),
   removeRemoteProject: vi.fn(),
+  duplicateProjectAsRemote: vi.fn(),
   getTabs: vi.fn(),
   setTabs: vi.fn(),
 }));
@@ -33,6 +34,7 @@ vi.mock("../api/client", () => ({
     removeProject: projectApi.removeProject,
     deleteGroup: projectApi.deleteGroup,
     removeRemoteProject: projectApi.removeRemoteProject,
+    duplicateProjectAsRemote: projectApi.duplicateProjectAsRemote,
     getTabs: projectApi.getTabs,
     setTabs: projectApi.setTabs,
   },
@@ -75,6 +77,7 @@ beforeEach(() => {
   projectApi.removeRemoteProject.mockReset().mockResolvedValue({ status: "ok" });
   projectApi.getTabs.mockReset().mockResolvedValue({ projects: {} });
   projectApi.setTabs.mockReset().mockResolvedValue({ status: "ok" });
+  projectApi.duplicateProjectAsRemote.mockReset().mockResolvedValue(undefined);
   busHandlers.clear();
   window.localStorage.clear();
 });
@@ -394,6 +397,35 @@ describe("projectStore destructive mutations propagate failures", () => {
     });
     expect(projectApi.removeRemoteProject).toHaveBeenCalledWith("/remote", "dev@example.com");
     expect(projectApi.removeProject).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("duplicateProjectAsRemote propagates a conflict so the dialog can show it", async () => {
+    projectApi.duplicateProjectAsRemote.mockRejectedValueOnce(
+      new Error("that project is already in the list for this host"),
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { result } = setup();
+    await act(async () => {
+      await expect(
+        result.current.duplicateProjectAsRemote({
+          host: "devbox",
+          path: "/home/user/app",
+          name: "My App",
+          group: "work",
+        }),
+      ).rejects.toThrow("already in the list");
+    });
+    expect(projectApi.duplicateProjectAsRemote).toHaveBeenCalledWith({
+      host: "devbox",
+      path: "/home/user/app",
+      name: "My App",
+      group: "work",
+    });
+    expect(errSpy).toHaveBeenCalledWith(
+      "Failed to duplicate project as remote:",
+      expect.any(Error),
+    );
     errSpy.mockRestore();
   });
 

@@ -13,6 +13,7 @@ vi.mock("./SpeechProvider", () => ({
     position: 0,
     duration: 0,
     speak: vi.fn(),
+    replay: vi.fn(),
     stop: vi.fn(),
     pause: vi.fn(),
     resume: vi.fn(),

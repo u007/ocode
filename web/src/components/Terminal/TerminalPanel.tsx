@@ -21,6 +21,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { registerFileLinkProvider } from "./terminalLinkProvider";
+import { openExternalURL } from "../../lib/externalLinks";
 import { buildTerminalOptions } from "./terminalOptions";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
@@ -731,9 +732,11 @@ export default function TerminalPanel({
     try {
       // Open http(s) URLs on any left click (the addon's default only fires on
       // ctrl/cmd+click). Only left-click (button 0) opens; right-click pastes.
+      // Route through openExternalURL so the desktop shell opens them in the
+      // OS browser instead of losing the webview to a navigation.
       webLinks = new WebLinksAddon((event, uri) => {
         if (event.type === "click" && event.button === 0 && /^https?:\/\//.test(uri) && !dragMovedRef.current) {
-          window.open(uri, "_blank", "noopener");
+          openExternalURL(uri);
         }
       });
       term.loadAddon(webLinks);

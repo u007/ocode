@@ -148,6 +148,26 @@ func TestDetect(t *testing.T) {
 			files: map[string]string{"a/b/c/deep.pdf": "%PDF-1.7\n"},
 			want:  nil,
 		},
+		{
+			name:  "docx does not also match the .doc glob or pptx",
+			files: map[string]string{"report.docx": "PK"},
+			want:  []string{"docx"},
+		},
+		{
+			name:  "legacy doc one level down → docx",
+			files: map[string]string{"legacy/old.doc": "\xd0\xcf\x11\xe0"},
+			want:  []string{"docx"},
+		},
+		{
+			name:  "legacy ppt → pptx",
+			files: map[string]string{"decks/q3/old.ppt": "\xd0\xcf\x11\xe0"},
+			want:  []string{"pptx"},
+		},
+		{
+			name:  "pdf, docx and pptx together",
+			files: map[string]string{"a.pdf": "%PDF", "b.docx": "PK", "c.pptx": "PK"},
+			want:  []string{"docx", "pdf", "pptx"},
+		},
 	}
 
 	for _, tc := range cases {

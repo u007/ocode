@@ -4,9 +4,8 @@ type: concept
 title: Knowledge Bundle System
 description: Internal architecture of the OKF v0.1 knowledge bundle — bundle detection, scanning, frontmatter parsing, doc search, .okfignore exclusion, and store CRUD with documented edge cases and gotchas.
 tags: [knowledge, bundle, okf, frontmatter, search, pagination, okfignore]
-timestamp: 2026-07-06T19:32:06+08:00
+timestamp: 2026-09-28T18:00:58Z
 ---
-
 # Knowledge Bundle System
 
 The OKF (Open Knowledge Format) knowledge bundle is ocode's curated project documentation system, rooted at `docs/`. It stores markdown files with YAML frontmatter and provides search, CRUD, and auto-maintained index/log.
@@ -117,6 +116,8 @@ before writing).
 
 ## Store CRUD
 
+The bundle exposes exactly **four** doc tools to the context agent: `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` (`internal/agent/doc_tools.go`). There is **no `doc_delete` tool** — removal is never a doc-tool operation. To remove a document: deprecate it first (`doc_deprecate`), then delete it via `/docs cleanup` (lists deprecated docs, `--yes` deletes them under lock), or use an external `rm` on the file for anything not already deprecated.
+
 ### Write
 
 `Store.Write()` creates or updates a document:
@@ -127,6 +128,16 @@ before writing).
 - **Merge behavior**: if the doc already exists and is conforming, known fields are updated and unknown frontmatter keys are preserved. If the existing doc is non-conforming, a fresh conforming doc is created but the original body is preserved.
 - **Side effects**: appends to `log.md` and regenerates `index.md`
 - **Locking**: all file mutations happen under `WithBundleLock`
+
+#### Gotcha: non-conforming existing file silently drops the `body` param
+
+`store.Write` (`internal/knowledge/store.go:234-248`) **silently ignores the `body` parameter** when the target file already exists but is non-conforming — `ParseDoc` marked it `Conforming: false` (no frontmatter, or unparseable frontmatter). The merge branch cannot safely apply, so Write creates a fresh conforming doc but copies the **existing file's** body into it (`Body: existingDoc.Body`) to avoid losing user-authored text. The caller's new body is discarded, yet `doc_write` still reports success (`doc_write: created/updated document`) — the old body survives and the new content never lands.
+
+**Workaround — two-write sequence:**
+1. **Write #1 (adopt)**: any `doc_write` to the path adds conforming frontmatter (title/type/description/tags) while preserving the old body. The file is now `Conforming: true`.
+2. **Write #2 (merge)**: a second `doc_write` with the intended content takes the conforming merge branch (`store.go:223-233`), which sets `doc.Body = body` and replaces the body as expected.
+
+So a single `doc_write` reported as "updated" may be a no-op for the body — if the target pre-existed without frontmatter, write twice (first to adopt, then to merge).
 
 ### Get
 

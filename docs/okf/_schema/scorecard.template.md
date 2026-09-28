@@ -16,7 +16,7 @@ evaluated_via: PROVIDER        # host used to RUN the eval — informational, NO
 evaluated_on: YYYY-MM-DD
 stack: STACK                   # e.g. react
 stack_corpus_rev: 1            # meta.yaml corpus_rev the answers were graded against
-threshold: 0.75                # derivation threshold used
+threshold: 0.75                # derivation threshold used (meta.yaml `threshold:` if set)
 ---
 
 <!-- Filename: model_id with "/" flattened to "__" so it is one valid path

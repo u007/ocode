@@ -61,7 +61,6 @@ import (
 	"github.com/u007/ocode/internal/usage"
 	"github.com/u007/ocode/internal/version"
 
-	"github.com/atotto/clipboard"
 	"github.com/gen2brain/beeep"
 
 	"charm.land/bubbles/v2/key"
@@ -1187,9 +1186,16 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 // installed and MCP enumeration has completed. It deliberately does not use
 // the old agent's injection queue: all queued work is dispatched through the
 // current agent/session in the existing unified queue order.
+//
+// shellInFlight() belongs in the guard for the same reason m.streaming does:
+// the replacement gate in handleChatKeys is evaluated BEFORE the shell gate, so
+// input typed while both a `!` command is running and a replacement is pending
+// lands here. Releasing it into the LLM mid-shell would reintroduce exactly the
+// bug shellInFlight() was introduced to fix. The queue is released by
+// shellFinishedMsg, mirroring how m.streaming defers to streamDoneMsg.
 func (m *model) drainReplacementQueueIfReady() tea.Cmd {
 	if !m.replacementQueuePending || m.modelSwitchPending || m.sessionResetPending ||
-		!m.mcpReady || m.agent == nil || m.streaming {
+		!m.mcpReady || m.agent == nil || m.streaming || m.shellInFlight() {
 		return nil
 	}
 	m.replacementQueuePending = false
@@ -1774,6 +1780,24 @@ func (m *model) markCmdFinished() {
 
 func (m model) cmdRunning() bool {
 	return m.cmdRunningCount > 0
+}
+
+// shellInFlight reports whether a `!` shell command is currently streaming.
+//
+// This is deliberately NOT the same condition as m.streaming: that flag is
+// set only on streamStartedMsg (an LLM turn), while a `!` command runs a
+// completely separate shell process emitting shellChunkMsg/shellFinishedMsg.
+// Every input-queueing gate must consult BOTH, or a message typed during
+// `!sleep 600` slips past the gate and reaches the LLM while the shell is
+// still running.
+//
+// Cleared unconditionally by the shellFinishedMsg handler, which is
+// guaranteed to arrive: runStreamingShell's reader goroutine always reaches
+// `close(ch)` (the channel close is not conditional on the process outcome),
+// and the final read of a closed channel yields shellFinishedMsg. So this
+// cannot latch true and strand the composer.
+func (m model) shellInFlight() bool {
+	return m.shellStreamCmd != nil
 }
 
 type toolOutputRegion struct {
@@ -2751,17 +2775,14 @@ func newModel(opts ...RunOptions) model {
 	// Mirror compaction decisions to disk: the in-memory log holds only the
 	// last 500 entries, which made "auto compact never ran" undiagnosable
 	// after the fact. COMPACT entries are rare (a few per turn at most).
-	if dataDir, err := paths.GlobalDataDir(); err == nil {
-		logsDir := filepath.Join(dataDir, "logs")
-		if err := os.MkdirAll(logsDir, 0755); err == nil {
-			DebugLog.MirrorKindToFile(debuglog.EntryKind("COMPACT"), filepath.Join(logsDir, "compact.log"))
-			// Mirror per-turn cache stats (input/cache_read/cache_write/output)
-			// to disk: the sidebar's cache-hit % is cumulative and hides
-			// per-turn variance needed to diagnose cache misses.
-			DebugLog.MirrorKindToFile(debuglog.EntryKind("TOKENS"), filepath.Join(logsDir, "tokens.log"))
-		} else {
-			DebugLog.Append(DebugEntry{Kind: DebugEntryKind("ERROR"), Message: fmt.Sprintf("create %s for compact log mirror: %v", logsDir, err)})
-		}
+	if logsDir, err := paths.LogsDir(); err == nil {
+		DebugLog.MirrorKindToFile(debuglog.EntryKind("COMPACT"), filepath.Join(logsDir, "compact.log"))
+		// Mirror per-turn cache stats (input/cache_read/cache_write/output)
+		// to disk: the sidebar's cache-hit % is cumulative and hides
+		// per-turn variance needed to diagnose cache misses.
+		DebugLog.MirrorKindToFile(debuglog.EntryKind("TOKENS"), filepath.Join(logsDir, "tokens.log"))
+	} else {
+		DebugLog.Append(DebugEntry{Kind: DebugEntryKind("ERROR"), Message: fmt.Sprintf("resolve logs dir for compact log mirror: %v", err)})
 	}
 
 	if shouldLoad {
@@ -3519,9 +3540,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		text := m.takeDelayedChatInput()
-		if m.streaming {
+		if m.streaming || m.shellInFlight() {
 			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemInput, text: text})
-			if m.agent != nil {
+			// Inject only into a live agent turn (see the matching gate in
+			// handleChatKeys): during a `!` shell command there is no Step
+			// loop, so an injection would never be consumed. shellFinishedMsg
+			// drains it instead.
+			if m.streaming && m.agent != nil {
 				m.agent.EnqueueInjection(agent.Message{Role: "user", Content: text})
 			}
 			return m, nil
@@ -3815,6 +3840,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rerenderTranscriptAndMaybeScroll()
 		}
 		m.saveSession()
+		// A `!` command finishing is a busy->idle transition, exactly like
+		// streamDoneMsg: anything typed while the shell was running has been
+		// parked in queuedItems and must be released now. Without this the
+		// queue only ever drains on an LLM turn boundary, so a message queued
+		// behind `!sleep 600` — and a second `!` command queued behind it,
+		// which has always queued at the input gate — would sit in the queue
+		// row forever with nothing left to trigger it.
+		//
+		// Skipped while a question/permission dialog owns the turn, matching
+		// the guard on the streamDoneMsg drain: those are answered by
+		// submitQuestionAnswers calling askAgent, which fires its own
+		// streamDoneMsg to drain the queue.
+		if !m.queueDrainBlocked() {
+			if cmd, drained := m.drainQueuedItems(); drained {
+				return m, cmd
+			}
+		}
 	case shellChunkMsg:
 		// A streaming chunk of a `!` shell command arrived. Append it to the
 		// transcript and re-dispatch the same reader command to keep the
@@ -6120,7 +6162,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			return true, newM, c
 		case "y":
 			if m.sessionID != "" {
-				_ = clipboard.WriteAll(m.sessionID)
+				return true, m, copyToClipboard(m.sessionID)
 			}
 			return true, m, nil
 		case "t":
@@ -6169,8 +6211,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		case "ctrl+y":
 			body := renderPermissionRequestBody(m.pendingPermission)
-			_ = clipboard.WriteAll(body)
-			return m, nil
+			return m, copyToClipboard(body)
 		}
 		return m, nil
 	}
@@ -6577,7 +6618,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		}
 
-		if m.streaming {
+		if m.streaming || m.shellInFlight() {
 			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemInput, text: text})
 			// Also hand it straight to the running agent: EnqueueInjection
 			// splices it into the Step loop at the next tool-call boundary,
@@ -6587,7 +6628,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			// actually picks it up; drainQueuedItems is the backstop for
 			// anything left over when the turn ends (e.g. injected too late
 			// to be seen by the last loop iteration).
-			if m.agent != nil {
+			//
+			// Only when an LLM turn is actually running: a `!` shell command
+			// is not an agent Step loop, so there is nothing to inject into
+			// and nothing would ever remove the entry. Such items wait for
+			// shellFinishedMsg to drain them.
+			if m.streaming && m.agent != nil {
 				m.agent.EnqueueInjection(agent.Message{Role: "user", Content: text})
 			}
 			m.input.Reset()
@@ -6690,11 +6736,10 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		text := m.filteredLogText()
 		if text == "" {
 			m.logStatus = "nothing to copy"
-		} else if err := clipboard.WriteAll(text); err != nil {
-			m.logStatus = "copy failed: " + err.Error()
-		} else {
-			m.logStatus = fmt.Sprintf("copied %d lines", strings.Count(text, "\n")+1)
+			break
 		}
+		m.logStatus = fmt.Sprintf("copied %d lines", strings.Count(text, "\n")+1)
+		return m, copyToClipboard(text)
 	case "esc":
 		// If the LLM is streaming, cancel the stream even from the log tab.
 		if m.streaming {
@@ -7425,10 +7470,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.sel.dragging = false
 			if m.sel.active {
 				text := extractSelectionText(m.rawTranscriptLines, m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
-				_ = clipboard.WriteAll(text)
 				m.sel = selectionState{}
 				m.applyOrClearSelectionHighlight()
-				return m, nil, true
+				return m, copyToClipboard(text), true
 			}
 			m.sel = selectionState{}
 			m.applyOrClearSelectionHighlight()
@@ -7437,14 +7481,10 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.logSel.dragging = false
 			if m.logSel.active {
 				text := extractSelectionText(m.logRawLines, m.logSel.startLine, m.logSel.startCol, m.logSel.endLine, m.logSel.endCol)
-				if err := clipboard.WriteAll(text); err != nil {
-					m.logStatus = "copy failed: " + err.Error()
-				} else {
-					m.logStatus = fmt.Sprintf("copied %d lines", strings.Count(text, "\n")+1)
-				}
+				m.logStatus = fmt.Sprintf("copied %d lines", strings.Count(text, "\n")+1)
 				m.logSel = selectionState{}
 				m.applyOrClearLogSelectionHighlight()
-				return m, nil, true
+				return m, copyToClipboard(text), true
 			}
 			m.logSel = selectionState{}
 			m.applyOrClearLogSelectionHighlight()
@@ -7453,10 +7493,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.filesSel.dragging = false
 			if m.filesSel.active {
 				text := m.files.extractSelectionText(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
-				_ = clipboard.WriteAll(text)
 				// keep selection + highlight after release so it persists
 				// until a new selection, file change, or add-to-context
-				return m, nil, true
+				return m, copyToClipboard(text), true
 			}
 			m.filesSel = selectionState{}
 			m.files.clearSelectionHighlight()
@@ -7466,9 +7505,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			if m.inputSel.active {
 				(&m).ensureRawInputLines()
 				text := extractSelectionText(m.rawInputLines, m.inputSel.startLine, m.inputSel.startCol, m.inputSel.endLine, m.inputSel.endCol)
-				_ = clipboard.WriteAll(text)
 				m.inputSel = selectionState{}
-				return m, nil, true
+				return m, copyToClipboard(text), true
 			}
 			m.inputSel = selectionState{}
 		}
@@ -7476,10 +7514,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.gitSel.dragging = false
 			if m.gitSel.active {
 				text := extractSelectionText(m.git.diffRawLines, m.gitSel.startLine, m.gitSel.startCol, m.gitSel.endLine, m.gitSel.endCol)
-				_ = clipboard.WriteAll(text)
 				m.gitSel = selectionState{}
 				m.git.clearDiffSelectionHighlight()
-				return m, nil, true
+				return m, copyToClipboard(text), true
 			}
 			m.gitSel = selectionState{}
 			m.git.clearDiffSelectionHighlight()
@@ -7488,12 +7525,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.sidebarSel.dragging = false
 			if m.sidebarSel.active {
 				text := extractSelectionText(m.rawSidebarLines, m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
-				if err := clipboard.WriteAll(text); err != nil {
-					log.Printf("sidebar copy failed: %v", err)
-				}
 				m.sidebarSel = selectionState{}
 				m.sidebarSelIncludesHeader = false
-				return m, nil, true
+				return m, copyToClipboard(text), true
 			}
 			// The gen button is a dedicated target and must win over title
 			// selection/toggle handling.
@@ -7702,12 +7736,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				top.sel.dragging = false
 				if top.sel.active {
 					text := extractSelectionText(top.rawLines, top.sel.startLine, top.sel.startCol, top.sel.endLine, top.sel.endCol)
-					if err := clipboard.WriteAll(text); err != nil {
-						log.Printf("detail selection copy failed: %v", err)
-					}
 					top.sel = selectionState{}
 					m.applyOrClearDetailSelectionHighlight()
-					return m, nil, true
+					return m, copyToClipboard(text), true
 				}
 				// No drag distance — treat as a plain click: clear and fall
 				// through to handleDetailClick for region/sub-agent toggles.
@@ -7742,9 +7773,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		m.statusSel.dragging = false
 		if m.statusSel.active {
 			text := extractSelectionText(m.statusRawLines, m.statusSel.startLine, m.statusSel.startCol, m.statusSel.endLine, m.statusSel.endCol)
-			_ = clipboard.WriteAll(text)
 			m.statusSel = selectionState{}
-			return m, nil, true
+			return m, copyToClipboard(text), true
 		}
 		// Plain click (no drag): check if click is on the permission text
 		// and cycle the permission mode. This stays release-based (inside

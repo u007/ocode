@@ -9,6 +9,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/url"
@@ -31,8 +32,11 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/desktop"
+	"github.com/u007/ocode/internal/logfile"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/remote"
+	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
@@ -144,6 +148,8 @@ func main() {
 		os.Exit(sandbox.ConfineEntrypoint(os.Args))
 	}
 
+	installDesktopLog()
+
 	// The desktop shell hosts the web UI, so resume a requested session by
 	// navigating to the same session route used by the web application.
 	for i := 1; i < len(os.Args); i++ {
@@ -185,6 +191,21 @@ func main() {
 	// macOS (see native_darwin.m for why the web layer cannot do this).
 	disablePressAndHold()
 
+	// The webview talks to the in-process server over TLS so it negotiates
+	// HTTP/2: over plain HTTP every webview engine caps a host at six HTTP/1.1
+	// connections, and long-lived SSE streams exhaust them (other requests then
+	// queue client-side and look like server hangs). The certificate is
+	// per-launch and pinned in-app — WKWebView/WebKitGTK via pinLocalCert,
+	// WebView2 via the SPKI browser argument below — never trusted system-wide.
+	// It is created before application.New because WebView2's browser
+	// arguments are fixed when the app is created.
+	// A failure is reported through the boot-error dialog below (log output
+	// goes nowhere in a double-clicked .app).
+	localCert, certErr := server.NewLocalCert()
+	if certErr == nil {
+		certErr = pinLocalCert(localCert)
+	}
+
 	// Only one desktop instance may run: it owns the in-process API server,
 	// the terminal ptys, and the per-window profile state, so a second copy
 	// would silently fork all of that. application.New acquires the instance
@@ -213,6 +234,11 @@ func main() {
 		Description: "AI coding agent",
 		Icon:        appIcon,
 		Services:    services,
+		Windows: application.WindowsOptions{
+			// Chromium's pin flag: exempts only this key from certificate
+			// errors (see localCert above).
+			AdditionalBrowserArgs: localCertBrowserArgs(localCert),
+		},
 		ShouldQuit: func() bool {
 			// Refuse to quit while the web UI reports unsaved work it could not
 			// persist; the user resolves it in the UI (retry the save) or uses
@@ -235,6 +261,23 @@ func main() {
 		// minimal _wails.invoke bridge (the full Wails runtime is never loaded).
 		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
 			quitGuard.HandleRawMessage(message)
+			// The Pulse dashboard can be opened from the tray or the app menu
+			// while ocode is in the background, so the page asks us to raise
+			// and focus the window. Going the OTHER direction (shell → page) is
+			// why this does not exist: see the ExecJS comment in buildAppMenu.
+			if message == msgFocusWindow {
+				if dw := mainWin.Load(); dw != nil && dw.window != nil {
+					dw.window.Show()
+					dw.window.Focus()
+				}
+			}
+			// External links: the SPA is served by ocode's own HTTP server, so
+			// it cannot import the Wails runtime module (see the handshake note
+			// in App.tsx) and asks the shell to open the URL in the system
+			// browser over this same bridge.
+			if raw, ok := strings.CutPrefix(message, msgOpenExternal); ok {
+				openExternalURL(raw)
+			}
 		},
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "com.ocode.desktop",
@@ -292,14 +335,16 @@ func main() {
 		handle  *desktop.Handle
 		bootErr error
 	)
-	if cfg, err := desktop.LoadWorkspaceConfig(); err == nil && cfg.Mode == desktop.WorkspaceRemoteSSH && cfg.TargetHost != "" {
+	if certErr != nil {
+		bootErr = fmt.Errorf("local TLS certificate: %w", certErr)
+	} else if cfg, err := desktop.LoadWorkspaceConfig(); err == nil && cfg.Mode == desktop.WorkspaceRemoteSSH && cfg.TargetHost != "" {
 		log.Printf("ocode-desktop: booting remote workspace %s:%d %s", cfg.TargetHost, cfg.TargetPort, cfg.RemotePath)
 		target := remote.Target{Kind: remote.KindSSH, Host: cfg.TargetHost, User: ""}
 		ws, err := desktop.OpenRemoteWorkspace(target, cfg.RemotePath)
 		if err != nil {
 			bootErr = fmt.Errorf("open remote workspace: %w", err)
 		} else {
-			handle, bootErr = desktop.StartServer(web.FS(), workDir, ws.Remote)
+			handle, bootErr = desktop.StartServer(web.FS(), workDir, ws.Remote, localCert)
 			if bootErr == nil {
 				// Persist the target for reconnect on next launch.
 				_ = desktop.SaveWorkspaceConfig(desktop.WorkspaceConfig{
@@ -310,7 +355,7 @@ func main() {
 			}
 		}
 	} else {
-		handle, bootErr = desktop.StartServer(web.FS(), workDir, nil)
+		handle, bootErr = desktop.StartServer(web.FS(), workDir, nil, localCert)
 	}
 	if bootErr != nil {
 		log.Printf("ocode-desktop: server boot failed: %v", bootErr)
@@ -368,6 +413,12 @@ func main() {
 
 	// Determine desktop URL via env override (for dev hot-reload).
 	desktopURL := appURL
+	// First launch after the move to https: open the old http origin once so
+	// the SPA can hand its localStorage to the https origin, which it then
+	// redirects to (web/src/lib/desktopStorageMigration.ts).
+	if handle.MigrateStorage {
+		desktopURL = debugURLFor(appURL, handle) + "&migrateTo=" + url.QueryEscape(appURL+"&storageImport=1")
+	}
 	if devURL := os.Getenv("OCODE_DESKTOP_DEV_URL"); devURL != "" {
 		log.Printf("ocode-desktop: using dev URL %s", devURL)
 		parsed, err := url.Parse(devURL)
@@ -485,6 +536,21 @@ func main() {
 			window.Show()
 			window.Focus()
 		}),
+		// The Pulse dashboard (cross-project live sessions). Raised here because
+		// the tray is the one surface available when the window is hidden, and
+		// the dock badge it mirrors (running + needs-permission counts) is
+		// exactly what this view answers.
+		//
+		// NOTE: there is deliberately no dock-BADGE-click handler. Wails v3
+		// beta.12's dock service is display-only (SetBadge/RemoveBadge) and
+		// pkg/events exposes no application-activated event, so on macOS a
+		// dock click while ocode is already running is indistinguishable from a
+		// plain activation. This tray item is the reachable equivalent.
+		application.NewMenuItem("Open Pulse").OnClick(func(ctx *application.Context) {
+			window.Show()
+			window.Focus()
+			openPulseInPage(window)
+		}),
 		// Web inspector for debugging the frontend. Also available from the
 		// native menu bar (View → Open Developer Tools, ⌥⌘I) in non-production
 		// builds; the tray entry makes it discoverable.
@@ -493,13 +559,13 @@ func main() {
 		}),
 		// The desktop shell runs on WKWebView (macOS)/WebKitGTK (Linux), neither
 		// of which exposes Chrome DevTools Protocol — CDP-based tools (Playwright,
-		// claude-in-chrome, htrcli) cannot attach to this window directly. It
-		// does load a plain HTTP page served by ocode's own server though, so
-		// pointing a real Chromium-based browser at the same URL (token included,
-		// since every /api/* route requires it) gets full CDP support against an
-		// otherwise-identical UI.
+		// claude-in-chrome, htrcli) cannot attach to this window directly. The
+		// same port also serves plain HTTP, so pointing a real Chromium-based
+		// browser at the http form of the URL (token included, since every
+		// /api/* route requires it) gets full CDP support against an
+		// otherwise-identical UI without tripping over the pinned certificate.
 		application.NewMenuItem("Copy Debug URL").OnClick(func(ctx *application.Context) {
-			app.Clipboard.SetText(desktopURL)
+			app.Clipboard.SetText(debugURLFor(desktopURL, handle))
 		}),
 		application.NewMenuItemSeparator(),
 		application.NewMenuItem("Share Session…").OnClick(func(ctx *application.Context) {
@@ -543,6 +609,68 @@ func main() {
 // desktopWindow is what the single-instance callback needs from the first
 // instance once its window exists: the window to raise and how to build a
 // session URL for a forwarded --session argument.
+// msgFocusWindow is the page → shell message asking the native window to be
+// raised and focused. It travels the minimal _wails.invoke bridge and lands in
+// application.Options.RawMessageHandler.
+//
+// The reverse direction (shell → page) cannot use Wails' event system: the
+// webview is served over plain http:// by ocode's own embed.FS-backed server,
+// so the wails:// scheme handler that injects window._wails never runs and
+// window.EmitEvent is a structural no-op. Shell → page is therefore an ExecJS
+// CustomEvent (see openPulseInPage), and the event name is the contract.
+const msgFocusWindow = "ocode:focus-window"
+
+// msgOpenExternal is the page → shell message asking the OS to open an http(s)
+// URL in the default browser. The URL follows the prefix verbatim.
+const msgOpenExternal = "ocode:open-external:"
+
+// openExternalURL opens raw in the user's default browser. It is the desktop
+// counterpart of the web build's window.open: the SPA asks for it over the
+// minimal _wails.invoke bridge because the full Wails runtime module is
+// unavailable (see the handshake note in App.tsx).
+//
+// Only http(s) is accepted — the page must not be able to talk the shell into
+// opening file:// or a custom scheme. The URL is deliberately never logged: it
+// can carry a one-time token or signed query string.
+func openExternalURL(raw string) {
+	if !isAllowedExternalURL(raw) {
+		log.Printf("ocode-desktop: refused external URL with unsupported scheme")
+		return
+	}
+	app := application.Get()
+	if app == nil {
+		log.Printf("ocode-desktop: refused external URL: application not ready")
+		return
+	}
+	if err := app.Browser.OpenURL(raw); err != nil {
+		log.Printf("ocode-desktop: opening external URL failed: %v", err)
+	}
+}
+
+// isAllowedExternalURL reports whether raw is a well-formed http/https URL.
+// Split out from openExternalURL so the scheme guard is unit-testable without
+// a running Wails application.
+func isAllowedExternalURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// openPulseInPage asks the loaded page to switch to the Pulse dashboard.
+//
+// ExecJS runs arbitrary JS in the page regardless of how it was loaded, so it
+// works here where EmitEvent does not. dispatchEvent on a bare CustomEvent (no
+// detail) keeps the two sides decoupled: the page is the only thing that knows
+// what "open Pulse" means.
+func openPulseInPage(window *application.WebviewWindow) {
+	if window == nil {
+		return
+	}
+	window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:open-pulse"))`)
+}
+
 type desktopWindow struct {
 	window     *application.WebviewWindow
 	sessionURL func(id string) string
@@ -613,16 +741,19 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow, handl
 		appMenu.Add("Settings…").
 			SetAccelerator("CmdOrCtrl+,").
 			OnClick(func(*application.Context) {
-				// window.EmitEvent depends on Wails' own wails:// scheme handler
-				// to inject window._wails into the page; this webview loads a
-				// plain http://127.0.0.1:PORT URL served by ocode's own
-				// embed.FS-backed HTTP server, which never goes through that
-				// handler, so window._wails is never injected there — the event
-				// is a structural no-op, not a timing issue. ExecJS instead runs
-				// arbitrary JS directly in the loaded page regardless of how it
-				// was loaded, so we dispatch a plain DOM CustomEvent that the
-				// React app listens for with a normal addEventListener.
 				window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:open-settings"))`)
+			})
+		// Pulse dashboard. CmdOrCtrl+Shift+J, not plain Cmd+J: the app menu
+		// accelerator is consumed by the native menu before the webview ever
+		// sees the key, so binding plain Cmd+J here would take the in-app
+		// toggle away. This mirrors the Settings accelerator style (+Shift for
+		// the app-level variant).
+		appMenu.Add("Dashboard…").
+			SetAccelerator("CmdOrCtrl+Shift+J").
+			OnClick(func(*application.Context) {
+				// See the Settings comment in buildAppMenu: ExecJS is the only
+				// shell → page transport available to a plain-http webview.
+				openPulseInPage(window)
 			})
 		appMenu.AddSeparator()
 		appMenu.AddRole(application.ServicesMenu)
@@ -642,9 +773,12 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow, handl
 		fileMenu.Add("Settings…").
 			SetAccelerator("CmdOrCtrl+,").
 			OnClick(func(*application.Context) {
-				// See the darwin branch comment: window.EmitEvent is a structural
-				// no-op for a plain http:// webview, so use ExecJS directly.
 				window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:open-settings"))`)
+			})
+		fileMenu.Add("Dashboard…").
+			SetAccelerator("CmdOrCtrl+Shift+J").
+			OnClick(func(*application.Context) {
+				openPulseInPage(window)
 			})
 		fileMenu.AddSeparator()
 		fileMenu.Add("Quit ocode").
@@ -810,4 +944,51 @@ func confirmQuit(app *application.App, window *application.WebviewWindow, handle
 		app.Quit()
 	})
 	dlg.Show()
+}
+
+// localCertBrowserArgs is WebView2's certificate pin: Chromium's
+// --ignore-certificate-errors-spki-list exempts only this key. Nil when the
+// certificate could not be created (boot then fails with a dialog).
+func localCertBrowserArgs(cert *server.LocalCert) []string {
+	if cert == nil {
+		return nil
+	}
+	return []string{"--ignore-certificate-errors-spki-list=" + cert.SPKISHA256}
+}
+
+// debugURLFor maps the webview's https URL to the same path on the plain-HTTP
+// side of the port, which an external browser can open without the pinned
+// certificate. A dev-override URL (OCODE_DESKTOP_DEV_URL) is returned as is.
+func debugURLFor(webviewURL string, handle *desktop.Handle) string {
+	if rest, ok := strings.CutPrefix(webviewURL, handle.URL); ok {
+		return handle.HTTPURL + rest
+	}
+	return webviewURL
+}
+
+// desktopLogName is this process's file in the shared paths.LogsDir(), next to
+// the TUI's tui-crash.log / compact.log / tokens.log.
+const desktopLogName = "desktop.log"
+
+// desktopLogMaxBytes is the rotation cap (one previous generation is kept as
+// desktop.log.1).
+const desktopLogMaxBytes = 5 << 20
+
+// installDesktopLog sends the standard logger — and with it slog's default
+// handler, which writes through it — to desktop.log as well as stderr. A
+// double-clicked .app has fd 2 on /dev/null, so without this every server
+// log line (git failures, storage migration, boot errors) is lost.
+func installDesktopLog() {
+	dir, err := paths.LogsDir()
+	if err != nil {
+		log.Printf("ocode-desktop: file logging disabled (logs dir: %v)", err)
+		return
+	}
+	w, err := logfile.Open(filepath.Join(dir, desktopLogName), desktopLogMaxBytes)
+	if err != nil {
+		log.Printf("ocode-desktop: file logging disabled: %v", err)
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, w))
+	log.Printf("ocode-desktop: logging to %s (pid %d)", filepath.Join(dir, desktopLogName), os.Getpid())
 }

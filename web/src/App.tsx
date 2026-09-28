@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import pkg from "../package.json";
 import { Routes, Route } from "react-router-dom";
 import { PanelLeft, PanelLeftClose, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatStateRef, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, findProjectPathForTab, useProjectState } from "./stores/projectStore";
+import { PulseProvider } from "./stores/pulseStore";
 import { TerminalProvider, useTerminalState } from "./stores/terminalStore";
 import { BrowserTabsProvider, useAllBrowserTabs, useBrowserTabs, useBrowserTabsDispatch } from "./stores/browserTabsStore";
 import { BrowserPanel } from "./components/Browser/BrowserPanel";
@@ -13,7 +14,7 @@ import PreviewTabPage from "./components/Preview/PreviewTabPage";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
-import { loadViewStateForProject, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
+import { loadViewStateForProject, saveViewStateForProject, type FocusedKind, type ActiveView } from "./lib/viewPersistence";
 import { sessionAskSurfaceVisible } from "./lib/dialogScope";
 import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
@@ -51,6 +52,7 @@ import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
+import { basename } from "./lib/utils";
 import ModelDialog from "./components/Layout/ModelDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
@@ -88,6 +90,11 @@ import { revokeBrowseSession } from "./api/client";
 import { getTrustedTerminalProject } from "./lib/trustedProject";
 import { resolveSessionHost, useSessionHost } from "./hooks/useSessionHost";
 import { SpeechProvider } from "./components/Speech/SpeechProvider";
+import { PulseView } from "./components/Pulse/PulseView";
+import { PulseBadge } from "./components/Pulse/PulseBadge";
+import { PulseShellSignal } from "./components/Pulse/PulseShellSignal";
+import { focusDesktopWindow } from "./lib/wails";
+import { PulseJumpProvider } from "./lib/jumpToSession";
 import SpeechToolbar from "./components/Speech/SpeechToolbar";
 import { TabLoadingOverlay } from "./components/common/TabLoadingOverlay";
 import {
@@ -264,12 +271,32 @@ function HomeApp() {
   }, [projectState.tabsByProject, projectState.projects]);
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<
-    "files" | "git" | "cron" | "assets" | "sessions" | "settings"
-  >("sessions");
+  // "pulse" is the cross-project live-sessions dashboard. This app has no
+  // client router, so a "view" is a value in this union — there is no /pulse
+  // URL. It is deliberately NOT persisted per project (see the saveViewState
+  // effect below): it is global, so switching projects must not strand the
+  // user in it, and leaving it must restore whatever that project was showing.
+  const [activeView, setActiveView] = useState<ActiveView | "pulse">("sessions");
   // Which half of the merged Sessions tab (chat vs terminal) is currently
   // shown. Restored from per-project persistence on project switch.
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
+  // Pulse (cross-project dashboard) view transitions. `previousViewRef` is what
+  // makes Cmd+J a TOGGLE: leaving the dashboard returns to whatever the user
+  // was looking at, not to a hard-coded default.
+  const previousViewRef = useRef<ActiveView | "pulse">("sessions");
+  const openPulse = useCallback(() => {
+    previousViewRef.current = activeView === "pulse" ? previousViewRef.current : activeView;
+    setActiveView("pulse");
+  }, [activeView]);
+  const togglePulse = useCallback(() => {
+    if (activeView === "pulse") {
+      setActiveView(previousViewRef.current);
+    } else {
+      previousViewRef.current = activeView;
+      setActiveView("pulse");
+    }
+  }, [activeView]);
+
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const activeProjectHost = projectState.activeProject?.host;
   const loadingStates = useTabLoadingStore();
@@ -393,6 +420,11 @@ function HomeApp() {
   useEffect(() => {
     const path = projectState.activeProject?.path;
     if (!path) return;
+    // "pulse" is global, not a per-project view: persisting it would make the
+    // NEXT project open straight into the dashboard, stranding the user away
+    // from their own sessions. Leaving it therefore also leaves the previous
+    // view stored, so returning lands back where they were.
+    if (activeView === "pulse") return;
     const t = setTimeout(() => {
       saveViewStateForProject(path, { view: activeView, focusedKind });
     }, 300);
@@ -573,8 +605,31 @@ function HomeApp() {
   // Files view and selects the editor tab. When line/query are provided (content search),
   // highlight is set via pending store (for newly mounted editors) and via event
   // (for already-mounted editors) with bounded retry.
+
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const [filePickerQuery, setFilePickerQuery] = useState<string | undefined>(undefined);
+
+  // The quick file lookup (Ctrl/Cmd+P) doubles as the fallback when a file
+  // link resolves to a path that is not in the project: the picker opens
+  // seeded with the link's basename so the user can find where it really
+  // lives instead of getting a silent no-op.
+  const openFilePicker = useCallback((query?: string) => {
+    setFilePickerQuery(query);
+    setFilePickerOpen(true);
+  }, []);
+  const closeFilePicker = useCallback(() => {
+    setFilePickerOpen(false);
+    setFilePickerQuery(undefined);
+  }, []);
+
   const openFileAndShow = useCallback(
-    async (path: string, projectRoot?: string, line?: number, query?: string) => {
+    async (
+      path: string,
+      projectRoot?: string,
+      line?: number,
+      query?: string,
+      fallbackQuickOpen = false,
+    ) => {
       // Resolve the host for this project root. When the root is the ACTIVE
       // project's, the active project is authoritative — a path-only lookup
       // would be ambiguous if a remote SSH project and a local project share an
@@ -589,7 +644,17 @@ function HomeApp() {
         // Line-only highlight (from chat file links) still needs dispatch
         setPendingHighlight(path, "", line, projectRoot);
       }
-      await handleOpenFile(path, projectRoot, host);
+      const opened = await handleOpenFile(path, projectRoot, host);
+      if (!opened) {
+        // A file LINK (chat / terminal / editor) that does not resolve in the
+        // project: silently doing nothing reads as a broken click. Open the
+        // quick file lookup seeded with the basename so the user can find the
+        // file wherever it actually lives (renamed, moved, or relative to a
+        // different root). Tree/git/picker callers pass false — they are
+        // already looking at a real file and must not get a modal.
+        if (fallbackQuickOpen) openFilePicker(basename(path));
+        return;
+      }
       setActiveView("files");
       if ((query && query.trim()) || (line && line > 0)) {
         const detail = { path, query: query?.trim() ?? "", line, projectRoot };
@@ -612,7 +677,7 @@ function HomeApp() {
         setTimeout(retry, 100);
       }
     },
-    [handleOpenFile, projectState.projects, projectState.activeProject],
+    [handleOpenFile, openFilePicker, projectState.projects, projectState.activeProject],
   );
 
   // File links in chat (markdown + plain text) dispatch this event.
@@ -622,7 +687,7 @@ function HomeApp() {
       const detail = (e as CustomEvent).detail as { path: string; line?: number; projectRoot?: string };
       if (!detail?.path) return;
       const projectRoot = detail.projectRoot ?? projectState.activeProject?.path;
-      void openFileAndShow(detail.path, projectRoot, detail.line);
+      void openFileAndShow(detail.path, projectRoot, detail.line, undefined, true);
     };
     window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
     return () => window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
@@ -742,12 +807,17 @@ function HomeApp() {
     return () => window.removeEventListener("ocode:open-settings", handler);
   }, []);
 
+  // The desktop app menu's "Dashboard…" item and the tray's "Open Pulse" item
+  // both ExecJS a plain CustomEvent into the page (see PulseShellSignal for why
+  // that is the only available transport). Focusing the window matters: the
+  // user invoked this from the tray or the menu bar, so the dashboard must not
+  // open behind whatever app is in front.
+
+
   // The desktop shell refuses to quit while unsaved editor drafts could not be
   // persisted and dispatches this event so the reason is re-surfaced (the user
   // may have dismissed the original toast). No-op in a plain browser.
   useEffect(() => installQuitBlockedListener(), []);
-
-  const [filePickerOpen, setFilePickerOpen] = useState(false);
 
   // Open a new chat tab AND reveal it — the keyboard/UI entry point shared by
   // Ctrl/Cmd+N and Ctrl/Cmd+T's non-Sessions fallback. Mirrors UnifiedTabBar's
@@ -764,6 +834,7 @@ function HomeApp() {
   useKeyboard({
     focusedKind,
     activeBrowserId,
+    onTogglePulse: togglePulse,
     onCloseBrowserTab: (id) => {
       // Mirrors the browser pill's X: strip identity + page state + session.
       closeBrowserTab(id);
@@ -790,7 +861,7 @@ function HomeApp() {
       }
     },
     onCommandPalette: () => setCmdOpen(true),
-    onFilePicker: () => setFilePickerOpen(true),
+    onFilePicker: () => openFilePicker(),
     onSave: () => {
       if (visibleActiveEditorTabId) {
         saveEditorTab(visibleActiveEditorTabId);
@@ -822,7 +893,7 @@ function HomeApp() {
     },
     onEscape: () => {
       setCmdOpen(false);
-      setFilePickerOpen(false);
+      closeFilePicker();
     },
   });
 
@@ -1243,6 +1314,7 @@ function HomeApp() {
           onToggle={() => setSidebarOpen(!sidebarOpen)}
           width={sidebarOpen && !isMobile ? sidebar.width : undefined}
           isMobile={isMobile}
+          onOpenDashboard={openPulse}
         />
 
         {/* Sidebar resize handle — desktop only: the mobile sidebar is a fixed
@@ -1291,6 +1363,17 @@ function HomeApp() {
                   loadingStates={loadingStates}
                 />
               </div>
+              <PulseBadge onClick={openPulse} />
+              {/* Desktop only: the shell signal has no meaning in a browser
+                  tab, and it is inert there anyway. Rendered beside the badge
+                  because both drive `openPulse`. */}
+              {!isMobile && (
+                <PulseShellSignal
+                  onOpen={openPulse}
+                  // False in a plain browser, where there is no window to raise.
+                  onFocus={() => focusDesktopWindow()}
+                />
+              )}
               <ProfileSwitcher />
             </div>
 
@@ -1549,6 +1632,18 @@ function HomeApp() {
               <TabsContent value="settings" forceMount className="relative flex-1 min-h-0 overflow-hidden m-0">
                 <SettingsPanel />
               </TabsContent>
+
+              {/* Pulse — the cross-project live-sessions dashboard. Global, not
+                  per-project, so it renders no matter which project is active.
+                  PulseJumpProvider supplies the "leave the dashboard" transition,
+                  because activeView lives here and the cards need to drive it. */}
+              {activeView === "pulse" && (
+                <div className="relative flex-1 min-h-0 overflow-hidden flex">
+                  <PulseJumpProvider exitPulse={() => setActiveView(previousViewRef.current)}>
+                    <PulseView />
+                  </PulseJumpProvider>
+                </div>
+              )}
 
               <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
                 <div className="relative flex flex-col h-full">
@@ -1918,9 +2013,11 @@ function HomeApp() {
 
       <FilePicker
         open={filePickerOpen}
-        onClose={() => setFilePickerOpen(false)}
+        onClose={closeFilePicker}
         onOpenFile={openFileAndShow}
         projectPath={projectState.activeProject?.path}
+        projectHost={projectState.activeProject?.host}
+        initialQuery={filePickerQuery}
       />
       <ConfirmCloseDialog
         path={pendingClose?.path ?? ""}
@@ -1931,6 +2028,26 @@ function HomeApp() {
         onCancel={cancelClose}
       />
     </div>
+  );
+}
+
+/**
+ * Resolves the active chat session and its host for <SpeechProvider>.
+ *
+ * This has to be its own component rendered INSIDE <ProjectProvider>.
+ * useProjectState() throws when called outside a provider, and App() is the
+ * component that RENDERS that provider — so reading the store directly in App()
+ * was outside its own provider and threw at mount, breaking every App-level
+ * test. The provider sits below App() in this tree, so the read has to happen
+ * in something below it too.
+ */
+function SpeechProviderInsideProject({ children }: { children: ReactNode }) {
+  const { activeTabId } = useProjectState();
+  const host = useSessionHost(activeTabId ?? undefined);
+  return (
+    <SpeechProvider sessionId={activeTabId ?? undefined} host={host}>
+      {children}
+    </SpeechProvider>
   );
 }
 
@@ -1961,10 +2078,15 @@ export default function App() {
 	return (
 	    <ErrorBoundary>
 	      <ChatProvider>
+        <PulseProvider>
 	        <ProjectProvider>
 	          <TerminalProvider>
 	            <BrowserTabsProvider>
-	              <SpeechProvider>
+	              {/* sessionId + host: the speech-summary endpoint is session-scoped
+	                  (it reuses that session's agent) and must be reached on the host
+	                  that runs the session, so a remote project summarises remotely.
+	                  Resolved by the bridge, which is inside <ProjectProvider>. */}
+	              <SpeechProviderInsideProject>
 	              <FrontendMemoryReporter />
               <StatusMetricsHydrator />
               <Routes>
@@ -1976,10 +2098,11 @@ export default function App() {
                   otherwise only console.error'd. Root-mounted so it survives
                   the ModelDialog closing on pick. */}
               <ActionErrorToast />
-	              </SpeechProvider>
+	              </SpeechProviderInsideProject>
 	            </BrowserTabsProvider>
           </TerminalProvider>
         </ProjectProvider>
+        </PulseProvider>
       </ChatProvider>
     </ErrorBoundary>
   );

@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:15:13Z
+---
 # Part 10 — Docs, TODO and spec delta
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`

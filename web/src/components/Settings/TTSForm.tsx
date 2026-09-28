@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/api/client";
 import type { TTSEngine, TTSInstallState } from "@/api/types";
 import { useSpeech } from "../Speech/SpeechProvider";
+import { isHTTPURL, openExternalURL } from "../../lib/externalLinks";
+import { speechSummaryDisplay } from "../../lib/speechSummaryConfig";
+import ModelDialog from "../Layout/ModelDialog";
 
 const POLL_MS = 1000;
 
@@ -10,7 +13,14 @@ function errorText(err: unknown) {
 }
 
 export default function TTSForm() {
-  const { engines, config, status, error, setMode, retry, selectEngine, refresh } = useSpeech();
+  const {
+    engines, config, status, error, setMode, retry, selectEngine, refresh,
+    summaryEnabled, summaryModel, setSummaryEnabled, setSummaryModel,
+  } = useSpeech();
+  const [summaryDialogOpen, setSummaryDialogOpen] = useState(false);
+  // A rejected write rethrows from the provider; surface it here rather than
+  // leaving a control that looks accepted but was not.
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [installStates, setInstallStates] = useState<Record<string, TTSInstallState>>({});
   const [stateError, setStateError] = useState<string | null>(null);
   const [busyEngine, setBusyEngine] = useState<string | null>(null);
@@ -89,7 +99,19 @@ export default function TTSForm() {
               {engine.license_url && (
                 <>
                   {" "}
-                  <a className="underline" href={engine.license_url} target="_blank" rel="noreferrer">view</a>
+                  <a
+                    className="underline"
+                    href={engine.license_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => {
+                      if (!engine.license_url || !isHTTPURL(engine.license_url)) return;
+                      e.preventDefault();
+                      openExternalURL(engine.license_url);
+                    }}
+                  >
+                    view
+                  </a>
                 </>
               )}
             </p>
@@ -234,6 +256,62 @@ export default function TTSForm() {
           );
         })}
         {stateError && <p className="text-[10px] text-destructive">Install state unavailable: {stateError}</p>}
+      </div>
+
+      {/* Speech summary. The MODEL rewrites a message into spoken prose (code
+          described, not read aloud) before synthesis; the GATE turns that off
+          to read the message verbatim. They are separate controls and separate
+          writes — picking a model must not re-enable summarising the user
+          turned off, and vice versa. */}
+      <div className="space-y-1.5">
+        <span className="block text-sm font-medium">Speech summary model</span>
+        <div className="flex items-center gap-2">
+          <div
+            className="flex h-9 min-w-0 flex-1 items-center truncate rounded-md border border-border bg-muted px-3 text-sm"
+            title={summaryModel || undefined}
+          >
+            {speechSummaryDisplay({ model: summaryModel })}
+          </div>
+          <button
+            type="button"
+            className="h-9 shrink-0 rounded-md border border-border bg-background px-3 text-sm hover:bg-muted"
+            onClick={() => setSummaryDialogOpen(true)}
+          >
+            Change…
+          </button>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Rewrites a message into spoken prose before it is read aloud, describing code instead of
+          reading it. Unset means the small model, then the main model.
+        </p>
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            aria-label="Summarise before speaking"
+            checked={summaryEnabled}
+            onChange={(event) => {
+              setSummaryError(null);
+              void setSummaryEnabled(event.target.checked).catch((err) =>
+                setSummaryError(errorText(err)),
+              );
+            }}
+          />
+          Summarise before speaking
+        </label>
+        {summaryError && <p className="text-[11px] text-destructive">{summaryError}</p>}
+        <ModelDialog
+          open={summaryDialogOpen}
+          onClose={() => setSummaryDialogOpen(false)}
+          purpose="speechsummary"
+          // The form owns the pick and hands it to the provider, which is the
+          // single owner of this config; a direct api write here would leave the
+          // toolbar and sidebar showing a stale model.
+          onPick={(_, model) => {
+            setSummaryError(null);
+            void setSummaryModel(model).catch((err) => setSummaryError(errorText(err)));
+          }}
+          currentValues={{ speechsummary: summaryModel }}
+        />
       </div>
 
       <label className="block space-y-1 text-sm">

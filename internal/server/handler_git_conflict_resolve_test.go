@@ -164,7 +164,7 @@ func TestResolveConflictMarkRefusesLeftoverMarkers(t *testing.T) {
 	}
 
 	// It must not have staged anything on the way out.
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 	if len(status.Conflicts) != 1 {
 		t.Errorf("the file must still be conflicted after a refused mark, got %+v", status.Conflicts)
 	}

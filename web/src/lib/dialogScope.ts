@@ -19,7 +19,13 @@ import type { SessionSubTabId } from "../stores/projectStore";
  */
 export interface SessionAskSurface {
   /** Top-level view currently on screen. */
-  activeView: ActiveView;
+  /**
+   * The App's full view set, including the global "pulse" dashboard, which is
+   * NOT a member of the persisted per-project `ActiveView`. Accepting it here
+   * is what keeps this predicate total: the dashboard is simply another
+   * surface where a chat ask must not be shown.
+   */
+  activeView: ActiveView | "pulse";
   /** Which half of the merged Sessions view is showing. */
   focusedKind: FocusedKind;
   /** The active session tab's sub-tab, when a session tab is active. */

@@ -31,3 +31,15 @@ export function invokeWails(message: string, target: Window = window): boolean {
   invoke(message);
   return true;
 }
+
+/**
+ * Ask the desktop shell to raise and focus its window.
+ *
+ * Used when the user opens the Pulse dashboard from the tray or the app menu
+ * while ocode is in the background: the page already switched views, but
+ * without this the new view appears behind whatever app is in front, which
+ * reads as "nothing happened". Returns false in a plain browser.
+ */
+export function focusDesktopWindow(target: Window = window): boolean {
+  return invokeWails("ocode:focus-window", target);
+}

@@ -576,7 +576,7 @@ describe("ChromeViewport", () => {
     const winOpen = vi.fn();
     vi.stubGlobal("open", winOpen);
     fireEvent.click(open);
-    expect(winOpen).toHaveBeenCalledWith("https://example.com/", "_blank", "noopener");
+    expect(winOpen).toHaveBeenCalledWith("https://example.com/", "_blank", "noopener,noreferrer");
   });
 
   it("sends nav when the user navigates (navSeq bumps with a new url)", () => {

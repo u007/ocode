@@ -10,6 +10,7 @@ import { basename } from "@/lib/utils";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
 import { tabLoadKey, type TabLoadingSnapshot } from "@/hooks/useKeyedLoad";
+import { useRemoteHostStatus } from "@/hooks/useRemoteHostStatus";
 import { TabLoadingIndicator } from "@/components/common/TabLoadingIndicator";
 
 interface Props {
@@ -82,18 +83,42 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
   const [gitAhead, setGitAhead] = useState(0);
   const [gitBehind, setGitBehind] = useState(0);
   const [gitHasUpstream, setGitHasUpstream] = useState(false);
+  // Last refresh failure (e.g. unreachable remote host), shown as the tab's
+  // error dot. Null once a refresh succeeds.
+  const [gitStatusError, setGitStatusError] = useState<string | null>(null);
+  // A remote project's status is fetched only while its host is connected:
+  // GET /api/git/status?host= is the cold-connect path, so polling a
+  // disconnected host would dial it every 10s (same gate as the project
+  // sidebar's useProjectGitCounts).
+  const hostStatus = useRemoteHostStatus(activeProjectHost, !!activeProjectHost);
+  const gitPollEnabled = !activeProjectHost || !!hostStatus.status?.connected;
   useEffect(() => {
-    if (!activeProjectPath) {
+    if (!activeProjectPath || !gitPollEnabled) {
       setGitStaged(0);
       setGitUnstaged(0);
       setGitConflicted(0);
       setGitAhead(0);
       setGitBehind(0);
       setGitHasUpstream(false);
+      setGitStatusError(null);
       return;
     }
     let cancelled = false;
+    // Whether this project has loaded once: until then a failure must not
+    // leave the previous project's counts on the badge.
+    let loaded = false;
+    // One request at a time: a remote project's status runs over SSH and can
+    // take up to the server's 30s bound, and every tick/event used to start
+    // another one on top. A trigger during a fetch is remembered and runs once
+    // when it settles, so the badge still reflects the latest change.
+    let inFlight = false;
+    let rerun = false;
     const fetchCounts = async () => {
+      if (inFlight) {
+        rerun = true;
+        return;
+      }
+      inFlight = true;
       try {
         const status = await api.getGitStatus(activeProjectPath, activeProjectHost);
         if (cancelled) return;
@@ -105,14 +130,28 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
         setGitAhead(status.ahead ?? 0);
         setGitBehind(status.behind ?? 0);
         setGitHasUpstream(status.has_upstream ?? false);
-      } catch {
+        setGitStatusError(null);
+        loaded = true;
+      } catch (err) {
+        console.error(`git badge: status for ${activeProjectPath} failed:`, err);
         if (!cancelled) {
-          setGitStaged(0);
-          setGitUnstaged(0);
-          setGitConflicted(0);
-          setGitAhead(0);
-          setGitBehind(0);
-          setGitHasUpstream(false);
+          // A failure is not "clean": keep the last good counts and flag the
+          // error rather than zeroing the badge.
+          setGitStatusError(err instanceof Error ? err.message : String(err));
+          if (!loaded) {
+            setGitStaged(0);
+            setGitUnstaged(0);
+            setGitConflicted(0);
+            setGitAhead(0);
+            setGitBehind(0);
+            setGitHasUpstream(false);
+          }
+        }
+      } finally {
+        inFlight = false;
+        if (rerun && !cancelled) {
+          rerun = false;
+          void fetchCounts();
         }
       }
     };
@@ -126,7 +165,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
       clearInterval(interval);
       off();
     };
-  }, [activeProjectPath, activeProjectHost]);
+  }, [activeProjectPath, activeProjectHost, gitPollEnabled]);
   const gitTotal = gitStaged + gitUnstaged + gitConflicted;
   const gitTitle =
     gitConflicted > 0
@@ -212,7 +251,9 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
           const isActive = activeTab === tab.id;
           const loadingState = loadingStates?.get(tabLoadKey(activeProjectHost, activeProjectPath, tab.id));
           const loading = loadingState?.phase === "refresh";
-          const loadError = loadingState?.phase === "error";
+          const gitFailed = tab.id === "git" && gitStatusError !== null;
+          const loadError = loadingState?.phase === "error" || gitFailed;
+          const indicatorLabel = gitFailed ? `Git status unavailable: ${gitStatusError}` : `Loading ${tab.label}`;
           const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
           const gitCount = tab.id === "git" && gitTotal > 0 ? gitTotal : undefined;
           return (
@@ -225,7 +266,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
             >
               <Icon className="w-4 h-4" />
               <span className="hidden sm:inline">{tab.label}</span>
-              <TabLoadingIndicator active={loading} error={loadError} label={`Loading ${tab.label}`} />
+              <TabLoadingIndicator active={loading} error={loadError} label={indicatorLabel} />
               {count !== undefined && (
                 <span
                   className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full text-xs font-semibold leading-none ${
@@ -275,7 +316,9 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
                 const Icon = tab.icon;
                 const loadingState = loadingStates?.get(tabLoadKey(activeProjectHost, activeProjectPath, tab.id));
                 const loading = loadingState?.phase === "refresh";
-                const loadError = loadingState?.phase === "error";
+                const gitFailed = tab.id === "git" && gitStatusError !== null;
+                const loadError = loadingState?.phase === "error" || gitFailed;
+                const indicatorLabel = gitFailed ? `Git status unavailable: ${gitStatusError}` : `Loading ${tab.label}`;
                 const count = tab.id === "sessions" ? sessionsCount + terminalCount : undefined;
                 const gitCount = tab.id === "git" && gitTotal > 0 ? gitTotal : undefined;
                 return (
@@ -283,7 +326,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
                     <span className="flex items-center gap-2">
                       <Icon className="w-3.5 h-3.5" />
                       {tab.label}
-                      <TabLoadingIndicator active={loading} error={loadError} label={`Loading ${tab.label}`} />
+                      <TabLoadingIndicator active={loading} error={loadError} label={indicatorLabel} />
                       {count !== undefined && (
                         <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-accent-foreground">
                           {count}

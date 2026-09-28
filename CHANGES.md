@@ -1,5 +1,724 @@
 # Changelog
 
+## 2026-09-29 — Discovery's two shared caches are locked across ocode instances
+
+Both discovery caches are **on-disk and machine-shared** — `<project>/.ocode/md-summaries.json`
+per project, and `corpus-<model>.json` under the shared cache dir, keyed by `DocHash` — but both
+were written last-writer-won. Two ocode instances working in the same project each embedded the
+whole doc set, and the slower writer's file replaced the faster one's work.
+
+- **`internal/agent/md_discovery.go`** — `withMDCacheLock` (bounded `mdLockAcquireTimeout`, 5s, an
+  `atomic.Int64` because tests shorten it while a peer goroutine may be reading it). `mdSummarizePass`
+  is now **lock-free probe → lock → re-check → index → write in one critical section**
+  (`mdSummarizePassLocked`), skipping quietly on contention. `mdIndexOutdated` reads the cache
+  unlocked, which is safe because writes are temp+rename and being wrong is cheap in both
+  directions. A new `st.synced` flag is load-bearing: "up to date on disk" is not "loaded into our
+  snapshot", so a fresh instance must still load the shared cache.
+- **`internal/discovery/cache.go`** — the same shape for the corpus: `corpusHasMisses` probes
+  lock-free, `withCorpusLock` bounds the wait, and the critical section **re-reads via `LoadCache`**
+  under the lock before embedding — a peer that embedded those docs while we waited must not be
+  re-embedded. `corpusLockWaitFor` clamps the 5s budget to the caller's deadline (the per-turn
+  `Warm` has a ~500ms context and `filelock` ignores contexts) and floors at 1ms, because
+  `filelock.WithFileLockTimeout` treats a non-positive timeout as *the package's 10s default*.
+- **Contention is a skip, not a failure.** `ErrCorpusLocked` + `isCorpusLocked` are returned, and
+  `internal/agent/discovery_glue.go` already maps **any** warm error to "deferred to background" +
+  `startBackgroundWarm` — so the lock holder becomes the deadlock-breaker and **zero edits were
+  needed outside `internal/discovery`**. Adding a caller-side special case would be the bug.
+- **Tests:** `internal/discovery/cache_lock_test.go` (new, 5 pins — no lock when fully cached,
+  skip while a peer holds it, concurrent builds embed each doc once, the wait never exceeds the
+  caller's deadline, and a lock on a fresh cache dir) plus `internal/agent/md_discovery_test.go`.
+- **Docs:** `docs/concepts/discovery-corpus-cache.md` (new), a See-also in
+  `docs/concepts/discovery-mcp-tool-gating.md`, and two mutation-check gotchas
+  (`docs/gotchas/mutation-check-false-caught.md`, `docs/gotchas/mutation-check-mutants-must-compile.md`)
+  recording that a compile-broken mutant is a false "CAUGHT" and that `min(a,b)` vs an explicit
+  clamp are equivalent mutants no test can catch.
+
+## 2026-09-29 — TUI copy reaches the local clipboard over SSH (OSC 52 + a local fallback)
+
+`tea.SetClipboard` emits an OSC 52 sequence, but the copy paths that went through a **local**
+clipboard utility silently failed on a remote SSH host: a selection copied in a remote workspace
+never appeared on the user's own machine, with no error to explain it.
+
+- **`internal/tui/clipboard.go` (new)** — `copyToClipboard` is a `tea.Batch` of the OSC 52 path and
+  `writeLocalClipboard` (pbcopy / xclip / xsel / wl-copy). Both are attempted because they cover
+  different terminals: OSC 52 travels back over the connection and is the only path that reaches the
+  *local* clipboard remotely; the local utility covers emulators that do not implement OSC 52.
+  Empty text returns `nil`, so every call site stays a bare `return m, copyToClipboard(text)`.
+- **All nine TUI copy sites now route through it** — `internal/tui/model.go` (message body, session
+  id, code/selection copies) and `internal/tui/files_model.go` (relative-path copy).
+- A local-utility failure is **logged, not surfaced**: OSC 52 may already have copied the text and
+  has no acknowledgement to combine the result with, so a local error is not proof the copy failed.
+- Tests: `internal/tui/clipboard_test.go`. Gotcha: `docs/gotchas/tui-clipboard-remote-ssh-osc52.md`.
+
+## 2026-09-29 — `~/.claude/skills` is searched at the home level
+
+A skill installed only by Claude Code was invisible to ocode. `SkillSearchPathsForRoot` scanned
+`~/.config/opencode/skills` and `~/.agents/skills` at home level but not `~/.claude/skills` — even
+though **project-local** `<root>/.claude/skills` was already supported, which made the omission an
+asymmetry rather than a policy.
+
+- **`internal/skill/loader.go`** — `~/.claude/skills` is now appended **third**, after ocode's
+  native global dir (the installer's write target, so it must stay first) and `~/.agents/skills`.
+  Search precedence is first-wins-on-directory-name (`loadSkillsFromPaths`), so a skill present in
+  more than one place still resolves to the ocode-native copy.
+- Tests: `internal/skill/loader_home_dirs_test.go` (new) — it points `bundled.SkillsDir` at an empty
+  dir so bundled skills cannot mask a search-path regression.
+
+## 2026-09-29 — Permission judges see resolved shell variables
+
+The TypeSafe judge (Jev) denied `MOD=$(go env GOMODCACHE); D="$MOD/..."; grep ... "$D/options.go"` as `truncated_or_unknown` at 0.75, below the 0.85 floor, because it cannot run anything to learn where `$D` points.
+
+- `internal/agent/permission_shellvars.go`: new `expandBashForJudge` resolves in-command assignments, referenced env vars (secret-looking names/values withheld as `<redacted>`), and `$(...)` from a fixed read-only allowlist (`pwd`, `go env VAR`, `git rev-parse --show-toplevel`, `npm root/prefix [-g]`, exact print-a-path `python -c` snippets). Nothing else is executed. When `/mask` is on, results pass through the session mask registry.
+- Jev state gains `expanded_command` / `resolved_variables` plus a rubric line; the chat judge prompt gains an "Expanded command" section. The command that runs is unchanged.
+- Docs: `docs/concepts/auto-permission-enforced-categories.md` ("Shell-variable expansion for the judges").
+
+## 2026-09-28 — Chat input queues behind a running `!` shell command (TUI)
+
+Running `!sleep 600` and then typing a message sent it to the model immediately,
+while the shell was still running.
+
+- Root cause: a `!` command and an LLM turn are independent subsystems, but every
+  input-queue gate checked only `m.streaming` — which is set solely by
+  `streamStartedMsg` and never by a `!` command. Three fixes:
+- `internal/tui/model.go` — new `shellInFlight()` helper; `handleChatKeys` and the
+  `delayedChatInputMsg` debounce flush now gate on `m.streaming || m.shellInFlight()`.
+  The flush needs its own check because text typed while idle can still be sitting in
+  the 1.5s debounce buffer when a `!` command starts.
+- `shellFinishedMsg` now calls `drainQueuedItems()` (guarded by `queueDrainBlocked`,
+  like the `streamDoneMsg` drain). Without it nothing released the queue after a `!`
+  command, so a second `!` command queued behind the first never ran.
+- `drainReplacementQueueIfReady` also guards on `shellInFlight()`. The replacement
+  gate in `handleChatKeys` is evaluated *before* the shell gate, so input typed
+  while both a `!` is running and a model switch is pending lands in the
+  replacement queue and was dispatched mid-shell. Now it defers to
+  `shellFinishedMsg`, exactly as the `m.streaming` guard defers to `streamDoneMsg`.
+- `EnqueueInjection` is now conditional on `m.streaming` — during a `!` command there
+  is no agent Step loop to consume an injection.
+- The web composer already did this (`busy = isStreaming || shellInFlight || …`); the
+  two surfaces had diverged. Tests in `internal/tui/shell_input_queue_test.go` and
+  `internal/tui/replacement_shell_gap_test.go`.
+
+## 2026-09-28 — Fewer auto-permission stoppers: trusted-path allow rules, allow rules sent to Jev, read-only `git branch`
+
+Session review showed most Jev stoppers were allows scored 0.75–0.83, below the
+floor, on commands the user already trusts.
+
+- `internal/agent/permissions.go` — `trustedToolBasename`: a bare-name allow
+  rule (e.g. `vp`) now also covers the binary called by path from
+  `node_modules/.bin` inside the project or `~/.vite-plus/bin` /
+  `~/.local/share/vite-plus/*/bin`. Arbitrary `*/vp` paths are still not covered.
+- `internal/agent/permission_typesafe.go` — the Jev state carries
+  `allowed_command_prefixes` (new `PermissionManager.BashAllowedPrefixes`), and
+  the rubric tells Jev that those commands are user-trusted.
+- `isReadOnlyGitBranchForm` — `git branch` listing forms (`-vv`, `-a`,
+  `--show-current`, `--list <pattern>`, `--contains`, …) auto-allow; create,
+  delete, rename and upstream forms do not.
+
+## 2026-09-28 — Desktop app writes a log file (`logs/desktop.log`)
+
+The desktop `.app` runs with stderr on `/dev/null`, so every server `log`/`slog`
+line (git failures, storage migration, boot errors) was lost.
+
+- `internal/paths.LogsDir()` — the shared log dir (`<GlobalDataDir>/logs`:
+  `~/.local/share/opencode/logs` on macOS, `$XDG_DATA_HOME/opencode/logs` on
+  Linux, `%LOCALAPPDATA%\opencode\logs` on Windows). The TUI's crash/compact/
+  tokens logs now resolve it through this helper.
+- `internal/logfile` — append-only writer rotating to `.1` past a size cap.
+- `cmd/ocode-desktop` — `installDesktopLog` tees the standard logger (and so
+  slog's default handler) to `desktop.log` (5 MB cap) plus stderr, right after
+  the hidden `lsp-daemon` / `sandbox-confine` subcommand dispatch.
+
+## 2026-09-28 — Code-search results are relevance-judged: grep/rgrep/glob hide out-of-scope files
+
+The TypeSafe/Jev relevance judge that already filters `doc_search` now filters the
+code-search tools. Each `grep`, `rgrep` and `glob` call takes a new required
+`intent` argument; the judge scores each matching file against it and removes files
+that are clearly out of scope, so a repo-wide keyword match stops paying context for
+dozens of unrelated files.
+
+- `internal/tool/search_judge.go` (new) — `SearchResult` / `SearchJudgeRequest` /
+  `SearchResultJudge` plus the `WithSearchResultJudge` / `SearchJudgeFromContext`
+  execution-context seam. The judge rides the context (not the tool struct) so
+  sub-agents and the transient advisor — which inherit the parent's tool objects —
+  judge with their own agent and cannot clobber the parent's.
+- `internal/tool/search.go`, `internal/tool/rgrep.go` — `grep`, `glob` and `rgrep`
+  build a per-file result set between collection and formatting, run the judge
+  (40-candidate cap), and render only the kept files. rgrep's raw-JSON re-decode
+  became a grouping pass preserving line truncation, path order, `files_with_matches`
+  dedup, and the capture-buffer truncated-tail behaviour.
+- `internal/agent/search_typesafe.go` (new) — the judge: intent/tool/query plus
+  line-numbered candidate summaries capped at 400 chars, the lenient rubric with
+  test/fixture and substring guards, delegating to the shared
+  `judgeRelevanceQuestions` helper (0.5 confidence floor, per-candidate fail-open,
+  side-usage accounting).
+- `internal/agent/typesafe.go` — new context-aware `DecideCtx`; the search judge gets
+  a 4s `searchJudgeTimeout` budget instead of the 30s permission budget, so a
+  provider that stalls costs a search about 4s, not 30s. The permission,
+  auto-continue and doc_search judges keep the 30s budget.
+- Fail-open everywhere: a judge error, timeout or missing answer renders every result
+  and is disclosed (`[relevance judge unavailable — results are unfiltered: …]`).
+  Vetoes are disclosed (`[relevance judge: N of M result(s) omitted as out of scope
+  for this intent]`), and results past the cap are kept unjudged with their count
+  shown. Vetoing everything prints an actionable narrow/re-run message, not an empty
+  list.
+- No configuration: the judge is live exactly when TypeSafe is connected, as for
+  `doc_search`. An empty `intent` skips judging (logged `intent-missing`). `read`,
+  `ast`, `lsp` and `ast_grep`, custom and MCP tools are not judged; `list` is deferred.
+- `skills/ocode-tools/SKILL.md` documents the seam, the `intent` argument and the
+  footer contract.
+
+## 2026-09-28 — Remote git no longer piles up: one badge poll at a time, 8 execs per host
+
+Behind the desktop hangs, the Git tab badge re-requested git status on every
+10s tick and every `git_status` event even while the last request (SSH, up to
+30s) was still running — 7 concurrent remote status calls were observed for
+one host.
+
+- `web/src/components/Layout/TopTabs.tsx` — the badge poll runs one request at
+  a time; triggers during a fetch collapse into a single trailing fetch.
+- `internal/server/handler_remote_work.go` — `runBounded` (every remote exec)
+  takes one of `remoteExecSlotsPerHost` = 8 slots per target before starting
+  ssh. SSH execs share one ControlMaster connection and sshd's `MaxSessions`
+  defaults to 10, so bursts from many projects on one host now queue instead
+  of being refused. The slot wait counts toward the caller's timeout.
+- `internal/server/handler_remote_git.go` — `remoteGitStatus` /
+  `remoteGitWorkspace` return an error when ssh fails or times out instead of an
+  empty status (which read as "clean repository"); the upstream and is-repo
+  probes also propagate transport failures. Every remote git status/workspace
+  response goes through `writeRemoteGitStatus` / `writeRemoteGitWorkspace`:
+  502 for transport failures, 500 otherwise, logged via slog.
+- `TopTabs.tsx` — a failed badge refresh keeps the last good counts and shows
+  the Git tab's red error dot ("Git status unavailable: …") instead of zeroing.
+- Local git has the same fix: `gitStatusForDir` / `gitWorkspaceForDir`
+  (`internal/server/handler_git.go`) return an error when a probe fails inside a
+  repository or `gitStatusTimeout` expires; a non-repo is still `is_repo:false`
+  with no error, and the unborn-branch / no-upstream probes stay tolerated.
+  Responses go through `writeLocalGitStatus` / `writeLocalGitWorkspace` (500,
+  slog). The git-status emitter publishes nothing for a failed project (logged
+  once per distinct error) and keeps it on the 10s retry cadence.
+- `TopTabs.tsx` — the badge no longer polls a remote project whose host is not
+  connected (same gate as the project sidebar), so a disconnected host is not
+  dialed every 10s.
+
+## 2026-09-28 — Desktop webview uses HTTPS + HTTP/2 (no more 6-connection stalls)
+
+The desktop UI could hang while the TUI stayed fast: WebKit capped the plain
+HTTP origin at 6 connections, and event streams plus slow remote git calls
+(SSH, up to 30s each) filled them, so every other request queued client-side.
+
+- `internal/server/localtls.go` — per-launch self-signed loopback cert and a
+  first-byte-sniffing listener serving TLS (h2) and plain HTTP on one port.
+- `internal/desktop/boot.go` — local and remote-mode desktop servers serve
+  through it; `Handle.URL` is https (webview), `Handle.HTTPURL` is http (debug
+  handle, "Copy Debug URL", share URLs keep working).
+- `cmd/ocode-desktop/localcert_*` — the cert is pinned in-app: WKWebView
+  auth-challenge method added to Wails' delegate (macOS), WebView2 SPKI browser
+  arg (Windows), WebKitGTK allow-cert-for-host (Linux). No keychain changes.
+- One-time localStorage migration from the old http origin
+  (`internal/desktop/storage_migration.go`, `web/src/lib/desktopStorageMigration.ts`;
+  `web/src/main.tsx` now dynamic-imports `bootstrap.tsx` after it).
+- Gotcha: `docs/gotchas/desktop-webview-http2.md`.
+
+## 2026-09-28 — Speech summary no longer stalls behind a running turn (and its timeout is real)
+
+A "Speak" click with speech summarising enabled could look hung, and the summary
+request could queue behind that session's entire turn.
+
+- `internal/server/handler_speech_summary.go` — `HandleSessionSpeechSummary`
+  now returns `{"summary": ""}` immediately when the session's turn is active
+  (`h.sessions.IsTurnActive`), instead of blocking on `as.mu`, which `runTurn`
+  holds for the whole turn (`agent_session.go:1036-1038`). An empty summary is
+  the fail-open signal, so the web layer speaks the full text at once. The guard
+  is a deferral: once the turn ends the same session summarises normally.
+- `HandleSetSpeechSummaryConfig` releases `h.mu` around the cross-process config
+  write (which can wait up to ~5s on a contended lock file) and re-acquires it
+  only to update `h.cfg`, so the server-global map lock is no longer held across
+  disk I/O.
+- `internal/agent/speech_summary.go` — the summariser's LLM call now goes through
+  `ChatWithContext` when the client supports it (the real `*GenericClient` does),
+  so the 60s `speechSummaryTimeout` cancels the in-flight request instead of
+  abandoning the wait and leaking the goroutine; contextless clients fall back to
+  `Chat`.
+- Tests: `TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive`,
+  `TestSummarizeForSpeechCancelsTheProviderCallOnTimeout` (`-count=20` stable),
+  `TestSummarizeForSpeechFallsBackToChatForContextlessClients`.
+- Docs: gotcha `docs/gotchas/speech-summary-turn-lock-wait.md`;
+  `docs/tts-speech-playback.md` and the TTS playback design spec gained a
+  fail-open "spoken summaries" section.
+
+Verified: `go build`/`go vet` clean for `internal/agent` and `internal/server`;
+full `internal/agent` suite green; `internal/server -run SpeechSummary -count=5`
+green; config speech-summary tests green. No server-global lock is involved —
+other endpoints and other chat sessions are unaffected.
+
+## 2026-09-28 — Monaco's WebKit clipboard workaround fired on every click and keystroke
+
+The desktop (Wails/WKWebView) console filled with `NotAllowedError` from
+`editor.api-*.js` while typing in chat, and input felt like it hung. Monaco's
+`BrowserClipboardService` installs `click` + `keydown` listeners on the layout
+service's main container — for standalone Monaco that is `document.body` — when
+it detects WebKit (`isWebkitWebView` is true for the Wails UA). Each event calls
+`navigator.clipboard.write([new ClipboardItem({...})])` to pre-arm a Safari
+gesture; in the WKWebView that write is denied, so **every click and every
+keystroke** (including the chat input, nowhere near the editor) produced a
+rejected promise plus a pasteboard IPC round-trip.
+
+- `web/src/lib/monacoClipboardPatch.ts` (new) — `disableMonacoWebKitClipboardWorkaround()`
+  no-ops the prototype method before any editor mounts, wired in
+  `web/src/lib/monaco-setup.ts`. UA detection is untouched; Monaco's normal
+  copy/paste falls through to `writeText` + the textarea `execCommand` fallback.
+- `web/src/monaco-internal.d.ts` (new) — ambient declaration for the one Monaco
+  internal module reached (Monaco ships types only for its public API).
+- `web/src/lib/monacoClipboardPatch.test.ts` (new) — asserts the real workaround
+  is present, is replaced, and the replacement is a no-op.
+- Docs: gotcha `docs/gotchas/monaco-webkit-clipboard-workaround.md`; entries in
+  `docs/index.md` and `docs/log.md`.
+
+Verified: production build emits the patch call site in the same chunk as the
+class definition, with the alias chain (`ya` ← `Y` ← `J6`) resolving to the
+class that defines the method — so the deep import and the internally
+instantiated service are one module instance. Full web suite 296 files / 2544
+tests green; `tsgo --noEmit` clean; `pnpm run build` green.
+
+## 2026-09-28 — Kaizen `docx` and `pptx` stacks; document stacks use a 0.9 threshold
+
+- **New stacks.** `docx` covers Word `.docx` and legacy `.doc`: 29 questions. `pptx` covers PowerPoint `.pptx`
+  and legacy `.ppt`: 27 questions. Both focus on editing existing files: delete or edit table rows, add a row
+  or column, insert a table, replace or insert an image, and verify the result. `stackdetect` finds
+  `*.docx`/`*.doc` and `*.pptx`/`*.ppt` at the repo root or up to two directories deep. Every API fact in the
+  answer keys was checked against python-docx 1.2.0 and python-pptx 1.0.2. One of those checks turned up a
+  trap: `Part.drop_rel` counts only `r:id` references, so it always drops an image rel referenced by
+  `a:blip r:embed`, even while another picture still uses it.
+- **Threshold 0.9 for `pdf`, `docx` and `pptx`** (`threshold:` in each `meta.yaml`; documented in
+  `rubric-guide.md`). Every tag below 0.9 gets a corrective section, and a skill passes validation only when
+  every target tag reaches 0.9 in a closed-book re-answer with the skill loaded. All 12 skills (3 stacks ×
+  4 models) are re-derived at 0.9, and 9 of them are validated. deepseek-v4.1-flash, mimo-v2.6-flash and
+  space-bunny-free pass every target on all three stacks (with-skill stack scores 95–100%). mimo pptx needed a
+  second iteration. glm-5.3-flash is derived but not validated, because its providers are out of credit.
+- **Live probes** (`docs/okf/{docx,pptx}/probe/`). The model edits a real `.docx`/`.pptx` through
+  `ocode run -yolo`, and a structural XML checker rejects cover-ups: hidden runs, white boxes, collapsed rows,
+  off-slide shapes, stale media, and a blob swap that changes a shared image. The checker self-test covers
+  8 correct references (all PASS) and 8 cover-up edits (all FAIL). Unchanged parts are compared as canonical
+  XML, so a model that re-serialises the XML is not failed for it. On the 0.9 skills, 69 of 72 live runs pass
+  (pdf, docx, pptx × 3 models × 8 tasks). One of the three failures was an ocode false positive, fixed below.
+- **Fix: bash hard-block no longer treats `||` as a pipe.** `isHardBlockedCommand` substring-matched
+  `"| python"`/`"| sh"`, so `cmd || python3 -c ...` was hard-denied even in `-yolo` (a model gave up on a task
+  over it), and `| shasum` counted as `| sh`. The new `pipesIntoInterpreter` finds real `|`/`|&` pipes into
+  bash, sh, perl or python* and reads the command name. `curl x |bash` (no space) and `| /bin/sh` are now
+  caught too. Quoted text is still scanned, so `bash -c "curl x | bash"` stays blocked.
+- **pdf answer key fix:** identical images are merged only by `garbage=4`. Levels 0–3 keep separate copies
+  (verified on PyMuPDF 1.27.1). `doc.new_page(n)` inserts before index `n`.
+
+## 2026-09-28 — All URLs open in the OS browser; unresolvable file links fall back to the quick file lookup
+
+**URLs.** Only some surfaces routed through `openExternalURL`; a raw `<a href>` in the desktop
+webview would replace the whole app with the target page (the SPA is served by ocode's own server and
+Wails beta.12 has no external-navigation delegate). Every user-facing URL now goes through it:
+
+- **`web/src/components/common/MarkdownLink.tsx` (new)** — the shared react-markdown anchor renderer;
+  intercepts http(s) clicks (`preventDefault` + `openExternalURL`), keeps `href`/`target`/`rel` so
+  middle-click and copy-link still work, and lets non-http schemes (`mailto:`, `#hash`) fall through.
+  Used by `MessageBubble`, `CompactionNotice` and `MarkdownViewer` (the last two previously rendered
+  bare anchors).
+- **Raw `window.open` removed for user-facing URLs** — terminal `WebLinksAddon` (`TerminalPanel.tsx`),
+  the embedded browser's "Open External" menu item and button (`BrowserPanel.tsx`, `ChromeViewport.tsx`),
+  and the TTS license + `SyncStatusWidget` verify links now call `openExternalURL`. The embedded
+  browser's own `target=_blank`/CDP new-tab path stays in-app by design; `PdfViewer`'s blob-URL
+  print/download `window.open` is not a URL navigation.
+
+**Files.** A file link that did not resolve was a silent no-op (`handleOpenFile` swallowed the failed
+read and returned void).
+
+- **`web/src/hooks/useEditorTabs.ts`** — `handleOpenFile` returns `Promise<boolean>` (`false` only when
+  the fetch fails and no draft rescues it; `true` on every success path, incl. preview-only and
+  already-open tabs).
+- **`web/src/App.tsx`** — the `ocode:open-file` handler passes `fallbackQuickOpen`; on `false` it opens
+  the quick file lookup (`FilePicker`, the ⌘P dialog) seeded with the link's **basename** — the file was
+  likely moved/renamed, and the full path would match nothing under the picker's whitespace-AND filter.
+  Tree/git/picker callers leave the flag off so a stale click there never pops a modal. The picker now
+  also receives the active project's `projectHost` (remote projects must search the host tree).
+- **`web/src/components/Files/FilePicker.tsx`** — new `initialQuery` prop, applied on open and cleared
+  on close.
+- Tests: `web/src/components/common/MarkdownLink.test.tsx` (new), `web/src/App.fileLinkFallback.test.tsx`
+  (new), `FilePicker.test.tsx` "FilePicker initialQuery", `useEditorTabs.test.ts` asserts the `false`
+  return, `ChromeViewport.test.tsx` updated for the new popup features. Mutation-verified: forcing the
+  fallback off fails the App test; removing the MarkdownLink intercept fails its test. Chunks of the web
+  suite covering every touched area (Chat, Preview, Browser, Settings, Files, Layout, hooks, lib,
+  Terminal, all `App.*` tests) pass; `tsgo --noEmit` + `vite build` clean.
+
+
+## 2026-09-28 — Terminal tab X now confirms before closing (fix)
+
+The chat and browser tab X buttons opened the bespoke "Close … tab?" confirmation, but the terminal
+tab's X killed its shell immediately: `handleRequestCloseTerminal` short-circuited on a hardcoded
+`hasRunningApp = false` — a busy-detection TODO that was never wired — so it never reached the
+`pendingClose` dialog. That made the terminal the one tab kind whose X bypassed the confirm, with
+the same effect as the middle-click path that is supposed to be the *only* bypass.
+
+- **`web/src/components/Layout/UnifiedTabBar.tsx`** — `handleRequestCloseTerminal` now always sets
+  `pendingClose` (kind `"terminal"`), matching chat/browser; middle-click still routes through
+  `handleImmediateCloseTerminal` → `doCloseTerminal` with no dialog. The stub is removed rather than
+  left dead: there is no reliable running-app signal in the tab metadata, so a bare prompt and a
+  shell mid-command look identical, and "close idle terminals directly" could kill a live shell with
+  no confirm. If a busy signal is ever wired in, it may skip the dialog only for a *provably* idle
+  shell, never the reverse. `⌘W`/`Ctrl+W` (`App.onCloseSession`) is deliberately unchanged.
+- Tests: `web/src/components/Layout/UnifiedTabBar.test.tsx` — "X on a terminal tab shows confirmation
+  before closing", "…Cancel preserves the tab", "middle-click on a terminal tab closes immediately
+  without confirmation" (the test's client mock gained `authedFetch`/`remoteApiBase`, which
+  `terminalStore` calls on close and which the bare `api` mock left undefined). Mutation-verified
+  (reverting the handler to `doCloseTerminal` fails the first two). Real-browser check against a
+  freshly built server (`go build` + `vite build`): terminal X → "Close terminal tab?" dialog, Cancel
+  preserves the tab, middle-click closes it with no dialog. Full web suite 287 files / 2485 tests
+  green; `tsgo --noEmit` + `vite build` clean.
+
+## 2026-09-28 — Desktop: external links now open in the default browser (fix)
+
+Clicking a link in the desktop app never reached the system browser. The SPA is served over `http://`
+by ocode's own Go server, not Wails' asset server, so the full Wails runtime module at
+`/wails/runtime.js` is unreachable — that path hits the SPA fallback and returns `index.html`, so
+`import("/wails/runtime.js")` always rejected. `openExternalURL` then fell through to
+`window.location.assign(value)`, which replaced the entire ocode webview with the target page (and
+Wails v3 beta.12 has no navigation delegate to divert it). Cmd+click, which macOS treats as "open in
+a new window", was a native no-op for the same reason.
+
+- **`web/src/lib/externalLinks.ts`** — the desktop branch now sends `ocode:open-external:<url>` over
+  the minimal `window._wails.invoke` bridge (the same channel as `wails:runtime:ready`, the
+  quit-guard messages, and `ocode:focus-window`), with a single 50 ms retry if the bridge has not
+  been injected yet. It never falls back to `location.assign`, which would destroy the app UI; the
+  browser branch (`window.open` → same-tab fallback) is unchanged.
+- **`cmd/ocode-desktop/main.go`** — `RawMessageHandler` recognises the prefix and calls
+  `app.Browser.OpenURL` (→ `/usr/bin/open`). `isAllowedExternalURL` accepts only well-formed
+  `http`/`https` URLs with a host, so the page cannot talk the shell into opening `file://` or a
+  custom scheme. The URL is never logged (it may carry a one-time token).
+- Tests: `web/src/lib/externalLinks.test.ts` (bridge routing, retry, non-http rejection, browser
+  popup) and `cmd/ocode-desktop/main_test.go` (`TestIsAllowedExternalURL` — both mutation-verified).
+  `web/src/lib/fileLinks.test.tsx` gained a Cmd/Ctrl-click case pinning that chat file paths open
+  regardless of the modifier (they never required Cmd, unlike the terminal and editor link
+  providers).
+
+
+## 2026-09-28 — Pulse: the cross-project live-sessions dashboard (web/desktop)
+
+You designed it on 2026-09-24 (spec + a 10-part plan) and it was never built — all ten steps were
+still `- [ ]`, there was no `/api/pulse` route, no `PulseView`, and `"pulse"` was missing from
+`activeView`, so there was nothing to see. It is built now, with the entry point moved from the
+plan's pinned session-tab pill to the **main menu at the top-left of the project list**, which is
+where a global view belongs (a per-project row would wrongly imply the dashboard is project-scoped).
+
+- **`GET /api/pulse` (`internal/server/handler_pulse.go` + `pulse_rows.go`)** — one row per top-level
+  session across every local project: `scope=live|all` (24h vs 7d idle window), `cursor`, `limit`
+  1–100. Status precedence is *pending permission → pending question → running → error → idle*; sort
+  is *rank → `updated_at` desc → `session_id` asc*; child sessions fold into the parent as
+  `child_count`. `pulse_rows.go` holds **all** of that as pure, I/O-free functions so it is testable
+  without a server, and it is the single definition of the ordering that `sortPulseRows` in the
+  client mirrors. A malformed `scope`/`limit`/`cursor` is a **400**, not a silent default — including a
+  present-but-empty `scope=`, which means the client computed a blank value and reading it as `live`
+  would hide that bug behind plausible data.
+- **`scope=all` reads metadata only** — one directory scan + one indexed query per project, no
+  transcript bodies, and **no todo file reads**, so the cost scales with the number of projects
+  rather than with history. Disk-only rows therefore carry no todo; they show project + title + age,
+  which is what that list is for. Live rows carry the full picture and always win on merge.
+- **`session.TitleForDir` (`internal/session/title.go`, new)** — a single indexed `index.sqlite` row
+  per live session, DDL-free via `openDBRaw` (same discipline as `StoredRevisionForDir`). A
+  full `ListRefsForDir` per request would re-scan a project with thousands of legacy session files
+  to look up a handful of titles, and would blow the p50 < 200ms budget.
+- **`sessionEntry.lastTurnErr` + `todo_updated`** — a turn's failure is now recorded on the registry
+  entry (cleared when a new turn starts, kept when a turn ends), because once `turn_active` drops, a
+  failed turn is otherwise indistinguishable from an idle one. `ReadTodoSummary(projectRoot,
+  sessionID)` reads a plan addressed by **(root, session)** — the existing `todoDir()` resolves from
+  the process cwd, which is wrong for a server that serves many projects — and reuses the existing
+  item parser rather than adding a second one. The server publishes `todo_updated` from the
+  `todowrite` tool result, using a per-turn `ToolID → name` map (a tool-result message carries only
+  `ToolID`). It is **not** in `liveFrameEvents`: a plan is a momentary reading, so replaying a
+  buffered copy into a mid-turn reload would show one the session has already moved past.
+- **`web/src/stores/pulseStore.tsx`** — seeded from `/api/pulse`, kept live by events forwarded
+  through `pulseEventSink`. Two deliberate non-behaviours: it **never synthesizes a row** (an event
+  for an unknown session triggers one debounced 300ms refetch, because inventing a card the user
+  cannot open is worse than one that arrives late), and a failed refetch **keeps** the last known
+  rows alongside the error rather than blanking the dashboard. The page envelope is validated before
+  it reaches state: consuming `res.items` blindly made a non-`PulsePage` body throw inside a
+  `setState` updater, i.e. during render, which unmounted the **whole app** instead of degrading
+  one view — every `App.*.test.tsx` suite went blank on a `{}` response. A malformed body is now a
+  reported error plus the last good rows.
+- **`web/src/lib/sessionEvents.ts`** — forwards to the sink **before** the `sessionIsTracked` gate
+  (a dashboard must see sessions with no open tab) and adds `todo_updated` to
+  `SESSION_SCOPED_EVENTS`, which is load-bearing: without it the router bails before the forward and
+  todo progress bars only ever appear on a full refetch. The two lists (Go `sessionScopedEvents`,
+  web `SESSION_SCOPED_EVENTS`) must stay in step.
+- **`web/src/lib/jumpToSession.tsx`** — `selectProject` **then** `openSessionTab`, awaited, because
+  the reverse order binds the tab to whichever project happened to be active. Project identity is
+  path **+ host**, never path alone. An unknown project is refused with a `console.error` rather than
+  opening a tab bound to no project. `activeView` is local `useState` in `App.tsx` and this app has
+  no client router, so the "leave the dashboard" transition is supplied by a small
+  `PulseJumpProvider` instead of the helper reaching into view state.
+- **Not verified: the performance budget.** The design specified p50 < 200 ms for `scope=live` and a
+  one-off `curl -w '%{time_total}'` of `scope=all` against a populated multi-project store. Neither
+  was measured — no such environment was available — so **no timing is claimed here**. The two
+  changes that exist to keep `live` cheap (a single indexed title row per session instead of a
+  per-request directory scan; no todo reads on the disk path) are in place and are covered by
+  correctness tests, not by timings. Recorded as outstanding in the plan's INDEX banner.
+- **Entry points** — main menu top-left of the project list; a header badge `● running · ◆ needs you`
+  that renders **nothing** at zero (a permanent `0 · 0` trains the user to ignore the one surface
+  whose job is "something needs you"); and **Cmd/Ctrl+J** to toggle, with the same xterm guard as the
+  existing Cmd+W so Ctrl+J (readline "kill line") is not stolen mid-command. `"pulse"` is deliberately
+  **not** persisted per project: it is global, so persisting it would make the next project open
+  straight into the dashboard.
+- **Desktop (`cmd/ocode-desktop`)** — app-menu "Dashboard…" (Cmd/Ctrl+Shift+J, not plain Cmd+J, which
+  the native menu would consume before the webview sees it) and a tray "Open Pulse" item. Both
+  `ExecJS` a `CustomEvent("ocode:open-pulse")` into the page, exactly as the existing
+  `ocode:open-settings` does, because the webview is served over plain `http://` and
+  `window.EmitEvent` is a **structural** no-op there. **There is no dock-badge-click handler**:
+  Wails v3 beta.12's `dock` service is display-only and `pkg/events` exposes no
+  application-activated event, so on macOS a dock click while ocode is already running is
+  indistinguishable from plain activation. The tray item is the reachable equivalent — see the
+  feature-request note below.
+
+## 2026-09-28 — Compaction summary model: a toggle + picker in the chat sidebar and Settings (web/desktop)
+
+`compact.summary_model` had a picker in Settings but nothing in the chat sidebar, and the value it
+stored was silently unusable. The settings dialog handed `ModelInfo.name` — the canonical
+`"provider/model"` id — straight to `summary_model`, and the server glued the **main** model's
+provider onto it: `"openai:anthropic/claude-haiku-4-5"`. `NewClient` splits on `/` first, so
+`"openai:anthropic"` is not a provider, and its colon fallback then built a perfectly *valid* client
+with provider `openai` and model `anthropic/claude-haiku-4-5` — every summary sent to the main
+backend under a model it does not serve, with no error anywhere. The pre-existing tests missed it
+because they only exercised `summary_provider` + a **bare** model name, a combination the old code
+handled correctly.
+
+- **`internal/agent/agent.go` (`compactSummaryClient`)** — resolution is now explicit: an EXPLICIT
+  `summary_provider` wins and is joined with `/` (never `:`, so resolution does not depend on
+  `NewClient`'s colon fallback, a last resort that mis-splits a provider segment containing a colon);
+  with no explicit provider an **already-qualified id passes through untouched**; a **bare name**
+  still falls back to the main client's provider, exactly as before.
+- **`internal/agent/client.go`** — extracted `providerAndModelID`, the three recognition cases
+  `NewClientWithProfile` has always applied (registered provider, `providerAliases` canonicalisation,
+  an explicit `cfg.Provider` block), and made the constructor call it, so the two cannot drift.
+  Behaviour-preserving; the existing opencode/orcarouter/groq/ollama/runinfra parsing tests cover it.
+- **`PUT /api/config/ocode/compact` is now a PARTIAL write, not a replace** — `CompactConfigPatch`
+  (all-pointer, so an absent key is distinguishable from an explicit zero) +
+  `SaveOcodeCompactConfigPatch`, which load-modify-writes **inside the config file lock** and returns
+  the merged block. This closes the lost-update race between the three writers of this block (sidebar
+  toggle, model picker, Settings form): a single-field write used to reset every field it did not
+  mention, and a full body fetched before another control's change reverted that change. Merging on
+  **disk** rather than on the handler's in-process cache also stops a second ocode process losing its
+  write. Absent ≠ zero (the picker's "Clear" sends `""` and must clear), a body with no recognised
+  key is 400 rather than an accepted no-op that would still rewrite the file, and a complete body
+  (the Settings form) still behaves as an exact replace *because* every key is present.
+- **`web/src/lib/compactConfig.ts` (new)** — `EMPTY_COMPACT_CONFIG`, `summaryModelPatch` (stores the
+  picked id verbatim and **always clears `summary_provider`**, since an explicit provider outranks the
+  id's own prefix and a stale one keeps routing summaries at the old backend), `setCompactConfig`
+  (sends only the changed keys — deliberately NOT a client-side read-modify-write, which would
+  reintroduce the race and cost a round trip), and `compactSummaryDisplay`.
+- **`web/src/components/Layout/CoworkSidebar.tsx`** — a new **Summary** row: the model picker plus a
+  `Summary enabled` toggle wired to `compact.enabled` (the automatic-compaction gate), optimistic and
+  rolled back on failure. The one model row with **no `tuiStatus` counterpart** — the compact block is
+  a persisted global config — so it renders straight from `api.getCompactConfig(sessionHost)`.
+  Host-threaded like every other row, so a remote SSH project's model lives on that host.
+- **`web/src/components/Layout/ModelDialog.tsx`** — `purpose="summary"` became a real purpose: it
+  loads the stored model on open, highlights it, persists a direct pick (or defers to the owning
+  form's Save), and clears back to the auto fallback. It now renders the recents/favorites sections
+  like the other sidebar-owned pickers (`autocontinue`) instead of the flat provider grouping, since
+  the TUI has no summary picker to mirror.
+- **`web/src/components/Settings/CompactForm.tsx`** — reuses the shared helpers, so a pick clears the
+  provider override exactly as the sidebar's does, and `summary_provider` is relabelled
+  "Summary provider override" with a hint that it applies only to a bare model name.
+
+The TUI is unchanged — it has no summary-model picker, and this request was scoped to web/desktop
+(which share `web/dist`; the desktop app picks it up on the next build).
+
+The Settings form adopts the merged block the response returns, so a window that saved after another
+control's edit now shows that edit instead of quietly reverting it.
+
+**Tests.** `internal/agent/agent_test.go` gains `TestCompactSummaryClientKeepsProviderQualifiedModel`
+(a registered main provider so the test fails on the silent-wrong MODEL NAME rather than a type
+assertion), `…ExplicitProviderWinsOverQualifiedModel`, `…BareModelFallsBackToMainProvider`, and a
+table-driven `TestProviderAndModelID`. Web gains `lib/compactConfig.test.ts`,
+`ModelDialog.summary.test.tsx`, `CoworkSidebar.summary.test.tsx`, and `CompactForm.summary.test.tsx`
+(this Settings form had no test file at all). Every new assertion was mutation-verified by reverting
+each fix in place: the pre-fix `compactSummaryClient` resolution, dropping the explicit-provider arm,
+dropping `providerAndModelID`'s `cfg.Provider` case, removing either `ModelDialog` `case`, dropping
+the host on the read or the write, dropping the `{...current, ...patch}` spread, and the
+provider-clearing pick. Two mutations initially **survived** and both were test defects, not code defects: the CompactForm
+provider-clearing test passed against a no-clear implementation because its fixture started with an
+empty provider (it now seeds a hand-edited `summary_provider` + bare model), and dropping a single
+`if p.X != nil` block from `applyTo` changed nothing observable because no Go test asserted each merge
+field can be *set* — only that it survives. `TestCompactConfigPatchApplyToCoversEveryField` is now
+one subtest per field, and removing any one of the eleven blocks fails it. A third "survivor",
+echoing `h.cfg.Ocode.Compact` instead of `merged` in the response, is an *equivalent* mutation — the
+cache is assigned from `merged` one line earlier, so both are the same value and no test should
+distinguish them.
+
+## 2026-09-28 — Port forwards: dead forwards are now detected and restarted
+
+"Sometimes the port map seems dead" was a real defect, not a missing feature. A forward's `ssh -N -L`
+child can die on its own — Wi-Fi change, laptop sleep/wake, remote host reboot — and nothing ever
+noticed. `m.live[remotePort]` was written by `Start` and deleted only by `Stop`, and the supervisor's
+`waitFn` for these children is a deliberate no-op ("the manager owns Wait") that nothing performed.
+So `IsLive` — a bare map lookup — answered true forever, and `Start` short-circuited on the same
+stale entry and returned `nil` without opening anything: the panel showed a live forward with
+nothing listening, and **Disable → Enable could not revive it**. A restart attempt would not even
+have worked — `canReplace` in `process_supervisor.go` only replaces a *terminal* record, and the
+crashed child's record stayed `ProcRunning`, so the retry took the duplicate-running path, killed its
+own freshly started child, and returned `already registered`.
+
+- **`internal/remote/portmap.go`** — `ForwardManager` now owns each child's `Wait`. A `forwardProcess`
+  pairs the cmd with a reaper goroutine (`reap`) that waits, marks the supervisor record terminal via
+  the PID-qualified `MarkExitedPID`/`MarkKilledPID` (generation-aware, so a stale reaper cannot
+  clobber a newer record under the same stable `remote-portmap-<port>` ID), and removes the live
+  entry under an identity check so a reaped old child cannot delete a newer one. `IsLive` is now a
+  real liveness signal. `Stop` kills and blocks on the reaper's `done` channel instead of calling
+  `Wait` itself (two `Wait`s on one process race, and the second never returns). `Start` registers
+  the entry and starts the reaper *before* the bounded readiness probe, so a child that exits during
+  the probe is never recorded as live. New `SetOnExit(fn func(remotePort, exitCode int, uptime))`
+  hook reports each reap once the live entry is gone.
+- **`internal/server/portmap_watchdog.go` (new)** — the restart monitor. `portMapPolicy` (one per
+  remote project) re-opens a dead forward: exponential backoff from 15s doubling to a 60s cap,
+  giving up after 8 consecutive failures and logging the give-up. A forward is only "recovered" once
+  a child outlives a 30s settle window or is seen live on a pass — a *successful* open does not clear
+  the failure count, so a forward that opens and dies immediately cannot be re-opened forever.
+  `portMapWatchdogLoop` runs from `server.go` beside `evictIdleLoop`; it is event-driven through a
+  buffered wake channel signalled by `SetOnExit` (a restart lands in milliseconds), with a 10s
+  ticker only as a safety net. Enable/Add clear a give-up (the user's "try it now"); Disable/Remove
+  forget the port. Every restart, failure, and give-up is logged — no silent swallow.
+- **Deliberately not covered:** whether the service *behind* a forward is up. `waitForTunnelReady`
+  only dials `127.0.0.1:localPort`, and ssh's local listener accepts whether or not the remote end
+  is reachable, so "live" means "our ssh child is running", not "the remote app answers". The
+  frontend was left load-on-open as asked, so the panel reflects reality on the next open.
+
+**Tests.** `internal/remote/portmap_test.go` gains four regressions over a fake `ssh` that exits on
+its own: `IsLive` goes false, the supervisor record goes terminal, a dead forward can be re-opened
+(no `already registered`), and `Stop` on an already-dead child does not hang.
+`internal/server/portmap_watchdog_test.go` (new) covers the policy on an injected clock — immediate
+retry after a healthy death, backoff after a flap, backoff after a failed open, give-up after 8
+failures, give-up for a forward that flaps on *every* open, forget on disable, forgive on healthy —
+plus the pass logic (only enabled, only dead), the end-to-end `SetOnExit` → wake wiring, and Enable
+clearing a give-up. Every one of the 16 fixes was mutation-verified by reverting it in place and
+confirming the named test fails; two mutations initially survived and exposed unsound tests (a
+"clears on healthy death" assertion seeded with zero prior failures, and a disabled-forward
+mutation that left the `continue` in place), both since rewritten.
+
+## 2026-09-28 — Security: a remote project's path is no longer a local filesystem root
+
+Fixed the open finding in `docs/gotchas/remote-project-path-trust-boundary.md`. A saved remote
+(SSH/WSL) project's `Path` is interpreted on the OTHER machine, but two local allowlists appended
+every saved project's path regardless of `Host`, so a host-less request could name a remote
+record's path and have this server serve/browse/run on THIS filesystem at that path. A saved
+`{host:"example.com", path:"/"}` was enough to make the whole local disk look like a registered
+project root — the gotcha's documented five-step exploit.
+
+- **`allowedProjectRoots()`** (`internal/server/handler.go`) now skips entries with `Host != ""`.
+  It is the shared local trust boundary for the file tree/content/raw/save/search handlers,
+  `/api/open`, secret files, the system-permissions catalog, `/api/init`, the local terminal's
+  project admission, and `SessionManager` project resolution — so all of them stop admitting
+  remote paths at once.
+- **`isRegisteredProjectRoot()`** (`internal/server/handler_git.go`) had the same path-only bug and
+  now skips remote entries too. It gates `mutationProjectDir` (file/git mutations) and the
+  `resolveRegisteredProjectRoot` tilde-expansion fallback.
+- **Not a regression for remote work:** the host that owns a path registers it as a LOCAL project
+  (`projects.Add` expands `~`), so its own `allowedProjectRoots` still serves it; every remote
+  endpoint selects the remote mode explicitly via `?host=` and validates the registered
+  `(host, path)` pair (`remoteWorkFor` / `remoteProjectRegistered`), which never consults
+  `allowedProjectRoots`. Local and remote projects sharing a path stay distinct.
+
+**Tests.** New `internal/server/remote_project_trust_boundary_test.go` covers the gotcha's required
+cases: the allowlist excludes a remote path and a remote `"/"` while keeping the workdir and local
+projects; `isRegisteredProjectRoot` ignores remote entries; a host-less file-tree, git-status and
+terminal-history request for a remote-only path is rejected while the registered `(host, path)`
+pair is admitted; and a path registered both locally and remotely appears once (as the local
+entry) while a remote-only path never becomes a local root. All six fail against the pre-fix code
+(mutation-verified by temporary revert). Full `internal/server` suite green; `go build ./...` /
+`go vet` / `gofmt` clean.
+
+## 2026-09-28 — Project list: duplicate a project as a remote (SSH/WSL) entry
+
+Asked: "project list, allow to duplicate for remote ssh or wsl."
+
+A saved project can now be opened over a second connection without retyping its path or losing
+its list metadata. Right-click any project row in the sidebar (local, SSH or WSL; the collapsed
+rail and the mobile drawer included) and pick **Duplicate as remote…**. The Add Remote dialog
+opens with the source's path prefilled and the source's display name and group carried into the
+new entry, so a local `/srv/app` can also appear as `devbox:/srv/app` in the same group.
+
+Project identity is scoped by `(host, path)` (`internal/projects/projects.go`), so the duplicate
+is a genuinely separate entry — independent sessions, terminals and git state — not a rename.
+
+- **Backend.** New `projects.Store.DuplicateAsRemote(host, path, port, name, group)` plus a
+  `ErrProjectExists` sentinel. Unlike `AddRemote`, which **upserts** a `(host, path)` entry on
+  re-add (existing behavior, pinned by `TestAddRemoteScopedByHost`), the duplicate refuses a
+  target that is already saved so the dialog can say so. The host is canonicalized with
+  `remote.ParseTarget` + `Validate` before the conflict check (so `devbox` and `james@devbox`
+  stay distinct, and an SSH port on a WSL target is rejected), and the path is stored verbatim
+  (`~` and the remote's separators are the remote's). New `POST /api/projects/duplicate`
+  (`HandleDuplicateProjectAsRemote`) returns the created `Project` on 200, **409** on
+  `ErrProjectExists`, and 400 for a missing host/path or invalid target. This follows the
+  `(host, path)` trust boundary rule in `docs/gotchas/remote-project-path-trust-boundary.md`:
+  the endpoint is explicitly remote-only (a non-empty `host` is required), never path-only.
+- **Frontend.** `api.duplicateProjectAsRemote` + `projectStore.duplicateProjectAsRemote`
+  (rethrows so the dialog keeps itself open and shows the conflict). `ProjectSidebar` gained
+  "Duplicate as remote…" in both row context menus and reuses `AddRemoteDialog` with new
+  `initialPath` / `heading` / `submitLabel` props. The dialog is rendered by **both** the expanded
+  list and the collapsed rail (a separate render branch with no dialogs of its own — a dialog
+  missing from the surface the user clicked is one that never appears).
+- **Known adjacent gap (fixed 2026-09-28 — see the security entry above):** `allowedProjectRoots()`
+  (`internal/server/handler.go`) appended `p.Path` for every saved project without a `Host != ""`
+  filter; the duplicate endpoint did not widen that surface, but the trust-boundary doc's
+  invariant is now enforced (and `isRegisteredProjectRoot` fixed alongside it).
+
+**Tests.** `internal/projects/projects_test.go`: inherit name/group, reject an existing target
+with `ErrProjectExists`, canonicalize the host before the check, validate target/path.
+`internal/server/handler_projects_test.go`: 200 + created entry, 409 conflict with no write, and
+400 validation. Web `ProjectSidebar.test.tsx`: dialog opens with the path prefilled from a local
+row and from the collapsed rail, submit carries the source name/group (SSH and WSL+port), a
+conflict keeps the dialog open with the reason, and a remote row also offers the action.
+`projectStore.test.tsx`: the action rethrows a conflict. All new tests were mutation-verified
+(expanded/rail wiring noop'd and the inherited name/group dropped each fail their case).
+
+## 2026-09-28 — Kaizen `pdf` stack; `ocode run` now loads bundled skills and Kaizen digests
+
+Asked: Kaizen skills for editing existing PDFs (delete, edit and add table rows, add columns, insert tables,
+replace and insert images) for deepseek-v4.1-flash, space-bunny-free, mimo-v2.6-flash and glm-5.3-flash.
+
+- **New `docs/okf/pdf/` corpus** (36 questions, 10 tags, corpus_rev 1). The PyMuPDF facts in the key were checked
+  on 1.27.1 and cross-checked with Context7. Detection is `*.pdf` at the repo root or up to two directories deep:
+  `internal/stackdetect` registry plus tests, and `gen-prompt-sheets.py` STACKS.
+- **Derived skills** `pdf-tuning-{deepseek-v4.1-flash,glm-5.3-flash,space-bunny-free}` are synced into
+  `skills/kaizen/`. mimo-v2.6-flash had no tag below 0.75, so it gets no skill.
+- **Bug: headless `ocode run` never called `registerBundled()`.** `serve`, `web`, `skills` and the TUI all call it.
+  Without it, a `run` session had no embedded skills, no Kaizen tuning skills and no force-injected digest. That
+  held in any repo other than an ocode checkout; the checkout was the exception because its `skills/` is found on
+  disk. `main.go` now registers the bundled FS and the bundled model configs before `runcli.Run`. Verified live:
+  a glm-5.3-flash `run` in a PDF-only directory now quotes the pdf digest from its system prompt, where it
+  previously answered "NONE". `internal/skill/kaizen_pdf_test.go` covers the gating, meaning the digest is
+  present for a PDF repo and absent without one.
+
+## 2026-09-28 — Remote project inventory: the terminal kill X waits for the project to be selected
+
+Reported: "on the project list of terminals and chat for remote session, don't show the X button unless its selected first."
+
+A remote (SSH/WSL) project's expandable inventory in the project sidebar lists its **Chats** and **Terminals**. Every
+terminal row carried a permanently visible red **X** (`aria-label="kill terminal <id>"`) that DELETEs the shell on
+the other machine through `killTerminal` — on *every* row of *every* remote project, selected or not, so a single
+stray click while browsing a project you were not working in destroyed a live remote shell.
+
+- **`web/src/components/Layout/RemoteProjectStatus.tsx`** now renders the kill X only when the row's project is the
+  selected one. The `isActive` predicate (host-qualified `activeProject` path + host match) was hoisted out of
+  `revealTab` — which already used it to select a non-active project before opening its tab — so "the project I am
+  working in" is decided once and both the reveal path and the kill control agree. Comparing paths alone would be
+  wrong: a local project and a remote one can share a path.
+- **Nothing else changed.** The inventory stays browsable and fully usable from an unselected project: attaching a
+  terminal or opening a chat still works (those rows select the project first, then reveal the tab), and the X
+  appears as soon as the project becomes active. On mobile, where the project must be tapped to leave the drawer
+  anyway, the X is reachable after that tap.
+
+**Tests.** `web/src/components/Layout/RemoteProjectStatus.test.tsx`: "hides the terminal kill X while … is the
+selected project" (parameterised over a different project *and* the same path on another host, while still asserting
+the chat/terminal rows are present and browsable) and "shows the terminal kill X as soon as the project becomes the
+selected one". Mutation-verified by temporary revert: removing the gate, making it always-true, and dropping the
+host qualification from the comparison each fail the intended case, as does a gate that never lifts.
+`web/src/App.tabFocusRemote.test.tsx` gains the end-to-end half — the unit test fakes the project store, so only the
+real-App suite proves that a real `activeProject` flip (one click on a chat) reveals the X with no reload. Full web
+suite green; `tsgo --noEmit` and `vite build` clean.
+
 ## 2026-09-28 — Version bump: 0.8.112 → 0.8.113
 
 - `internal/version/version.go` updated. No breaking changes; routine patch bump.

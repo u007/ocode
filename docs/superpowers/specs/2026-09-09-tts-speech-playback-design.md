@@ -1,7 +1,7 @@
 ---
 type: Decision
 title: TTS Speech Playback Design Specification
-description: User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source).
+description: User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2, 2026-09-28).
 tags:
   - TTS
   - speech
@@ -9,22 +9,24 @@ tags:
   - local-model
   - supervisor
   - DOM-extraction
-timestamp: 2026-09-16T12:32:11Z
-resource: ""
+  - speech-summary
+  - fail-open
+timestamp: 2026-09-28T13:01:47Z
+resource: "docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md"
 ---
 # TTS Speech Playback Design Specification
 
 **Type:** Decision  
-**Description:** User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing.  
+**Description:** User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2).  
 **Resource:** docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md  
-**Tags:** TTS, speech, design, local-model, supervisor  
+**Tags:** TTS, speech, design, local-model, supervisor, DOM-extraction  
 
 ---
 
 # TTS Speech Playback Design Specification
 
 **Status**: Active
-**Last Updated**: 2026-09-16
+**Last Updated**: 2026-09-28
 
 ## Overview
 
@@ -122,6 +124,47 @@ Three helpers in `web/src/components/Speech/speechUtils.ts` cover the extraction
 
 **Scope note:** `ThinkingBlock` reasoning and terminal selections are plain text (not markdown) and are passed through unchanged — no DOM extraction needed.
 
+#### 10.2 Spoken Summaries — fail-open (added 2026-09-28)
+
+Optional prose rewriting sits between extraction (§10.1) and synthesis. When
+`SpeechSummaryEnabled` is on, `resolveSpeechText`
+(`web/src/components/Speech/SpeechProvider.tsx`) first asks
+`POST /api/sessions/{id}/speech-summary` to rewrite the extracted text into
+spoken prose using that session's own agent — same credentials, active
+profile and usage attribution as its turns. Settings pair is read/written via
+`GET`/`PUT /api/config/ocode/speech-summary` (`SpeechSummaryModel`,
+`SpeechSummaryEnabled`).
+
+**Contract: a summary is an optimisation, never a prerequisite for speech.**
+
+- **`200 {"summary": ""}` is the fail-open signal** — speak the original full
+  text. Empty/whitespace-only summaries and request failures resolve to the
+  original text identically; speech is never silenced by a side task failing.
+- **Degrade while the turn is active.** `runTurn` holds the session's `as.mu`
+  for the entire turn, so `HandleSessionSpeechSummary` checks
+  `h.sessions.IsTurnActive(id)` on the non-blocking registry *before* taking
+  `as.mu` and returns the empty summary immediately instead of queueing
+  behind the turn (`internal/server/handler_speech_summary.go`). The same
+  empty summary covers a session with no buildable agent.
+- **The summariser's LLM call is cancellable.** `SummarizeForSpeech` issues
+  its call through `chatWithOptionalContext`, preferring
+  `ChatWithContext(ctx, …)` so the 60s `speechSummaryTimeout` cancels the
+  in-flight provider request rather than abandoning the wait; contextless
+  clients fall back to `Chat` (`internal/agent/speech_summary.go`).
+- **No work lock.** The config PUT releases `h.mu` around
+  `config.SaveOcodeSpeechSummary` (cross-process config lock, ~5s bound) and
+  re-locks only to update `h.cfg` — `h.mu` is a short-lived map lock, never a
+  work lock (`internal/server/agent_session.go:40-46`).
+- **Scope stays local.** No server-global lock anywhere in the speech path;
+  blocking scope is one request / one session. `POST /api/tts/speak` still
+  returns immediately with synthesis in a background goroutine, and §7's one
+  playback generation per server process is unchanged.
+
+Regression tests: `TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive`,
+`TestSummarizeForSpeechCancelsTheProviderCallOnTimeout`,
+`TestSummarizeForSpeechFallsBackToChatForContextlessClients`.
+See `gotchas/speech-summary-turn-lock-wait.md` for the full write-up.
+
 ### 11. Terminal TTS
 - xterm selection right-click → Play selection
 - Visible terminal action
@@ -137,6 +180,7 @@ Three helpers in `web/src/components/Speech/speechUtils.ts` cover the extraction
 - No silent fallback — errors are always surfaced
 - No partial installs — lock release guaranteed
 - Retry/status flow; process recovery only per supervisor policy
+- Exception: the speech-summary side task is explicitly fail-open (§10.2) — an empty summary or failed request degrades to speaking the full text, never to silence or an error
 
 ### 14. Retry Semantics
 - Three bounded download attempts with backoff, then surface a manual Retry action
@@ -170,6 +214,7 @@ Three helpers in `web/src/components/Speech/speechUtils.ts` cover the extraction
 | Retry bounded vs unbounded | Three bounded download attempts with backoff, then surface a manual Retry action. Manual Retry creates a new setup generation. No unbounded retry and no Browser Native fallback. |
 | Engine-specific manifests/runtime hooks | Piper/Kokoro/Fish Audio/Breeze each get pinned verified manifests, engine-specific startup/health/inference adapters, packaging/license/platform validation; common supervisor interface only. |
 | Playback control ownership | seek/pause/play/timeline controls are frontend Audio/SpeechController operations where possible; backend generates/serves seekable local audio and reports progress/state. Do not present POST /tts/seek as a required backend operation; list conceptual configuration/status/synthesis/cancel/event surfaces instead. |
+| "No silent fallback" (§13) vs fail-open summaries (§10.2) | Not a contradiction: §13 covers engine/install/playback errors, which must always surface. The speech summary is an optional side rewrite — its failure degrades to the full text (visible in what is spoken) and never silences speech. |
 
 ## Frontend (React) Architecture
 
@@ -219,6 +264,8 @@ Three helpers in `web/src/components/Speech/speechUtils.ts` cover the extraction
 - POST /tts/seek not presented as a required backend operation; list conceptual configuration/status/synthesis/cancel/event surfaces instead
 - GET /tts/status — current playback state and engine status
 - GET /tts/engines — list available engines and their status
+- POST /api/sessions/{id}/speech-summary — rewrite one message into spoken prose; fail-open, returns `{"summary": ""}` immediately while that session's turn is active (§10.2)
+- GET/PUT /api/config/ocode/speech-summary — read/write the summary model + gate; the PUT holds `h.mu` only to read and to store the result, never across the config write (§10.2)
 
 ## Testing Strategy
 
@@ -231,10 +278,13 @@ Three helpers in `web/src/components/Speech/speechUtils.ts` cover the extraction
 - Adoption of newly downloaded engines
 - Cache namespace verification: <global-data>/models/tts/<engine>/<voice-or-model-id>/<manifest-version>/<GOOS>-<GOARCH>/
 - Late-event ignoring verification
+- Speech summary skipped while the turn is active, summarised afterwards (`TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive`)
+- Speech summariser cancelled by its timeout via `ChatWithContext`, with a `Chat` fallback for contextless clients (`TestSummarizeForSpeechCancelsTheProviderCallOnTimeout`, `TestSummarizeForSpeechFallsBackToChatForContextlessClients`)
 
 ### Frontend Tests
 - `speechUtils.test.ts` — extractor unit tests for `renderedSpeechText`, `renderedSpeechTexts`, `lastRenderedSpeechText` (whitespace collapse, exclusion attributes, block-level line breaks)
 - `MessageBubble.speak.test.tsx` — the Speak button speaks rendered text, not `**`/`#`/backticks/URLs
+- `SpeechProvider.speechSummary.test.tsx` — empty/whitespace/failed summary resolves to the original text (fail-open)
 - Voice selector state transitions
 - Toolbar playback control
 - Error surfacing without fallback

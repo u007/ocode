@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -67,6 +68,51 @@ func (h *Handler) HandleAddProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleDuplicateProjectAsRemote creates a NEW remote (SSH/WSL) project entry
+// that reuses an existing project's path, so the same folder can also be
+// opened over a remote connection. The display name and group are carried
+// over from the source row by the client. Unlike HandleAddProject, a target
+// that is already saved is a conflict (409) rather than an upsert, so the
+// dialog can tell the user the project is already in the list.
+func (h *Handler) HandleDuplicateProjectAsRemote(w http.ResponseWriter, r *http.Request) {
+	if h.projects == nil {
+		writeError(w, http.StatusInternalServerError, "project store not available")
+		return
+	}
+
+	var body struct {
+		Host  string `json:"host"`
+		Path  string `json:"path"`
+		Port  int    `json:"port"`
+		Name  string `json:"name"`
+		Group string `json:"group"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.Host == "" {
+		writeError(w, http.StatusBadRequest, "host is required")
+		return
+	}
+	if body.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	project, err := h.projects.DuplicateAsRemote(body.Host, body.Path, body.Port, body.Name, body.Group)
+	if err != nil {
+		if errors.Is(err, projects.ErrProjectExists) {
+			writeError(w, http.StatusConflict, "that project is already in the list for this host")
+			return
+		}
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("duplicate project: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, project)
 }
 
 // HandleRemoveProject removes a project root from the saved list.

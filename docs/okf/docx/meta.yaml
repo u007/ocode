@@ -1,0 +1,34 @@
+stack: docx
+title: Word document editing (existing .docx / legacy .doc — tables, images; Python, python-docx-centric)
+corpus_rev: 1
+# Derivation + validation threshold for this stack (rubric-guide.md default is 0.75).
+threshold: 0.9
+# Version scope: python-docx >= 1.1 (verified on 1.2.0), lxml for raw WordprocessingML,
+# LibreOffice headless for legacy .doc conversion. Answers are graded on technique, not
+# on one library: an equivalent correct approach (docx4j, Open XML SDK, raw zip+XML)
+# earns the point. API facts in the answer key were verified against python-docx 1.2.0.
+version_scope: "python-docx>=1.1"
+
+# Tag vocabulary — each tag is a subscore axis.
+tags:
+  - docx-model       # zip of XML parts, w:tbl/w:tr/w:tc/w:tblGrid, runs, units
+  - table-locate     # find the right table/row/cell, merged cells, split runs
+  - row-delete       # remove a w:tr, merges, totals/fields
+  - cell-edit        # replace cell text keeping run/cell formatting
+  - table-relayout   # add a row mid-table, add a column, width budget
+  - table-insert     # create a table at a given place, style, widths
+  - image-replace    # swap an existing picture (rels, shared parts, headers)
+  - image-insert     # place a new picture (inline, in a cell, sizing)
+  - legacy-doc       # binary .doc: detect, convert, round-trip
+  - verify-safety    # keep the original, real removal, re-open and check every part
+
+detection:
+  mode: any
+  # Depth-limited: stackdetect uses filepath.Glob, which has no "**".
+  markers:
+    - { type: file, glob: "*.docx" }
+    - { type: file, glob: "*/*.docx" }
+    - { type: file, glob: "*/*/*.docx" }
+    - { type: file, glob: "*.doc" }
+    - { type: file, glob: "*/*.doc" }
+    - { type: file, glob: "*/*/*.doc" }

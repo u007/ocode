@@ -41,7 +41,9 @@ function useRunningSessions(): Set<string> {
  * Collapsed: `v1.2.3 · 2 chats (1 running) · 3 terminals`, or `not connected`
  * with a Connect action. An outdated server gets an amber dot and a Restart
  * action. Clicking the line expands a chat list (open as tabs; running badges)
- * and the host's live terminal list (attach by id; kill).
+ * and the host's live terminal list (attach by id; kill). The kill X renders
+ * only for the selected project — the inventory is browsable from any row, but
+ * killing a shell on another machine requires the project to be active first.
  *
  * The status hook is owned by the parent row (so its context menu can trigger
  * the same Restart); this component owns expansion and the terminal inventory.
@@ -120,6 +122,12 @@ export function RemoteProjectStatus({
 
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
 
+  // Is this the project the user is currently working in? One predicate, two
+  // consumers: `revealTab` (which must select a non-active project before it
+  // acts on it) and the terminal kill control below.
+  const active = projectState.activeProject;
+  const isActive = active?.path === project.path && (active?.host ?? "") === (project.host ?? "");
+
   // Opening a chat/terminal from this inventory must reveal it: the user needs
   // to see the tab they just picked, not an unchanged main pane. This row lives
   // outside App's tree, so it cannot set activeView/focusedKind itself — it
@@ -129,8 +137,6 @@ export function RemoteProjectStatus({
   // otherwise the session tab would be bound to whichever project is active and
   // `resolveSessionHost` would route the remote session through the local server.
   const revealTab = (focus: { kind: "chat" | "terminal"; terminalId?: string }) => {
-    const active = projectState.activeProject;
-    const isActive = active?.path === project.path && (active?.host ?? "") === (project.host ?? "");
     if (!isActive) void selectProject(project);
     tabFocusActions.request({ ...focus, projectPath: project.path, host: project.host });
     onRevealTab?.();
@@ -247,17 +253,23 @@ export function RemoteProjectStatus({
                     {title || `Terminal ${t.id.slice(0, 6)}`}
                   </button>
                   {openTerminalIds.has(t.id) && <span className="shrink-0 text-[10px] text-muted-foreground">open</span>}
-                  <button
-                    type="button"
-                    aria-label={`kill terminal ${t.id}`}
-                    className="shrink-0 text-muted-foreground hover:text-destructive"
-                    onClick={(e) => {
-                      stop(e);
-                      killTerminal(t.id);
-                    }}
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
+                  {/* The kill X is destructive and one stray click away on
+                      every row, so it is reserved for the project the user has
+                      actually selected — the same precondition revealTab
+                      applies. The inventory stays browsable without it. */}
+                  {isActive && (
+                    <button
+                      type="button"
+                      aria-label={`kill terminal ${t.id}`}
+                      className="shrink-0 text-muted-foreground hover:text-destructive"
+                      onClick={(e) => {
+                        stop(e);
+                        killTerminal(t.id);
+                      }}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
                 </div>
                 );
               })

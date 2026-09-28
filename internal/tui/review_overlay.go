@@ -9,7 +9,6 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
 )
 
 // reviewOverlay represents the review overlay state.
@@ -184,45 +183,51 @@ func (m *model) exportReview() tea.Cmd {
 
 // copyReviewToClipboard copies the review summary to clipboard.
 func (m *model) copyReviewToClipboard() tea.Cmd {
-	return func() tea.Msg {
-		if !m.review.active {
-			return statusMsg{text: "No active review to copy"}
-		}
-
-		result := m.review.result
-		var b strings.Builder
-
-		b.WriteString(fmt.Sprintf("Code Review — %s\n", result.Timestamp.Format("2006-01-02 15:04:05")))
-		b.WriteString(fmt.Sprintf("Target: %s\n\n", result.Context))
-
-		if result.Summary != "" {
-			b.WriteString("Summary:\n")
-			b.WriteString(result.Summary)
-			b.WriteString("\n\n")
-		}
-
-		if len(result.Findings) > 0 {
-			b.WriteString(fmt.Sprintf("Findings (%d):\n", len(result.Findings)))
-			for i, finding := range result.Findings {
-				label := severityLabel(finding.Severity)
-				b.WriteString(fmt.Sprintf("%d. [%s] %s", i+1, label, finding.Message))
-				if finding.File != "" {
-					b.WriteString(fmt.Sprintf(" (%s", finding.File))
-					if finding.Line > 0 {
-						b.WriteString(fmt.Sprintf(":%d", finding.Line))
-					}
-					b.WriteString(")")
-				}
-				b.WriteString("\n")
-			}
-		}
-
-		err := clipboard.WriteAll(b.String())
-		if err != nil {
-			return statusMsg{text: fmt.Sprintf("Error copying to clipboard: %v", err)}
-		}
-		return statusMsg{text: "Review copied to clipboard"}
+	if !m.review.active {
+		return func() tea.Msg { return statusMsg{text: "No active review to copy"} }
 	}
+	text := formatReviewForClipboard(m.review.result)
+	if text == "" {
+		return func() tea.Msg { return statusMsg{text: "No active review to copy"} }
+	}
+	// copyToClipboard emits OSC 52 so the copy reaches the user's own machine
+	// when the TUI runs on a remote host, and also tries the local utility.
+	return tea.Batch(
+		copyToClipboard(text),
+		func() tea.Msg { return statusMsg{text: "Review copied to clipboard"} },
+	)
+}
+
+// formatReviewForClipboard renders a review result as plain text — no ANSI
+// styling — for copying to the clipboard.
+func formatReviewForClipboard(result reviewResult) string {
+	var b strings.Builder
+
+	b.WriteString(fmt.Sprintf("Code Review — %s\n", result.Timestamp.Format("2006-01-02 15:04:05")))
+	b.WriteString(fmt.Sprintf("Target: %s\n\n", result.Context))
+
+	if result.Summary != "" {
+		b.WriteString("Summary:\n")
+		b.WriteString(result.Summary)
+		b.WriteString("\n\n")
+	}
+
+	if len(result.Findings) > 0 {
+		b.WriteString(fmt.Sprintf("Findings (%d):\n", len(result.Findings)))
+		for i, finding := range result.Findings {
+			label := severityLabel(finding.Severity)
+			b.WriteString(fmt.Sprintf("%d. [%s] %s", i+1, label, finding.Message))
+			if finding.File != "" {
+				b.WriteString(fmt.Sprintf(" (%s", finding.File))
+				if finding.Line > 0 {
+					b.WriteString(fmt.Sprintf(":%d", finding.Line))
+				}
+				b.WriteString(")")
+			}
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // renderReviewDetail renders the review overlay in the detail view.

@@ -10,12 +10,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/discovery"
+	"github.com/u007/ocode/internal/filelock"
 	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/paths"
 )
@@ -71,11 +73,30 @@ type mdDiscoveryState struct {
 	client    LLMClient // model used for summaries (small model, else main client)
 	total     int       // md files discovered on the last scan (ready + pending)
 	lastScan  time.Time // last completed scan; gates re-walk throttle
+	synced    bool      // snapshot has been loaded from the shared cache at least once
 }
 
 // mdFailBackoff is how long a file whose summarization failed is left alone
 // before retrying — bounds the cost of a doc that always times out or errors.
 const mdFailBackoff = 30 * time.Minute
+
+// mdLockAcquireTimeout bounds how long a pass waits for the project cache lock
+// before giving up and skipping. Missing the lock is the NORMAL contended case
+// rather than an error: whoever holds it is indexing these same files, so there
+// is nothing to recover and nothing to panic about — the files are simply picked
+// up by a later pass. Deliberately short because refreshMDSummaries runs on the
+// turn path (discovery_glue.go), so every millisecond spent here is added to the
+// user's response time.
+//
+// Atomic rather than a plain var: tests shorten the wait while a peer goroutine
+// may still be inside the lock reading it, and a plain read/write of a shared
+// duration is a genuine data race. Production never writes it.
+var mdLockAcquireTimeout atomic.Int64
+
+func init() { mdLockAcquireTimeout.Store(int64(5 * time.Second)) }
+
+// mdLockWait is the current acquire budget.
+func mdLockWait() time.Duration { return time.Duration(mdLockAcquireTimeout.Load()) }
 
 // mdSummaryWorkers bounds concurrent summary model calls during a blocking pass,
 // so a large repo summarizes in parallel without flooding the provider.
@@ -205,10 +226,15 @@ func (a *Agent) refreshMDSummaries() {
 	st.mu.Unlock()
 }
 
-// mdSummarizePass walks the repo, reuses cached summaries for unchanged files,
-// and generates summaries for new/stale ones with bounded concurrency. Blocks
-// until every file is resolved, then publishes the snapshot and persists the
-// cache. Deleted files drop out (next is rebuilt from the current walk).
+// mdSummarizePass indexes the project's markdown, or skips when another ocode
+// instance already holds the project lock.
+//
+// The cache read that decides whether there is anything to do is deliberately
+// LOCK-FREE. A steady-state pass finds nothing out of date, and that is the
+// common case; taking the lock unconditionally would make every peer wait on it
+// for no reason. That read is only a hint — the authoritative re-check happens
+// under the lock, because an instance which indexed the file between our probe
+// and our acquisition would otherwise be needlessly duplicated.
 func (a *Agent) mdSummarizePass(root string) {
 	var ignorePaths []string
 	if a.config != nil {
@@ -216,15 +242,78 @@ func (a *Agent) mdSummarizePass(root string) {
 	}
 	refs := walkMarkdownFiles(root, ignorePaths...)
 
-	// Snapshot the current cache under lock so we can decide what needs work
-	// without holding the lock across model calls.
+	st := a.mdState
+	if !a.mdIndexOutdated(refs) {
+		return // already up to date; do not contend for the lock
+	}
+
+	// Something IS out of date. Take the lock (bounded) and, holding it,
+	// re-check → index → write. Missing the lock is the NORMAL contended case,
+	// not a failure: the holder is indexing these same files, so skip quietly
+	// and let a later pass pick them up. Falling through to an unlocked pass is
+	// exactly the duplicate work the lock exists to prevent.
+	if err := withMDCacheLock(st.cachePath, func() error {
+		a.mdSummarizePassLocked(root, refs)
+		return nil
+	}); err != nil {
+		emitDebug("MD-DISCOVERY", fmt.Sprintf("another instance is indexing this project, skipping pass: %v", err))
+	}
+}
+
+// mdIndexOutdated reports whether any walked file might need a summary.
+//
+// It reads the cache WITHOUT the lock. Writes are atomic (temp + rename), so a
+// lock-free reader sees either the whole old file or the whole new one, never a
+// torn one — and being wrong here is cheap in both directions: a false "outdated"
+// costs one lock acquisition, a false "up to date" is caught by the authoritative
+// re-check under the lock. It deliberately does NOT hold the lock across the
+// summarization calls: those take minutes, and a peer blocked for minutes on a
+// turn-path scan is worse than the duplicate work being avoided.
+func (a *Agent) mdIndexOutdated(refs []mdRef) bool {
 	st := a.mdState
 	st.mu.Lock()
-	cur := make(map[string]mdEntry, len(st.cache))
-	for k, v := range st.cache {
-		cur[k] = v
-	}
+	synced, snapLen := st.synced, len(st.snapshot)
 	st.mu.Unlock()
+
+	// "Up to date on disk" is not the same as "loaded into our snapshot". A fresh
+	// instance — or one whose earlier pass deferred because a peer held the lock —
+	// has an empty snapshot and must still load the existing cache, so the probe
+	// cannot short-circuit until one pass has actually run.
+	if !synced {
+		return true
+	}
+	cur := loadMDCache(st.cachePath)
+	if len(refs) == 0 {
+		// Every markdown file was deleted. Still take the lock once, so the docs
+		// already published from them are dropped — otherwise the snapshot would
+		// keep advertising files that no longer exist.
+		return snapLen > 0
+	}
+	ready := 0
+	for _, r := range refs {
+		e, ok := cur[r.rel]
+		if !ok || e.Summary == "" || e.MTime != r.mtime || e.Size != r.size {
+			return true
+		}
+		ready++
+	}
+	// A peer may have summarized files we never loaded (our pass deferred, or it
+	// ran after our last one). Cheap count comparison catches that without
+	// holding the lock; a mismatch only costs a re-sync, never lost work.
+	return ready != snapLen
+}
+
+// mdSummarizePassLocked re-checks, indexes and writes, all while the caller holds
+// the project cache lock. Doing all three under one lock is what makes the
+// sequence atomic: split into a separate re-read and a separate write, two
+// instances can both conclude "missing" and both do the work. Holding the lock
+// across the model calls is safe because the kernel releases a flock when its
+// holder dies — no stale lock to detect, time out or steal.
+func (a *Agent) mdSummarizePassLocked(root string, refs []mdRef) {
+	// Re-read the cache now that the lock is held. The lock-free probe was only a
+	// hint; this is the authoritative check, and it is where another instance's
+	// finished summaries are found — which is the entire point of having waited.
+	cur := loadMDCache(a.mdState.cachePath)
 
 	next := make(map[string]mdEntry, len(refs))
 	var jobs []mdRef // files that need a fresh summary
@@ -294,22 +383,33 @@ func (a *Agent) mdSummarizePass(root string) {
 		}
 		wg.Wait()
 		for i, r := range jobs {
-			if results[i].Hash != "" { // empty Hash → read failed, skip
+			if results[i].Hash != "" {
 				next[r.rel] = results[i]
 				dirty = true
+				continue
 			}
+			// No result (read failed, or the worker panicked). Keep the file
+			// outstanding so the next pass retries, which is the pre-existing
+			// behaviour for a transient read error.
+			next[r.rel] = mdEntry{MTime: r.mtime, Size: r.size}
+			dirty = true
 		}
 	}
 
 	a.publishMDSnapshot(next)
 	if dirty {
-		if err := saveMDCache(st.cachePath, next); err != nil {
+		// writeMDCache, not saveMDCache: we already hold the lock, and flock is
+		// per open-file-description, so re-entering it on a new descriptor would
+		// block against ourselves until the acquire timeout.
+		if err := writeMDCache(a.mdState.cachePath, next); err != nil {
 			a.emitDebug("MD-DISCOVERY", fmt.Sprintf("save cache failed: %v", err))
 		}
 	}
+	st := a.mdState
 	st.mu.Lock()
 	st.cache = next
 	st.total = len(refs)
+	st.synced = true
 	st.mu.Unlock()
 }
 
@@ -545,6 +645,25 @@ func loadGitignore(root string) gitignore.Matcher {
 	return gitignore.NewMatcher(patterns)
 }
 
+// withMDCacheLock runs fn holding an exclusive advisory lock on the cache's lock
+// file, making the whole re-check/summarize/write pass atomic against other
+// instances. Acquiring is bounded by mdLockAcquireTimeout; on timeout the error
+// is returned and callers treat it as "a peer is already on it" and defer.
+//
+// A flock is owned by the kernel, not by a pid we track, so a holder that dies
+// mid-pass releases it automatically — there is no stale lock to detect, time
+// out, or steal, and therefore no need for pid bookkeeping here.
+func withMDCacheLock(cachePath string, fn func() error) error {
+	// The lock file lives beside the cache, and on a first run neither exists
+	// yet. filelock opens with O_CREATE, which creates the lock FILE but not its
+	// parent directory — so the directory has to be made first, or every lock
+	// attempt fails and the pass silently degrades to unlocked duplicate work.
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir md cache dir: %w", err)
+	}
+	return filelock.WithFileLockTimeout(cachePath+".lock", mdLockWait(), fn)
+}
+
 // loadMDCache reads the summary cache, returning an empty map on any error
 // (missing/corrupt cache rebuilds from scratch — logged, not silently dropped).
 func loadMDCache(path string) map[string]mdEntry {
@@ -572,11 +691,17 @@ func loadMDCache(path string) map[string]mdEntry {
 // the same project are not lost — only keys absent from `cache` are carried
 // over, so our freshly-generated summaries always win for the files we walked.
 func saveMDCache(path string, cache map[string]mdEntry) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir md cache dir: %w", err)
-	}
-	// Merge: pull in any entries written by a concurrent instance that we
-	// did not process ourselves. Our entries take precedence.
+	return withMDCacheLock(path, func() error { return writeMDCache(path, cache) })
+}
+
+// writeMDCache merges the current on-disk entries into cache and writes the file
+// atomically. The caller must ALREADY hold the project cache lock: the merge is a
+// read-modify-write, so doing it unlocked would still lose an entry written by
+// another instance between our read and our rename.
+func writeMDCache(path string, cache map[string]mdEntry) error {
+	// Carry over entries this instance did not walk. Under the whole-pass lock
+	// these are the same-process leftovers, but the merge is what keeps a key we
+	// did not touch from being dropped on the floor.
 	if existing := loadMDCache(path); len(existing) > 0 {
 		for k, v := range existing {
 			if _, have := cache[k]; !have {

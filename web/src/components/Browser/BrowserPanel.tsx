@@ -6,6 +6,7 @@ import { DevConsole } from "./DevConsole";
 import { useBrowserMessages } from "./useBrowserMessages";
 import { ChromeViewport } from "./ChromeViewport";
 import { LoadingSpinner } from "./LoadingSpinner";
+import { openExternalURL } from "../../lib/externalLinks";
 
 // Frontend parity of Go's isLoopbackHost — handles [::1]:port via URL.hostname
 function isLoopbackHost(hostname: string): boolean {
@@ -243,7 +244,7 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
         onBack={() => actions.back(stateKey)}
         onForward={() => actions.forward(stateKey)}
         onReload={() => actions.navigate(stateKey, s.url)}
-        onOpenExternal={() => window.open(s.url, "_blank", "noopener")}
+        onOpenExternal={() => openExternalURL(s.url)}
       />
       {isTLSBypassable && (
         <div className="px-3 py-2 bg-amber-50 dark:bg-amber-950 border-b border-amber-200 dark:border-amber-800 text-sm flex items-center gap-3" role="alert" data-testid="tls-bypass-banner">

@@ -94,6 +94,38 @@ func TestHandleSetCommitMsgConfigPersists(t *testing.T) {
 	}
 }
 
+// seedCompactOnDiskOnly writes a compact block straight to ocodeconfig.json,
+// bypassing the handler, and leaves h.cfg alone. Used to model a SECOND writer
+// (another ocode process / another window) that the handler's cache has not
+// seen.
+func seedCompactOnDiskOnly(t *testing.T, cfg config.CompactConfig) {
+	t.Helper()
+	if err := config.SaveOcodeCompactConfig(cfg); err != nil {
+		t.Fatalf("seed disk: %v", err)
+	}
+}
+
+// seedCompactOnDisk writes cfg to disk AND syncs the handler's cache, i.e. the
+// state a handler is in right after its own successful save.
+func seedCompactOnDisk(t *testing.T, h *Handler, cfg config.CompactConfig) {
+	t.Helper()
+	seedCompactOnDiskOnly(t, cfg)
+	h.mu.Lock()
+	h.cfg.Ocode.Compact = cfg
+	h.mu.Unlock()
+}
+
+// readCompactFromDisk re-reads the persisted block through the public loader, so
+// an assertion cannot pass on the handler's in-memory copy alone.
+func readCompactFromDisk(t *testing.T) config.CompactConfig {
+	t.Helper()
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	return cfg.Compact
+}
+
 func TestHandleSetCompactConfigPersists(t *testing.T) {
 	h := testConfigHandler(t)
 
@@ -112,6 +144,154 @@ func TestHandleSetCompactConfigPersists(t *testing.T) {
 	h.mu.Unlock()
 	if !got.Enabled || got.SummaryModel != "claude-haiku-4-5" || got.KeepRecentTurns != 4 || got.SummaryFirstTokenTimeoutSeconds != 300 {
 		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}
+
+// TestHandleSetCompactConfigPartialBodyPreservesOtherFields is the regression
+// for the lost-update race between the three independent writers of this block
+// (the CoworkSidebar on/off toggle, the model picker's direct persist, and the
+// Settings → Compact form). PUT /api/config/ocode/compact used to REPLACE the
+// struct, so a single-field write — or a full body the client had fetched
+// before another control changed — silently reset every field it did not
+// mention. The handler now merges the keys the body actually carries onto the
+// stored config, read fresh from disk under the config file lock.
+func TestHandleSetCompactConfigPartialBodyPreservesOtherFields(t *testing.T) {
+	h := testConfigHandler(t)
+	seedCompactOnDisk(t, h, config.CompactConfig{
+		Enabled:               true,
+		SummaryModel:          "anthropic/claude-haiku-4-5",
+		TokenThreshold:        0.8,
+		KeepRecentTurns:       4,
+		SummaryTimeoutSeconds: 30,
+		SummaryMaxRetries:     2,
+	})
+
+	// Only the gate — exactly what the sidebar toggle sends.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/compact", strings.NewReader(`{"enabled":false}`))
+	h.HandleSetCompactConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+
+	h.mu.Lock()
+	got := h.cfg.Ocode.Compact
+	h.mu.Unlock()
+	if got.Enabled {
+		t.Error("enabled must be flipped to false")
+	}
+	// Every other field must survive untouched.
+	if got.SummaryModel != "anthropic/claude-haiku-4-5" {
+		t.Errorf("summary_model was clobbered by a single-field write: %q", got.SummaryModel)
+	}
+	if got.TokenThreshold != 0.8 || got.KeepRecentTurns != 4 || got.SummaryTimeoutSeconds != 30 || got.SummaryMaxRetries != 2 {
+		t.Errorf("tuning fields were clobbered by a single-field write: %+v", got)
+	}
+	// The merge source is DISK, so the persisted file must agree too — not just
+	// the handler's in-memory cache.
+	if onDisk := readCompactFromDisk(t); onDisk.SummaryModel != "anthropic/claude-haiku-4-5" || onDisk.Enabled {
+		t.Errorf("on-disk block was clobbered: %+v", onDisk)
+	}
+
+	// The response is the merged block (authoritative), not the request echo.
+	var resp config.CompactConfig
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.SummaryModel != "anthropic/claude-haiku-4-5" || resp.TokenThreshold != 0.8 || resp.Enabled {
+		t.Errorf("response must be the merged block, got %+v", resp)
+	}
+}
+
+// TestHandleSetCompactConfigMergesFromDiskNotCache pins WHY the merge happens
+// server-side: the handler's in-memory copy can be stale relative to the file
+// (a second ocode process, or a Settings window that saved after this handler
+// last loaded). A whole-struct replace from a client-held snapshot would then
+// silently revert that other writer. Merging on disk keeps the newest value.
+func TestHandleSetCompactConfigMergesFromDiskNotCache(t *testing.T) {
+	h := testConfigHandler(t)
+	// Handler cache and disk deliberately disagree: disk is newer.
+	h.mu.Lock()
+	h.cfg.Ocode.Compact = config.CompactConfig{SummaryModel: "stale/in-cache", Enabled: true}
+	h.mu.Unlock()
+	seedCompactOnDiskOnly(t, config.CompactConfig{SummaryModel: "fresh/on-disk", Enabled: true, KeepRecentTurns: 7})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/compact", strings.NewReader(`{"enabled":false}`))
+	h.HandleSetCompactConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+
+	h.mu.Lock()
+	got := h.cfg.Ocode.Compact
+	h.mu.Unlock()
+	if got.SummaryModel != "fresh/on-disk" {
+		t.Errorf("merge must come from disk, not the handler's stale cache: got %q", got.SummaryModel)
+	}
+	if got.KeepRecentTurns != 7 {
+		t.Errorf("another writer's on-disk field was lost: %+v", got)
+	}
+}
+
+// TestHandleSetCompactConfigHonoursExplicitZero pins the other half of the
+// absent-vs-zero distinction: the model picker's "Clear" sends
+// {"summary_model":"","summary_provider":""} to go back to the auto fallback,
+// and those explicit empty strings MUST be written. Only an ABSENT key leaves
+// a field alone.
+func TestHandleSetCompactConfigHonoursExplicitZero(t *testing.T) {
+	h := testConfigHandler(t)
+	seedCompactOnDisk(t, h, config.CompactConfig{
+		Enabled:         true,
+		SummaryProvider: "openai",
+		SummaryModel:    "gpt-4o-mini",
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/compact", strings.NewReader(`{"summary_model":"","summary_provider":""}`))
+	h.HandleSetCompactConfig(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+
+	h.mu.Lock()
+	got := h.cfg.Ocode.Compact
+	h.mu.Unlock()
+	if got.SummaryModel != "" || got.SummaryProvider != "" {
+		t.Errorf("an explicit empty string must clear the field, got model=%q provider=%q", got.SummaryModel, got.SummaryProvider)
+	}
+	// The unrelated gate is still not touched.
+	if !got.Enabled {
+		t.Error("enabled must be preserved when the body does not mention it")
+	}
+}
+
+// TestHandleSetCompactConfigRejectsEmptyBody: a body with no recognised key is
+// almost certainly a client bug, and accepting it would still fire
+// OnConfigSaved and rewrite the config file for nothing. Mirrors
+// HandleSetSmallModel's "model or enabled is required".
+func TestHandleSetCompactConfigRejectsEmptyBody(t *testing.T) {
+	h := testConfigHandler(t)
+
+	for _, body := range []string{`{}`, `{"unrelated_key":1}`} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("PUT", "/api/config/ocode/compact", strings.NewReader(body))
+		h.HandleSetCompactConfig(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400", body, w.Code)
+		}
+	}
+}
+
+// TestHandleSetCompactConfigRejectsMalformedBody keeps the 400 path.
+func TestHandleSetCompactConfigRejectsMalformedBody(t *testing.T) {
+	h := testConfigHandler(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/compact", strings.NewReader(`{`))
+	h.HandleSetCompactConfig(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
 	}
 }
 

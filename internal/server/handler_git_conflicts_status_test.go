@@ -151,7 +151,7 @@ func TestParseUnmergedPorcelain(t *testing.T) {
 // the conflicts list.
 func TestGitStatusReportsConflictOnce(t *testing.T) {
 	dir := gitConflictedMerge(t)
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 
 	if len(status.Conflicts) != 1 {
 		t.Fatalf("conflicts = %+v, want exactly one", status.Conflicts)
@@ -202,7 +202,7 @@ func TestGitStatusReportsConflictOnce(t *testing.T) {
 // where one side is a deletion, which is what the resolver branches on.
 func TestGitStatusModifyDeleteConflict(t *testing.T) {
 	dir := gitModifyDeleteConflict(t)
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 
 	if len(status.Conflicts) != 1 {
 		t.Fatalf("conflicts = %+v, want exactly one", status.Conflicts)
@@ -230,7 +230,7 @@ func TestGitStatusCleanRepoHasNoConflicts(t *testing.T) {
 	run(t, dir, "git", "add", "a.txt")
 	run(t, dir, "git", "commit", "-m", "first")
 
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 	if status.Conflicts == nil {
 		t.Error("conflicts must be an empty slice, not nil (the web reads .length)")
 	}
@@ -262,7 +262,7 @@ func TestGitStatusCleanRepoHasNoConflicts(t *testing.T) {
 
 	// Two polls of an unchanged repository must marshal identically, or the
 	// emitter would publish a git_status event every interval.
-	again, err := json.Marshal(gitStatusForDir(dir))
+	again, err := json.Marshal(mustGitStatus(t, dir))
 	if err != nil {
 		t.Fatalf("marshal again: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestGitStatusCleanRepoHasNoConflicts(t *testing.T) {
 // operation.
 func TestGitStatusNonRepoHasNoConflictsOrOperation(t *testing.T) {
 	dir := t.TempDir()
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 	if len(status.Conflicts) != 0 {
 		t.Errorf("a non-repository has no conflicts, got %+v", status.Conflicts)
 	}
@@ -303,7 +303,7 @@ func TestGitStatusKeepsUnconflictedChanges(t *testing.T) {
 	run(t, dir, "git", "add", "staged.txt")
 	writeFile(t, filepath.Join(dir, "committed.txt"), "two\n")
 
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 	if len(status.Conflicts) != 0 {
 		t.Errorf("no conflict expected, got %+v", status.Conflicts)
 	}

@@ -126,6 +126,58 @@ describe("FilePicker keyword filter", () => {
   });
 });
 
+describe("FilePicker initialQuery", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  const tree = [
+    { name: "alpha.ts", path: "src/alpha.ts", is_dir: false },
+    { name: "beta.ts", path: "src/beta.ts", is_dir: false },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchSpy = vi.spyOn(globalThis as any, "fetch").mockImplementation(async () => mockTreeResponse(tree));
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("seeds the filter with the requested basename", async () => {
+    render(
+      <FilePicker
+        open={true}
+        onClose={vi.fn()}
+        onOpenFile={vi.fn()}
+        projectPath="/proj"
+        initialQuery="beta.ts"
+      />,
+    );
+    const input = screen.getByPlaceholderText("Filter by keywords...") as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("beta.ts"));
+    await waitFor(() => expect(screen.getByText("src/beta.ts")).toBeInTheDocument());
+    expect(screen.queryByText("src/alpha.ts")).not.toBeInTheDocument();
+  });
+
+  it("does not carry the seed into a later open without one", async () => {
+    const props = { onClose: vi.fn(), onOpenFile: vi.fn(), projectPath: "/proj" };
+    const { rerender } = render(
+      <FilePicker {...props} open={true} initialQuery="beta.ts" />,
+    );
+    const input = screen.getByPlaceholderText("Filter by keywords...") as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("beta.ts"));
+
+    rerender(<FilePicker {...props} open={false} />);
+    rerender(<FilePicker {...props} open={true} />);
+    // The dialog content unmounts while closed, so re-query the reopened input.
+    const reopened = (await screen.findByPlaceholderText(
+      "Filter by keywords...",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(reopened.value).toBe(""));
+    await waitFor(() => expect(screen.getByText("src/alpha.ts")).toBeInTheDocument());
+  });
+});
+
 describe("FilePicker shortest-path ordering", () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 

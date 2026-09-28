@@ -914,6 +914,10 @@ func (h *Handler) publishTurnError(sessionID string, err error, stage string) {
 		data["ended_at"] = endedAt.UTC().Format(time.RFC3339Nano)
 		data["took_ms"] = tookMs
 	}
+	// Record the failure on the registry entry before publishing, so a client
+	// that reacts to turn_error by immediately fetching GET /api/pulse already
+	// sees the error row instead of a stale idle one.
+	h.sessions.setTurnError(sessionID, err.Error())
 	h.publishBusEvent("turn_error", sessionID, data)
 	if h.RCBridge() == nil {
 		h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "error", Data: map[string]string{"error": err.Error()}})

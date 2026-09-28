@@ -65,6 +65,8 @@ implemented — derived skills are synced into the embed tree by
 | `conduct/` | 45 | **universal** (any repo) |
 | `hallucination/` | 31 | **universal** (any repo) |
 | `pdf/` | 36 | `*.pdf` at repo root or ≤2 dirs deep |
+| `docx/` | 29 | `*.docx` / `*.doc` at repo root or ≤2 dirs deep |
+| `pptx/` | 27 | `*.pptx` / `*.ppt` at repo root or ≤2 dirs deep |
 
 `react/` also carries a worked example scorecard + derived skill (illustrative).
 The others have corpora only — no evaluations run yet.

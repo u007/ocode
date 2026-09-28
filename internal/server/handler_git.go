@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -96,7 +97,7 @@ func (h *Handler) HandleGitStatus(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	dir, ok := h.gitProjectDir(r)
@@ -104,7 +105,7 @@ func (h *Handler) HandleGitStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 func (h *Handler) gitProjectDir(r *http.Request) (string, bool) {
@@ -146,12 +147,21 @@ func (h *Handler) resolveRegisteredProjectRoot(p string) (string, bool) {
 	return "", false
 }
 
-// isRegisteredProjectRoot reports whether p is one of the saved project roots.
+// isRegisteredProjectRoot reports whether p is one of the saved LOCAL project
+// roots. Remote (SSH/WSL) entries are skipped: their path belongs to another
+// machine and local git/fs mutations must never target it (see
+// allowedProjectRoots and docs/gotchas/remote-project-path-trust-boundary.md).
+// On the host that owns the path, the project is registered as a local entry,
+// so the tilde-expansion fallback in resolveRegisteredProjectRoot still works
+// there.
 func (h *Handler) isRegisteredProjectRoot(p string) bool {
 	if h.projects == nil {
 		return false
 	}
 	for _, proj := range h.projects.List() {
+		if proj.Host != "" {
+			continue
+		}
 		if proj.Path == p {
 			return true
 		}
@@ -199,23 +209,24 @@ var gitBinary = "git"
 // path (remoteExecTimeout): a repo whose git wedges — a stalled network mount,
 // an index.lock held by a dead process, a pathological tree — would otherwise
 // hang its own HTTP request and, worse, stall the shared git-status emitter
-// for every other viewed project. When the budget expires the remaining
-// probes fail fast and the project reports an empty, non-repo status; the next
-// poll retries.
+// for every other viewed project. When the budget expires gitStatusForDir
+// returns an error (never an empty status, which would read as a clean
+// repository); the next poll retries.
 var gitStatusTimeout = 10 * time.Second
 
 // gitStatusForDir computes the working-tree status of the repo at dir. It is
 // shared by the legacy GET endpoint (with the server's workdir) and the
-// subscriber-aware server-push git watcher (per project root). A non-repo or
-// erroring dir yields an empty, no-changes status. All git probes share one
-// deadline (gitStatusTimeout) so a wedged repo can never pin the caller.
-func gitStatusForDir(dir string) GitStatus {
+// subscriber-aware server-push git watcher (per project root). A non-repo dir
+// yields an empty status with IsRepo=false and no error. A probe that fails
+// inside a repository, or the shared deadline (gitStatusTimeout) expiring, is
+// an error — an empty status would read as a clean repository.
+func gitStatusForDir(dir string) (GitStatus, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitStatusTimeout)
 	defer cancel()
 	// runRaw returns stdout verbatim; run trims it for the line-oriented
 	// probes. The `-z` probe must not be trimmed, because its records are
 	// NUL-separated and a path is allowed to end in whitespace.
-	runRaw := func(args ...string) string {
+	runRaw := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, gitBinary, args...)
 		if dir != "" {
 			cmd.Dir = dir
@@ -226,28 +237,62 @@ func gitStatusForDir(dir string) GitStatus {
 		// a permanent lock contender against the user's own git commands — and
 		// a probe SIGKILLed by gitStatusTimeout mid-write could strand the lock.
 		cmd.Env = gitexec.Env()
-		out, _ := cmd.Output()
-		return string(out)
+		out, err := cmd.Output()
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git status for %s timed out after %s", dir, gitStatusTimeout)
+		}
+		// stdout is returned even alongside an exit error: on an unborn branch
+		// `rev-parse --abbrev-ref HEAD` prints "HEAD" and still exits 128.
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+				return string(out), fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(exitErr.Stderr)))
+			}
+			return string(out), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		}
+		return string(out), nil
 	}
-	run := func(args ...string) string {
-		return strings.TrimSpace(runRaw(args...))
+	run := func(args ...string) (string, error) {
+		out, err := runRaw(args...)
+		return strings.TrimSpace(out), err
 	}
 
 	// Initialize slices so JSON serializes [] (not null) — the web UI reads
 	// staged_files.length / changed_files.length unconditionally.
 	status := GitStatus{
-		Branch:       run("rev-parse", "--abbrev-ref", "HEAD"),
 		StagedFiles:  []string{},
 		ChangedFiles: []string{},
 		Conflicts:    []GitConflict{},
 	}
+
+	// Repo-ness first: a non-repo is a normal answer (IsRepo=false), not an
+	// error, and needs none of the probes below. Only a timeout is an error.
+	if _, err := run("rev-parse", "--git-dir"); err != nil {
+		if ctx.Err() != nil {
+			return GitStatus{}, err
+		}
+		return status, nil
+	}
+	status.IsRepo = true
+
+	// The branch probe fails legitimately on an unborn branch (no commits
+	// yet), so only a timeout is fatal here.
+	branch, err := run("rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil && ctx.Err() != nil {
+		return GitStatus{}, err
+	}
+	status.Branch = branch
 
 	// Unmerged paths, with their status code and which index stages exist. One
 	// `-z` probe supplies all of it: the record carries an object id per stage
 	// and an all-zero id marks a deleted side. The non-`-z` porcelain v2 probe
 	// further down cannot be reused, because changing its record separator
 	// would break the branch-header parse.
-	status.Conflicts = parseUnmergedPorcelain(runRaw("status", "--porcelain=v2", "-z"))
+	unmerged, err := runRaw("status", "--porcelain=v2", "-z")
+	if err != nil {
+		return GitStatus{}, err
+	}
+	status.Conflicts = parseUnmergedPorcelain(unmerged)
 
 	// A conflicted path is reported by both diff listings (and twice within
 	// one of them), so divert it: it belongs to the conflicts list alone.
@@ -255,12 +300,20 @@ func gitStatusForDir(dir string) GitStatus {
 	for _, c := range status.Conflicts {
 		conflicted[c.Path] = true
 	}
-	for _, f := range dedupePaths(strings.Split(run("diff", "--name-only", "--cached"), "\n")) {
+	cached, err := run("diff", "--name-only", "--cached")
+	if err != nil {
+		return GitStatus{}, err
+	}
+	for _, f := range dedupePaths(strings.Split(cached, "\n")) {
 		if !conflicted[f] {
 			status.StagedFiles = append(status.StagedFiles, f)
 		}
 	}
-	for _, f := range dedupePaths(strings.Split(run("diff", "--name-only"), "\n")) {
+	unstaged, err := run("diff", "--name-only")
+	if err != nil {
+		return GitStatus{}, err
+	}
+	for _, f := range dedupePaths(strings.Split(unstaged, "\n")) {
 		if !conflicted[f] {
 			status.ChangedFiles = append(status.ChangedFiles, f)
 		}
@@ -277,7 +330,11 @@ func gitStatusForDir(dir string) GitStatus {
 	for _, f := range status.ChangedFiles {
 		seen[f] = true
 	}
-	for _, line := range strings.Split(run("status", "--porcelain", "-u"), "\n") {
+	porcelain, err := run("status", "--porcelain", "-u")
+	if err != nil {
+		return GitStatus{}, err
+	}
+	for _, line := range strings.Split(porcelain, "\n") {
 		if len(line) < 4 {
 			continue
 		}
@@ -294,7 +351,10 @@ func gitStatusForDir(dir string) GitStatus {
 	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0 || len(status.Conflicts) > 0
 
 	// Divergence from upstream using --branch (works for detached HEAD too).
-	branchLine := run("status", "--porcelain=v2", "--branch")
+	branchLine, err := run("status", "--porcelain=v2", "--branch")
+	if err != nil {
+		return GitStatus{}, err
+	}
 	status.HasUpstream = false
 	status.Ahead = 0
 	status.Behind = 0
@@ -322,20 +382,15 @@ func gitStatusForDir(dir string) GitStatus {
 	}
 	// Detect upstream even when divergence is 0.
 	if branchLine == "" || !strings.Contains(branchLine, "# branch.ab") {
-		upstream := run("rev-parse", "--abbrev-ref", "@{upstream}")
-		if upstream != "" && upstream != "HEAD" && !strings.Contains(upstream, "fatal:") && !strings.Contains(upstream, "unknown") {
+		// Failing is the normal "no upstream" answer; only a timeout is fatal.
+		upstream, upErr := run("rev-parse", "--abbrev-ref", "@{upstream}")
+		if upErr != nil && ctx.Err() != nil {
+			return GitStatus{}, upErr
+		}
+		if upErr == nil && upstream != "" && upstream != "HEAD" && !strings.Contains(upstream, "fatal:") && !strings.Contains(upstream, "unknown") {
 			status.HasUpstream = true
 		}
 	}
-
-	// Same dir handling as the run closure above (empty dir = server workdir).
-	repoCmd := exec.CommandContext(ctx, gitBinary, "rev-parse", "--git-dir")
-	if dir != "" {
-		repoCmd.Dir = dir
-	}
-	repoCmd.Env = gitexec.Env()
-	_, err := repoCmd.Output()
-	status.IsRepo = err == nil
 
 	// A halted operation is a state of the repository, so it is reported
 	// alongside IsRepo. Detection spends one more git process, still inside the
@@ -359,7 +414,10 @@ func gitStatusForDir(dir string) GitStatus {
 	} else {
 		status.Operation = op
 	}
-	return status
+	if ctx.Err() != nil {
+		return GitStatus{}, fmt.Errorf("git status for %s timed out after %s", dir, gitStatusTimeout)
+	}
+	return status, nil
 }
 
 // dedupePaths drops empty entries and duplicates while preserving order. Git
@@ -430,7 +488,7 @@ func (h *Handler) HandleGitWorkspace(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitWorkspace(r.Context(), rw))
+		writeRemoteGitWorkspace(w, r.Context(), rw)
 		return
 	}
 	dir, ok := h.gitProjectDir(r)
@@ -438,27 +496,54 @@ func (h *Handler) HandleGitWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
 		return
 	}
-	writeJSON(w, http.StatusOK, gitWorkspaceForDir(dir))
+	writeLocalGitWorkspace(w, dir)
 }
 
 // gitWorkspaceForDir computes the full workspace snapshot for dir. A non-repo
 // dir yields an empty, no-changes snapshot (same contract as gitStatusForDir).
-func gitWorkspaceForDir(dir string) GitWorkspace {
+func gitWorkspaceForDir(dir string) (GitWorkspace, error) {
+	status, err := gitStatusForDir(dir)
+	if err != nil {
+		return GitWorkspace{}, err
+	}
 	ws := GitWorkspace{
-		Status:   gitStatusForDir(dir),
+		Status:   status,
 		Staged:   []GitDiffFile{},
 		Unstaged: []GitDiffFile{},
 	}
-	// A non-repo dir: gitStatusForDir already returned an empty status; bail
-	// before the git diff calls emit errors.
-	if ws.Status.Branch == "" && !ws.Status.HasChanges {
-		if _, err := gitRunInDir(dir, "rev-parse", "--git-dir"); err != nil {
-			return ws
-		}
+	// A non-repo dir: bail before the git diff calls emit errors.
+	if !ws.Status.IsRepo {
+		return ws, nil
 	}
 	ws.Staged = diffFilesForDir(dir, true, "")
 	ws.Unstaged = diffFilesForDir(dir, false, "")
-	return ws
+	return ws, nil
+}
+
+// writeLocalGitError answers a failed local git status/workspace read.
+func writeLocalGitError(w http.ResponseWriter, dir string, err error) {
+	slog.Error("local git read failed", "project", dir, "err", err)
+	writeError(w, http.StatusInternalServerError, err.Error())
+}
+
+// writeLocalGitStatus responds with dir's git status, or the error.
+func writeLocalGitStatus(w http.ResponseWriter, dir string) {
+	status, err := gitStatusForDir(dir)
+	if err != nil {
+		writeLocalGitError(w, dir, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// writeLocalGitWorkspace responds with dir's git workspace, or the error.
+func writeLocalGitWorkspace(w http.ResponseWriter, dir string) {
+	ws, err := gitWorkspaceForDir(dir)
+	if err != nil {
+		writeLocalGitError(w, dir, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ws)
 }
 
 // diffFilesForDir returns the parsed unified diff of the repo at dir — the

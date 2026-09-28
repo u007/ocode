@@ -275,7 +275,7 @@ func (h *Handler) HandleGitFetch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git fetch failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitFetchLocal(w, r)
@@ -290,7 +290,7 @@ func (h *Handler) gitFetchLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git fetch failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 // HandleGitPull merges the configured upstream into the current branch.
@@ -304,7 +304,7 @@ func (h *Handler) HandleGitPull(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git pull failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitPullLocal(w, r)
@@ -319,7 +319,7 @@ func (h *Handler) gitPullLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git pull failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 // HandleGitPush pushes the current branch. A forced push uses
@@ -344,7 +344,7 @@ func (h *Handler) HandleGitPush(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git push failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitPushLocal(w, r)
@@ -368,7 +368,7 @@ func (h *Handler) gitPushLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git push failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 // HandleGitResetRemote is the explicit destructive alternative to a forced
@@ -393,7 +393,7 @@ func (h *Handler) HandleGitResetRemote(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git reset to remote failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitResetRemoteLocal(w, r)
@@ -417,7 +417,7 @@ func (h *Handler) gitResetRemoteLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git reset to remote failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 func (h *Handler) HandleGitStage(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +435,7 @@ func (h *Handler) HandleGitStage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitStageLocal(w, r)
@@ -455,7 +455,7 @@ func (h *Handler) gitStageLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 func (h *Handler) HandleGitUnstage(w http.ResponseWriter, r *http.Request) {
@@ -473,7 +473,7 @@ func (h *Handler) HandleGitUnstage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git reset failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitUnstageLocal(w, r)
@@ -493,7 +493,7 @@ func (h *Handler) gitUnstageLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git reset failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 // HandleGitDiscard reverts working-tree changes for the given tracked paths
@@ -517,7 +517,7 @@ func (h *Handler) HandleGitDiscard(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitDiscardLocal(w, r)
@@ -541,7 +541,7 @@ func (h *Handler) gitDiscardLocal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
@@ -558,7 +558,7 @@ func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git stash failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitStashLocal(w, r)
@@ -612,7 +612,7 @@ func (h *Handler) gitStashLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git stash failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }
 
 // HandleGitStashApply restores the selected files from a stash entry into the
@@ -658,7 +658,7 @@ func (h *Handler) gitStashApplyLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git stash restore failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitWorkspaceForDir(dir))
+	writeLocalGitWorkspace(w, dir)
 }
 
 // restoreStashPaths restores the selected paths from the stash commit
@@ -784,7 +784,7 @@ func (h *Handler) HandleGitCommit(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "git commit failed: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitStatus(r.Context(), rw))
+		writeRemoteGitStatus(w, r.Context(), rw)
 		return
 	}
 	h.gitCommitLocal(w, r)
@@ -808,5 +808,5 @@ func (h *Handler) gitCommitLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git commit failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	writeLocalGitStatus(w, dir)
 }

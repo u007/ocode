@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:15:12Z
+---
 # Part 08 — `PulseView` and entry points
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`

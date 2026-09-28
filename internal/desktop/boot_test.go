@@ -2,6 +2,8 @@ package desktop
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"os"
@@ -10,19 +12,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/u007/ocode/internal/server"
 )
 
 func TestStartServerServesAuthedAPI(t *testing.T) {
-	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir()) // keep the sticky-port file out of the real config dir
-	h, err := StartServer(nil, t.TempDir(), nil) // nil webFS: API still works, SPA 404s
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())              // keep the sticky-port file out of the real config dir
+	h, err := StartServer(nil, t.TempDir(), nil, testCert(t)) // nil webFS: API still works, SPA 404s
 	if err != nil {
 		t.Fatalf("StartServer: %v", err)
 	}
 	if h.Token == "" || len(h.Token) != 32 {
 		t.Fatalf("expected 32-char hex token, got %q", h.Token)
 	}
-	if h.URL == "" {
-		t.Fatal("expected non-empty URL")
+	if !strings.HasPrefix(h.URL, "https://127.0.0.1:") {
+		t.Fatalf("expected https webview URL, got %q", h.URL)
+	}
+	if want := "http://" + strings.TrimPrefix(h.URL, "https://"); h.HTTPURL != want {
+		t.Fatalf("HTTPURL = %q, want %q (same port, plain HTTP)", h.HTTPURL, want)
 	}
 
 	// 15s: the first /api/models synchronously annotates every catalog model
@@ -31,7 +38,7 @@ func TestStartServerServesAuthedAPI(t *testing.T) {
 	client := &http.Client{Timeout: 15 * time.Second}
 
 	// Authed request succeeds.
-	req, _ := http.NewRequest("GET", h.URL+"/api/models", nil)
+	req, _ := http.NewRequest("GET", h.HTTPURL+"/api/models", nil)
 	req.Header.Set("Authorization", "Bearer "+h.Token)
 	res, err := client.Do(req)
 	if err != nil {
@@ -76,7 +83,7 @@ func TestStartServerFallbackDoesNotOverwriteSavedPort(t *testing.T) {
 		t.Fatalf("parse blocker port: %v", err)
 	}
 
-	h, err := StartServer(nil, t.TempDir(), nil)
+	h, err := StartServer(nil, t.TempDir(), nil, testCert(t))
 	if err != nil {
 		t.Fatalf("StartServer with occupied saved port: %v", err)
 	}
@@ -115,7 +122,7 @@ func TestSaveDebugHandleWritesURLAndToken(t *testing.T) {
 
 func TestStartServerRejectsUnauthed(t *testing.T) {
 	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir()) // keep the sticky-port file out of the real config dir
-	h, err := StartServer(nil, t.TempDir(), nil)
+	h, err := StartServer(nil, t.TempDir(), nil, testCert(t))
 	if err != nil {
 		t.Fatalf("StartServer: %v", err)
 	}
@@ -123,7 +130,7 @@ func TestStartServerRejectsUnauthed(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	// No auth header → 401
-	req, _ := http.NewRequest("GET", h.URL+"/api/models", nil)
+	req, _ := http.NewRequest("GET", h.HTTPURL+"/api/models", nil)
 	res, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("unauthed request failed: %v", err)
@@ -134,7 +141,7 @@ func TestStartServerRejectsUnauthed(t *testing.T) {
 	}
 
 	// Wrong token → 401
-	req, _ = http.NewRequest("GET", h.URL+"/api/models", nil)
+	req, _ = http.NewRequest("GET", h.HTTPURL+"/api/models", nil)
 	req.Header.Set("Authorization", "Bearer wrongtoken")
 	res, err = client.Do(req)
 	if err != nil {
@@ -179,5 +186,44 @@ func TestResolveWindowTitle(t *testing.T) {
 	// Tilde not expanded -> basename (filepath.Clean doesn't expand ~).
 	if got := ResolveWindowTitle("~/projects"); got != "projects" {
 		t.Errorf("tilde: got %q, want %q", got, "projects")
+	}
+}
+
+func testCert(t *testing.T) *server.LocalCert {
+	t.Helper()
+	c, err := server.NewLocalCert()
+	if err != nil {
+		t.Fatalf("NewLocalCert: %v", err)
+	}
+	return c
+}
+
+// The webview origin must negotiate HTTP/2 so its requests multiplex over one
+// connection instead of queueing behind the six-connection HTTP/1.1 cap.
+func TestStartServerWebviewURLNegotiatesHTTP2(t *testing.T) {
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+	cert := testCert(t)
+	h, err := StartServer(nil, t.TempDir(), nil, cert)
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert.TLS.Leaf)
+	client := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{
+		TLSClientConfig:   &tls.Config{RootCAs: pool},
+		ForceAttemptHTTP2: true,
+	}}
+	req, _ := http.NewRequest("GET", h.URL+"/api/models", nil)
+	req.Header.Set("Authorization", "Bearer "+h.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET over TLS: %v", err)
+	}
+	resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("proto = %s, want HTTP/2", resp.Proto)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
 	}
 }

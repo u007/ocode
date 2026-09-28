@@ -131,10 +131,10 @@ export interface TTSEngine {
   voice_id?: string;
   voices?: string[];
   manifest_version?: string;
-	license_name?: string;
-	license_url?: string;
-	license_text?: string;
-	license_hash?: string;
+  license_name?: string;
+  license_url?: string;
+  license_text?: string;
+  license_hash?: string;
 }
 
 export type TTSInstallStatus =
@@ -356,11 +356,7 @@ export interface ComputerUsePermissionReport {
 
 // ── System Permissions (OS permission manager) ──
 export type SystemPermissionStatus =
-  | "granted"
-  | "denied"
-  | "not_determined"
-  | "unknown"
-  | "not_required";
+  "granted" | "denied" | "not_determined" | "unknown" | "not_required";
 
 export interface SystemPermissionEntry {
   id: string;
@@ -422,10 +418,7 @@ export interface SSEPermissionEvent {
 
 /** Decisions accepted by POST /api/permissions/resolve (`decision` field). */
 export type PermissionDecision =
-  | "allow"
-  | "deny"
-  | "always_rule"
-  | "always_tool";
+  "allow" | "deny" | "always_rule" | "always_tool";
 
 export interface SSEDoneEvent {
   session_id: string;
@@ -1079,4 +1072,71 @@ export interface VaultGenOptions {
   upper?: boolean;
   digits?: boolean;
   symbols?: boolean;
+}
+
+// ── Pulse (cross-project live-sessions dashboard) ────────────────────────────
+// Mirrors internal/server/pulse_rows.go. The status union and its precedence
+// (needs_permission > needs_question > running > error > idle), the sort order
+// (rank → updated_at desc → session_id asc) and the live/all inclusion windows
+// are all defined server-side; `sortPulseRows` below re-implements ONLY the sort,
+// because the client re-sorts after applying a live SSE event.
+
+export type PulseStatus =
+  "needs_permission" | "needs_question" | "running" | "error" | "idle";
+
+export type PulseTaskKind = "todo" | "tool" | "text";
+export type PulseTodoState = "pending" | "in_progress" | "done";
+export type PulseAskKind = "permission" | "question";
+
+export interface PulseTask {
+  kind: PulseTaskKind;
+  text: string;
+}
+
+export interface PulseTodoItem {
+  text: string;
+  state: PulseTodoState;
+}
+
+export interface PulseTodo {
+  done: number;
+  total: number;
+  current: string;
+  items: PulseTodoItem[];
+}
+
+export interface PulseAsk {
+  kind: PulseAskKind;
+  summary: string;
+}
+
+export interface PulseRow {
+  session_id: string;
+  project_path: string;
+  title: string;
+  status: PulseStatus;
+  /** Null for needs-you rows: the pending ask already carries the text. */
+  current_task: PulseTask | null;
+  todo: PulseTodo | null;
+  pending_ask: PulseAsk | null;
+  /** RFC 3339. */
+  turn_started_at: string;
+  /** RFC 3339. */
+  updated_at: string;
+  child_count: number;
+}
+
+export interface PulsePage {
+  items: PulseRow[];
+  /** Explicit null on the final page (the server sends the key, not omitempty). */
+  next_cursor: string | null;
+}
+
+/** SSE `todo_updated` payload: a session's plan right after a todowrite. */
+export interface TodoUpdatedEvent {
+  session_id: string;
+  done: number;
+  total: number;
+  current: string;
+  items: PulseTodoItem[];
 }

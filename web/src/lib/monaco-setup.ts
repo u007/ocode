@@ -5,6 +5,14 @@ import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+import { disableMonacoWebKitClipboardWorkaround } from "./monacoClipboardPatch";
+
+// Must run before the first editor mounts: Monaco installs a WebKit
+// click/keydown clipboard workaround in the clipboard service's constructor.
+// In the desktop WKWebView that fires a denied `navigator.clipboard.write` on
+// every click and keystroke (console spam + input lag). See
+// lib/monacoClipboardPatch.ts.
+disableMonacoWebKitClipboardWorkaround();
 
 // Workers are bundled locally via Vite's `?worker` imports so the editor runs
 // fully offline in the ocode-desktop webview — no CDN fetch. Without this,

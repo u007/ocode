@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:07:03Z
+---
 # Part 02 — Record last turn error on `sessionEntry`
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
@@ -29,14 +33,14 @@ Pulse's `error` status needs to know whether the most recent turn failed.
 
 ## Steps
 
-- [ ] **Write failing tests**: register an entry; `setTurnError` → snapshot
+- [x] **Write failing tests**: register an entry; `setTurnError` → snapshot
   shows the message; subsequent `setTurnActive(id, true)` clears it;
   `setTurnActive(id, false)` after an error keeps it; unknown session id is
   a no-op (no panic, no entry created).
-- [ ] Run `go test ./internal/server -run TestSessionManagerTurnError` → FAIL.
-- [ ] **Implement** field + setter under `m.mu`; clear in the `active` branch
+- [x] Run `go test ./internal/server -run TestSessionManagerTurnError` → FAIL.
+- [x] **Implement** field + setter under `m.mu`; clear in the `active` branch
   of `setTurnActive`.
-- [ ] **Wire** the setter at the `turn_error` publish site in
+- [x] **Wire** the setter at the `turn_error` publish site in
   `agent_session.go` with the same error text sent on the event.
-- [ ] Run the test → PASS; run `go test ./internal/server/...`.
-- [ ] Commit: `feat(server): track last turn error per live session`.
+- [x] Run the test → PASS; run `go test ./internal/server/...`.
+- [x] Commit: `feat(server): track last turn error per live session`.

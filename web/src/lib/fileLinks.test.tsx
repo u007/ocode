@@ -29,6 +29,19 @@ describe("fileLinks", () => {
       window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
     });
 
+    it("Cmd/Ctrl-click opens the file too (modifier is neither required nor ignored)", () => {
+      const handler = vi.fn();
+      window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);
+      const nodes = linkifyPlainText("see src/app.ts:10 for details");
+      const { container } = render(<div>{nodes}</div>);
+      const link = container.querySelector('[role="link"]') as HTMLElement;
+      fireEvent.click(link, { metaKey: true });
+      expect(handler).toHaveBeenCalledTimes(1);
+      const detail = (handler.mock.calls[0][0] as CustomEvent).detail;
+      expect(detail).toEqual({ path: "src/app.ts", line: 10 });
+      window.removeEventListener(OPEN_FILE_EVENT, handler as EventListener);
+    });
+
     it("Enter key dispatches same event", () => {
       const handler = vi.fn();
       window.addEventListener(OPEN_FILE_EVENT, handler as EventListener);

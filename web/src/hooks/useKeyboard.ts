@@ -17,6 +17,8 @@ interface ShortcutHandlers {
   /** The focused browser tab's id, when a browser tab is focused. */
   activeBrowserId?: string | null;
   onCloseBrowserTab?: (id: string) => void;
+  /** Toggle the Pulse dashboard. Wired to Cmd/Ctrl+J (see the handler). */
+  onTogglePulse?: () => void;
 }
 
 /**
@@ -66,6 +68,16 @@ export function useKeyboard(handlers: ShortcutHandlers) {
         } else {
           h.onCloseSession?.();
         }
+      }
+      if (e.key === "j" && (e.metaKey || e.ctrlKey)) {
+        // Same hazard as the Ctrl+W guard above: Ctrl+J is readline "kill
+        // line" inside a shell, so a global shortcut must not yank the user
+        // out to another view while they are typing a command. Cmd+J is never
+        // sent to the pty on macOS, so it still works from the terminal.
+        const target = e.target as Element | null;
+        if (!e.metaKey && target instanceof Element && target.closest(".xterm")) return;
+        e.preventDefault();
+        ref.current.onTogglePulse?.();
       }
       if (e.key === "Escape") {
         ref.current.onEscape?.();

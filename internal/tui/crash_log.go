@@ -9,7 +9,7 @@ import (
 	"github.com/u007/ocode/internal/paths"
 )
 
-// crashLogName is the file under <GlobalDataDir>/logs that receives the
+// crashLogName is the file under paths.LogsDir() that receives the
 // process's stderr for the lifetime of a TUI run. Go runtime panics, fatal
 // errors, crashguard traces, and the exit reason all land there, so a TUI
 // that dies with the terminal still in raw/mouse mode leaves evidence on
@@ -22,12 +22,12 @@ const crashLogName = "tui-crash.log"
 // left on the terminal and the returned logger writes there, so
 // instrumentation never blocks a run.
 func installCrashLog() (func(format string, args ...interface{}), string) {
-	dataDir, err := paths.GlobalDataDir()
+	logsDir, err := paths.LogsDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ocode: crash log disabled (data dir: %v)\n", err)
+		fmt.Fprintf(os.Stderr, "ocode: crash log disabled (logs dir: %v)\n", err)
 		return stderrLogf, ""
 	}
-	f, err := openCrashLog(filepath.Join(dataDir, "logs"))
+	f, err := openCrashLog(logsDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ocode: crash log disabled: %v\n", err)
 		return stderrLogf, ""

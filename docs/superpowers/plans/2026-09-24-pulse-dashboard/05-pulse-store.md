@@ -1,3 +1,7 @@
+---
+type: Plan
+timestamp: 2026-09-28T10:16:42Z
+---
 # Part 05 — Web API client and app-level `pulseStore`
 
 Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
@@ -45,7 +49,7 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 
 ## Steps
 
-- [ ] **Failing store tests** (Vitest + mocked `api.getPulse`):
+- [x] **Failing store tests** (Vitest + mocked `api.getPulse`):
   - seeds from `getPulse("live", null, 50)` on mount;
   - `turn_started` for known row → status `running`, moves to Running rank;
   - `permission` → `needs_permission` with summary; `permission_resolved`
@@ -60,12 +64,12 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
     context, `rows` unchanged (no stale substitute);
   - `session_rekeyed` → row re-keyed.
   - `setScope("all")` refetches from first page; `loadMore` appends with cursor.
-- [ ] **Failing router test**: an event for a session with no open tab
+- [x] **Failing router test**: an event for a session with no open tab
   reaches `pulseEventSink`; tracked-session routing unchanged (existing
   `sessionEvents.test.ts` stays green).
-- [ ] Run `cd web && pnpm vitest run src/stores/pulseStore.test.tsx src/lib/sessionEvents.pulse.test.ts` → FAIL.
-- [ ] **Implement** types, client method, provider (reducer-based, matching
+- [x] Run `cd web && pnpm vitest run src/stores/pulseStore.test.tsx src/lib/sessionEvents.pulse.test.ts` → FAIL.
+- [x] **Implement** types, client method, provider (reducer-based, matching
   existing stores' pattern e.g. `chatStore.tsx`), and the one-line forward
   in `sessionEvents.ts` placed before both `sessionIsTracked` checks.
-- [ ] Run → PASS; `pnpm test && pnpm typecheck`.
+- [x] Run → PASS; `pnpm test && pnpm typecheck`.
 - [ ] Commit: `feat(web): add pulseStore fed by /api/pulse and all-session SSE events`.

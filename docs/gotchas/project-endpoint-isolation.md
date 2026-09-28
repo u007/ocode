@@ -33,6 +33,13 @@ or session.** Violations show up as "everywhere hangs" or "the whole app freezes
 3. **Never pin an HTTP connection for the length of a turn.** Browser HTTP/1.1 allows only ~6
    connections per origin; holding one open for the duration of an LLM turn starves every other
    request from that origin. Use async 202 + SSE mirror instead.
+   (The desktop webview now uses HTTP/2 over a pinned local TLS cert and is
+   exempt — `desktop-webview-http2.md` — but browsers on `ocode serve` are not.)
+4. **Cap concurrent remote execs per host.** SSH execs multiplex over one ControlMaster
+   connection; sshd's `MaxSessions` (default 10) refuses sessions past that. `runBounded`
+   (`handler_remote_work.go`) holds one of `remoteExecSlotsPerHost` (8) slots per target;
+   route every new remote exec through it. Pollers must not start a request while their
+   previous one is in flight (`TopTabs.tsx` git badge, `projectGitCounts.ts`).
 
 ## Isolation mechanisms that are already correct (audit baseline)
 

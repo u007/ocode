@@ -23,6 +23,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import {
   FolderGit2,
+  LayoutDashboard,
+  Menu,
   Plus,
   Trash2,
   ChevronLeft,
@@ -44,8 +46,10 @@ import {
   Globe,
   RotateCw,
   GitBranch,
+  Copy,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Input } from "../ui/input";
 import ConfirmDialog from "../common/ConfirmDialog";
 import { ScrollArea } from "../ui/scroll-area";
@@ -397,6 +401,8 @@ interface SortableProjectRowProps {
    *  from the row's remote inventory (whose controls stop propagation). */
   onRevealTab?: () => void;
   onEdit?: () => void;
+  /** "Duplicate as remote…" — offered on every row (local, SSH and WSL). */
+  onDuplicate: () => void;
   onRemove: () => void;
   onRename: (name: string) => Promise<void>;
   onCreateGroup: (name: string) => Promise<void>;
@@ -411,6 +417,7 @@ function SortableProjectRow({
   onSelect,
   onRevealTab,
   onEdit,
+  onDuplicate,
   onRemove,
   onRename,
   onCreateGroup,
@@ -449,6 +456,7 @@ function SortableProjectRow({
       ...(project.host
         ? [{ label: "Restart remote server", icon: <RotateCw className="w-3.5 h-3.5" />, onClick: hostStatus.restart }]
         : []),
+      { label: "Duplicate as remote…", icon: <Copy className="w-3.5 h-3.5" />, onClick: onDuplicate },
       { label: "Rename", icon: <Pencil className="w-3.5 h-3.5" />, onClick: rename.start },
       { label: "Remove", icon: <Trash2 className="w-3.5 h-3.5" />, onClick: onRemove, destructive: true },
       { separator: true, label: "", onClick: () => {} },
@@ -489,7 +497,7 @@ function SortableProjectRow({
     }
 
     return items;
-  }, [groups, project.group, project.host, rename.start, onRemove, onCreateGroup, onAddToGroup, onRemoveFromGroup, onEdit, hostStatus.restart]);
+  }, [groups, project.group, project.host, rename.start, onRemove, onCreateGroup, onAddToGroup, onRemoveFromGroup, onEdit, onDuplicate, hostStatus.restart]);
 
   const {
     attributes,
@@ -759,10 +767,18 @@ function AddRemoteDialog({
   open,
   onClose,
   onAdd,
+  initialPath = "",
+  heading = "Add Remote Project",
+  submitLabel = "Add Remote",
 }: {
   open: boolean;
   onClose: () => void;
   onAdd: (host: string, path: string, port?: number) => Promise<void>;
+  /** Prefill for the remote path — used by "Duplicate as remote…" so the
+   *  source project's path does not have to be retyped. */
+  initialPath?: string;
+  heading?: string;
+  submitLabel?: string;
 }) {
   const [host, setHost] = useState("");
   const [path, setPath] = useState("");
@@ -774,13 +790,13 @@ function AddRemoteDialog({
   useEffect(() => {
     if (open) {
       setHost("");
-      setPath("");
+      setPath(initialPath);
       setPort("");
       setError(null);
       setLoading(false);
       setTimeout(() => hostRef.current?.focus(), 50);
     }
-  }, [open]);
+  }, [open, initialPath]);
 
   if (!open) return null;
 
@@ -807,7 +823,7 @@ function AddRemoteDialog({
     <div className="px-3 py-2 border-t border-border bg-muted/30">
       <div className="text-xs font-semibold text-foreground mb-2 flex items-center gap-1.5">
         <Server className="w-3.5 h-3.5 text-sky-600" />
-        Add Remote Project
+        {heading}
       </div>
       <div className="flex flex-col gap-2">
         <Input
@@ -833,7 +849,7 @@ function AddRemoteDialog({
         <div className="flex gap-2">
           <Button size="sm" className="flex-1 h-7 text-xs" onClick={handleAdd} disabled={loading}>
             {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-            Add Remote
+            {submitLabel}
           </Button>
           <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onClose} disabled={loading}>
             Cancel
@@ -945,6 +961,7 @@ function CollapsedProjectButton({
   isActive,
   onSelect,
   onEdit,
+  onDuplicate,
   onToggleExpand,
   onRemove,
   onAddToGroup,
@@ -955,6 +972,7 @@ function CollapsedProjectButton({
   isActive: boolean;
   onSelect: () => void;
   onEdit?: () => void;
+  onDuplicate: () => void;
   onToggleExpand: () => void;
   onRemove: () => void;
   onAddToGroup: (group: string) => void;
@@ -1027,6 +1045,7 @@ function CollapsedProjectButton({
   const contextItems: ContextMenuItem[] = useMemo(() => {
     const items: ContextMenuItem[] = [
       ...(onEdit ? [{ label: "Edit connection", icon: <Pencil className="w-3.5 h-3.5" />, onClick: onEdit }] : []),
+      { label: "Duplicate as remote…", icon: <Copy className="w-3.5 h-3.5" />, onClick: onDuplicate },
       {
         label: "Rename",
         icon: <Pencil className="w-3.5 h-3.5" />,
@@ -1054,7 +1073,7 @@ function CollapsedProjectButton({
       });
     }
     return items;
-  }, [groups, project.group, onRemove, onAddToGroup, onRemoveFromGroup, onSelect, onToggleExpand, onEdit]);
+  }, [groups, project.group, onRemove, onAddToGroup, onRemoveFromGroup, onSelect, onToggleExpand, onEdit, onDuplicate]);
 
   return (
     <ContextMenu items={contextItems}>
@@ -1126,14 +1145,23 @@ interface Props {
    * always mounted (so it can slide) and the collapsed rail is skipped.
    */
   isMobile?: boolean;
+  /**
+   * Open the Pulse cross-project dashboard. The dashboard is GLOBAL — it spans
+   * every project — so it is reached from the list's own main menu rather than
+   * from a project row (a row entry point would wrongly imply it is scoped to
+   * that project). Omit it and the menu is not rendered at all, so a
+   * half-mounted tree never offers a button that does nothing.
+   */
+  onOpenDashboard?: () => void;
 }
 
-export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Props) {
+export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOpenDashboard }: Props) {
   const {
     state,
     selectProject,
     addProject,
     addRemoteProject,
+    duplicateProjectAsRemote,
     updateRemoteProject,
     removeProject,
     renameProject,
@@ -1151,6 +1179,10 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [addingRemote, setAddingRemote] = useState(false);
   const [editingRemote, setEditingRemote] = useState<Project | null>(null);
+  // Source of a "Duplicate as remote…" action; while set, the Add Remote
+  // dialog is reused with the source's path prefilled and its name/group
+  // carried into the new entry.
+  const [duplicatingRemote, setDuplicatingRemote] = useState<Project | null>(null);
   // Removing a project or a group is a one-click, un-undoable list edit, so
   // every entry point (context menus, the row's trash button) only sets one of
   // these and lets the shared ConfirmDialog do the mutation. They hold the
@@ -1259,6 +1291,36 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
   const handleAddRemote = useCallback(async (host: string, path: string, port?: number) => {
     await addRemoteProject(host, path, port);
   }, [addRemoteProject]);
+
+  // "Duplicate as remote…": reuse the source project's path, name and group
+  // for a NEW (host, path) entry. The backend rejects a target that is already
+  // saved (409), which the dialog surfaces verbatim.
+  const handleDuplicateRemote = useCallback(async (host: string, path: string, port?: number) => {
+    const source = duplicatingRemote;
+    if (!source) return;
+    await duplicateProjectAsRemote({
+      host,
+      path,
+      ...(port ? { port } : {}),
+      ...(source.name ? { name: source.name } : {}),
+      ...(source.group ? { group: source.group } : {}),
+    });
+  }, [duplicatingRemote, duplicateProjectAsRemote]);
+
+  // Rendered in BOTH the expanded list and the collapsed rail: "Duplicate as
+  // remote…" is offered on every row, and the rail (a separate render branch)
+  // has no dialogs of its own — a dialog missing from the surface the user
+  // clicked is a dialog that never appears.
+  const renderDuplicateRemoteDialog = () => (
+    <AddRemoteDialog
+      open={duplicatingRemote !== null}
+      onClose={() => setDuplicatingRemote(null)}
+      onAdd={handleDuplicateRemote}
+      initialPath={duplicatingRemote?.path ?? ""}
+      heading={duplicatingRemote ? `Duplicate "${duplicatingRemote.name}" as remote` : "Duplicate as remote"}
+      submitLabel="Duplicate"
+    />
+  );
 
   // Build the sorted list: groups first (in group order), then ungrouped projects
   const sortedItems = useMemo(() => {
@@ -1396,6 +1458,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
                     isActive={state.activeProject?.path === p.path && (state.activeProject?.host ?? "") === (p.host ?? "")}
                     onSelect={() => selectProject(p)}
                     onEdit={p.host ? () => setEditingRemote(p) : undefined}
+                    onDuplicate={() => setDuplicatingRemote(p)}
                     onToggleExpand={onToggle}
                     onRemove={() => setPendingRemove(p)}
                     onAddToGroup={(group) => setProjectGroup(p.path, group, p.host)}
@@ -1408,6 +1471,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
           )}
         </div>
         {renderConfirms()}
+        {renderDuplicateRemoteDialog()}
       </TooltipProvider>
     );
   }
@@ -1420,9 +1484,41 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
       <>
 
       {/* Header */}
-      <div className="flex items-center justify-between px-4 h-12 border-b border-border">
-        <h2 className="text-sm font-semibold text-foreground">Projects</h2>
-        <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={onToggle}>
+      <div className="flex items-center gap-1 px-3 h-12 border-b border-border">
+        {onOpenDashboard && (
+          // The project list's main menu. Global actions that are not about one
+          // project live here — today that is the Pulse dashboard. Popover
+          // (not a DropdownMenu, which this repo does not ship) with explicit
+          // menu roles, matching UnifiedTabBar's mobile tab popover.
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 p-0 shrink-0"
+                data-testid="project-main-menu"
+                aria-label="Open project menu"
+              >
+                <Menu className="w-4 h-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" sideOffset={4} className="w-56 p-1">
+              <div role="menu" aria-label="Project menu" className="flex flex-col gap-0.5">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={onOpenDashboard}
+                  className="flex items-center gap-2 w-full px-2 py-1.5 rounded-sm text-sm text-left hover:bg-accent hover:text-accent-foreground"
+                >
+                  <LayoutDashboard className="w-4 h-4 shrink-0 text-muted-foreground" />
+                  Dashboard
+                </button>
+              </div>
+            </PopoverContent>
+          </Popover>
+        )}
+        <h2 className="flex-1 min-w-0 text-sm font-semibold text-foreground truncate">Projects</h2>
+        <Button variant="ghost" size="sm" className="h-8 w-8 p-0 shrink-0" onClick={onToggle}>
           <ChevronLeft className="w-4 h-4" />
         </Button>
       </div>
@@ -1475,6 +1571,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
                       // propagation (so the onSelect above never runs).
                       onRevealTab={isMobile ? onToggle : undefined}
                       onEdit={project.host ? () => setEditingRemote(project) : undefined}
+                      onDuplicate={() => setDuplicatingRemote(project)}
                       onRemove={() => setPendingRemove(project)}
                       onRename={(name) => renameProject(project.path, name, project.host)}
                       onCreateGroup={async (name) => {
@@ -1565,6 +1662,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile }: Pr
       </div>
 
       <AddRemoteDialog open={addingRemote} onClose={() => setAddingRemote(false)} onAdd={handleAddRemote} />
+      {renderDuplicateRemoteDialog()}
       <EditRemoteDialog project={editingRemote} onClose={() => setEditingRemote(null)} onSave={updateRemoteProject} />
       <CreateGroupDialog open={creatingGroup} onClose={() => setCreatingGroup(false)} onCreate={handleCreateGroup} />
       <DirectoryBrowser open={browserOpen} onOpenChange={setBrowserOpen} onSelect={(path) => { setNewPath(path); setBrowserOpen(false); }} />

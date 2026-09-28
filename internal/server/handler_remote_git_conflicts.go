@@ -108,7 +108,11 @@ func (h *Handler) remoteGitResolveConflict(w http.ResponseWriter, r *http.Reques
 
 	// Re-detect from the REMOTE index, never from the request: the per-side
 	// flags decide whether the chosen side can be checked out at all.
-	status := remoteGitStatus(r.Context(), rw)
+	status, err := remoteGitStatus(r.Context(), rw)
+	if err != nil {
+		writeRemoteGitError(w, rw, err)
+		return
+	}
 	var conflict *GitConflict
 	for i := range status.Conflicts {
 		if status.Conflicts[i].Path == spec {
@@ -125,7 +129,7 @@ func (h *Handler) remoteGitResolveConflict(w http.ResponseWriter, r *http.Reques
 		if err := h.remoteGitMarkResolved(w, r.Context(), rw, spec); err != nil {
 			return
 		}
-		writeJSON(w, http.StatusOK, remoteGitWorkspace(r.Context(), rw))
+		writeRemoteGitWorkspace(w, r.Context(), rw)
 		return
 	}
 
@@ -160,7 +164,7 @@ func (h *Handler) remoteGitResolveConflict(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, remoteGitWorkspace(r.Context(), rw))
+	writeRemoteGitWorkspace(w, r.Context(), rw)
 }
 
 // remoteGitMarkResolved is gitMarkResolved over the transport: it verifies the
@@ -238,7 +242,11 @@ func (h *Handler) remoteGitOperation(w http.ResponseWriter, r *http.Request, hos
 	// a whole batched ssh script, so calling it twice here would cost a second
 	// round trip on every operation — the exact cost the batched probe exists
 	// to avoid.
-	status := remoteGitStatus(r.Context(), rw)
+	status, err := remoteGitStatus(r.Context(), rw)
+	if err != nil {
+		writeRemoteGitError(w, rw, err)
+		return
+	}
 	detected := status.Operation
 	if detected == nil {
 		writeError(w, http.StatusConflict, "no git operation is in progress")
@@ -271,7 +279,10 @@ func (h *Handler) remoteGitOperation(w http.ResponseWriter, r *http.Request, hos
 		writeError(w, http.StatusConflict, "git "+args[0]+" failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, GitOperationResult{
-		Workspace: remoteGitWorkspace(r.Context(), rw),
-	})
+	ws, err := remoteGitWorkspace(r.Context(), rw)
+	if err != nil {
+		writeRemoteGitError(w, rw, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, GitOperationResult{Workspace: ws})
 }

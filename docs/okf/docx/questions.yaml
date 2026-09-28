@@ -1,0 +1,594 @@
+# Word (.docx / .doc) editing benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+# Grade technique, not library: an equivalent correct approach (Open XML SDK,
+# docx4j, raw zip + lxml) earns the point.
+# python-docx facts below were verified on 1.2.0 (2026-09-28).
+
+# ---------------------------------------------------------------- docx-model
+
+- id: docx-model-01
+  difficulty: easy
+  weight: 3
+  tags: [docx-model]
+  question: >
+    What is a .docx file physically, and where does a table's data live? Name
+    the XML elements that make up a Word table, from the table down to the
+    text.
+  answer: >
+    A .docx is a ZIP (OPC package) of XML parts. The body is
+    word/document.xml. Headers, footers, footnotes and media are separate
+    parts, linked by relationships (*.rels). A table is w:tbl, which contains
+    w:tblPr (style, width, borders), w:tblGrid with one w:gridCol per grid
+    column, then one w:tr per row. Each w:tr has optional w:trPr and one w:tc
+    per cell. Each w:tc has optional w:tcPr (width, span, merge, shading) and
+    one or more w:p paragraphs. Each paragraph holds w:r runs with w:t text.
+  rubric:
+    - { point: "zip of XML parts; body in word/document.xml; other parts linked by rels", score: 1 }
+    - { point: "w:tbl > w:tblGrid/w:gridCol + w:tr > w:tc > w:p > w:r > w:t", score: 1 }
+    - { partial: "says 'XML inside a zip' without the table element hierarchy", score: 0.5 }
+
+- id: docx-model-02
+  difficulty: medium
+  weight: 3
+  tags: [docx-model, table-locate]
+  question: >
+    You search a table cell for "Widget C" by iterating paragraph runs and
+    checking `run.text == "Widget C"`, and find nothing, although the cell
+    clearly shows "Widget C". Why, and how do you find and replace the text
+    reliably?
+  answer: >
+    Word splits a paragraph's text across several w:r runs, because of
+    formatting changes, spell-check marks, revision ids or edit history. For
+    example, "Wid" and "get C" can be separate runs. Match on paragraph.text,
+    which joins the runs. To replace, write the new text into the first
+    run(s) that covered the match and clear or remove the rest, so the first
+    run's formatting is kept. Never compare run by run.
+  rubric:
+    - { point: "text is split across multiple runs (formatting/proofing/rsid)", score: 1 }
+    - { point: "match on paragraph text, then rewrite runs keeping the first run's formatting", score: 1 }
+    - { partial: "suggests regex on paragraph.text and paragraph.text = new (loses run formatting)", score: 0.5 }
+
+- id: docx-model-03
+  difficulty: medium
+  weight: 2
+  tags: [docx-model, table-relayout]
+  question: >
+    Which units does WordprocessingML use for table/cell widths and for image
+    sizes, and how do they convert to points and inches?
+  answer: >
+    Table, cell and grid widths (w:tblW, w:tcW with type "dxa", w:gridCol
+    w:w) and page margins are in twentieths of a point (twips): 1440 per
+    inch, 20 per point. Image extents (wp:extent cx/cy, a:ext) are in EMU:
+    914400 per inch, 12700 per point. python-docx Length objects convert
+    between them (Inches, Pt, Emu, Twips, .twips, .pt).
+  rubric:
+    - { point: "table/cell widths in twips (dxa): 1440/inch, 20/pt", score: 1 }
+    - { point: "images in EMU: 914400/inch, 12700/pt", score: 1 }
+
+# ---------------------------------------------------------------- table-locate
+
+- id: docx-locate-01
+  difficulty: medium
+  weight: 3
+  tags: [table-locate]
+  question: >
+    A report has several tables. How do you find "the invoice table" and the
+    row for item "Gadget D" robustly with python-docx, and what should you
+    check before editing?
+  answer: >
+    Iterate doc.tables. Nested tables are inside cells, via cell.tables. Identify
+    the table by its header row text (e.g. "Item" and "Qty"), not by its
+    index. Find the row whose first-column cell text, stripped, equals
+    "Gadget D". Assert exactly one match; zero or several means stop and ask.
+    Remember that headers and footers have their own tables
+    (section.header.tables), which doc.tables does not include.
+  rubric:
+    - { point: "identify the table by header content, not a hard-coded index", score: 1 }
+    - { point: "match the row by cell text and assert exactly one match", score: 1 }
+    - { partial: "doc.tables[0].rows[n] by position only", score: 0.5 }
+
+- id: docx-locate-02
+  difficulty: hard
+  weight: 2
+  tags: [table-locate, docx-model]
+  question: >
+    In python-docx, a table's first row has a cell that spans two columns.
+    What does `row.cells` return for that row, and what goes wrong if you
+    delete "the second cell" by index or iterate `row.cells` to count
+    columns?
+  answer: >
+    row.cells returns one entry per GRID column. A merged cell (w:gridSpan=2)
+    is returned twice as the same _Cell object, over the same w:tc. The row
+    holds fewer w:tc elements than there are grid columns. Indexes from
+    row.cells therefore do not map to w:tc elements. Deleting "the second
+    cell" deletes the merged cell, or deletes the wrong one. Deduplicate by
+    the underlying _tc, or work on row._tr.tc_lst while accounting for
+    gridSpan. Vertical merges (w:vMerge) likewise repeat the top cell.
+  rubric:
+    - { point: "row.cells is per grid column; merged cell appears repeatedly (same _tc)", score: 1 }
+    - { point: "dedupe by _tc / use tc_lst + gridSpan before indexing or deleting", score: 1 }
+
+# ---------------------------------------------------------------- row-delete
+
+- id: docx-rowdel-01
+  difficulty: easy
+  weight: 3
+  tags: [row-delete]
+  question: >
+    How do you delete a row from a Word table with python-docx? Is there a
+    table.delete_row() or row.delete() method?
+  answer: >
+    No. python-docx has no row-delete API. Remove the row's XML element from
+    its parent: `tr = row._tr; tr.getparent().remove(tr)`. Unlike a PDF, Word
+    reflows, so the rows below move up by themselves. No manual shifting is
+    needed. Then update any Total that depended on the row.
+  rubric:
+    - { point: "no delete API; remove row._tr from its parent", score: 1 }
+    - { point: "Word reflows: no gap to close manually; update totals", score: 1 }
+    - { partial: "invents a delete_row()/remove_row() method", score: 0 }
+
+- id: docx-rowdel-02
+  difficulty: hard
+  weight: 2
+  tags: [row-delete, table-locate]
+  question: >
+    The row you must delete begins a vertical merge: its first cell has
+    `<w:vMerge w:val="restart"/>` and the next two rows' first cells have
+    `<w:vMerge/>`. What happens if you just remove the row, and how do you
+    do it correctly?
+  answer: >
+    The restart marker leaves with the row. The continuation cells below then
+    attach to whatever merged region is above them, or are left without a
+    start, which gives a corrupted or wrong merge. Before deleting, move the
+    merged cell's content to the next row's cell and set
+    w:vMerge w:val="restart" on it. If only one row remains in the merge,
+    drop vMerge. Then delete the row.
+  rubric:
+    - { point: "continuation cells lose their restart → broken/wrong merge", score: 1 }
+    - { point: "promote the next row's cell to restart (move content) before deleting", score: 1 }
+
+- id: docx-rowdel-03
+  difficulty: hard
+  weight: 2
+  tags: [row-delete, cell-edit]
+  question: >
+    The invoice's Total cell contains a Word field `{ =SUM(ABOVE) }`. You
+    delete a line-item row with python-docx and save. What does the Total
+    show when the file is opened, and how should you handle it?
+  answer: >
+    A field stores its instruction (w:instrText / w:fldSimple) plus a CACHED
+    result: the runs between the separate and end fldChars. python-docx never
+    recalculates, so the old sum stays displayed until fields are updated.
+    Word does not recalculate on open by default. Compute the new total and
+    write it into the cached result run, keeping the field. Optionally also
+    set <w:updateFields w:val="true"/> in settings.xml, which makes Word
+    offer to update fields on open (it prompts the user).
+  rubric:
+    - { point: "field result is cached; python-docx/Word-on-open do not recompute it", score: 1 }
+    - { point: "write the recomputed value into the field's result run (optionally updateFields)", score: 1 }
+    - { partial: "only says 'update the total' without noticing the field/cached result", score: 0.5 }
+
+- id: docx-rowdel-04
+  difficulty: medium
+  weight: 2
+  tags: [row-delete, verify-safety]
+  question: >
+    To "delete" a row quickly, someone sets its height to 0 (exact) and makes
+    its text white, or marks its runs hidden. Why is that not a deletion, and
+    how do you prove the row is really gone?
+  answer: >
+    The row and its text are still in document.xml. They are extractable,
+    searchable and copyable, they show when hidden text is displayed or the
+    formatting changes, and they still count in fields like SUM(ABOVE). Remove
+    the w:tr. To verify, re-open the saved file and check that no w:t in any
+    part (document.xml, headers and footers) contains the row's text, and
+    that the row count dropped by exactly one.
+  rubric:
+    - { point: "hidden/white/zero-height text is still in the XML (extractable, counts in fields)", score: 1 }
+    - { point: "remove the w:tr; verify by re-opening and searching all XML text for the old value", score: 1 }
+
+# ---------------------------------------------------------------- cell-edit
+
+- id: docx-cell-01
+  difficulty: easy
+  weight: 3
+  tags: [cell-edit]
+  question: >
+    A header cell is bold, 9 pt, white text on dark shading. You change its
+    text with `cell.text = "SKU"` in python-docx. What formatting survives
+    and what is lost?
+  answer: >
+    cell.text replaces all the cell's content with ONE new plain run. Run
+    formatting (bold, size, colour, font) is lost; the new run inherits only
+    paragraph and style defaults. Cell-level formatting in w:tcPr (shading,
+    width, borders) survives. To keep run formatting, set the text of the
+    first existing run and clear the others, or copy the old run's rPr onto
+    the new run.
+  rubric:
+    - { point: "run formatting (bold/size/colour/font) is lost; tcPr shading/width kept", score: 1 }
+    - { point: "edit the existing first run's text (clear the rest) or copy rPr", score: 1 }
+    - { partial: "says cell.text keeps formatting", score: 0 }
+
+- id: docx-cell-02
+  difficulty: medium
+  weight: 2
+  tags: [cell-edit, table-locate]
+  question: >
+    You change Qty for one invoice line from 5 to 12. What else in the
+    document must change, and how do you make the numbers consistent?
+  answer: >
+    Change the row's Amount (qty × unit price) and the Total, plus any
+    subtotal, tax or grand total and any number repeated in the text (e.g.
+    "Total due: …"). Compute these from the table data rather than editing
+    strings by hand. Keep the existing number format (decimals, thousands
+    separators, currency) and the alignment of each cell's paragraph. If the
+    totals are fields, update their cached result.
+  rubric:
+    - { point: "recompute dependent cells: row amount + total (and other derived numbers)", score: 1 }
+    - { point: "keep number format/alignment; compute from data, not ad-hoc strings", score: 1 }
+
+- id: docx-cell-03
+  difficulty: medium
+  weight: 2
+  tags: [cell-edit, verify-safety]
+  question: >
+    The document has Track Changes turned on (w:trackRevisions in settings)
+    and the user wants a clean edit of a cell. What happens if you just
+    rewrite the w:t text with python-docx, and what should you consider?
+  answer: >
+    python-docx writes directly: no w:del/w:ins revision marks are produced,
+    so the change is invisible in the review pane even though tracking is
+    on. Existing revisions in the cell (w:del with w:delText, w:ins) are
+    also part of the XML. Old deleted text can survive in w:delText, and
+    python-docx 1.2.0's paragraph.text (and .runs) skips runs inside both
+    w:del and w:ins, so pending inserted text is invisible to it too. Ask whether the edit must be tracked. If so, write
+    w:del/w:ins markup. Otherwise accept or reject the existing revisions
+    in that region first, and check that w:delText no longer holds the old
+    value.
+  rubric:
+    - { point: "direct edit bypasses tracking (no w:ins/w:del); existing revisions complicate text", score: 1 }
+    - { point: "decide tracked vs clean; resolve revisions and check w:delText for the old value", score: 1 }
+
+# ---------------------------------------------------------------- table-relayout
+
+- id: docx-relayout-01
+  difficulty: medium
+  weight: 3
+  tags: [table-relayout]
+  question: >
+    You must insert a new row after "Service G" and before the Total row. What
+    does python-docx's `table.add_row()` do, and how do you insert a
+    correctly formatted row in the middle?
+  answer: >
+    add_row() appends a new w:tr at the BOTTOM, after the Total. Its cells
+    get only a width (tcW from the grid) and one empty paragraph. It copies no
+    trPr (height, header flags), no tcPr shading or borders and no run
+    formatting. For a mid-table row, deep-copy an existing body row that has
+    the right style (copy.deepcopy(row._tr)), insert it with
+    ref_tr.addnext(new_tr) or total_tr.addprevious(new_tr), then set each
+    cell's text through its existing run. With alternating shading, choose
+    or adjust the copied row so the banding still alternates.
+  rubric:
+    - { point: "add_row appends at the end and copies no formatting (only widths)", score: 1 }
+    - { point: "deepcopy a styled row and insert with addnext/addprevious", score: 1 }
+    - { point: "fill text via existing runs; keep banding/shading consistent", score: 1 }
+
+- id: docx-relayout-02
+  difficulty: hard
+  weight: 3
+  tags: [table-relayout]
+  question: >
+    You add a "SKU" column after the Item column. What does
+    `table.add_column(width)` do, and what must you do so the table stays
+    inside the page margins and looks like the other columns?
+  answer: >
+    add_column appends a w:gridCol and one new w:tc at the RIGHT end of every
+    row. It never inserts in the middle and does not shrink the other
+    columns, so the grid gets wider than the text width
+    (section.page_width − left_margin − right_margin). To insert in the
+    middle: add a w:gridCol after the Item column's gridCol, and in every row
+    insert a deep copy of the Item cell after it (item_tc.addnext), taking
+    care with gridSpan cells such as a merged Total. Then rebalance: new
+    widths for all gridCols and each cell's tcW, summing to at most the text
+    width. Copy the header cell's formatting (shading, white bold text) for
+    the new header, and the body style for the new body cells.
+  rubric:
+    - { point: "add_column appends at the far right and widens the table (no rebalance)", score: 1 }
+    - { point: "insert gridCol + a tc per row at the right index (mind gridSpan)", score: 1 }
+    - { point: "rebalance gridCol and tcW to fit text width; copy header/body cell formatting", score: 1 }
+
+- id: docx-relayout-03
+  difficulty: medium
+  weight: 2
+  tags: [table-relayout, docx-model]
+  question: >
+    You changed the w:gridCol widths of a table but Word still shows the old
+    column widths. Why, and what must you update?
+  answer: >
+    Each cell carries its own preferred width in w:tcPr/w:tcW, and Word,
+    especially with autofit layout, lays out from the cell widths (and tblW)
+    more than from tblGrid. LibreOffice leans more on the grid. Update
+    gridCol, every cell's tcW (and tblW if set) consistently. Set a fixed
+    layout (w:tblLayout w:type="fixed") if the widths must hold exactly.
+  rubric:
+    - { point: "tcW per cell (and tblW) also define width; Word uses them", score: 1 }
+    - { point: "update gridCol + all tcW consistently (fixed layout if exact)", score: 1 }
+
+# ---------------------------------------------------------------- table-insert
+
+- id: docx-tblins-01
+  difficulty: medium
+  weight: 3
+  tags: [table-insert]
+  question: >
+    You must insert a new table right after the paragraph "Notes:" in the
+    middle of a document. Where does python-docx's `doc.add_table()` put it,
+    and how do you place it correctly?
+  answer: >
+    doc.add_table() appends the table at the END of the body, before the
+    final sectPr. Create it, then move its element: `notes_p._p.addnext(table._tbl)`.
+    Add a heading paragraph the same way if one is needed. Word reflows the
+    content after it. python-docx has no insert_paragraph_after; use
+    next_paragraph.insert_paragraph_before, or addnext with a new w:p.
+  rubric:
+    - { point: "add_table appends at the end of the body", score: 1 }
+    - { point: "move the w:tbl after the anchor paragraph (addnext)", score: 1 }
+
+- id: docx-tblins-02
+  difficulty: medium
+  weight: 2
+  tags: [table-insert]
+  question: >
+    You set `table.style = "Grid Table 4 Accent 1"` on a table added to an
+    existing company template, and python-docx raises KeyError. Why, and how
+    do you get a ruled table?
+  answer: >
+    python-docx can only use styles defined in the document's styles.xml. Built-in
+    Word styles that the template never used are not present, and a missing
+    name raises KeyError. List doc.styles and use an existing table style,
+    such as "Table Grid", or the style of an existing table in the document.
+    Otherwise set the borders explicitly in w:tblPr/w:tblBorders or per-cell
+    w:tcBorders.
+  rubric:
+    - { point: "style must exist in the document's styles.xml (KeyError otherwise)", score: 1 }
+    - { point: "use an existing style (e.g. Table Grid / an existing table's style) or explicit tblBorders", score: 1 }
+
+- id: docx-tblins-03
+  difficulty: medium
+  weight: 2
+  tags: [table-insert, table-relayout]
+  question: >
+    How wide is a table from `doc.add_table(rows, cols)` by default, and what
+    should you set so it matches the existing invoice table?
+  answer: >
+    python-docx splits the section's text width (page width minus the
+    margins) evenly across the gridCols and cells. To match the existing
+    table, reuse its style, its column widths (gridCol plus tcW for each
+    cell), its alignment and its header formatting (shading, bold/white
+    runs). Keep the total width at or below the text width. Put the text into
+    runs whose formatting matches, not bare cell.text, when the header style
+    is not applied by the table style.
+  rubric:
+    - { point: "default = text width split evenly across columns", score: 1 }
+    - { point: "match existing: style, widths (gridCol+tcW), header formatting", score: 1 }
+
+# ---------------------------------------------------------------- image-replace
+
+- id: docx-imgrep-01
+  difficulty: medium
+  weight: 3
+  tags: [image-replace, docx-model]
+  question: >
+    How does a picture in document.xml reference its image bytes, and how do
+    you replace ONE picture (a logo) with a new file while keeping its
+    position and size?
+  answer: >
+    The picture is a w:drawing (wp:inline or wp:anchor) that contains
+    pic:pic/a:blip with an r:embed rId. The rId is a relationship of the
+    document part that points to an image part (word/media/imageN.*). Size
+    comes from wp:extent/a:ext (EMU), not from the file. To replace one
+    picture: add the new image as a part (rId, _ = doc.part.get_or_add_image(path)),
+    point that blip's r:embed at the new rId and keep the extents. If the
+    aspect ratio differs, adjust one dimension. If nothing else uses the old
+    rId, remove that rel so the old media leaves the package.
+  rubric:
+    - { point: "a:blip r:embed → document-part rel → word/media image part; size from wp:extent", score: 1 }
+    - { point: "add new image part and repoint this blip's r:embed; keep extents (aspect)", score: 1 }
+    - { point: "remove the old rel/media if unused so the old image is gone", score: 1 }
+
+- id: docx-imgrep-02
+  difficulty: hard
+  weight: 2
+  tags: [image-replace]
+  question: >
+    You replace a logo by overwriting the bytes of its image part
+    (`image_part._blob = new_bytes`). The logo changed, but so did a
+    different picture on page 3. Why?
+  answer: >
+    python-docx deduplicates images by SHA1: adding the same image twice
+    reuses one image part, and several blips (or rIds) can point to it.
+    Overwriting the part's blob changes every picture that references it.
+    To change one picture, give it its own new image part and repoint its
+    r:embed. Check first how many blips reference the rId or part.
+  rubric:
+    - { point: "image parts are shared (SHA1 dedupe / several blips per part)", score: 1 }
+    - { point: "replace one instance by a new part + repointing its blip; check references first", score: 1 }
+
+- id: docx-imgrep-03
+  difficulty: medium
+  weight: 2
+  tags: [image-replace, table-locate]
+  question: >
+    The company logo is shown at the top of every page. `doc.inline_shapes`
+    does not list it. Where is it, and how do you find and replace it?
+  answer: >
+    It is in a header part (section.header, and first_page_header or
+    even_page_header if those are enabled), not in the body. It may also be
+    an anchored (floating, wp:anchor) picture; inline_shapes lists only
+    body wp:inline pictures. Walk every section's header parts (and footers),
+    find a:blip elements, and replace through that PART's relationships:
+    the rId belongs to the header part, not the document part. Linked
+    headers are shared across sections.
+  rubric:
+    - { point: "logo lives in a header part and/or is anchored → not in inline_shapes", score: 1 }
+    - { point: "search header/footer parts' a:blip; use that part's rels for the replacement", score: 1 }
+
+# ---------------------------------------------------------------- image-insert
+
+- id: docx-imgins-01
+  difficulty: medium
+  weight: 3
+  tags: [image-insert]
+  question: >
+    Insert signature.png 1.5 inches wide right after the paragraph "Approved
+    by:", keeping its aspect ratio. Where does `doc.add_picture()` put it,
+    and how do you place it correctly?
+  answer: >
+    doc.add_picture() appends a NEW paragraph at the end of the document.
+    Instead, add a run in the target paragraph (or in a new paragraph
+    inserted after it) and call run.add_picture(path, width=Inches(1.5)).
+    Giving only width keeps the aspect ratio, because height is computed from
+    the pixel dimensions. Set the paragraph alignment (e.g. right) if
+    required.
+  rubric:
+    - { point: "doc.add_picture appends at the end", score: 1 }
+    - { point: "run.add_picture in the target/new paragraph; width only keeps aspect", score: 1 }
+
+- id: docx-imgins-02
+  difficulty: medium
+  weight: 2
+  tags: [image-insert, table-relayout]
+  question: >
+    You put a 3-inch-wide image into a table cell that is 1.2 inches wide. What
+    happens, and how do you size it?
+  answer: >
+    An inline picture wider than its cell either stretches the column
+    (autofit), which distorts the table, or overflows or is clipped (fixed
+    layout). Size the picture from the cell's usable width: cell width (tcW
+    or gridCol) minus the cell margins. Pass width=… only, so height follows
+    the aspect ratio, and put it into the cell's paragraph via
+    cell.paragraphs[0].add_run().add_picture().
+  rubric:
+    - { point: "oversized inline image widens/distorts the table (or overflows)", score: 1 }
+    - { point: "size to the cell's usable width (minus margins), width only for aspect", score: 1 }
+
+# ---------------------------------------------------------------- legacy-doc
+
+- id: docx-legacy-01
+  difficulty: easy
+  weight: 3
+  tags: [legacy-doc]
+  question: >
+    The user gives you report.doc (Word 97–2003) and asks you to delete a
+    table row. Can python-docx open it? What is the workflow?
+  answer: >
+    No. .doc is the binary OLE2 compound-file format, not a ZIP of XML, and
+    python-docx raises an error (PackageNotFoundError / not a zip). Renaming
+    the extension does not help. Convert it with LibreOffice headless
+    (soffice --headless --convert-to docx --outdir out report.doc), edit the
+    .docx, and convert back to .doc only if the user needs .doc
+    (--convert-to doc). Keep the original, and check the converted file
+    before editing, since the conversion can change the layout.
+  rubric:
+    - { point: ".doc is binary OLE2, python-docx cannot open it (renaming doesn't help)", score: 1 }
+    - { point: "convert with LibreOffice headless → docx, edit, convert back if needed", score: 1 }
+
+- id: docx-legacy-02
+  difficulty: medium
+  weight: 2
+  tags: [legacy-doc, verify-safety]
+  question: >
+    On macOS without LibreOffice you convert a .doc with `textutil -convert
+    docx`. What risk does that carry for a table-editing task, and how do you
+    detect it?
+  answer: >
+    textutil goes through a rich-text model and loses Word structure. Tables
+    can be flattened into plain paragraphs (no w:tbl), and styles, fields and
+    images may be dropped. After any conversion, open the result and count
+    the tables, rows and images against what the document should contain
+    before editing. If they are missing, use a faithful converter
+    (LibreOffice or Word) or ask the user.
+  rubric:
+    - { point: "textutil/lossy converters can drop tables/styles/images", score: 1 }
+    - { point: "verify tables/rows/images after conversion before editing; use LibreOffice/Word", score: 1 }
+
+- id: docx-legacy-03
+  difficulty: hard
+  weight: 1
+  tags: [legacy-doc]
+  question: >
+    `soffice --headless --convert-to docx file.doc` exits immediately and no
+    output file appears, while a LibreOffice window is open on the desktop.
+    Why, and how do you run it reliably from a script?
+  answer: >
+    A running LibreOffice instance holds the user profile. The headless
+    call hands the job to that instance, or fails because of the profile
+    lock, and produces nothing. Use a separate throwaway profile, e.g.
+    -env:UserInstallation=file:///tmp/lo_profile_$$, pass an explicit
+    --outdir, and check that the output file exists afterwards (the exit code
+    alone isn't reliable).
+  rubric:
+    - { point: "running instance / profile lock swallows the headless conversion", score: 1 }
+    - { point: "separate -env:UserInstallation profile + --outdir, verify output exists", score: 1 }
+
+# ---------------------------------------------------------------- verify-safety
+
+- id: docx-verify-01
+  difficulty: easy
+  weight: 3
+  tags: [verify-safety]
+  question: >
+    What is the safe save-and-verify procedure after editing invoice.docx
+    with a script?
+  answer: >
+    Never overwrite the source. Write to a new file (or keep a copy of the
+    original). Re-open the output with python-docx to prove it parses. Check
+    the intended change: row count, the exact cell texts in order, totals.
+    Check that nothing else changed, for example by diffing the other
+    paragraphs, tables and parts against the original. Search every XML part
+    for text that should be gone.
+  rubric:
+    - { point: "save to a new file / keep the original untouched", score: 1 }
+    - { point: "re-open and assert exact expected content + unchanged remainder", score: 1 }
+
+- id: docx-verify-02
+  difficulty: medium
+  weight: 2
+  tags: [verify-safety, docx-model]
+  question: >
+    After raw-XML edits a .docx still opens in python-docx, but Word says "Word
+    found unreadable content". Name common structural mistakes in table
+    edits that cause this.
+  answer: >
+    Common causes:
+    - a w:tc with no w:p (every cell must end with a paragraph);
+    - the number of gridCols not matching the cells per row, counting gridSpan;
+    - a broken vMerge sequence;
+    - elements out of schema order (e.g. tcPr not first in w:tc, trPr not first in w:tr);
+    - a blip rId with no relationship;
+    - duplicate drawing ids (wp:docPr id) after copying pictures.
+    python-docx does not validate these, so check them yourself.
+  rubric:
+    - { point: "cell without w:p / gridCol-vs-cells mismatch / broken vMerge", score: 1 }
+    - { point: "schema order, dangling rIds or duplicate docPr ids; python-docx doesn't validate", score: 1 }
+    - { partial: "only 'check the XML is well-formed'", score: 0.5 }
+
+- id: docx-verify-03
+  difficulty: medium
+  weight: 2
+  tags: [verify-safety, image-replace]
+  question: >
+    You replaced a confidential logo by removing its w:drawing and inserting
+    a new picture. How do you make sure the old image is not still inside the
+    .docx?
+  answer: >
+    Removing the w:drawing does not remove the relationship or the media
+    part. python-docx saves every part that is still reachable through
+    rels, so word/media/imageN.* stays in the zip. Remove the rel from the
+    owning part once no other blip uses that rId. Then list the saved zip
+    and check that no entry still contains the old image bytes (hash each
+    word/media file).
+  rubric:
+    - { point: "removing the drawing leaves the rel + media part in the zip", score: 1 }
+    - { point: "drop the unused rel; verify by listing/hashing zip media", score: 1 }

@@ -155,6 +155,50 @@ Permission defaults are defined in `permissions.go:NewPermissionManager()`:
 
 Tools not in any list default to `PermissionAsk` (e.g. `github_pr`, `github_issue`, `github_workflow`).
 
+### Code-search relevance judge (`grep` / `rgrep` / `glob`)
+
+The three code-search tools filter their per-file results through the TypeSafe/Jev
+relevance judge before rendering, so out-of-scope files never reach the transcript.
+
+- **Seam.** The judge rides the **execution context**, not the tool struct:
+  `agent.executeToolCallWithContext` attaches `a.searchResultJudge()` via
+  `tool.WithSearchResultJudge(toolCtx, judge)` for `grep`/`rgrep`/`glob` only, and the
+  tool reads it back with `tool.SearchJudgeFromContext(ctx)`
+  (`internal/tool/search_judge.go`). This is why sub-agents and transient advisor
+  agents — which are handed the parent's tool objects — judge with their own agent
+  and cannot clobber the parent's judge (`internal/agent/search_typesafe.go`). The
+  attach is gated to the three tool names so no other dispatch touches the judge
+  client factory.
+- **`intent` is a required argument.** Each tool's schema adds `intent` to both
+  `properties` and `required`; it is the anchor the judge scores against. An empty
+  `intent` skips judging (logged `intent-missing`) — never an error; `required`
+  teaches the model but is not enforced.
+- **Activation** is provider-connection only, identical to `doc_search`: the judge is
+  live exactly when `discoveryJudgeClient()` yields a keyed `*TypesafeClient`. No
+  config key.
+- **Fail-open is the invariant.** A judge can only ever hide a result. A judge error,
+  a timeout (4s `searchJudgeTimeout` via `DecideCtx`), or a missing answer keeps
+  results; the error is disclosed in the output.
+- **Candidate cap** `searchJudgeMaxCandidates = 40`: results past the cap are kept
+  unjudged (never dropped) and the count is disclosed in the footer. The pre-judge
+  order is each tool's output order (`glob`: modification time descending).
+- **Footers.** judge ran, vetoed > 0 →
+  `[relevance judge: N of M result(s) omitted as out of scope for this intent]`
+  (+ `; K beyond the judge cap were not judged` when capped); all vetoed →
+  `Found N matching file(s), but none are in scope …` with a narrow/re-run tail;
+  judge error → `[relevance judge unavailable — results are unfiltered: <err>]`;
+  vetoed 0, or no judge wired → nothing appended (byte-identical to unjudged output).
+- **Not judged:** `read` (an explicit caller choice), `ast`/`lsp`/`ast_grep`
+  (precise hits), custom/MCP tools (their schemas cannot be enforced), and `list`
+  (deferred — sibling filenames are the weakest signal; see `TODO.md`).
+
+Regression tests: `internal/tool/search_judge_grep_test.go`,
+`search_judge_glob_test.go`, `search_judge_rgrep_test.go` (judge-absent golden output
+per `output_mode`, per-file grouping, cap boundary, all-vetoed, error footer, schema);
+`internal/agent/search_typesafe_test.go` (state shape, query whitelist, summary cap,
+timeout budget, empty intent, fail-open); `internal/agent/search_wiring_test.go`
+(per-agent seam over shared tool objects, dispatch-coverage scan, prompt directive).
+
 ## 5. Extra utilities
 
 | File | Purpose |
@@ -170,6 +214,8 @@ Tools not in any list default to `PermissionAsk` (e.g. `github_pr`, `github_issu
 | `ast.go` | `AstTool` — LSP-backed semantic code query (registered when LSP server available on PATH) |
 | `ast_grep.go` | `AstGrepTool` — structural search/rewrite via ast-grep CLI (opt-in via `plugins.ast`) |
 | `rgrep.go` | `RgrepTool` — ripgrep-backed content search (registered when `rg` resolves on PATH) |
+| `search_judge.go` | `SearchResult` / `SearchJudgeRequest` / `SearchResultJudge` contract + `WithSearchResultJudge` / `SearchJudgeFromContext` execution-context seam for the code-search relevance judge |
+| `search_judge_apply.go` | `runSearchJudge` (candidate cap + fail-open), footer/all-vetoed messages, and `writeSearchResultBlock` shared by `grep`/`rgrep` |
 | `bash_backup.go` | Bash undo command whitelist used by `UndoTool` |
 | `undo.go` | `UndoTool` — file change undo via snapshot store |
 | `cron.go` | `CronTool` — scheduled job management (requires scheduler service) |

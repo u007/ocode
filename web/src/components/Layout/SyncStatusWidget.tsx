@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { isDesktopShell } from "../../lib/desktopShell";
 import { openExternalURL } from "../../lib/externalLinks";
+import MarkdownLink from "../common/MarkdownLink";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -207,14 +208,12 @@ export default function SyncStatusWidget() {
                 </Button>
               </div>
               <div className="flex items-center gap-2">
-                <a
+                <MarkdownLink
                   href={loginState.verifyUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
                   className="flex-1 text-xs text-blue-400 hover:underline break-all"
                 >
                   {loginState.verifyUrl}
-                </a>
+                </MarkdownLink>
                 <Button
                   variant="ghost"
                   size="sm"

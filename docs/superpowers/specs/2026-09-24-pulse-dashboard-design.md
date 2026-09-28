@@ -1,7 +1,26 @@
+---
+type: Design
+title: Pulse — cross-project live sessions dashboard
+description: 'Approved design spec for the Pulse cross-project live-sessions dashboard, implemented 2026-09-28, with as-shipped amendment notes recorded inline: activeView value "pulse" instead of a route (no client router), a ProjectSidebar main menu instead of a pinned tab entry, no dock-badge click (Wails v3 dock service is display-only; gap tracked in TODO.md; shipped entries are a Dashboard app-menu item and a tray Open Pulse), todo_updated published from the server tool-result broadcast and deliberately excluded from live frames, scope=all metadata-only cost with an unmeasured budget, and TitleForDir single-row title reads.'
+tags:
+  - design
+  - spec
+  - pulse
+  - dashboard
+  - sessions
+  - web
+  - desktop
+  - superpowers
+timestamp: 2026-09-28T09:32:28Z
+---
 # Pulse — cross-project live sessions dashboard
 
 Date: 2026-09-24
 Status: design approved in chat, awaiting spec review
+
+**Amendments (2026-09-28):** implemented as shipped; corrections are marked
+inline below as **As shipped (2026-09-28)** notes. The original approved
+wording above and below is retained — this stays an approved-design record.
 
 ## Goal
 
@@ -35,6 +54,24 @@ Deferred (each gets a TODO.md entry):
 - Header badge `● <running> · ◆ <needs-you>`, always visible; click opens
   Pulse. Hidden when both counts are zero.
 - Desktop: clicking the existing dock badge opens Pulse.
+
+**As shipped (2026-09-28):** there is no client router, so Pulse is not a
+route — it is the `activeView` value `"pulse"` (`web/src/App.tsx`) — and the
+pinned tab-bar entry did not ship: the dashboard is global, so a
+per-project tab-strip slot would wrongly imply it is scoped to the active
+project. The entry point is instead a main menu at the top-left of the
+`ProjectSidebar` header (a `Popover` with `role="menu"`, since the repo
+ships no dropdown-menu primitive). `⌘J` and the header badge shipped as
+specified.
+
+**As shipped (2026-09-28):** the dock-badge click did **not** ship and was
+not substituted silently: Wails v3 beta.12's `dock` service is display-only
+(`SetBadge`/`RemoveBadge`/`SetCustomBadge`) and `pkg/events` exposes no
+application-activated event, so a macOS dock click while ocode is already
+running is indistinguishable from plain activation. The plan's own gate said
+to stop and ask rather than swap in a different mechanism, so the gap is
+recorded in `TODO.md`, and the shipped desktop entries are an app-menu
+**Dashboard…** item on `Cmd/Ctrl+Shift+J` plus a tray **Open Pulse** item.
 
 ### Layout
 Responsive card grid in three sections, fixed order:
@@ -132,6 +169,12 @@ Sources:
   (live data wins). Must reuse the existing session list path and must
   not call the per-project list endpoint per project.
 
+**As shipped (2026-09-28):** live rows get their title from a new single-row
+indexed read, `session.TitleForDir` (`internal/session/title.go`), not from a
+full `ListRefsForDir` per request — the latter would re-scan a project with
+thousands of legacy session files on every request and blow the p50 < 200ms
+budget.
+
 Status derivation (first match wins): pending permission ask →
 `needs_permission`; pending question → `needs_question`; turn running →
 `running`; last turn ended in error → `error`; else `idle`.
@@ -149,11 +192,28 @@ Performance: `scope=all` must be measured during planning against the
 `docs/gotchas/web-all-sessions-dialog-slow.md`. Budget: p50 < 200ms for
 `scope=live`.
 
+**As shipped (2026-09-28):** `scope=all` reads metadata only — one directory
+scan plus one indexed query per project, no transcript bodies, no todo-file
+reads — so its cost scales with the number of projects rather than with
+history; disk-only rows therefore carry `todo: null`, and live state is
+merged over them. The planned manual `curl -w '%{time_total}'` measurement
+of the real `all` path was **not** performed during implementation (no live
+server with a populated multi-project store was available in that session),
+so this budget is recorded as unmeasured rather than as a claimed number.
+
 ### `todo_updated` event
 Published on the EventBus whenever the todo tool writes a session's todo
 file. Payload: `{ session_id, done, total, current }`. Added to the event
 type list in `event_bus.go`. Not replayed on reconnect (same as
 `agent_activity`).
+
+**As shipped (2026-09-28):** the event is published from the server's
+tool-result broadcast — right after the `todowrite` tool result in
+`internal/server/handler.go` — not from the todo writer itself, and the
+shipped payload also carries `items: [{text, state}]`. It is deliberately
+**not** in `liveFrameEvents`: a plan is a momentary reading, so replaying a
+buffered copy into a mid-turn reload would show a plan the session has
+already moved past; clients recover on their next `/api/pulse` fetch.
 
 ### Existing events consumed
 `agent_activity`, `turn_started`, `turn_done`, `turn_error`,
@@ -178,6 +238,11 @@ On card expand: fetch `GET /api/sessions/{id}/state` once for buffered
 frames, render the last ~6 lines, then append from text-delta events
 while expanded. Discard tail state on collapse.
 
+**As shipped (2026-09-28):** that path only exists while a turn runs — live
+frames are cleared at turn end — so idle and error cards (and needs-you rows
+paused on an ask) take their tail from the last assistant message in the
+transcript instead, with no text-delta subscription.
+
 ### `lib/jumpToSession.ts`
 `jumpToSession(projectPath, host, sessionId, title)`: `selectProject`
 then `openSessionTab`. Terminals and browser tabs restore via their
@@ -193,6 +258,9 @@ existing project-scoped stores; side pane restores via
 - `components/Pulse/PulseBadge.tsx` — header counts.
 - `⌘J` binding in `hooks/useKeyboard.ts`.
 - Pinned tab entry in `UnifiedTabBar`.
+
+**As shipped (2026-09-28):** the pinned `UnifiedTabBar` entry did not ship —
+see **Entry points** above. `⌘J` and `PulseBadge` shipped as listed.
 
 Built from existing `components/ui` primitives (Badge, Tooltip,
 ScrollArea, Progress). The expand overlay is CSS, not a popover.

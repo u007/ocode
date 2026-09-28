@@ -4,6 +4,7 @@ package projects
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +17,12 @@ import (
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/remote"
 )
+
+// ErrProjectExists is returned by DuplicateAsRemote when the target
+// (host, path) is already saved. It lets the API surface a "already in the
+// list" conflict instead of silently reusing the existing entry (which is
+// what AddRemote's upsert semantics do).
+var ErrProjectExists = errors.New("project already exists")
 
 // Project represents a saved project root.
 type Project struct {
@@ -481,6 +488,63 @@ func (s *Store) AddRemote(host, path string, ports ...int) error {
 	setRemoteFields(&project, target)
 	s.cache = append(s.cache, project)
 	return s.save()
+}
+
+// DuplicateAsRemote inserts a NEW remote (SSH/WSL) project entry that reuses
+// the path of an existing project (local or remote) so the same folder can
+// also be opened over a remote connection. Unlike AddRemote — which upserts a
+// (host, path) entry so re-adding focuses the existing row — this refuses a
+// target that is already saved and returns ErrProjectExists, so the UI can
+// report the conflict instead of silently reusing the row.
+//
+// name and group are carried over from the source project; an empty name
+// falls back to the canonical "host:path" label. path is stored verbatim
+// (no filepath.Clean) for the same reason as AddRemote: the remote's
+// separator conventions are the remote's, and a leading "~" is meaningful
+// only to the remote shell.
+func (s *Store) DuplicateAsRemote(host, path string, port int, name, group string) (Project, error) {
+	target, err := remote.ParseTarget(host)
+	if err != nil {
+		return Project{}, fmt.Errorf("projects: duplicate remote: %w", err)
+	}
+	if port > 0 {
+		target.Port = port
+	}
+	if err := target.Validate(); err != nil {
+		return Project{}, fmt.Errorf("projects: duplicate remote: %w", err)
+	}
+	if path == "" {
+		return Project{}, fmt.Errorf("projects: duplicate remote: path is required")
+	}
+	canonicalHost := target.String()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.cache {
+		if s.cache[i].Host == canonicalHost && s.cache[i].Path == path {
+			return Project{}, ErrProjectExists
+		}
+	}
+
+	now := time.Now()
+	if name == "" {
+		name = canonicalHost + ":" + path
+	}
+	project := Project{
+		Path:       path,
+		Name:       name,
+		Group:      group,
+		Host:       canonicalHost,
+		AddedAt:    now,
+		LastUsedAt: now,
+	}
+	setRemoteFields(&project, target)
+	s.cache = append(s.cache, project)
+	if err := s.save(); err != nil {
+		return Project{}, err
+	}
+	return project, nil
 }
 
 // UpdateRemote atomically changes a saved remote project's connection and/or

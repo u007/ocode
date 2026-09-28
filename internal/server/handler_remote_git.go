@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -18,7 +20,7 @@ import (
 // remoteGitStatus is gitStatusForDir over the transport. It batches all of
 // the cheap status queries into one exec (one ssh round trip) and parses
 // the delimited output locally.
-func remoteGitStatus(ctx context.Context, rw remoteWork) GitStatus {
+func remoteGitStatus(ctx context.Context, rw remoteWork) (GitStatus, error) {
 	status := GitStatus{
 		StagedFiles:  []string{},
 		ChangedFiles: []string{},
@@ -55,7 +57,9 @@ func remoteGitStatus(ctx context.Context, rw remoteWork) GitStatus {
 		remoteGitCommand(rw.Path, "rev-parse", "--is-inside-work-tree") + " 2>/dev/null || echo not-a-repo\n"
 	out, err := remoteRun(ctx, rw, script)
 	if err != nil {
-		return status
+		// Never answer an unreachable or timed-out host with an empty status:
+		// it reads as "clean repository" everywhere the UI shows git state.
+		return GitStatus{}, fmt.Errorf("remote git status: %w", err)
 	}
 	// 8 sections: the 5 pre-existing data probes, conflicts, operation state,
 	// and the trailing is-inside-work-tree. SplitN caps the split count as a
@@ -140,14 +144,22 @@ func remoteGitStatus(ctx context.Context, rw remoteWork) GitStatus {
 	}
 	if branchLine == "" || !strings.Contains(branchLine, "# branch.ab") {
 		upOut, upErr := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "rev-parse", "--abbrev-ref", "@{upstream}"))
+		if isRemoteTransportError(upErr) {
+			return GitStatus{}, fmt.Errorf("remote git upstream probe: %w", upErr)
+		}
 		upstream := strings.TrimSpace(upOut)
 		if upErr == nil && upstream != "" && upstream != "HEAD" && !strings.Contains(upstream, "fatal:") && !strings.Contains(upstream, "unknown") {
 			status.HasUpstream = true
 		}
 	}
+	// A non-zero exit here means "not a repository"; only a transport failure
+	// is an error.
 	_, repoErr := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "rev-parse", "--is-inside-work-tree"))
-	status.IsRepo = err == nil && repoErr == nil
-	return status
+	if isRemoteTransportError(repoErr) {
+		return GitStatus{}, fmt.Errorf("remote git repo probe: %w", repoErr)
+	}
+	status.IsRepo = repoErr == nil
+	return status, nil
 }
 
 // sectionAt returns section i of a separator-split output, or "" past the
@@ -173,18 +185,55 @@ func nonEmptyLines(s string) []string {
 
 // remoteGitWorkspace is gitWorkspaceForDir over the transport: status +
 // staged diff + unstaged diff (with untracked patches) in one payload.
-func remoteGitWorkspace(ctx context.Context, rw remoteWork) GitWorkspace {
+func remoteGitWorkspace(ctx context.Context, rw remoteWork) (GitWorkspace, error) {
+	status, err := remoteGitStatus(ctx, rw)
+	if err != nil {
+		return GitWorkspace{}, err
+	}
 	ws := GitWorkspace{
-		Status:   remoteGitStatus(ctx, rw),
+		Status:   status,
 		Staged:   []GitDiffFile{},
 		Unstaged: []GitDiffFile{},
 	}
 	if !ws.Status.IsRepo {
-		return ws
+		return ws, nil
 	}
 	ws.Staged = remoteDiffFiles(ctx, rw, true, "")
 	ws.Unstaged = remoteDiffFiles(ctx, rw, false, "")
-	return ws
+	return ws, nil
+}
+
+// writeRemoteGitError answers a failed remote git status/workspace read:
+// 502 when the host could not be reached or the command hit its bound, 500
+// when the remote script itself failed — the same split the other remote
+// git endpoints use.
+func writeRemoteGitError(w http.ResponseWriter, rw remoteWork, err error) {
+	slog.Error("remote git read failed", "host", rw.Target.String(), "project", rw.Path, "err", err)
+	if isRemoteTransportError(err) {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err.Error())
+}
+
+// writeRemoteGitStatus responds with rw's git status, or the error.
+func writeRemoteGitStatus(w http.ResponseWriter, ctx context.Context, rw remoteWork) {
+	status, err := remoteGitStatus(ctx, rw)
+	if err != nil {
+		writeRemoteGitError(w, rw, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// writeRemoteGitWorkspace responds with rw's git workspace, or the error.
+func writeRemoteGitWorkspace(w http.ResponseWriter, ctx context.Context, rw remoteWork) {
+	ws, err := remoteGitWorkspace(ctx, rw)
+	if err != nil {
+		writeRemoteGitError(w, rw, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ws)
 }
 
 // remoteDiffFiles is diffFilesForDir over the transport. Diffs travel raw

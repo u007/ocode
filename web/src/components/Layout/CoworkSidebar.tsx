@@ -5,6 +5,8 @@ import { useProjectState } from "../../stores/projectStore";
 import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
 import { reportActionError } from "../../lib/actionErrors";
+import { setSpeechSummaryConfig, speechSummaryDisplay } from "../../lib/speechSummaryConfig";
+import { useSpeechOptional } from "../Speech/SpeechProvider";
 import type { AgentInfo, LSPStatus, MCPStatus } from "../../api/types";
 import PluginsPanel from "./PluginsPanel";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
@@ -25,7 +27,7 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   activeAgent: string;
-  onModelClick?: (tab: "main" | "small" | "advisor" | "permission" | "explorer" | "context" | "autocontinue") => void;
+  onModelClick?: (tab: "main" | "small" | "advisor" | "permission" | "explorer" | "context" | "autocontinue" | "speechsummary") => void;
   // When true the sidebar becomes a fixed overlay (right side) with a backdrop
   // instead of pushing the chat column. Used for the mobile layout (≤767px).
   isMobile?: boolean;
@@ -57,6 +59,11 @@ interface ConfigState {
   // session's TUIStatus snapshot exists (tuiStatus wins once present).
   autoContinueModel?: string;
   autoContinueEnabled?: boolean;
+  // Speech-summary row. Unlike every field above, the speech-summary block is
+  // persisted GLOBAL config with no per-session TUIStatus counterpart, so this
+  // is the only source for both halves of the row.
+  speechSummaryModel?: string;
+  speechSummaryEnabled?: boolean;
 }
 
 // Expanded/collapsed state of the sidebar sections. Persisted to localStorage
@@ -112,6 +119,7 @@ export default function CoworkSidebar({
   const [explorerLoading, setExplorerLoading] = useState(false);
   const [contextLoading, setContextLoading] = useState(false);
   const [autoContinueLoading, setAutoContinueLoading] = useState(false);
+  const [speechSummaryLoading, setSummaryLoading] = useState(false);
   // Full discovery config (not just the enabled flag): the PUT replaces the
   // whole block, so a sidebar toggle must round-trip embedding model/backend,
   // pinned skills and ignore paths untouched. null until the fetch resolves.
@@ -151,6 +159,12 @@ export default function CoworkSidebar({
   // API calls below must route through /api/remote/{host} for a remote
   // project, or they hit the local server and return the wrong data.
   const sessionHost = resolveSessionHost(projectState.state, sessionId ?? undefined);
+  // Speech-summary is a persisted global config owned at runtime by
+  // SpeechProvider (the speak path reads it). Prefer the provider so this row
+  // and the Settings/model-picker writes cannot drift apart; fall back to the
+  // local fetch when the sidebar is rendered without a provider (isolated
+  // tests).
+  const speech = useSpeechOptional();
   // `sessionModel` is the per-session slice field — a draft tab's locally-picked
   // model before the session exists server-side (see SessionSlice.model). The
   // authoritative model for a real session is `tuiStatus.main_model`, which is
@@ -175,6 +189,14 @@ export default function CoworkSidebar({
     tuiStatus?.advisor_enabled ??
     config.advisorEnabled ??
     globalAdvisorEnabled;
+  // The speech-summary block has no per-session snapshot, so the persisted
+  // the only source — no `tuiStatus?.x ?? config.x` chain, unlike the rows above.
+  // Undefined until the fetch resolves, which renders as off exactly like the
+  // other rows' pre-snapshot state. When the provider owns it, read from there:
+  // the provider updates on a model pick (which this sidebar never sees) so the
+  // row cannot keep showing "(auto: …)" after a pick.
+  const speechSummaryOn = speech ? speech.summaryEnabled : config.speechSummaryEnabled ?? false;
+  const speechSummaryModel = speech ? speech.summaryModel : config.speechSummaryModel;
 
   // ── Session title display — mirrors TUI's sidebarDisplayTitle() ────────────
   // Priority: explicit session_title → first user prompt (truncated) → "Untitled".
@@ -299,12 +321,16 @@ export default function CoworkSidebar({
       api.getExplorerModel(sessionHost).catch(() => null),
       api.getContextModel(sessionHost).catch(() => null),
       api.getAutoContinue(sessionHost).catch(() => null),
+      // Speech-summary settings are a persisted global config (no per-session
+      // snapshot), but they still belong to the HOST that runs the session —
+      // a remote project's summary model lives on the remote.
+      api.getSpeechSummaryConfig(sessionHost).catch(() => null),
       // Discovery is not part of the per-session TUI status snapshot, so the
       // sidebar row seeds itself from the persisted config endpoint (same one
       // the Settings → Discovery tab and /discover write).
       api.getDiscoveryConfig(sessionHost).catch(() => null),
     ])
-      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes, discoveryRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes, speechRes, discoveryRes]) => {
         setConfig({
           model: modelRes?.model || "",
           thinkingBudget: thinkingRes?.budget,
@@ -324,6 +350,10 @@ export default function CoworkSidebar({
           contextModelEnabled: contextRes?.enabled,
           autoContinueModel: autoContinueRes?.model || "",
           autoContinueEnabled: autoContinueRes?.enabled,
+          // Guard on a real payload so a partially-mocked / errored response
+          // never renders a bogus ●on for a block the server never returned.
+          speechSummaryModel: speechRes?.model || "",
+          speechSummaryEnabled: typeof speechRes?.enabled === "boolean" ? speechRes.enabled : undefined,
         });
         // Guard against partially-mocked / malformed responses (the boolean
         // check requires a real payload) so the row never renders a bogus
@@ -609,6 +639,47 @@ export default function CoworkSidebar({
       reportActionError(e, "Toggling auto-continue");
     } finally {
       setAutoContinueLoading(false);
+    }
+  };
+
+  // Speech-summary on/off. NOT the compaction gate: this flag decides whether
+  // assistant text is shortened by a model before TTS reads it. It is
+  // deliberately independent of `compact.enabled`.
+  // the other rows: picking a model never touches the gate.
+  //
+  // Optimistic, like every other toggle here, but rolled back to the in-effect
+  // value on failure so a rejected write cannot leave the row lying. Only
+  // `enabled` is sent: PUT /api/config/ocode/speech-summary merges the present
+  // onto the block read fresh from disk, so this cannot reset the threshold,
+  // timeout and keep-recent settings the Settings form owns — and cannot revert
+  // an edit another window made after this sidebar loaded.
+  const toggleSpeechSummary = async () => {
+    const current = speechSummaryOn;
+    const next = !current;
+    setSummaryLoading(true);
+    // Optimistic. In production the provider owns the value and flips itself;
+    // the local mirror keeps the no-provider fallback in step and is the
+    // rollback source if the write fails. Only `enabled` is sent, and the
+    // endpoint merges it onto the block read fresh from disk, so a concurrent
+    // model pick (or another window) cannot be reverted.
+    setConfig((prev) => ({ ...prev, speechSummaryEnabled: next }));
+    try {
+      const saved = speech
+        ? await speech.setSummaryEnabled(next)
+        : await setSpeechSummaryConfig({ enabled: next }, sessionHost);
+      // The server's saved block is authoritative and carries the model too, so
+      // this row picks up a pick made in the model dialog.
+      setConfig((prev) => ({
+        ...prev,
+        speechSummaryEnabled: saved.enabled,
+        speechSummaryModel: saved.model,
+      }));
+    } catch (e) {
+      console.error("toggle speech summary error", e);
+      reportActionError(e, "Toggling speech summarising");
+      setConfig((prev) => ({ ...prev, speechSummaryEnabled: current }));
+    } finally {
+      setSummaryLoading(false);
     }
   };
 
@@ -919,6 +990,41 @@ export default function CoworkSidebar({
               checked={Boolean(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled)}
               disabled={autoContinueLoading}
               onChange={toggleAutoContinue}
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+            />
+          </label>
+
+          {/* Speech summary — model picker + on/off toggle. Web/desktop
+              only: the TUI has no speech-summary picker, so unlike the rows
+              above this one has no tuiStatus counterpart and reads the
+              persisted speech-summary block directly. ●on means text is
+              shortened before being spoken; the model line is the picker, and
+              picking a model never flips the gate. */}
+          <button
+            type="button"
+            onClick={() => onModelClick?.("speechsummary")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-muted disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
+            title="Pick the model that summarises text before it is spoken"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Speech summary</span>
+              <span className={`font-mono text-[11px] ${speechSummaryOn ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {speechSummaryOn ? "●on" : "○off"}
+              </span>
+            </div>
+            <div className="text-foreground font-mono truncate">
+              {speechSummaryDisplay({ model: speechSummaryModel })}
+            </div>
+          </button>
+          <label className="flex items-center justify-between cursor-pointer rounded px-1 py-1 hover:bg-muted">
+            <span className="text-xs text-muted-foreground">Speech summary enabled</span>
+            <input
+              type="checkbox"
+              aria-label="Speech summary enabled"
+              checked={speechSummaryOn}
+              disabled={speechSummaryLoading}
+              onChange={toggleSpeechSummary}
               className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>

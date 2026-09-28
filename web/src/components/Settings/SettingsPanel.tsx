@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import ModelDefaultsForm from "./ModelDefaultsForm";
 import CommitMsgForm from "./CommitMsgForm";
 import CompactForm from "./CompactForm";
+import SpeechSummaryForm from "./SpeechSummaryForm";
 import AdvisorForm from "./AdvisorForm";
 import PermissionsForm from "./PermissionsForm";
 import SystemPermissionsForm from "./SystemPermissionsForm";
@@ -39,6 +40,7 @@ export type SettingsGroupId =
   | "model-defaults"
   | "commit-msg"
   | "compact"
+  | "speech-summary"
   | "chat-display"
   | "advisor"
   | "permissions"
@@ -76,6 +78,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "model-defaults", label: "Model Defaults & Recap" },
   { id: "commit-msg", label: "Commit Message" },
   { id: "compact", label: "Compact" },
+  { id: "speech-summary", label: "Speech Summary" },
   { id: "chat-display", label: "Chat display" },
   { id: "advisor", label: "Advisor" },
   { id: "permissions", label: "Permissions" },
@@ -125,6 +128,8 @@ function renderGroup(id: SettingsGroupId) {
       return <CommitMsgForm />;
     case "compact":
       return <CompactForm />;
+    case "speech-summary":
+      return <SpeechSummaryForm />;
     case "chat-display":
       return <ChatDisplayForm />;
     case "advisor":

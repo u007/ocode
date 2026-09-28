@@ -1401,23 +1401,53 @@ func (h *Handler) HandleGetCompactConfig(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, cfg)
 }
 
-// HandleSetCompactConfig persists the auto-compact settings block.
+// HandleSetCompactConfig persists the auto-compact settings block as a PARTIAL
+// update: the body carries only the keys the caller changed, and they are
+// merged onto the block read fresh from disk (see
+// config.SaveOcodeCompactConfigPatch). Three independent controls write this
+// block — the CoworkSidebar compaction on/off toggle, the model picker's direct
+// persist, and the Settings → Compact form — so a replace-everything write made
+// a single-field change reset all the others, and made a full body that another
+// control had already superseded lose that control's edit.
+//
+// A Settings form that sends every key still behaves exactly like a replace,
+// because every field is then present. An explicit zero (the picker's "Clear"
+// sends "", a threshold reset sends 0) is written; only an ABSENT key is left
+// alone.
+//
+// The response is the merged block as saved, not an echo of the request, so a
+// caller can refresh from it without a follow-up GET.
 func (h *Handler) HandleSetCompactConfig(w http.ResponseWriter, r *http.Request) {
-	var req config.CompactConfig
-	if err := readBodyJSON(r, &req); err != nil {
+	var patch config.CompactConfigPatch
+	if err := readBodyJSON(r, &patch); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := config.SaveOcodeCompactConfig(req); err != nil {
+	if patch.IsEmpty() {
+		// Otherwise this would still rewrite the config file and fire
+		// OnConfigSaved for a no-op, so a client bug would look like a save.
+		writeError(w, http.StatusBadRequest, "at least one compact setting is required")
+		return
+	}
+
+	// h.mu is held across the save so two in-process writers cannot interleave:
+	// each gets the merged block the file lock produced, and the cache ends up
+	// holding the last writer's result. Same shape as HandleSetSmallModel. No
+	// lock inversion: the only OnConfigSaved subscriber is a channel signal
+	// (internal/sync/watcher.go), which never takes h.mu.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	merged, err := config.SaveOcodeCompactConfigPatch(patch)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
 	}
-	h.mu.Lock()
-	if h.cfg != nil {
-		h.cfg.Ocode.Compact = req
-	}
-	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, req)
+	h.cfg.Ocode.Compact = merged
+	writeJSON(w, http.StatusOK, merged)
 }
 
 // HandleGetPermissionConcerns reports the catalog of judge concern categories the

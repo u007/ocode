@@ -2737,46 +2737,84 @@ func (a *Agent) compactSummaryClient() LLMClient {
 		// enabled (compaction is a good fit for it — cheap/fast, no tool
 		// calls), falling back to the main client when small-model use is
 		// disabled or unresolvable.
-		if a.SmallModelRuntimeEnabled() {
-			if small := a.resolveSmallModel(); small != "" {
-				if client := NewClient(&compactCfg, small); client != nil {
-					return a.bindOpenCodeSessionID(client)
-				}
-			}
-		}
-		// Fallback: try to create a fresh no-thinking client for the main
-		// provider/model. If a.client is a custom/mock implementation that
-		// cannot be reconstructed, return it as-is — compaction may then
-		// use extended thinking; this is a documented limitation for
-		// non-standard client implementations.
-		if noThink := a.noThinkingClient(); noThink != nil {
-			return noThink
-		}
-		return a.client
+		return a.smallModelOrMainClient(&compactCfg)
 	}
 
 	provider := compact.SummaryProvider
-	if provider == "" {
-		provider = a.client.GetProvider()
-	}
-
 	model := compact.SummaryModel
 	if model == "" {
 		model = a.client.GetModel()
 	}
 	if model == "" {
-		if noThink := a.noThinkingClient(); noThink != nil {
-			return noThink
+		return a.smallModelOrMainClient(&compactCfg)
+	}
+
+	return a.overrideModelClient(&compactCfg, provider, model)
+}
+
+// smallModelOrMainClient is the "no explicit override" arm shared by the
+// compaction and speech-summary side clients: prefer the small model when its
+// gate is on, then a no-thinking copy of the main client. Factored out so both
+// paths resolve identically — a divergence here would make one feature silently
+// use a different (and possibly thinking-enabled) model than the other.
+func (a *Agent) smallModelOrMainClient(cfg *config.Config) LLMClient {
+	if a.SmallModelRuntimeEnabled() {
+		if small := a.resolveSmallModel(); small != "" {
+			if client := NewClient(cfg, small); client != nil {
+				return a.bindOpenCodeSessionID(client)
+			}
 		}
-		return a.client
 	}
+	// Fallback: a fresh no-thinking client for the main provider/model. If
+	// a.client is a custom/mock implementation that cannot be reconstructed,
+	// return it as-is — the side task may then use extended thinking; this is a
+	// documented limitation for non-standard client implementations.
+	if noThink := a.noThinkingClient(); noThink != nil {
+		return noThink
+	}
+	return a.client
+}
 
+// overrideModelClient builds a no-thinking client for an EXPLICIT side-task
+// model (compaction's summary_model, speech's speech_summary_model), or falls
+// back to the small/main resolution when construction is impossible.
+//
+// Compose the wire id for NewClient, which parses "provider/model" itself:
+//
+//   - An EXPLICIT provider always wins and is joined with "/". The model half
+//     may itself be a routed id (OpenRouter addresses models as
+//     "openai/gpt-oss-120b:free"), so the composite must read provider first:
+//     "openrouter/openai/gpt-oss-120b:free".
+//   - With NO explicit provider, a model id that already names one is passed
+//     through untouched (modelIDProvider covers both id formats NewClient
+//     accepts: "provider/model" and "provider:model"). This is the shape the
+//     web/desktop model picker persists (ModelInfo.name is the canonical
+//     "provider/model" id written straight into the config field). Prefixing it
+//     with the MAIN client's provider built "openai:anthropic/claude-haiku-4-5",
+//     which NewClient's colon fallback happily resolved to provider "openai" +
+//     model "anthropic/claude-haiku-4-5" — a valid client that sends every
+//     request to the main backend under a model it does not serve, with no
+//     error anywhere.
+//   - Otherwise the id is a BARE model name; it runs on the main model's
+//     provider.
+//
+// "/" (not ":") builds the composite so resolution never depends on NewClient's
+// colon fallback, a last resort that mis-splits an id whose provider segment
+// itself contains a colon.
+func (a *Agent) overrideModelClient(cfg *config.Config, provider, model string) LLMClient {
 	targetModel := model
-	if provider != "" {
-		targetModel = provider + ":" + model
+	switch {
+	case provider != "":
+		targetModel = provider + "/" + model
+	default:
+		if modelIDProvider(cfg, model) == "" {
+			if mainProvider := a.client.GetProvider(); mainProvider != "" {
+				targetModel = mainProvider + "/" + model
+			}
+		}
 	}
 
-	if client := NewClient(&compactCfg, targetModel); client != nil {
+	if client := NewClient(cfg, targetModel); client != nil {
 		return a.bindOpenCodeSessionID(client)
 	}
 	if noThink := a.noThinkingClient(); noThink != nil {
@@ -3608,6 +3646,11 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 	// Inherit the main conversation identity (opencode* request affinity).
 	client = a.bindOpenCodeSessionID(client)
 	pinDeterministicSampling(client)
+	// The judge's read_file results travel back through this client, not the
+	// main conversation, so it needs the session mask hook of its own.
+	if gc, ok := client.(*GenericClient); ok && a.judgeMaskRegistry() != nil && a.redactionHook != nil {
+		gc.Redaction = a.redactionHook
+	}
 
 	// Gather context limits from config.
 	maxCtxBytes := 2048
@@ -3625,13 +3668,18 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		}
 	}
 
-	// Build initial context snapshot.
-	context := a.buildPermissionContext(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource)
+	// Build initial context snapshot. With /mask on, secrets in it and in the
+	// arguments are masked before the prompt leaves the host.
+	maskReg := a.judgeMaskRegistry()
+	context := redactFileText(a.buildPermissionContext(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource), maskReg)
 
 	// Build the prompt. Bash is rendered as the command itself (real newlines,
 	// no JSON escaping): the escaped form inflates the size and hides the
 	// line structure a reviewer reads. Every other tool renders its raw JSON.
 	toolArgs, argsTruncated := permissionArgsPayload(toolName, args)
+	if maskReg != nil {
+		toolArgs = redactText(toolArgs, maskReg)
+	}
 
 	rule := "tool." + toolName
 	scope := "tool"
@@ -3683,6 +3731,19 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		}
 	}
 
+	expandedSection := ""
+	if toolName == "bash" {
+		if exp, ok := a.expandBashForJudge(bashCommand(args)); ok {
+			var b strings.Builder
+			b.WriteString("\nExpanded command (ocode resolved these shell variables and read-only $(...) substitutions; judge paths and targets from this form — a variable resolved here is NOT undefined or unresolvable; <redacted> or an OCSEC token marks a withheld secret; anything still written as $NAME or $(...) was not resolved):\n")
+			b.WriteString(exp.Command + "\n")
+			for _, v := range exp.Variables {
+				b.WriteString("  - " + v.Name + " = " + v.Value + " (" + v.Source + ")\n")
+			}
+			expandedSection = b.String()
+		}
+	}
+
 	truncationNote := ""
 	if argsTruncated {
 		truncationNote = "\n\nNOTE: the arguments above are TRUNCATED — only a prefix of the request is shown, so the full effect is unknown. You must not approve a request you cannot fully see; answer DENY."
@@ -3693,11 +3754,13 @@ A tool call is requesting permission. Decide whether to ALLOW or DENY it.
 
 Tool: %s
 Arguments: %s
-Rule: %s
+%sRule: %s
 Scope: %s
 %s%s%s%s
 Project context:
 %s
+A value written as [[OCSEC:xxxxxx:N]] is a secret ocode masked: treat it exactly
+like the credential it stands for.
 Relative paths in the arguments — including "cd" targets — resolve against the
 "Working directory" above. A "cd" into a subdirectory of a pre-authorized path
 stays inside that path; it is NOT an escape.
@@ -3722,7 +3785,7 @@ Keep your reply short. Examples of correctly formatted final lines:
 ALLOW: writes a test file inside the project directory
 ALLOW: read-only listing of project files
 DENY: deletes files outside the working directory
-These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, relaxedSection, truncationNote, context)
+These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, expandedSection, rule, scope, allowedRoots, bannedPrefixes, relaxedSection, truncationNote, context)
 
 	// Insert the user's own local addendum (auto-permission-prompt.local.md)
 	// right after the bundled prompt, before this final prepend step runs.

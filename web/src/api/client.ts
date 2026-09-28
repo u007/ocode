@@ -45,26 +45,36 @@ import type {
   SyncStatusResponse,
   SyncLoginStartResponse,
   SyncLoginPollResponse,
-	PermissionDecision,
-	TTSEngine,
-	TTSConfig,
-	TTSStatus,
-	TTSPlayback,
-	TTSInstallState,
-	PortMapView,
-	PortMapTarget,
-	ContextBudgetReport,
-	VaultItem,
-	VaultItemMeta,
-	VaultStatus,
-	VaultGenOptions,
+  PermissionDecision,
+  TTSEngine,
+  TTSConfig,
+  TTSStatus,
+  TTSPlayback,
+  TTSInstallState,
+  PortMapView,
+  PortMapTarget,
+  ContextBudgetReport,
+  VaultItem,
+  VaultItemMeta,
+  VaultStatus,
+  VaultGenOptions,
   ChatVerbosityConfig,
   ChatVerbosityResponse,
   PendingRewind,
   PreparePendingRewindRequest,
+  PulsePage,
 } from "./types";
 
 import { noteSessionRevision } from "../lib/sessionRevision";
+
+/** Speech summarising: shortens assistant text before TTS reads it aloud.
+ *  `model` empty resolves at call time to small -> main. `enabled` is ALWAYS
+ *  serialised (never omitted), so the UI never has to guess between "off" and
+ *  "not loaded yet". */
+export interface SpeechSummaryConfig {
+  model: string;
+  enabled: boolean;
+}
 
 export interface CompactConfig {
   enabled: boolean;
@@ -78,6 +88,17 @@ export interface CompactConfig {
   summary_first_token_timeout_seconds: number;
   summary_max_retries: number;
   max_summary_input_tokens: number;
+}
+
+/**
+ * Speech-summary settings. The model rewrites an assistant message into spoken
+ * prose (code described, not read aloud) before TTS synthesises it, and
+ * `enabled` gates that entirely. It defaults to TRUE — unlike every other model
+ * gate in this file — so a fresh install speaks summaries.
+ */
+export interface SpeechSummaryConfig {
+  model: string;
+  enabled: boolean;
 }
 
 export interface AutoPermissionConfig {
@@ -263,7 +284,9 @@ function markRemoteSession(): void {
 }
 
 function resolveInitialToken(): { token: string; isRemote: boolean } {
-  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const hashParams = new URLSearchParams(
+    window.location.hash.replace(/^#/, ""),
+  );
   const fragmentToken = hashParams.get("token");
   if (fragmentToken) {
     try {
@@ -301,7 +324,8 @@ function resolveInitialToken(): { token: string; isRemote: boolean } {
     return { token: "", isRemote: true };
   }
 
-  const queryToken = new URLSearchParams(window.location.search).get("token") ?? "";
+  const queryToken =
+    new URLSearchParams(window.location.search).get("token") ?? "";
   return { token: queryToken, isRemote: false };
 }
 
@@ -341,7 +365,10 @@ export function reportAuthFailure(status: number): void {
   try {
     sessionStorage.removeItem(REMOTE_TOKEN_STORAGE_KEY);
   } catch (err) {
-    console.error("client: failed to clear stale remote token from sessionStorage", err);
+    console.error(
+      "client: failed to clear stale remote token from sessionStorage",
+      err,
+    );
   }
   onAuthFailure?.();
 }
@@ -373,9 +400,13 @@ export function authToken(): string {
  * credentials, which returns 401 "unauthorized", trips the rate limiter
  * (429 "too many requests"), and makes the non-JSON error body fail .json().
  */
-export async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+export async function authedFetch(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
   const headers = new Headers(init.headers);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (!headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
   const res = await fetch(apiPath(path), { ...init, headers });
   if (!res.ok) reportAuthFailure(res.status);
@@ -451,9 +482,15 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchJSON<T>(path: string, init?: RequestInit, host?: string, projectPath?: string): Promise<T> {
+export async function fetchJSON<T>(
+  path: string,
+  init?: RequestInit,
+  host?: string,
+  projectPath?: string,
+): Promise<T> {
   const headers = new Headers(init?.headers);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (!headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
   if (host && projectPath) headers.set("X-Ocode-Project", projectPath);
   const prefixed = host ? `${remoteApiBase(host)}${path}` : path;
@@ -489,7 +526,8 @@ export async function fetchJSON<T>(path: string, init?: RequestInit, host?: stri
 
 async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
   const headers = new Headers(init?.headers);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (!headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
   const res = await fetch(apiPath(path), { ...init, headers });
   if (!res.ok) {
@@ -544,7 +582,8 @@ export async function readSSEStream<T = unknown>(
   const dispatchFrame = (frame: string) => {
     for (const line of frame.split("\n")) {
       if (line.startsWith(":")) continue; // comment / keepalive
-      if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+      if (line.startsWith("data:"))
+        dataLines.push(line.slice(5).replace(/^ /, ""));
       else if (line.startsWith("event:")) eventName = line.slice(6).trim();
     }
     dispatch();
@@ -571,12 +610,18 @@ export async function readSSEStream<T = unknown>(
  *  built here rather than via the host-prefixing fetchJSON. On a non-2xx the
  *  thrown Error carries the body's `error` and `stage` so the UI can say which
  *  stage failed (remote-connect / remote-kill / remote-register). */
-async function remoteLifecycleRequest<T>(path: string, method: "GET" | "POST"): Promise<T> {
+async function remoteLifecycleRequest<T>(
+  path: string,
+  method: "GET" | "POST",
+): Promise<T> {
   const res = await fetch(apiPath(path), { method, headers: authHeaders() });
   if (!res.ok) {
     reportAuthFailure(res.status);
     const body = (await res.json().catch((err: unknown) => {
-      console.error(`remote lifecycle: non-JSON error body from ${path} (status ${res.status}):`, err);
+      console.error(
+        `remote lifecycle: non-JSON error body from ${path} (status ${res.status}):`,
+        err,
+      );
       return {};
     })) as { error?: string; stage?: string };
     const message = body.error || res.statusText || `HTTP ${res.status}`;
@@ -603,14 +648,19 @@ export const api = {
       host,
     );
   },
-  getSession: (id: string, opts?: { limit?: number; offset?: number }, host?: string) => {
+  getSession: (
+    id: string,
+    opts?: { limit?: number; offset?: number },
+    host?: string,
+  ) => {
     const params = new URLSearchParams();
     if (opts?.limit) params.set("limit", String(opts.limit));
     if (opts?.offset) params.set("offset", String(opts.offset));
     const qs = params.toString();
     return fetchJSON<SessionDetail>(
       `/api/sessions/${id}${qs ? `?${qs}` : ""}`,
-      undefined, host,
+      undefined,
+      host,
     ).then((detail) => {
       // Record the stored-transcript revision this transcript was fetched at,
       // so the cross-process revalidation poll can detect an out-of-process
@@ -620,29 +670,54 @@ export const api = {
       return detail;
     });
   },
-  prepareRewind: (id: string, request: PreparePendingRewindRequest, host?: string) =>
-    fetchJSON<PendingRewind>(`/api/sessions/${id}/rewinds`, {
-      method: "POST",
-      body: JSON.stringify(request),
-    }, host),
+  prepareRewind: (
+    id: string,
+    request: PreparePendingRewindRequest,
+    host?: string,
+  ) =>
+    fetchJSON<PendingRewind>(
+      `/api/sessions/${id}/rewinds`,
+      {
+        method: "POST",
+        body: JSON.stringify(request),
+      },
+      host,
+    ),
   getRewind: (id: string, token: string, host?: string) =>
-    fetchJSON<PendingRewind>(`/api/sessions/${id}/rewinds/${encodeURIComponent(token)}`, {
-      method: "GET",
-    }, host),
+    fetchJSON<PendingRewind>(
+      `/api/sessions/${id}/rewinds/${encodeURIComponent(token)}`,
+      {
+        method: "GET",
+      },
+      host,
+    ),
   cancelRewind: (id: string, token: string, host?: string) =>
-    fetchJSON<{ cancelled: boolean }>(`/api/sessions/${id}/rewinds/${encodeURIComponent(token)}`, {
-      method: "DELETE",
-    }, host),
+    fetchJSON<{ cancelled: boolean }>(
+      `/api/sessions/${id}/rewinds/${encodeURIComponent(token)}`,
+      {
+        method: "DELETE",
+      },
+      host,
+    ),
   truncateSession: (id: string, keepUntil: number, host?: string) =>
-    fetchJSON<SessionDetail>(`/api/sessions/${id}/truncate`, {
-      method: "POST",
-      body: JSON.stringify({ keepUntil }),
-    }, host),
+    fetchJSON<SessionDetail>(
+      `/api/sessions/${id}/truncate`,
+      {
+        method: "POST",
+        body: JSON.stringify({ keepUntil }),
+      },
+      host,
+    ),
   // Full-transcript message search (/search, Ctrl/Cmd+F). Returns matching
   // message INDICES in the server's post-load array — the same positions
   // `getSession` paginates, so the find bar can jump to an off-window hit.
   // See internal/server/handler_session_search.go for why this is server-side.
-  searchSession: (id: string, q: string, opts?: { limit?: number }, host?: string) => {
+  searchSession: (
+    id: string,
+    q: string,
+    opts?: { limit?: number },
+    host?: string,
+  ) => {
     const params = new URLSearchParams({ q });
     if (opts?.limit) params.set("limit", String(opts.limit));
     return fetchJSON<{
@@ -652,7 +727,10 @@ export const api = {
       scanned: number;
     }>(`/api/sessions/${id}/search?${params.toString()}`, undefined, host);
   },
-  listModels: (opts?: { provider?: string; refresh?: boolean; configured?: boolean }, host?: string) => {
+  listModels: (
+    opts?: { provider?: string; refresh?: boolean; configured?: boolean },
+    host?: string,
+  ) => {
     const params = new URLSearchParams();
     if (opts?.provider) params.set("provider", opts.provider);
     if (opts?.refresh) params.set("refresh", "true");
@@ -660,13 +738,19 @@ export const api = {
     // the server that answers (the host's own state for a remote session).
     if (opts?.configured) params.set("configured", "true");
     const qs = params.toString();
-    return fetchJSON<ModelInfo[]>(`/api/models${qs ? `?${qs}` : ""}`, undefined, host);
+    return fetchJSON<ModelInfo[]>(
+      `/api/models${qs ? `?${qs}` : ""}`,
+      undefined,
+      host,
+    );
   },
-  listAgents: (host?: string) => fetchJSON<AgentInfo[]>("/api/config/agents", undefined, host),
+  listAgents: (host?: string) =>
+    fetchJSON<AgentInfo[]>("/api/config/agents", undefined, host),
   listAgentRuns: (session?: string, host?: string) =>
     fetchJSON<AgentRun[]>(
       `/api/agents/runs${session ? `?session=${encodeURIComponent(session)}` : ""}`,
-      undefined, host,
+      undefined,
+      host,
     ),
   // `host` routes a session-scoped config read/write to a remote project's
   // server (/api/remote/<host>/…). The agent that consumes these process-global
@@ -674,12 +758,20 @@ export const api = {
   // config and the remote session's sidebar refetch then shows no change at
   // all — the "toggle does nothing" symptom on remote SSH.
   getConfigModel: (host?: string) =>
-    fetchJSON<{ model: string; context_max_tokens?: number }>("/api/config/model", undefined, host),
+    fetchJSON<{ model: string; context_max_tokens?: number }>(
+      "/api/config/model",
+      undefined,
+      host,
+    ),
   setConfigModel: (model: string, host?: string) =>
-    fetchJSON<{ model: string }>("/api/config/model", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    }, host),
+    fetchJSON<{ model: string }>(
+      "/api/config/model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ model }),
+      },
+      host,
+    ),
   // Per-session model override (Part: per-chat-session model). Sets the model
   // for one session only — persisted in its transcript metadata and reflected
   // in that session's status snapshot — without touching the global config
@@ -714,13 +806,17 @@ export const api = {
   // off; levels list the canonical off/low/med/high/xhigh/max options shared
   // with the TUI's /effort command.
   getThinkingBudget: (host?: string) =>
-    fetchJSON<{ budget: number; level: string; levels: { level: string; budget: number }[] }>(
-      "/api/config/thinking-budget",
-      undefined,
-      host,
-    ),
+    fetchJSON<{
+      budget: number;
+      level: string;
+      levels: { level: string; budget: number }[];
+    }>("/api/config/thinking-budget", undefined, host),
   setThinkingBudget: (level: string, host?: string) =>
-    fetchJSON<{ budget: number; level: string; levels: { level: string; budget: number }[] }>(
+    fetchJSON<{
+      budget: number;
+      level: string;
+      levels: { level: string; budget: number }[];
+    }>(
       "/api/config/thinking-budget",
       { method: "PUT", body: JSON.stringify({ level }) },
       host,
@@ -735,207 +831,428 @@ export const api = {
       host,
     ),
   getSmallModel: (host?: string) =>
-    fetchJSON<{ model: string; priority: string }>("/api/config/small-model", undefined, host),
+    fetchJSON<{ model: string; priority: string }>(
+      "/api/config/small-model",
+      undefined,
+      host,
+    ),
   setSmallModel: (model: string, host?: string) =>
-    fetchJSON<{ model: string; source: string }>("/api/config/small-model", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    }, host),
+    fetchJSON<{ model: string; source: string }>(
+      "/api/config/small-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ model }),
+      },
+      host,
+    ),
   // Flip the runtime small-model on/off gate (persisted, mirrors the TUI's
   // small-model sidebar toggle).
   setSmallModelEnabled: (enabled: boolean, host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean; source: string }>("/api/config/small-model", {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    }, host),
+    fetchJSON<{ model: string; enabled: boolean; source: string }>(
+      "/api/config/small-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      },
+      host,
+    ),
 
   getPermissionModel: (host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", undefined, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/permission-model",
+      undefined,
+      host,
+    ),
   setPermissionModel: (model: string, host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    }, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/permission-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ model }),
+      },
+      host,
+    ),
   setPermissionModelEnabled: (enabled: boolean, host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/permission-model", {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    }, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/permission-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      },
+      host,
+    ),
 
   // Explorer agent (explore/scout) model. Off or unset falls back to the
   // small model, then the main model — see agent.injectPurposeModelIfEligible.
   getExplorerModel: (host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", undefined, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/explorer-model",
+      undefined,
+      host,
+    ),
   setExplorerModel: (model: string, host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    }, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/explorer-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ model }),
+      },
+      host,
+    ),
   setExplorerModelEnabled: (enabled: boolean, host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/explorer-model", {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    }, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/explorer-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      },
+      host,
+    ),
 
   // Context agent (context/doc-sync) model. Off or unset falls back to the
   // small model, then the main model — see agent.injectPurposeModelIfEligible.
   getContextModel: (host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", undefined, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/context-model",
+      undefined,
+      host,
+    ),
   setContextModel: (model: string, host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    }, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/context-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ model }),
+      },
+      host,
+    ),
   setContextModelEnabled: (enabled: boolean, host?: string) =>
-    fetchJSON<{ model: string; enabled: boolean }>("/api/config/context-model", {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    }, host),
+    fetchJSON<{ model: string; enabled: boolean }>(
+      "/api/config/context-model",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      },
+      host,
+    ),
 
   // --- New/extended OcodeConfig endpoints (Plan 1: configuration-api-backend) ---
 
   getRecapConfig: (host?: string) =>
-    fetchJSON<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>(
+    fetchJSON<{
+      recap_model: string;
+      recap_model_enabled: boolean;
+      recap_timeout_seconds: number;
+    }>("/api/config/ocode/recap", undefined, host),
+  setRecapConfig: (
+    recap_model: string,
+    recap_model_enabled: boolean,
+    recap_timeout_seconds: number,
+    host?: string,
+  ) =>
+    fetchJSON<{
+      recap_model: string;
+      recap_model_enabled: boolean;
+      recap_timeout_seconds: number;
+    }>(
       "/api/config/ocode/recap",
-      undefined,
-      host,
-    ),
-  setRecapConfig: (recap_model: string, recap_model_enabled: boolean, recap_timeout_seconds: number, host?: string) =>
-    fetchJSON<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>(
-      "/api/config/ocode/recap",
-      { method: "PUT", body: JSON.stringify({ recap_model, recap_model_enabled, recap_timeout_seconds }) },
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          recap_model,
+          recap_model_enabled,
+          recap_timeout_seconds,
+        }),
+      },
       host,
     ),
 
   getCommitMsgConfig: () =>
-    fetchJSON<{ commit_msg_model: string; commit_msg_prompt: string }>("/api/config/ocode/commit-msg"),
+    fetchJSON<{ commit_msg_model: string; commit_msg_prompt: string }>(
+      "/api/config/ocode/commit-msg",
+    ),
   setCommitMsgConfig: (commit_msg_model: string, commit_msg_prompt: string) =>
-    fetchJSON<{ commit_msg_model: string; commit_msg_prompt: string }>("/api/config/ocode/commit-msg", {
-      method: "PUT",
-      body: JSON.stringify({ commit_msg_model, commit_msg_prompt }),
-    }),
+    fetchJSON<{ commit_msg_model: string; commit_msg_prompt: string }>(
+      "/api/config/ocode/commit-msg",
+      {
+        method: "PUT",
+        body: JSON.stringify({ commit_msg_model, commit_msg_prompt }),
+      },
+    ),
 
-  getCompactConfig: () => fetchJSON<CompactConfig>("/api/config/ocode/compact"),
-  setCompactConfig: (cfg: CompactConfig) =>
-    fetchJSON<CompactConfig>("/api/config/ocode/compact", { method: "PUT", body: JSON.stringify(cfg) }),
-
-  getAdvisorFull: (host?: string) =>
-    fetchJSON<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>(
-      "/api/config/advisor",
-      undefined,
+  // Host-threaded like every other config read: a remote SSH project's
+  // compaction settings live on the host that runs the session, so reading the
+  // local server's block would show and write the wrong summary model.
+  getCompactConfig: (host?: string) =>
+    fetchJSON<CompactConfig>("/api/config/ocode/compact", undefined, host),
+  // PARTIAL write: only the keys present in `patch` are applied, merged onto the
+  // block the server reads fresh from disk, so concurrent writers cannot lose
+  // each other's field. Responds with the merged block as saved, NOT an echo of
+  // the request — callers refresh from it.
+  setCompactConfig: (patch: Partial<CompactConfig>, host?: string) =>
+    fetchJSON<CompactConfig>(
+      "/api/config/ocode/compact",
+      { method: "PUT", body: JSON.stringify(patch) },
       host,
     ),
-  setAdvisorFull: (fields: Partial<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>, host?: string) =>
-    fetchJSON<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>(
+
+  // Host-threaded like every other config read: a remote SSH project's
+  // speech-summary settings live on the host that would run the summariser, so
+  // reading the local server's block would show and write the wrong model.
+  getSpeechSummaryConfig: (host?: string) =>
+    fetchJSON<SpeechSummaryConfig>("/api/config/ocode/speech-summary", undefined, host),
+  // PARTIAL write: only the keys present in `patch` are applied, merged onto the
+  // block the server reads fresh from disk. This is what lets the on/off toggle
+  // and the model picker coexist -- neither can clobber the other's field.
+  // Responds with the merged block as saved, NOT an echo of the request.
+  setSpeechSummaryConfig: (patch: Partial<SpeechSummaryConfig>, host?: string) =>
+    fetchJSON<SpeechSummaryConfig>(
+      "/api/config/ocode/speech-summary",
+      { method: "PUT", body: JSON.stringify(patch) },
+      host,
+    ),
+
+  // Shorten `text` for reading aloud. Session-scoped so it reuses that
+  // session's agent (credentials, profile, model) rather than the local
+  // server's. A summariser failure resolves with an EMPTY summary rather than
+  // an error, so callers fall back to the full text: speech must never be
+  // blocked because a side task could not run.
+  summarizeSpeech: (sessionId: string, text: string, host?: string) =>
+    fetchJSON<{ summary: string }>(
+      `/api/sessions/${sessionId}/speech-summary`,
+      { method: "POST", body: JSON.stringify({ text }) },
+      host,
+    ),
+
+  getAdvisorFull: (host?: string) =>
+    fetchJSON<{
+      model: string;
+      provider: string;
+      claude_code: boolean;
+      checkpoints: string[];
+    }>("/api/config/advisor", undefined, host),
+  setAdvisorFull: (
+    fields: Partial<{
+      model: string;
+      provider: string;
+      claude_code: boolean;
+      checkpoints: string[];
+    }>,
+    host?: string,
+  ) =>
+    fetchJSON<{
+      model: string;
+      provider: string;
+      claude_code: boolean;
+      checkpoints: string[];
+    }>(
       "/api/config/advisor",
       { method: "PUT", body: JSON.stringify(fields) },
       host,
     ),
 
-  getAutoPermissionConfig: () => fetchJSON<AutoPermissionConfig>("/api/config/ocode/permissions-auto"),
+  getAutoPermissionConfig: () =>
+    fetchJSON<AutoPermissionConfig>("/api/config/ocode/permissions-auto"),
   setAutoPermissionConfig: (cfg: AutoPermissionConfig) =>
     fetchJSON<AutoPermissionConfig>("/api/config/ocode/permissions-auto", {
       method: "PUT",
       body: JSON.stringify(cfg),
     }),
   getPermissionConcerns: () =>
-    fetchJSON<{ concerns: RelaxableConcern[] }>("/api/config/ocode/permissions-concerns"),
+    fetchJSON<{ concerns: RelaxableConcern[] }>(
+      "/api/config/ocode/permissions-concerns",
+    ),
 
   getMaskAdvanced: () =>
     fetchJSON<{
-      enabled: boolean; mode: string; model: string; base_url: string; fail_mode: string;
-      allow_remote_tier2: boolean; custom_words: string[];
+      enabled: boolean;
+      mode: string;
+      model: string;
+      base_url: string;
+      fail_mode: string;
+      allow_remote_tier2: boolean;
+      custom_words: string[];
     }>("/api/config/mask"),
-  setMaskAdvanced: (fields: { base_url: string; fail_mode: string; allow_remote_tier2: boolean; custom_words: string[] }) =>
-    fetchJSON<typeof fields>("/api/config/mask/advanced", { method: "PUT", body: JSON.stringify(fields) }),
+  setMaskAdvanced: (fields: {
+    base_url: string;
+    fail_mode: string;
+    allow_remote_tier2: boolean;
+    custom_words: string[];
+  }) =>
+    fetchJSON<typeof fields>("/api/config/mask/advanced", {
+      method: "PUT",
+      body: JSON.stringify(fields),
+    }),
 
-	getDiscoveryConfig: (host?: string) =>
-	  fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", undefined, host),
-	setDiscoveryConfig: (cfg: DiscoveryConfig, host?: string) =>
-	  fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", { method: "PUT", body: JSON.stringify(cfg) }, host),
-	/** Config + live runtime status for one session (/discover status). */
-	getDiscoveryStatus: (id: string, host?: string) =>
-	  fetchJSON<DiscoveryStatus>(`/api/sessions/${id}/discovery`, undefined, host),
+  getDiscoveryConfig: (host?: string) =>
+    fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", undefined, host),
+  setDiscoveryConfig: (cfg: DiscoveryConfig, host?: string) =>
+    fetchJSON<DiscoveryConfig>(
+      "/api/config/ocode/discovery",
+      { method: "PUT", body: JSON.stringify(cfg) },
+      host,
+    ),
+  /** Config + live runtime status for one session (/discover status). */
+  getDiscoveryStatus: (id: string, host?: string) =>
+    fetchJSON<DiscoveryStatus>(
+      `/api/sessions/${id}/discovery`,
+      undefined,
+      host,
+    ),
 
-	getTTSEngines: () => fetchJSON<{ engines: TTSEngine[] }>("/api/tts/engines"),
-	getTTSStatus: () => fetchJSON<TTSStatus>("/api/tts/status"),
-	getTTSState: () => fetchJSON<Record<string, TTSInstallState>>("/api/tts/state"),
-	ttsAcceptLicense: (engine: string, license_hash: string, license_name: string) =>
-	  fetchJSON<{ state: string }>("/api/tts/license", { method: "POST", body: JSON.stringify({ engine, license_hash, license_name }) }),
-	ttsPin: (engine: string, manifest_version: string) =>
-	  fetchJSON<{ state: string }>("/api/tts/pin", { method: "POST", body: JSON.stringify({ engine, manifest_version }) }),
-	ttsDownload: (engine: string) =>
-	  fetchJSON<{ state: string }>("/api/tts/download", { method: "POST", body: JSON.stringify({ engine }) }),
-	ttsEnable: (engine: string, model?: string) =>
-	  fetchJSON<TTSStatus>("/api/tts/enable", { method: "POST", body: JSON.stringify({ engine, model }) }),
-	ttsModelVoice: (engine: string, model: string, voice?: string) =>
-	  fetchJSON<{ engine: string; model: string; voice: string }>("/api/tts/model-voice", { method: "POST", body: JSON.stringify({ engine, model, voice }) }),
-	ttsAudioBlob: async (audioId: string): Promise<Blob> => {
-	  const res = await fetch(apiPath(`/api/tts/audio/${encodeURIComponent(audioId)}`), { headers: authHeaders() });
-	  if (!res.ok) throw new Error(`audio fetch failed (${res.status})`);
-	  return res.blob();
-	},
-	getTTSConfig: () => fetchJSON<TTSConfig>("/api/config/ocode/tts"),
-	setTTSConfig: (cfg: TTSConfig) =>
-	  fetchJSON<TTSStatus>("/api/config/ocode/tts", { method: "PUT", body: JSON.stringify(cfg) }),
-	ttsSpeak: (text: string, model?: string) =>
-	  fetchJSON<TTSPlayback>("/api/tts/speak", { method: "POST", body: JSON.stringify({ text, model }) }),
-	ttsStop: () => fetchJSON<TTSPlayback>("/api/tts/stop", { method: "POST" }),
+  getTTSEngines: () => fetchJSON<{ engines: TTSEngine[] }>("/api/tts/engines"),
+  getTTSStatus: () => fetchJSON<TTSStatus>("/api/tts/status"),
+  getTTSState: () =>
+    fetchJSON<Record<string, TTSInstallState>>("/api/tts/state"),
+  ttsAcceptLicense: (
+    engine: string,
+    license_hash: string,
+    license_name: string,
+  ) =>
+    fetchJSON<{ state: string }>("/api/tts/license", {
+      method: "POST",
+      body: JSON.stringify({ engine, license_hash, license_name }),
+    }),
+  ttsPin: (engine: string, manifest_version: string) =>
+    fetchJSON<{ state: string }>("/api/tts/pin", {
+      method: "POST",
+      body: JSON.stringify({ engine, manifest_version }),
+    }),
+  ttsDownload: (engine: string) =>
+    fetchJSON<{ state: string }>("/api/tts/download", {
+      method: "POST",
+      body: JSON.stringify({ engine }),
+    }),
+  ttsEnable: (engine: string, model?: string) =>
+    fetchJSON<TTSStatus>("/api/tts/enable", {
+      method: "POST",
+      body: JSON.stringify({ engine, model }),
+    }),
+  ttsModelVoice: (engine: string, model: string, voice?: string) =>
+    fetchJSON<{ engine: string; model: string; voice: string }>(
+      "/api/tts/model-voice",
+      { method: "POST", body: JSON.stringify({ engine, model, voice }) },
+    ),
+  ttsAudioBlob: async (audioId: string): Promise<Blob> => {
+    const res = await fetch(
+      apiPath(`/api/tts/audio/${encodeURIComponent(audioId)}`),
+      { headers: authHeaders() },
+    );
+    if (!res.ok) throw new Error(`audio fetch failed (${res.status})`);
+    return res.blob();
+  },
+  getTTSConfig: () => fetchJSON<TTSConfig>("/api/config/ocode/tts"),
+  setTTSConfig: (cfg: TTSConfig) =>
+    fetchJSON<TTSStatus>("/api/config/ocode/tts", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  ttsSpeak: (text: string, model?: string) =>
+    fetchJSON<TTSPlayback>("/api/tts/speak", {
+      method: "POST",
+      body: JSON.stringify({ text, model }),
+    }),
+  ttsStop: () => fetchJSON<TTSPlayback>("/api/tts/stop", { method: "POST" }),
 
-	getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
+  getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
   setTUISettings: (cfg: TUISettings) =>
-    fetchJSON<TUISettings>("/api/config/ocode/tui", { method: "PUT", body: JSON.stringify(cfg) }),
+    fetchJSON<TUISettings>("/api/config/ocode/tui", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
 
   getEditorConfig: () =>
-    fetchJSON<{ editor: string; editor_mode: string; ide_mode: string }>("/api/config/ocode/editor"),
+    fetchJSON<{ editor: string; editor_mode: string; ide_mode: string }>(
+      "/api/config/ocode/editor",
+    ),
   setEditorConfig: (editor: string, editor_mode: string, ide_mode: string) =>
-    fetchJSON<{ editor: string; editor_mode: string; ide_mode: string }>("/api/config/ocode/editor", {
-      method: "PUT",
-      body: JSON.stringify({ editor, editor_mode, ide_mode }),
-    }),
+    fetchJSON<{ editor: string; editor_mode: string; ide_mode: string }>(
+      "/api/config/ocode/editor",
+      {
+        method: "PUT",
+        body: JSON.stringify({ editor, editor_mode, ide_mode }),
+      },
+    ),
 
-  getImageGenConfig: () => fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen"),
+  getImageGenConfig: () =>
+    fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen"),
   setImageGenConfig: (cfg: ImageGenConfig) =>
-    fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen", { method: "PUT", body: JSON.stringify(cfg) }),
+    fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
 
   getPathsConfig: () =>
-    fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string; platform?: string }>(
-      "/api/config/ocode/paths",
-    ),
+    fetchJSON<{
+      extra_allowed_paths: string[];
+      upload_dir: string;
+      platform?: string;
+    }>("/api/config/ocode/paths"),
   setPathsConfig: (extra_allowed_paths: string[], upload_dir: string) =>
-    fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>("/api/config/ocode/paths", {
-      method: "PUT",
-      body: JSON.stringify({ extra_allowed_paths, upload_dir }),
-    }),
+    fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>(
+      "/api/config/ocode/paths",
+      {
+        method: "PUT",
+        body: JSON.stringify({ extra_allowed_paths, upload_dir }),
+      },
+    ),
 
   getLimitsConfig: () =>
-    fetchJSON<{ max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }>(
-      "/api/config/ocode/limits",
-    ),
-  setLimitsConfig: (fields: { max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }) =>
-    fetchJSON<typeof fields>("/api/config/ocode/limits", { method: "PUT", body: JSON.stringify(fields) }),
+    fetchJSON<{
+      max_steps: number;
+      image_max_dim: number;
+      max_concurrent_agents: number;
+      undo_max_age_delta: number;
+    }>("/api/config/ocode/limits"),
+  setLimitsConfig: (fields: {
+    max_steps: number;
+    image_max_dim: number;
+    max_concurrent_agents: number;
+    undo_max_age_delta: number;
+  }) =>
+    fetchJSON<typeof fields>("/api/config/ocode/limits", {
+      method: "PUT",
+      body: JSON.stringify(fields),
+    }),
 
   getBrowserConfig: () =>
-    fetchJSON<{ chrome_path: string; idle_timeout_minutes: number; screencast_quality: number }>(
-      "/api/config/ocode/browser",
-    ),
-  setBrowserConfig: (fields: { chrome_path: string; idle_timeout_minutes: number; screencast_quality: number }) =>
-    fetchJSON<typeof fields>("/api/config/ocode/browser", { method: "PUT", body: JSON.stringify(fields) }),
+    fetchJSON<{
+      chrome_path: string;
+      idle_timeout_minutes: number;
+      screencast_quality: number;
+    }>("/api/config/ocode/browser"),
+  setBrowserConfig: (fields: {
+    chrome_path: string;
+    idle_timeout_minutes: number;
+    screencast_quality: number;
+  }) =>
+    fetchJSON<typeof fields>("/api/config/ocode/browser", {
+      method: "PUT",
+      body: JSON.stringify(fields),
+    }),
 
   // Managed `htrcli serve` daemon lifecycle (Settings > Browser). start/stop
   // also persist htr_enabled; a failure is reported in status.error at HTTP 200.
   getHtrStatus: () => fetchJSON<HtrStatus>("/api/config/ocode/htr"),
-  startHtr: () => fetchJSON<HtrStatus>("/api/config/ocode/htr/start", { method: "POST" }),
-  stopHtr: () => fetchJSON<HtrStatus>("/api/config/ocode/htr/stop", { method: "POST" }),
-  listHtrTabs: () => fetchJSON<{ tabs: HtrTab[]; error?: string }>("/api/config/ocode/htr/tabs"),
+  startHtr: () =>
+    fetchJSON<HtrStatus>("/api/config/ocode/htr/start", { method: "POST" }),
+  stopHtr: () =>
+    fetchJSON<HtrStatus>("/api/config/ocode/htr/stop", { method: "POST" }),
+  listHtrTabs: () =>
+    fetchJSON<{ tabs: HtrTab[]; error?: string }>("/api/config/ocode/htr/tabs"),
 
   getFeaturesConfig: () =>
-    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features"),
+    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>(
+      "/api/config/ocode/features",
+    ),
   setFeaturesConfig: (memory_enabled: boolean, doc_prompt_enabled: boolean) =>
-    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features", {
-      method: "PUT",
-      body: JSON.stringify({ memory_enabled, doc_prompt_enabled }),
-    }),
+    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>(
+      "/api/config/ocode/features",
+      {
+        method: "PUT",
+        body: JSON.stringify({ memory_enabled, doc_prompt_enabled }),
+      },
+    ),
   getChatVerbosityConfig: () =>
     fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity"),
   setChatVerbosityConfig: (cfg: ChatVerbosityConfig) =>
@@ -944,26 +1261,43 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
 
-  getProfileDebugConfig: () => fetchJSON<{ profile_debug: boolean }>("/api/config/ocode/profile-debug"),
+  getProfileDebugConfig: () =>
+    fetchJSON<{ profile_debug: boolean }>("/api/config/ocode/profile-debug"),
   setProfileDebugConfig: (profile_debug: boolean) =>
     fetchJSON<{ profile_debug: boolean }>("/api/config/ocode/profile-debug", {
       method: "PUT",
       body: JSON.stringify({ profile_debug }),
     }),
 
-  getPluginsEnabledConfig: () => fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled"),
+  getPluginsEnabledConfig: () =>
+    fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled"),
   setPluginsEnabledConfig: (ast: boolean) =>
-    fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled", { method: "PUT", body: JSON.stringify({ ast }) }),
+    fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled", {
+      method: "PUT",
+      body: JSON.stringify({ ast }),
+    }),
 
   getLocalModelsConfig: (host?: string) =>
-    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models", undefined, host),
-  setLocalModelsConfig: (models: Record<string, { enabled: boolean; max_parallel: number }>, host?: string) =>
-    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models", {
-      method: "PUT",
-      body: JSON.stringify(models),
-    }, host),
+    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>(
+      "/api/config/ocode/local-models",
+      undefined,
+      host,
+    ),
+  setLocalModelsConfig: (
+    models: Record<string, { enabled: boolean; max_parallel: number }>,
+    host?: string,
+  ) =>
+    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>(
+      "/api/config/ocode/local-models",
+      {
+        method: "PUT",
+        body: JSON.stringify(models),
+      },
+      host,
+    ),
 
-  getBackendConfig: () => fetchJSON<{ backend_url: string }>("/api/config/ocode/backend"),
+  getBackendConfig: () =>
+    fetchJSON<{ backend_url: string }>("/api/config/ocode/backend"),
   setBackendConfig: (backend_url: string) =>
     fetchJSON<{ backend_url: string }>("/api/config/ocode/backend", {
       method: "PUT",
@@ -973,21 +1307,37 @@ export const api = {
   // Config/auth sync server (kakiit) override — separate from backend_url
   // above. Empty sync_url means "use the default" (resolved_url reports
   // what that resolves to: OCODE_SYNC_URL, then the production hub).
-  getSyncURLConfig: () => fetchJSON<{ sync_url: string; resolved_url: string }>("/api/config/ocode/sync-url"),
+  getSyncURLConfig: () =>
+    fetchJSON<{ sync_url: string; resolved_url: string }>(
+      "/api/config/ocode/sync-url",
+    ),
   setSyncURLConfig: (sync_url: string) =>
-    fetchJSON<{ sync_url: string; resolved_url: string }>("/api/config/ocode/sync-url", {
-      method: "PUT",
-      body: JSON.stringify({ sync_url }),
-    }),
+    fetchJSON<{ sync_url: string; resolved_url: string }>(
+      "/api/config/ocode/sync-url",
+      {
+        method: "PUT",
+        body: JSON.stringify({ sync_url }),
+      },
+    ),
   getFakeAgentConfig: () =>
-    fetchJSON<{ fake_agent: string; active: string; options: string[] }>("/api/config/ocode/fake-agent"),
+    fetchJSON<{ fake_agent: string; active: string; options: string[] }>(
+      "/api/config/ocode/fake-agent",
+    ),
   setFakeAgentConfig: (fake_agent: string) =>
-    fetchJSON<{ fake_agent: string; active: string; options: string[] }>("/api/config/ocode/fake-agent", {
-      method: "PUT",
-      body: JSON.stringify({ fake_agent }),
-    }),
+    fetchJSON<{ fake_agent: string; active: string; options: string[] }>(
+      "/api/config/ocode/fake-agent",
+      {
+        method: "PUT",
+        body: JSON.stringify({ fake_agent }),
+      },
+    ),
 
-  getGitDiff: (path?: string, project?: string, staged?: boolean, host?: string) => {
+  getGitDiff: (
+    path?: string,
+    project?: string,
+    staged?: boolean,
+    host?: string,
+  ) => {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
     if (project) params.set("project", project);
@@ -1052,11 +1402,18 @@ export const api = {
   /** Resolve one conflicted file: resolution is "ours" | "theirs" | "mark".
    *  `mark` stages the file as-is and the server refuses while conflict
    *  markers remain, so the user cannot half-resolve. */
-  gitResolveConflict: (req: GitConflictResolveRequest, project?: string, host?: string) =>
-    fetchJSON<GitWorkspace>(`/api/git/conflict/resolve${projQuery(project, host)}`, {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+  gitResolveConflict: (
+    req: GitConflictResolveRequest,
+    project?: string,
+    host?: string,
+  ) =>
+    fetchJSON<GitWorkspace>(
+      `/api/git/conflict/resolve${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(req),
+      },
+    ),
 
   /** Continue / abort / skip an operation that halted mid-flight. `kind` is
    *  the operation the panel currently shows; the server re-detects it and
@@ -1064,15 +1421,28 @@ export const api = {
    *  operation. Which actions are valid depends on the kind — a merge has no
    *  skip, a bisect has no continue. */
   gitOperation: (req: GitOperationRequest, project?: string, host?: string) =>
-    fetchJSON<GitOperationResult>(`/api/git/operation${projQuery(project, host)}`, {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+    fetchJSON<GitOperationResult>(
+      `/api/git/operation${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(req),
+      },
+    ),
 
-  gitStash: (message: string, paths: string[], project?: string, host?: string, includeUntracked = false) =>
+  gitStash: (
+    message: string,
+    paths: string[],
+    project?: string,
+    host?: string,
+    includeUntracked = false,
+  ) =>
     fetchJSON<GitStatus>(`/api/git/stash${projQuery(project, host)}`, {
       method: "POST",
-      body: JSON.stringify({ paths, message, include_untracked: includeUntracked }),
+      body: JSON.stringify({
+        paths,
+        message,
+        include_untracked: includeUntracked,
+      }),
     }),
 
   /** Stash entries of the repo, newest first. */
@@ -1089,7 +1459,12 @@ export const api = {
 
   /** Restore selected files from a stash entry into the working tree
    *  (unstaged). The stash entry is kept. Returns the refreshed workspace. */
-  gitStashApply: (index: number, paths: string[], project?: string, host?: string) =>
+  gitStashApply: (
+    index: number,
+    paths: string[],
+    project?: string,
+    host?: string,
+  ) =>
     fetchJSON<GitWorkspace>(`/api/git/stash/apply${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ index, paths }),
@@ -1101,7 +1476,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ index }),
     }),
-  gitCommit: (message: string, paths: string[], project?: string, host?: string) =>
+  gitCommit: (
+    message: string,
+    paths: string[],
+    project?: string,
+    host?: string,
+  ) =>
     fetchJSON<GitStatus>(`/api/git/commit${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths, message }),
@@ -1139,30 +1519,45 @@ export const api = {
       body: JSON.stringify({ paths, dest_dir: destDir }),
     }),
   fsDelete: (paths: string[], project?: string, host?: string) =>
-    fetchJSON<{ success: boolean }>(`/api/fs/delete${projQuery(project, host)}`, {
-      method: "POST",
-      body: JSON.stringify({ paths }),
-    }),
+    fetchJSON<{ success: boolean }>(
+      `/api/fs/delete${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ paths }),
+      },
+    ),
   fsRename: (path: string, newName: string, project?: string, host?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/rename${projQuery(project, host)}`, {
-      method: "POST",
-      body: JSON.stringify({ path, new_name: newName }),
-    }),
+    fetchJSON<{ success: boolean; path: string }>(
+      `/api/fs/rename${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ path, new_name: newName }),
+      },
+    ),
   fsNewFile: (path: string, project?: string, host?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-file${projQuery(project, host)}`, {
-      method: "POST",
-      body: JSON.stringify({ path }),
-    }),
+    fetchJSON<{ success: boolean; path: string }>(
+      `/api/fs/new-file${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      },
+    ),
   fsNewFolder: (path: string, project?: string, host?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/new-folder${projQuery(project, host)}`, {
-      method: "POST",
-      body: JSON.stringify({ path }),
-    }),
+    fetchJSON<{ success: boolean; path: string }>(
+      `/api/fs/new-folder${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      },
+    ),
   fsDuplicate: (path: string, project?: string, host?: string) =>
-    fetchJSON<{ success: boolean; path: string }>(`/api/fs/duplicate${projQuery(project, host)}`, {
-      method: "POST",
-      body: JSON.stringify({ path }),
-    }),
+    fetchJSON<{ success: boolean; path: string }>(
+      `/api/fs/duplicate${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      },
+    ),
   listCronJobs: () => fetchJSON<CronJobsResponse>("/api/cron"),
   getCronJob: (id: string) => fetchJSON<CronJob>(`/api/cron/${id}`),
   addCronJob: (job: CronJobWriteRequest) =>
@@ -1183,9 +1578,13 @@ export const api = {
   drainCronOutbox: () =>
     fetchJSON<CronOutboxResponse>("/api/cron/outbox?drain=true"),
   getCronRuns: (jobId: string, limit = 50, offset = 0) =>
-    fetchJSON<CronRunsResponse>(`/api/cron/${encodeURIComponent(jobId)}/runs?limit=${limit}&offset=${offset}`),
+    fetchJSON<CronRunsResponse>(
+      `/api/cron/${encodeURIComponent(jobId)}/runs?limit=${limit}&offset=${offset}`,
+    ),
   getCronRun: (jobId: string, runId: string) =>
-    fetchJSON<CronRun>(`/api/cron/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}`),
+    fetchJSON<CronRun>(
+      `/api/cron/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}`,
+    ),
   getCronTargets: () => fetchJSON<CronTargetsResponse>("/api/cron/targets"),
   setCronTarget: (workdir: string, chatId: number) =>
     fetchJSON<{ ok: boolean }>("/api/cron/targets", {
@@ -1210,17 +1609,23 @@ export const api = {
   syncLogout: () => fetchEmpty("/api/sync/logout", { method: "POST" }),
   getMCP: (host?: string, sessionId?: string) =>
     fetchJSON<MCPStatus[]>(
-      sessionId ? `/api/mcp?session_id=${encodeURIComponent(sessionId)}` : "/api/mcp",
+      sessionId
+        ? `/api/mcp?session_id=${encodeURIComponent(sessionId)}`
+        : "/api/mcp",
       undefined,
       host,
     ),
   getAdvisor: (host?: string) =>
     fetchJSON<{ model: string }>("/api/config/advisor", undefined, host),
   setAdvisor: (model: string, host?: string) =>
-    fetchJSON<{ model: string }>("/api/config/advisor", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    }, host),
+    fetchJSON<{ model: string }>(
+      "/api/config/advisor",
+      {
+        method: "PUT",
+        body: JSON.stringify({ model }),
+      },
+      host,
+    ),
   // Advisor on/off gate. With a sessionId it reads/writes that chat session's
   // own override (persisted to the session transcript metadata by the server,
   // never to global config); without one it is the process-wide default used
@@ -1241,7 +1646,9 @@ export const api = {
       "/api/config/advisor-enabled",
       {
         method: "PUT",
-        body: JSON.stringify(sessionId ? { enabled, session_id: sessionId } : { enabled }),
+        body: JSON.stringify(
+          sessionId ? { enabled, session_id: sessionId } : { enabled },
+        ),
       },
       host,
     ),
@@ -1273,10 +1680,13 @@ export const api = {
       body: JSON.stringify({ scrollback_lines }),
     }),
   setTerminalFontConfig: (font_family: string, font_size: number) =>
-    fetchJSON<{ font_family: string; font_size: number }>("/api/config/terminal", {
-      method: "PUT",
-      body: JSON.stringify({ font_family, font_size }),
-    }),
+    fetchJSON<{ font_family: string; font_size: number }>(
+      "/api/config/terminal",
+      {
+        method: "PUT",
+        body: JSON.stringify({ font_family, font_size }),
+      },
+    ),
   setTerminalShell: (shell: string) =>
     fetchJSON<{ shell: string }>("/api/config/terminal", {
       method: "PUT",
@@ -1305,11 +1715,23 @@ export const api = {
   // updates live without polling.
   getTUIStatus: () => fetchJSON<TUIStatus>("/api/tui-status"),
   getSpending: (host?: string) =>
-    fetchJSON<{ spending_usd: number; records: number }>("/api/spending", undefined, host),
+    fetchJSON<{ spending_usd: number; records: number }>(
+      "/api/spending",
+      undefined,
+      host,
+    ),
   getLSPStatuses: (host?: string) =>
-    fetchJSON<{ lsp_servers: LSPStatus[] }>("/api/lsp/statuses", undefined, host),
+    fetchJSON<{ lsp_servers: LSPStatus[] }>(
+      "/api/lsp/statuses",
+      undefined,
+      host,
+    ),
   getModifiedFiles: (host?: string) =>
-    fetchJSON<{ modified_files: FileStatus[] }>("/api/files/modified", undefined, host),
+    fetchJSON<{ modified_files: FileStatus[] }>(
+      "/api/files/modified",
+      undefined,
+      host,
+    ),
   getSessionContext: (id: string, host?: string) =>
     fetchJSON<{
       session_id: string;
@@ -1419,12 +1841,17 @@ export const api = {
 
   // ── Computer use ──
   getComputerUseConfig: () =>
-    fetchJSON<import("../api/types").ComputerUseConfig>("/api/config/computer-use"),
+    fetchJSON<import("../api/types").ComputerUseConfig>(
+      "/api/config/computer-use",
+    ),
   setComputerUseConfig: (enabled: boolean) =>
-    fetchJSON<import("../api/types").ComputerUseConfig>("/api/config/computer-use", {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    }),
+    fetchJSON<import("../api/types").ComputerUseConfig>(
+      "/api/config/computer-use",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      },
+    ),
   // Triggers the operating-system permission prompts the computer tool needs
   // (macOS: Accessibility + Screen Recording + Automation). Informational and
   // no-op on Windows/Linux, which require no explicit grant.
@@ -1483,40 +1910,62 @@ export const api = {
   // requests — a second session would just sit there doing nothing. The turn's
   // output arrives over the session mirror (see SessionTabSync), which is where
   // the UI renders it from anyway.
-  sendMessage: (sessionId: string, content: string, host?: string, rewindToken?: string) => {
+  sendMessage: (
+    sessionId: string,
+    content: string,
+    host?: string,
+    rewindToken?: string,
+  ) => {
     // Must be the same window id the ProfileSwitcher wrote its active profile
     // to (see getWindowId); re-deriving it here is what let the two diverge.
-    const windowId = getWindowId()
-    return fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
-      method: "POST",
-      headers: { "X-Window-Id": windowId },
-      body: JSON.stringify({
-        content,
-        windowId,
-        async: true,
-        ...(rewindToken ? { rewindToken } : {}),
-      }),
-    }, host)
+    const windowId = getWindowId();
+    return fetchJSON<ChatResponse>(
+      `/api/sessions/${sessionId}/message`,
+      {
+        method: "POST",
+        headers: { "X-Window-Id": windowId },
+        body: JSON.stringify({
+          content,
+          windowId,
+          async: true,
+          ...(rewindToken ? { rewindToken } : {}),
+        }),
+      },
+      host,
+    );
   },
-  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string, host?: string, permissionMode?: string) => {
-    const windowId = getWindowId()
-    return fetchJSON<ChatResponse>("/api/chat", {
-      method: "POST",
-      headers: { "X-Window-Id": windowId },
-      body: JSON.stringify({
-        content,
-        sessionId,
-        model,
-        request_id: requestId,
-        project_path: projectPath,
-        windowId,
-        // A draft ("new-*") tab has no server session id yet, so its permission
-        // mode rides along with the first message; the server persists it as
-        // the new session's override. Ignored for an existing session.
-        permission_mode: permissionMode,
-        async: true,
-      }),
-    }, host, projectPath)
+  chat: (
+    content: string,
+    sessionId?: string,
+    model?: string,
+    requestId?: string,
+    projectPath?: string,
+    host?: string,
+    permissionMode?: string,
+  ) => {
+    const windowId = getWindowId();
+    return fetchJSON<ChatResponse>(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: { "X-Window-Id": windowId },
+        body: JSON.stringify({
+          content,
+          sessionId,
+          model,
+          request_id: requestId,
+          project_path: projectPath,
+          windowId,
+          // A draft ("new-*") tab has no server session id yet, so its permission
+          // mode rides along with the first message; the server persists it as
+          // the new session's override. Ignored for an existing session.
+          permission_mode: permissionMode,
+          async: true,
+        }),
+      },
+      host,
+      projectPath,
+    );
   },
   // Run a shell command via POST /api/shell (the `!` prefix). `host` targets a
   // registered ocode Remote project: the server runs the command on that host
@@ -1526,17 +1975,27 @@ export const api = {
   // per-session shell keyed by it, so env/aliases/functions are present and
   // state (cwd, exports) persists between `!` commands. `cwd` comes back on
   // every server path.
-  shellCommand: (command: string, workDir?: string, host?: string, session?: string) =>
-    fetchJSON<{ output: string; exitCode: number; error: string; cwd: string }>("/api/shell", {
-      method: "POST",
-      body: JSON.stringify({ command, workDir, host, session }),
-    }),
+  shellCommand: (
+    command: string,
+    workDir?: string,
+    host?: string,
+    session?: string,
+  ) =>
+    fetchJSON<{ output: string; exitCode: number; error: string; cwd: string }>(
+      "/api/shell",
+      {
+        method: "POST",
+        body: JSON.stringify({ command, workDir, host, session }),
+      },
+    ),
   listProjects: () => fetchJSON<Project[]>("/api/projects"),
   /** The saved project root matching the server's working directory (auto-added
    *  when the cwd is a real project root), or null. Used to auto-select the
    *  sidebar project on startup. */
   getCurrentProject: () =>
-    fetchJSON<{ project: Project | null; cwd?: string }>("/api/projects/current"),
+    fetchJSON<{ project: Project | null; cwd?: string }>(
+      "/api/projects/current",
+    ),
   addProject: (path: string) =>
     fetchJSON<{ status: string }>("/api/projects", {
       method: "POST",
@@ -1547,6 +2006,27 @@ export const api = {
     fetchJSON<{ status: string }>("/api/projects", {
       method: "POST",
       body: JSON.stringify({ host, path, ...(port ? { port } : {}) }),
+    }),
+  /** Create a NEW remote (SSH/WSL) project reusing an existing project's path,
+   *  display name and group ("duplicate as remote"). Unlike addRemoteProject,
+   *  a target that is already saved fails with HTTP 409 (ApiError) instead of
+   *  silently reusing the existing row. */
+  duplicateProjectAsRemote: (input: {
+    host: string;
+    path: string;
+    port?: number;
+    name?: string;
+    group?: string;
+  }) =>
+    fetchJSON<Project>("/api/projects/duplicate", {
+      method: "POST",
+      body: JSON.stringify({
+        host: input.host,
+        path: input.path,
+        ...(input.port ? { port: input.port } : {}),
+        ...(input.name ? { name: input.name } : {}),
+        ...(input.group ? { group: input.group } : {}),
+      }),
     }),
   updateRemoteProject: (input: {
     old_host: string;
@@ -1587,7 +2067,9 @@ export const api = {
       // Scoped form: remote entries are keyed by (host, verbatim path) so
       // the same path on two hosts (or local vs remote) keeps its own
       // position. Local entries omit host, preserving legacy semantics.
-      body: JSON.stringify({ projects: refs.map((r) => ({ path: r.path, host: r.host ?? "" })) }),
+      body: JSON.stringify({
+        projects: refs.map((r) => ({ path: r.path, host: r.host ?? "" })),
+      }),
     }),
   setProjectGroup: (path: string, group: string, host?: string) =>
     fetchJSON<{ status: string }>("/api/projects/group", {
@@ -1597,19 +2079,26 @@ export const api = {
   listGroups: () => fetchJSON<ProjectGroup[]>("/api/projects/groups"),
   /** Every project's open-session tabs, server-side so every window/origin
    *  sees the same tab bar. */
-  getTabs: () => fetchJSON<{ projects: Record<string, ServerProjectTabs> }>("/api/tabs"),
+  getTabs: () =>
+    fetchJSON<{ projects: Record<string, ServerProjectTabs> }>("/api/tabs"),
   /** Full replacement of every project's open-session tabs. */
   setTabs: (projects: Record<string, ServerProjectTabs>) =>
-    fetchJSON<{ status: string }>("/api/tabs", { method: "PUT", body: JSON.stringify({ projects }) }),
+    fetchJSON<{ status: string }>("/api/tabs", {
+      method: "PUT",
+      body: JSON.stringify({ projects }),
+    }),
   createGroup: (name: string) =>
     fetchJSON<{ status: string }>("/api/projects/groups", {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
   deleteGroup: (name: string) =>
-    fetchJSON<{ status: string }>("/api/projects/groups/" + encodeURIComponent(name), {
-      method: "DELETE",
-    }),
+    fetchJSON<{ status: string }>(
+      "/api/projects/groups/" + encodeURIComponent(name),
+      {
+        method: "DELETE",
+      },
+    ),
   renameGroup: (oldName: string, newName: string) =>
     fetchJSON<Project[]>("/api/projects/groups/rename", {
       method: "POST",
@@ -1626,16 +2115,28 @@ export const api = {
       body: JSON.stringify({ name, collapsed }),
     }),
   // Monaco editor settings and extensions
-  getMonacoSettings: () => fetchJSON<{ theme: string; font_size: number; tab_size: number; word_wrap: boolean; minimap: boolean; line_numbers: boolean }>("/api/monaco/settings"),
+  getMonacoSettings: () =>
+    fetchJSON<{
+      theme: string;
+      font_size: number;
+      tab_size: number;
+      word_wrap: boolean;
+      minimap: boolean;
+      line_numbers: boolean;
+    }>("/api/monaco/settings"),
   setMonacoSettings: (settings: Record<string, unknown>) =>
     fetchJSON<{ status: string }>("/api/monaco/settings", {
       method: "PUT",
       body: JSON.stringify(settings),
     }),
   listMonacoExtensions: () =>
-    fetchJSON<Array<{ name: string; label: string; enabled: boolean; builtin: boolean }>>("/api/monaco/extensions"),
+    fetchJSON<
+      Array<{ name: string; label: string; enabled: boolean; builtin: boolean }>
+    >("/api/monaco/extensions"),
   toggleMonacoExtension: (name: string) =>
-    fetchJSON<{ name: string; label: string; enabled: boolean; builtin: boolean }[]>("/api/monaco/extensions/" + encodeURIComponent(name) + "/toggle", {
+    fetchJSON<
+      { name: string; label: string; enabled: boolean; builtin: boolean }[]
+    >("/api/monaco/extensions/" + encodeURIComponent(name) + "/toggle", {
       method: "PUT",
     }),
   // Directory browser for the project sidebar folder picker.
@@ -1653,16 +2154,19 @@ export const api = {
   recapSession: (id: string, host?: string) =>
     fetchJSON<{ recap: string }>(
       `/api/sessions/${encodeURIComponent(id)}/recap`,
-      undefined, host,
+      undefined,
+      host,
     ),
   shareSession: (id: string, host?: string) =>
     fetchJSON<{ markdown: string }>(
       `/api/sessions/${encodeURIComponent(id)}/share`,
-      undefined, host,
+      undefined,
+      host,
     ),
   btwSession: (id: string, content: string, host?: string) =>
     fetchJSON<{ status: string }>(
-      `/api/sessions/${encodeURIComponent(id)}/btw`, {
+      `/api/sessions/${encodeURIComponent(id)}/btw`,
+      {
         method: "POST",
         body: JSON.stringify({ content }),
       },
@@ -1671,7 +2175,9 @@ export const api = {
 
   // Mask (secret redaction) config
   getMaskConfig: () =>
-    fetchJSON<{ enabled: boolean; mode: string; model: string }>("/api/config/mask"),
+    fetchJSON<{ enabled: boolean; mode: string; model: string }>(
+      "/api/config/mask",
+    ),
   setMaskEnabled: (enabled: boolean) =>
     fetchJSON<{ enabled: boolean }>("/api/config/mask/enabled", {
       method: "PUT",
@@ -1707,20 +2213,42 @@ export const api = {
   // query string (the server dispatches on hostParam(r) only — a host
   // field in the JSON body is ignored and the save would take the LOCAL
   // branch against a remote project_root).
-  saveFileContent: (path: string, content: string, projectRoot?: string, expectedHash?: string, force?: boolean, host?: string) =>
-    fetchJSON<{ path: string; saved: boolean }>(`/api/files/content${host ? `?host=${encodeURIComponent(host)}` : ""}`, {
-      method: "PUT",
-      body: JSON.stringify({ path, content, project_root: projectRoot, expected_hash: expectedHash, force }),
-    }),
+  saveFileContent: (
+    path: string,
+    content: string,
+    projectRoot?: string,
+    expectedHash?: string,
+    force?: boolean,
+    host?: string,
+  ) =>
+    fetchJSON<{ path: string; saved: boolean }>(
+      `/api/files/content${host ? `?host=${encodeURIComponent(host)}` : ""}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          path,
+          content,
+          project_root: projectRoot,
+          expected_hash: expectedHash,
+          force,
+        }),
+      },
+    ),
 
   // ── File content load (GET) for the sidebar PreviewHost text/markdown
   // viewer (same endpoint the editor tabs use). host selects a registered
   // remote project — the read runs on that host.
-  getFileContent: async (path: string, projectRoot?: string, host?: string): Promise<{ content: string; is_binary: boolean }> => {
+  getFileContent: async (
+    path: string,
+    projectRoot?: string,
+    host?: string,
+  ): Promise<{ content: string; is_binary: boolean }> => {
     const query = new URLSearchParams({ path });
     if (projectRoot) query.set("project_root", projectRoot);
     if (host) query.set("host", host);
-    const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), { headers: authHeaders() });
+    const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), {
+      headers: authHeaders(),
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
       throw new Error(err.error || res.statusText);
@@ -1753,9 +2281,15 @@ export const api = {
   // GET /api/files/raw (auth headers required — plain <img>/<iframe> tags
   // can't attach them, so callers use fetch + blob URLs). host selects a
   // registered remote project — the read runs on that host.
-  fetchFileRaw: async (path: string, projectRoot?: string, host?: string): Promise<ArrayBuffer> => {
+  fetchFileRaw: async (
+    path: string,
+    projectRoot?: string,
+    host?: string,
+  ): Promise<ArrayBuffer> => {
     const q = `path=${encodeURIComponent(path)}${projectRoot ? `&project_root=${encodeURIComponent(projectRoot)}` : ""}${host ? `&host=${encodeURIComponent(host)}` : ""}`;
-    const res = await fetch(apiPath(`/api/files/raw?${q}`), { headers: authHeaders() });
+    const res = await fetch(apiPath(`/api/files/raw?${q}`), {
+      headers: authHeaders(),
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
       throw new Error(err.error || res.statusText);
@@ -1816,15 +2350,36 @@ export const api = {
     if (range) params.set("range", range);
     if (sessionId) params.set("session_id", sessionId);
     const q = params.toString();
-    return fetchJSON<UsageSummary>(`/api/usage${q ? `?${q}` : ""}`, undefined, host);
+    return fetchJSON<UsageSummary>(
+      `/api/usage${q ? `?${q}` : ""}`,
+      undefined,
+      host,
+    );
+  },
+
+  // ── Pulse ──
+  /** GET /api/pulse — the cross-project live-sessions dashboard.
+   *  `scope` is "live" (24h idle window) or "all" (7d). `cursor` comes from a
+   *  previous page's `next_cursor`. No host parameter: v1 is local-server only,
+   *  so threading a host here would suggest a capability that does not exist. */
+  getPulse: (scope: "live" | "all", cursor: string | null, limit: number) => {
+    const params = new URLSearchParams();
+    params.set("scope", scope);
+    if (cursor) params.set("cursor", cursor);
+    params.set("limit", String(limit));
+    return fetchJSON<PulsePage>(`/api/pulse?${params.toString()}`);
   },
 
   // ── Init ──
   initProject: (project?: string, host?: string) =>
-    fetchJSON<{ path: string; status: string }>("/api/init", {
-      method: "POST",
-      body: JSON.stringify({ project: project || undefined }),
-    }, host),
+    fetchJSON<{ path: string; status: string }>(
+      "/api/init",
+      {
+        method: "POST",
+        body: JSON.stringify({ project: project || undefined }),
+      },
+      host,
+    ),
 
   // ── Permissions ──
   // Permission modes are PER CHAT SESSION. Every read/write takes an optional
@@ -1845,41 +2400,63 @@ export const api = {
       host,
     ),
   setYolo: (enabled: boolean, sessionId?: string, host?: string) =>
-    fetchJSON<{ yolo: boolean }>("/api/permissions/yolo", {
-      method: "PUT",
-      body: JSON.stringify({ enabled, session_id: sessionId }),
-    }, host),
+    fetchJSON<{ yolo: boolean }>(
+      "/api/permissions/yolo",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled, session_id: sessionId }),
+      },
+      host,
+    ),
   /** Set one chat session's live permission mode: normal|yolo|locked|sandbox.
    *  The override is persisted in that session's metadata so it survives
    *  resume and restart; it never affects any other session. */
   setPermissionMode: (mode: string, sessionId?: string, host?: string) =>
-    fetchJSON<{ mode: string; session_id?: string }>("/api/permissions/mode", {
-      method: "PUT",
-      body: JSON.stringify({ mode, session_id: sessionId }),
-    }, host),
+    fetchJSON<{ mode: string; session_id?: string }>(
+      "/api/permissions/mode",
+      {
+        method: "PUT",
+        body: JSON.stringify({ mode, session_id: sessionId }),
+      },
+      host,
+    ),
   /** The persisted default permission mode new TUI/web/RC sessions start in. */
   getPermissionModeConfig: () =>
-    fetchJSON<PermissionModeConfigResponse>("/api/config/ocode/permissions-mode"),
+    fetchJSON<PermissionModeConfigResponse>(
+      "/api/config/ocode/permissions-mode",
+    ),
   /** Persist the default permission mode: normal|yolo|locked|sandbox. */
   setPermissionModeConfig: (mode: string) =>
-    fetchJSON<PermissionModeConfigResponse>("/api/config/ocode/permissions-mode", {
-      method: "PUT",
-      body: JSON.stringify({ mode }),
-    }),
+    fetchJSON<PermissionModeConfigResponse>(
+      "/api/config/ocode/permissions-mode",
+      {
+        method: "PUT",
+        body: JSON.stringify({ mode }),
+      },
+    ),
 
   // ── Agent selection ──
   setAgent: (name: string, sessionId?: string, host?: string) =>
-    fetchJSON<{ name: string; description: string }>("/api/config/agent", {
-      method: "PUT",
-      body: JSON.stringify({ name, session_id: sessionId }),
-    }, host),
+    fetchJSON<{ name: string; description: string }>(
+      "/api/config/agent",
+      {
+        method: "PUT",
+        body: JSON.stringify({ name, session_id: sessionId }),
+      },
+      host,
+    ),
 
   // ── MCP enable/disable ──
   // Passing a sessionId scopes the toggle to that chat: the server persists the
   // global config (matching /mcp) but also records a per-session override and
   // rebuilds only that session's agent, so the change takes effect in the
   // current chat without disturbing others. host routes remote projects.
-  setMCPEnabled: (name: string, enabled: boolean, host?: string, sessionId?: string) =>
+  setMCPEnabled: (
+    name: string,
+    enabled: boolean,
+    host?: string,
+    sessionId?: string,
+  ) =>
     fetchJSON<{ name: string; status: string }>(
       `/api/mcp/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}${
         sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""
@@ -1892,17 +2469,19 @@ export const api = {
   // The server refuses non-loopback callers (the browser callback only reaches
   // the machine running ocode), so a remote session surfaces a 403 explanation.
   startMCPAuth: (name: string, host?: string) =>
-    fetchJSON<{ job_id: string; server: string; status: string; browser_note?: string }>(
-      `/api/mcp/${encodeURIComponent(name)}/auth`,
-      { method: "POST" },
-      host,
-    ),
+    fetchJSON<{
+      job_id: string;
+      server: string;
+      status: string;
+      browser_note?: string;
+    }>(`/api/mcp/${encodeURIComponent(name)}/auth`, { method: "POST" }, host),
   getMCPAuthStatus: (jobId: string, host?: string) =>
-    fetchJSON<{ job_id: string; server: string; status: string; error?: string }>(
-      `/api/mcp/auth/${encodeURIComponent(jobId)}`,
-      undefined,
-      host,
-    ),
+    fetchJSON<{
+      job_id: string;
+      server: string;
+      status: string;
+      error?: string;
+    }>(`/api/mcp/auth/${encodeURIComponent(jobId)}`, undefined, host),
 
   // ── Plugins ──
   listPlugins: () => fetchJSON<PluginInfo[]>("/api/plugins"),
@@ -1937,7 +2516,12 @@ export const api = {
   // (the server resolves it against its registry); `host` routes the call to a
   // remote project's server. Without both, a remote/multi-project tab got the
   // server's default workdir instead of its own repo.
-  getCommandContext: (name: string, args?: string, project?: string, host?: string) => {
+  getCommandContext: (
+    name: string,
+    args?: string,
+    project?: string,
+    host?: string,
+  ) => {
     const params = new URLSearchParams();
     if (args) params.set("args", args);
     if (project) params.set("project", project);
@@ -1970,12 +2554,23 @@ export const api = {
       body: JSON.stringify({ prefix, level }),
     }),
   getAutoContinue: (host?: string) =>
-    fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocode/autocontinue", undefined, host),
-  setAutoContinue: (fields: { enabled?: boolean; model?: string; clear?: boolean }, host?: string) =>
-    fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocode/autocontinue", {
-      method: "PUT",
-      body: JSON.stringify(fields),
-    }, host),
+    fetchJSON<{ enabled: boolean; model: string }>(
+      "/api/config/ocode/autocontinue",
+      undefined,
+      host,
+    ),
+  setAutoContinue: (
+    fields: { enabled?: boolean; model?: string; clear?: boolean },
+    host?: string,
+  ) =>
+    fetchJSON<{ enabled: boolean; model: string }>(
+      "/api/config/ocode/autocontinue",
+      {
+        method: "PUT",
+        body: JSON.stringify(fields),
+      },
+      host,
+    ),
   connectProvider: (provider: string, api_key: string) =>
     fetchJSON<{ provider: string; key: string }>("/api/auth/connect", {
       method: "POST",
@@ -1983,31 +2578,52 @@ export const api = {
     }),
   getDocsStatus: (project?: string, host?: string) => {
     const query = project ? `?project=${encodeURIComponent(project)}` : "";
-    return fetchJSON<{ enabled: boolean; text: string }>(`/api/docs/status${query}`, undefined, host);
+    return fetchJSON<{ enabled: boolean; text: string }>(
+      `/api/docs/status${query}`,
+      undefined,
+      host,
+    );
   },
   docsInit: (project?: string, host?: string) => {
     const query = project ? `?project=${encodeURIComponent(project)}` : "";
-    return fetchJSON<{ result: string; annotate_prompt?: string }>(`/api/docs/init${query}`, {
-      method: "POST",
-    }, host);
+    return fetchJSON<{ result: string; annotate_prompt?: string }>(
+      `/api/docs/init${query}`,
+      {
+        method: "POST",
+      },
+      host,
+    );
   },
-  docsUpdate: (sessionId: string, focus: string, project?: string, host?: string) => {
+  docsUpdate: (
+    sessionId: string,
+    focus: string,
+    project?: string,
+    host?: string,
+  ) => {
     const params = new URLSearchParams();
     if (project) params.set("project", project);
     const query = params.toString();
-    return fetchJSON<{ result: string }>(`/api/docs/update${query ? `?${query}` : ""}`, {
-      method: "POST",
-      body: JSON.stringify({ session_id: sessionId, focus }),
-    }, host);
+    return fetchJSON<{ result: string }>(
+      `/api/docs/update${query ? `?${query}` : ""}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId, focus }),
+      },
+      host,
+    );
   },
   docsCleanup: (confirm: boolean, project?: string, host?: string) => {
     const params = new URLSearchParams();
     if (project) params.set("project", project);
     const query = params.toString();
-    return fetchJSON<{ result: string }>(`/api/docs/cleanup${query ? `?${query}` : ""}`, {
-      method: "POST",
-      body: JSON.stringify({ confirm }),
-    }, host);
+    return fetchJSON<{ result: string }>(
+      `/api/docs/cleanup${query ? `?${query}` : ""}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ confirm }),
+      },
+      host,
+    );
   },
 
   // ── GitHub (backing /github pr|issue) ──
@@ -2031,14 +2647,18 @@ export const api = {
     answers: import("./types").QuestionAnswerPayload[],
     host?: string,
   ) =>
-    fetchJSON<ChatResponse>("/api/questions", {
-      method: "POST",
-      body: JSON.stringify({
-        request_id: requestId,
-        session_id: sessionId ?? undefined,
-        answers,
-      }),
-    }, host),
+    fetchJSON<ChatResponse>(
+      "/api/questions",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          request_id: requestId,
+          session_id: sessionId ?? undefined,
+          answers,
+        }),
+      },
+      host,
+    ),
 
   // Explicitly dismiss a pending `question` prompt without answering it. This
   // is the final server-side action behind the dialog's "Don't answer" button;
@@ -2046,14 +2666,22 @@ export const api = {
   // tool result in place with a dismissal notice, persists it, and broadcasts
   // `question_resolved`; no continuation turn runs, so the session goes idle
   // and the next user message starts an ordinary turn.
-  cancelQuestion: (requestId: string, sessionId: string | null, host?: string) =>
-    fetchJSON<ChatResponse>("/api/questions/cancel", {
-      method: "POST",
-      body: JSON.stringify({
-        request_id: requestId,
-        session_id: sessionId ?? undefined,
-      }),
-    }, host),
+  cancelQuestion: (
+    requestId: string,
+    sessionId: string | null,
+    host?: string,
+  ) =>
+    fetchJSON<ChatResponse>(
+      "/api/questions/cancel",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          request_id: requestId,
+          session_id: sessionId ?? undefined,
+        }),
+      },
+      host,
+    ),
 
   // ── Agent permission prompts ──
   // Resolve a pending PERMISSION_ASK raised by the agent (headless serve mode).
@@ -2070,14 +2698,18 @@ export const api = {
     decision: PermissionDecision,
     host?: string,
   ) =>
-    fetchJSON<ChatResponse>("/api/permissions/resolve", {
-      method: "POST",
-      body: JSON.stringify({
-        request_id: requestId,
-        session_id: sessionId ?? undefined,
-        decision,
-      }),
-    }, host),
+    fetchJSON<ChatResponse>(
+      "/api/permissions/resolve",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          request_id: requestId,
+          session_id: sessionId ?? undefined,
+          decision,
+        }),
+      },
+      host,
+    ),
   // ── Changes tab (session file changes) ──
   // `host` routes a remote (SSH/WSL) project's session-scoped request through
   // /api/remote/{host}; without it the local server answers (and returns an
@@ -2127,7 +2759,11 @@ export const api = {
   secretInit: (path: string, passphrase: string, confirmPassphrase: string) =>
     fetchJSON<{ key_path: string }>("/api/secret/init", {
       method: "POST",
-      body: JSON.stringify({ path, passphrase, confirm_passphrase: confirmPassphrase }),
+      body: JSON.stringify({
+        path,
+        passphrase,
+        confirm_passphrase: confirmPassphrase,
+      }),
     }),
   secretScan: (path: string, mode: "encrypt" | "decrypt") =>
     fetchJSON<SecretScanResponse>(
@@ -2136,7 +2772,8 @@ export const api = {
   // CLI-utility detection/install — the `/tools` command's data source. These
   // hit the local server; a remote project's SPA routes them through
   // /api/remote/<host>/… so the probe runs on the remote host's PATH.
-  getCliTools: (host?: string) => fetchJSON<CliToolsResponse>("/api/cli-tools", undefined, host),
+  getCliTools: (host?: string) =>
+    fetchJSON<CliToolsResponse>("/api/cli-tools", undefined, host),
   startCliToolsInstall: (tool: string, host?: string) =>
     fetchJSON<CliToolInstallStartResponse>(
       "/api/cli-tools/install",
@@ -2149,17 +2786,30 @@ export const api = {
       undefined,
       host,
     ),
-  secretEncrypt: (path: string, passphrase: string, confirmPassphrase: string) =>
+  secretEncrypt: (
+    path: string,
+    passphrase: string,
+    confirmPassphrase: string,
+  ) =>
     fetchJSON<SecretTransformResponse>("/api/secret/encrypt", {
       method: "POST",
-      body: JSON.stringify({ path, passphrase, confirm_passphrase: confirmPassphrase }),
+      body: JSON.stringify({
+        path,
+        passphrase,
+        confirm_passphrase: confirmPassphrase,
+      }),
     }),
   secretDecrypt: (path: string, passphrase: string) =>
     fetchJSON<SecretTransformResponse>("/api/secret/decrypt", {
       method: "POST",
       body: JSON.stringify({ path, passphrase }),
     }),
-  secretRekey: (path: string, oldPassphrase: string, newPassphrase: string, confirmNewPassphrase: string) =>
+  secretRekey: (
+    path: string,
+    oldPassphrase: string,
+    newPassphrase: string,
+    confirmNewPassphrase: string,
+  ) =>
     fetchJSON<{ key_path: string }>("/api/secret/rekey", {
       method: "POST",
       body: JSON.stringify({
@@ -2175,33 +2825,49 @@ export const api = {
       body: JSON.stringify({ job_id: jobId }),
     }),
   cancelSession: (sessionId: string, host?: string) =>
-    fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
-      method: "POST",
-    }, host),
+    fetchJSON<{ cancelled: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/cancel`,
+      {
+        method: "POST",
+      },
+      host,
+    ),
   /** Re-run the last turn in place (the composer's Retry after a Stop or an
    *  LLM-loop error). Unlike sendMessage, the server does NOT append a new user
    *  row — it re-steps the existing transcript tail — so the user's message is
    *  not duplicated. `host` routes remote (SSH/WSL) sessions to their server. */
   retrySession: (sessionId: string, host?: string) =>
-    fetchJSON<ChatResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/retry`, {
-      method: "POST",
-      headers: { "X-Window-Id": getWindowId() },
-    }, host),
+    fetchJSON<ChatResponse>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/retry`,
+      {
+        method: "POST",
+        headers: { "X-Window-Id": getWindowId() },
+      },
+      host,
+    ),
   /** Terminate the backend for a closed session (web/desktop tab close):
    *  cancels in-flight work AND releases the resident agent. Fire-and-forget
    *  safe on idle sessions (server no-ops). */
   closeSession: (sessionId: string, host?: string) =>
-    fetchJSON<{ cancelled: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
-      method: "POST",
-    }, host),
+    fetchJSON<{ cancelled: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/close`,
+      {
+        method: "POST",
+      },
+      host,
+    ),
   /** Re-key a chat with a fresh session id, keeping the transcript (/reset-id).
    *  The provider's X-Opencode-Session / x-session-id header derives from the
    *  session id, so this busts provider-side cache/rate-limit/sticky-routing
    *  grouping. `host` routes remote (SSH/WSL) sessions to their own server. */
   resetSessionId: (sessionId: string, host?: string) =>
-    fetchJSON<{ old_id: string; new_id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/reset-id`, {
-      method: "POST",
-    }, host),
+    fetchJSON<{ old_id: string; new_id: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/reset-id`,
+      {
+        method: "POST",
+      },
+      host,
+    ),
   // Port forwards. With a target, these hit the project-scoped family served by
   // internal/server (`/api/portmaps?host=&project=`) so the panel follows the
   // active remote SSH project. Without one they hit the desktop
@@ -2216,18 +2882,29 @@ export const api = {
       body: JSON.stringify({ remote_port: remotePort, local_port: localPort }),
     }),
   removePortMap: (remotePort: number, target?: PortMapTarget) =>
-    fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}`), { method: "DELETE" }),
-  setPortMapEnabled: (remotePort: number, enabled: boolean, target?: PortMapTarget) =>
-    fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}/${enabled ? "enable" : "disable"}`), {
-      method: "POST",
+    fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}`), {
+      method: "DELETE",
     }),
+  setPortMapEnabled: (
+    remotePort: number,
+    enabled: boolean,
+    target?: PortMapTarget,
+  ) =>
+    fetchJSON<PortMapView[]>(
+      portMapsPath(target, `/${remotePort}/${enabled ? "enable" : "disable"}`),
+      {
+        method: "POST",
+      },
+    ),
 
   // ── Password vault ──
   // Server-side, per-surface-unlocked credential store. Settings uses the
   // fixed surface id "settings"; the vault is process-wide state, so these are
   // deliberately NOT host-threaded (like the other Settings forms).
   vaultStatus: (surface: string) =>
-    fetchJSON<VaultStatus>(`/api/vault/status?surface=${encodeURIComponent(surface)}`),
+    fetchJSON<VaultStatus>(
+      `/api/vault/status?surface=${encodeURIComponent(surface)}`,
+    ),
   vaultInit: (master: string, surface: string) =>
     fetchJSON<{ unlocked: boolean }>("/api/vault/init", {
       method: "POST",
@@ -2243,7 +2920,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(surface ? { surface } : {}),
     }),
-  vaultList: (surface: string, opts: { sort?: string; limit?: number; offset?: number }) => {
+  vaultList: (
+    surface: string,
+    opts: { sort?: string; limit?: number; offset?: number },
+  ) => {
     const params = new URLSearchParams();
     params.set("surface", surface);
     // Send a value whenever the caller supplied one — the server rejects
@@ -2261,10 +2941,13 @@ export const api = {
       `/api/vault/items/${encodeURIComponent(id)}/reveal?surface=${encodeURIComponent(surface)}`,
     ),
   vaultCreate: (item: Partial<VaultItem>, surface: string) =>
-    fetchJSON<VaultItem>(`/api/vault/items?surface=${encodeURIComponent(surface)}`, {
-      method: "POST",
-      body: JSON.stringify(item),
-    }),
+    fetchJSON<VaultItem>(
+      `/api/vault/items?surface=${encodeURIComponent(surface)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(item),
+      },
+    ),
   vaultUpdate: (id: string, item: Partial<VaultItem>, surface: string) =>
     fetchJSON<VaultItem>(
       `/api/vault/items/${encodeURIComponent(id)}?surface=${encodeURIComponent(surface)}`,
@@ -2322,12 +3005,15 @@ function portMapsPath(target?: PortMapTarget, suffix = ""): string {
  *  the server answered but does not accept this project (unregistered host, or
  *  a WSL target, which never needs forwards). Any other error is assumed
  *  transient and keeps the panel offered, matching the historical behavior. */
-export async function isPortMapsAvailable(target?: PortMapTarget): Promise<boolean> {
+export async function isPortMapsAvailable(
+  target?: PortMapTarget,
+): Promise<boolean> {
   try {
     const maps = await api.listPortMaps(target);
     return Array.isArray(maps);
   } catch (e) {
-    if (e instanceof ApiError && (e.status === 404 || e.status === 400)) return false;
+    if (e instanceof ApiError && (e.status === 404 || e.status === 400))
+      return false;
     return !(e instanceof ApiError && e.status === 404);
   }
 }
@@ -2409,9 +3095,9 @@ let _browseRemoteMode = false;
 
 /** Test-only: clear the cached browse base URL. */
 export function __resetBrowseBaseCache(): void {
-	_browseBase = null;
-	_browseHTRNotice = "";
-	_browseRemoteMode = false;
+  _browseBase = null;
+  _browseHTRNotice = "";
+  _browseRemoteMode = false;
 }
 
 /** Fetches (once, then cached) the browse-origin base URL from the main
@@ -2421,22 +3107,26 @@ export async function getBrowseBase(): Promise<string> {
   if (_browseBase) return _browseBase;
   const res = await authedFetch("/api/browse/config", { method: "GET" });
   if (!res.ok) throw new Error(`browse config: ${res.status}`);
-	const body = (await res.json()) as { base_url: string; htr_notice?: string; remote_mode?: boolean };
-	_browseBase = body.base_url;
-	_browseHTRNotice = body.htr_notice ?? "";
-	_browseRemoteMode = body.remote_mode ?? false;
-	return _browseBase;
+  const body = (await res.json()) as {
+    base_url: string;
+    htr_notice?: string;
+    remote_mode?: boolean;
+  };
+  _browseBase = body.base_url;
+  _browseHTRNotice = body.htr_notice ?? "";
+  _browseRemoteMode = body.remote_mode ?? false;
+  return _browseBase;
 }
 
 export function getBrowseHTRNotice(): string {
-	return _browseHTRNotice;
+  return _browseHTRNotice;
 }
 
 /** True when the browse origin backs a remote-workspace server (`ocode serve
  *  --remote`): every host, not just private ones, routes through the
  *  reverse-proxy pipeline, so the panel should never select chrome/CDP mode. */
 export function getBrowseRemoteMode(): boolean {
-	return _browseRemoteMode;
+  return _browseRemoteMode;
 }
 
 /** Mints a one-time grant for a stateKey; the first iframe navigation carries
@@ -2455,7 +3145,10 @@ export async function mintBrowseGrant(stateKey: string): Promise<string> {
 /** Answers a Chrome-mode file chooser: uploads the picked files so headless
  *  Chrome can attach them to the page's <input type=file>. 409 means the
  *  page no longer has a chooser waiting. */
-export async function uploadBrowseFiles(stateKey: string, files: File[]): Promise<void> {
+export async function uploadBrowseFiles(
+  stateKey: string,
+  files: File[],
+): Promise<void> {
   const form = new FormData();
   form.append("state_key", stateKey);
   for (const f of files) form.append("files", f, f.name);
@@ -2481,7 +3174,10 @@ export async function revokeBrowseSession(stateKey: string): Promise<void> {
 }
 
 /** Explicit TLS bypass for a self-signed local host after the user clicks “Continue anyway”. */
-export async function bypassBrowseTLS(stateKey: string, host: string): Promise<void> {
+export async function bypassBrowseTLS(
+  stateKey: string,
+  host: string,
+): Promise<void> {
   const res = await authedFetch("/api/browse/bypass", {
     method: "POST",
     body: JSON.stringify({ state_key: stateKey, host }),
@@ -2492,9 +3188,14 @@ export async function bypassBrowseTLS(stateKey: string, host: string): Promise<v
 }
 
 /** Builds the iframe src pointing at the browse origin's stateless route:
-  *  {base}/b/{stateKey}/{scheme}/{host}/{path}?{query}[&__grant=...].
-  *  Only http/https targets are supported. */
-export function browseSrc(base: string, grant: string | null, stateKey: string, url: string): string {
+ *  {base}/b/{stateKey}/{scheme}/{host}/{path}?{query}[&__grant=...].
+ *  Only http/https targets are supported. */
+export function browseSrc(
+  base: string,
+  grant: string | null,
+  stateKey: string,
+  url: string,
+): string {
   const u = new URL(normalizeBrowseURL(url));
   const scheme = u.protocol.replace(":", "");
   const host = u.host; // host:port

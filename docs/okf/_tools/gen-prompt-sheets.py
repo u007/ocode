@@ -20,7 +20,7 @@ STACKS = [
     "react", "rust", "tanstack", "nextjs", "golang", "conduct", "php",
     "csharp", "vbnet", "dotnet", "nestjs", "python", "ruby", "ror", "elixir",
     "hallucination",
-    "pdf",
+    "pdf", "docx", "pptx",
 ]
 
 HEADER = """# {title} — Kaizen blind answer sheet (questions only)

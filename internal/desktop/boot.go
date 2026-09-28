@@ -26,9 +26,19 @@ import (
 
 // Handle is the result of a successful server boot.
 type Handle struct {
-	URL   string // e.g. "http://127.0.0.1:52341" (no trailing slash)
-	Token string // hex-encoded 16-byte random token (32 hex chars)
-	Srv   *server.Server
+	// URL is the webview origin, e.g. "https://127.0.0.1:52341" (no trailing
+	// slash). It is TLS so the webview negotiates HTTP/2; see
+	// server.NewSniffTLSListener.
+	URL string
+	// HTTPURL is the same port over plain HTTP, for tools and external
+	// browsers that do not trust the per-launch certificate (debug handle,
+	// "Copy Debug URL", curl, htrcli).
+	HTTPURL string
+	Token   string // hex-encoded 16-byte random token (32 hex chars)
+	Srv     *server.Server
+	// MigrateStorage is true when the webview must first open HTTPURL to hand
+	// its localStorage over to the https origin (see storage_migration.go).
+	MigrateStorage bool
 }
 
 // StartServer boots an ocode HTTP/SSE API server with a fresh auth token,
@@ -44,11 +54,12 @@ type Handle struct {
 // (http://<lan-ip>:<port>) must be reachable from other devices. Exposure is
 // token-gated (128-bit random token per launch, auth required on every API
 // route, rate-limited), the same posture as the TUI's /rc server which also
-// binds the LAN IP. The webview itself still opens http://127.0.0.1:PORT,
-// preserving the localStorage origin the sticky port exists for.
+// binds the LAN IP. The webview itself opens https://127.0.0.1:PORT (cert
+// pinned in-app, HTTP/2), preserving the localStorage origin the sticky port
+// exists for; plain HTTP stays served on the same port for share URLs/tools.
 //
 // The port is sticky across launches: the webview's localStorage (terminal
-// tabs, editor tabs, session tabs) is scoped to the http://127.0.0.1:PORT
+// tabs, editor tabs, session tabs) is scoped to the https://127.0.0.1:PORT
 // origin, so a random port every launch would silently discard all persisted
 // UI state. The first launch binds a random port and saves it; later launches
 // reuse it, falling back to a fresh random port (and re-saving) only if the
@@ -60,7 +71,7 @@ type Handle struct {
 // instead of being handled locally. In remote mode the listener binds
 // 127.0.0.1:0 (not 0.0.0.0) to avoid LAN exposure, and no browse
 // panel is started.
-func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace) (*Handle, error) {
+func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace, cert *server.LocalCert) (*Handle, error) {
 	tokenBytes := make([]byte, 16)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, fmt.Errorf("desktop: generate token: %w", err)
@@ -68,7 +79,7 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace)
 	token := hex.EncodeToString(tokenBytes)
 
 	if workspace != nil {
-		return startRemoteServer(webFS, workspace, token)
+		return startRemoteServer(webFS, workspace, token, cert)
 	}
 
 	savedPort := loadSavedPort()
@@ -79,6 +90,7 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace)
 
 	srv := server.New(bindAddr, "ocode", token, webFS)
 	srv.SetWorkDir(workDir)
+	srv.SetLocalTLS(cert)
 
 	ln, err := srv.Listen()
 	if err != nil && savedPort > 0 {
@@ -89,6 +101,7 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace)
 		log.Printf("desktop: saved port range %d+ unavailable, falling back to a random port for this run only: %v", savedPort, err)
 		srv = server.New("0.0.0.0:0", "ocode", token, webFS)
 		srv.SetWorkDir(workDir)
+		srv.SetLocalTLS(cert)
 		ln, err = srv.Listen()
 	}
 	if err != nil {
@@ -103,16 +116,25 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace)
 		return nil, fmt.Errorf("desktop: parse bound address %s: %w", ln.Addr().String(), err)
 	}
 	addr := ln.Addr().String()
-	url := fmt.Sprintf("http://127.0.0.1:%s", portStr)
+	url := fmt.Sprintf("https://127.0.0.1:%s", portStr)
+	httpURL := fmt.Sprintf("http://127.0.0.1:%s", portStr)
 	// Persist the bound port only when it is the saved port (or there was no
 	// saved port yet). server.Listen walks forward up to 20 ports on
 	// EADDRINUSE, so a conflict yields savedPort+1: saving that would move the
 	// webview's localStorage origin and permanently orphan the previous
 	// origin's UI state (terminal/editor tabs, unsaved editor drafts).
-	if boundPort, perr := strconv.Atoi(portStr); perr == nil && (savedPort == 0 || boundPort == savedPort) {
+	boundPort, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("desktop: parse bound port %q: %w", portStr, err)
+	}
+	if savedPort == 0 || boundPort == savedPort {
 		saveBoundPort(addr)
 	}
-	saveDebugHandle(url, token)
+	saveDebugHandle(httpURL, token)
+	migration := newStorageMigration(savedPort, boundPort, token)
+	if migration != nil {
+		srv.HandleDesktopRoute(StorageMigrationPath, migration)
+	}
 
 	// Browse origin: a second loopback listener, isolated from the SPA
 	// origin, backing the embedded browser panel. Failing to bind it means
@@ -134,9 +156,11 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace)
 	}()
 
 	return &Handle{
-		URL:   url,
-		Token: token,
-		Srv:   srv,
+		URL:            url,
+		HTTPURL:        httpURL,
+		Token:          token,
+		Srv:            srv,
+		MigrateStorage: migration != nil,
 	}, nil
 }
 
@@ -321,14 +345,15 @@ func ResolveFallbackWorkDir() string {
 // the SSH tunnel (same-number -L; see remote serve spec and workspace
 // tunnel contract). No agent/LSP/git infrastructure runs locally —
 // all execution is on the remote server.
-func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToken string) (*Handle, error) {
+func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToken string, cert *server.LocalCert) (*Handle, error) {
 	proxy, err := NewRemoteProxy(workspace, localToken)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy: %w", err)
 	}
 	bindAddr := "127.0.0.1:0"
-	if p := loadSavedPort(); p > 0 {
-		bindAddr = fmt.Sprintf("127.0.0.1:%d", p)
+	savedPort := loadSavedPort()
+	if savedPort > 0 {
+		bindAddr = fmt.Sprintf("127.0.0.1:%d", savedPort)
 	}
 
 	mux := http.NewServeMux()
@@ -367,19 +392,31 @@ func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToke
 
 	srv := &http.Server{Addr: bindAddr, Handler: mux}
 
-	ln, err := net.Listen("tcp", bindAddr)
+	inner, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		return nil, fmt.Errorf("desktop: remote listen: %w", err)
 	}
+	ln := server.NewSniffTLSListener(inner, cert)
 
 	_, portStr, err := net.SplitHostPort(ln.Addr().String())
 	if err != nil {
 		return nil, fmt.Errorf("desktop: parse bound address %s: %w", ln.Addr().String(), err)
 	}
 	addr := ln.Addr().String()
-	url := fmt.Sprintf("http://127.0.0.1:%s", portStr)
+	url := fmt.Sprintf("https://127.0.0.1:%s", portStr)
+	httpURL := fmt.Sprintf("http://127.0.0.1:%s", portStr)
+	boundPort, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("desktop: parse bound port %q: %w", portStr, err)
+	}
 	saveBoundPort(addr)
-	saveDebugHandle(url, localToken)
+	saveDebugHandle(httpURL, localToken)
+	// Registered after the "/api/" proxy catch-all is fine: ServeMux picks the
+	// more specific pattern regardless of order.
+	migration := newStorageMigration(savedPort, boundPort, localToken)
+	if migration != nil {
+		mux.Handle(StorageMigrationPath, migration)
+	}
 
 	go func() {
 		log.Printf("desktop: serving remote workspace on %s (proxy → remote)", url)
@@ -391,9 +428,11 @@ func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToke
 	// Srv is nil in remote mode (no local server; the remote
 	// server is the authority). main.go guards handle.Srv == nil.
 	return &Handle{
-		URL:   url,
-		Token: localToken,
-		Srv:   nil,
+		URL:            url,
+		HTTPURL:        httpURL,
+		Token:          localToken,
+		Srv:            nil,
+		MigrateStorage: migration != nil,
 	}, nil
 }
 

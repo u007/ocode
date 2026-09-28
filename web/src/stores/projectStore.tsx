@@ -517,6 +517,15 @@ interface ProjectContextType {
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
   addRemoteProject: (host: string, path: string, port?: number) => Promise<void>;
+  /** Create a NEW remote (SSH/WSL) project reusing an existing project's path,
+   *  name and group. Rejects with an ApiError on a (host, path) conflict. */
+  duplicateProjectAsRemote: (input: {
+    host: string;
+    path: string;
+    port?: number;
+    name?: string;
+    group?: string;
+  }) => Promise<void>;
   updateRemoteProject: (input: {
     old_host: string;
     old_path: string;
@@ -844,6 +853,25 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProjects]);
 
+  const duplicateProjectAsRemote = useCallback(async (input: {
+    host: string;
+    path: string;
+    port?: number;
+    name?: string;
+    group?: string;
+  }) => {
+    try {
+      await api.duplicateProjectAsRemote(input);
+      await refreshProjects();
+    } catch (err) {
+      // Re-thrown so the duplicate dialog can stay open and show the reason
+      // (a 409 "already in the list", invalid host, …). Same contract as
+      // removeProject/renameProject.
+      console.error("Failed to duplicate project as remote:", err);
+      throw err;
+    }
+  }, [refreshProjects]);
+
   const updateRemoteProject = useCallback(async (input: Parameters<NonNullable<typeof api.updateRemoteProject>>[0]) => {
     const updated = await api.updateRemoteProject(input);
     dispatch({
@@ -1078,6 +1106,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           closeSessionTab,
           addProject,
           addRemoteProject,
+          duplicateProjectAsRemote,
           updateRemoteProject,
           removeProject,
           renameProject,

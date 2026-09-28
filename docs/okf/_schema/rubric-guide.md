@@ -50,6 +50,9 @@ Flag tags below that in the scorecard as `(low-n)`.
   restating it wastes prompt tokens and prefix-cache budget.
 - Adjust the threshold per stack if the derived skill comes out too large/small,
   and record the chosen threshold in the derived skill's front matter.
+- A stack can set its own `threshold:` in `meta.yaml`. The document-editing stacks
+  `pdf`, `docx` and `pptx` use **0.9**: derive every tag below 0.9, and a with-skill
+  validation passes only when every target tag reaches 0.9.
 
 ## Worked example (abridged)
 

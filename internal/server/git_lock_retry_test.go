@@ -78,7 +78,7 @@ func TestGitStageRidesOutTransientIndexLock(t *testing.T) {
 		t.Fatalf("staging with a transient index.lock holder returned %d, want 200: %s", w.Code, w.Body.String())
 	}
 	staged := false
-	for _, f := range gitStatusForDir(dir).StagedFiles {
+	for _, f := range mustGitStatus(t, dir).StagedFiles {
 		if f == "a.txt" {
 			staged = true
 		}

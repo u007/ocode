@@ -157,6 +157,13 @@ func main() {
 			}
 			return
 		case "run":
+			// Headless runs load the same prompt as the TUI: without the
+			// embedded skills FS, bundled and Kaizen skills (and their
+			// force-injected digests) are silently absent.
+			registerBundled()
+			if fsys := bundledModelConfigFS(); fsys != nil {
+				agent.SetBundledModelConfigFS(fsys)
+			}
 			if err := runcli.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)

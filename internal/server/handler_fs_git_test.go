@@ -188,7 +188,7 @@ func TestGitStageDeletedFile(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 staging a deleted file, got %d: %s", w.Code, w.Body.String())
 	}
-	st := gitStatusForDir(dir)
+	st := mustGitStatus(t, dir)
 	found := false
 	for _, f := range st.StagedFiles {
 		if f == "a.txt" {

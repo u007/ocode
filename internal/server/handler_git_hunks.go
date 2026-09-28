@@ -82,7 +82,7 @@ func (h *Handler) HandleGitHunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, gitWorkspaceForDir(dir))
+	writeLocalGitWorkspace(w, dir)
 }
 
 // applyGitHunk performs the requested hunk operation for one file.

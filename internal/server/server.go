@@ -125,6 +125,10 @@ type Server struct {
 	procSup *tool.ProcessSupervisor
 	tts     *tts.Supervisor
 
+	// localTLS, when set, makes Serve accept TLS (h2) and plain HTTP on the
+	// same port. Set by the desktop shell only; see localtls.go.
+	localTLS *LocalCert
+
 	// ln and httpServer are populated by Serve so Shutdown can stop accepting
 	// new connections and drain in-flight ones. Guarded by shutdownMu.
 	shutdownMu       sync.Mutex
@@ -217,6 +221,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/state", s.authMiddleware(s.handleSessionState))
 	s.mux.HandleFunc("GET /api/sessions/{id}/status", s.authMiddleware(s.handleSessionStatus))
 	s.mux.HandleFunc("GET /api/sessions/{id}/search", s.authMiddleware(s.handleSearchSession))
+	// Pulse: the cross-project live-sessions dashboard. Lives next to the
+	// session routes because every row is a session; it is a global view
+	// (no project_path filter) by design, which is the whole point.
+	s.mux.HandleFunc("GET /api/pulse", s.authMiddleware(s.handlePulse))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
@@ -325,6 +333,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/btw", s.authMiddleware(s.handleBtw))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
+	s.mux.HandleFunc("POST /api/sessions/{id}/speech-summary", s.authMiddleware(s.handleSessionSpeechSummary))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 	s.mux.HandleFunc("GET /api/sessions/{id}/discovery", s.authMiddleware(s.handleSessionDiscovery))
 	s.mux.HandleFunc("POST /api/sessions/{id}/truncate", s.authMiddleware(s.handler.HandleTruncateSession))
@@ -372,6 +381,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/terminal", s.authMiddleware(s.handleSetTerminalConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/recap", s.authMiddleware(s.handleGetRecapConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/recap", s.authMiddleware(s.handleSetRecapConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/speech-summary", s.authMiddleware(s.handleGetSpeechSummaryConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/speech-summary", s.authMiddleware(s.handleSetSpeechSummaryConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/commit-msg", s.authMiddleware(s.handleGetCommitMsgConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/commit-msg", s.authMiddleware(s.handleSetCommitMsgConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/compact", s.authMiddleware(s.handleGetCompactConfig))
@@ -525,6 +536,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/projects", s.authMiddleware(s.handleAddProject))
 	s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
 	s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
+	s.mux.HandleFunc("POST /api/projects/duplicate", s.authMiddleware(s.handleDuplicateProjectAsRemote))
 	s.mux.HandleFunc("POST /api/projects/rename", s.authMiddleware(s.handleRenameProject))
 	s.mux.HandleFunc("PATCH /api/projects/remote", s.authMiddleware(s.handleUpdateRemoteProject))
 	s.mux.HandleFunc("POST /api/projects/reorder", s.authMiddleware(s.handleReorderProjects))
@@ -1233,6 +1245,10 @@ func (s *Server) handleSearchSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSearchSession(w, r, id)
 }
 
+func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandlePulse(w, r)
+}
+
 func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSetSessionModel(w, r, id)
@@ -1546,6 +1562,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	stop := make(chan struct{})
 	defer close(stop)
 	go s.handler.evictIdleLoop(stop)
+	go s.handler.portMapWatchdogLoop(stop)
 	// Forward new debug-log entries onto the unified event bus exactly once,
 	// process-wide (never per SSE connection).
 	go s.handler.logBusForwardLoop(stop)
@@ -1553,6 +1570,9 @@ func (s *Server) Serve(ln net.Listener) error {
 	// Track the listener + an *http.Server so Shutdown can stop accepting new
 	// connections and drain in-flight ones (graceful shutdown for desktop quit
 	// and any caller that wires it up).
+	if s.localTLS != nil {
+		ln = NewSniffTLSListener(ln, s.localTLS)
+	}
 	s.shutdownMu.Lock()
 	s.ln = ln
 	// Apply CORS at the serving boundary, after all routes (including
@@ -1563,6 +1583,19 @@ func (s *Server) Serve(ln net.Listener) error {
 	s.shutdownMu.Unlock()
 
 	return s.httpServer.Serve(ln)
+}
+
+// HandleDesktopRoute mounts a desktop-shell-owned route on the API mux. The
+// handler does its own auth: it is also mounted on the remote-mode proxy mux,
+// which has no authMiddleware.
+func (s *Server) HandleDesktopRoute(pattern string, h http.Handler) {
+	s.mux.Handle(pattern, h)
+}
+
+// SetLocalTLS makes Serve accept TLS with cert alongside plain HTTP on the same
+// port. Must be called before Serve.
+func (s *Server) SetLocalTLS(cert *LocalCert) {
+	s.localTLS = cert
 }
 
 // serveHandler is the final HTTP boundary for the route registry. Keeping the
@@ -1921,6 +1954,9 @@ func (s *Server) handleSetSessionTitle(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGenerateSessionTitle(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGenerateSessionTitle(w, r, r.PathValue("id"))
 }
+func (s *Server) handleSessionSpeechSummary(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSessionSpeechSummary(w, r, r.PathValue("id"))
+}
 func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionContext(w, r, r.PathValue("id"))
 }
@@ -2028,6 +2064,12 @@ func (s *Server) handleSetRecapConfig(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleGetCommitMsgConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetCommitMsgConfig(w, r)
+}
+func (s *Server) handleGetSpeechSummaryConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetSpeechSummaryConfig(w, r)
+}
+func (s *Server) handleSetSpeechSummaryConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetSpeechSummaryConfig(w, r)
 }
 func (s *Server) handleSetCommitMsgConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetCommitMsgConfig(w, r)
@@ -2403,6 +2445,9 @@ func (s *Server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListProjectSessions(w, r)
+}
+func (s *Server) handleDuplicateProjectAsRemote(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDuplicateProjectAsRemote(w, r)
 }
 func (s *Server) handleRenameProject(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleRenameProject(w, r)

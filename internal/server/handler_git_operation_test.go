@@ -249,7 +249,7 @@ func TestGitOperationRejectsStaleKind(t *testing.T) {
 	}
 
 	// The rejected request must have changed nothing.
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 	if status.Operation == nil || status.Operation.Kind != "merge" {
 		t.Errorf("the merge must still be in progress, got %+v", status.Operation)
 	}
@@ -324,7 +324,7 @@ func gitConflictedBisect(t *testing.T) string {
 func TestGitOperationDetectsARealBisect(t *testing.T) {
 	dir := gitConflictedBisect(t)
 
-	status := gitStatusForDir(dir)
+	status := mustGitStatus(t, dir)
 	if status.Operation == nil {
 		t.Fatal("a real bisect must be reported as an operation")
 	}

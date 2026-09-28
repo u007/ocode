@@ -981,3 +981,70 @@ func ReadTodoSnapshot() TodoSnapshot {
 	}
 	return TodoSnapshot{Revision: rev, Content: serializeItems(items), HasOpenItems: open}
 }
+
+// TodoSummaryItem is one todo line reduced to what a cross-session dashboard
+// needs: the text plus a normalized state word. The raw status marker (" ",
+// "•", "✓") stays an internal detail of the file grammar.
+type TodoSummaryItem struct {
+	Text  string
+	State string // "pending" | "in_progress" | "done"
+}
+
+// TodoSummary is a per-session todo plan reduced to counts plus the item list.
+// Unlike TodoSnapshot it is addressed by (project root, session id) rather than
+// the process's current session, so a multi-project server can summarize any
+// session's plan without mutating or depending on the shared in-memory cache
+// (which is keyed by session id alone).
+type TodoSummary struct {
+	Done    int
+	Total   int
+	Current string // text of the first in-progress item, "" when none
+	Items   []TodoSummaryItem
+}
+
+// ReadTodoSummary reads <projectRoot>/.ocode/todo/<sessionID>.md and summarizes
+// it. The returned bool is false when no file exists for the session — that is
+// the common case for a session that never used todowrite, and is NOT an error.
+// A parse failure returns an error naming the path so a malformed file is
+// reported rather than silently rendered as an empty plan.
+//
+// It resolves the directory from the passed projectRoot rather than the
+// process-global todoDir(): the headless server serves many projects from one
+// process and never chdir's per project (only the TUI does), so the global would
+// read whichever project the process happened to start in.
+func ReadTodoSummary(projectRoot, sessionID string) (TodoSummary, bool, error) {
+	if projectRoot == "" || sessionID == "" {
+		return TodoSummary{}, false, nil
+	}
+	path := filepath.Join(projectRoot, ".ocode", "todo", sessionID+".md")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return TodoSummary{}, false, nil
+	}
+	if err != nil {
+		return TodoSummary{}, false, fmt.Errorf("read todo file %s: %w", path, err)
+	}
+	// Same strict on-disk grammar readTodoFile uses: a todo file always carries
+	// the revision header and per-item ids, so a file without them is corrupt
+	// rather than a lenient legacy body.
+	_, items, err := parseTodoDoc(string(data))
+	if err != nil {
+		return TodoSummary{}, true, fmt.Errorf("todo file %s failed to parse: %w", path, err)
+	}
+	sum := TodoSummary{Total: len(items)}
+	for _, it := range items {
+		state := "pending"
+		switch it.status {
+		case "✓":
+			state = "done"
+			sum.Done++
+		case "•":
+			state = "in_progress"
+			if sum.Current == "" {
+				sum.Current = it.text
+			}
+		}
+		sum.Items = append(sum.Items, TodoSummaryItem{Text: it.text, State: state})
+	}
+	return sum, true, nil
+}

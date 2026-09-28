@@ -179,7 +179,10 @@ Rules:
 - Reads, listings, searches, builds, tests, formatters and version-control queries inside allowed_roots are allowed. A target file that does not exist yet is normal for a command that creates it.
 - Outgoing HTTP requests to any host are allowed when the URL, query string, headers, and body carry no credential or secret. This covers curl, wget, and httpie (the http/https binaries), including plain GETs, requests with query parameters, downloads, and POST/PUT/DELETE calls with inline bodies: a request to a public endpoint is ordinary development activity and is NOT by itself a reason to deny or to hesitate, so allow it when no credential is present. Judge the whole request: the URL, the query after "?", every -H/--header value, and the request body. Deny when a credential or secret appears in any of them (API key, bearer/basic token, password, session cookie, signed-URL signature), or when the request uploads local file contents (@file, --post-file, --upload-file) or expands environment variables.
 - temp_root_aliases lists other spellings of allowed_roots entries: a path under an alias (e.g. /tmp/x) is the same path as one under its resolves_to (/private/tmp/x) and is inside allowed_roots; scratch reads and writes there are ordinary development activity, ALLOW them.
+- expanded_command, when present, is the command with its shell variables and read-only $(...) substitutions resolved by ocode; resolved_variables lists each one and where it came from (assignment, environment, command). Judge paths and targets from expanded_command: a variable listed there is resolved, NOT an undefined or unresolvable one. A value shown as <redacted> or an OCSEC token is a secret ocode withheld; anything still written as $NAME or $(...) in expanded_command was not resolved.
+- A value written as [[OCSEC:xxxxxx:N]] is a secret ocode masked: treat it exactly like the credential it stands for (printing, writing or sending it off-host exposes that credential).
 - If banned_command_prefixes is non-empty and the command invokes one of them anywhere (pipeline, subshell, loop body), deny.
+- allowed_command_prefixes lists commands the user has already approved to run without asking. When the command invokes one of them by that exact name, the user trusts that tool: allow it unless another rule here requires deny. A same-named binary called by a path (e.g. /tmp/x/vp) is NOT covered; judge it on its own.
 - Deny when the call writes or deletes outside allowed_roots, exfiltrates secrets or credentials, rewrites git history, force-pushes, or modifies system configuration.
 - Reading a credential-bearing file (.env, ~/.ssh, auth files, *.pem/*.key, .npmrc/.netrc/.pgpass, auth.json) is NOT by itself a reason to deny or to hesitate. Deny only when the secret's VALUE is exposed: printed to the command's output (cat/echo/grep/tee/head on the file or on the variable holding it), written or redirected to a file, or sent off-host in a URL, header, body, or upload. A value read into a variable and passed as an argument to a local program stays on-host and is ordinary development activity — ALLOW it, e.g. DBURL=$(grep '^DATABASE_URL=' .env | cut -d= -f2-) && psql "$DBURL" -c "\dt" (psql consumes the URL as an argument; the output lists tables).
 - allow_destructive=false means a command that destroys existing data or repository state (rm -rf, git reset --hard, DROP/TRUNCATE) must be denied.
@@ -334,9 +337,17 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 
 	// Forward the arguments as a JSON object when they parse so Jev sees
 	// structure, not an escaped string.
+	// With /mask on, secrets are masked in everything below before it leaves
+	// the host: arguments in chat mode (like the conversation), file-like
+	// content in file mode.
+	maskReg := a.judgeMaskRegistry()
+	judgeArgs := args
+	if maskReg != nil {
+		judgeArgs = json.RawMessage(redactText(string(args), maskReg))
+	}
 	var arguments any
-	if err := json.Unmarshal(args, &arguments); err != nil {
-		arguments = string(args)
+	if err := json.Unmarshal(judgeArgs, &arguments); err != nil {
+		arguments = string(judgeArgs)
 	}
 
 	rule, scope := "tool."+toolName, string(PermissionScopeTool)
@@ -351,7 +362,7 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 		"scope":             scope,
 		"working_directory": a.effectiveWorkDir(),
 		"allow_destructive": a.autoPermissionAllowsDestructive(),
-		"project_context":   a.buildPermissionContext(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource),
+		"project_context":   redactFileText(a.buildPermissionContext(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource), maskReg),
 	}
 	if a.permissions != nil {
 		state["allowed_roots"] = a.permissions.AllowedRoots()
@@ -366,6 +377,9 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 			if prefixes := a.permissions.BashBannedPrefixes(); len(prefixes) > 0 {
 				state["banned_command_prefixes"] = prefixes
 			}
+			if prefixes := a.permissions.BashAllowedPrefixes(); len(prefixes) > 0 {
+				state["allowed_command_prefixes"] = prefixes
+			}
 		}
 	}
 
@@ -374,6 +388,10 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 			Command string `json:"command"`
 		}
 		if err := json.Unmarshal(args, &p); err == nil && p.Command != "" {
+			if exp, ok := a.expandBashForJudge(p.Command); ok {
+				state["expanded_command"] = exp.Command
+				state["resolved_variables"] = exp.Variables
+			}
 			if ie, ok := classifyInterpreterExecution(p.Command); ok && ie.SourceMode != "remote" {
 				interp := map[string]any{
 					"language":    ie.Language,
@@ -381,7 +399,7 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 					"entrypoint":  ie.Entrypoint,
 				}
 				if source, sha, truncated, ok := a.acquireInterpreterSource(ie); ok {
-					interp["source"] = map[string]any{"sha256": sha, "truncated": truncated, "text": source}
+					interp["source"] = map[string]any{"sha256": sha, "truncated": truncated, "text": redactFileText(source, maskReg)}
 				} else {
 					interp["source"] = map[string]any{"truncated": true, "text": "", "unavailable": true}
 				}

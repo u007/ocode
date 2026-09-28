@@ -36,6 +36,10 @@ interface Props {
    *  the remote host (?host=). Without it a remote project's picker lists
    *  the server-local tree instead. */
   projectHost?: string;
+  /** Query prefilled into the filter when the dialog opens. Used by the
+   *  "file link didn't resolve" fallback, which seeds the basename so the
+   *  user can find where the file actually lives. */
+  initialQuery?: string;
 }
 
 function flattenFiles(nodes: FileNode[]): string[] {
@@ -50,7 +54,7 @@ function flattenFiles(nodes: FileNode[]): string[] {
   return out;
 }
 
-export default function FilePicker({ open, onClose, onOpenFile, projectPath, projectHost }: Props) {
+export default function FilePicker({ open, onClose, onOpenFile, projectPath, projectHost, initialQuery }: Props) {
   const [files, setFiles] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   // The choice is per project (and remote host); follow a project switch.
@@ -102,7 +106,8 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
 
   useEffect(() => {
     if (!open) setQuery("");
-  }, [open]);
+    else setQuery(initialQuery ?? "");
+  }, [open, initialQuery]);
 
   const keywords = useMemo(() => parseKeywords(query), [query]);
   const filteredFiles = useMemo(() => {

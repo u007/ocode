@@ -747,25 +747,19 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
     doCloseBrowser(id);
   }, [doCloseBrowser]);
 
+  // Terminal tabs follow the same rule as chat/browser: the X opens the
+  // confirmation dialog, middle-click closes immediately. We no longer try to
+  // close "idle" terminals directly: there is no reliable running-app signal in
+  // the tab metadata, so a shell mid-command and a bare prompt look identical
+  // — guessing wrong killed a live shell with no confirm. If a busy signal is
+  // ever wired in, it may skip the dialog for a *provably* idle shell, never
+  // the other way around.
   const handleRequestCloseTerminal = useCallback((e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    // If the terminal has no running app, close directly without confirmation.
-    // We have no reliable "running" signal in the tab metadata, so treat idle
-    // terminals as directly closable. A future enhancement can check a live
-    // busy flag before showing the dialog.
     const t = terminals.find((term) => term.id === id);
-    // Heuristic: if we ever track busy state, gate on it here. For now all
-    // terminals are considered idle → close immediately (no confirmation).
-    // To preserve the "confirm when busy" contract, keep the pending path
-    // reachable by checking t?.alerted or similar when available.
-    const hasRunningApp = false; // TODO: wire to actual busy detection when available
-    if (!hasRunningApp) {
-      doCloseTerminal(id);
-      return;
-    }
     const title = t ? terminalDisplayTitle(t) : id;
     setPendingClose({ kind: "terminal", id, title });
-  }, [terminals, doCloseTerminal]);
+  }, [terminals]);
 
   const handleImmediateCloseTerminal = useCallback((e: React.MouseEvent, id: string) => {
     e.stopPropagation();

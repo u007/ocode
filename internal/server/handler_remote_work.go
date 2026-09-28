@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/u007/ocode/internal/projects"
@@ -126,7 +127,7 @@ func remoteRunRaw(ctx context.Context, rw remoteWork, command string) (string, e
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := runWithContext(ctx, cmd); err != nil {
+	if err := runWithContext(ctx, rw.Target, cmd); err != nil {
 		if isRemoteTransportError(err) {
 			return "", err
 		}
@@ -149,8 +150,8 @@ func remoteRunRaw(ctx context.Context, rw remoteWork, command string) (string, e
 // attached at start time (CommandContext) so an abandoned web request can't
 // leave an ssh child running; without a deadline (plain requests) the exec
 // is bounded by remoteExecTimeout anyway.
-func runWithContext(ctx context.Context, cmd *exec.Cmd) error {
-	return runBounded(ctx, cmd, remoteExecTimeout)
+func runWithContext(ctx context.Context, t remote.Target, cmd *exec.Cmd) error {
+	return runBounded(ctx, t, cmd, remoteExecTimeout)
 }
 
 // remoteShellResult is the outcome of running one shell command on a remote
@@ -184,7 +185,7 @@ func remoteShellRun(ctx context.Context, rw remoteWork, command string, timeout 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := runBounded(ctx, cmd, timeout); err != nil {
+	if err := runBounded(ctx, rw.Target, cmd, timeout); err != nil {
 		out := joinedShellOutput(stdout.String(), stderr.String())
 		// A remote command that ran and exited non-zero is reported via
 		// ExitCode with its output, never Err — the same contract
@@ -243,7 +244,7 @@ var remoteShellProbeFn = func(ctx context.Context, t remote.Target) (string, err
 	stdout := &remote.LimitedBuffer{Max: remote.MaxExecOutput}
 	cmd.Stdout = stdout
 	cmd.Stderr = &remote.LimitedBuffer{Max: remote.MaxExecOutput}
-	if err := runBounded(ctx, cmd, remoteShellProbeTimeout); err != nil {
+	if err := runBounded(ctx, t, cmd, remoteShellProbeTimeout); err != nil {
 		return "", err
 	}
 	return stdout.String(), nil
@@ -304,12 +305,21 @@ func (h *Handler) remoteShellInfo(ctx context.Context, rw remoteWork) remote.Rem
 // already-built *exec.Cmd, so the bound is enforced with a watcher goroutine
 // that kills the process when the deadline fires (no cmd.Cancel mutation,
 // which os/exec only honors on CommandContext-created commands).
-func runBounded(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) error {
+//
+// At most remoteExecSlotsPerHost commands run against one target at a time
+// (see remoteExecSlot); waiting for a slot counts toward timeout, so the
+// caller's bound still holds.
+func runBounded(ctx context.Context, t remote.Target, cmd *exec.Cmd, timeout time.Duration) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	release, err := acquireRemoteExecSlot(ctx, t, timeout)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := cmd.Start(); err != nil {
 		return &remoteTransportError{msg: err.Error()}
 	}
@@ -327,6 +337,41 @@ func runBounded(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) error
 			return &remoteTransportError{msg: "remote command cancelled"}
 		}
 		return &remoteTransportError{msg: fmt.Sprintf("remote command timed out after %s", timeout)}
+	}
+}
+
+// remoteExecSlotsPerHost caps concurrent remote commands per target. SSH
+// execs share one ControlMaster connection, and sshd's MaxSessions (default
+// 10) caps sessions per connection — past it new execs are refused. Many
+// projects on one host polling git at once used to exceed it (and pile up
+// 30s-bounded requests); the cap queues the excess instead, leaving
+// headroom under 10 for anything else sharing the connection.
+const remoteExecSlotsPerHost = 8
+
+var (
+	remoteExecSlotsMu sync.Mutex
+	remoteExecSlots   = map[string]chan struct{}{}
+)
+
+// acquireRemoteExecSlot blocks until t has a free exec slot or ctx ends. The
+// returned release must be called exactly once.
+func acquireRemoteExecSlot(ctx context.Context, t remote.Target, timeout time.Duration) (func(), error) {
+	key := t.String()
+	remoteExecSlotsMu.Lock()
+	slots, ok := remoteExecSlots[key]
+	if !ok {
+		slots = make(chan struct{}, remoteExecSlotsPerHost)
+		remoteExecSlots[key] = slots
+	}
+	remoteExecSlotsMu.Unlock()
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, &remoteTransportError{msg: "remote command cancelled while waiting for a free " + key + " exec slot"}
+		}
+		return nil, &remoteTransportError{msg: fmt.Sprintf("remote command timed out after %s waiting for a free %s exec slot", timeout, key)}
 	}
 }
 
@@ -352,7 +397,7 @@ func remoteRunNetwork(ctx context.Context, rw remoteWork, command string) error 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := runBounded(ctx, cmd, remoteNetworkTimeout); err != nil {
+	if err := runBounded(ctx, rw.Target, cmd, remoteNetworkTimeout); err != nil {
 		if isRemoteTransportError(err) {
 			return err
 		}
@@ -559,7 +604,7 @@ func remoteWriteFile(ctx context.Context, rw remoteWork, path string, data []byt
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := runWithContext(ctx, cmd); err != nil {
+	if err := runWithContext(ctx, rw.Target, cmd); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()

@@ -84,7 +84,7 @@ The chat `renderContent` has a **safety net**: if the rendered output's height e
 1. A `selectionState{dragging, startLine, startCol, endLine, endCol, active}` per surface.
 2. **Press** inside the region → record start, `dragging:true`, return handled.
 3. **Motion** while dragging → update end, set `active` only when anchor actually moved, re-render with `applySelectionHighlight(styledLines, rawLines, sl,sc,el,ec)`.
-4. **Release** → if `active`, `extractSelectionText` + `clipboard.WriteAll` (log copy errors, never swallow); if **not active** (no drag distance), clear and **fall through to the click handler** so a plain click still toggles/opens.
+4. **Release** → if `active`, `extractSelectionText` then `copyToClipboard(text)` (returns a `tea.Cmd`; return it from the handler). `copyToClipboard` sends **both** an OSC 52 sequence (`tea.SetClipboard`) and a local-utility write, because OSC 52 is the only path that reaches the user's own clipboard when the TUI runs on a remote host over SSH — a local utility alone writes the remote machine's clipboard, or fails with "No clipboard utilities available". Never call `clipboard.WriteAll` directly from a view; if **not active** (no drag distance), clear and **fall through to the click handler** so a plain click still toggles/opens.
 5. Track both styled and `stripANSI` raw lines so highlight and extract share the same coordinate space. Selection coords are screen-row/col relative to the content's top-left (`contentTopY`); bordered box left chrome = 2 cols (border(1) + padding(1)).
 
 See `internal/tui/selection.go`, `handleMouseAction` / `handleMouseMotion` in `model.go`, and the per-surface sel fields on the model struct (`m.sel`, `m.logSel`, `m.filesSel`, `m.gitSel`, `m.inputSel`, `m.sidebarSel`) plus the drill-in's own `detailView.sel` (`internal/tui/detail_view.go`) for working copies.
@@ -132,6 +132,7 @@ In `internal/tui`:
 - `internal/tui/theme.go` — themes + style singletons.
 - `internal/tui/tabs.go` — tab constants (6: chat, agents, files, changes, git, log) + `renderTabBar`.
 - `internal/tui/selection.go` — shared `selectionState`, `applySelectionHighlight`, `extractSelectionText`, `normaliseSelection`.
+- `internal/tui/clipboard.go` — `copyToClipboard(text) tea.Cmd`: OSC 52 (`tea.SetClipboard`) + local-utility fallback. The single entry point for every copy path (mouse selections, `ctrl+y`, review copy).
 - `internal/tui/scrollbar.go` — `renderScrollbar`, `scrollbarThumbMetrics`, `scrollbarThumbOffset`, `renderListScrollbar`.
 - `internal/tui/debuglog.go` — debug panel writer (target of `log.SetOutput`).
 

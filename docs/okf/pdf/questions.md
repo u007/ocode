@@ -50,12 +50,21 @@ Legend: **W** = weight (1–3), **D** = difficulty. Rubric shows scored points
 
 ### pdf-rowdel-01 · row-delete · W3 · medium
 **Q:** Outline a correct procedure to delete one row from a ruled, shaded table in an existing PDF (rows below must move up, the Total must be updated) using PyMuPDF.
-**A:** 1) Locate the table and rows (find_tables), and extract the data. 2) Redact the deleted row AND everything below it that has to move (the remaining rows, the Total row and any content under the table), or simply the whole table: add_redact_annot on those rects, then apply_redactions. 3) Redraw the remaining rows shifted up by one row height with the same style: text, alternating shading, horizontal and vertical rules. Put the Total row back with a recomputed value. 4) Move the content that was below the table up too, or leave it in place on purpose. 5) Save to a new file and verify. Rebuilding the whole table from extracted data is the simplest reliable version.
+**A:** 1) Locate the table and rows (find_tables), and extract the data. 2) Redact the deleted row AND everything below it that has to move (the
+   remaining rows, the Total row and any content under the table), or
+   simply the whole table: add_redact_annot on those rects, then
+   apply_redactions.
+3) Redraw the remaining rows shifted up by one row height with the same
+   style: text, alternating shading, horizontal and vertical rules. Put
+   the Total row back with a recomputed value.
+4) Move the content that was below the table up too, or leave it in place
+   on purpose.
+5) Save to a new file and verify. Rebuilding the whole table from extracted data is the simplest reliable version.
 • true removal (redact/apply) of the row AND the content that must shift • redraw remaining rows shifted up one row height, keeping text + shading + rules • recompute Total from data; handle content below the table ~ removes the row text only, leaving a gap or orphan lines
 
 ### pdf-rowdel-02 · row-delete, cell-edit · W3 · hard
 **Q:** In PyMuPDF, what do the default arguments of `page.apply_redactions()` do to images and vector graphics, and why does that matter when you redact a table row or cell?
-**A:** The defaults are images=PDF_REDACT_IMAGE_PIXELS (2), which blanks the overlapping image pixels, graphics=PDF_REDACT_LINE_ART_REMOVE_IF_COVERED (1), which removes line-art covered by the redaction, and text=PDF_REDACT_TEXT_REMOVE (0). So a redaction over a row or cell also deletes the shading rectangles and rule segments it covers, and punches a hole in any image it touches. To change only text, pass graphics=PDF_REDACT_LINE_ART_NONE (0) and images=PDF_REDACT_IMAGE_NONE (0). If you are rebuilding the region anyway, keep the defaults and redraw the graphics.
+**A:** The defaults are images=PDF_REDACT_IMAGE_PIXELS (2), which blanks the overlapping image pixels, graphics=PDF_REDACT_LINE_ART_REMOVE_IF_COVERED (1), which removes vector shapes lying entirely inside the redaction rect (partly covered shapes stay whole, never clipped; 2 removes anything touched), and text=PDF_REDACT_TEXT_REMOVE (0). So a redaction over a row also deletes that row's shading rectangle and any rule fully inside it, and punches a hole in any image it touches. To change only text, pass graphics=PDF_REDACT_LINE_ART_NONE (0) and images=PDF_REDACT_IMAGE_NONE (0). If you are rebuilding the region anyway, keep the defaults and redraw the graphics.
 • default removes covered vector graphics (lines/shading) and blanks overlapping image pixels • pass graphics=0 / images=0 (LINE_ART_NONE / IMAGE_NONE) to keep them, or redraw deliberately ~ knows redaction removes text but unaware of graphics/image side effects
 
 ### pdf-rowdel-03 · row-delete · W2 · medium
@@ -70,7 +79,15 @@ Legend: **W** = weight (1–3), **D** = difficulty. Rubric shows scored points
 
 ### pdf-cell-01 · cell-edit · W3 · medium
 **Q:** Replace one right-aligned number in a table cell (e.g. "22.50" → "54.00") in an existing PDF with PyMuPDF so it looks native. Give the steps.
-**A:** 1) Find the old value's bbox (search_for, or the find_tables cell) and read its style (get_text dict: font, size, color, origin). 2) Add a redact annotation on a rect slightly inset inside the cell, covering the glyphs but not neighbouring cells, and apply it with graphics=0 and images=0 so the rules and shading stay. 3) Measure the new text with pymupdf.get_text_length or Font.text_length. Insert it with page.insert_text at x = old_right_edge − width, keeping the old baseline y, font, size and colour. 4) Save to a new file and re-extract to verify.
+**A:** 1) Find the old value's bbox (search_for, or the find_tables cell) and
+   read its style (get_text dict: font, size, color, origin).
+2) Add a redact annotation on a rect slightly inset inside the cell,
+   covering the glyphs but not neighbouring cells, and apply it with
+   graphics=0 and images=0 so the rules and shading stay.
+3) Measure the new text with pymupdf.get_text_length or Font.text_length.
+   Insert it with page.insert_text at x = old_right_edge − width, keeping
+   the old baseline y, font, size and colour.
+4) Save to a new file and re-extract to verify.
 • true removal with a tight rect + graphics/images preserved • measure new width and right-align to the old right edge at the old baseline • match font/size/colour from the original span ~ inserts at the old left x (misaligned) or overlays
 
 ### pdf-cell-02 · cell-edit · W2 · medium
@@ -110,7 +127,15 @@ Legend: **W** = weight (1–3), **D** = difficulty. Rubric shows scored points
 
 ### pdf-tblins-01 · table-insert · W3 · medium
 **Q:** Insert a new small ruled table (header + 2 rows) into free space on page 1 of an existing PDF. Describe two practical ways to do it in Python.
-**A:** 1) Draw it directly with PyMuPDF: page.insert_text for each cell (measure for alignment), page.draw_line or draw_rect for the rules and header fill, laid out on a computed grid inside the free rect. 2) Generate the table separately and stamp it: - insert_htmlbox(rect, "<table>…</table>", css=…), which lays out HTML tables in a rect, or - build a one-page PDF with reportlab (Table + TableStyle) sized to the rect, then page.show_pdf_page(rect, table_doc, 0). Both keep the text real (extractable). Pasting a raster image of a table does not.
+**A:** 1) Draw it directly with PyMuPDF: page.insert_text for each cell (measure
+   for alignment), page.draw_line or draw_rect for the rules and header
+   fill, laid out on a computed grid inside the free rect.
+2) Generate the table separately and stamp it:
+   - insert_htmlbox(rect, "<table>…</table>", css=…), which lays out HTML
+     tables in a rect, or
+   - build a one-page PDF with reportlab (Table + TableStyle) sized to the
+     rect, then page.show_pdf_page(rect, table_doc, 0).
+Both keep the text real (extractable). Pasting a raster image of a table does not.
 • direct drawing: insert_text + draw_line/draw_rect on a computed grid • stamp approach: insert_htmlbox table or reportlab table → show_pdf_page (text stays real) ~ only 'insert an image of a table'
 
 ### pdf-tblins-02 · table-insert · W2 · medium
@@ -120,7 +145,13 @@ Legend: **W** = weight (1–3), **D** = difficulty. Rubric shows scored points
 
 ### pdf-tblins-03 · table-insert, table-relayout · W2 · hard
 **Q:** The new table must go between two existing paragraphs, but there is no gap there. What are your options?
-**A:** There is no reflow. Either: - Make room by moving everything below the insertion point down (redact that region and restamp it lower with show_pdf_page(clip=...), or re-insert it). If content then runs past the page bottom, spill it onto a new inserted page. - Or place the table where there is free space, or on a new page, and tell the user. - Or regenerate from source if available. Don't overlap existing content.
+**A:** There is no reflow. Either: - Make room by moving everything below the insertion point down (redact
+  that region and restamp it lower with show_pdf_page(clip=...), or
+  re-insert it). If content then runs past the page bottom, spill it onto
+  a new inserted page.
+- Or place the table where there is free space, or on a new page, and
+  tell the user.
+- Or regenerate from source if available. Don't overlap existing content.
 • no reflow: must move content below down (redact + restamp/reinsert) handling page overflow • alternatives: new page / free space (tell user) / regenerate from source; never overlap ~ draws table over the paragraph or shrinks everything
 
 ### pdf-imgrep-01 · image-replace · W3 · medium
@@ -135,7 +166,11 @@ Legend: **W** = weight (1–3), **D** = difficulty. Rubric shows scored points
 
 ### pdf-imgrep-03 · image-replace · W2 · hard
 **Q:** `page.get_images()` shows no image, yet the logo is visible on the page. What could be going on, and how do you find and replace it?
-**A:** The logo may be: - inside a Form XObject: get_images(full=True) shows the referencer, and get_image_info / get_image_rects still find placements; - vector artwork built from paths, not a raster image (see get_drawings); - an inline image in the content stream; - part of an annotation's appearance stream. Identify which kind it is. Vector art can't be image-replaced: remove it by redacting with graphics removal, then insert the new image.
+**A:** The logo may be: - inside a Form XObject: get_images(full=True) shows the referencer, and
+  get_image_info / get_image_rects still find placements;
+- vector artwork built from paths, not a raster image (see
+  get_drawings);
+- an inline image in the content stream; - part of an annotation's appearance stream. Identify which kind it is. Vector art can't be image-replaced: remove it by redacting with graphics removal, then insert the new image.
 • Form XObject / inline image / annotation appearance / vector paths as causes • vector: redact graphics then insert; else locate via get_image_info/full=True ~ assumes the PDF is corrupt / scanned
 
 ### pdf-imgins-01 · image-insert · W3 · easy
@@ -145,12 +180,18 @@ Legend: **W** = weight (1–3), **D** = difficulty. Rubric shows scored points
 
 ### pdf-imgins-02 · image-insert · W2 · medium
 **Q:** You insert the same logo on every page of a 200-page PDF with insert_image and the file grows by 200 copies of the image. How do you avoid that?
-**A:** insert_image returns the image xref. Insert once from the file and pass xref=that_xref on the later pages, so every page references the same image object. Saving with garbage≥3 (deduplication) also merges identical objects. PyMuPDF may already reuse an identical image within one session, but pass xref explicitly.
+**A:** insert_image returns the image xref. Insert once from the file and pass xref=that_xref on the later pages, so every page references the same image object. Saving with garbage=4 also merges identical streams (verified on 1.27.1: levels 0-3 keep separate copies). PyMuPDF may already reuse an identical image within one session, but pass xref explicitly.
 • reuse via xref returned by first insert_image (xref= param) • or save with garbage/dedup to merge identical streams
 
 ### pdf-imgins-03 · image-insert, pdf-model · W2 · medium
 **Q:** You inserted an image with PyMuPDF but it does not appear, or appears underneath a filled background box. Name the likely causes.
-**A:** Likely causes: - overlay=False, so it went under the existing content (e.g. under a filled rect); - the rect is off the visible page: a y-origin mix-up (bottom-left vs top-left), a rotated page, or a CropBox offset; - a zero-size or inverted rect; - the page was saved without the change: saved to the original without incremental, or never saved; - a transparency/mask issue. Check page.get_image_info() for its bbox.
+**A:** Likely causes: - overlay=False, so it went under the existing content (e.g. under a
+  filled rect);
+- the rect is off the visible page: a y-origin mix-up (bottom-left
+  vs top-left), a rotated page, or a CropBox offset;
+- a zero-size or inverted rect; - the page was saved without the change: saved to the original without
+  incremental, or never saved;
+- a transparency/mask issue. Check page.get_image_info() for its bbox.
 • overlay flag / paint order under a filled shape • coordinate mistake (origin/rotation/cropbox/empty rect) — verify via get_image_info bbox
 
 ### pdf-fonts-01 · fonts · W3 · hard
