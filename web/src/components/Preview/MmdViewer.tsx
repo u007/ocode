@@ -9,6 +9,7 @@ export default function MmdViewer({
   projectHost,
   onOpenFile,
   revision,
+  content,
 }: {
   path: string;
   projectRoot?: string;
@@ -17,11 +18,20 @@ export default function MmdViewer({
   /** Live-refresh revision from the sidebar PreviewHost; refetched silently
    *  when it changes (AI edited the diagram mid-turn). */
   revision?: number;
+  /** Controlled mode (Files-tab split preview): when provided, the diagram
+   *  renders from this live editor content instead of fetching from disk. */
+  content?: string;
 }) {
-  const [code, setCode] = useState<string | null>(null);
+  const [code, setCode] = useState<string | null>(content ?? null);
   const [error, setError] = useState<string | null>(null);
 
+  // Controlled mode: content prop provided, skip fetch
   useEffect(() => {
+    if (content !== undefined) {
+      setCode(content);
+      setError(null);
+      return;
+    }
     let cancelled = false;
     setCode(null);
     setError(null);
@@ -36,10 +46,11 @@ export default function MmdViewer({
     return () => {
       cancelled = true;
     };
-  }, [path, projectRoot, projectHost]);
+  }, [path, projectRoot, projectHost, content]);
 
   // Live refresh on revision bumps (sidebar live mode only).
   useEffect(() => {
+    if (content !== undefined) return;
     if (revision === undefined || revision === 0) return;
     let cancelled = false;
     api
@@ -53,7 +64,7 @@ export default function MmdViewer({
     return () => {
       cancelled = true;
     };
-  }, [revision, path, projectRoot, projectHost]);
+  }, [revision, path, projectRoot, projectHost, content]);
 
   if (error) return <div className="p-4 text-xs text-red-400">Diagram failed: {error}</div>;
   if (code === null) return <div className="p-4 text-xs text-muted-foreground">Loading diagram…</div>;

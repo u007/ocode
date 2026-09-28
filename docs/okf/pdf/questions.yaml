@@ -1,0 +1,767 @@
+# PDF editing benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+# Grade technique, not library: an equivalent correct approach in another tool
+# (pdfplumber, pikepdf, pypdf, qpdf, reportlab) earns the point.
+# PyMuPDF facts below were verified on 1.27.1 (2026-09-28).
+
+# ---------------------------------------------------------------- pdf-model
+
+- id: pdf-model-01
+  difficulty: easy
+  weight: 3
+  tags: [pdf-model]
+  question: >
+    A user asks you to "delete the third row of the table" in an existing PDF.
+    What does a PDF actually contain for that table, and what does that imply
+    about how the edit must be done?
+  answer: >
+    A PDF has no table, row or cell objects. The page content stream holds
+    positioned drawing operators: text shown at x/y coordinates (Tj/TJ), plus
+    separate lines and filled rectangles for the rules and shading. "Deleting
+    a row" means removing that row's text and graphics, then moving or
+    redrawing everything below it so no gap is left. Nothing reflows by
+    itself.
+  rubric:
+    - { point: "no table/row/cell structure — content stream of positioned text + separate vector lines/rects", score: 1 }
+    - { point: "nothing reflows: must remove the row's content AND move/redraw content below it", score: 1 }
+    - { partial: "says PDFs are 'hard to edit' / fixed layout without explaining positioned operators", score: 0.5 }
+
+- id: pdf-model-02
+  difficulty: medium
+  weight: 3
+  tags: [pdf-model, verify-safety]
+  question: >
+    A quick way to "remove" text from a PDF is to draw a white rectangle over
+    it and type the new text on top. Why is that not an edit, and what should
+    be used instead?
+  answer: >
+    The original text is still in the content stream underneath: it can be
+    extracted, searched, copied, and read by screen readers and parsers
+    (and it leaks data if it was sensitive). The white box also hides the
+    table rules and shading under it, and fails on non-white backgrounds.
+    Actually remove the content: redaction (PyMuPDF add_redact_annot +
+    apply_redactions) or content-stream editing, then draw the replacement.
+  rubric:
+    - { point: "old text remains in the text layer: extractable/searchable/copyable (data leak)", score: 1 }
+    - { point: "use true removal: redaction apply (or content-stream edit), then insert new text", score: 1 }
+    - { partial: "says overlay 'looks wrong' / hides lines but misses that text survives", score: 0.5 }
+
+- id: pdf-model-03
+  difficulty: medium
+  weight: 2
+  tags: [pdf-model]
+  question: >
+    You want to edit PDF text by modifying the raw content stream (e.g. with
+    pikepdf) and replace the string "22.50" with "54.00". Why might a plain
+    search-and-replace on the stream bytes fail or corrupt the page?
+  answer: >
+    Streams are usually compressed (Flate), so the bytes must be decoded first.
+    Even decoded, the visible text is often not stored as one literal: it can be
+    split across several Tj/TJ operators or kerned TJ arrays, hex-encoded, or
+    written as glyph ids through a font's encoding (Identity-H CID fonts,
+    subset fonts), so "22.50" may never appear. A different-length
+    replacement also shifts alignment (right-aligned numbers stop lining up).
+    Parse the stream tokens properly, or use a higher-level tool
+    (redact + insert).
+  rubric:
+    - { point: "text may be split/kerned (TJ arrays), hex or glyph-id encoded (CID/subset) — literal may not exist", score: 1 }
+    - { point: "compression and/or alignment/length shift — prefer parsed tokens or redact+insert", score: 1 }
+    - { partial: "mentions only compression", score: 0.5 }
+
+- id: pdf-model-04
+  difficulty: medium
+  weight: 2
+  tags: [pdf-model]
+  question: >
+    In PyMuPDF you read a word's bbox from `page.get_text("words")` and want to
+    draw at that position. How do PyMuPDF coordinates relate to raw PDF
+    coordinates, and what changes if the page has a /Rotate or a CropBox that
+    is offset from the MediaBox?
+  answer: >
+    PDF user space has its origin at the bottom-left with y going up. PyMuPDF
+    exposes a top-left origin with y going down, relative to the (unrotated)
+    page, so its extracted bboxes and its insert/draw methods share one
+    system. Positions taken from get_text can be passed straight back. Rotated
+    pages: page.rect reflects the rotation. Converting between systems needs
+    page.rotation_matrix / derotation_matrix, and raw content-stream edits
+    need the MediaBox/CropBox offset. Mixing raw PDF numbers with PyMuPDF
+    rects puts things upside down or shifted.
+  rubric:
+    - { point: "PDF origin bottom-left y-up; PyMuPDF top-left y-down (consistent between its extract and insert APIs)", score: 1 }
+    - { point: "rotation / CropBox offset must be accounted for (rotation/derotation matrix or box offsets)", score: 1 }
+    - { partial: "knows y is flipped but nothing about rotation/cropbox", score: 0.5 }
+
+# ---------------------------------------------------------------- table-locate
+
+- id: pdf-locate-01
+  difficulty: easy
+  weight: 3
+  tags: [table-locate]
+  question: >
+    How do you programmatically find a table in an existing PDF page and get the
+    bounding box of each row and cell (not just the text)?
+  answer: >
+    Use a table finder that gives geometry. In PyMuPDF, page.find_tables()
+    returns tables with .bbox, .rows[i].bbox, .rows[i].cells (a cell bbox
+    each), .header and .extract(). pdfplumber's page.find_tables() or
+    extract_tables() is similar. It finds tables from the ruling lines, or
+    from text alignment when there are no lines. As a fallback, group
+    get_text("words") by their y coordinate to rebuild rows.
+  rubric:
+    - { point: "a table finder with geometry (PyMuPDF find_tables / pdfplumber) → table/row/cell bboxes", score: 1 }
+    - { point: "detects via ruling lines or text alignment; words-with-coordinates fallback", score: 1 }
+    - { partial: "only extracts text (extract_text / pdftotext) with no coordinates", score: 0.5 }
+
+- id: pdf-locate-02
+  difficulty: medium
+  weight: 2
+  tags: [table-locate]
+  question: >
+    You have the text of the row you want ("Widget C"). Why is
+    `page.search_for("Widget C")` alone not enough to define what to remove,
+    and how do you get the full row region?
+  answer: >
+    search_for only returns the rectangle of that phrase. The row also has
+    other cells (qty, price, amount), shading and rules across the table's
+    whole width, and the phrase may occur more than once. Take the row from
+    the table finder (the row bbox that contains the hit), or span the table's
+    x-range at the hit's y-range, bounded by the neighbouring horizontal rules.
+    Check that the match is unique and inside the table.
+  rubric:
+    - { point: "search hit covers only that phrase — row spans all cells + shading/rules across table width", score: 1 }
+    - { point: "use the table row bbox (or table x-range × rule-bounded y-range); check uniqueness", score: 1 }
+    - { partial: "uses search_for rect and pads it without reasoning about other cells", score: 0.5 }
+
+- id: pdf-locate-03
+  difficulty: medium
+  weight: 2
+  tags: [table-locate, cell-edit]
+  question: >
+    Before replacing a cell's text you want to match its original style. How do
+    you read the font, size, colour and baseline of existing text in PyMuPDF?
+  answer: >
+    page.get_text("dict") (or "rawdict") gives blocks → lines → spans. Each
+    span has font (name), size, color (an sRGB int; convert with
+    pymupdf.sRGB_to_pdf), flags (bold/italic bits) and origin (the baseline
+    point) plus bbox. Use origin as the baseline for insert_text. Map the font
+    name to a usable font: a base-14 alias like helv/hebo, or the embedded
+    font file.
+  rubric:
+    - { point: "get_text('dict'/'rawdict') spans: font, size, color, flags", score: 1 }
+    - { point: "use span origin (baseline) / bbox for placement; convert color int", score: 1 }
+    - { partial: "names get_text('dict') but no fields/placement", score: 0.5 }
+
+- id: pdf-locate-04
+  difficulty: hard
+  weight: 2
+  tags: [table-locate, table-relayout]
+  question: >
+    You need to know the table's column boundaries and the x position where each
+    right-aligned number ends, so that new or edited values line up. Where do
+    you get that information?
+  answer: >
+    From the table geometry: the find_tables cell bboxes (the column x-edges),
+    or the vertical rules from page.get_drawings(), which are line and rect
+    items. For right-aligned cells, measure the existing values' word bbox x1:
+    that is the right padding edge (cell x1 minus padding). Place new text at
+    x = right_edge − text_length. Take the widths from the file. Don't assume
+    them.
+  rubric:
+    - { point: "column edges from cell bboxes or vertical rules via get_drawings", score: 1 }
+    - { point: "right-aligned: use existing values' x1 as the edge, x = edge − measured width", score: 1 }
+    - { partial: "eyeballs/assumes column positions", score: 0.5 }
+
+# ---------------------------------------------------------------- row-delete
+
+- id: pdf-rowdel-01
+  difficulty: medium
+  weight: 3
+  tags: [row-delete]
+  question: >
+    Outline a correct procedure to delete one row from a ruled, shaded table in
+    an existing PDF (rows below must move up, the Total must be updated) using
+    PyMuPDF.
+  answer: >
+    1) Locate the table and rows (find_tables), and extract the data.
+    2) Redact the deleted row AND everything below it that has to move (the
+       remaining rows, the Total row and any content under the table), or
+       simply the whole table: add_redact_annot on those rects, then
+       apply_redactions.
+    3) Redraw the remaining rows shifted up by one row height with the same
+       style: text, alternating shading, horizontal and vertical rules. Put
+       the Total row back with a recomputed value.
+    4) Move the content that was below the table up too, or leave it in place
+       on purpose.
+    5) Save to a new file and verify.
+    Rebuilding the whole table from extracted data is the simplest reliable
+    version.
+  rubric:
+    - { point: "true removal (redact/apply) of the row AND the content that must shift", score: 1 }
+    - { point: "redraw remaining rows shifted up one row height, keeping text + shading + rules", score: 1 }
+    - { point: "recompute Total from data; handle content below the table", score: 1 }
+    - { partial: "removes the row text only, leaving a gap or orphan lines", score: 0.5 }
+
+- id: pdf-rowdel-02
+  difficulty: hard
+  weight: 3
+  tags: [row-delete, cell-edit]
+  question: >
+    In PyMuPDF, what do the default arguments of `page.apply_redactions()` do to
+    images and vector graphics, and why does that matter when you redact a
+    table row or cell?
+  answer: >
+    The defaults are images=PDF_REDACT_IMAGE_PIXELS (2), which blanks the
+    overlapping image pixels, graphics=PDF_REDACT_LINE_ART_REMOVE_IF_COVERED
+    (1), which removes line-art covered by the redaction, and
+    text=PDF_REDACT_TEXT_REMOVE (0). So a redaction over a row or cell also
+    deletes the shading rectangles and rule segments it covers, and punches a
+    hole in any image it touches. To change only text, pass
+    graphics=PDF_REDACT_LINE_ART_NONE (0) and images=PDF_REDACT_IMAGE_NONE (0).
+    If you are rebuilding the region anyway, keep the defaults and redraw the
+    graphics.
+  rubric:
+    - { point: "default removes covered vector graphics (lines/shading) and blanks overlapping image pixels", score: 1 }
+    - { point: "pass graphics=0 / images=0 (LINE_ART_NONE / IMAGE_NONE) to keep them, or redraw deliberately", score: 1 }
+    - { partial: "knows redaction removes text but unaware of graphics/image side effects", score: 0.5 }
+
+- id: pdf-rowdel-03
+  difficulty: medium
+  weight: 2
+  tags: [row-delete]
+  question: >
+    Instead of re-typing every row below a deleted row, is there a way in
+    PyMuPDF to move an existing region of a page up, preserving its exact
+    appearance?
+  answer: >
+    Yes. Keep a copy of the source document. Redact the region to be moved
+    (plus the deleted row) on the target page. Then use
+    page.show_pdf_page(target_rect, src_doc, pno, clip=source_rect) to stamp
+    the original region at its new position, shifted up by the row height. The
+    stamped region is a Form XObject: it looks identical and its text stays
+    extractable. Alternatively, rebuild those rows from the extracted data.
+  rubric:
+    - { point: "show_pdf_page with clip from a copy of the original, placed one row higher (or equivalent XObject)", score: 1 }
+    - { point: "must redact the old region first so it isn't duplicated", score: 1 }
+    - { partial: "says 'just redraw everything' with no region-move technique", score: 0.5 }
+
+- id: pdf-rowdel-04
+  difficulty: easy
+  weight: 2
+  tags: [row-delete, verify-safety]
+  question: >
+    After deleting a row from an invoice table, what else in the document is
+    likely to need changing besides the row itself?
+  answer: >
+    Derived values: the Total, subtotal and tax figures (recompute them from
+    the remaining rows; don't patch them by guesswork). Row numbering or
+    alternating shading, which must stay consistent after the shift. Content
+    positioned below the table, such as notes, and page references. If the
+    task is ambiguous, confirm which totals should change.
+  rubric:
+    - { point: "recompute totals/derived values from the remaining data", score: 1 }
+    - { point: "keep striping/numbering consistent and handle content below", score: 1 }
+    - { partial: "mentions only the total", score: 0.5 }
+
+# ---------------------------------------------------------------- cell-edit
+
+- id: pdf-cell-01
+  difficulty: medium
+  weight: 3
+  tags: [cell-edit]
+  question: >
+    Replace one right-aligned number in a table cell (e.g. "22.50" → "54.00")
+    in an existing PDF with PyMuPDF so it looks native. Give the steps.
+  answer: >
+    1) Find the old value's bbox (search_for, or the find_tables cell) and
+       read its style (get_text dict: font, size, color, origin).
+    2) Add a redact annotation on a rect slightly inset inside the cell,
+       covering the glyphs but not neighbouring cells, and apply it with
+       graphics=0 and images=0 so the rules and shading stay.
+    3) Measure the new text with pymupdf.get_text_length or Font.text_length.
+       Insert it with page.insert_text at x = old_right_edge − width, keeping
+       the old baseline y, font, size and colour.
+    4) Save to a new file and re-extract to verify.
+  rubric:
+    - { point: "true removal with a tight rect + graphics/images preserved", score: 1 }
+    - { point: "measure new width and right-align to the old right edge at the old baseline", score: 1 }
+    - { point: "match font/size/colour from the original span", score: 1 }
+    - { partial: "inserts at the old left x (misaligned) or overlays", score: 0.5 }
+
+- id: pdf-cell-02
+  difficulty: medium
+  weight: 2
+  tags: [cell-edit]
+  question: >
+    PyMuPDF's `apply_redactions` removes "characters whose bbox overlaps the
+    redaction rectangle". How should you size the rectangle when redacting one
+    cell of a tight table, and why?
+  answer: >
+    Make it cover the target glyphs completely but stay inside the cell. Inset
+    it from the cell borders and don't let it reach the next cell's or row's
+    text. Any character whose bbox merely overlaps is removed, so a padded
+    rect silently deletes characters from neighbouring cells. Then check that
+    the neighbours are still intact.
+  rubric:
+    - { point: "overlap rule → oversized rect deletes neighbouring characters", score: 1 }
+    - { point: "cover the glyphs, inset from borders, verify neighbours after", score: 1 }
+    - { partial: "says 'make it a bit bigger to be safe'", score: 0 }
+
+- id: pdf-cell-03
+  difficulty: medium
+  weight: 2
+  tags: [cell-edit, table-relayout]
+  question: >
+    The new cell text is longer than the column is wide. What does PyMuPDF's
+    `insert_textbox` do when the text does not fit, and what are your options?
+  answer: >
+    insert_textbox writes nothing when the text doesn't fit. It returns a
+    negative number (the height shortfall) and raises no exception, so you
+    must check the return value. Options:
+    - Reduce the font size a little (within reason).
+    - Wrap into more lines, making the row taller and shifting the rows below.
+    - Widen the column by re-laying out the table.
+    - Use insert_htmlbox, which can scale text down to fit (scale_low).
+    Never let text spill over the cell border.
+  rubric:
+    - { point: "negative return, nothing written, no exception — must check the value", score: 1 }
+    - { point: "options: shrink font, wrap + taller row + shift, widen column/relayout, htmlbox scaling", score: 1 }
+    - { partial: "knows it may overflow but not the silent negative return", score: 0.5 }
+
+- id: pdf-cell-04
+  difficulty: easy
+  weight: 2
+  tags: [cell-edit]
+  question: >
+    `page.insert_text(point, text)` — what does `point` refer to, and what goes
+    wrong if you pass the top-left corner of the old word's bbox?
+  answer: >
+    point is the baseline start of the first character (bottom-left of the
+    text baseline), not the top-left corner. Passing bbox.top_left draws the
+    text roughly one line too high, since the glyphs sit above the baseline.
+    Use the old span's origin, or approximately bbox.y1 minus the descender.
+  rubric:
+    - { point: "point = baseline origin (bottom-left), not top-left", score: 1 }
+    - { point: "top-left → text drawn ~a line too high; use span origin", score: 1 }
+
+# ---------------------------------------------------------------- table-relayout
+
+- id: pdf-relayout-01
+  difficulty: medium
+  weight: 3
+  tags: [table-relayout]
+  question: >
+    Add a new row to an existing ruled table just above its Total row in a PDF.
+    What must happen to the Total row, the table rules and any content below the
+    table?
+  answer: >
+    Remove the Total row and everything below it that is in the way, then
+    redraw. Draw the new row at the old Total position, in the right striping
+    colour. Draw the Total one row lower, with a recomputed value. Extend the
+    vertical rules and add the extra horizontal rule. Move the content below
+    the table (notes) down by one row height, or check there is enough free
+    space. If the page lacks room, the table must continue on a new page. You
+    can't just draw a row over whatever sits underneath.
+  rubric:
+    - { point: "shift Total (recomputed) and content below down one row; redact then redraw", score: 1 }
+    - { point: "extend vertical rules + extra horizontal rule + keep striping", score: 1 }
+    - { point: "check free space / page overflow → continue on next page", score: 1 }
+    - { partial: "draws the new row into the gap below the table without moving anything", score: 0.5 }
+
+- id: pdf-relayout-02
+  difficulty: hard
+  weight: 3
+  tags: [table-relayout]
+  question: >
+    Add a new column to a table that already spans the full width between the
+    page margins. What is the correct approach and what is the common mistake?
+  answer: >
+    The common mistake is to append the column to the right, which overflows
+    the margin or page, or to squeeze text into an existing column's space so
+    it overlaps. Correct approach: re-lay out the whole table. Extract the
+    data. Choose new column widths that sum to the same total width, shrinking
+    the wide columns, and check the widest text in each still fits (measure
+    it; reduce the font slightly or wrap if needed). Redact the old table and
+    redraw every column, with header, cells, shading and vertical and
+    horizontal rules, at the new x positions.
+  rubric:
+    - { point: "appending right overflows margin; must redistribute widths within the same total width", score: 1 }
+    - { point: "measure content to fit new widths (font/wrap fallback deliberate)", score: 1 }
+    - { point: "remove old table and redraw all columns incl. header/rules/shading at new x", score: 1 }
+    - { partial: "adds column at right edge / shrinks page scale", score: 0.5 }
+
+- id: pdf-relayout-03
+  difficulty: medium
+  weight: 2
+  tags: [table-relayout, pdf-model]
+  question: >
+    Someone proposes: convert the PDF to DOCX (or HTML), edit the table there,
+    and convert back to PDF. When is that acceptable and what are the risks?
+  answer: >
+    It is only acceptable as a last resort, and only if exact fidelity doesn't
+    matter. PDF→DOCX converters guess the structure. Fonts, spacing, positions,
+    headers and footers, images and other pages shift. Tables often come out
+    as floating text boxes, and the result is a different document. The better
+    choices are: edit the original source (template, HTML, reportlab code,
+    spreadsheet) and regenerate, if it exists; or do a surgical in-place edit
+    of the PDF. Ask whether a source is available.
+  rubric:
+    - { point: "round-trip loses fidelity (layout/fonts/other pages change) — last resort", score: 1 }
+    - { point: "prefer regenerating from the original source if available, else surgical in-place edit", score: 1 }
+    - { partial: "says it's fine / the easiest way", score: 0 }
+
+- id: pdf-relayout-04
+  difficulty: medium
+  weight: 2
+  tags: [table-relayout, table-insert]
+  question: >
+    How do you check whether there is enough empty space on a page to grow a
+    table or place new content without overlapping anything?
+  answer: >
+    Collect the occupied rectangles: text block and word bboxes (get_text
+    "blocks"/"words"), drawings (get_drawings rects), and images
+    (get_image_info bboxes). Compute the free band, for example between the
+    table bottom and the next element, and the page bottom margin. Test the
+    planned rect against those bboxes with intersects(). Keep within the
+    margins inferred from the existing content.
+  rubric:
+    - { point: "gather text + drawing + image bboxes", score: 1 }
+    - { point: "test planned rect for intersection and stay within margins/page", score: 1 }
+    - { partial: "only checks text, not drawings/images", score: 0.5 }
+
+# ---------------------------------------------------------------- table-insert
+
+- id: pdf-tblins-01
+  difficulty: medium
+  weight: 3
+  tags: [table-insert]
+  question: >
+    Insert a new small ruled table (header + 2 rows) into free space on page 1
+    of an existing PDF. Describe two practical ways to do it in Python.
+  answer: >
+    1) Draw it directly with PyMuPDF: page.insert_text for each cell (measure
+       for alignment), page.draw_line or draw_rect for the rules and header
+       fill, laid out on a computed grid inside the free rect.
+    2) Generate the table separately and stamp it:
+       - insert_htmlbox(rect, "<table>…</table>", css=…), which lays out HTML
+         tables in a rect, or
+       - build a one-page PDF with reportlab (Table + TableStyle) sized to the
+         rect, then page.show_pdf_page(rect, table_doc, 0).
+    Both keep the text real (extractable). Pasting a raster image of a table
+    does not.
+  rubric:
+    - { point: "direct drawing: insert_text + draw_line/draw_rect on a computed grid", score: 1 }
+    - { point: "stamp approach: insert_htmlbox table or reportlab table → show_pdf_page (text stays real)", score: 1 }
+    - { partial: "only 'insert an image of a table'", score: 0.5 }
+
+- id: pdf-tblins-02
+  difficulty: medium
+  weight: 2
+  tags: [table-insert]
+  question: >
+    When drawing a new table into an existing page, how do you make it look
+    consistent with the document and avoid visual glitches?
+  answer: >
+    Reuse the document's existing style: the font and size (read spans), rule
+    width and colour (from get_drawings), header fill and padding, and the left
+    margin (align with existing content). Draw fills first and text after, so
+    the fills don't cover the text; draw the rules last or with care. Keep the
+    cell padding consistent, and measure text so numbers right-align.
+  rubric:
+    - { point: "copy existing font/size/rule width/colour/margins from the page", score: 1 }
+    - { point: "paint order fills → text/lines; consistent padding + measured alignment", score: 1 }
+    - { partial: "generic 'make it look nice'", score: 0 }
+
+- id: pdf-tblins-03
+  difficulty: hard
+  weight: 2
+  tags: [table-insert, table-relayout]
+  question: >
+    The new table must go between two existing paragraphs, but there is no gap
+    there. What are your options?
+  answer: >
+    There is no reflow. Either:
+    - Make room by moving everything below the insertion point down (redact
+      that region and restamp it lower with show_pdf_page(clip=...), or
+      re-insert it). If content then runs past the page bottom, spill it onto
+      a new inserted page.
+    - Or place the table where there is free space, or on a new page, and
+      tell the user.
+    - Or regenerate from source if available.
+    Don't overlap existing content.
+  rubric:
+    - { point: "no reflow: must move content below down (redact + restamp/reinsert) handling page overflow", score: 1 }
+    - { point: "alternatives: new page / free space (tell user) / regenerate from source; never overlap", score: 1 }
+    - { partial: "draws table over the paragraph or shrinks everything", score: 0 }
+
+# ---------------------------------------------------------------- image-replace
+
+- id: pdf-imgrep-01
+  difficulty: medium
+  weight: 3
+  tags: [image-replace]
+  question: >
+    Replace an existing logo image on page 1 of a PDF with a new PNG at the same
+    position and size using PyMuPDF. How, and what is the catch with shared
+    images?
+  answer: >
+    Find the image xref with page.get_images() and its placement with
+    page.get_image_info(xrefs=True) or get_image_rects(xref). Then call
+    page.replace_image(xref, filename="new.png"). Placement stays the same
+    because only the image object is swapped. The catch: an xref can be
+    referenced from many places (every page's header logo, for example), and
+    replace_image changes all of them. To replace a single occurrence, remove
+    that placement (redact its rect with images=PDF_REDACT_IMAGE_REMOVE) and
+    insert_image the new file at that rect. Keep the aspect ratio in mind: a
+    different-aspect PNG gets stretched into the old box.
+  rubric:
+    - { point: "find xref + rect (get_images / get_image_info/get_image_rects); replace_image(xref, filename)", score: 1 }
+    - { point: "xref shared → replace_image changes every use; single occurrence = remove that placement + insert_image", score: 1 }
+    - { point: "aspect ratio/stretch awareness", score: 1 }
+    - { partial: "inserts the new image on top of the old one", score: 0.5 }
+
+- id: pdf-imgrep-02
+  difficulty: medium
+  weight: 2
+  tags: [image-replace, verify-safety]
+  question: >
+    You put a new image on top of an old logo (insert_image at the same rect)
+    and it looks right. What is wrong with that?
+  answer: >
+    The old image is still in the file and on the page, just covered. It
+    shows through if the new image has transparency or a different aspect.
+    It can still be extracted (data leak if the logo was confidential), and
+    the file keeps both copies. Replace the object or remove the old
+    placement, and verify there is exactly one image at that rect.
+  rubric:
+    - { point: "old image still present/extractable/shows through transparency; bloats file", score: 1 }
+    - { point: "replace or remove old placement; verify one image at that rect", score: 1 }
+
+- id: pdf-imgrep-03
+  difficulty: hard
+  weight: 2
+  tags: [image-replace]
+  question: >
+    `page.get_images()` shows no image, yet the logo is visible on the page. What
+    could be going on, and how do you find and replace it?
+  answer: >
+    The logo may be:
+    - inside a Form XObject: get_images(full=True) shows the referencer, and
+      get_image_info / get_image_rects still find placements;
+    - vector artwork built from paths, not a raster image (see
+      get_drawings);
+    - an inline image in the content stream;
+    - part of an annotation's appearance stream.
+    Identify which kind it is. Vector art can't be image-replaced: remove it by
+    redacting with graphics removal, then insert the new image.
+  rubric:
+    - { point: "Form XObject / inline image / annotation appearance / vector paths as causes", score: 1 }
+    - { point: "vector: redact graphics then insert; else locate via get_image_info/full=True", score: 1 }
+    - { partial: "assumes the PDF is corrupt / scanned", score: 0 }
+
+# ---------------------------------------------------------------- image-insert
+
+- id: pdf-imgins-01
+  difficulty: easy
+  weight: 3
+  tags: [image-insert]
+  question: >
+    Insert a signature PNG at the bottom right of page 1, 150pt wide, keeping
+    its aspect ratio, without covering text. How do you compute the rect and
+    insert it with PyMuPDF?
+  answer: >
+    Read the pixel size (Pixmap or PIL). Height = 150 × h/w. Right-align x1 to
+    the content's right edge (for example the table's x1). Put y1 above the
+    footer's top with some padding. rect = Rect(x1 − 150, y1 − height, x1, y1)
+    in PyMuPDF's top-left coordinates. Check the rect doesn't intersect any
+    text or drawing bboxes. Then call page.insert_image(rect,
+    filename="signature.png") (keep_proportion=True by default).
+  rubric:
+    - { point: "compute height from aspect ratio; place relative to real content edges in top-left coords", score: 1 }
+    - { point: "insert_image(rect, filename=…) and check no intersection with text", score: 1 }
+    - { partial: "hard-codes coordinates without checking content", score: 0.5 }
+
+- id: pdf-imgins-02
+  difficulty: medium
+  weight: 2
+  tags: [image-insert]
+  question: >
+    You insert the same logo on every page of a 200-page PDF with insert_image
+    and the file grows by 200 copies of the image. How do you avoid that?
+  answer: >
+    insert_image returns the image xref. Insert once from the file and pass
+    xref=that_xref on the later pages, so every page references the same image
+    object. Saving with garbage≥3 (deduplication) also merges identical
+    objects. PyMuPDF may already reuse an identical image within one session,
+    but pass xref explicitly.
+  rubric:
+    - { point: "reuse via xref returned by first insert_image (xref= param)", score: 1 }
+    - { point: "or save with garbage/dedup to merge identical streams", score: 1 }
+
+- id: pdf-imgins-03
+  difficulty: medium
+  weight: 2
+  tags: [image-insert, pdf-model]
+  question: >
+    You inserted an image with PyMuPDF but it does not appear, or appears
+    underneath a filled background box. Name the likely causes.
+  answer: >
+    Likely causes:
+    - overlay=False, so it went under the existing content (e.g. under a
+      filled rect);
+    - the rect is off the visible page: a y-origin mix-up (bottom-left
+      vs top-left), a rotated page, or a CropBox offset;
+    - a zero-size or inverted rect;
+    - the page was saved without the change: saved to the original without
+      incremental, or never saved;
+    - a transparency/mask issue.
+    Check page.get_image_info() for its bbox.
+  rubric:
+    - { point: "overlay flag / paint order under a filled shape", score: 1 }
+    - { point: "coordinate mistake (origin/rotation/cropbox/empty rect) — verify via get_image_info bbox", score: 1 }
+
+# ---------------------------------------------------------------- fonts
+
+- id: pdf-fonts-01
+  difficulty: hard
+  weight: 3
+  tags: [fonts]
+  question: >
+    The table text uses an embedded subset font (name like "AAAAAA+Georgia").
+    You change an item name to text with letters that never appeared in the
+    document. Why can reusing the embedded font fail, and what should you do?
+  answer: >
+    A subset font contains only the glyphs that the document used. New
+    letters have no glyph (or no code mapping), so they render blank or as
+    .notdef boxes, and may not extract. Use a full font: the original font
+    file if you have it (insert_font(fontfile=…)), or the closest system or
+    base-14 font. Check glyph coverage, for example
+    Font(fontfile).has_glyph(ord(c)), and verify by rendering and
+    re-extracting.
+  rubric:
+    - { point: "subset contains only used glyphs → new chars render blank/.notdef", score: 1 }
+    - { point: "embed a full font (original TTF) or closest base-14; check glyph coverage + verify render", score: 1 }
+    - { partial: "knows subset fonts exist but proposes reusing it anyway", score: 0.5 }
+
+- id: pdf-fonts-02
+  difficulty: medium
+  weight: 2
+  tags: [fonts]
+  question: >
+    What are PyMuPDF's built-in base-14 font names for Helvetica regular and
+    bold, and what limitation do base-14 fonts have for non-Latin or special
+    characters?
+  answer: >
+    helv (Helvetica) and hebo (Helvetica-Bold). Others include tiro/tibo
+    (Times), cour (Courier), symb and zadb. Base-14 fonts are not embedded
+    and use a simple 8-bit encoding (WinAnsi/Latin), so characters outside it
+    are missing. That includes CJK, many symbols, and € in some setups. For
+    those, embed a TTF/OTF via fontfile or use a Noto font (for example
+    fontname="china-s" or pymupdf-fonts).
+  rubric:
+    - { point: "helv / hebo (base-14 short names)", score: 1 }
+    - { point: "8-bit/Latin only, not embedded → embed a TTF for other chars", score: 1 }
+    - { partial: "gives full names only (Helvetica-Bold) with no limitation", score: 0.5 }
+
+- id: pdf-fonts-03
+  difficulty: medium
+  weight: 2
+  tags: [fonts, cell-edit]
+  question: >
+    You edited a bold header cell but your new text comes out in regular weight
+    and slightly different size. How do you detect and match the original
+    weight and size?
+  answer: >
+    Read the original span from get_text("dict"). Its "size" is the exact
+    font size. For the weight, check the span font name (for example
+    "Helvetica-Bold") and the flags bit for bold (flags & 16). Then choose the
+    matching font (hebo, or the bold TTF) and size in insert_text. Don't
+    assume 11 (the insert_text default) or regular weight.
+  rubric:
+    - { point: "span size + font name/bold flag (flags & 16) from get_text dict", score: 1 }
+    - { point: "pick matching bold font + exact size (don't rely on defaults)", score: 1 }
+
+# ---------------------------------------------------------------- verify-safety
+
+- id: pdf-verify-01
+  difficulty: easy
+  weight: 3
+  tags: [verify-safety]
+  question: >
+    After editing a table in a PDF, how do you verify the edit actually worked
+    (not just that the script ran)?
+  answer: >
+    Re-open the saved output and check the text layer:
+    - search_for or get_text on the old value returns nothing;
+    - the new values are present;
+    - find_tables().extract() on the output equals the expected rows in order;
+    - the other pages' text is unchanged;
+    - nothing overlaps or falls outside the page.
+    Render the page (get_pixmap or pdftoppm) and look at it for gaps, broken
+    rules, misalignment and stretched images. A render alone can't tell a
+    white-box overlay from a real edit.
+  rubric:
+    - { point: "re-extract from saved output: old gone, new present, table rows equal expected", score: 1 }
+    - { point: "render to image for visual check (rules/gaps/alignment) + other pages unchanged", score: 1 }
+    - { point: "knows a visual check alone can't catch overlays", score: 1 }
+    - { partial: "only 'open it and look' or 'script didn't error'", score: 0.5 }
+
+- id: pdf-verify-02
+  difficulty: medium
+  weight: 3
+  tags: [verify-safety]
+  question: >
+    You removed a confidential row with redaction and saved with
+    `doc.save("same.pdf", incremental=True)`. Is the row gone from the file?
+  answer: >
+    Not necessarily. An incremental save appends the changes and keeps the
+    previous revision in the file, so the old content stream (with the row)
+    can be recovered by truncating to the earlier %%EOF or with a forensic
+    tool. For real removal, do a full save to a new file with garbage
+    collection (garbage=3 or 4, deflate). PyMuPDF refuses to save to the
+    original path without incremental=True anyway ("save to original must be
+    incremental"), so write a new file and replace it deliberately.
+  rubric:
+    - { point: "incremental keeps the old revision → old row recoverable", score: 1 }
+    - { point: "full save to a new file with garbage collection for real removal", score: 1 }
+    - { partial: "says yes it's gone", score: 0 }
+
+- id: pdf-verify-03
+  difficulty: easy
+  weight: 2
+  tags: [verify-safety]
+  question: >
+    A user asks you to edit invoice.pdf. What file-safety practices should you
+    follow?
+  answer: >
+    Don't destroy the original. Write to a new output file (or keep a backup
+    and only replace after verifying). Leave pages you weren't asked to touch
+    unchanged, and check the page count and the other pages' text. Preserve
+    metadata, bookmarks and form fields unless told otherwise. If the PDF is
+    encrypted or signed, say that editing breaks the signature or needs the
+    password. Report exactly what changed.
+  rubric:
+    - { point: "keep original / write new file, replace only after verifying", score: 1 }
+    - { point: "other pages untouched + signatures/encryption/metadata awareness", score: 1 }
+    - { partial: "only 'make a backup'", score: 0.5 }
+
+- id: pdf-verify-04
+  difficulty: medium
+  weight: 2
+  tags: [verify-safety, pdf-model]
+  question: >
+    You wrote a Python script that edits a PDF. The script ran without errors
+    and printed "done". Why is that not evidence the PDF is correct?
+  answer: >
+    Many PDF edit calls fail silently or partially:
+    - insert_textbox returns a negative value and writes nothing;
+    - apply_redactions returns False when there was no annotation;
+    - search_for returns [] and the loop does nothing;
+    - text lands off-page (coordinate mistakes);
+    - redaction removes neighbouring glyphs or rules.
+    Check return values in the script (fail loudly) and verify the saved
+    output by re-extracting and rendering.
+  rubric:
+    - { point: "silent failures: negative return / empty search / off-page / collateral removal", score: 1 }
+    - { point: "check return values (fail fast) + verify saved output", score: 1 }
+    - { partial: "generic 'always test'", score: 0.5 }

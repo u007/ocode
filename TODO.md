@@ -1,5 +1,22 @@
 # TODO
 
+## Split-preview candidates beyond HTML (2026-09-27)
+
+HTML files (`.html`/`.htm`) now have Edit/Preview/Split mode in the Files tab,
+matching Markdown. SVG (`.svg`), CSV/TSV (`.csv`, `.tsv`), JSON (`.json`),
+and Mermaid (`.mmd`) have all been shipped with the same treatment.
+
+No deferred candidates remain.
+
+## JsonViewer: no size guard for very large JSON files (2026-09-28, deferred)
+
+`JsonViewer` (web/src/components/Preview/JsonViewer.tsx) has no size limit.
+Opening a very large JSON file (e.g. 5 MB) in Split mode could freeze the tab —
+`JSON.parse` runs synchronously on the main thread and the tree renders every
+node. A size guard (e.g. skip preview above 1 MB and show "file too large to
+preview") or virtualized rendering would fix this. Lower priority because large
+JSON files are uncommon in typical editing workflows.
+
 ## Compaction: local config is tight for large sessions (2026-09-27, needs a user decision)
 
 `~/.config/opencode/ocodeconfig.json` currently has `summary_timeout_seconds:
@@ -971,6 +988,17 @@ The benchmark corpus + scoring system is built under `docs/okf/` (design:
 `docs/superpowers/specs/2026-07-11-model-stack-benchmark-design.md`). React is a
 fully-built exemplar (26 Q&A + rubric, one worked scorecard, one example derived
 skill). Not yet done:
+
+- [ ] **`hallucination` corpus: no baselines or skills yet (2026-09-28).** Corpus +
+  universal loader gate are in; no model has been evaluated, so no
+  `hallucination-tuning-*` skill exists. Pending: (1) a per-question answerer
+  runner, since the corpus's delivery rule forbids sending the sheet, title or ids;
+  (2) baselines per model, and decide per run whether the conduct digest is
+  force-injected (`ocode run` injects it for hy3/deepseek-v4-flash), then record
+  that in the scorecard; (3) if `existence`/`output-fabrication` saturate near 1.0
+  (the question text states the trap), rewrite them to show raw tool output and
+  ask only for a status; (4) `skills/kaizen-review` still maps
+  hallucinated-path/API/flag findings to conduct tags, not the new corpus.
 
 - [x] **Detection engine** — `internal/stackdetect` (`Detect(root) []string`)
   reads package.json deps + marker files per `stack-detection.md`. Tested. This
@@ -2609,3 +2637,4 @@ scope:
   QuestionDialog multi-select Space/Enter never submits implicitly.
 - [ ] Verify ReasoningLevelSelector and ProfileSwitcher Escape restores trigger
   focus and Tab closes the popover.
+- [ ] **FileTree auto-refresh misses bash-command file changes (known, not fixed)** — the auto-refresh subscribes to `tool_start` and matches mutating tools by parsed path args. `bash` commands (`rm`, `mv`, `git checkout`, etc.) change files with no parseable path in the tool args, so the tree stays stale until the user clicks refresh or triggers another in-tree op. Fixing this would require either a server-side fsnotify watcher (doesn't exist) or a `tool_result`-based fallback that refreshes after any bash call completes (heuristic — could cause false positives). Tracked as a known limitation.

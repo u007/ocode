@@ -45,17 +45,17 @@ func TestPinRejectsForeignManifestVersion(t *testing.T) {
 	}
 }
 
-func TestInstallStepsRefuseUnavailableEngines(t *testing.T) {
+func TestInstallStepsRefuseUnknownEngines(t *testing.T) {
 	s := NewSupervisor(DefaultConfig(), Options{Root: t.TempDir()})
-	// Engines without authoritative license metadata cannot record consent.
-	if err := s.AcceptLicense("fish-audio", "h", "n"); err == nil {
-		t.Fatal("accepted a license for an engine without authoritative metadata")
+	// Unknown engines cannot record consent.
+	if err := s.AcceptLicense("unknown-engine", "h", "n"); err == nil {
+		t.Fatal("accepted a license for an unknown engine")
 	}
 	// Pin/Download are also blocked: no manifest exists.
-	if err := s.Pin("fish-audio", "v"); err == nil {
+	if err := s.Pin("unknown-engine", "v"); err == nil {
 		t.Fatal("pinned an engine with no manifest")
 	}
-	if err := s.Download("fish-audio"); err == nil {
+	if err := s.Download("unknown-engine"); err == nil {
 		t.Fatal("downloaded an engine with no manifest")
 	}
 }

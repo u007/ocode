@@ -35,6 +35,7 @@ detection:
 | nextjs   | `dep: next` OR `file: next.config.*`             |
 | golang   | `file: go.mod`                                    |
 | rust     | `file: Cargo.toml`                                |
+| pdf      | `file: *.pdf`, `*/*.pdf`, `*/*/*.pdf` (no `**` in Go glob) |
 
 ## Activation gate (the whole point)
 
@@ -67,8 +68,9 @@ that as a distinct eval.
 > `BuildCatalogForModel`) reads these markers via `stackdetect.Detect(root)` and
 > admits a derived skill only when its `stack` is active AND the active model
 > matches its `tuned_for` (case-insensitive exact, or provider-prefixed
-> `.../tuned_for`). The universal `conduct` corpus is admitted on model match
-> alone (no stack marker).
+> `.../tuned_for`). The universal `conduct` and `hallucination` corpora are
+> admitted on model match alone (no stack marker; hardcoded in `stackActive` —
+> a new universal corpus must be added there).
 >
 > **Delivery (both discovery states).** An admitted derived skill is always
 > **advertised by name** (name + description) so the model can see it — the

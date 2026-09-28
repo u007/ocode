@@ -13,9 +13,23 @@ const MAX_COLS = 100;
  * Spreadsheet viewer (SheetJS `xlsx` — stable/maintained, Apache-2.0).
  * Read-only by design (same as Word/PowerPoint/PDF): sheet tabs across
  * the top, the active sheet as a plain HTML table with selectable text
- * for Copy / Ask-LLM. Never routed through the Monaco editor.
+ * for Copy / Ask-LLM.
+ *
+ * When `content` is provided (controlled mode from FileTabContent split view),
+ * CSV/TSV is parsed from the live editor string instead of fetching from disk.
  */
-export default function ExcelViewer({ path, projectRoot, projectHost }: { path: string; projectRoot?: string; projectHost?: string }) {
+export default function ExcelViewer({
+  path,
+  projectRoot,
+  projectHost,
+  content,
+}: {
+  path: string;
+  projectRoot?: string;
+  projectHost?: string;
+  /** Live editor content for split-view controlled mode (CSV/TSV only). */
+  content?: string;
+}) {
   const [sheets, setSheets] = useState<string[]>([]);
   const [active, setActive] = useState(0);
   const [rows, setRows] = useState<string[][]>([]);
@@ -33,6 +47,37 @@ export default function ExcelViewer({ path, projectRoot, projectHost }: { path: 
     setSheets([]);
     setRows([]);
     setActive(0);
+
+    const parseWorkbook = (wb: XLSX.WorkBook) => {
+      if (cancelled) return;
+      bookRef.current = wb;
+      setSheets(wb.SheetNames);
+      loadSheet(wb, 0);
+      setLoading(false);
+    };
+
+    const handleError = (e: unknown) => {
+      if (!cancelled) {
+        setError(e instanceof Error ? e.message : String(e));
+        setLoading(false);
+      }
+    };
+
+    // Controlled mode: parse CSV/TSV from live editor content
+    if (content !== undefined) {
+      try {
+        // TSV is just CSV with tab delimiters — SheetJS handles both via type:"string"
+        const wb = XLSX.read(content, { type: "string", sheetRows: MAX_ROWS });
+        parseWorkbook(wb);
+      } catch (e) {
+        handleError(e);
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Uncontrolled mode: fetch from disk
     api
       .fetchFileRaw(path, projectRoot, projectHost)
       .then((buf) => {
@@ -44,22 +89,13 @@ export default function ExcelViewer({ path, projectRoot, projectHost }: { path: 
         const wb = path.toLowerCase().endsWith(".csv")
           ? XLSX.read(new TextDecoder().decode(buf), { type: "string", sheetRows: MAX_ROWS })
           : XLSX.read(buf, { type: "array", sheetRows: MAX_ROWS });
-        bookRef.current = wb;
-        setSheets(wb.SheetNames);
-        loadSheet(wb, 0);
-        setLoading(false);
+        parseWorkbook(wb);
       })
-      .catch((e) => {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : String(e));
-          setLoading(false);
-        }
-      });
+      .catch(handleError);
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, projectRoot, projectHost]);
+  }, [path, projectRoot, projectHost, content]);
 
   const loadSheet = (wb: XLSX.WorkBook, idx: number) => {
     const name = wb.SheetNames[idx];

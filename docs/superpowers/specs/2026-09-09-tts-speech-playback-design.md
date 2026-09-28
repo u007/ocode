@@ -37,7 +37,7 @@ This specification defines the TTS (Text-to-Speech) speech playback system for t
 - The implementation targets desktop (macOS, Linux) and web browsers, with a shared React frontend and Go backend.
 
 ### 2. Flat Voice Choices
-- Browser Native (default), Piper, Kokoro, Fish Audio, Breeze
+- Browser Native (default), Piper, Kokoro (Fish Audio and Breeze removed 2026-09-27)
 - No cloud TTS — all engines are locally hosted or browser-native only.
 
 ### 3. Browser Native

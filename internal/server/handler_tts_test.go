@@ -16,7 +16,7 @@ func newTTSTestServer() *Server {
 
 func TestValidateTTSConfigRejectsUnavailableEngines(t *testing.T) {
 	s := newTTSTestServer()
-	for _, engine := range []tts.EngineID{tts.EnginePiper, tts.EngineKokoro, tts.EngineFishAudio, tts.EngineBreeze} {
+	for _, engine := range []tts.EngineID{tts.EnginePiper, tts.EngineKokoro} {
 		cfg := tts.Config{Engine: engine, Mode: tts.PlaybackManual}
 		if err := s.validateTTSConfig(cfg); err == nil {
 			t.Errorf("validateTTSConfig accepted unavailable engine %q", engine)

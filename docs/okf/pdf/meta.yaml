@@ -1,0 +1,29 @@
+stack: pdf
+title: PDF editing (existing documents — tables, images; Python, PyMuPDF-centric)
+corpus_rev: 1
+# Version scope: PyMuPDF >= 1.24 (import name `pymupdf`; `fitz` is the legacy
+# alias), pdfplumber, pikepdf, pypdf 4+. Answers are graded on technique, not on
+# one library: an equivalent correct approach in another tool earns the point.
+# Key API facts in the answer key were verified against PyMuPDF 1.27.1.
+version_scope: "pymupdf>=1.24"
+
+# Tag vocabulary — each tag is a subscore axis.
+tags:
+  - pdf-model        # content streams, no table/row objects, glyph positioning, coordinate systems
+  - table-locate     # find the table, rows, cells and their geometry
+  - row-delete       # remove a row and close the gap, recompute totals
+  - cell-edit        # replace a cell's text in place (remove, measure, align, style match)
+  - table-relayout   # add a row / add a column: shift content, width budget, page overflow
+  - table-insert     # draw a new table into free space
+  - image-replace    # swap an existing image
+  - image-insert     # place a new image
+  - fonts            # base-14 vs embedded/subset fonts, glyph coverage, style matching
+  - verify-safety    # prove the edit on the text layer, keep the original, real removal
+
+detection:
+  mode: any
+  # Depth-limited: stackdetect uses filepath.Glob, which has no "**".
+  markers:
+    - { type: file, glob: "*.pdf" }
+    - { type: file, glob: "*/*.pdf" }
+    - { type: file, glob: "*/*/*.pdf" }

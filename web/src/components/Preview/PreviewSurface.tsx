@@ -18,6 +18,8 @@ const PptxViewer = lazy(() => import("./PptxViewer"));
 const ExcelViewer = lazy(() => import("./ExcelViewer"));
 const MmdViewer = lazy(() => import("./MmdViewer"));
 const MarkdownViewer = lazy(() => import("./MarkdownViewer"));
+const HtmlViewer = lazy(() => import("./HtmlViewer"));
+const JsonViewer = lazy(() => import("./JsonViewer"));
 const TextViewer = lazy(() => import("./TextViewer"));
 
 /** Minimal placeholder while a heavy viewer's chunk downloads. Intentionally
@@ -92,11 +94,13 @@ export default function PreviewSurface({
         {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
         {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
-        {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
-        {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} />}
+        {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} />}
+        {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} />}
         {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} />}
+        {kind === "html" && <HtmlViewer content={content ?? ""} />}
+        {kind === "json" && <JsonViewer content={content ?? ""} />}
         {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
-        {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
+        {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} />}
         {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" active={active} />}
         {kind === "video" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="video" active={active} />}
       </Suspense>

@@ -239,3 +239,48 @@ func TestPlaybackConcurrentOperationsPublishLatestGeneration(t *testing.T) {
 		t.Fatalf("active generation = %d, want %d", got, operations)
 	}
 }
+
+func TestStripMarkdown(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bold asterisks", "This is **bold** text", "This is bold text"},
+		{"bold underscores", "This is __bold__ text", "This is bold text"},
+		{"italic asterisks", "This is *italic* text", "This is italic text"},
+		{"inline code", "Run `go build` now", "Run go build now"},
+		{"fenced code block", "```go\nfmt.Println()\n```", "fmt.Println()\n"},
+		{"heading hashes", "# Title\n## Subtitle\nBody", "Title\nSubtitle\nBody"},
+		{"blockquote", "> quoted text", "quoted text"},
+		{"list markers", "- first\n- second\n+ third\n1. fourth", "first\nsecond\nthird\nfourth"},
+		{"horizontal rule", "before\n---\nafter", "before\n\nafter"},
+		{"strikethrough", "This is ~~deleted~~ text", "This is deleted text"},
+		{"link keeps text drops URL", "Open [the page](https://example.com) now", "Open the page now"},
+		{"image keeps alt drops URL", "![screenshot](https://img.com/x.png)", "screenshot"},
+		{"html tags", "Some <strong>bold</strong> text", "Some bold text"},
+		{"comparison operators preserved", "a < b and c > d", "a < b and c > d"},
+		{"generics preserved", "Use Vec<T>, Map<A, B> or List<String>", "Use Vec<T>, Map<A, B> or List<String>"},
+		{"legitimate math preserved", "5 * 3 = 15", "5 * 3 = 15"},
+		{"snake_case preserved", "Use snake_case_name here", "Use snake_case_name here"},
+		{"nested bold italic", "***bold italic***", "bold italic"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripMarkdown(tc.in)
+			if got != tc.want {
+				t.Errorf("stripMarkdown(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeTextStripsMarkdown(t *testing.T) {
+	// The at-bottom fallback sends raw assistant.content; NormalizeText must
+	// strip markdown before the text reaches a local TTS engine.
+	in := "## Summary\n\nThe **quick** brown fox *jumps* over [the dog](https://example.com)."
+	want := "Summary\n\nThe quick brown fox jumps over the dog."
+	if got := NormalizeText(in); got != want {
+		t.Errorf("NormalizeText(%q) = %q, want %q", in, got, want)
+	}
+}

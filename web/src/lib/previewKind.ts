@@ -32,6 +32,8 @@ export type PreviewKind =
   | "video"
   | "mermaid"
   | "markdown"
+  | "html"
+  | "json"
   | "text";
 
 const kindByExt: Record<string, PreviewKind> = {
@@ -41,6 +43,7 @@ const kindByExt: Record<string, PreviewKind> = {
   ".xlsx": "excel",
   ".xls": "excel",
   ".csv": "excel",
+  ".tsv": "excel",
   ".png": "image",
   ".jpg": "image",
   ".jpeg": "image",
@@ -175,6 +178,38 @@ const PREVIEW_ONLY_KINDS: ReadonlySet<PreviewKind> = new Set(["pdf", "docx", "pp
  */
 export function isMarkdownPath(path: string): boolean {
   return previewKindForPath(path) === "markdown";
+}
+
+/**
+ * True for an HTML document (`.html` / `.htm`). HTML is NOT preview-only —
+ * it stays editable in Monaco — but the Files tab gives it an Edit/Preview/Split
+ * mode switch (default: Edit) because a rendered preview is useful alongside
+ * the source. See `FileTabContent`.
+ */
+export function isHtmlPath(path: string): boolean {
+  const ext = extensionOf(path);
+  return ext === ".html" || ext === ".htm";
+}
+
+/**
+ * Split-preview kind for a path: returns the PreviewKind for files that
+ * support an Edit/Preview/Split mode switch in the Files tab, or null
+ * when they do not. These formats stay editable in Monaco but benefit from
+ * a rendered preview alongside the source.
+ *
+ * SVG and CSV/TSV are included because they have existing renderers
+ * (ImageViewer, ExcelViewer) and are editable text formats. Other images
+ * (png/jpg/etc.) and Excel formats (xlsx/xls) remain preview-only.
+ */
+export function splitPreviewKindForPath(path: string): PreviewKind | null {
+  const ext = extensionOf(path);
+  if (ext === ".md" || ext === ".markdown" || ext === ".mdx") return "markdown";
+  if (isHtmlPath(path)) return "html";
+  if (ext === ".svg") return "image";
+  if (ext === ".csv" || ext === ".tsv") return "excel";
+  if (ext === ".mmd") return "mermaid";
+  if (ext === ".json") return "json";
+  return null;
 }
 
 /**

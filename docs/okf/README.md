@@ -63,6 +63,8 @@ implemented — derived skills are synced into the embed tree by
 | `tanstack/` | 31 | `@tanstack/react-query` or `-router` dep |
 | `nextjs/` | 34 | `next` dep or `next.config.*` |
 | `conduct/` | 45 | **universal** (any repo) |
+| `hallucination/` | 31 | **universal** (any repo) |
+| `pdf/` | 36 | `*.pdf` at repo root or ≤2 dirs deep |
 
 `react/` also carries a worked example scorecard + derived skill (illustrative).
 The others have corpora only — no evaluations run yet.
@@ -75,6 +77,25 @@ framework knowledge. It is anchored to this project's house rules
 activates for the tuned model universally, gated only on exact model id, not on a
 stack marker. This is the corpus that catches "different models behave
 differently while coding."
+
+**`hallucination/` is the second universal corpus.** Instead of asking a model
+to recite a verify-first policy (which every model aces), most of its questions
+are **false-premise probes**: they ask about a plausible API, flag, paper, or
+result that doesn't exist or wasn't observed, and score whether the model says so
+or makes up details. A few **CONTROL** items are real and score confident
+answers, so over-hedging also loses points. Every false premise was checked
+against a real toolchain; `meta.yaml` records which versions. Gated on exact
+model id alone, like `conduct`. The package-name items come from real model
+hallucinations ([trendmicro/slopsquatting](https://github.com/trendmicro/slopsquatting), MIT)
+and depend on live PyPI state, so re-check them before each sweep (`meta.yaml`
+lists which names and their status).
+
+> **Delivery rule (hallucination only).** The sheet's title, the
+> `hallucination-*` ids and the "if unsure, say so" header tell the answerer
+> every premise is suspect, which inflates the false-premise scores and pushes
+> it to hedge on the controls. Ask **one question per fresh session, sending
+> only the question text**: no title, no header, no id. The runner keeps the
+> id→answer mapping itself.
 
 ## Layout
 

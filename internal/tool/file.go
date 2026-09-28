@@ -1306,7 +1306,7 @@ func (t MultiEditTool) Parallel() bool { return false }
 func (t MultiEditTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "multiedit",
-		"description": "Perform multiple search/replace edits to a single file. All edits are applied in sequence on the result of the previous edit, and all are validated before writing — if any edit fails, none are applied.",
+		"description": "Perform multiple search/replace edits to a single file. Shape: top-level `file_path`, and each edit is {oldString, newString, replaceAll?}. All edits are applied in sequence on the result of the previous edit, and all are validated before writing — if any edit fails, none are applied. For edits spanning several files use multi_file_edit (different shape).",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1435,7 +1435,7 @@ func (t MultiFileEditTool) Parallel() bool { return false }
 func (t MultiFileEditTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "multi_file_edit",
-		"description": "Perform multiple search/replace edits across files. All edits are validated first, then applied atomically — if any edit fails, none are applied.",
+		"description": "Perform multiple search/replace edits across files. Shape: NO top-level path — every edit carries its own {path, search, replace, replace_all?} (not oldString/newString). All edits are validated first, then applied atomically — if any edit fails, none are applied. For several edits to one file, multiedit (top-level file_path + oldString/newString) also works.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1469,6 +1469,10 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 			Search     string `json:"search"`
 			Replace    string `json:"replace"`
 			ReplaceAll bool   `json:"replace_all"`
+			// Decoded only to name the multiedit shape in the schema error;
+			// never accepted as an alias for search/replace.
+			OldString *string `json:"oldString"`
+			NewString *string `json:"newString"`
 		} `json:"edits"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
@@ -1494,6 +1498,9 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 		// path otherwise resolves to the workdir and surfaces as a confusing
 		// "cannot read : ... is a directory".
 		if e.Path == "" || e.Search == "" {
+			if e.OldString != nil || e.NewString != nil {
+				return "", fmt.Errorf("edit %d: missing required field(s); each edit needs path, search, replace — got oldString/newString, which is the multiedit shape (top-level file_path). Retry multi_file_edit with path/search/replace on every edit, or call multiedit instead", i+1)
+			}
 			return "", fmt.Errorf("edit %d: missing required field(s); each edit needs path, search, replace", i+1)
 		}
 		safe, err := confinedPath(ctx, e.Path)

@@ -2,6 +2,7 @@ package tts
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,7 +98,53 @@ func (p *PlaybackManager) Status() Playback {
 	return p.active
 }
 
+// stripMarkdown removes markdown emphasis markers, code fences, heading
+// hashes, and link syntax from text before speech synthesis. It is a
+// best-effort cleanup for the local TTS engines (kokoro/piper); the
+// Browser Native engine receives already-clean text from the frontend.
+// The server must not trust the client — a raw `assistant.content` fallback
+// or a future caller could otherwise send "**bold**" verbatim.
+func stripMarkdown(text string) string {
+	// Fenced code blocks: ```lang\ncode``` → code
+	text = regexp.MustCompile("(?s)```[\\w-]*\\n(.*?)```").ReplaceAllString(text, "$1")
+	text = regexp.MustCompile("(?s)```(.*?)```").ReplaceAllString(text, "$1")
+	// Inline code: `code` → code
+	text = regexp.MustCompile("`([^`]+)`").ReplaceAllString(text, "$1")
+	// Horizontal rules: ---, ***, ___. Must run BEFORE italic so `***` is
+	// consumed as a rule, not partially matched as italic (which would leave
+	// a stray `*`). Use [ \t]* not \s* so the trailing newline is preserved.
+	text = regexp.MustCompile(`(?m)^[ \t]*(-{3,}|\*{3,}|_{3,})[ \t]*$`).ReplaceAllString(text, "")
+	// Bold: **text** or __text__ → text
+	text = regexp.MustCompile(`\*\*([^*]+)\*\*`).ReplaceAllString(text, "$1")
+	text = regexp.MustCompile(`__([^_]+)__`).ReplaceAllString(text, "$1")
+	// Italic: *text* → text (require non-space content).
+	// Single-underscore italic is skipped: RE2 has no lookbehind, and
+	// `snake_case_name` is far more common in code/identifiers than _italic_.
+	text = regexp.MustCompile(`\*(\S(?:[^*]*\S)?)\*`).ReplaceAllString(text, "$1")
+	// Strikethrough: ~~text~~ → text
+	text = regexp.MustCompile(`~~([^~]+)~~`).ReplaceAllString(text, "$1")
+	// Images: ![alt](url) → alt. Must run BEFORE links so the `!` prefix
+	// is consumed as part of the image syntax, not left dangling.
+	text = regexp.MustCompile(`!\[([^\]]*)\]\([^)]+\)`).ReplaceAllString(text, "$1")
+	// Links: [text](url) → text
+	text = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`).ReplaceAllString(text, "$1")
+	// ATX headings: # text → text
+	text = regexp.MustCompile(`(?m)^#{1,6}\s+`).ReplaceAllString(text, "")
+	// Blockquotes: > text → text
+	text = regexp.MustCompile(`(?m)^>\s?`).ReplaceAllString(text, "")
+	// List markers at line starts: "- ", "* ", "+ ", "1. ". Use [ \t]+ not
+	// \s+ so a lone "*" left by italic stripping isn't matched as a list item
+	// (the newline would otherwise be consumed as the required trailing whitespace).
+	text = regexp.MustCompile(`(?m)^[ \t]*[-*+][ \t]+`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`(?m)^[ \t]*\d+\.[ \t]+`).ReplaceAllString(text, "")
+	// HTML tags: only known element names, so prose comparisons
+	// ("a < b and c > d") and generics ("Vec<T>") keep their words.
+	text = regexp.MustCompile(`</?(?:a|b|i|u|s|p|br|hr|em|strong|code|pre|span|div|img|sub|sup|kbd|mark|del|ins|details|summary|ul|ol|li|table|thead|tbody|tr|td|th|h[1-6]|blockquote)\b[^<>]*>`).ReplaceAllString(text, "")
+	return text
+}
+
 func NormalizeText(text string) string {
+	text = stripMarkdown(text)
 	var b strings.Builder
 	for _, r := range text {
 		if unicode.IsControl(r) && r != '\n' && r != '\t' {

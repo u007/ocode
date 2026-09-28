@@ -119,7 +119,7 @@ export interface ModelInfo {
   has_kaizen?: boolean;
 }
 
-export type TTSEngineId = "browser-native" | "piper" | "kokoro" | "fish-audio" | "breeze";
+export type TTSEngineId = "browser-native" | "piper" | "kokoro";
 export type TTSPlaybackMode = "manual" | "at-bottom" | "auto";
 
 export interface TTSEngine {

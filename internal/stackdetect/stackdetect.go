@@ -153,6 +153,16 @@ var registry = []stack{
 			{kind: markerFile, glob: "*.vbproj"},
 		},
 	},
+	{
+		// PDF documents to edit. Depth-limited because filepath.Glob has no
+		// "**" and Detect must stay a cheap, non-walking check.
+		id: "pdf",
+		markers: []marker{
+			{kind: markerFile, glob: "*.pdf"},
+			{kind: markerFile, glob: "*/*.pdf"},
+			{kind: markerFile, glob: "*/*/*.pdf"},
+		},
+	},
 }
 
 // Detect returns the sorted ids of every known stack the repo at root uses.

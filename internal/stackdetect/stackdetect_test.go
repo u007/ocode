@@ -133,6 +133,21 @@ func TestDetect(t *testing.T) {
 			},
 			want: []string{"golang", "react", "rust"},
 		},
+		{
+			name:  "pdf at root → pdf",
+			files: map[string]string{"invoice.pdf": "%PDF-1.7\n"},
+			want:  []string{"pdf"},
+		},
+		{
+			name:  "pdf two levels down → pdf",
+			files: map[string]string{"docs/reports/q3.pdf": "%PDF-1.7\n"},
+			want:  []string{"pdf"},
+		},
+		{
+			name:  "pdf deeper than two levels is not detected",
+			files: map[string]string{"a/b/c/deep.pdf": "%PDF-1.7\n"},
+			want:  nil,
+		},
 	}
 
 	for _, tc := range cases {

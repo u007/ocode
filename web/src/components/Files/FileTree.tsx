@@ -44,6 +44,7 @@ import {
   Loader2,
   Lock,
   Pencil,
+  RefreshCw,
   Scissors,
   Search,
   Trash2,
@@ -60,6 +61,8 @@ import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFilter
 import { fileTreeRootKey, loadExpandedDirs, saveExpandedDirs } from "./fileTreeExpansionPersistence";
 import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
+import { eventBus } from "@/lib/eventBus";
+import { isMutatingTool, mutatedPathsFromToolCall } from "@/lib/previewLiveMutations";
 
 // Suppress unused-import errors for in-progress secret/file-tree work (dirty
 // working tree from parallel feature). The build is strict (`noUnusedLocals`).
@@ -816,6 +819,7 @@ export default function FileTree({
   const [clipboard, setClipboard] = useState<{ op: "copy" | "cut"; paths: string[] } | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   const [extraPaths, setExtraPaths] = useState<string[]>([]);
   // Server OS (GOOS) for the "reveal in file manager" menu label; loaded from
   // GET /api/config/ocode/paths alongside the extra roots. Undefined until the
@@ -1002,9 +1006,11 @@ export default function FileTree({
           setTree(result.value.children);
           setIsGitRepo(!!result.value.is_git_repo);
           setLoading(false);
+          setRefreshing(false);
         } else if (result.status === "error") {
           console.error("File tree error:", result.error);
           setLoading(false);
+          setRefreshing(false);
         }
       });
     },
@@ -1019,10 +1025,14 @@ export default function FileTree({
     const root = activeRoot ?? projectPath;
     setRefreshKey((k) => k + 1);
     if (!root) return;
+    setRefreshing(true);
     void runKeyedLoad(
       ({ signal }) => fetchRootChildren(root, signal),
       { empty: (data) => data.children.length === 0 },
     ).then((result) => {
+      if (result.status !== "stale" && result.status !== "aborted") {
+        setRefreshing(false);
+      }
       if (result.status === "success" || result.status === "empty") {
         setTree(result.value.children);
         setIsGitRepo(!!result.value.is_git_repo);
@@ -1055,6 +1065,39 @@ export default function FileTree({
     setColumns([]);
     setColumnSelections([]);
   }, [showHiddenFiles, viewMode]);
+
+  // Auto-refresh: when a mutating tool targets a path within the tree root,
+  // debounce a refresh so bursts of edits collapse into one refetch and the
+  // fetch lands after the write completes (tool_start fires before the write).
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const off = eventBus.on("tool_start", (env) => {
+      const data = env.data as { tool?: string; command?: string };
+      if (!data?.tool || !isMutatingTool(data.tool)) return;
+      const root = activeRoot ?? projectPath;
+      if (!root) return;
+      const paths = mutatedPathsFromToolCall(data.tool, data.command);
+      if (paths.length === 0) return;
+      const rootNormalized = root.replace(/\\/g, "/").replace(/\/+$/, "");
+      const inRoot = paths.some((p) => {
+        // Normalize Windows separators; absolute = POSIX `/…` or drive `C:/…`
+        const normalized = p.replace(/\\/g, "/");
+        const isAbs = normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized);
+        const abs = isAbs ? normalized : `${rootNormalized}/${normalized}`;
+        return abs === rootNormalized || abs.startsWith(rootNormalized + "/");
+      });
+      if (!inRoot) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        refresh();
+      }, 500);
+    });
+    return () => {
+      off();
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeRoot, projectPath, refresh]);
 
   // Fetch full tree for keyword filtering.
   useEffect(() => {
@@ -1633,6 +1676,16 @@ export default function FileTree({
           </Select>
         )}
         <div className="flex-1" />
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={refreshing}
+          title="Refresh file tree"
+          aria-label="Refresh file tree"
+          className="p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors rounded-md disabled:opacity-50 shrink-0"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} />
+        </button>
         <div className="flex items-center rounded-md border border-border overflow-hidden shrink-0" role="group" aria-label="View mode">
           <button
             type="button"

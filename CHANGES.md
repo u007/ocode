@@ -1,5 +1,161 @@
 # Changelog
 
+## 2026-09-28 — Version bump: 0.8.112 → 0.8.113
+
+- `internal/version/version.go` updated. No breaking changes; routine patch bump.
+
+## 2026-09-28 — TTS: strip markdown before speech synthesis
+
+- **Server-side `stripMarkdown` in `internal/tts/playback.go`** removes emphasis
+  markers, code fences, heading hashes, links, and other markdown syntax from
+  text before sending it to the local TTS engines (kokoro/piper). The server
+  must not trust the client — a raw `assistant.content` fallback or a future
+  caller could otherwise send `**bold*` verbatim. The Browser Native engine
+  receives already-clean text from the frontend and is unaffected.
+- **Client-side `stripMarkdown` in `web/src/components/Speech/speechUtils.ts`**
+  mirrors the Go logic for the `sanitizeSpeechText` path, which the
+  `at-bottom` auto-speak uses when the rendered DOM node is virtualized away.
+  Without this the engine reads "asterisk asterisk bold", "hash Title",
+  backticks and link URLs aloud.
+
+## 2026-09-28 — BTW: concurrent-safe append
+
+- **`HandleBtw` in `internal/server/handler.go`** now uses
+  `session.AppendUserMessageForDir` (tail-insert with bounded retry) instead
+  of the load→append→save pattern. The old path raced any concurrent writer
+  (another ocode process, a live turn's sync save): the overlap check found
+  the stored transcript had diverged from the stale snapshot and returned
+  `ErrTranscriptConflict`, losing the BTW message.
+
+## 2026-09-28 — stackdetect: detect PDF files
+
+- **New `pdf` stack in `internal/stackdetect/stackdetect.go`** — detects
+  `*.pdf` at the repo root, one level deep, or two levels deep. This lets
+  Kaizen skills gate on "PDF documents to edit" without a full directory
+  walk (`Detect` stays a cheap, non-walking check).
+
+## 2026-09-28 — Kaizen: new universal `hallucination` corpus
+
+- **New `docs/okf/hallucination/` corpus: 26 questions (rev 1), 6 tags** (api-invention,
+  existence, stale-recall, output-fabrication, citation, calibration; at least 4
+  per tag). Most are false-premise probes, e.g. Go `strings.Reverse` /
+  `slices.Unique`, `itertools.flatten`, `Array.prototype.unique`, `git branch
+  --prune-merged`, or a made-up paper, each scored on flagging it instead of
+  making up details. CONTROL items (`strings.Cut`, `math.isqrt`,
+  `Object.groupBy`, RFC 2324) score confident answers, so over-hedging also loses
+  points. Every premise was checked against Go 1.27 / Python 3.12 / Node 22 /
+  git 2.54.
+- **Loader: `hallucination` is universal like `conduct`.** `stackActive` in
+  `internal/skill/loader.go` admits a `stack: hallucination` tuning skill on
+  model match alone. Guarded by `TestKaizenStackGating`.
+- Answer sheet `docs/okf/_prompts/hallucination.md` (added to
+  `gen-prompt-sheets.py`). No models evaluated yet. `conduct-halluc-01..04` were
+  kept as they are so existing conduct scorecards stay valid.
+- **corpus_rev 2: 5 package-name probes from real hallucinations.** Taken from
+  trendmicro/slopsquatting (MIT; 126 names that 14 models or agents invented in
+  2025), checked against live PyPI on 2026-09-28. 25 of those names have since
+  been registered, most as anonymous "Benign slopsquatting research package"
+  placeholders, so a name existing on PyPI no longer proves anything.
+  `exist-05`/`07` use two of those placeholders (`litestar-graphql`,
+  `pywebsocketx`); `exist-06`/`08`/`09` use names still unregistered
+  (`piccolo-orm`, `prisma-client-py`, `vulcanmind`). `exist-02` now scores
+  checking the package's identity, not just that the name exists. 31 questions.
+
+## 2026-09-28 — multi_file_edit / multiedit: state each tool's argument shape
+
+- **Tool descriptions now state the argument shape and point at the sibling tool.**
+  `multiedit` takes a top-level `file_path` + `{oldString, newString}` edits;
+  `multi_file_edit` takes NO top-level path and a `{path, search, replace}` per
+  edit. Kaizen live probes caught models (longcat-2.5-preview-free, both runs;
+  glm-5.3-flash earlier) sending the multiedit shape to `multi_file_edit`.
+- **The wrong-shape error names the fix.** When an edit carries
+  `oldString`/`newString`, the error says it is the multiedit shape and to retry
+  with `path`/`search`/`replace` or call `multiedit`. The shape is still rejected
+  — `oldString`/`newString` are never accepted as aliases. Re-probe after the fix:
+  2/2 runs, zero failed edit calls.
+
+## 2026-09-28 — Files tab: refresh button + auto-refresh on agent edits
+
+- **FileTree header gains a refresh button** (RefreshCw icon) next to the
+  view-mode toggle. Clicking re-fetches the root listing without unmounting
+  the tree (expansion state survives). The icon spins while a refresh is
+  in flight.
+- **FileTree auto-refreshes when agent tools mutate files in the tree.**
+  Subscribes to `tool_start` on the eventBus; when a mutating tool
+  (write/edit/multiedit/multi_file_edit/apply_patch/replace_lines/delete)
+  targets a path within the current tree root, a debounced refresh fires
+  (500ms). The debounce merges bursts of edits into one refetch and lets
+  slow writes land before the fetch. Non-mutating tools (read) and paths
+  outside the root are ignored.
+- Uses the existing `previewLiveMutations.ts` helpers (`isMutatingTool`,
+  `mutatedPathsFromToolCall`) — no duplicated path-matching logic.
+
+## 2026-09-28 — JSON files get Edit / Preview / Split mode
+
+- **JSON files (`.json`) now have an Edit / Preview / Split mode switch** in the Files tab, matching Markdown/HTML/SVG/CSV/Mermaid. Invalid JSON (common while typing in split mode) shows an inline parse-error message — the preview never throws.
+- **New `JsonViewer` component** renders a collapsible tree view with `aria-expanded` toggle buttons. Objects/arrays show a count preview (`{3 keys}`, `[5 items]`) when collapsed.
+- **`.json` is NOT in `kindByExt`** — it stays as `"text"` so Monaco mounts; only `splitPreviewKindForPath` returns `"json"`.
+
+## 2026-09-28 — Mermaid (.mmd) files get Edit / Preview / Split mode
+- **Mermaid (`.mmd`) now has an Edit / Preview / Split mode switch** in the Files tab, matching Markdown/HTML/SVG/CSV. `splitPreviewKindForPath` returns `"mermaid"` for `.mmd`. `MmdViewer` gained an optional `content` prop — controlled mode (when `content !== undefined`) skips both the `fetchFileRaw` call and the `revision` live-refresh effect, rendering directly from the editor buffer. `PreviewSurface` passes `content` to `MmdViewer`. The `SPLIT_KIND_LABELS` map gained `mermaid: "Mermaid"`. The 200ms debounce in `FileTabContent` covers Mermaid too, so the diagram re-renders on a typing burst, not per keystroke.
+
+## 2026-09-27 — SVG, CSV/TSV, and Mermaid files get Edit / Preview / Split mode
+
+- **SVG (`.svg`), CSV/TSV (`.csv`, `.tsv`), and Mermaid (`.mmd`) now have an Edit / Preview /
+  Split mode switch in the Files tab**, matching the existing Markdown and
+  HTML behavior. The mode group offers `edit` (default), `preview`
+  (full-width rendered), and `split` (Monaco editor left, live preview
+  right with a resizable divider). The Monaco pane is hidden with CSS
+  (never unmounted) so cursor/scroll/undo survive.
+- **ImageViewer and ExcelViewer accept a live `content` prop** for
+  controlled mode. When provided (from FileTabContent split view), the
+  viewers render from the editor's current string instead of fetching from
+  disk. SVG is rendered via a Blob URL (never innerHTML) to prevent script
+  execution. CSV/TSV is parsed from the string via SheetJS.
+- **`FileTabContent` checks `splitPreviewKindForPath` before
+  `previewOnlyKindForPath`** so SVG and CSV reach the split branch with
+  Monaco still mounted. Other images (png/jpg/etc.) and Excel formats
+  (xlsx/xls) remain preview-only.
+- **`previewKind.ts`**: `splitPreviewKindForPath` now returns `"image"`
+  for `.svg` and `"excel"` for `.csv`/`.tsv` in addition to `"markdown"`
+  and `"html"`.
+
+## 2026-09-27 — Remove Breeze from TTS engine catalog
+
+- **Breeze TTS 2 and Fish Audio removed from the TTS engine catalog.**
+  Breeze requires reference-audio voice cloning (no preset voice IDs), which
+  doesn't fit the generic voice-selector UI pattern shared by Piper and
+  Kokoro. Fish Audio has the same cloning limitation plus a heavy
+  SGLang/vLLM stack. The `EngineBreeze` and `EngineFishAudio` constants,
+  catalog entries, and TS type union members are removed. Saved configs
+  referencing a removed engine load without error but show no "current"
+  badge; selecting or speaking returns an "unknown TTS engine" error.
+
+## 2026-09-27 — HTML files get Edit / Preview / Split mode (like Markdown)
+
+- **HTML files (`.html` / `.htm`) now have an Edit / Preview / Split mode
+  switch in the Files tab**, matching the existing Markdown behavior. The
+  mode group (`role="group"` + `aria-pressed` buttons) offers `edit`
+  (default), `preview` (full-width rendered HTML), and `split` (Monaco
+  editor left, live HTML preview right with a resizable divider). The
+  Monaco pane is hidden with CSS (never unmounted) so cursor/scroll/undo
+  survive a trip through the preview.
+- **New `HtmlViewer` component** renders the live editor content in a
+  sandboxed `<iframe srcDoc={content} sandbox="allow-scripts">`. The
+  sandbox allows scripts to run but omits `allow-same-origin`, giving the
+  iframe an opaque origin so it cannot reach the parent document's cookies,
+  localStorage, or the ocode API. Known limitation: relative asset paths
+  (`<link>`, `<img>`, `<script src>`) do not resolve because `srcDoc` has
+  no base URL.
+- **`previewKind.ts` gains `isHtmlPath()` and `splitPreviewKindForPath()`**.
+  The latter returns `"markdown"` or `"html"` for files that support the
+  split mode switch, or `null` otherwise. `FileTabContent` uses this
+  single helper instead of checking `isMarkdownPath` directly, so the
+  mode-switch logic is not duplicated per format.
+- **`PreviewSurface` handles `kind="html"`** by rendering `HtmlViewer`
+  with the live `content` prop (same controlled-mode pattern as
+  `MarkdownViewer`).
+
 ## 2026-09-27 — Compaction: keep a summary that beat the deadline, and stop
 calling every cancellation a timeout
 
@@ -3852,7 +4008,7 @@ Two follow-ups to the session-switch work.
 
 - **Remote web session routing (2026-09-17)** — open tabs register their remote hosts with the event bus; session model selection, command context, and agent-run seed requests follow the session host. Agent-run caches are host-scoped, unresolved project snapshots defer seed requests, and clearing the active project clears the event bus's active host. Regression coverage includes host inventory, model-dialog routing, command context, project-store state, and agent-run loading.
 - **Version workflow** — added `make up-patch` and `make up-minor` to update the canonical version and changelog entry, then install the CLI and build the macOS desktop app with the new version.
-- **Version Bump** — 0.8.110 → 0.8.111
+- **Version Bump** — 0.8.112 → 0.8.113
 - **Web/Desktop: Computer Use settings group** (`web/src/components/Settings/`) — new `ComputerUseForm.tsx` (enable checkbox + Save, loads `GET /api/config/computer-use`, saves `PUT /api/config/computer-use`) registered as its own `computer-use` nav entry in `SettingsPanel.tsx` (`OCODE_GROUPS` after OCR + `renderGroup` case). Renders the shared `computer.StatusLines` block, so the panel shows the platform backend and the macOS permission reminder without probing the desktop. Regression suite: `ComputerUseForm.test.tsx` (nav registration verified to fail without the `OCODE_GROUPS` entry). `docs/computer-use.md` updated to document the panel as the third toggle surface.
 - **Agent: remove state reflection feature** (`internal/agent/`) — deleted `state_reflect.go`, `state_reflect_test.go`, `agent_state_reflect_methods.go` and the `reflectState` field / `reflectTail` call from `agent.go`; the reflection hook that appended user messages on preview/browser snapshot changes is removed entirely
 - **LSP diagnostics: fingerprint only emitted diagnostics** (`internal/agent/lsp_inject.go`) — `injectLSPDelta` now records `a.lspSeen[uri]` after the line-cap check and rendering, so diagnostics that were skipped or never delivered are not permanently marked as reported

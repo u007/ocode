@@ -1,9 +1,59 @@
+/**
+ * Strips markdown syntax so TTS reads prose, not formatting markers.
+ *
+ * The "at-bottom" auto-speak falls back to raw `assistant.content` when the
+ * rendered DOM node is virtualized away, and any future caller may also pass
+ * raw source. Without this the engine reads "asterisk asterisk bold", "hash
+ * Title", backticks and link URLs aloud. The patterns are deliberately
+ * conservative — they require non-space content inside emphasis markers so
+ * legitimate math like `5 * 3` is left alone.
+ */
+export function stripMarkdown(text: string): string {
+  let result = text;
+  // Fenced code blocks (```lang\ncode```) — drop fences, keep content.
+  result = result.replace(/```[\w-]*\n([\s\S]*?)```/g, "$1");
+  result = result.replace(/```([\s\S]*?)```/g, "$1");
+  // Inline code (`code`) — drop backticks.
+  result = result.replace(/`([^`]+)`/g, "$1");
+  // Horizontal rules (---, ***, ___). Must run BEFORE italic so `***` is
+  // consumed as a rule, not partially matched as italic (which would leave
+  // a stray `*`). Use [ \t]* not \s* so the trailing newline is preserved.
+  result = result.replace(/^[ \t]*(-{3,}|\*{3,}|_{3,})[ \t]*$/gm, "");
+  // Bold (**text** or __text__).
+  result = result.replace(/\*\*([^*]+)\*\*/g, "$1");
+  result = result.replace(/__([^_]+)__/g, "$1");
+  // Italic (*text* or _text_) — require non-space content so `5 * 3` survives.
+  result = result.replace(/\*(\S(?:[^*]*\S)?)\*/g, "$1");
+  result = result.replace(/(?<!\w)_(\S(?:[^_]*\S)?)_(?!\w)/g, "$1");
+  // Strikethrough (~~text~~).
+  result = result.replace(/~~([^~]+)~~/g, "$1");
+  // Images ![alt](url) — keep the alt text. Must run BEFORE links so the
+  // `!` prefix is consumed as part of the image syntax, not left dangling.
+  result = result.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
+  // Links [text](url) — keep the visible text, drop the target.
+  result = result.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  // ATX headings (# text).
+  result = result.replace(/^#{1,6}\s+/gm, "");
+  // Blockquotes (> text).
+  result = result.replace(/^>\s?/gm, "");
+  // List markers (- / * / + / 1.). Use [ \t]+ not \s+ so a lone "*" left
+  // by italic stripping isn't matched as a list item (the newline would
+  // otherwise be consumed as the required trailing whitespace).
+  result = result.replace(/^[ \t]*[-*+][ \t]+/gm, "");
+  result = result.replace(/^[ \t]*\d+\.[ \t]+/gm, "");
+  // HTML tags: only known element names, so prose comparisons
+  // ("a < b and c > d") and generics ("Vec<T>") keep their words.
+  result = result.replace(/<\/?(?:a|b|i|u|s|p|br|hr|em|strong|code|pre|span|div|img|sub|sup|kbd|mark|del|ins|details|summary|ul|ol|li|table|thead|tbody|tr|td|th|h[1-6]|blockquote)\b[^<>]*>/g, "");
+  return result;
+}
+
 export function sanitizeSpeechText(text: string) {
-  return text
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, "")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-    .trim();
+  return stripMarkdown(
+    text
+      .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+      .replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, "")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
+  ).trim();
 }
 
 /**

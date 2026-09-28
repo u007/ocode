@@ -31,7 +31,7 @@ Two roles, **two separate agents/sessions**, strict information barrier:
 ## What you need
 
 - A stack folder under `docs/okf/<stack>/` with a `questions.yaml` (react,
-  golang, rust, tanstack, nextjs, conduct today) and its generated
+  golang, rust, tanstack, nextjs, conduct, hallucination today) and its generated
   `docs/okf/_prompts/<stack>.md` answer sheet.
 - The **exact** model id + version you're evaluating, **provider-stripped** (e.g.
   `tencent/hy3` @ `3.0`, not `novita/tencent/hy3`). Never a family name.
@@ -67,6 +67,10 @@ is only as honest as the answers are blind.
 
 ## Answerer prompt (closed-book — give this to the TARGET model)
 
+**Exception — `hallucination`:** don't send the sheet or the instruction below.
+Send each question's text alone in its own fresh session (no title, header, or
+id); see the delivery rule in README.md.
+
 Give the target model the contents of `docs/okf/_prompts/<STACK>.md` and this
 instruction. Do NOT give it repo access. If it's a sub-agent, the sheet is its
 ONLY input.
@@ -97,7 +101,7 @@ you have the answer key, so any answer you write would be a copy. If the answer
 file is missing, STOP and report it; do not substitute your own answers.
 
 INPUTS (fill these in):
-- STACK: <react | golang | rust | tanstack | nextjs | conduct>
+- STACK: <react | golang | rust | tanstack | nextjs | conduct | hallucination>
 - MODEL_ID: <PROVIDER-STRIPPED model id, e.g. claude-opus-4-8 or tencent/hy3>
   # Strip the leading provider segment: `novita/tencent/hy3` -> `tencent/hy3`,
   # `anthropic/claude-opus-4-8` -> `claude-opus-4-8`. NEVER a family name, and

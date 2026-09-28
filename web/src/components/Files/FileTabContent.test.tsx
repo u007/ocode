@@ -169,6 +169,291 @@ describe("FileTabContent markdown modes", () => {
   });
 });
 
+describe("FileTabContent HTML modes", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("defaults HTML to Edit with no rendered preview", async () => {
+    render(<FileTabContent path="index.html" content="<h1>Hello</h1>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /edit/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("preview-html")).toBeNull();
+  });
+
+  it("shows the HTML view mode group", async () => {
+    render(<FileTabContent path="index.html" content="<h1>Hello</h1>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: /html view mode/i })).toBeInTheDocument();
+  });
+
+  it("renders a full-width preview while keeping Monaco mounted", async () => {
+    render(<FileTabContent path="index.html" content="<h1>Hello</h1>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }));
+
+    const preview = screen.getByTestId("preview-html");
+    expect(preview).toHaveAttribute("data-content", "<h1>Hello</h1>");
+    expect(screen.getByRole("button", { name: /preview/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).toHaveClass("hidden");
+  });
+
+  it("shows the editor and a resizable divider in Split mode", async () => {
+    render(<FileTabContent path="index.html" content="<h1>Hello</h1>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).not.toHaveClass("hidden");
+    expect(screen.getByTestId("preview-html")).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: /resize editor and preview/i })).toBeInTheDocument();
+  });
+
+  it("feeds live editor content into the split preview", async () => {
+    const { rerender } = render(<FileTabContent path="index.html" content="<h1>One</h1>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+    expect(screen.getByTestId("preview-html")).toHaveAttribute("data-content", "<h1>One</h1>");
+
+    rerender(<FileTabContent path="index.html" content="<h1>Two</h1>" />);
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-html")).toHaveAttribute("data-content", "<h1>Two</h1>"),
+    );
+  });
+
+  it("treats .htm as HTML too", async () => {
+    render(<FileTabContent path="page.htm" content="<p>Hi</p>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: /html view mode/i })).toBeInTheDocument();
+  });
+});
+
+describe("FileTabContent SVG modes", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("defaults SVG to Edit with no rendered preview", async () => {
+    render(<FileTabContent path="icon.svg" content="<svg></svg>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /edit/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("preview-image")).toBeNull();
+  });
+
+  it("shows the SVG view mode group", async () => {
+    render(<FileTabContent path="icon.svg" content="<svg></svg>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: /svg view mode/i })).toBeInTheDocument();
+  });
+
+  it("renders a full-width preview while keeping Monaco mounted", async () => {
+    render(<FileTabContent path="icon.svg" content={"<svg><circle r=\"10\"/></svg>"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }));
+
+    const preview = screen.getByTestId("preview-image");
+    expect(preview).toHaveAttribute("data-content", "<svg><circle r=\"10\"/></svg>");
+    expect(screen.getByRole("button", { name: /preview/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).toHaveClass("hidden");
+  });
+
+  it("shows the editor and a resizable divider in Split mode", async () => {
+    render(<FileTabContent path="icon.svg" content="<svg></svg>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).not.toHaveClass("hidden");
+    expect(screen.getByTestId("preview-image")).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: /resize editor and preview/i })).toBeInTheDocument();
+  });
+
+  it("feeds live editor content into the split preview", async () => {
+    const { rerender } = render(<FileTabContent path="icon.svg" content="<svg>v1</svg>" />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+    expect(screen.getByTestId("preview-image")).toHaveAttribute("data-content", "<svg>v1</svg>");
+
+    rerender(<FileTabContent path="icon.svg" content="<svg>v2</svg>" />);
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-image")).toHaveAttribute("data-content", "<svg>v2</svg>"),
+    );
+  });
+});
+
+describe("FileTabContent CSV modes", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("defaults CSV to Edit with no rendered preview", async () => {
+    render(<FileTabContent path="data.csv" content={"a,b,c\n1,2,3"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /edit/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("preview-excel")).toBeNull();
+  });
+
+  it("shows the CSV view mode group", async () => {
+    render(<FileTabContent path="data.csv" content={"a,b,c\n1,2,3"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: /csv view mode/i })).toBeInTheDocument();
+  });
+
+  it("renders a full-width preview while keeping Monaco mounted", async () => {
+    render(<FileTabContent path="data.csv" content={"a,b,c\n1,2,3"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-excel")).toHaveAttribute("data-content", "a,b,c\n1,2,3"),
+    );
+    expect(screen.getByRole("button", { name: /preview/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).toHaveClass("hidden");
+  });
+
+  it("shows the editor and a resizable divider in Split mode", async () => {
+    render(<FileTabContent path="data.csv" content={"a,b,c\n1,2,3"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).not.toHaveClass("hidden");
+    expect(screen.getByTestId("preview-excel")).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: /resize editor and preview/i })).toBeInTheDocument();
+  });
+
+  it("feeds live editor content into the split preview", async () => {
+    const { rerender } = render(<FileTabContent path="data.csv" content={"a,b\n1,2"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+    expect(screen.getByTestId("preview-excel")).toHaveAttribute("data-content", "a,b\n1,2");
+
+    rerender(<FileTabContent path="data.csv" content={"x,y\n9,8"} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-excel")).toHaveAttribute("data-content", "x,y\n9,8"),
+    );
+  });
+
+  it("treats .tsv as CSV too", async () => {
+    render(<FileTabContent path="data.tsv" content={"a\tb\n1\t2"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: /csv view mode/i })).toBeInTheDocument();
+  });
+});
+
+describe("FileTabContent JSON modes", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("defaults JSON to Edit with no rendered preview", async () => {
+    render(<FileTabContent path="data.json" content={"{}"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /edit/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("preview-json")).toBeNull();
+  });
+
+  it("shows the JSON view mode group", async () => {
+    render(<FileTabContent path="data.json" content={"{}"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: /json view mode/i })).toBeInTheDocument();
+  });
+
+  it("renders a full-width preview while keeping Monaco mounted", async () => {
+    render(<FileTabContent path="data.json" content={"{}"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-json")).toHaveAttribute("data-content", "{}"),
+    );
+    expect(screen.getByRole("button", { name: /preview/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).toHaveClass("hidden");
+  });
+
+  it("shows the editor and a resizable divider in Split mode", async () => {
+    render(<FileTabContent path="data.json" content={"{}"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).not.toHaveClass("hidden");
+    expect(screen.getByTestId("preview-json")).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: /resize editor and preview/i })).toBeInTheDocument();
+  });
+
+  it("feeds live editor content into the split preview", async () => {
+    const { rerender } = render(<FileTabContent path="data.json" content={"{}"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+    expect(screen.getByTestId("preview-json")).toHaveAttribute("data-content", "{}");
+
+    rerender(<FileTabContent path="data.json" content={"{\"a\":1}"} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-json")).toHaveAttribute("data-content", "{\"a\":1}"),
+    );
+  });
+});
+
+describe("FileTabContent Mermaid modes", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("defaults Mermaid to Edit with no rendered preview", async () => {
+    render(<FileTabContent path="flow.mmd" content={"graph TD\nA-->B"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /edit/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("preview-mermaid")).toBeNull();
+  });
+
+  it("shows the Mermaid view mode group", async () => {
+    render(<FileTabContent path="flow.mmd" content={"graph TD\nA-->B"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: /mermaid view mode/i })).toBeInTheDocument();
+  });
+
+  it("renders a full-width preview while keeping Monaco mounted", async () => {
+    render(<FileTabContent path="flow.mmd" content={"graph TD\nA-->B"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-mermaid")).toHaveAttribute("data-content", "graph TD\nA-->B"),
+    );
+    expect(screen.getByRole("button", { name: /preview/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).toHaveClass("hidden");
+  });
+
+  it("shows the editor and a resizable divider in Split mode", async () => {
+    render(<FileTabContent path="flow.mmd" content={"graph TD\nA-->B"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+
+    expect(screen.getByTestId("monaco")).toBeInTheDocument();
+    expect(screen.getByTestId("monaco").parentElement).not.toHaveClass("hidden");
+    expect(screen.getByTestId("preview-mermaid")).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: /resize editor and preview/i })).toBeInTheDocument();
+  });
+
+  it("feeds live editor content into the split preview", async () => {
+    const { rerender } = render(<FileTabContent path="flow.mmd" content={"graph TD\nA-->B"} />);
+    await waitFor(() => expect(screen.getByTestId("monaco")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /split/i }));
+    expect(screen.getByTestId("preview-mermaid")).toHaveAttribute("data-content", "graph TD\nA-->B");
+
+    rerender(<FileTabContent path="flow.mmd" content={"graph LR\nX-->Y"} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("preview-mermaid")).toHaveAttribute("data-content", "graph LR\nX-->Y"),
+    );
+  });
+});
+
 describe("FileTabContent viewer-state persistence", () => {
   beforeEach(() => localStorage.clear());
 

@@ -22,8 +22,6 @@ const (
 	EngineBrowserNative EngineID = "browser-native"
 	EnginePiper         EngineID = "piper"
 	EngineKokoro        EngineID = "kokoro"
-	EngineFishAudio     EngineID = "fish-audio"
-	EngineBreeze        EngineID = "breeze"
 )
 
 type PlaybackMode string
@@ -399,8 +397,6 @@ func Catalog() []Engine {
 		{ID: EngineBrowserNative, Label: "Browser Native", Availability: AvailabilityReady, BrowserOnly: true},
 		piper,
 		kokoro,
-		{ID: EngineFishAudio, Label: "Fish Audio", Availability: AvailabilityUnavailable, Reason: "Runtime packaging and Fish Audio Research License terms are not approved for managed distribution."},
-		{ID: EngineBreeze, Label: "Breeze", Availability: AvailabilityUnavailable, Reason: "Breeze model licensing and a pinned runtime/model manifest require product approval."},
 	}
 }
 

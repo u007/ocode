@@ -3,7 +3,7 @@ type: Gotcha
 title: Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
 description: '''Gotcha: Files-tab auto-preview routing for binary/Office/media formats plus markdown/MDX Edit/Preview/Split mode switch. Open-classification model: specialized renderers + binary denylist + default text. UTF-16/UTF-32 BOM text is transcoded, not flagged binary.'''
 resource: ""
-tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit]
+tags: [gotcha, web, files-tab, editor, preview, monaco, binary, pdf, docx, pptx, excel, image, audio, video, media, routing, useEditorTabs, streaming, http-range, servecontent, capability-token, media-token, auth, markdown, mdx, split-mode, useResizableSplit, json, jsonviewer]
 timestamp: 2026-09-23T08:32:38Z
 ---
 # Files Tab Auto-Previews Binary/Office/Media Formats (Preview-Only Routing + Local Media Streaming)
@@ -31,7 +31,7 @@ routing point for a Files-tab editor tab body, in priority order:
 The **preview-only kind set** is `pdf`, `docx`, `pptx`, `excel`, `image`,
 `audio`, `video` (`PREVIEW_ONLY_KINDS`, `web/src/lib/previewKind.ts:84`). These
 are binary containers with no editable text representation. `markdown`, `text`,
-and `mermaid` are **deliberately excluded** and keep the Monaco editor.
+are **deliberately excluded** and keep the Monaco editor. (2026-09-28: `.mmd` was promoted to split-preview — see the history note below.)
 `.mdx` is also **deliberately excluded** and keeps the Monaco editor (it routes
 to the same markdown mode switch as `.md`/`.markdown`).
 `previewOnlyKindForPath` (`previewKind.ts:91`) is therefore the narrow
@@ -138,6 +138,16 @@ exported helper `isMarkdownPath(path)` (`previewKind.ts:92`) returns
 (`internal/server/handler_files.go:960`) gained matching types/captured
 extensions. 2026-09-16: `.mmd` (Mermaid flow) was already in the markdown kind
 and renders through `MermaidViewer`. 2026-09-21: `.mdx` added to the markdown
+kind. 2026-09-28: `.mmd` promoted to Edit/Preview/Split — `splitPreviewKindForPath`
+returns `"mermaid"`, `MmdViewer` gained a `content` prop (controlled mode skips
+fetch + revision refresh), `PreviewSurface` passes `content` to it, and the
+SPLIT_KIND_LABELS map gained `mermaid: "Mermaid"`. 2026-09-28: `.json` promoted
+to Edit/Preview/Split — `splitPreviewKindForPath` returns `"json"`, rendered by
+the new `JsonViewer` (collapsible tree view). `.json` deliberately stays OUT of
+`kindByExt`, so `previewKindForPath` still returns `"text"` and the file opens
+in Monaco; only `splitPreviewKindForPath` returns `"json"`. The SPLIT_KIND_LABELS
+map gained `json: "JSON"`. Invalid JSON (common while typing in split mode) shows
+an inline parse-error message — the preview never throws.
 kind (previewable, editor default Edit with mode switch).
 
 ## UTF-16 / UTF-32 BOM transcoding (2026-09-23)

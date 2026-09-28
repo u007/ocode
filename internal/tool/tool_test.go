@@ -660,6 +660,9 @@ func TestMultiFileEditToolRejectsWrongSchema(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "edit 1: missing required field(s)") {
 		t.Fatalf("expected schema error, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "multiedit shape") {
+		t.Fatalf("schema error must name the multiedit shape so the model can self-correct, got %v", err)
+	}
 	got, _ := os.ReadFile("config.py")
 	if string(got) != "PORT = 8080\n" {
 		t.Fatalf("file must be untouched, got %q", string(got))

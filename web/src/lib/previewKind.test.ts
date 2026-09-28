@@ -4,12 +4,14 @@ import {
   PREVIEW_CONTEXT_EVENT,
   dispatchOpenPreview,
   dispatchPreviewContext,
+  isHtmlPath,
   isLegacyOfficePath,
   isMarkdownPath,
   parsePreviewOpen,
   previewKindForPath,
   previewOnlyKindForPath,
   resolvePreviewDoc,
+  splitPreviewKindForPath,
 } from "./previewKind";
 
 describe("previewKindForPath", () => {
@@ -71,19 +73,24 @@ describe("previewOnlyKindForPath", () => {
     expect(previewOnlyKindForPath("spec.docx")).toBe("docx");
     expect(previewOnlyKindForPath("deck.pptx")).toBe("pptx");
     expect(previewOnlyKindForPath("budget.xlsx")).toBe("excel");
-    expect(previewOnlyKindForPath("data.csv")).toBe("excel");
     expect(previewOnlyKindForPath("photo.PNG")).toBe("image");
-    expect(previewOnlyKindForPath("icon.svg")).toBe("image");
     expect(previewOnlyKindForPath("song.mp3")).toBe("audio");
     expect(previewOnlyKindForPath("voice.m4a")).toBe("audio");
     expect(previewOnlyKindForPath("clip.mp4")).toBe("video");
     expect(previewOnlyKindForPath("screen.webm")).toBe("video");
   });
 
+  it("still returns image/excel for SVG/CSV (split-first ordering in FileTabContent prevents preview-only routing)", () => {
+    expect(previewOnlyKindForPath("icon.svg")).toBe("image");
+    expect(previewOnlyKindForPath("data.csv")).toBe("excel");
+    expect(previewOnlyKindForPath("data.tsv")).toBe("excel");
+  });
+
   it("keeps editable and unrenderable paths in the editor", () => {
     expect(previewOnlyKindForPath("main.go")).toBeNull();
     expect(previewOnlyKindForPath("notes.md")).toBeNull();
     expect(previewOnlyKindForPath("page.mdx")).toBeNull();
+    expect(previewOnlyKindForPath("index.html")).toBeNull();
     expect(previewOnlyKindForPath("flow.mmd")).toBeNull();
     expect(previewOnlyKindForPath("legacy.doc")).toBeNull();
     expect(previewOnlyKindForPath("movie.mkv")).toBeNull();
@@ -104,6 +111,65 @@ describe("isMarkdownPath", () => {
     expect(isMarkdownPath("main.go")).toBe(false);
     expect(isMarkdownPath("flow.mmd")).toBe(false);
     expect(isMarkdownPath("Makefile")).toBe(false);
+  });
+});
+
+describe("isHtmlPath", () => {
+  it("covers .html and .htm", () => {
+    expect(isHtmlPath("index.html")).toBe(true);
+    expect(isHtmlPath("page.htm")).toBe(true);
+    expect(isHtmlPath("docs/INDEX.HTML")).toBe(true);
+    expect(isHtmlPath("main.go")).toBe(false);
+    expect(isHtmlPath("notes.md")).toBe(false);
+    expect(isHtmlPath("style.css")).toBe(false);
+  });
+});
+
+describe("splitPreviewKindForPath", () => {
+  it("returns markdown for .md/.markdown/.mdx", () => {
+    expect(splitPreviewKindForPath("notes.md")).toBe("markdown");
+    expect(splitPreviewKindForPath("docs/page.mdx")).toBe("markdown");
+  });
+
+  it("returns html for .html/.htm", () => {
+    expect(splitPreviewKindForPath("index.html")).toBe("html");
+    expect(splitPreviewKindForPath("page.htm")).toBe("html");
+  });
+
+  it("returns image for .svg", () => {
+    expect(splitPreviewKindForPath("icon.svg")).toBe("image");
+    expect(splitPreviewKindForPath("ICON.SVG")).toBe("image");
+  });
+
+  it("returns excel for .csv/.tsv", () => {
+    expect(splitPreviewKindForPath("data.csv")).toBe("excel");
+    expect(splitPreviewKindForPath("data.tsv")).toBe("excel");
+    expect(splitPreviewKindForPath("DATA.CSV")).toBe("excel");
+  });
+
+  it("returns mermaid for .mmd", () => {
+    expect(splitPreviewKindForPath("flow.mmd")).toBe("mermaid");
+    expect(splitPreviewKindForPath("FLOW.MMD")).toBe("mermaid");
+  });
+
+  it("returns json for .json", () => {
+    expect(splitPreviewKindForPath("data.json")).toBe("json");
+    expect(splitPreviewKindForPath("DATA.JSON")).toBe("json");
+  });
+
+  it("returns null for non-split-preview formats", () => {
+    expect(splitPreviewKindForPath("main.go")).toBeNull();
+    expect(splitPreviewKindForPath("report.pdf")).toBeNull();
+    expect(splitPreviewKindForPath("photo.png")).toBeNull();
+    expect(splitPreviewKindForPath("budget.xlsx")).toBeNull();
+    expect(splitPreviewKindForPath("Makefile")).toBeNull();
+  });
+});
+
+describe("previewKindForPath does not return json for .json", () => {
+  it("keeps .json as text so it stays editable in Monaco", () => {
+    expect(previewKindForPath("data.json")).toBe("text");
+    expect(previewKindForPath("DATA.JSON")).toBe("text");
   });
 });
 

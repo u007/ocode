@@ -80,10 +80,8 @@ embeds the same React application.
   (`<cache>/.espeak-data`) and passes that path to the synth process. See
   `gotchas/kokoro-espeak-ng-path-limit.md` for full details.
 
-- **Fish Audio and Breeze** remain unavailable until their runtime, artifact,
-  output protocol, platform matrix, and license review are complete. The UI
-  does not silently switch to Browser Native when a local engine is selected or
-  fails.
+- The UI does not silently switch to Browser Native when a local engine is
+  selected or fails.
 
 ## Installing a local engine
 

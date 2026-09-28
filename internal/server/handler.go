@@ -2006,19 +2006,19 @@ func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	s, err := h.loadSession(id)
+	// Resolve the project root so we can use the concurrent-safe append path.
+	// A load→append→save here races any concurrent writer (another ocode process,
+	// a live turn's sync save): the overlap check finds the stored transcript
+	// has diverged from our stale snapshot and returns ErrTranscriptConflict.
+	// AppendUserMessageForDir does a tail-insert with bounded retry instead.
+	entry, err := h.sessions.Resolve(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	msg := agent.Message{
-		Role:    "user",
-		Content: "By the way: " + req.Content,
-	}
-	s.Messages = append(s.Messages, msg)
-
-	if err := h.saveSession(id, s.Title, s.Messages, nil); err != nil {
+	content := "By the way: " + req.Content
+	if err := session.AppendUserMessageForDir(entry.ProjectRoot, id, content); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

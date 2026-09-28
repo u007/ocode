@@ -77,6 +77,11 @@ func TestKaizenStackGating(t *testing.T) {
 	if !kaizenAdmitted(universal, model, []string{"react"}) {
 		t.Fatal("universal conduct skill must be admitted regardless of stack")
 	}
+	// Universal (hallucination): same as conduct — no stack marker exists.
+	halluc := Skill{Name: "hallucination-tuning-tencent-hy3", TunedFor: "tencent/hy3", Stack: "hallucination"}
+	if !kaizenAdmitted(halluc, model, nil) {
+		t.Fatal("universal hallucination skill must be admitted with no stack detected")
+	}
 	// Wrong model → neither admitted, even with the stack present.
 	if kaizenAdmitted(stackGated, "anthropic/claude-opus-4-8", []string{"golang"}) {
 		t.Fatal("wrong model admitted a stack-gated skill")

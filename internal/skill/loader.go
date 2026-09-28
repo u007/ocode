@@ -25,8 +25,8 @@ type Skill struct {
 	// model + stack and must NEVER appear in an ungated listing.
 	TunedFor string
 	// Stack is the Kaizen `stack` frontmatter (e.g. "react", "conduct"). The
-	// special value "conduct" (and an empty value) is universal — active in
-	// every repo; any other value gates on stackdetect.Detect(root).
+	// universal corpora ("conduct", "hallucination") and an empty value are
+	// active in every repo; any other value gates on stackdetect.Detect(root).
 	Stack string
 	// Digest is the compact directive block carved from a SKILL.md between the
 	// `<!-- kaizen:digest -->` … `<!-- /kaizen:digest -->` markers. For a Kaizen
@@ -237,7 +237,7 @@ func excludeKaizen(in []Skill) []Skill {
 
 // kaizenAdmitted reports whether a Kaizen skill is admitted for the session:
 // the active model must match the skill's tuned_for AND the skill's stack must
-// be active (universal "conduct"/"" or present in the detected stacks).
+// be active (universal "conduct"/"hallucination"/"" or present in the detected stacks).
 func kaizenAdmitted(s Skill, activeModel string, detected []string) bool {
 	if !modelMatchesTuned(activeModel, s.TunedFor) {
 		return false
@@ -246,10 +246,10 @@ func kaizenAdmitted(s Skill, activeModel string, detected []string) bool {
 }
 
 // stackActive reports whether a Kaizen skill's stack is active for this repo.
-// The universal conduct corpus (and an empty stack) is always active; any other
-// stack must appear in the detected set.
+// The universal corpora (conduct, hallucination) and an empty stack are always
+// active; any other stack must appear in the detected set.
 func stackActive(stack string, detected []string) bool {
-	if strings.TrimSpace(stack) == "" || strings.EqualFold(stack, "conduct") {
+	if strings.TrimSpace(stack) == "" || strings.EqualFold(stack, "conduct") || strings.EqualFold(stack, "hallucination") {
 		return true
 	}
 	for _, d := range detected {
