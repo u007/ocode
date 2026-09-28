@@ -391,6 +391,11 @@ type grepParams struct {
 	OutputMode string   `json:"output_mode"`
 	Multiline  bool     `json:"multiline"`
 	Ignore     []string `json:"ignore"`
+	// Intent is the caller's stated purpose for the search. It is the anchor
+	// the relevance judge scores candidates against; an empty intent skips the
+	// judge (the agent logs intent-missing) rather than erroring — required in
+	// the schema is a teaching device, not enforcement.
+	Intent string `json:"intent"`
 }
 
 type GrepTool struct{}
@@ -419,6 +424,10 @@ func (t GrepTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "Optional glob pattern to filter files (e.g. *.go, **/*.tsx)",
 				},
+				"intent": map[string]interface{}{
+					"type":        "string",
+					"description": "Required. One sentence stating what you are looking for and why. A relevance judge scores each matching file against this intent and omits files that are clearly out of scope; an empty intent skips that filtering.",
+				},
 				"output_mode": map[string]interface{}{
 					"type":        "string",
 					"enum":        []string{"files_with_matches", "content", "count"},
@@ -429,7 +438,7 @@ func (t GrepTool) Definition() map[string]interface{} {
 					"description": "Enable multiline matching where . matches newlines (default: false)",
 				},
 			},
-			"required": []string{"pattern"},
+			"required": []string{"pattern", "intent"},
 		},
 	}
 }
@@ -470,7 +479,11 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	type fileResult struct {
 		path  string
 		count int
+		// lines is the rendered content block (content mode only).
 		lines []string
+		// sample is the first few matching lines in "L<n>:<text>" form, kept in
+		// every output_mode so the relevance judge sees where the file matched.
+		sample []string
 	}
 	var fileResults []fileResult
 
@@ -541,6 +554,16 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 						fr.lines = append(fr.lines, string(match))
 					}
 				}
+				for _, match := range re.FindAll(content, -1) {
+					if len(fr.sample) >= searchJudgeSampleLines {
+						break
+					}
+					block := string(match)
+					if nl := strings.IndexByte(block, '\n'); nl >= 0 {
+						block = block[:nl]
+					}
+					fr.sample = append(fr.sample, block)
+				}
 				if capped {
 					fr.lines = append(fr.lines, fmt.Sprintf("[file larger than the %d-byte scan cap — past-cap content not searched]", maxGrepFileBytes))
 				}
@@ -559,6 +582,9 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 					if params.OutputMode == "content" {
 						fr.lines = append(fr.lines, fmt.Sprintf("%d:%s", lineNum, line))
 					}
+					if len(fr.sample) < searchJudgeSampleLines {
+						fr.sample = append(fr.sample, fmt.Sprintf("L%d:%s", lineNum, line))
+					}
 				}
 				lineNum++
 			}
@@ -571,6 +597,7 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		}
 		return nil
 	})
+
 	if walkErr != nil {
 		return "", fmt.Errorf("grep failed: %w", walkErr)
 	}
@@ -582,11 +609,40 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		return "No matches found", nil
 	}
 
-	var b strings.Builder
+	// Build the structured result set and run the relevance judge between
+	// collection and formatting. A nil judge (TypeSafe not connected) leaves the
+	// output byte-identical to before; a judge failure renders everything and is
+	// disclosed in a footer. The candidate cap never drops a result.
+	judgeResults := make([]SearchResult, len(fileResults))
 	for i, fr := range fileResults {
-		if i > 0 {
+		judgeResults[i] = SearchResult{
+			Path:    fr.path,
+			Count:   fr.count,
+			Summary: strings.Join(fr.sample, "\n"),
+		}
+	}
+	outcome := runSearchJudge(ctx, "grep", params.Intent, map[string]string{
+		"pattern": params.Pattern,
+		"path":    params.Path,
+		"include": params.Include,
+	}, judgeResults)
+
+	if outcome.AllVetoed() {
+		return searchJudgeAllVetoedMessage(outcome.Judged, `"pattern"/"include"`), nil
+	}
+
+	kept := outcome.KeptPaths()
+
+	var b strings.Builder
+	first := true
+	for _, fr := range fileResults {
+		if !kept[fr.path] {
+			continue
+		}
+		if !first {
 			b.WriteString("\n")
 		}
+		first = false
 		switch params.OutputMode {
 		case "files_with_matches":
 			b.WriteString(fr.path)
@@ -605,8 +661,10 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 
 	// Same output cap the bash tool uses (truncateOutput, exec.go) — bounds
 	// the response even for a properly scoped grep whose pattern matches
-	// pervasively (e.g. a common token across a large "include" set).
-	return truncateOutput(strings.TrimRight(b.String(), "\n")), nil
+	// pervasively (e.g. a common token across a large "include" set). The judge
+	// runs before this cap; the disclosure footer is appended after it so a
+	// truncation cannot hide the fact that results were filtered.
+	return truncateOutput(strings.TrimRight(b.String(), "\n")) + outcome.Footer(), nil
 }
 
 type ListTool struct{}
