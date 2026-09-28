@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/snapshot"
 )
@@ -45,6 +46,27 @@ func TestMain(m *testing.M) {
 	os.Setenv("XDG_STATE_HOME", tmp)
 	os.Setenv("APPDATA", tmp)
 	os.Setenv("LOCALAPPDATA", tmp)
+
+	// Provider API-key env vars are process-global as well, and they WIN over a
+	// stored credential (see auth.Provider.EnvVar). A developer machine that
+	// exports e.g. OPENCODE_API_KEY — which is how ocode is normally used — made
+	// every "build a client from a stored credential" test resolve the real key
+	// instead of the fixture's, so the suite failed on the user's own machine and
+	// passed in CI. Clear them next to the HOME/XDG isolation and restore them
+	// below. Derived from the registry, so a new provider cannot reintroduce the
+	// leak. Tests that genuinely need a key set it themselves with t.Setenv.
+	for _, p := range auth.Providers {
+		if p.EnvVar == "" {
+			continue
+		}
+		if _, seen := orig[p.EnvVar]; seen {
+			continue
+		}
+		orig[p.EnvVar] = os.Getenv(p.EnvVar)
+		if err := os.Unsetenv(p.EnvVar); err != nil {
+			panic(err)
+		}
+	}
 
 	// Re-point the snapshot store now that HOME is isolated.
 	if p, err := config.ActiveOcodeConfigPath(); err == nil {

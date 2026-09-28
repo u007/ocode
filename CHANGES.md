@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-29 — The server test binary is now hermetic against exported provider keys
+
+`TestReconcileProfileAgentAppliesProfileCredential` and
+`TestProxiedActiveProfileRebuildsAgentCredential` failed on any machine that exports a provider API
+key — which is how ocode is normally used, and was true of this repo's own dev box with
+`OPENCODE_API_KEY` set. Both store a fixture credential in the auth store and then assert the built
+client carries it, but an env var **wins over a stored credential** (`auth.Provider.EnvVar`), so the
+client resolved the real key. Green in CI, red on the user's machine.
+
+- **`internal/server/testmain_test.go`** — the same isolation `TestMain` already does for `HOME` /
+  `XDG_*` / `APPDATA` now also covers every `auth.Provider.EnvVar`, saved before and restored after
+  the run. The list is derived from the registry, so a new provider cannot reintroduce the leak.
+- **The tests were not weakened.** They still assert the fixture's key; only the process-global
+  *input* is neutralised. Nothing reads a provider key from the environment in this package, and a
+  test that genuinely needs one can set it with `t.Setenv`.
+- Load-sensitivity, separately: `TestTaskToolBackgroundRunUnexpectedStopMarksFailed`,
+  `TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent`,
+  `TestNestedSyncTaskDispatchDoesNotDeadlockUnderMaxConcurrentAgentsOne` and
+  `TestStreamStepRecoversFromPanic` have 2–5s deadlines and fail when the full web suite is running
+  alongside them. They pass on a quiet machine; their timeouts were **not** relaxed, because a
+  deadline that only holds when nothing else runs is not evidence the code is correct.
+
 ## 2026-09-29 — Discovery's two shared caches are locked across ocode instances
 
 Both discovery caches are **on-disk and machine-shared** — `<project>/.ocode/md-summaries.json`
@@ -70,7 +92,8 @@ The TypeSafe judge (Jev) denied `MOD=$(go env GOMODCACHE); D="$MOD/..."; grep ..
 
 - `internal/agent/permission_shellvars.go`: new `expandBashForJudge` resolves in-command assignments, referenced env vars (secret-looking names/values withheld as `<redacted>`), and `$(...)` from a fixed read-only allowlist (`pwd`, `go env VAR`, `git rev-parse --show-toplevel`, `npm root/prefix [-g]`, exact print-a-path `python -c` snippets). Nothing else is executed. When `/mask` is on, results pass through the session mask registry.
 - Jev state gains `expanded_command` / `resolved_variables` plus a rubric line; the chat judge prompt gains an "Expanded command" section. The command that runs is unchanged.
-- Docs: `docs/concepts/auto-permission-enforced-categories.md` ("Shell-variable expansion for the judges").
+- `/mask` now covers everything the permission judges receive (previously nothing): arguments (chat mode), project context and interpreter source (file mode, new `redactFileText`), and the chat judge's `read_file` results (session `NetHook` attached to the judge client). Both rubrics explain OCSEC tokens.
+- Docs: `docs/concepts/auto-permission-enforced-categories.md` ("Shell-variable expansion for the judges", "`/mask` covers everything the judges receive").
 
 ## 2026-09-28 — Chat input queues behind a running `!` shell command (TUI)
 

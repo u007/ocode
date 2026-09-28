@@ -112,6 +112,17 @@ Neither judge can run anything, so a bash command built from variables (`MOD=$(g
 - **`$(...)` substitutions.** Only this fixed read-only allowlist is ever executed (via `shell.Build`, 3s timeout, stdout only, single-line output required): `pwd` (answered from the working directory, no process), `go env <VAR>`, `git rev-parse --show-toplevel`, `npm root [-g]`, `npm prefix [-g]`, and `python|python3 -c '<snippet>'` where the snippet is one of the exact print-a-path snippets in `pythonSnippetsOK` (`sys.prefix`, `sys.base_prefix`, `sys.executable`, `site.getusersitepackages()`, `site.getsitepackages()[0]`, `sysconfig.get_paths()['purelib'|'platlib']`). Any other substitution, backticks, `${X:-y}`-style forms and `$((...))` are never run and stay verbatim.
 - **`/mask`.** When session redaction is on, every resolved value and the expanded command pass through the session registry (`redactText` + `Registry.Substitute`), so a known secret reaches the judge as its OCSEC token.
 
+### `/mask` covers everything the judges receive
+
+The judges are separate model calls, so the main conversation's masking never reached them. With `/mask` on (`judgeMaskRegistry`, `internal/agent/redaction_helpers.go`):
+
+- **Arguments** are masked in chat mode (`redactText`), like the conversation. Tool args usually already carry OCSEC tokens: they are resolved back to raw values only in `executeToolCallWithContext`, after the permission check.
+- **Project context** and **interpreter source** (Jev) are masked in file mode (`redactFileText`: known formats only, no keyword/entropy heuristics).
+- **Chat judge `read_file` results** are masked by the session `NetHook`, which `askPermissionModel` attaches to the per-request judge client.
+- Both rubrics tell the judge that `[[OCSEC:xxxxxx:N]]` is a masked secret, to be treated as the credential it stands for.
+
+`user_policy` is the user's own text and is sent as-is.
+
 Jev gets `expanded_command` and `resolved_variables` in its state plus a rubric line telling it to judge paths from the expanded form. The chat judge gets the same as an "Expanded command" section under `Arguments`. The expansion is judge context only: the command that runs is unchanged, and `verifyAutoGrant` still checks the original.
 
 ## UI
