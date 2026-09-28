@@ -204,8 +204,12 @@ func (t GlobTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "Optional base directory to search in (default: project root)",
 				},
+				"intent": map[string]interface{}{
+					"type":        "string",
+					"description": "Required. One sentence stating what you are looking for and why. A relevance judge scores each matched file against this intent and omits files that are clearly out of scope; an empty intent skips that filtering.",
+				},
 			},
-			"required": []string{"pattern"},
+			"required": []string{"pattern", "intent"},
 		},
 	}
 }
@@ -225,6 +229,8 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		Pattern string   `json:"pattern"`
 		Path    string   `json:"path"`
 		Ignore  []string `json:"ignore"`
+		// Intent anchors the relevance judge; empty skips judging.
+		Intent string `json:"intent"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -293,9 +299,31 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		truncated = true
 	}
 
-	var paths []string
+	if len(matches) == 0 {
+		return "No files matched", nil
+	}
+
+	// The mtime-descending order glob already computed is the pre-judge order
+	// the candidate cap samples from. A nil judge leaves the output
+	// byte-identical; a failure is disclosed in a footer.
+	judgeResults := make([]SearchResult, len(matches))
+	for i, m := range matches {
+		judgeResults[i] = SearchResult{Path: m.path}
+	}
+	outcome := runSearchJudge(ctx, "glob", params.Intent, map[string]string{
+		"pattern": params.Pattern,
+		"path":    params.Path,
+	}, judgeResults)
+	if outcome.AllVetoed() {
+		return searchJudgeAllVetoedMessage(outcome.Judged, `"pattern"/"path"`), nil
+	}
+
+	kept := outcome.KeptPaths()
+	paths := make([]string, 0, len(matches))
 	for _, m := range matches {
-		paths = append(paths, m.path)
+		if kept[m.path] {
+			paths = append(paths, m.path)
+		}
 	}
 
 	result := strings.Join(paths, "\n")
@@ -303,11 +331,7 @@ func (t GlobTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 		result += fmt.Sprintf("\n\n... (%d files matched, showing first %d)", totalMatches, globMaxResults)
 	}
 
-	if len(paths) == 0 {
-		return "No files matched", nil
-	}
-
-	return result, nil
+	return result + outcome.Footer(), nil
 }
 
 // globMatcher holds a glob pattern compiled once so per-file matching inside
