@@ -8,10 +8,12 @@ description: >
   anchoring inserted images to real content, deduplicating repeated images,
   and matching header style in new columns.
 when_to_use: >
-  Load when the provider-stripped model id (see stack-detection.md) resolves
-  to exactly `deepseek-v4.1-flash` AND the repository contains a PDF
-  (`*.pdf` at the root or up to two directories deep — per meta.yaml
-  detection). For any other model or a repo without PDFs, do not load.
+  Load when the provider-stripped model id (see stack-detection.md)
+  resolves to exactly `deepseek-v4.1-flash`. There is no repo/detection gate: the
+  pdf corpus is universal (internal/skill universalStacks), because a
+  *.pdf marker file cannot detect the create-from-scratch case, a PDF
+  attached from outside the repo, or one deeper than the glob limit.
+  For any other model, do not load.
 tuned_for: deepseek-v4.1-flash
 tuned_version: "4.1"
 stack: pdf

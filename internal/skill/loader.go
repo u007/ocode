@@ -22,11 +22,12 @@ type Skill struct {
 	// TunedFor is the Kaizen `tuned_for` frontmatter: the provider-stripped
 	// canonical model id this skill was derived for (e.g. "tencent/hy3"). A
 	// non-empty TunedFor marks this as a Kaizen skill, which is gated by
-	// model + stack and must NEVER appear in an ungated listing.
+	// model + stack (see universalStacks / stackActive) and must NEVER appear
+	// in an ungated listing.
 	TunedFor string
 	// Stack is the Kaizen `stack` frontmatter (e.g. "react", "conduct"). The
-	// universal corpora ("conduct", "hallucination") and an empty value are
-	// active in every repo; any other value gates on stackdetect.Detect(root).
+	// universal corpora (see universalStacks) and an empty value are active in
+	// every repo; any other value gates on stackdetect.Detect(root).
 	Stack string
 	// Digest is the compact directive block carved from a SKILL.md between the
 	// `<!-- kaizen:digest -->` … `<!-- /kaizen:digest -->` markers. For a Kaizen
@@ -235,9 +236,36 @@ func excludeKaizen(in []Skill) []Skill {
 	return out
 }
 
+// universalStacks are the Kaizen corpora admitted on an exact model-id match
+// ALONE, with no stackdetect gate. Two reasons a corpus earns a place here:
+//
+//   - "conduct" / "hallucination" are not tech stacks at all. They probe model
+//     behaviour that applies in every repo, so no marker file could detect them
+//     (docs/okf/hallucination/meta.yaml sets `detection: mode: universal`).
+//   - "pdf" is a real document format, but its only marker is a *.pdf file at the
+//     repo root or one/two levels down (internal/stackdetect). That is a proxy for
+//     "a PDF already exists here", and it cannot see the tasks these corrections
+//     exist for: generating a PDF from scratch (nothing on disk yet), a PDF
+//     attached from outside the repo, or a PDF deeper than the glob limit. It also
+//     misses the session that first writes a PDF, because the prompt context is
+//     built once and cached for prefix stability before the request exists. The
+//     result was a create-a-PDF task running with no catalogue line and no digest:
+//     the model had no way to learn the corrections were there.
+//
+// A corpus listed here has its digest force-injected into EVERY session for models
+// that have a tuning skill in that corpus (KaizenDigestBlock), at ~1.7KB for pdf.
+// That is deliberate: cheap next to the defects it prevents, and a
+// request-conditional gate is not implementable without re-breaking prefix
+// stability.
+var universalStacks = map[string]bool{
+	"conduct":       true,
+	"hallucination": true,
+	"pdf":           true,
+}
+
 // kaizenAdmitted reports whether a Kaizen skill is admitted for the session:
 // the active model must match the skill's tuned_for AND the skill's stack must
-// be active (universal "conduct"/"hallucination"/"" or present in the detected stacks).
+// be active (a universal corpus, an empty stack, or a detected stack).
 func kaizenAdmitted(s Skill, activeModel string, detected []string) bool {
 	if !modelMatchesTuned(activeModel, s.TunedFor) {
 		return false
@@ -246,10 +274,10 @@ func kaizenAdmitted(s Skill, activeModel string, detected []string) bool {
 }
 
 // stackActive reports whether a Kaizen skill's stack is active for this repo.
-// The universal corpora (conduct, hallucination) and an empty stack are always
+// The universal corpora (see universalStacks) and an empty stack are always
 // active; any other stack must appear in the detected set.
 func stackActive(stack string, detected []string) bool {
-	if strings.TrimSpace(stack) == "" || strings.EqualFold(stack, "conduct") || strings.EqualFold(stack, "hallucination") {
+	if strings.TrimSpace(stack) == "" || universalStacks[strings.ToLower(strings.TrimSpace(stack))] {
 		return true
 	}
 	for _, d := range detected {

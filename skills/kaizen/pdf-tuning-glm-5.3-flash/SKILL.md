@@ -7,10 +7,12 @@ description: >
   insert_text puts the baseline, growing and re-laying tables without broken
   rules, replace_image is global, and scripts must check return values.
 when_to_use: >
-  Load when the provider-stripped model id (see stack-detection.md) resolves
-  to exactly `glm-5.3-flash` AND the repository contains a PDF (`*.pdf` at
-  the root or up to two directories deep — per meta.yaml detection). For any
-  other model or a repo without PDFs, do not load.
+  Load when the provider-stripped model id (see stack-detection.md)
+  resolves to exactly `glm-5.3-flash`. There is no repo/detection gate: the
+  pdf corpus is universal (internal/skill universalStacks), because a
+  *.pdf marker file cannot detect the create-from-scratch case, a PDF
+  attached from outside the repo, or one deeper than the glob limit.
+  For any other model, do not load.
 tuned_for: glm-5.3-flash
 tuned_version: "5.3"
 stack: pdf

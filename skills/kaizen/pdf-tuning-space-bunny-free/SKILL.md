@@ -7,10 +7,12 @@ description: >
   placement; bold flag bits and subset-font glyph coverage; image reuse and
   overlay; rotated-page coordinates; relayout and make-room procedures.
 when_to_use: >
-  Load when the provider-stripped model id (see stack-detection.md) resolves
-  to exactly `space-bunny-free` AND the repository contains a PDF (`*.pdf` at
-  the root or up to two directories deep — per meta.yaml detection). For any
-  other model or a repo without PDFs, do not load.
+  Load when the provider-stripped model id (see stack-detection.md)
+  resolves to exactly `space-bunny-free`. There is no repo/detection gate: the
+  pdf corpus is universal (internal/skill universalStacks), because a
+  *.pdf marker file cannot detect the create-from-scratch case, a PDF
+  attached from outside the repo, or one deeper than the glob limit.
+  For any other model, do not load.
 tuned_for: space-bunny-free
 tuned_version: "alpha"
 stack: pdf

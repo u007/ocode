@@ -22,9 +22,29 @@ tags:
   - fonts            # base-14 vs embedded/subset fonts, glyph coverage, style matching
   - verify-safety    # prove the edit on the text layer, keep the original, real removal
 
+# Universal: the skill gate does NOT use marker detection for this corpus. These
+# tuning skills are admitted on the exact model id alone (internal/skill
+# universalStacks -> stackActive), for the same reason as conduct/ and
+# hallucination/ — but unlike those two, pdf is a real document format, so the
+# reason is a concrete detection gap rather than "not a stack at all":
+#
+#   * generate a PDF from scratch — no .pdf exists yet, so the marker is absent;
+#   * a PDF attached/streamed from outside the repo — marker globs only see disk;
+#   * a PDF deeper than the glob limit (stackdetect uses filepath.Glob, no "**");
+#   * the session that FIRST writes the PDF, because the prompt context is built
+#     once and cached for prefix stability before the request exists.
+#
+# All four produced a create/edit PDF task running with no catalogue line and no
+# digest, so the model had no way to learn these corrections existed.
+#
+# `markers` below are retained as INFORMATION ONLY: internal/stackdetect still
+# reports `pdf` (other consumers may read Detect output), but the skill gate
+# ignores it. Nothing in docs/okf/_tools/ derives stackdetect from this file, so
+# mode and markers cannot drift out of sync silently in either direction.
 detection:
-  mode: any
-  # Depth-limited: stackdetect uses filepath.Glob, which has no "**".
+  mode: universal
+  # Informational: what stackdetect still globs for (depth-limited; filepath.Glob
+  # has no "**"). NOT a gate for these skills.
   markers:
     - { type: file, glob: "*.pdf" }
     - { type: file, glob: "*/*.pdf" }

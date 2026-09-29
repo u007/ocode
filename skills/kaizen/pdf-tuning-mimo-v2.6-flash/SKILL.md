@@ -6,10 +6,12 @@ description: >
   moving regions without duplicates, APIs that do not exist, subset fonts,
   rotated-page coordinates, and image replace/dedup details.
 when_to_use: >
-  Load when the provider-stripped model id (see stack-detection.md) resolves
-  to exactly `mimo-v2.6-flash` AND the repository contains a PDF (`*.pdf` at
-  the root or up to two directories deep — per meta.yaml detection). For any
-  other model or a repo without PDFs, do not load.
+  Load when the provider-stripped model id (see stack-detection.md)
+  resolves to exactly `mimo-v2.6-flash`. There is no repo/detection gate: the
+  pdf corpus is universal (internal/skill universalStacks), because a
+  *.pdf marker file cannot detect the create-from-scratch case, a PDF
+  attached from outside the repo, or one deeper than the glob limit.
+  For any other model, do not load.
 tuned_for: mimo-v2.6-flash
 tuned_version: "2.6"
 stack: pdf
