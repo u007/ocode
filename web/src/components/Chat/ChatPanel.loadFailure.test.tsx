@@ -44,6 +44,9 @@ vi.mock("../../api/client", () => ({
   },
 }));
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectDispatch: () => hoisted.projectDispatch,
 }));
 

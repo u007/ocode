@@ -63,6 +63,9 @@ vi.mock("../../api/client", () => ({
 // --- Mock the project store (ChatPanel only dispatches UPDATE_TAB_TITLE via
 // the stable dispatch-only context).
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectDispatch: () => hoisted.projectDispatch,
 }));
 
@@ -315,6 +318,53 @@ function DispatchCapture({ onCapture }: { onCapture: (d: (a: unknown) => void) =
   return null;
 }
 
+/** Structurally identical but referentially new — the point of the resnapshot is
+ *  that the store sees objects it has never held before. */
+function structuredCloneish(msgs: Message[]): Message[] {
+  return msgs.map((m) => ({ ...m, tool_calls: m.tool_calls?.map((tc) => ({ ...tc })) }));
+}
+
+/** Replays a transcript through a full-array snapshot with brand-new object
+ *  identities, mimicking the turn-end refetch that replaces the whole
+ *  `messages` array. Triggered by clicking the button so the test controls
+ *  exactly when the replacement lands. */
+function Resnapshot({
+  sessionId,
+  messages,
+  testId,
+  action = "MERGE_SNAPSHOT",
+}: {
+  sessionId: string;
+  messages: Message[];
+  testId: string;
+  /** MERGE_SNAPSHOT covers initial load + the turn watchdog; SET_MESSAGES is the
+   *  turn boundary (the `messages` SSE event) and is the one that clears `live`. */
+  action?: "MERGE_SNAPSHOT" | "SET_MESSAGES";
+}) {
+  const dispatch = useChatDispatch();
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      onClick={() =>
+        dispatch(
+          action === "SET_MESSAGES"
+            ? { type: "SET_MESSAGES", sessionId, messages }
+            : { type: "MERGE_SNAPSHOT", sessionId, messages, total: messages.length },
+        )
+      }
+    >
+      resnapshot
+    </button>
+  );
+}
+
+function resnapshotButton(container: HTMLElement): HTMLButtonElement {
+  const btn = container.querySelector('[data-testid="resnapshot-keys"]');
+  if (!btn) throw new Error("resnapshot button not rendered");
+  return btn as HTMLButtonElement;
+}
+
 function tick() {
   return act(async () => {
     await Promise.resolve();
@@ -336,6 +386,17 @@ function advanceFrame() {
   return act(async () => {
     await new Promise((r) => requestAnimationFrame(() => r(null)));
   });
+}
+
+/** A reader scrolling UP. Dispatches the gesture as well as the scroll event,
+ *  because unpinning is gated on real user intent: `el.scrollTop =
+ *  el.scrollHeight` is clamped when the content is shorter than the requested
+ *  offset, so a bare offset decrease is indistinguishable from one of our own
+ *  pins being clamped. Tests that mean "the reader scrolled up" must say so with
+ *  the same event a browser would deliver. */
+function userScrollsUp(el: HTMLElement) {
+  fireEvent.wheel(el, { deltaY: -120 });
+  fireEvent.scroll(el);
 }
 
 /** The scroll container inside a rendered ChatPanel. */
@@ -569,7 +630,7 @@ describe("ChatPanel", () => {
       const obs = scrollObserverFor(container);
       const f = fakeScroll(el, 0); // user read from the top of the viewport
       // Scroll event with a bottom far away → handleScroll unpins the panel.
-      fireEvent.scroll(el);
+      userScrollsUp(el);
       await advanceFrame();
       act(() => obs.fire(0));
       f.set(0);
@@ -598,7 +659,7 @@ describe("ChatPanel", () => {
       const obs = scrollObserverFor(container);
       const f = fakeScroll(el, 0);
       // Unpin via a real scroll event, then a hidden→visible cycle arrives.
-      fireEvent.scroll(el);
+      userScrollsUp(el);
       await advanceFrame();
       act(() => obs.fire(0));
       act(() => obs.fire(600));
@@ -633,7 +694,7 @@ describe("ChatPanel", () => {
       const el = scrollElOf(container);
       const f = fakeScroll(el, 0);
       // Unpin via a real scroll event (bottom far away).
-      fireEvent.scroll(el);
+      userScrollsUp(el);
       await advanceFrame();
       const list = el.querySelector('div[style*="height"]') as HTMLElement;
       act(() => observerForEl(list).fire());
@@ -674,9 +735,17 @@ describe("ChatPanel", () => {
 
       // Settle the pinned state, then the reader wheel-scrolls up: the offset
       // decreases, which must unpin synchronously (our own pins only grow it).
+      //
+      // The wheel event is not decoration. Unpinning is now gated on real user
+      // scroll intent, because a pin write is CLAMPED when the content is
+      // shorter than the requested offset — so a bare decrease can be our own
+      // doing rather than the reader's. Moving the offset and firing `scroll`
+      // with no gesture is exactly the shape of that false positive, so a
+      // realistic test has to dispatch the gesture the reader would dispatch.
       fireEvent.scroll(el);
       await advanceFrame();
       f.set(0);
+      fireEvent.wheel(el, { deltaY: -120 });
       fireEvent.scroll(el);
 
       // A streamed token lands BEFORE the deferred at-bottom recompute runs.
@@ -687,6 +756,70 @@ describe("ChatPanel", () => {
       });
       await advanceFrame();
       expect(f.get()).toBe(0);
+    });
+
+    it("still unpins on a real wheel-up, and holds the reader's position", async () => {
+      // Counterpart to the clamped-pin test above: the intent gate must not have
+      // disabled unpinning altogether. A reader who genuinely scrolls up has the
+      // follow dropped immediately, and a row growing above the fold is
+      // compensated by virtual-core rather than shoving the viewport.
+      const sessionId = "sess-wheel-unpin";
+      const { container, dispatch } = await renderLocked(sessionId, [
+        mk("user", "hi"),
+        mk("assistant", "yo"),
+      ]);
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 5000);
+
+      fireEvent.scroll(el);
+      await advanceFrame();
+      expect(f.get()).toBe(5000);
+
+      // A real gesture, then the offset the reader dragged it to.
+      f.set(0);
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(f.get()).toBe(0);
+
+      // Streaming continues; the reader must NOT be yanked back down.
+      act(() => {
+        dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: " more" });
+      });
+      await advanceFrame();
+      expect(f.get()).toBe(0);
+    });
+
+    it("does NOT unpin when the offset falls without a user gesture (our own clamped pin)", async () => {
+      const sessionId = "sess-clamp-nopin";
+      const { container, dispatch } = await renderLocked(sessionId, [
+        mk("user", "hi"),
+        mk("assistant", "yo"),
+      ]);
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 5000);
+
+      // Settle pinned.
+      fireEvent.scroll(el);
+      await advanceFrame();
+      expect(f.get()).toBe(5000);
+
+      // The offset now DECREASES with no wheel/touch/key gesture behind it.
+      // This is the shape of a clamped `el.scrollTop = el.scrollHeight`: the
+      // content shrank (a collapsed tool block, markdown settling, the
+      // live->committed swap), so the browser clamped our pin downward. The
+      // reader did not ask for this, so the tail follow must survive it —
+      // previously the bare decrease unpinned, the stream stopped being
+      // followed, and the transcript was stranded above the bottom.
+      f.set(3000);
+      fireEvent.scroll(el);
+      await advanceFrame();
+
+      // Still following: a growing tail pulls the viewport back down.
+      act(() => {
+        dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: " more" });
+      });
+      await advanceFrame();
+      expect(f.get()).toBe(5000);
     });
 
     it("re-arms the tail follow when the transcript is reset (truncate)", async () => {
@@ -763,7 +896,7 @@ describe("ChatPanel", () => {
       const el = scrollElOf(container);
       const f = fakeScroll(el, 0, 5000);
       // Lock the reader away from the bottom.
-      fireEvent.scroll(el);
+      userScrollsUp(el);
       await advanceFrame();
       expect(f.get()).toBe(0);
 
@@ -1220,6 +1353,113 @@ describe("ChatPanel", () => {
     expect(groupedItem?.textContent).toContain('content of a.go');
     expect(groupedItem?.textContent).toContain('b.go');
     expect(toolHeaders.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps a row's disclosure state across the turn-end snapshot that replaces every message object", async () => {
+    // Regression guard for the scroll bounce. Virtual items used to be keyed
+    // by message-object identity, and the turn-boundary SET_MESSAGES replaces
+    // the whole messages array with freshly parsed objects. Every key therefore
+    // changed at the end of every turn, which emptied the virtualizer's
+    // itemSizeCache, collapsed the list container back to count*estimateSize,
+    // and made the pin's `scrollTop = scrollHeight` clamp — the viewport jumped
+    // up. Keys are now global transcript positions, which do not move.
+    //
+    // Disclosure state is the observable proxy: it is keyed off the same
+    // getEntryKey, so a key that moves is a disclosure that resets.
+    const msgs: Message[] = [
+      mk("user", "read a.go"),
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call-1", function: { name: "read", arguments: '{"path":"a.go"}' } }],
+      },
+      { role: "tool", content: "content of a.go", tool_call_id: "call-1" },
+    ];
+    const { container } = render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-keystable" messages={msgs} />
+        <Resnapshot sessionId="sess-keystable" testId="resnapshot-keys" messages={structuredCloneish(msgs)} />
+        <ChatPanel sessionId="sess-keystable" />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+
+    const outputToggle = () =>
+      Array.from(container.querySelectorAll("button[aria-expanded]")).find((b) =>
+        /output/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement | undefined;
+
+    // Collapse the tool output.
+    const toggle = outputToggle();
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("aria-expanded")).toBe("true");
+    act(() => {
+      toggle!.click();
+    });
+    expect(outputToggle()!.getAttribute("aria-expanded")).toBe("false");
+
+    // Replay the transcript with BRAND NEW object
+    // identities — exactly what the turn-end refetch does.
+    act(() => {
+      resnapshotButton(container).click();
+    });
+    await tick();
+    await flushRAF();
+
+    // Same window start, same row count, new objects: the collapse must hold.
+    expect(outputToggle()!.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps a row's disclosure state across the turn-boundary SET_MESSAGES", async () => {
+    // Same contract as the MERGE_SNAPSHOT test above, but through the action that
+    // actually runs at the end of a turn. `messages` SSE -> SET_MESSAGES replaces
+    // the array with new objects AND clears `live`, so this is the path that made
+    // the tail pin clamp against a collapsed list container.
+    const msgs: Message[] = [
+      mk("user", "read b.go"),
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call-9", function: { name: "read", arguments: '{"path":"b.go"}' } }],
+      },
+      { role: "tool", content: "content of b.go", tool_call_id: "call-9" },
+    ];
+    const { container } = render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-setmsgs" messages={msgs} />
+        <Resnapshot
+          sessionId="sess-setmsgs"
+          testId="resnapshot-setmessages"
+          action="SET_MESSAGES"
+          messages={structuredCloneish(msgs)}
+        />
+        <ChatPanel sessionId="sess-setmsgs" />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+
+    const outputToggle = () =>
+      Array.from(container.querySelectorAll("button[aria-expanded]")).find((b) =>
+        /output/i.test(b.textContent ?? ""),
+      ) as HTMLButtonElement | undefined;
+
+    const toggle = outputToggle();
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("aria-expanded")).toBe("true");
+    act(() => {
+      toggle!.click();
+    });
+    expect(outputToggle()!.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => {
+      (container.querySelector('[data-testid="resnapshot-setmessages"]') as HTMLButtonElement).click();
+    });
+    await tick();
+    await flushRAF();
+
+    expect(outputToggle()!.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("shows an 'Open question' button that explicitly shows the same request", async () => {

@@ -14,6 +14,7 @@ import { useChatVerbosity } from "../../lib/chatVerbosity";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 import ModelPromptRow from "./ModelPromptRow";
 import { absoluteRestoreTarget } from "../../lib/inputRestore";
+import { transcriptItemKey } from "../../lib/chatItemKeys";
 import { SESSION_PREFETCH_LIMIT, takePrefetchedSession } from "../../lib/sessionPrefetch";
 import {
   buildJumpTargets,
@@ -26,11 +27,33 @@ import { requestSpeech } from "../Speech/SpeechProvider";
 import { lastRenderedSpeechText, renderedSpeechTexts } from "../Speech/speechUtils";
 import { ArrowDown, ArrowUp, Volume2 } from "lucide-react";
 
+/** Rough per-row height for an unmeasured virtualized transcript row. Real
+ *  heights vary a lot (code blocks vs. one-line replies); `measureElement`
+ *  corrects each row after first paint. */
+const DEFAULT_ESTIMATE_SIZE = 96;
+
 const PAGE_SIZE = 50;
 /** Debounce for the full-transcript search query. Long enough to avoid a
  *  request per keystroke, short enough that the out-of-window count settles
  *  while the user is still reading the result. */
 const SEARCH_DEBOUNCE_MS = 200;
+/** How recently a real user scroll gesture must have landed for a decrease in
+ *  scrollTop to count as reader intent. Generous enough to cover a wheel burst
+ *  and the browser's own scroll-event debounce, short enough that a clamped
+ *  pin from an unrelated late correction is never mistaken for a gesture. */
+const USER_SCROLL_INTENT_MS = 250;
+/** True when a real scroll gesture landed within the intent window. See
+ *  userScrollIntentAtRef. */
+function isRecentUserScrollIntent(at: number, now: number = Date.now()): boolean {
+  return now - at < USER_SCROLL_INTENT_MS;
+}
+/** Keys that scroll the transcript upward. A plain ArrowDown/End is excluded:
+ *  those only ever move the viewport toward the bottom, which the deferred
+ *  near-bottom re-pin already handles. */
+const SCROLL_UP_KEYS = new Set(["ArrowUp", "PageUp", "Home"]);
+/** Width of the scrollbar strip along a scroll container's trailing edge that
+ *  counts as a scrollbar drag rather than a click on the transcript. */
+const SCROLLBAR_GESTURE_WIDTH_PX = 20;
 /** Scroll a container to an offset. Falls back to the `scrollTop` property
  *  when `Element.prototype.scrollTo` is unavailable (jsdom), so the scroll
  *  affordances degrade instead of throwing under test. */
@@ -131,6 +154,16 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   // streamed token that lands in the same frame from re-pinning and swallowing
   // the user's scroll-up.
   const lastScrollTopRef = useRef(0);
+  // Timestamp of the last genuine USER scroll gesture on this panel.
+  //
+  // A decrease in scrollTop is NOT on its own evidence of a reader scrolling
+  // up: `el.scrollTop = el.scrollHeight` is CLAMPED by the browser whenever the
+  // content is shorter than the offset we asked for, so our own pin can move
+  // the offset DOWNWARD. Treating that as user intent silently disabled the tail
+  // follow mid-turn and left the transcript stranded above the bottom. So a
+  // decrease only unpins when a real gesture (wheel/touch/drag/key) arrived
+  // within the last USER_SCROLL_INTENT_MS.
+  const userScrollIntentAtRef = useRef(0);
   // Previous committed message-list size, so the auto-scroll effect can tell a
   // transcript RESET (truncate/clear/replace, which shrinks the list) from an
   // append or prepend (which only grow it).
@@ -251,28 +284,25 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
         }>;
       };
 
-  const msgKeyMap = useRef(new WeakMap<object, number>());
-  const msgKeyCounter = useRef(0);
   const renderEntriesRef = useRef<RenderEntry[]>([]);
-  const getObjectKey = useCallback((keyObj: object): number => {
-    let id = msgKeyMap.current.get(keyObj);
-    if (id === undefined) {
-      id = msgKeyCounter.current++;
-      msgKeyMap.current.set(keyObj, id);
-    }
-    return id;
-  }, []);
+  // Virtual-item keys must survive a store update that REPLACES the message
+  // objects. The turn-boundary SET_MESSAGES does exactly that (and clears
+  // `live` in the same update), so keying on object identity handed every row a
+  // fresh key at the end of every turn, emptied the virtualizer's
+  // itemSizeCache, and collapsed the list container back to count*estimateSize
+  // — the pin then clamped and the viewport jumped up. Global transcript
+  // position is stable across both that snapshot and prepend pagination.
+  // See lib/chatItemKeys.ts for the full derivation.
+  const windowStartRef = useRef(windowStartServerIndex);
+  windowStartRef.current = windowStartServerIndex;
   const getItemKey = useCallback((index: number): number => {
     const entry = renderEntriesRef.current[index] as RenderEntry | undefined;
     if (!entry) return index;
-    const keyObj: object =
-      entry.kind === "single" ? (entry.msg as object) : (entry.assistant as object);
-    return getObjectKey(keyObj);
-  }, [getObjectKey]);
+    return transcriptItemKey(windowStartRef.current, entry.originalIndex);
+  }, []);
   const getEntryKey = useCallback((entry: RenderEntry): string => {
-    const keyObj: object = entry.kind === "single" ? entry.msg : entry.assistant;
-    return `message:${getObjectKey(keyObj)}`;
-  }, [getObjectKey]);
+    return `message:${transcriptItemKey(windowStartRef.current, entry.originalIndex)}`;
+  }, []);
 
   // Group tool results into their parent assistant turn so the web transcript
   // matches the TUI and the user can tell which result belongs to which
@@ -419,16 +449,146 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   // estimateSize is deliberately rough (real heights vary a lot — code
   // blocks vs. one-line replies); measureElement (wired via the ref callback
   // below) corrects it per item after first paint.
+  // --- Live-block height capture (turn-end estimate seeding) -----------------
+  // With stable item keys the list keeps its measured heights across the
+  // turn-end snapshot, but the SWAP itself still punches a hole: the
+  // non-virtualized `live` block is torn down (chatStore's SET_MESSAGES
+  // clears it in the same update that commits the turn) while its replacement
+  // rows mount at `estimateSize`. A turn with several tool blocks is routinely
+  // a couple of thousand pixels, so `scrollHeight` drops sharply, the pin's
+  // `el.scrollTop = el.scrollHeight` clamps against the shrunken container, and
+  // the viewport jumps upward.
+  //
+  // So measure the live block while it is on screen and hand that height to the
+  // virtualizer as the estimate for the rows replacing it. The container height
+  // stays continuous across the swap, the pin is never clamped, and
+  // `measureElement` still corrects each row to its true height a frame later.
+  //
+  // A ResizeObserver is used rather than measuring in an effect: it fires after
+  // layout, so streaming deltas do not each force a synchronous reflow.
+  const liveBlockRef = useRef<HTMLDivElement>(null);
+  const liveBlockHeightRef = useRef(0);
+  // Global transcript position where this turn's committed rows will start,
+  // captured when the live block appears: the end of the committed list as it
+  // stood before the turn ended.
+  const liveTailStartRef = useRef<number | null>(null);
+  // Named so the live-block effect's dependency list reads as two conditions
+  // rather than an inline expression.
+  const hasLiveBlock = liveRenderParts.length > 0;
+
+  useEffect(() => {
+    const el = liveBlockRef.current;
+    if (!el) return;
+    if (liveTailStartRef.current === null) {
+      liveTailStartRef.current = transcriptItemKey(windowStartRef.current, messages.length);
+    }
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      const height = cr ? cr.height : el.getBoundingClientRect().height;
+      // Only a positive measurement is usable; a just-unmounted block (and
+      // jsdom) report 0, which must never seed a zero-height estimate.
+      if (height > 0) liveBlockHeightRef.current = height;
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+    };
+  }, [hasLiveBlock, messages.length]);
+
+  // Estimates for the rows replacing the live block. Computed during render
+  // (before the JSX calls getTotalSize) from the captured live height, and read
+  // by `estimateSize` for rows that have no measurement yet.
+  const liveTailEstimates = useMemo(() => {
+    const start = liveTailStartRef.current;
+    const liveHeight = liveBlockHeightRef.current;
+    if (start === null || liveHeight <= 0 || renderEntries.length === 0) return null;
+    const tail: number[] = [];
+    let defaults = 0;
+    for (let i = 0; i < renderEntries.length; i++) {
+      const key = transcriptItemKey(windowStartRef.current, renderEntries[i].originalIndex);
+      if (key >= start) {
+        tail.push(i);
+        defaults += DEFAULT_ESTIMATE_SIZE;
+      }
+    }
+    // No overlap means the snapshot did not add the turn's rows (e.g. the turn
+    // persisted nothing), so there is nothing to seed.
+    if (tail.length === 0 || defaults <= 0) return null;
+    // Spread the measured live height over the new rows in proportion to their
+    // default estimates, so only the TOTAL is pinned to the real height. The
+    // per-row split is a guess; `measureElement` replaces it within a frame and
+    // the tail pin keeps the viewport at the bottom throughout.
+    const scale = liveHeight / defaults;
+    const map = new Map<number, number>();
+    for (const i of tail) map.set(i, DEFAULT_ESTIMATE_SIZE * scale);
+    return map;
+  }, [renderEntries, messages.length, live.length]);
+
+  // Retire the capture once the swap has rendered: those rows are measured for
+  // real now, and leaving it armed would re-seed a later turn with a stale
+  // height. Cleared in an effect (not during render) so the seeding render above
+  // still sees the captured value.
+  useEffect(() => {
+    if (hasLiveBlock) return;
+    if (liveTailStartRef.current === null) return;
+    liveTailStartRef.current = null;
+    liveBlockHeightRef.current = 0;
+  }, [hasLiveBlock]);
+
   const virtualizer = useVirtualizer({
     count: renderEntries.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 96,
+    // Rows replacing the just-torn-down live block are seeded with its
+    // measured height so the container does not shrink across the swap; every
+    // other row gets the rough default. See the seeding block above.
+    estimateSize: (index: number) => liveTailEstimates?.get(index) ?? DEFAULT_ESTIMATE_SIZE,
     overscan: 8,
     // Coordinate space = scroll surface top + this margin. Measured live (see
     // effect below) so the header's variable height is always accounted for.
     scrollMargin: listMargin,
     getItemKey,
   });
+
+  // virtual-core compensates an estimate->measure delta by writing scrollTop
+  // directly (+= delta) to hold the anchor row visually still. That is the right
+  // call for a reader who has scrolled up, but it directly opposes our tail pin,
+  // which must be the only writer while the viewport is pinned to the bottom —
+  // otherwise the two pull in opposite directions on every size correction.
+  //
+  // It is an INSTANCE field, not a `useVirtualizer` option, and `setOptions`
+  // never resets it, so the assignment is durable for the instance's life.
+  //
+  // Assigned during render rather than in an effect on purpose: `measureElement`
+  // is a ref callback, so the FIRST batch of measurements happens during the
+  // commit phase — strictly before any effect runs. In an effect the initial
+  // page load would measure with the default adjustment still active, which is
+  // exactly the "bounces on render finish" case. The write is idempotent (it
+  // only ever installs a closure over a ref), so re-running it every render is
+  // harmless, and a discarded render cannot leave it in a worse state.
+  //
+  // The override GATES virtual-core's own condition rather than replacing it.
+  // Returning a bare `!atBottomRef.current` would compensate every size change
+  // for a scrolled-up reader, including a row growing below the fold (streamed
+  // tool output), which shifts their view — the exact regression virtual-core
+  // avoids in its default. So the default is reproduced from the args and ANDed
+  // with the pin.
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    // Pinned to the tail: our pin is the only writer, and virtual-core's
+    // estimate->measure compensation would pull against it.
+    if (atBottomRef.current) return false;
+    // `scrollOffset` is the public face of virtual-core's private
+    // `getScrollOffset()`; it is null only before the first measurement, where
+    // the library's own `initialOffset` (0) applies.
+    const offset = (instance.scrollOffset ?? 0) + instance.scrollAdjustments;
+    if (instance.itemSizeCache.has(item.key)) {
+      // Re-measure: only a row ENTIRELY above the fold, and never while
+      // scrolling backward (rows would jump while the reader moves up).
+      return item.start + item.size <= offset && instance.scrollDirection !== "backward";
+    }
+    // First measure: the whole estimated block sat above the fold, so the
+    // estimate->actual delta must be compensated regardless of direction.
+    return item.start < offset;
+  };
 
   const lastPolicyRevisionRef = useRef(chatPolicyRevision);
   useEffect(() => {
@@ -1009,6 +1169,51 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     );
   }, [jumpTargets.length]);
 
+  // Record genuine user scroll gestures so handleScroll can tell a reader
+  // scrolling up apart from one of our own clamped pins moving the offset down.
+  // Wheel, touch, scrollbar drag (pointerdown on the element itself — content
+  // clicks are ignored) and the upward navigation keys all count.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const mark = () => {
+      userScrollIntentAtRef.current = Date.now();
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) mark();
+    };
+    const onTouchMove = () => mark();
+    const onPointerDown = (e: PointerEvent) => {
+      // The scrollbar lives on the element's own edge; clicks on the transcript
+      // content are not scroll gestures.
+      const rect = el.getBoundingClientRect();
+      const onScrollbar = e.clientX > rect.right - SCROLLBAR_GESTURE_WIDTH_PX;
+      if (onScrollbar) mark();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!SCROLL_UP_KEYS.has(e.key)) return;
+      // ArrowUp in the composer recalls prompt history, and in a tool-output
+      // block it navigates — neither scrolls the transcript. Counting those as
+      // scroll intent would let a clamped pin unpin the follow 250ms later.
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.isContentEditable) return;
+      const tag = target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      mark();
+    };
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
   // Pin to bottom immediately (used by the "jump to bottom" affordance).
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
@@ -1052,10 +1257,15 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     // re-pinning and swallowing the scroll-up (the "can't stay scrolled up
     // while the LLM streams" report). The deferred pass still owns the
     // near-bottom re-pin and the content-growth race it was written for.
+    //
+    // Gated on real user intent: a pin write is CLAMPED when the content is
+    // shorter than the requested offset, so a decrease can also be our own
+    // doing. Unpinning on that stranded the transcript mid-turn with the tail
+    // no longer followed.
     const top = el.scrollTop;
     const prevTop = lastScrollTopRef.current;
     lastScrollTopRef.current = top;
-    if (top < prevTop - 1) {
+    if (top < prevTop - 1 && isRecentUserScrollIntent(userScrollIntentAtRef.current)) {
       atBottomRef.current = false;
     }
 
@@ -1068,7 +1278,14 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       // path already re-arms the follow (and clears both affordances).
       const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       const atBottom = distanceFromBottom < 200;
-      atBottomRef.current = atBottom;
+      // Re-arming must stay unconditional — it is how the follow resumes after
+      // the reader scrolls back down. UNPINNING, like the synchronous check
+      // above, needs a real gesture: a clamped pin of our own can leave the
+      // viewport well above the bottom with no user input at all, and treating
+      // that as the reader leaving silently killed the follow mid-turn.
+      if (atBottom || isRecentUserScrollIntent(userScrollIntentAtRef.current)) {
+        atBottomRef.current = atBottom;
+      }
       setShowJumpToBottom(!atBottom);
       setShowJumpToTop(el.scrollTop > 200);
     });
@@ -1180,7 +1397,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       </div>
       <div
         ref={scrollRef}
-        className="relative flex-1 min-h-0 overflow-y-auto p-4"
+        className="relative flex-1 min-h-0 overflow-y-auto p-4 [overflow-anchor:none]"
         onScroll={handleScroll}
         onMouseUp={() => setSelectedText(window.getSelection()?.toString().trim() ?? "")}
       >
@@ -1337,7 +1554,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
         )}
 
         {liveRenderParts.length > 0 && (
-          <div>
+          <div ref={liveBlockRef}>
             {liveRenderParts.map((entry) => {
               if (entry.kind === "notices") {
                 const groupKey = `live:${entry.start}:notices`;
