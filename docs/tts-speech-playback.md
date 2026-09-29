@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Speech playback
-description: 'Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim.'
+description: 'Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key.'
 tags:
   - speech
   - tts
@@ -12,7 +12,7 @@ tags:
   - DOM-extraction
   - speech-summary
   - fail-open
-timestamp: 2026-09-29T02:58:31Z
+timestamp: 2026-09-29T07:16:45Z
 ---
 # Speech playback
 
@@ -225,6 +225,47 @@ prerequisite for speech.** Concretely, since the 2026-09-28 fix:
   `TestSummarizeForSpeechSkipsTheLLMForShortPlainProse`,
   `TestSummarizeForSpeechStillSummarisesShortTextCarryingArtifacts`,
   `TestSpeechTextNeedsRewrite`.
+- **A long message opens with a one-line recap before the detail (added
+  2026-09-29).** When the message is at or above
+  `speechSummaryRecapMinChars = 1200` runes (roughly one minute of speech at
+  160 wpm), `speechSummaryPromptFor` appends `speechSummaryRecapClause` to
+  the system prompt. The clause requires a one-line recap of the whole reply
+  — what it did or decided, and what that means, as one self-contained
+  sentence — written as the FIRST sentence, *in addition to* the usual
+  two-to-five detail sentences rather than as one of them, with the detail
+  not restating it. Two wording choices are load-bearing: without the "in
+  addition to" line a model treats the recap as sentence one and shrinks the
+  detail to compensate, losing more than the recap gains; and the recap must
+  be unlabelled plain prose with no heading, colon or line break, because
+  `cleanSpeechSummary` strips a recognised "Summary:"-style first line and
+  would delete a labelled recap along with its label. Below the threshold no
+  recap is requested at all — a recap of a short reply just restates the
+  summary's only sentence, and a short reply carrying an artifact needs the
+  description, not an orientation line.
+- **The recap threshold must sit ABOVE the short-text skip gate.** The
+  1200-rune recap threshold is deliberately well above the 400-rune
+  `speechSummarySkipChars` gate, and that ordering is an invariant: at or
+  below the skip gate a message is spoken verbatim without ever reaching the
+  summariser, so a recap threshold there would be unreachable on length and
+  could only fire for a short artifact-carrying message — precisely the case
+  that does not want a recap. `speechSummaryPromptFor` is the single home for
+  the length test, and it only runs once the skip gate has let the message
+  through. Regression: `TestSpeechSummaryRecapMinCharsSitsAboveTheSkipGate`,
+  `TestSummarizeForSpeechAsksForAnOpeningRecapOnALongMessage`,
+  `TestSummarizeForSpeechOmitsTheRecapInstructionOnAShorterMessage`.
+- **The prompt version is salted into the summary cache key (added
+  2026-09-29).** `speechSummaryCacheKey` hashes `speechSummaryPromptVersion`
+  (currently `"2"`) together with the model id and the message text —
+  sha256 over `version || 0x00 || modelID || 0x00 || text`, via
+  `speechSummaryCacheKeyFor` (`internal/agent/speech_summary.go`). The cache
+  is otherwise keyed on text + model, which cannot see a PROMPT change:
+  without the salt, every summary written in the last `speechSummaryCacheTTL`
+  (24h) would keep serving output from the previous prompt — here, the
+  no-recap prompt — until the TTL expired. Bump the version whenever the
+  prompt or the recap threshold changes; the cost is one paid round trip per
+  recently summarised message, which is the intended trade. Regression:
+  `TestSpeechSummaryCacheKeyIncludesThePromptVersion`,
+  `TestSpeechSummaryCacheKeyShape`.
 - **The endpoint degrades immediately while that session's turn is running.**
   `runTurn` holds the session's `as.mu` for the entire turn, so the handler
   checks `h.sessions.IsTurnActive(id)` on the (non-blocking) registry first

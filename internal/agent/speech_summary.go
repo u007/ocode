@@ -33,6 +33,28 @@ Rewrite it as spoken prose:
 
 Output ONLY the spoken text, with no preamble, labels or quotation marks.`
 
+// speechSummaryRecapClause is appended to the system prompt when, and only
+// when, the message is long (speechSummaryRecapMinChars). It exists because a
+// long reply summarised as a flat two-to-five sentences leaves the listener
+// without a way in: the opening recap answers "what was this whole thing about"
+// in one sentence BEFORE the detail, so a listener who stopped listening halfway
+// still caught the point.
+//
+// Two wording choices are load-bearing:
+//
+//   - "The recap is in addition to the two-to-five sentences above, not one of
+//     them." Without that, a model treats the recap as sentence one and shrinks
+//     the summary to compensate, which loses more detail than the recap gains.
+//   - The recap is prose with no label. cleanSpeechSummary strips a recognised
+//     "Summary:"-style first line, so a labelled recap would be deleted along
+//     with its label — the one sentence the feature exists to guarantee.
+const speechSummaryRecapClause = `
+
+This reply is LONG, so it must open with a recap:
+- Write a one-line recap of the WHOLE reply as the FIRST sentence: what it did or decided, and what that means, in one self-contained sentence the listener can act on.
+- Then write the summary as instructed above. The recap is in addition to the two-to-five sentences above, not one of them, and the detail must not restate it.
+- The recap is plain prose, continuous with the rest. No label, heading or colon before it, and no line break between the recap and what follows.`
+
 const (
 	// speechSummaryTimeoutSeconds bounds one rewrite. Generous relative to
 	// compaction's per-batch budget because this is a single small request and a
@@ -59,6 +81,26 @@ const (
 	// a reply that short rarely hides a decision worth compressing. Length alone
 	// is NOT the test: see speechTextHasSpeakableArtifact.
 	speechSummarySkipChars = 400
+	// speechSummaryRecapMinChars is the length at or above which the summary
+	// must OPEN with a one-line recap of the whole message before the detail
+	// (speechSummaryRecapClause). Below it the recap is not requested: a recap
+	// of a short reply just restates the summary's only sentence, and a short
+	// reply carrying an artifact needs the description, not an orientation
+	// line. The value is roughly one minute of speech at 160 words per minute —
+	// long enough that a listener needs orienting, short enough that a two
+	// sentence summary still fits. It must stay ABOVE speechSummarySkipChars:
+	// at or below that a message is spoken verbatim, so a recap threshold there
+	// would be unreachable on length and could only fire for a short artifact
+	// message, which is precisely the case that does not want one.
+	speechSummaryRecapMinChars = 1200
+	// speechSummaryPromptVersion is salted into the summary cache key. The
+	// cache is keyed on the message text and the model id, so a PROMPT change
+	// is invisible to it: without a salt, every summary written in the last
+	// speechSummaryCacheTTL would keep serving output from the previous prompt
+	// (here: no recap) for up to 24 hours. Bump it whenever the prompt or the
+	// recap threshold changes; the cost is one paid round trip per recently
+	// summarised message, which is the intended trade.
+	speechSummaryPromptVersion = "2"
 	// speechSummaryPruneInterval throttles the opportunistic sweep so a busy
 	// server does not rescan the cache directory on every write.
 	speechSummaryPruneInterval = time.Hour
@@ -115,6 +157,18 @@ func chatWithOptionalContext(ctx context.Context, client LLMClient, messages []M
 		return cc.ChatWithContext(ctx, messages, nil)
 	}
 	return client.Chat(messages, nil)
+}
+
+// speechSummaryPromptFor returns the system prompt for one message: the base
+// prompt, plus the recap clause when the message is long enough to need
+// orienting (speechSummaryRecapMinChars). Exported through this helper rather
+// than inlined so the length test has exactly one home, and so a future prompt
+// variant cannot be added on a path that forgot to ask whether it applies.
+func speechSummaryPromptFor(text string) string {
+	if len([]rune(text)) < speechSummaryRecapMinChars {
+		return speechSummarySystemPrompt
+	}
+	return speechSummarySystemPrompt + speechSummaryRecapClause
 }
 
 // speechTextNeedsRewrite reports whether text is worth a summariser round
@@ -310,8 +364,13 @@ func (a *Agent) SummarizeForSpeech(text string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), speechSummaryTimeout)
 	defer cancel()
 	done := make(chan summaryResult, 1)
+	// Measured on the full text, not the possibly-truncated body: a message
+	// long enough to be truncated is over speechSummaryMaxInputChars, which is
+	// far above speechSummaryRecapMinChars, so the two can only ever agree.
+	// Reading it from the full text keeps the rule "long message, long recap"
+	// stated in terms of what the user wrote.
 	messages := []Message{
-		{Role: "system", Content: speechSummarySystemPrompt},
+		{Role: "system", Content: speechSummaryPromptFor(text)},
 		{Role: "user", Content: body},
 	}
 	crashguard.Go(func() {
@@ -436,12 +495,22 @@ func speechSummaryCacheDir() string {
 	return filepath.Join(os.TempDir(), "ocode-speech-summaries")
 }
 
-// speechSummaryCacheKey derives the entry name from the input text AND the
-// model: the same message summarised by two models must not collide, and the
-// text is hashed rather than stored so the cache directory never leaks message
-// contents into filenames.
+// speechSummaryCacheKey derives the entry name from the input text, the model
+// AND the prompt version: the same message summarised by two models must not
+// collide, and the text is hashed rather than stored so the cache directory
+// never leaks message contents into filenames. speechSummaryPromptVersion is in
+// the hash because a cache entry is the output of a PROMPT, and a prompt edit
+// would otherwise keep replaying the previous prompt's output for the whole TTL.
 func speechSummaryCacheKey(text, modelID string) string {
-	sum := sha256.Sum256([]byte(modelID + "\x00" + text))
+	return speechSummaryCacheKeyFor(text, modelID, speechSummaryPromptVersion)
+}
+
+// speechSummaryCacheKeyFor is the version-parameterised form of the key, so a
+// test can prove the prompt version is actually hashed in rather than trusting
+// the constant to stay wired up. Production always passes
+// speechSummaryPromptVersion.
+func speechSummaryCacheKeyFor(text, modelID, promptVersion string) string {
+	sum := sha256.Sum256([]byte(promptVersion + "\x00" + modelID + "\x00" + text))
 	return hex.EncodeToString(sum[:])
 }
 

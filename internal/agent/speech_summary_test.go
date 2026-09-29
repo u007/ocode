@@ -116,6 +116,94 @@ func TestSpeechSummaryBodyStillReachesTheModel(t *testing.T) {
 	}
 }
 
+// speechSummaryLongBody is past speechSummaryRecapMinChars, so a message this
+// size must be summarised with an opening recap line. It is plain prose on
+// purpose, like speechSummaryBody: the message reaches the model because of its
+// LENGTH alone, so a test that sees the recap instruction cannot be explained
+// by the artifact path.
+//
+// It is a function, not a const, so a caller can vary it — and it asserts its
+// own length in the tests, so shrinking the sentence below cannot quietly drop
+// the fixture under the threshold and turn those tests into a mystery failure.
+func speechSummaryLongBody() string {
+	return strings.Repeat("The retry helper now carries the previous delay forward, so one transient error from a flaky provider no longer turns into five attempts. ", 12)
+}
+
+// TestSummarizeForSpeechAsksForAnOpeningRecapOnALongMessage is the product
+// requirement: when a message is long, the spoken summary must open with a
+// one-line recap of the WHOLE message before the detail. The instruction is
+// what produces that ordering, so it is pinned in the system prompt actually
+// sent — a change that drops the clause silently reverts the feature.
+func TestSummarizeForSpeechAsksForAnOpeningRecapOnALongMessage(t *testing.T) {
+	body := speechSummaryLongBody()
+	if len([]rune(body)) < speechSummaryRecapMinChars {
+		t.Fatalf("the long fixture is %d chars, under speechSummaryRecapMinChars=%d", len([]rune(body)), speechSummaryRecapMinChars)
+	}
+	stub := &speechSummaryTestClient{reply: "It fixes the retry loop. The helper now carries the delay forward."}
+	a := newSpeechSummaryTestAgent(t, stub)
+
+	if got := a.SummarizeForSpeech(body); got == "" {
+		t.Fatalf("a long message must be summarised, got %q", got)
+	}
+
+	for _, want := range []string{
+		"LONG",
+		"one-line recap",
+		"FIRST sentence",
+	} {
+		if !strings.Contains(stub.gotSystem, want) {
+			t.Errorf("a long message's system prompt must contain %q; got:\n%s", want, stub.gotSystem)
+		}
+	}
+}
+
+// TestSummarizeForSpeechOmitsTheRecapInstructionOnAShorterMessage is the other
+// side of the same condition. A recap earns its place only when there is enough
+// message behind it: on a short reply the recap would just restate the
+// summary's only sentence, and on a short code block the listener needs the
+// description, not an orientation line. Both still reach the model — the recap
+// is gated on LENGTH, not on whether summarising happens at all.
+func TestSummarizeForSpeechOmitsTheRecapInstructionOnAShorterMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"longer-than-skip plain prose", speechSummaryBody},
+		{"short code block", "```go\nretries = 3\n```"},
+		{"short diff", "@@ -1,3 +1,3 @@"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &speechSummaryTestClient{reply: "described, not quoted"}
+			a := newSpeechSummaryTestAgent(t, stub)
+
+			if got := a.SummarizeForSpeech(tc.text); got != "described, not quoted" {
+				t.Fatalf("%s must still be summarised, got %q", tc.name, got)
+			}
+			if stub.calls != 1 {
+				t.Fatalf("expected one model call for %s, got %d", tc.name, stub.calls)
+			}
+			if strings.Contains(stub.gotSystem, "one-line recap") {
+				t.Errorf("%s is %d chars, under speechSummaryRecapMinChars=%d, so no recap may be requested; got:\n%s",
+					tc.name, len([]rune(tc.text)), speechSummaryRecapMinChars, stub.gotSystem)
+			}
+		})
+	}
+}
+
+// TestSpeechSummaryRecapMinCharsSitsAboveTheSkipGate keeps the two length
+// thresholds from crossing. At or below speechSummarySkipChars a message is
+// spoken verbatim, so a recap threshold set there would be unreachable on
+// length alone: the recap instruction could only ever fire for a short message
+// carrying an artifact, which is exactly the case that does NOT want an
+// orientation line.
+func TestSpeechSummaryRecapMinCharsSitsAboveTheSkipGate(t *testing.T) {
+	if speechSummaryRecapMinChars <= speechSummarySkipChars {
+		t.Fatalf("speechSummaryRecapMinChars=%d must be above speechSummarySkipChars=%d",
+			speechSummaryRecapMinChars, speechSummarySkipChars)
+	}
+}
+
 // TestSummarizeForSpeechSkipsTheLLMForShortPlainProse is the cost fix: a
 // message that is already short, plain prose is spoken verbatim, so the
 // summariser must not spend a model call (and its seconds of latency) on it.
@@ -410,6 +498,21 @@ func TestSpeechSummaryCacheKeyShape(t *testing.T) {
 	}
 	if strings.Contains(a, "same") || strings.Contains(a, "text") {
 		t.Errorf("the cache key leaks the input text: %q", a)
+	}
+}
+
+// TestSpeechSummaryCacheKeyIncludesThePromptVersion is what stops a prompt edit
+// from being invisible to the cache. The entry is the OUTPUT of a prompt, so
+// without the version in the hash every summary written before the edit keeps
+// serving the old prompt's output for the whole TTL — here, up to 24 hours of
+// long messages summarised without the opening recap.
+func TestSpeechSummaryCacheKeyIncludesThePromptVersion(t *testing.T) {
+	const text, model = "a long message worth summarising", "openai/gpt-4o-mini"
+
+	// Stability for an unchanged version is already covered by
+	// TestSpeechSummaryCacheKeyShape; only the version's PARTICIPATION is new.
+	if speechSummaryCacheKeyFor(text, model, "1") == speechSummaryCacheKeyFor(text, model, "2") {
+		t.Error("the cache key must include the prompt version; otherwise a prompt change replays the previous output for the whole TTL")
 	}
 }
 
