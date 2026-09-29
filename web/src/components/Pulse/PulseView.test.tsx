@@ -184,6 +184,17 @@ describe("PulseView toolbar", () => {
     expect(screen.getByRole("button", { name: /^live/i }).getAttribute("aria-pressed")).toBe("false");
   });
 
+  it("renders no loading spinner while a fetch is in flight", () => {
+    // Rows are deliberately kept on screen during a refresh (the error banner
+    // is non-destructive for the same reason), so a toolbar spinner was the
+    // only thing that moved on every fetch. Rows also arrive over SSE, so it
+    // blinked on unrelated live events and read as a stall. Asserted by
+    // class, not testid: the point of the test is that NO element is there.
+    overrides = { loading: true, rows: [row({ session_id: "a" })] };
+    const { container } = mount();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+  });
+
   it("shows a Load more button only when hasMore is true", async () => {
     const loadMore = vi.fn();
     overrides = { hasMore: true, loadMore, rows: [row({ session_id: "a" })] };

@@ -1,5 +1,5 @@
 import { useMemo, useState, type KeyboardEvent } from "react";
-import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
+import { AlertCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePulse } from "@/stores/pulseStore";
 import { PulseCard } from "./PulseCard";
@@ -31,7 +31,7 @@ const SECTION_ORDER: { key: Section; title: string; matches: (s: PulseStatus) =>
 ];
 
 export function PulseView() {
-  const { rows, scope, setScope, loadMore, hasMore, error, retry, loading } = usePulse();
+  const { rows, scope, setScope, loadMore, hasMore, error, retry } = usePulse();
   const [filter, setFilter] = useState("");
 
   const filtered = useMemo(() => rows.filter((r) => pulseRowMatchesFilter(r, filter)), [rows, filter]);
@@ -80,7 +80,6 @@ export function PulseView() {
             </Button>
           ))}
         </div>
-        {loading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" />}
       </div>
 
       {/* Error banner. Deliberately NOT destructive: the rows below stay, so a

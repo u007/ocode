@@ -117,6 +117,9 @@ const actionsFake = vi.hoisted(() => ({
 }));
 
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     state: stateFake,
     ...actionsFake,
@@ -1042,44 +1045,64 @@ describe("ProjectSidebar duplicate as remote", () => {
 });
 
 
-// ── Pulse dashboard entry (main menu, top-left of the project list) ─────────
-// The dashboard is GLOBAL (cross-project), so it is reached from the project
-// list's own main menu rather than from any one project row: a row entry point
-// would imply the dashboard is scoped to that project, which it is not.
-describe("Pulse dashboard main-menu entry", () => {
-  it("renders a main menu button in the project list header", () => {
+// ── Pulse dashboard entry (top-level icon beside the Projects heading) ──────
+// The dashboard is GLOBAL (cross-project), so it is a sibling of the project
+// list rather than an action inside it: a per-project row, or an item buried
+// in a hamburger menu under the list, both imply it is project-scoped.
+describe("Pulse dashboard entry", () => {
+  it("renders a dashboard icon button beside the Projects heading", () => {
     render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} onOpenDashboard={vi.fn()} />);
-    expect(screen.getByTestId("project-main-menu")).toBeTruthy();
+    const button = screen.getByTestId("open-dashboard");
+    // "Beside Projects" is positional, not just present: the button must sit in
+    // the same header row as the heading, after it in DOM order.
+    const heading = screen.getByRole("heading", { name: /projects/i });
+    const header = heading.closest("div");
+    expect(header).toBeTruthy();
+    expect(within(header as HTMLElement).getByTestId("open-dashboard")).toBe(button);
   });
 
-  it("opens a menu whose item opens the dashboard", async () => {
+  it("opens the dashboard when the icon is clicked", async () => {
     const onOpenDashboard = vi.fn();
     render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} onOpenDashboard={onOpenDashboard} />);
-    const trigger = screen.getByTestId("project-main-menu");
-    expect(screen.queryByRole("menuitem", { name: /dashboard/i })).toBeNull();
     await act(async () => {
-      fireEvent.click(trigger);
-    });
-    const item = await screen.findByRole("menuitem", { name: /dashboard/i });
-    await act(async () => {
-      fireEvent.click(item);
+      fireEvent.click(screen.getByTestId("open-dashboard"));
     });
     expect(onOpenDashboard).toHaveBeenCalledTimes(1);
   });
 
-  it("spells the dashboard in the item's text, not just an icon", async () => {
+  it("names the control for assistive tech, not just via an icon", () => {
     render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} onOpenDashboard={vi.fn()} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("project-main-menu"));
-    });
-    const item = await screen.findByRole("menuitem", { name: /dashboard/i });
-    expect(item.textContent?.toLowerCase()).toContain("dashboard");
+    expect(screen.getByRole("button", { name: /dashboard/i })).toBeTruthy();
   });
 
-  it("omits the menu when no handler is passed, rather than rendering a dead control", () => {
+  it("does NOT hide the dashboard behind a hamburger menu", () => {
+    // The regression this replaces: the only entry point was a "project main
+    // menu" popover whose single item was Dashboard, so a top-level global view
+    // was two clicks deep and looked project-scoped.
+    const { container } = render(
+      <ProjectSidebar isOpen={true} onToggle={vi.fn()} onOpenDashboard={vi.fn()} />,
+    );
+    expect(container.querySelector('[data-testid="project-main-menu"]')).toBeNull();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("also works in the mobile drawer, which has no TooltipProvider of its own", async () => {
+    // The mobile branch renders the SAME shared body. The dashboard icon is a
+    // Radix Tooltip, and without an ancestor TooltipProvider the whole subtree
+    // throws "Tooltip must be used within TooltipProvider" — which would blank
+    // the drawer, not just lose the icon.
+    const onOpenDashboard = vi.fn();
+    render(<ProjectSidebar isOpen onToggle={vi.fn()} isMobile onOpenDashboard={onOpenDashboard} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("open-dashboard"));
+    });
+    expect(onOpenDashboard).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the icon when no handler is passed, rather than rendering a dead control", () => {
     // App always passes one; a half-mounted tree must not offer a button that
     // does nothing when clicked.
     const { container } = render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
-    expect(container.querySelector('[data-testid="project-main-menu"]')).toBeNull();
+    expect(container.querySelector('[data-testid="open-dashboard"]')).toBeNull();
   });
 });

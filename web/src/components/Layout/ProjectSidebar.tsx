@@ -24,7 +24,6 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   FolderGit2,
   LayoutDashboard,
-  Menu,
   Plus,
   Trash2,
   ChevronLeft,
@@ -49,7 +48,6 @@ import {
   Copy,
 } from "lucide-react";
 import { Button } from "../ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Input } from "../ui/input";
 import ConfirmDialog from "../common/ConfirmDialog";
 import { ScrollArea } from "../ui/scroll-area";
@@ -1147,10 +1145,11 @@ interface Props {
   isMobile?: boolean;
   /**
    * Open the Pulse cross-project dashboard. The dashboard is GLOBAL — it spans
-   * every project — so it is reached from the list's own main menu rather than
-   * from a project row (a row entry point would wrongly imply it is scoped to
-   * that project). Omit it and the menu is not rendered at all, so a
-   * half-mounted tree never offers a button that does nothing.
+   * every project — so it is a SIBLING of the project list: a direct icon
+   * button beside the "Projects" heading, not a project row (which would
+   * wrongly imply project scope) and not an item inside a menu (which buries a
+   * top-level view and reads the same way). Omit it and the button is not
+   * rendered at all, so a half-mounted tree never offers a dead control.
    */
   onOpenDashboard?: () => void;
 }
@@ -1479,45 +1478,43 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
   // Shared body of the expanded sidebar (header + project list + add-project
   // footer + dialogs). A hoisted function declaration (not a const) so the
   // mobile drawer branch above can call it without duplicating ~140 lines.
+  //
+  // The TooltipProvider lives HERE, inside the shared body, not in the
+  // branches: the header's dashboard icon is a Radix Tooltip and both callers
+  // (mobile drawer, desktop expanded column) previously rendered this body
+  // with no provider ancestor, which throws "Tooltip must be used within
+  // TooltipProvider". Only the collapsed rail brought its own.
   function renderExpandedInner() {
     return (
+      <TooltipProvider delayDuration={300}>
       <>
 
       {/* Header */}
       <div className="flex items-center gap-1 px-3 h-12 border-b border-border">
+        <h2 className="flex-1 min-w-0 text-sm font-semibold text-foreground truncate">Projects</h2>
         {onOpenDashboard && (
-          // The project list's main menu. Global actions that are not about one
-          // project live here — today that is the Pulse dashboard. Popover
-          // (not a DropdownMenu, which this repo does not ship) with explicit
-          // menu roles, matching UnifiedTabBar's mobile tab popover.
-          <Popover>
-            <PopoverTrigger asChild>
+          // The Pulse dashboard is GLOBAL — it spans every project — so it is a
+          // sibling of the project list, not an action inside it. A hamburger
+          // menu here (the previous shape) buried a top-level view two clicks
+          // deep and read as project-scoped, so it is a direct icon button
+          // beside the heading instead. aria-label carries the name, since the
+          // control is an icon with no visible text.
+          <Tooltip>
+            <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-8 w-8 p-0 shrink-0"
-                data-testid="project-main-menu"
-                aria-label="Open project menu"
+                onClick={onOpenDashboard}
+                data-testid="open-dashboard"
+                aria-label="Open dashboard"
               >
-                <Menu className="w-4 h-4" />
+                <LayoutDashboard className="w-4 h-4" />
               </Button>
-            </PopoverTrigger>
-            <PopoverContent align="start" sideOffset={4} className="w-56 p-1">
-              <div role="menu" aria-label="Project menu" className="flex flex-col gap-0.5">
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={onOpenDashboard}
-                  className="flex items-center gap-2 w-full px-2 py-1.5 rounded-sm text-sm text-left hover:bg-accent hover:text-accent-foreground"
-                >
-                  <LayoutDashboard className="w-4 h-4 shrink-0 text-muted-foreground" />
-                  Dashboard
-                </button>
-              </div>
-            </PopoverContent>
-          </Popover>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Dashboard — all projects</TooltipContent>
+          </Tooltip>
         )}
-        <h2 className="flex-1 min-w-0 text-sm font-semibold text-foreground truncate">Projects</h2>
         <Button variant="ghost" size="sm" className="h-8 w-8 p-0 shrink-0" onClick={onToggle}>
           <ChevronLeft className="w-4 h-4" />
         </Button>
@@ -1668,6 +1665,7 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
       <DirectoryBrowser open={browserOpen} onOpenChange={setBrowserOpen} onSelect={(path) => { setNewPath(path); setBrowserOpen(false); }} />
       {renderConfirms()}
       </>
+      </TooltipProvider>
     );
   }
 

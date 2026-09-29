@@ -461,3 +461,51 @@ describe("sortPulseRows", () => {
     expect(rows.map((r) => r.session_id)).toEqual(before);
   });
 });
+
+describe("pulseStore known-session no-refetch", () => {
+  it("does not refetch for a known session's unhandled event", async () => {
+    vi.useFakeTimers();
+    getPulse.mockResolvedValue(page([row({ session_id: "a" }), row({ session_id: "b" })]));
+    mount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    getPulse.mockClear();
+
+    // Streaming frames for a row we already have must not be mistaken for an
+    // unknown session; before the fix each re-armed the 300ms debounce and
+    // polled GET /api/pulse continuously during a turn.
+    emit("text", "a", { delta: "hi" });
+    emit("thinking", "a", { delta: "..." });
+    emit("tool_output", "a", {});
+    emit("turn_heartbeat", "a", {});
+
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(getPulse).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+});
+
+describe("sortPulseRows across timestamp formats", () => {
+  it("orders by instant, not lexical string, across offset vs Z", () => {
+    // Server rows carry Go local-offset stamps; live patches carry "...Z".
+    // "2026-09-28T13:00:00Z" is LATER than "2026-09-28T20:00:00+08:00"
+    // (12:00Z) but sorts lexically BEFORE it.
+    const olderServer = row({
+      session_id: "server_plus08",
+      status: "running",
+      updated_at: "2026-09-28T20:00:00+08:00",
+    });
+    const newerLive = row({
+      session_id: "live_Z",
+      status: "running",
+      updated_at: "2026-09-28T13:00:00Z",
+    });
+    expect(sortPulseRows([olderServer, newerLive]).map((r) => r.session_id)).toEqual([
+      "live_Z",
+      "server_plus08",
+    ]);
+  });
+});

@@ -83,6 +83,12 @@ export function sortPulseRows(rows: PulseRow[]): PulseRow[] {
     const ra = statusRank(a.status);
     const rb = statusRank(b.status);
     if (ra !== rb) return ra - rb;
+    // Compare INSTANTS, not strings: the server serializes Go time.Time with a
+    // local offset (e.g. "+08:00") while a live event stamps "...Z", so a
+    // lexical compare misorders a just-updated row below older ones.
+    const ta = Date.parse(a.updated_at);
+    const tb = Date.parse(b.updated_at);
+    if (!Number.isNaN(ta) && !Number.isNaN(tb) && ta !== tb) return tb - ta;
     if (a.updated_at !== b.updated_at) return a.updated_at < b.updated_at ? 1 : -1;
     return a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0;
   });
@@ -312,11 +318,18 @@ function usePulseState(): PulseApi {
       // Read the current list out here, not inside a setState updater: updaters
       // must stay pure (React invokes them twice in StrictMode), and the
       // unknown-session branch has a side effect (arming a timer).
+      // A null result means EITHER "unknown session" (refetch to learn about
+      // it) OR "known session, event type the dashboard does not patch". Only
+      // the former may refetch: during a turn, text/thinking/tool_output/
+      // turn_heartbeat for a known row would otherwise re-arm the debounce
+      // continuously and poll GET /api/pulse several times a second.
+      const known = stateRef.current.rows.some((r) => r.session_id === sessionId);
       const rows = applyPulseEvent(stateRef.current.rows, event, sessionId, data);
       if (rows) {
         setState((s) => ({ ...s, rows, counts: countPulse(rows) }));
         return;
       }
+      if (known) return;
       if (unknownRef.current !== undefined) return; // already armed
       unknownRef.current = window.setTimeout(() => {
         unknownRef.current = undefined;
