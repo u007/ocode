@@ -9,9 +9,25 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
+)
+
+// Seams so Run is testable without a network round-trip and without writing
+// to the user's real ~/.local/share/opencode/projects.json. Production leaves
+// them pointing at the real implementations; see remotecli_persist_test.go,
+// which drives every project-persistence path through a temp-dir store.
+//
+// connect/connectWeb are vars (not inlined calls) so a test can simulate both
+// outcomes that matter: a host that never establishes, and a host that
+// establishes and is then disconnected.
+var (
+	newStore   = projects.NewStore
+	connect    = remote.Connect
+	connectWeb = remote.ConnectWeb
 )
 
 // Run dispatches `ocode remote <[user@]host> [path] [--web] [--no-sync]`.
@@ -31,7 +47,7 @@ func Run(args []string) error {
 		return fmt.Errorf("ocode remote --web does not yet support selecting a specific project path; omit the path argument, or connect without --web for TUI mode")
 	}
 
-	store, _, err := projects.NewStore()
+	store, _, err := newStore()
 	if err != nil {
 		// Non-fatal: recent-project lookup/recording is a convenience, not
 		// required for a connect to succeed.
@@ -50,41 +66,85 @@ func Run(args []string) error {
 		}
 	}
 
+	// established flips the moment the connect reports the host usable (the
+	// remote answered over ssh, its platform was detected and ocode was
+	// ensured on it). Everything after that point can fail for reasons that
+	// still leave a real project — the user hitting Ctrl-C, the tunnel
+	// dropping, the remote server refusing to start — so it is the boundary
+	// that decides whether this attempt leaves a project entry behind.
+	established := false
+
 	connectOpts := remote.ConnectOptions{
 		Target: target,
 		Path:   path,
 		NoSync: noSync,
 		Out:    os.Stdout,
+		OnEstablished: func() {
+			established = true
+		},
 	}
+	// createdByPreWrite records that the --web pre-connect write below
+	// introduced a brand-new entry, so a connect that never establishes can
+	// roll back exactly that write and nothing else. A project the user
+	// already had is never removed by a failed connect.
+	createdByPreWrite := false
 	if web {
 		// SSH only: WSL's ConnectWeb path returns before ever reaching the
 		// wait loop the hook drives (Windows already shares WSL2's
 		// localhost natively, so extra forwards are a no-op there). Ensure
 		// the project entry exists BEFORE connecting — Load()/AddPortMap
 		// key off it, and it wouldn't exist yet on a brand-new project
-		// (the AddRemote call below only runs after Connect returns).
+		// (the post-connect AddRemote only runs once the host is known
+		// usable).
 		if store != nil && target.Kind == remote.KindSSH {
+			existedBefore := remoteEntryExists(store, hostKey, path)
 			if aerr := store.AddRemote(hostKey, path); aerr == nil {
+				createdByPreWrite = !existedBefore
 				connectOpts.PortMapHook = &storePortMapHook{
 					store: store,
 					ref:   projects.ProjectRef{Path: path, Host: hostKey},
 				}
 			}
 		}
-		err = remote.ConnectWeb(connectOpts)
+		err = connectWeb(connectOpts)
 	} else {
-		err = remote.Connect(connectOpts)
+		err = connect(connectOpts)
 	}
 
 	if store != nil {
-		// Record the attempt regardless of how the session ended (a
-		// deliberate disconnect exits Connect with an error too, but the
-		// project itself is still the one the user wants to reattach to
-		// next time).
-		_ = store.AddRemote(hostKey, path)
+		if shouldPersistRemote(hostKey, established) {
+			// The host is real, so record the attempt however the session
+			// ended — a deliberate disconnect exits Connect with an error
+			// too, but this is a project the user wants to reattach to.
+			_ = store.AddRemote(hostKey, path)
+		} else if createdByPreWrite {
+			// The host never became usable, so undo the pre-connect write.
+			// Best-effort: the connect error is the one worth reporting.
+			if rerr := store.RemoveRemote(hostKey, path); rerr != nil {
+				fmt.Fprintf(os.Stderr, "remote: could not remove unused project %s:%s: %v\n", hostKey, path, rerr)
+			}
+		}
 	}
 
 	return err
+}
+
+// shouldPersistRemote decides whether a finished connect attempt may leave a
+// project entry in the store. Both conditions are required: the host has to
+// have been confirmed usable (otherwise a typo'd or offline host silently
+// becomes a permanent dead entry in the project list), and there has to be a
+// non-blank host to key it on.
+func shouldPersistRemote(hostKey string, established bool) bool {
+	return established && strings.TrimSpace(hostKey) != ""
+}
+
+// remoteEntryExists reports whether the store already holds an entry for this
+// exact (host, path) pair. hostKey must already be canonical
+// (target.String()), which is the form AddRemote stores and matches on.
+func remoteEntryExists(store *projects.Store, hostKey, path string) bool {
+	return slices.ContainsFunc(store.List(), func(p projects.Project) bool {
+		return p.Host == hostKey && p.Path == path
+	})
 }
 
 func parseArgs(args []string) (target remote.Target, path string, noSync bool, web bool, err error) {

@@ -2,6 +2,7 @@ package remotecli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -75,14 +76,18 @@ func TestRunRejectsExplicitPathWithWebFlag(t *testing.T) {
 }
 
 func TestRunAllowsWebFlagWithoutExplicitPath(t *testing.T) {
-	// nosuchhost.invalid (RFC 2606 reserved TLD, guaranteed never to
-	// resolve) makes Run fail fast on the "reachable" prepare stage instead
-	// of reaching a real host — this test only needs to confirm the new
-	// path guard does not fire when no path was given; a real connection
-	// failure past that point is expected and fine.
-	err := Run([]string{"--web", "nosuchhost.invalid"})
+	// Only needs to confirm the path guard does not fire when no path was
+	// given, i.e. that Run gets past parseArgs into the connect. The connect
+	// itself is stubbed to fail, so this is hermetic: it touches neither the
+	// network nor the developer's real projects.json. (It used to dial
+	// nosuchhost.invalid for real, which both hit the network and wrote a
+	// junk project entry into ~/.local/share/opencode/projects.json.)
+	installStore(t)
+	installConnect(t, false, errors.New("stub: host never established"))
+
+	err := Run([]string{"--web", "somehost"})
 	if err == nil {
-		t.Fatal("expected an error (no such remote host), just not the path-rejection one")
+		t.Fatal("expected the stubbed connect error, just not the path-rejection one")
 	}
 	if strings.Contains(err.Error(), "does not yet support selecting a specific project path") {
 		t.Errorf("--web without an explicit path must not be rejected by the path guard: %v", err)

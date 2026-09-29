@@ -51,10 +51,14 @@ func NewForwardManager(sup *tool.ProcessSupervisor, target Target) *ForwardManag
 }
 
 // forwardRegistrationID must stay distinct from StartTunnel's
-// "remote-tunnel-<apiPort>" IDs (keyed on a different number space) and from
-// each other (keyed on remotePort, which PortMap already treats as unique).
-func forwardRegistrationID(remotePort int) string {
-	return "remote-portmap-" + strconv.Itoa(remotePort)
+// "remote-tunnel-<apiPort>" IDs AND from every OTHER project's forward on the
+// same remote port. The supervisor is process-global and shared by all
+// projects' ForwardManagers, so keying on remotePort alone made two projects
+// forwarding the same port collide ("already registered") — the second could
+// never open. The target is part of the ID; the supervisor keys on the string
+// in a map, so "@"/":" are safe.
+func forwardRegistrationID(target Target, remotePort int) string {
+	return "remote-portmap-" + target.String() + "-" + strconv.Itoa(remotePort)
 }
 
 // SetOnExit registers a monitor callback, invoked from the reaper goroutine
@@ -95,7 +99,7 @@ func (m *ForwardManager) IsLive(remotePort int) bool {
 func (m *ForwardManager) reap(remotePort int, fp *forwardProcess) {
 	err := fp.cmd.Wait()
 	code := processExitCode(err)
-	id := forwardRegistrationID(remotePort)
+	id := forwardRegistrationID(m.target, remotePort)
 	// The PID-qualified variants are generation-aware: a reaper left over from
 	// an earlier child of the same stable ID must not clobber the new record.
 	if fp.stopped.Load() {
@@ -157,7 +161,7 @@ func (m *ForwardManager) Start(pm ProjectPortMap) error {
 	}
 	cmd := exec.Command("ssh", args...)
 	if _, err := tool.StartSupervised(m.sup, cmd, tool.ProcessRegistration{
-		ID:      forwardRegistrationID(pm.RemotePort),
+		ID:      forwardRegistrationID(m.target, pm.RemotePort),
 		Name:    "ssh-portmap",
 		Command: cmd.String(),
 		Kind:    tool.ProcessKindRemote,

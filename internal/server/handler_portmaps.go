@@ -223,6 +223,28 @@ func (h *Handler) HandleRemovePortMap(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	ref := portMapRef(rw)
+	// Resolve existence BEFORE any destructive teardown. A port the store does
+	// not know (a registry entry created by a list probe, or a stale client)
+	// must 404 WITHOUT stopping and suppressing the forward it may still own —
+	// the old order tore the forward down first, then 404'd, leaving the port
+	// suppressed with the watchdog unable to restart it.
+	maps, err := h.projects.PortMaps(ref)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	found := false
+	for _, m := range maps {
+		if m.RemotePort == port {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "port map not found for this project")
+		return
+	}
 	// A removal must never be undone by the watchdog. Suppress restarts BEFORE
 	// Stop: a watchdog pass that already read an "enabled" snapshot could
 	// otherwise re-open the forward after Stop but before the store drops the
@@ -234,8 +256,11 @@ func (h *Handler) HandleRemovePortMap(w http.ResponseWriter, r *http.Request) {
 	// The forward is going away, so drop its restart bookkeeping rather than
 	// leaving a stale give-up behind for a port that may be re-added later.
 	entry.policy.forget(port)
-	ref := portMapRef(rw)
 	if err := h.projects.RemovePortMap(ref, port); err != nil {
+		// The store refused the write, so the row survives. Undo the
+		// suppression: otherwise the still-persisted, enabled forward stays
+		// suppressed and the watchdog can never restart it.
+		entry.policy.reset(port)
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}

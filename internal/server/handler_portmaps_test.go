@@ -298,3 +298,29 @@ func TestPortMapRegistryKeyMatchesStoreRef(t *testing.T) {
 		t.Fatal("different remote path shared a manager")
 	}
 }
+
+// TestRemovePortMapUnknownPortDoesNotSuppress pins the ordering contract: a
+// DELETE for a port the store does not know must 404 WITHOUT tearing down and
+// suppressing the forward. The old order stopped the forward first, then 404'd
+// on the store write, leaving the port permanently suppressed (the watchdog
+// could never restart it; only a manual re-enable cleared the tombstone).
+func TestRemovePortMapUnknownPortDoesNotSuppress(t *testing.T) {
+	h, mux := newTestPortMapsHandler(t, "user@devbox", "/srv/app")
+	// A list probe creates the registry entry even before any forward exists.
+	target, err := remote.ParseTarget("user@devbox")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	entry := h.portMaps.entry(target, "/srv/app")
+
+	rec := doPortMaps(t, mux, "DELETE", "/api/portmaps/4096?host=user@devbox&project=%2Fsrv%2Fapp", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("DELETE unknown port = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	entry.policy.mu.Lock()
+	suppressed := entry.policy.isSuppressed(4096)
+	entry.policy.mu.Unlock()
+	if suppressed {
+		t.Fatal("failed removal left the port suppressed; the watchdog can never restart it")
+	}
+}

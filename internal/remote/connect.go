@@ -40,6 +40,20 @@ type ConnectOptions struct {
 	// wait prompt. nil means no port-map support (Connect/plain TUI mode
 	// never sets it; there is no local tunnel to manage there).
 	PortMapHook PortMapHook
+	// OnEstablished, when non-nil, is called exactly once as soon as the
+	// remote host is confirmed usable — immediately after the shared
+	// prepare stages (reachability, platform detect, ensure-binary,
+	// credential sync) succeed, before any launch/tunnel/browser stage.
+	// It is NOT called when prepare fails.
+	//
+	// This is the boundary between "this host is real" and "something
+	// later went wrong": everything past it (multiplexer detection, remote
+	// server start, tunnel setup, the foreground wait, or the user simply
+	// hitting Ctrl-C) can fail for reasons that still leave a genuine
+	// project worth remembering. Callers that persist a project entry use
+	// this to tell a deliberate disconnect (keep the entry) apart from a
+	// host that was never reachable (persist nothing).
+	OnEstablished func()
 }
 
 // Connect runs the full Phase-1 connect flow: reachability, platform
@@ -64,6 +78,9 @@ func Connect(opts ConnectOptions) error {
 	}()
 	if err != nil {
 		return err
+	}
+	if opts.OnEstablished != nil {
+		opts.OnEstablished()
 	}
 
 	progress.Start("multiplex", "checking for tmux/screen")
@@ -158,10 +175,10 @@ func runPrepareStages(opts ConnectOptions, progress *Progress) (Transport, *tool
 	return transport, sup, nil
 }
 
-// newTransportForTarget builds the Transport implementation for t.Kind,
-// after validating the target is usable on this OS (KindWSL requires
-// Windows — see target.go's validateTargetOS).
-func newTransportForTarget(t Target, sup *tool.ProcessSupervisor) (Transport, error) {
+// newTransportForTarget is a var so tests can drive runPrepareStages (and with
+// it the OnEstablished boundary) through a fakeTransport, with no real ssh
+// process ever spawned. Production leaves it as the constructor below.
+var newTransportForTarget = func(t Target, sup *tool.ProcessSupervisor) (Transport, error) {
 	if err := validateTargetOS(t.Kind, runtime.GOOS); err != nil {
 		return nil, err
 	}
@@ -211,6 +228,9 @@ func ConnectWeb(opts ConnectOptions) error {
 	defer shutdownSupervisor(sup)
 	if err != nil {
 		return err
+	}
+	if opts.OnEstablished != nil {
+		opts.OnEstablished()
 	}
 
 	progress.Start("server", "discovering or starting remote server")

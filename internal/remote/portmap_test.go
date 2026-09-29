@@ -34,8 +34,43 @@ func TestForwardRegistrationIDDistinctFromTunnelID(t *testing.T) {
 	// apiPort); ForwardManager must never collide with that ID space for the
 	// same numeric port, or ProcessSupervisor.Register would reject the
 	// second registration as a duplicate.
-	if got := forwardRegistrationID(4096); got == "remote-tunnel-4096" {
+	if got := forwardRegistrationID(Target{Kind: KindSSH, Host: "example.invalid"}, 4096); got == "remote-tunnel-4096" {
 		t.Fatalf("forwardRegistrationID(4096) = %q, collides with StartTunnel's ID space", got)
+	}
+}
+
+// TestForwardRegistrationIDIsTargetScoped pins the cross-project collision: all
+// projects' ForwardManagers share ONE process supervisor, so a port-only ID
+// meant a second project forwarding the same remote port hit "already
+// registered" and its forward could never open.
+func TestForwardRegistrationIDIsTargetScoped(t *testing.T) {
+	a := Target{Kind: KindSSH, User: "u", Host: "host-a"}
+	b := Target{Kind: KindSSH, User: "u", Host: "host-b"}
+	if forwardRegistrationID(a, 4096) == forwardRegistrationID(b, 4096) {
+		t.Fatal("two projects' forwards on the same remote port share a supervisor ID; the second can never start")
+	}
+}
+
+// TestForwardStartSameRemotePortTwoProjects is the integration form: with real
+// Start calls against one supervisor, the second project must succeed where
+// the old port-only ID made it fail with "already registered".
+func TestForwardStartSameRemotePortTwoProjects(t *testing.T) {
+	installFakeSSHExiting(t, 10*time.Second)
+	lnA, portA := listenLocalPort(t)
+	defer lnA.Close()
+	lnB, portB := listenLocalPort(t)
+	defer lnB.Close()
+
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	fmA := NewForwardManager(sup, Target{Kind: KindSSH, User: "u", Host: "host-a"})
+	fmB := NewForwardManager(sup, Target{Kind: KindSSH, User: "u", Host: "host-b"})
+	if err := fmA.Start(ProjectPortMap{RemotePort: 3510, LocalPort: portA, Enabled: true}); err != nil {
+		t.Fatalf("project A Start: %v", err)
+	}
+	if err := fmB.Start(ProjectPortMap{RemotePort: 3510, LocalPort: portB, Enabled: true}); err != nil {
+		t.Fatalf("project B Start on the same remote port: %v", err)
 	}
 }
 
@@ -218,7 +253,7 @@ func TestForwardManagerMarksSupervisorRecordTerminalOnUnexpectedExit(t *testing.
 	if err := fm.Start(pm); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	id := forwardRegistrationID(pm.RemotePort)
+	id := forwardRegistrationID(fm.target, pm.RemotePort)
 	if rec, ok := sup.Lookup(id); !ok {
 		t.Fatalf("supervisor has no record for %q", id)
 	} else if rec.Status != tool.ProcRunning {
