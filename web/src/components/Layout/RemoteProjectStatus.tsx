@@ -215,7 +215,7 @@ export function RemoteProjectStatus({
                   onPointerUp={(e) => {
                     e.stopPropagation();
                     revealTab({ kind: "chat" });
-                    openSessionTab(s.id, s.title || s.id, project.path);
+                    openSessionTab(s.id, s.title || s.id, project.path, project.host);
                   }}
                 >
                   <MessageSquare className="w-3 h-3 shrink-0" />

@@ -10,6 +10,9 @@ vi.mock("./PortMapsWidget", () => ({ default: () => null }));
 
 const activeProject = vi.hoisted(() => ({ current: { path: "/proj", name: "proj" } as { path: string; name: string; host?: string } }));
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     state: { activeProject: activeProject.current, projects: [], tabsByProject: {} },
   }),

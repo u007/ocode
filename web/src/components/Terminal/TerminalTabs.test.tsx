@@ -67,6 +67,9 @@ vi.mock("@/api/client", () => ({
 // Static no-op stubs keep this terminal-focused test self-contained; the
 // real providers live in the app's composition root (see App.tsx).
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectState: () => ({ state: { tabsByProject: {}, activeTabByProject: {} } }),
 }));
 vi.mock("../../stores/browserTabsStore", () => ({

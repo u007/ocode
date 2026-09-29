@@ -100,10 +100,10 @@ export default function SessionDialog() {
   // Open a session tab and switch to it. Message loading is handled centrally
   // by SessionTabSync (it watches activeTabId).
   const handleSessionClick = useCallback((sessionId: string, title: string) => {
-    openSessionTab(sessionId, title);
+    openSessionTab(sessionId, title, activeProject?.path, activeProject?.host);
     toggleSessionPicker();
     setSearchQuery("");
-  }, [openSessionTab, toggleSessionPicker]);
+  }, [openSessionTab, toggleSessionPicker, activeProject?.path, activeProject?.host]);
 
   const sessionNavIds = useMemo(
     () => visibleSessions.map((session) => `session:${session.id}`),

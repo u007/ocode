@@ -15,6 +15,9 @@ import type { DiscoveryConfig } from "../../api/client";
 // pinned skills and ignore paths must survive the toggle).
 vi.mock("../../stores/projectStore", () => ({
   findProjectPathForTab: () => undefined,
+  // resolveSessionHost (CoworkSidebar.tsx:161) calls this directly — it is NOT
+  // mocked, so it is the REAL implementation running against the stub state.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     activeTabId: "session-1",
     state: { activeProject: null },

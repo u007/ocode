@@ -45,6 +45,9 @@ vi.mock("../../stores/projectStore", () => ({
     toggleSessionPicker,
     dispatch: projectDispatch,
   }),
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the real
+  // implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   findProjectPathForTab: (_state: { tabsByProject?: Record<string, { id: string }[]> }, tabId: string) => {
     // The real findProjectPathForTab searches tabsByProject, but the test
     // mock uses a flat tabs array with projectPath.  Build a lookup from

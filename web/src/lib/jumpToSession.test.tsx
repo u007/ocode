@@ -100,7 +100,7 @@ describe("useJumpToSession", () => {
     // binds it to the wrong project's session list.
     expect(order).toEqual(["select", "open"]);
     expect(mockSelectProject).toHaveBeenCalledWith(projects[1]);
-    expect(mockOpenSessionTab).toHaveBeenCalledWith("ses_2", "two", "/proj-b");
+    expect(mockOpenSessionTab).toHaveBeenCalledWith("ses_2", "two", "/proj-b", "");
   });
 
   it("also selects when the session is already in the active project (idempotent)", async () => {
@@ -109,7 +109,7 @@ describe("useJumpToSession", () => {
       jump({ projectPath: "/proj-a", host: "", sessionId: "ses_1", title: "one" });
     });
     expect(mockSelectProject).toHaveBeenCalledWith(projects[0]);
-    expect(mockOpenSessionTab).toHaveBeenCalledWith("ses_1", "one", "/proj-a");
+    expect(mockOpenSessionTab).toHaveBeenCalledWith("ses_1", "one", "/proj-a", "");
   });
 
   it("passes the host so a remote project is not confused with a local one", async () => {

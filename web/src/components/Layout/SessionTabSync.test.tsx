@@ -25,6 +25,9 @@ let tabsByProject: Record<string, { id: string; title: string }[]> = {};
 
 vi.mock("../../stores/projectStore", () => ({
   findProjectPathForTab: () => undefined,
+  // resolveSessionHost (via useSessionHost) calls this directly, so the REAL
+  // implementation runs against the stub state below.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     state: { tabsByProject },
     dispatch: vi.fn(),

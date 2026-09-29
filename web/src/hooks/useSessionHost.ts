@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
+import { useProjectState, findProjectPathForTab, findTabForSession } from "../stores/projectStore";
 import { getTrustedTerminalProject } from "../lib/trustedProject";
 import type { ProjectState } from "../stores/projectStore";
 
@@ -22,6 +22,14 @@ export function resolveSessionHost(
   opts?: { fallbackToActive?: boolean },
 ): string | undefined {
   const fallbackToActive = opts?.fallbackToActive ?? false;
+  // A tab opened against a known host carries it explicitly. Prefer that over
+  // path inference: a path saved on two hosts (duplicate as remote) is
+  // deliberately ambiguous, and re-deriving from the path rejects it and
+  // silently routes to the LOCAL server. `""` is an explicit local binding.
+  if (sessionId) {
+    const tab = findTabForSession(projectState, sessionId);
+    if (tab && tab.host !== undefined) return tab.host || undefined;
+  }
   const projectPath = sessionId
     ? findProjectPathForTab(projectState, sessionId) ?? (fallbackToActive ? projectState.activeProject?.path : undefined)
     : (fallbackToActive ? projectState.activeProject?.path : undefined);

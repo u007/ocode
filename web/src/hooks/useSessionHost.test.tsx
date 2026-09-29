@@ -74,3 +74,38 @@ describe("useSessionHost", () => {
     expect(result.current.host).toBeUndefined();
   });
 });
+
+  it("prefers a tab's explicit host over an ambiguous path (duplicate as remote)", () => {
+    // A local and a remote project deliberately share a path (duplicate as
+    // remote). Path-only inference rejects the ambiguity and would route to the
+    // LOCAL server; the tab's own host must win.
+    const localProject = { ...remoteProject, host: "", name: "app-local", order: 0 };
+    const { result } = renderHook(
+      () => ({ host: useSessionHost("sess-dup"), project: useProjectState() }),
+      { wrapper: Wrapper },
+    );
+    act(() => {
+      result.current.project.dispatch({ type: "SET_PROJECTS", projects: [localProject, remoteProject] });
+      result.current.project.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-dup", projectPath: "/srv/app", title: "Dup", activeSubTab: "chat", host: "devbox" },
+      });
+    });
+    expect(result.current.host).toBe("devbox");
+  });
+
+  it("still rejects an ambiguous path for a legacy tab with no explicit host", () => {
+    const localProject = { ...remoteProject, host: "", name: "app-local", order: 0 };
+    const { result } = renderHook(
+      () => ({ host: useSessionHost("sess-legacy"), project: useProjectState() }),
+      { wrapper: Wrapper },
+    );
+    act(() => {
+      result.current.project.dispatch({ type: "SET_PROJECTS", projects: [localProject, remoteProject] });
+      result.current.project.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-legacy", projectPath: "/srv/app", title: "Legacy", activeSubTab: "chat" },
+      });
+    });
+    expect(result.current.host).toBeUndefined();
+  });

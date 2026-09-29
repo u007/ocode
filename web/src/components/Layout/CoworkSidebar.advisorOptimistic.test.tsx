@@ -18,6 +18,9 @@ import { getActionError, resetActionErrors } from "../../lib/actionErrors";
 //      session and 404s), leaving the toggle silently inert.
 vi.mock("../../stores/projectStore", () => ({
   findProjectPathForTab: () => undefined,
+  // resolveSessionHost (CoworkSidebar.tsx:161) calls this directly — it is NOT
+  // mocked, so it is the REAL implementation running against the stub state.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     activeTabId: "session-1",
     state: { activeProject: null },

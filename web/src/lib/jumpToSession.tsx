@@ -89,7 +89,7 @@ function useJump(openSidePane: boolean) {
         return;
       }
       await selectProject(project);
-      openSessionTab(target.sessionId, target.title, target.projectPath);
+      openSessionTab(target.sessionId, target.title, target.projectPath, target.host);
       // The pane is keyed by session id, so it can only be opened once the tab
       // exists — otherwise it would attach to nothing and silently not show.
       if (openSidePane) {

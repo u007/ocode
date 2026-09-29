@@ -24,6 +24,9 @@ vi.mock("../../stores/chatStore", () => ({
 }));
 
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     state: {
       projectSessions: mocks.projectSessions,
@@ -153,7 +156,7 @@ describe("SessionDialog keyboard navigation", () => {
     expect(document.activeElement).toBe(row);
 
     fireEvent.keyDown(row!, { key: "Enter" });
-    expect(mocks.openSessionTab).toHaveBeenCalledWith("session-1", "Alpha session");
+    expect(mocks.openSessionTab).toHaveBeenCalledWith("session-1", "Alpha session", "/project", undefined);
     expect(mocks.toggleSessionPicker).toHaveBeenCalled();
 
     mocks.openSessionTab.mockClear();

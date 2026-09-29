@@ -16,6 +16,13 @@ export interface Tab {
    *  against a later auto-generated title (status SSE broadcast) silently
    *  overwriting the user's own choice. */
   titleManual?: boolean;
+  /** SSH/WSL host this tab was opened against, when the opener knew it (the
+   *  remote inventory, a jump from the Pulse dashboard). `undefined` means
+   *  "infer from the project path" (legacy/restored tabs); `""` means
+   *  explicitly local. Without this, a path saved on two hosts (duplicate as
+   *  remote) made resolveSessionHost reject the path as ambiguous and silently
+   *  fall back to the LOCAL server. */
+  host?: string;
 }
 
 /** One project's cached session list, plus when it landed. */
@@ -126,6 +133,17 @@ export function findProjectPathForTab(state: ProjectState, tabId: string): strin
     if (list.some((t) => t.id === tabId)) return path;
   }
   return null;
+}
+
+/** The Tab bound to a session id, across every project. Lets host resolution
+ *  read the tab's own host instead of re-deriving it from the (possibly
+ *  ambiguous) project path. */
+export function findTabForSession(state: ProjectState, tabId: string): Tab | undefined {
+  for (const list of Object.values(state.tabsByProject)) {
+    const found = list.find((t) => t.id === tabId);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function projectReducer(state: ProjectState, action: ProjectAction): ProjectState {
@@ -513,7 +531,7 @@ interface ProjectContextType {
   /** Open (or focus) a session tab, bound to `projectPath` when given (for a
    *  session picked from a non-active project's list) or to the active project
    *  otherwise. */
-  openSessionTab: (sessionId: string, sessionTitle: string, projectPath?: string) => void;
+  openSessionTab: (sessionId: string, sessionTitle: string, projectPath?: string, host?: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
   addRemoteProject: (host: string, path: string, port?: number) => Promise<void>;
@@ -792,13 +810,17 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
    *  that project through — a tab bound to the local active project silently
    *  routes the resumed remote session locally. The owning project must
    *  separately be made active for the tab to be visible. */
-  const openSessionTab = useCallback((sessionId: string, sessionTitle: string, projectPath?: string) => {
+  const openSessionTab = useCallback((sessionId: string, sessionTitle: string, projectPath?: string, host?: string) => {
     const path = projectPath || state.activeProject?.path || "";
+    // Only stamp host when the caller supplied one. `undefined` keeps the
+    // legacy path-inference behaviour; passing "" records an explicit local
+    // binding (which survives a same-path remote duplicate ambiguity).
     const tab: Tab = {
       id: sessionId,
       projectPath: path,
       title: sessionTitle || sessionId,
       activeSubTab: "chat",
+      ...(host !== undefined ? { host } : {}),
     };
     dispatch({ type: "ADD_TAB", tab });
   }, [state.activeProject]);
@@ -1002,7 +1024,17 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       return activeId;
     }
     const tempId = `new-${Date.now()}`;
-    dispatch({ type: "ADD_TAB", tab: { id: tempId, projectPath: path, title: "New session", activeSubTab: "chat" } });
+    const activeHost = state.activeProject && state.activeProject.path === path ? state.activeProject.host : undefined;
+    dispatch({
+      type: "ADD_TAB",
+      tab: {
+        id: tempId,
+        projectPath: path,
+        title: "New session",
+        activeSubTab: "chat",
+        ...(activeHost !== undefined ? { host: activeHost } : {}),
+      },
+    });
     return tempId;
   }, [state.activeProject, state.activeTabByProject]);
 

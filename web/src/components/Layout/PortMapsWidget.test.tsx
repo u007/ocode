@@ -36,6 +36,9 @@ const projectState = vi.hoisted(() => ({
   value: { projects: [] as { path: string; host?: string; remote_kind?: string }[], activeProject: null as null | { path: string } },
 }));
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectState: () => ({ state: projectState.value, dispatch: vi.fn() }),
 }));
 

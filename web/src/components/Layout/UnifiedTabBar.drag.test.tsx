@@ -42,6 +42,9 @@ const toggleSessionPicker = vi.fn();
 const projectDispatch = vi.fn();
 
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     state: projectFake.state,
     tabs: projectFake.tabs,

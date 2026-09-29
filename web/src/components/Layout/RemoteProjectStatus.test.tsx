@@ -161,7 +161,7 @@ describe("RemoteProjectStatus", () => {
 
     // Bound to the clicked project (not the active one) so a remote session is
     // routed through its host, and queued for the app shell to reveal.
-    expect(projectStoreFake.openSessionTab).toHaveBeenCalledWith("s1", "Chat one", "/srv");
+    expect(projectStoreFake.openSessionTab).toHaveBeenCalledWith("s1", "Chat one", "/srv", "dev@box");
     expect(mockTabFocusRequest).toHaveBeenCalledWith({
       kind: "chat",
       projectPath: "/srv",

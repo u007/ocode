@@ -5,6 +5,9 @@ import { AGENT_PREVIEW_COLLAPSED_STORAGE_KEY } from "./agentPreviewPersistence";
 import type { AgentRun } from "../../api/types";
 
 vi.mock("../../stores/projectStore", () => ({
+  // resolveSessionHost (useSessionHost.ts) imports this directly, so the
+  // real implementation runs against the stub state in these tests.
+  findTabForSession: () => undefined,
   useProjectState: () => ({ activeTabId: "session-1" }),
 }));
 

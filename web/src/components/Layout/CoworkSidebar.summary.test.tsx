@@ -15,6 +15,9 @@ import type { SpeechSummaryConfig } from "../../api/client";
 // before TTS reads it. The row is about the latter.
 vi.mock("../../stores/projectStore", () => ({
   findProjectPathForTab: () => undefined,
+  // resolveSessionHost (CoworkSidebar.tsx:161) calls this directly — it is NOT
+  // mocked, so it is the REAL implementation running against the stub state.
+  findTabForSession: () => undefined,
   useProjectState: () => ({
     activeTabId: "session-1",
     state: { activeProject: null },

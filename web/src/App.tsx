@@ -1141,7 +1141,7 @@ function HomeApp() {
       return { handled: true, startedTurn: true, accepted };
     }
     if (result.sessionId) {
-      openSessionTab(result.sessionId, result.sessionId);
+      openSessionTab(result.sessionId, result.sessionId, targetProjectPath, targetHost);
     }
     if (result.newSession) {
       openNewSessionTab(isNewSessionTabEmpty(targetSessionId), targetProjectPath);
@@ -2042,10 +2042,21 @@ function HomeApp() {
  * in something below it too.
  */
 function SpeechProviderInsideProject({ children }: { children: ReactNode }) {
-  const { activeTabId } = useProjectState();
+  const { activeTabId, tabs, state } = useProjectState();
   const host = useSessionHost(activeTabId ?? undefined);
+  // Labelled for the speech toolbar: while a queued message plays, the bar says
+  // which project and chat session it came from. Read here, at the bridge,
+  // because the provider itself is rendered bare (no ProjectProvider) in its
+  // own tests and must not reach for this store.
+  const projectTitle = state.activeProject?.name;
+  const sessionTitle = tabs.find((tab) => tab.id === activeTabId)?.title;
   return (
-    <SpeechProvider sessionId={activeTabId ?? undefined} host={host}>
+    <SpeechProvider
+      sessionId={activeTabId ?? undefined}
+      host={host}
+      projectTitle={projectTitle}
+      sessionTitle={sessionTitle}
+    >
       {children}
     </SpeechProvider>
   );
