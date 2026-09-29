@@ -10,8 +10,8 @@ tags:
   - desktop
   - provider
   - backend
-timestamp: 2026-09-21T05:45:25Z
-resource: web/src/components/Layout/ModelDialog.tsx; internal/tui/picker.go; web/src/components/Layout/modelSelection.ts; internal/server/handler_config.go; internal/agent/advisor_tool.go
+timestamp: 2026-09-29T06:12:53Z
+resource: "web/src/components/Layout/ModelDialog.tsx; internal/tui/picker.go; web/src/components/Layout/modelSelection.ts; internal/server/handler_config.go; internal/agent/advisor_tool.go"
 ---
 ## Summary
 
@@ -24,6 +24,7 @@ The web/desktop advisor model picker (`web/src/components/Layout/ModelDialog.tsx
 **Current model list (keep in sync with TUI `CLAUDE_CODE_ADVISOR_MODELS`):**
 - `claude-sonnet-4-6`
 - `claude-sonnet-5`
+- `claude-sonnet-5-5`
 - `claude-opus-4-8`
 - `claude-opus-4-7`
 - `claude-opus-5`

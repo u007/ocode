@@ -1,7 +1,7 @@
 ---
 type: Decision
 title: TTS Speech Playback Design Specification
-description: User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2, 2026-09-28).
+description: 'User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2, 2026-09-28). Amended 2026-09-29: short plain-prose messages skip the summariser LLM entirely (§10.2 short-text gate). Amended 2026-09-29: client-side FIFO speak queue and now-playing `project · session` label (§7, §8).'
 tags:
   - TTS
   - speech
@@ -11,13 +11,13 @@ tags:
   - DOM-extraction
   - speech-summary
   - fail-open
-timestamp: 2026-09-28T13:01:47Z
+timestamp: 2026-09-29T03:51:10Z
 resource: "docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md"
 ---
 # TTS Speech Playback Design Specification
 
 **Type:** Decision  
-**Description:** User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2).  
+**Description:** User-approved design for TTS speech playback across desktop/web UI, covering model selection, playback semantics, UI, error handling, and testing. Updated with rendered-text extraction rule (DOM-based, never markdown source) and the fail-open spoken-summary contract (§10.2). Amended 2026-09-29: short plain-prose messages skip the summariser LLM entirely (§10.2). Amended 2026-09-29: client-side FIFO speak queue and now-playing `project · session` label (§7, §8).  
 **Resource:** docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md  
 **Tags:** TTS, speech, design, local-model, supervisor, DOM-extraction  
 
@@ -26,7 +26,7 @@ resource: "docs/superpowers/specs/2026-09-09-tts-speech-playback-design.md"
 # TTS Speech Playback Design Specification
 
 **Status**: Active
-**Last Updated**: 2026-09-28
+**Last Updated**: 2026-09-29
 
 ## Overview
 
@@ -77,7 +77,13 @@ This specification defines the TTS (Text-to-Speech) speech playback system for t
 - Partial files never count as installed
 
 ### 7. Selection & Playback Replacement
-- New selection/text immediately replaces current playback and clears queue
+- Superseded 2026-09-29: new speak requests no longer replace the current playback (previously "New selection/text immediately replaces current playback and clears queue"). They are APPENDED to a client-side FIFO queue in `SpeechProvider` (`web/src/components/Speech/SpeechProvider.tsx`) and play one at a time, in click order (`enqueue`, `SpeechProvider.tsx:598`).
+- Only an explicit Stop (`stop`, `SpeechProvider.tsx:278`) or an engine switch clears the queue. Stop also cancels the in-flight item, including one still awaiting its summary.
+- The queue is client-side, not server state. The per-server-process playback generation rule below is UNCHANGED: each queued item gets a fresh generation as it starts, so there is still exactly one active local playback generation per process.
+- Summarising resolves when an item reaches the HEAD of the queue, not when it is enqueued (`drain`, `SpeechProvider.tsx:544`). A burst of N speak requests therefore costs one in-flight summariser call at a time, never N concurrent 60s model calls racing to land out of order.
+- A failed item (synthesis error, audio error) does not strand the queue: the worker moves on to the next item and the error stays visible in the toolbar. Errors are still surfaced, never silently swallowed — consistent with §13.
+- Each queued item carries the project title and the chat session title captured AT ENQUEUE TIME, plus the session id, host and speak-mode gate used for summarising. A queue outlives a tab switch, so these are snapshotted per item: an item queued in session A is summarised against session A and labelled with A's project/session even if the user is now looking at B. The toolbar shows the now-playing item's `project · session` label for exactly this reason.
+- Browser Native remains tab-local, and disconnect behaviour is unchanged: cancel the active generation, do not resume automatically.
 - One active local playback generation per running ocode server process, shared across its tabs/sessions
 - Separate ocode server processes are not one shared playback state
 - Browser Native remains tab-local
@@ -92,6 +98,10 @@ This specification defines the TTS (Text-to-Speech) speech playback system for t
 - Elapsed / Total time display
 - Local audio is seekable
 - Browser Native: pause/resume/cancel + best-effort estimated text-offset skip/seek
+- A now-playing label showing `projectTitle · sessionTitle` for the item currently playing, omitted when neither is known. Truncated with the full value in the tooltip (`speechItemLabel`, `web/src/components/Speech/SpeechToolbar.tsx:20`; label span at `SpeechToolbar.tsx:55`).
+- A `+N queued` badge counting only the items still WAITING (not the one playing), with an accessible name of "N queued" (`SpeechToolbar.tsx:63`).
+- **Next** — abandon the current item and promote the next queued one. Disabled/absent when the queue is empty (`SpeechToolbar.tsx:66`).
+- **Clear queue** — drop every waiting item but let the current one finish. Distinct from Stop, which silences the current item too (`SpeechToolbar.tsx:67`).
 
 ### 9. Settings Playback Modes
 - Manual / Speak visible (default; button always present)
@@ -124,7 +134,7 @@ Three helpers in `web/src/components/Speech/speechUtils.ts` cover the extraction
 
 **Scope note:** `ThinkingBlock` reasoning and terminal selections are plain text (not markdown) and are passed through unchanged — no DOM extraction needed.
 
-#### 10.2 Spoken Summaries — fail-open (added 2026-09-28)
+#### 10.2 Spoken Summaries — fail-open (added 2026-09-28; short-text gate added 2026-09-29)
 
 Optional prose rewriting sits between extraction (§10.1) and synthesis. When
 `SpeechSummaryEnabled` is on, `resolveSpeechText`
@@ -140,6 +150,40 @@ profile and usage attribution as its turns. Settings pair is read/written via
 - **`200 {"summary": ""}` is the fail-open signal** — speak the original full
   text. Empty/whitespace-only summaries and request failures resolve to the
   original text identically; speech is never silenced by a side task failing.
+- **A further cause of the same empty summary (added 2026-09-29): the message
+  is short plain prose and is spoken verbatim.** `SummarizeForSpeech` returns
+  `""` — the established "speak the original" signal — *before* resolving a
+  client and *before* reading the 24h disk cache (nothing ever caches a
+  summary for such text, so there is nothing to look up), gated by
+  `speechTextNeedsRewrite` (`internal/agent/speech_summary.go:290`): the text
+  must be at most `speechSummarySkipChars = 400` runes
+  (`speech_summary.go:61`, the const block shared with
+  `speechSummaryMaxInputChars`, `speechSummaryMaxOutputChars`,
+  `speechSummaryTimeoutSeconds`, `speechSummaryCacheTTL` and
+  `speechSummaryPruneInterval` — roughly 20 seconds of speech at 160 wpm)
+  **and** carry no speakable artifact. Length alone is not the test:
+  `speechTextHasSpeakableArtifact` (`speech_summary.go:153`) scans for a
+  backtick (fence or inline code), `http://`/`https://`, a `@@` diff hunk
+  header, crash markers (`panic:`, `Traceback (most recent call last)`,
+  `Exception in thread`, `fatal error:`), and per line a `+`/`-` marker with
+  no space after it (markdown bullets require the space, so that is a diff
+  and not a list), a `$ ` shell prompt, two or more pipes (a table row), and
+  any whitespace-delimited token that looks like a path or filename. The
+  rationale is already written into the code: the summariser's own prompt
+  (`speechSummarySystemPrompt`, `speech_summary.go:24`) tells the model to
+  return an already-short plain-prose reply "almost unchanged"
+  (`speech_summary.go:31`), so the round trip buys no rewrite — but *not*
+  calling the model on a short code block or diff would read source code
+  aloud, the exact failure the summariser was added to prevent, so the
+  artifact scan errs towards firing. The skip logs one debug line
+  (`speaking N chars verbatim; no summary needed`), consistent with the other
+  early exits. No new config key, no new endpoint, no client change: an
+  empty summary already meant "speak the full text". Two known,
+  user-visible limits: (1) a table that reached the server as RENDERED text
+  has no pipes left to detect, so a short table is read as its bare cell
+  contents; (2) a bare filename ("I edited main.go") IS detected, but a bare
+  version/abbreviation is not — "e.g", "U.S", "1.2.3" and "3.14" are
+  deliberately not treated as files.
 - **Degrade while the turn is active.** `runTurn` holds the session's `as.mu`
   for the entire turn, so `HandleSessionSpeechSummary` checks
   `h.sessions.IsTurnActive(id)` on the non-blocking registry *before* taking
@@ -154,7 +198,7 @@ profile and usage attribution as its turns. Settings pair is read/written via
 - **No work lock.** The config PUT releases `h.mu` around
   `config.SaveOcodeSpeechSummary` (cross-process config lock, ~5s bound) and
   re-locks only to update `h.cfg` — `h.mu` is a short-lived map lock, never a
-  work lock (`internal/server/agent_session.go:40-46`).
+  work lock (`internal/server/agent_session.go:39-46`).
 - **Scope stays local.** No server-global lock anywhere in the speech path;
   blocking scope is one request / one session. `POST /api/tts/speak` still
   returns immediately with synthesis in a background goroutine, and §7's one
@@ -162,7 +206,10 @@ profile and usage attribution as its turns. Settings pair is read/written via
 
 Regression tests: `TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive`,
 `TestSummarizeForSpeechCancelsTheProviderCallOnTimeout`,
-`TestSummarizeForSpeechFallsBackToChatForContextlessClients`.
+`TestSummarizeForSpeechFallsBackToChatForContextlessClients`, plus the
+short-text gate: `TestSummarizeForSpeechSkipsTheLLMForShortPlainProse`,
+`TestSummarizeForSpeechStillSummarisesShortTextCarryingArtifacts`,
+`TestSpeechTextNeedsRewrite`.
 See `gotchas/speech-summary-turn-lock-wait.md` for the full write-up.
 
 ### 11. Terminal TTS
@@ -215,6 +262,7 @@ See `gotchas/speech-summary-turn-lock-wait.md` for the full write-up.
 | Engine-specific manifests/runtime hooks | Piper/Kokoro/Fish Audio/Breeze each get pinned verified manifests, engine-specific startup/health/inference adapters, packaging/license/platform validation; common supervisor interface only. |
 | Playback control ownership | seek/pause/play/timeline controls are frontend Audio/SpeechController operations where possible; backend generates/serves seekable local audio and reports progress/state. Do not present POST /tts/seek as a required backend operation; list conceptual configuration/status/synthesis/cancel/event surfaces instead. |
 | "No silent fallback" (§13) vs fail-open summaries (§10.2) | Not a contradiction: §13 covers engine/install/playback errors, which must always surface. The speech summary is an optional side rewrite — its failure degrades to the full text (visible in what is spoken) and never silences speech. |
+| Client-side queue vs §7's one-generation-per-process rule and the §8 global-vs-tab-local split | The queue is a CLIENT-side playback SEQUENCE over items, not shared server state. Each item still takes the single server playback generation in turn, so the global one-active-playback rule is unchanged; Browser Native items queue within the tab as before. |
 
 ## Frontend (React) Architecture
 
@@ -238,6 +286,7 @@ See `gotchas/speech-summary-turn-lock-wait.md` for the full write-up.
 
 ### PlaybackState
 - Tracks: engine type, current text, position, duration, queue state, error state, selection generation
+- Queue state is concrete: a ref of items `{id, text, prepared, sessionId, host, summaryEnabled, speakMode, projectTitle, sessionTitle}` (`queue`, `SpeechProvider.tsx:174`), plus `queuedCount` and `nowPlaying` for rendering (`SpeechProvider.tsx:180`), and a single-flight `draining` latch (`SpeechProvider.tsx:179`) so an item's natural end and a user pressing Next in the same tick cannot start two workers
 - Emits progress events for UI updates
 - On server/process/browser disconnect, cancels/expires active generation; does not resume automatically
 
@@ -280,11 +329,14 @@ See `gotchas/speech-summary-turn-lock-wait.md` for the full write-up.
 - Late-event ignoring verification
 - Speech summary skipped while the turn is active, summarised afterwards (`TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive`)
 - Speech summariser cancelled by its timeout via `ChatWithContext`, with a `Chat` fallback for contextless clients (`TestSummarizeForSpeechCancelsTheProviderCallOnTimeout`, `TestSummarizeForSpeechFallsBackToChatForContextlessClients`)
+- Short plain-prose messages skip the summariser LLM entirely (zero model calls), while equally short text carrying a code/diff/path/URL/table/crash artifact is still summarised (`TestSummarizeForSpeechSkipsTheLLMForShortPlainProse`, `TestSummarizeForSpeechStillSummarisesShortTextCarryingArtifacts`, `TestSpeechTextNeedsRewrite`)
 
 ### Frontend Tests
 - `speechUtils.test.ts` — extractor unit tests for `renderedSpeechText`, `renderedSpeechTexts`, `lastRenderedSpeechText` (whitespace collapse, exclusion attributes, block-level line breaks)
 - `MessageBubble.speak.test.tsx` — the Speak button speaks rendered text, not `**`/`#`/backticks/URLs
-- `SpeechProvider.speechSummary.test.tsx` — empty/whitespace/failed summary resolves to the original text (fail-open)
+- `SpeechProvider.speechSummary.test.tsx` — empty/whitespace/failed summary resolves to the original text (fail-open); its "plays only the newest message when two summaries resolve out of order" case was REPLACED by "plays BOTH messages in click order when two speaks are queued", because newest-wins is precisely what the queue removes
+- `SpeechProvider.queue.test.tsx` — items play in click order; the badge counts only waiting items; Stop clears the queue; Next promotes the next item and is a no-op on an empty queue; Clear drops the backlog but lets the current item finish; one summary in flight at a time; at-bottom auto-speak queues behind the playing item and ignores the event when not at the bottom; a failed item does not strand the queue; labels and the summariser's session are snapshotted at enqueue and survive a tab switch
+- `SpeechToolbar.queue.test.tsx` — `speechItemLabel` joining/skipping halves, the now-playing label and its tooltip, the `+N queued` badge and its accessible name, and the Next / Clear queue controls (including that Clear does not call Stop)
 - Voice selector state transitions
 - Toolbar playback control
 - Error surfacing without fallback

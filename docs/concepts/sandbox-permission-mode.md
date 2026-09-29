@@ -51,11 +51,13 @@ The **live** mode is per chat session, not per process. `PUT /api/permissions/mo
 
 ## Destructive git routing
 
-In `PermissionManager.Decide` (`internal/agent/permissions.go`), two guards fire **before** the sandbox auto-allow:
+In `PermissionManager.Decide` (`internal/agent/permissions.go`), three guards fire **before** the sandbox auto-allow:
 
 1. **`isHarmfulForceCommand(command)`** → `bashPermissionRequest(..., "sandbox.harmful_force")` → `PermissionAsk`. Covers force-flagged `git push`/`git pull`.
 
-2. **`IsHarmfulBashCommand(command)`** → `bashPermissionRequest(..., "sandbox.harmful_git")` → `PermissionAsk`. Covers the destructive git family: `git stash pop/apply/drop/clear`, `git checkout`, `git reset`, `git clean`, `git restore`, `git switch`.
+2. **`isExfiltrationRiskBash(command)`** → `bashPermissionRequest(..., "sandbox.exfiltration_risk")` → `PermissionAsk`. Covers curl/wget/httpie/nc exfiltration forms (file upload, env var in URL/flag position, subshell). Checked before the git gate only so the Ask carries an accurate label — `IsHarmfulBashCommand` also includes this family and would otherwise report it as `sandbox.harmful_git`. The loopback exemption (`subprocessTargetsLocalhost`) applies only when every target token is loopback — any other URL (even a `-e`/`--proxy` value), a whole-word `$`/backtick expansion that could be the target (`$URL`, `"$2"`), or a scheme-less dotted host voids it. Env vars used as data to loopback (header/query/`-u`/`-d` values) keep the exemption. A curl whose URL or flags arrive through a variable or function argument (`curl $A "$2"`) therefore cannot be proven loopback and always lands here.
+
+3. **`IsHarmfulBashCommand(command)`** → `bashPermissionRequest(..., "sandbox.harmful_git")` → `PermissionAsk`. Covers the destructive git family: `git stash pop/apply/drop/clear`, `git checkout`, `git reset`, `git clean`, `git restore`, `git switch`.
 
 Rationale: the OS write-wall confines file writes to classified roots but is blind to repo mutations that stay inside the allowed workdir — history rewrite, branch switch, stash create/drop, untracked removal all mutate the repo within the writable boundary. Normal mode is unchanged (already Ask via `IsHarmfulBashCommand`); YOLO remains the promptless escape hatch.
 
@@ -84,7 +86,7 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 - **auth.json / auth.profiles.json** (read or write) → Ask
 - **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
 - **~/.ssh** (read or write) → Ask
-- **Secret material** (`isSecretMaterialPath`) → Ask (read or write)
+- **Secret material** (`isSecretMaterialPath`) → Ask (read or write). Bare relative dotfiles (`cat .env`, `grep X .env`) are path args (`isLikelyPathArg`), same as `./.env`.
 - **Repo metadata** (`isRepoMetadataPath`) → Ask on write only; read/list auto-allows
 
 These route through the auto-permission judge when `auto` is on, else a human prompt.

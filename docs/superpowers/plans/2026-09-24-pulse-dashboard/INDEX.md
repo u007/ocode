@@ -7,13 +7,15 @@
 >    purpose — the whole feature landed as one change set rather than the ten
 >    commits this plan describes, because the working tree had unrelated
 >    in-flight work that a part-by-part commit would have swept in.
-> 2. **Part 04's performance measurement was not performed.** The plan asked for
->    a `BenchmarkHandlePulseLive` with ~50 live entries and one
->    `curl -w '%{time_total}'` of `scope=all` against a populated multi-project
->    store. No such environment was available, so **the p50 < 200 ms budget for
->    `scope=live` and the `scope=all` cost are UNMEASURED.** The design work
->    that should keep them in budget (metadata-only disk scan, one indexed
->    title row per live session) is in place; the numbers are not claimed.
+> 2. **Part 04's performance measurement is PARTIAL.** The `curl -w
+>    '%{time_total}'` measurement WAS taken on a real multi-project store
+>    (9 projects, 100+ sessions over 2 pages): `scope=live` = **0.6 ms** with
+>    an *empty* live registry (a floor, not the p50), `scope=all` = **0.92 s
+>    cold / ~0.58 s warm** with one 6.5 s first-call outlier. The design's
+>    "stop and report if `all` exceeds 1 s" gate is met on repeat calls and
+>    marginal on a cold process — reported, not optimised. Still **not** done:
+>    `BenchmarkHandlePulseLive` with ~50 live entries, so the p50 < 200 ms
+>    budget remains unverified.
 >
 > The per-part checkboxes are a partial record — parts 03–07 were ticked as they
 > ran, parts 01–02 retrospectively, and parts 08–10 still show unticked boxes

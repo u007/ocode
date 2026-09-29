@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Speech playback
-description: Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write).
+description: 'Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim.'
 tags:
   - speech
   - tts
@@ -12,7 +12,7 @@ tags:
   - DOM-extraction
   - speech-summary
   - fail-open
-timestamp: 2026-09-28T12:57:56Z
+timestamp: 2026-09-29T02:58:31Z
 ---
 # Speech playback
 
@@ -186,7 +186,7 @@ at the bottom. Browser Native pause, resume, stop, and replay are local to the
 browser tab; duration and seek are intentionally best-effort because browser
 speech implementations do not expose a reliable audio timeline.
 
-## Spoken summaries (fail-open) — updated 2026-09-28
+## Spoken summaries (fail-open) — updated 2026-09-28, amended 2026-09-29
 
 Optional prose rewriting sits between text extraction and synthesis. When the
 speech-summary gate is on (`SpeechSummaryEnabled`, reported by
@@ -204,6 +204,27 @@ prerequisite for speech.** Concretely, since the 2026-09-28 fix:
   not an error. `resolveSpeechText` (`web/src/components/Speech/SpeechProvider.tsx`)
   returns the original text for an empty or whitespace-only summary *and* for
   a failed request — a side task failing must never silence speech.
+- **A short message can produce that same empty summary (added 2026-09-29):
+  it is spoken verbatim.** `SummarizeForSpeech`
+  (`internal/agent/speech_summary.go`) skips the summariser LLM entirely for
+  a message that is already short plain prose — at most `speechSummarySkipChars
+  = 400` runes (roughly 20 seconds of speech at 160 wpm) **and** carrying no
+  speakable artifact. The gate runs *before* the model client is resolved and
+  *before* the 24h summary cache is read, logs one debug line
+  (`speaking N chars verbatim; no summary needed`) and returns `""`. This is
+  a cost/latency fix only: an empty summary already meant "speak the full
+  text", so nothing changed for the client — no new config key, no new
+  endpoint, no web-layer change. Length alone is not the test, though: a
+  short code block, diff, URL, table row, shell prompt, crash trace or
+  path/filename token still goes to the model, because reading source code
+  aloud is the exact failure the summariser exists to prevent. Two known
+  user-visible limits: a table that arrived as *rendered* text has no pipes
+  left to detect, so a short table is read as its bare cell contents; and a
+  bare version/abbreviation ("e.g", "U.S", "1.2.3", "3.14") is deliberately
+  not treated as a file (a bare filename like "main.go" is). Regression:
+  `TestSummarizeForSpeechSkipsTheLLMForShortPlainProse`,
+  `TestSummarizeForSpeechStillSummarisesShortTextCarryingArtifacts`,
+  `TestSpeechTextNeedsRewrite`.
 - **The endpoint degrades immediately while that session's turn is running.**
   `runTurn` holds the session's `as.mu` for the entire turn, so the handler
   checks `h.sessions.IsTurnActive(id)` on the (non-blocking) registry first

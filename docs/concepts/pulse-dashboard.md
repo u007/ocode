@@ -11,7 +11,7 @@ tags:
   - web
   - desktop
   - api
-timestamp: 2026-09-28T07:10:34Z
+timestamp: 2026-09-29T04:38:57Z
 ---
 # Pulse — cross-project live-sessions dashboard
 
@@ -26,7 +26,9 @@ session manager: no rename, delete, archive, or bulk actions. v1 is
 - Design spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 - Implementation plan: `docs/superpowers/plans/2026-09-24-pulse-dashboard/` (tasks 01–10 + INDEX)
 - **Superseded spec items:** the spec's "route `/pulse`" and "pinned Pulse tab
-  in `UnifiedTabBar`" were both wrong and are replaced as described under
+  in `UnifiedTabBar`" were both wrong, and its shipped replacement — a
+  hamburger main menu in the `ProjectSidebar` header — is itself superseded;
+  all are replaced as described under
   [Entry points](#entry-points-and-the-no-client-router-correction).
 
 ## API: `GET /api/pulse`
@@ -265,13 +267,24 @@ URL**. (The spec's "route `/pulse`" was wrong; corrected here.)
 
 Entry points:
 
-- **(a) Main menu at the top-left of the project list** — a `Popover` in the
-  `ProjectSidebar` header with explicit `role="menu"`/`role="menuitem"` (the
-  repo ships **no** dropdown-menu primitive; this matches UnifiedTabBar's
-  mobile tab popover). It replaced the spec's pinned session-tab pill because
-  the dashboard is *global* — a per-project row would wrongly imply it is
-  project-scoped. The `onOpenDashboard` prop is optional: omit it and the menu
-  is not rendered, so a half-mounted tree never offers a dead button.
+- **(a) Dashboard icon button beside the "Projects" heading** — a direct
+  `LayoutDashboard` icon button in the `ProjectSidebar` header row, between the
+  `h2 "Projects"` and the chevron-left collapse button:
+  `data-testid="open-dashboard"`, `aria-label="Open dashboard"`, a Radix
+  `Tooltip` reading "Dashboard — all projects", calling the `onOpenDashboard`
+  prop. Two earlier shapes were rejected on the same grounds: the spec's
+  pinned session-tab pill, because the dashboard is *global* — a per-project
+  row would wrongly imply it is project-scoped — and the first shipped shape,
+  a hamburger `Menu` popover whose single item was "Dashboard", which buried a
+  global, all-projects view two clicks deep *inside* the project list and so
+  read as project-scoped too. The `onOpenDashboard` prop is optional: omit it
+  and the button is not rendered at all, so a half-mounted tree never offers a
+  dead button. The button is also the first Radix `Tooltip` in
+  `renderExpandedInner()`'s shared body, so that body now wraps itself in
+  `TooltipProvider delayDuration={300}`: both callers (the mobile drawer branch
+  and the desktop expanded column) previously rendered it with no provider
+  ancestor, and Radix throws "Tooltip must be used within `TooltipProvider`"
+  (only the collapsed rail had brought its own).
 - **(b) Header badge** — `PulseBadge` renders `● running · ◆ needs you` and
   renders **nothing at zero** (a permanent "● 0 · ◆ 0" is noise).
 - **(c) Cmd/Ctrl+J** to toggle in and out (`onTogglePulse` in

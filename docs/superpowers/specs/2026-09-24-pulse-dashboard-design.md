@@ -1,7 +1,7 @@
 ---
 type: Design
 title: Pulse — cross-project live sessions dashboard
-description: 'Approved design spec for the Pulse cross-project live-sessions dashboard, implemented 2026-09-28, with as-shipped amendment notes recorded inline: activeView value "pulse" instead of a route (no client router), a ProjectSidebar main menu instead of a pinned tab entry, no dock-badge click (Wails v3 dock service is display-only; gap tracked in TODO.md; shipped entries are a Dashboard app-menu item and a tray Open Pulse), todo_updated published from the server tool-result broadcast and deliberately excluded from live frames, scope=all metadata-only cost with an unmeasured budget, and TitleForDir single-row title reads.'
+description: 'Approved design spec for the Pulse cross-project live-sessions dashboard, implemented 2026-09-28, with as-shipped amendment notes recorded inline: activeView value "pulse" instead of a route (no client router), a dashboard icon button beside the Projects heading in the ProjectSidebar instead of a pinned tab entry, no dock-badge click (Wails v3 dock service is display-only; gap tracked in TODO.md; shipped entries are a Dashboard app-menu item and a tray Open Pulse), todo_updated published from the server tool-result broadcast and deliberately excluded from live frames, scope=all metadata-only cost with an unmeasured budget, and TitleForDir single-row title reads.'
 tags:
   - design
   - spec
@@ -11,7 +11,7 @@ tags:
   - web
   - desktop
   - superpowers
-timestamp: 2026-09-28T09:32:28Z
+timestamp: 2026-09-29T04:41:13Z
 ---
 # Pulse — cross-project live sessions dashboard
 
@@ -55,13 +55,17 @@ Deferred (each gets a TODO.md entry):
   Pulse. Hidden when both counts are zero.
 - Desktop: clicking the existing dock badge opens Pulse.
 
-**As shipped (2026-09-28):** there is no client router, so Pulse is not a
-route — it is the `activeView` value `"pulse"` (`web/src/App.tsx`) — and the
-pinned tab-bar entry did not ship: the dashboard is global, so a
-per-project tab-strip slot would wrongly imply it is scoped to the active
-project. The entry point is instead a main menu at the top-left of the
-`ProjectSidebar` header (a `Popover` with `role="menu"`, since the repo
-ships no dropdown-menu primitive). `⌘J` and the header badge shipped as
+**As shipped (2026-09-28; entry-point shape revised 2026-09-29):** there is
+no client router, so Pulse is not a route — it is the `activeView` value
+`"pulse"` (`web/src/App.tsx`) — and the pinned tab-bar entry did not ship: the
+dashboard is global, so a per-project tab-strip slot would wrongly imply it is
+scoped to the active project. The entry point is a direct `LayoutDashboard`
+icon button in the `ProjectSidebar` header row, a sibling of the "Projects"
+heading (`data-testid="open-dashboard"`, `aria-label="Open dashboard"`,
+tooltip "Dashboard — all projects"). An interim shape — a hamburger `Menu`
+popover whose single item was "Dashboard" — was itself replaced on 2026-09-29
+because it buried a global, all-projects view two clicks deep inside the
+project list and read as project-scoped. `⌘J` and the header badge shipped as
 specified.
 
 **As shipped (2026-09-28):** the dock-badge click did **not** ship and was

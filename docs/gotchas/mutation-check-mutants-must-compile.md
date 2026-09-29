@@ -1,19 +1,24 @@
 ---
 type: Gotcha
-title: 'Mutation-check: mutants must compile; filelock non-positive timeout = 10s default'
-description: 'Two mutation-check findings: a mutant that only breaks compilation is a false-positive kill (compile-check before tests, classify non-compiling mutants INVALID), and filelock treats non-positive timeouts as the 10s package default, so corpusLockWaitFor must floor at a positive wait. Cross-references concepts/discovery-corpus-cache.md for the underlying lock design.'
+title: 'Mutation-check: mutants must compile; filelock non-positive timeout = 10s default; harness backup/trap/preflight hygiene'
+description: 'Three mutation-check findings: a mutant that only breaks compilation is a false-positive kill (compile-check before tests, classify INVALID); filelock treats non-positive timeouts as the 10s package default so corpusLockWaitFor must floor at a positive wait; and harness hygiene — mktemp private backup dir, EXIT/INT/TERM trap, cmp-before-restore, dirty-tree preflight and post-restore git-diff guards (web/mutate_speech.sh). Cross-references concepts/discovery-corpus-cache.md and the sibling verdict-classification gotcha.'
 tags:
   - mutation-testing
   - gotcha
   - discovery
   - filelock
   - testing
-timestamp: 2026-09-28T17:03:30Z
+  - harness
+  - git
+timestamp: 2026-09-29T00:05:20Z
 ---
 # Mutation-check mutants must compile, and `filelock` treats non-positive timeouts as "10s default"
 
 Two findings from a mutation-check session over the discovery corpus-lock code
-(`internal/discovery/cache.go`, harness `mutcheck_corpus.py`).
+(`internal/discovery/cache.go`, harness `mutcheck_corpus.py`), plus the
+harness-hygiene failure modes found later while hardening a second harness
+(`web/mutate_speech.sh`, section 3) — those corrupted the *source tree* rather
+than the verdict.
 
 > **Context:** the lock semantics found here — `ErrCorpusLocked`, the bounded
 > wait, cross-instance sharing of the on-disk cache, and the warm-gate
@@ -74,12 +79,75 @@ if got := corpusLockWaitFor(expired); got <= 0 {
 }
 ```
 
+## 3. Harness hygiene: private backup, exit trap, cmp-before-restore, dirty-tree preflight
+
+Found while hardening `web/mutate_speech.sh` (the speech-summary mutation
+harness) after it exhibited two failure modes. Sections 1–2 corrupt the
+*verdict*; these corrupt the **working tree**, so the damage survives the run
+and shows up as unrelated downstream test failures.
+
+**Failure mode A — fixed backup path + no exit trap.** The backup lived at a
+fixed `/tmp` path, so a stale backup from an unrelated run could be restored
+*over* the real source file. And because nothing trapped INT/TERM, a killed run
+left the **mutated** source stranded in the tree — the next `go`/vitest run
+then failed for reasons unrelated to the code under review, sending the
+investigator down a long detour (this happened twice before the fix).
+
+**Failure mode B — no dirty-tree preflight.** Starting without a `git diff`
+check let an already-dirty source be baked into the backup and then
+"restored" as if pristine — the mutated bytes became the new "original" and
+every CAUGHT/SURVIVED verdict below that point is meaningless.
+
+**Fixes (all verified in `web/mutate_speech.sh`):**
+
+```bash
+# 1. Dirty-tree abort guard BEFORE any backup (lines 13-16)
+if ! git diff --quiet -- "$SRC"; then
+  echo "ABORT: $SRC has uncommitted changes; commit or stash them first." >&2
+  exit 1
+fi
+
+# 2. Private temp dir — never a fixed /tmp path (line 22)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/mutate-speech.XXXXXX")
+BAK="$WORK/SpeechProvider.tsx"
+cp "$SRC" "$BAK"
+
+# 3. cmp before cp: a restore that silently writes the WRONG bytes is worse
+#    than no restore, because it looks like a clean run afterwards (line 29)
+restore() { cmp -s "$BAK" "$SRC" || cp "$BAK" "$SRC"; }
+
+# 4. Every exit path — success, failed mutation, SIGINT, SIGTERM — puts the
+#    source back and removes the work dir (line 35)
+trap 'restore; rm -rf "$WORK"' EXIT INT TERM
+
+# 5. Post-restore confirmation: after the final restore, re-check and refuse
+#    to let a still-mutated file be committed (lines 96-100)
+restore
+if ! git diff --quiet -- "$SRC"; then
+  echo "ABORT: $SRC is still mutated after restore — do not commit." >&2
+  exit 1
+fi
+```
+
+Note the harness itself points back at this gotcha (its line-21 comment cites
+`docs/gotchas/mutation-check-mutants-must-compile.md`), so the fix and the
+recorded lesson stay in sync.
+
 ## Checklist
 
 - [ ] Mutant compiles (`go build`) before any test run; otherwise INVALID.
 - [ ] Kill = a *test* observed the behavior change, not a build failure.
 - [ ] Any timeout passed to `filelock.WithFileLockTimeout` must be strictly
       positive — `<= 0` silently means the 10s package default.
+- [ ] Backup lives in a `mktemp -d` private dir, never a fixed `/tmp` path.
+- [ ] `trap ... EXIT INT TERM` restores the source on every exit path — a
+      killed run must not strand a mutated file in the tree.
+- [ ] `cmp` before `cp` on restore, so a restore never silently writes the
+      wrong bytes.
+- [ ] Preflight `git diff --quiet -- $SRC` aborts when the source is already
+      dirty (an old backup must not be "restored" as pristine).
+- [ ] Post-restore `git diff` confirms the source is back to pristine before
+      anything is committed.
 
 ## Related
 
@@ -87,3 +155,6 @@ if got := corpusLockWaitFor(expired); got <= 0 {
   gotcha was found against: probe → lock → re-check → write, `ErrCorpusLocked`
   skip semantics, bounded wait, and why concurrent ocode instances share the
   on-disk `corpus-<model>.json`.
+- [Mutation-check false verdicts](gotchas/mutation-check-false-caught.md) —
+  sibling gotcha on verdict classification: false CAUGHT (compile-broken
+  mutants) and false MISS (equivalent mutants).
