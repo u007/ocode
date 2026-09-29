@@ -245,6 +245,43 @@ func (a *Agent) bindOpenCodeSessionID(client LLMClient) LLMClient {
 	return client
 }
 
+// attachRedactionHook wires the agent's tier-1 redaction hook onto a
+// freshly-built side-task client. NewClient cannot know about the hook: it is
+// set on the agent AFTER the main client is built, and only applySpecModel
+// re-applied it. Without this, the compaction and speech-summary side clients
+// (small model, or an explicit summary model) would send the transcript to the
+// summary provider UNREDACTED whenever redaction is enabled — the exact
+// conversation content the main client strips.
+//
+// A nil hook or a non-*GenericClient implementation is returned unchanged, so
+// custom/mock clients keep working.
+func (a *Agent) attachRedactionHook(client LLMClient) LLMClient {
+	if client == nil || a.redactionHook == nil {
+		return client
+	}
+	// Non-*GenericClient implementations (custom/mock) have no Redaction field.
+	// intentional: we cannot attach the hook to them; in production every
+	// side-client constructor returns a *GenericClient, and a test double
+	// shipping real content is not a leak.
+	if gc, ok := client.(*GenericClient); ok {
+		gc.Redaction = a.redactionHook
+	}
+	return client
+}
+
+// bindSideClient is the chokepoint for every FRESHLY-BUILT side-task client
+// (compaction, speech summary, recap, title, advisor, auto-continue judge,
+// doc/memory maintenance, task contract). It tags the client with the session's
+// opencode affinity AND the agent's tier-1 redaction hook, so a side call can
+// never ship conversation or file content the main client would have redacted.
+//
+// Call it ONLY on a client you just constructed. Never pass a.client: writing
+// Redaction onto the live main client would race with its own in-flight use
+// (the hook is already wired on it by SetRedactionHook).
+func (a *Agent) bindSideClient(client LLMClient) LLMClient {
+	return a.attachRedactionHook(a.bindOpenCodeSessionID(client))
+}
+
 // SetChangesSession tags only the snapshot store with a session id (so
 // backups journal under it) and rehydrates journaled snapshots for it.
 // The TUI uses this instead of SetSessionID because its debug-log entries
@@ -2349,7 +2386,7 @@ func (a *Agent) recapClient() LLMClient {
 	recap := strings.TrimSpace(a.config.Ocode.RecapModel)
 	if recap != "" {
 		if client := NewClient(a.config, recap); client != nil {
-			return a.bindOpenCodeSessionID(client)
+			return a.bindSideClient(client)
 		}
 	}
 	// Fall back to small model.
@@ -2358,7 +2395,7 @@ func (a *Agent) recapClient() LLMClient {
 		return a.client
 	}
 	if client := NewClient(a.config, small); client != nil {
-		return a.bindOpenCodeSessionID(client)
+		return a.bindSideClient(client)
 	}
 	return a.client
 }
@@ -2378,7 +2415,7 @@ func (a *Agent) autoContinueJudgeClient() LLMClient {
 		return nil
 	}
 	if client := newClientFn(a.config, model); client != nil {
-		return a.bindOpenCodeSessionID(client)
+		return a.bindSideClient(client)
 	}
 	return nil
 }
@@ -2688,7 +2725,7 @@ func (a *Agent) noThinkingClient() LLMClient {
 	// are copied; per-call fields (OnDelta, OnUsage, RetryNotifier, deltaMu,
 	// deltaWrapToken) are left at zero values — ChatWithContext initialises
 	// them per-call.
-	return a.bindOpenCodeSessionID(&GenericClient{
+	return a.bindSideClient(&GenericClient{
 		APIKey:          gc.APIKey,
 		Model:           gc.Model,
 		BaseURL:         gc.BaseURL,
@@ -2761,7 +2798,7 @@ func (a *Agent) smallModelOrMainClient(cfg *config.Config) LLMClient {
 	if a.SmallModelRuntimeEnabled() {
 		if small := a.resolveSmallModel(); small != "" {
 			if client := NewClient(cfg, small); client != nil {
-				return a.bindOpenCodeSessionID(client)
+				return a.bindSideClient(client)
 			}
 		}
 	}
@@ -2815,7 +2852,7 @@ func (a *Agent) overrideModelClient(cfg *config.Config, provider, model string) 
 	}
 
 	if client := NewClient(cfg, targetModel); client != nil {
-		return a.bindOpenCodeSessionID(client)
+		return a.bindSideClient(client)
 	}
 	if noThink := a.noThinkingClient(); noThink != nil {
 		return noThink
@@ -3648,6 +3685,9 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 	pinDeterministicSampling(client)
 	// The judge's read_file results travel back through this client, not the
 	// main conversation, so it needs the session mask hook of its own.
+	// Deliberately NOT bindSideClient: the hook only makes sense when a
+	// judgeMaskRegistry exists to UNMASK with; without one the judge must see
+	// raw text, so the registry check is load-bearing, not a shortcut.
 	if gc, ok := client.(*GenericClient); ok && a.judgeMaskRegistry() != nil && a.redactionHook != nil {
 		gc.Redaction = a.redactionHook
 	}
@@ -5354,7 +5394,7 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
 		} else if client := NewClient(a.config, spec.Model); client != nil {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
-			client = a.bindOpenCodeSessionID(client)
+			client = a.bindSideClient(client)
 			// Also carry the debug-log sessionID: NewClient only binds the
 			// *opencode* session id, so without this a swapped purpose/small
 			// client's emitDebug would fall back to the process-global sink and
@@ -5373,12 +5413,6 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 			a.preloadedModelContextKind = ""
 			a.preloadedModelContextPath = ""
 			a.preloadedModelContextReady = false
-			// Re-wire the tier-1 redaction hook onto the new client.
-			if a.redactionHook != nil {
-				if gc, ok := a.client.(*GenericClient); ok {
-					gc.Redaction = a.redactionHook
-				}
-			}
 		} else {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
 		}

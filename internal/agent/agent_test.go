@@ -3472,3 +3472,63 @@ func TestHandleToolCallAutoPermissionHarmfulSegmentNotMaskedByEarlierAsk(t *test
 		})
 	}
 }
+
+// TestSideClientsCarryRedactionHook pins the tier-1 redaction leak: side-task
+// clients are built with NewClient, which cannot know about a.redactionHook
+// (the hook is set on the agent AFTER the main client is built). Before
+// bindSideClient, the compaction and speech-summary clients (and recap /
+// auto-continue / title) shipped conversation content UNREDACTED to the side
+// model whenever redaction was enabled.
+//
+// Mutation: removing the attachRedactionHook from bindSideClient makes every
+// case below fail.
+func TestSideClientsCarryRedactionHook(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	hook := &redact.NetHook{Enabled: true}
+
+	cfg := &config.Config{Ocode: config.OcodeConfig{
+		SmallModel:         "openai/gpt-4o-mini",
+		SmallModelEnabled:  true,
+		RecapModel:         "openai/gpt-4o-mini",
+		AutoContinueModel:  "openai/gpt-4o-mini",
+		SpeechSummaryModel: "openai/gpt-4o-mini",
+		Compact:            config.CompactConfig{SummaryProvider: "openai", SummaryModel: "gpt-5"},
+	}}
+
+	a := &Agent{
+		client: &GenericClient{Model: "openai/gpt-4o", Provider: "openai", APIKey: "test-key"},
+		config: cfg,
+	}
+	a.SetRedactionHook(hook)
+
+	cases := map[string]LLMClient{
+		"compact":      a.compactSummaryClient(),
+		"speech":       a.speechSummaryClient(),
+		"recap":        a.recapClient(),
+		"autoContinue": a.autoContinueJudgeClient(),
+		"doc":          a.docMaintenanceClient(),
+		"memory":       a.memoryMaintenanceClient(),
+		"taskContract": TaskTool{mainAgent: a}.verifierClient(),
+	}
+	if tc := a.titleClients(); len(tc) > 0 {
+		cases["title"] = tc[0]
+	}
+	// The advisor client (advisor_tool.go ExecuteCtx) is the 9th bindSideClient
+	// site; it is only reachable by running a full advisor turn, so it is not
+	// unit-exercised here — the shared chokepoint means the wiring is identical.
+
+	for name, client := range cases {
+		if client == nil {
+			t.Errorf("%s: nil client (test setup), cannot verify redaction", name)
+			continue
+		}
+		gc, ok := client.(*GenericClient)
+		if !ok {
+			t.Errorf("%s: client is %T, want *GenericClient (redaction unverifiable)", name, client)
+			continue
+		}
+		if gc.Redaction != hook {
+			t.Errorf("%s: Redaction = %v, want the agent hook — transcript would leak unredacted", name, gc.Redaction)
+		}
+	}
+}

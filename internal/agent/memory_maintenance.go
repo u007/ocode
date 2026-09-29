@@ -202,7 +202,7 @@ func (a *Agent) memoryMaintenanceClient() LLMClient {
 	}
 	if client := newClientFn(a.config, model); client != nil {
 		// Inherit the main conversation identity (opencode* request affinity).
-		return a.bindOpenCodeSessionID(client)
+		return a.bindSideClient(client)
 	}
 	return a.client
 }

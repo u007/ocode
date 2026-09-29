@@ -267,7 +267,7 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	// affinity / prompt caching across the advisor side-call (both the plain
 	// single-turn fallback below and the exploration sub-agent share it).
 	if t.mainAgent != nil {
-		client = t.mainAgent.bindOpenCodeSessionID(client)
+		client = t.mainAgent.bindSideClient(client)
 	}
 
 	// Create a sub-agent with exploration tools so the advisor can investigate
