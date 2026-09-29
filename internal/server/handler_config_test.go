@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/browse/cdp"
@@ -1090,5 +1091,52 @@ func TestHandleStartHTRSurfacesFailure(t *testing.T) {
 	}
 	if got, _ := put["htr_error"].(string); !strings.Contains(got, "htrcli not found") {
 		t.Fatalf("browser PUT htr_error = %q, want start failure", got)
+	}
+}
+
+// TestHandleSetCompactConfigDoesNotHoldMuAcrossSave pins the lock scope: the
+// compact save is a cross-process read-modify-write that can wait ~5s, and h.mu
+// is the map lock every session send / run-state poll takes. While the save is
+// blocked, an h.mu-taking request must still complete.
+func TestHandleSetCompactConfigDoesNotHoldMuAcrossSave(t *testing.T) {
+	h := testConfigHandler(t)
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	orig := saveCompactConfigPatch
+	saveCompactConfigPatch = func(patch config.CompactConfigPatch) (config.CompactConfig, error) {
+		close(entered)
+		<-release
+		return config.CompactConfig{TokenThreshold: 0.9}, nil
+	}
+	defer func() { saveCompactConfigPatch = orig }()
+
+	putDone := make(chan struct{})
+	go func() {
+		defer close(putDone)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("PUT", "/api/config/ocode/compact", strings.NewReader(`{"token_threshold":0.9}`))
+		h.HandleSetCompactConfig(w, r)
+	}()
+	<-entered
+
+	muDone := make(chan struct{})
+	go func() {
+		defer close(muDone)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/config/ocode/auto-permission", nil)
+		h.HandleGetAutoPermissionConfig(w, r)
+	}()
+	select {
+	case <-muDone:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("h.mu was held across the config save; a concurrent request stalled")
+	}
+	close(release)
+	select {
+	case <-putDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("compact PUT did not finish after the save was released")
 	}
 }

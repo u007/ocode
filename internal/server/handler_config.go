@@ -1430,24 +1430,35 @@ func (h *Handler) HandleSetCompactConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// h.mu is held across the save so two in-process writers cannot interleave:
-	// each gets the merged block the file lock produced, and the cache ends up
-	// holding the last writer's result. Same shape as HandleSetSmallModel. No
-	// lock inversion: the only OnConfigSaved subscriber is a channel signal
-	// (internal/sync/watcher.go), which never takes h.mu.
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cfg == nil {
+	cfgLoaded := h.cfg != nil
+	h.mu.Unlock()
+	if !cfgLoaded {
 		writeError(w, http.StatusInternalServerError, "config not loaded")
 		return
 	}
-	merged, err := config.SaveOcodeCompactConfigPatch(patch)
+	// The disk write is a cross-process read-modify-write that can wait ~5s on a
+	// contended lock file. h.mu is the short-lived map lock every other
+	// session's send and the run-state polls take, so it is NOT held across the
+	// save (same rule as HandleSetSpeechSummaryConfig); the config file lock
+	// already serializes concurrent writers. Holding it here stalled the whole
+	// server behind one config PUT.
+	merged, err := saveCompactConfigPatch(patch)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
 	}
+	h.mu.Lock()
 	h.cfg.Ocode.Compact = merged
+	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, merged)
+}
+
+// saveCompactConfigPatch is the disk write used by HandleSetCompactConfig, a
+// package-level var so a test can block it and prove h.mu is not held across
+// the write.
+var saveCompactConfigPatch = func(patch config.CompactConfigPatch) (config.CompactConfig, error) {
+	return config.SaveOcodeCompactConfigPatch(patch)
 }
 
 // HandleGetPermissionConcerns reports the catalog of judge concern categories the
