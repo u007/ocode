@@ -8,7 +8,7 @@ tags:
   - relevance-judge
   - tools
   - architecture
-timestamp: 2026-09-28T15:35:52Z
+timestamp: 2026-09-29T04:42:31Z
 ---
 # Code-Search Relevance Judge
 
@@ -47,7 +47,7 @@ With no judge, `runSearchJudge` returns every result untouched (`internal/tool/s
 
 ## The seam: the judge rides the execution context
 
-The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:4837`), gated to the three tool names (`internal/agent/agent.go:4934`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:4936`). Any other tool's dispatch never touches the judge client factory.
+The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:4902`), gated to the three tool names (`internal/agent/agent.go:4999`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:5001`). Any other tool's dispatch never touches the judge client factory.
 
 The rationale is load-bearing: sub-agents and the transient advisor are handed the **parent's** tool objects (`internal/agent/ask.go:166`, `internal/agent/subagent.go:1126`, `internal/agent/advisor_tool.go:176` all call `GetTools()`), so a judge field on the tool struct would be overwritten by each child — and the advisor is shut down after one call, leaving the parent judging against a dead agent. It would also be a data race, since the search tools are `Parallel() == true`. With the context seam each agent attaches its own judge for its own call: no shared mutable state, no clobbering.
 
@@ -61,7 +61,7 @@ Two regression tests pin this (`internal/agent/search_wiring_test.go`):
 **A judge can only ever hide a result — never create, never drop on failure.** Every failure mode keeps results, and the failure itself is disclosed rather than swallowed (the `SearchResultJudge` signature's `error` return exists precisely so "the judge errored and I kept everything" stays distinguishable from "the judge ran and everything was in scope", `internal/tool/search_judge.go:50`).
 
 - The code-search judge runs on a short budget: `searchJudgeTimeout` = **4s** (`internal/agent/search_typesafe.go:27`), applied through the context-aware `DecideCtx` (`internal/agent/typesafe.go:88`). Fail-open still *waits*, so without this a provider that accepts the connection and then stalls would add the full default timeout to every search in the session.
-- The permission, auto-continue and doc_search judges keep the 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) — they are higher-stakes and lower-frequency: `Decide` (`internal/agent/typesafe.go:76`) remains a `DecideCtx` wrapper with that fallback, used by `internal/agent/permission_typesafe.go:248` and `internal/agent/autocontinue_typesafe.go:126`; the doc_search relevance path passes a background context and inherits the same 30s fallback.
+- The permission, auto-continue and doc_search judges keep the 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) — they are higher-stakes and lower-frequency: `Decide` (`internal/agent/typesafe.go:76`) remains a `DecideCtx` wrapper with that fallback, used by `internal/agent/permission_typesafe.go:251` and `internal/agent/autocontinue_typesafe.go:126`; the doc_search relevance path passes a background context and inherits the same 30s fallback.
 
 | Condition | Behaviour |
 |---|---|
@@ -123,7 +123,7 @@ Emitted under kind `TOOL`, tag `search_typesafe`:
 - **`read` is never judged.** Reading a named path is an explicit caller choice — the same carve-out the doc_search judge applies to `doc_get` (see [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md), "Scope boundary"). A judge cannot improve an explicit choice.
 - **`ast`, `lsp`, `ast_grep` are out of v1.** They return precise symbol hits, so the noise problem is materially smaller, and a wrong veto there hides a definition or call site the model specifically asked for. Stated honestly: the model *can* route around a judged `grep` by reaching for `ast`, so the "a second unjudged path is a bypass" principle ([Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md)) does not hold in its strong form here — that principle governs attach gates, while this is a context-economy filter where the judge can only ever hide a result, never grant one. If debug logs show the model preferring `ast` to evade filtering, adding those tools is the v2 move.
 - **Custom and MCP search tools are out.** Nothing in ocode can enforce a `required` argument on a third-party tool schema.
-- **`list` is deferred.** It is `os.ReadDir` on a single directory (`ListTool`, `internal/tool/search.go:685`) with no cap: judging sibling filenames is the weakest relevance signal of the code-search tools and the highest false-positive risk (a veto hides a name the model needed) for the least context saved. Tracked in `TODO.md` under "Code-search relevance judge (2026-09-28)" (`TODO.md:2682`); rationale in spec §8. Adding it later is a `SearchResult` producer plus one call site.
+- **`list` is deferred.** It is `os.ReadDir` on a single directory (`ListTool`, `internal/tool/search.go:685`) with no cap: judging sibling filenames is the weakest relevance signal of the code-search tools and the highest false-positive risk (a veto hides a name the model needed) for the least context saved. Tracked in `TODO.md` under "Code-search relevance judge (2026-09-28)" (`TODO.md:2718`); rationale in spec §8. Adding it later is a `SearchResult` producer plus one call site.
 
 ## See also
 

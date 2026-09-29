@@ -8,7 +8,7 @@ tags:
   - typesafe-judge
   - code-search
   - permissions
-timestamp: 2026-09-28T06:56:59Z
+timestamp: 2026-09-29T04:43:19Z
 ---
 # Code-Search Relevance Judge Implementation Plan
 
@@ -73,12 +73,12 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Produces: `tool.SearchResult{Path, Summary string; Count int}`, `tool.SearchJudgeRequest{Tool, Intent string; Query map[string]string; Results []SearchResult}`, `tool.SearchResultJudge func(SearchJudgeRequest) (kept []SearchResult, vetoed int, err error)`, `tool.WithSearchResultJudge(ctx, judge) context.Context`, `tool.SearchJudgeFromContext(ctx) tool.SearchResultJudge`. Exact field and signature forms are in spec §4 — copy them from there, do not improvise.
 
 **Steps:**
-- [ ] Write the failing test: a context round-trip returns the judge that was attached; a nil judge and a nil context both return nil without panicking.
-- [ ] Run `go test ./internal/tool/ -run SearchJudge` and confirm it fails on the missing functions.
-- [ ] Implement the types and the two context functions, mirroring the shape and the nil-handling comment style of `internal/tool/workdir_ctx.go`.
-- [ ] Document the contract on the types, specifically recording that the judge's `err` return exists so a failed judge stays distinguishable from one that legitimately kept everything, and that callers must render all results when `err` is non-nil.
-- [ ] Re-run the test and confirm it passes.
-- [ ] Commit.
+- [x] Write the failing test: a context round-trip returns the judge that was attached; a nil judge and a nil context both return nil without panicking.
+- [x] Run `go test ./internal/tool/ -run SearchJudge` and confirm it fails on the missing functions.
+- [x] Implement the types and the two context functions, mirroring the shape and the nil-handling comment style of `internal/tool/workdir_ctx.go`.
+- [x] Document the contract on the types, specifically recording that the judge's `err` return exists so a failed judge stays distinguishable from one that legitimately kept everything, and that callers must render all results when `err` is non-nil.
+- [x] Re-run the test and confirm it passes.
+- [x] Commit.
 
 ### Task 2: Context-aware TypeSafe decide
 
@@ -91,11 +91,11 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Consumes: nothing new. `Decide` keeps its current signature and its 30s budget for the three existing callers (`permission_typesafe.go`, `autocontinue_typesafe.go`, `relevance_typesafe.go`).
 
 **Steps:**
-- [ ] Write the failing test: a server that never responds is abandoned when the context deadline fires; an already-cancelled context returns without issuing a request.
-- [ ] Run the test and confirm it fails.
-- [ ] Add `DecideCtx`, moving the request construction onto the context, and reduce `Decide` to a wrapper that keeps the existing `typesafeRequestTimeout` behaviour.
-- [ ] Re-run and confirm it passes, then run the full `go test ./internal/agent/ -run Typesafe` to confirm the three existing judge paths are unaffected.
-- [ ] Commit.
+- [x] Write the failing test: a server that never responds is abandoned when the context deadline fires; an already-cancelled context returns without issuing a request.
+- [x] Run the test and confirm it fails.
+- [x] Add `DecideCtx`, moving the request construction onto the context, and reduce `Decide` to a wrapper that keeps the existing `typesafeRequestTimeout` behaviour.
+- [x] Re-run and confirm it passes, then run the full `go test ./internal/agent/ -run Typesafe` to confirm the three existing judge paths are unaffected.
+- [x] Commit.
 
 ### Task 3: Agent-side relevance judge
 
@@ -109,15 +109,15 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Produces: `(*Agent).searchResultJudge() tool.SearchResultJudge`, returning nil when TypeSafe is not connected.
 
 **Steps:**
-- [ ] Write the failing pure-function tests: the state builder produces the request/tool/query/candidates shape from spec §6; the per-candidate summary is capped; match line numbers survive into the summary; the query map carries only pattern, path and include and never secret material.
-- [ ] Write the failing judge tests against a fake client: veto-all, keep-all, a missing or non-`noul` answer for one candidate, and a transport error. Assert the fail-open outcomes from spec §10.
-- [ ] Write the failing test for an empty `intent`: no `Decide` request is issued at all, and an `intent-missing` debug line is emitted.
-- [ ] Write the failing test for the timeout budget: a stalled server is abandoned at roughly the 4s budget rather than the 30s default.
-- [ ] Write the failing wiring test: attaching a nil judge is a no-op and tool dispatch is unaffected.
-- [ ] Implement `buildSearchJudgeState`, the per-candidate `noul` question text (including the two code-specific rubric guards — do not veto a file merely for being a test or fixture, and do not veto on a substring match unrelated to the request), `judgeSearchResults` delegating to `judgeRelevanceQuestions`, and `searchResultJudge` gated on `discoveryJudgeClient()`. Apply the 4s budget via `DecideCtx`.
-- [ ] Attach the judge to `toolCtx` in `executeToolCallWithContext`.
-- [ ] Re-run the focused tests, then `go build ./...` and `go vet ./internal/agent/`.
-- [ ] Commit.
+- [x] Write the failing pure-function tests: the state builder produces the request/tool/query/candidates shape from spec §6; the per-candidate summary is capped; match line numbers survive into the summary; the query map carries only pattern, path and include and never secret material.
+- [x] Write the failing judge tests against a fake client: veto-all, keep-all, a missing or non-`noul` answer for one candidate, and a transport error. Assert the fail-open outcomes from spec §10.
+- [x] Write the failing test for an empty `intent`: no `Decide` request is issued at all, and an `intent-missing` debug line is emitted.
+- [x] Write the failing test for the timeout budget: a stalled server is abandoned at roughly the 4s budget rather than the 30s default.
+- [x] Write the failing wiring test: attaching a nil judge is a no-op and tool dispatch is unaffected.
+- [x] Implement `buildSearchJudgeState`, the per-candidate `noul` question text (including the two code-specific rubric guards — do not veto a file merely for being a test or fixture, and do not veto on a substring match unrelated to the request), `judgeSearchResults` delegating to `judgeRelevanceQuestions`, and `searchResultJudge` gated on `discoveryJudgeClient()`. Apply the 4s budget via `DecideCtx`.
+- [x] Attach the judge to `toolCtx` in `executeToolCallWithContext`.
+- [x] Re-run the focused tests, then `go build ./...` and `go vet ./internal/agent/`.
+- [x] Commit.
 
 ### Task 4: `grep` — the first live path
 
@@ -130,12 +130,12 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Produces: the `intent` property, added to both `properties` and `required`.
 
 **Steps:**
-- [ ] FIRST, before changing any code, capture golden output for the judge-absent case: all three `output_mode` values over a fixed fixture tree, plus the truncated-input and no-match messages. These are the refactor guard.
-- [ ] Write the failing test: with no judge attached, output is byte-identical to the captured golden output.
-- [ ] Write the failing tests: the judge receives one `SearchResult` per matching file with the right count and a bounded summary; a vetoed file's lines are absent from every `output_mode`; the cap boundary at 39, 40 and 41 candidates including the unjudged-count footer; the all-vetoed message with its actionable tail; the judge-error footer; and `intent` present in the schema's required list.
-- [ ] Replace the tool's internal per-file result type with `tool.SearchResult`, run the judge between collection and formatting, move the format switch to run on the kept set, and keep `truncateOutput` last. Add the `intent` property and required entry.
-- [ ] Re-run every test above, including the golden comparison.
-- [ ] Commit.
+- [x] FIRST, before changing any code, capture golden output for the judge-absent case: all three `output_mode` values over a fixed fixture tree, plus the truncated-input and no-match messages. These are the refactor guard.
+- [x] Write the failing test: with no judge attached, output is byte-identical to the captured golden output.
+- [x] Write the failing tests: the judge receives one `SearchResult` per matching file with the right count and a bounded summary; a vetoed file's lines are absent from every `output_mode`; the cap boundary at 39, 40 and 41 candidates including the unjudged-count footer; the all-vetoed message with its actionable tail; the judge-error footer; and `intent` present in the schema's required list.
+- [x] Replace the tool's internal per-file result type with `tool.SearchResult`, run the judge between collection and formatting, move the format switch to run on the kept set, and keep `truncateOutput` last. Add the `intent` property and required entry.
+- [x] Re-run every test above, including the golden comparison.
+- [x] Commit.
 
 ### Task 5: `glob`
 
@@ -148,11 +148,11 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Produces: the `intent` property, added to both `properties` and `required`.
 
 **Steps:**
-- [ ] Capture judge-absent golden output for the existing capped and uncapped result shapes, including the existing "N files matched, showing first 100" note, before changing code.
-- [ ] Write the failing tests: byte-identical output with no judge; the mtime ordering is preserved as the pre-judge order the cap samples from; the cap boundary and its unjudged-count footer; the all-vetoed message; the judge-error footer; `intent` in the schema.
-- [ ] Convert the match slice to `[]tool.SearchResult`, keeping the mtime sort, then judge, then format.
-- [ ] Re-run all tests and confirm the golden comparison passes.
-- [ ] Commit.
+- [x] Capture judge-absent golden output for the existing capped and uncapped result shapes, including the existing "N files matched, showing first 100" note, before changing code.
+- [x] Write the failing tests: byte-identical output with no judge; the mtime ordering is preserved as the pre-judge order the cap samples from; the cap boundary and its unjudged-count footer; the all-vetoed message; the judge-error footer; `intent` in the schema.
+- [x] Convert the match slice to `[]tool.SearchResult`, keeping the mtime sort, then judge, then format.
+- [x] Re-run all tests and confirm the golden comparison passes.
+- [x] Commit.
 
 ### Task 6: `rgrep`
 
@@ -165,12 +165,12 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Produces: the `intent` property, added to both `properties` and `required`.
 
 **Steps:**
-- [ ] FIRST capture golden judge-absent output for all three `output_mode` values, including a line longer than the truncation limit, a file with multiple matches (to pin `files_with_matches` dedup and `count`), and a run whose output hits the capture cap (to pin the truncated-tail behaviour).
-- [ ] Write the failing golden-comparison test.
-- [ ] Write the failing judge tests: the judge receives correctly grouped per-file results with counts and bounded summaries; a vetoed file is absent from every mode; cap boundary and footer; all-vetoed; judge error; `intent` in the schema.
-- [ ] Replace the raw-JSON re-decode in `format` with a grouping pass. This is tractable because the rg invocation already passes `--sort path`, so records for one path are contiguous. Preserve exactly: per-line truncation at the existing limit, path ordering, `files_with_matches` deduplication, and the truncated-tail behaviour of the capture buffer. Then share the formatter with the other search tools rather than keeping a third copy.
-- [ ] Re-run every test, including the golden comparison.
-- [ ] Commit.
+- [x] FIRST capture golden judge-absent output for all three `output_mode` values, including a line longer than the truncation limit, a file with multiple matches (to pin `files_with_matches` dedup and `count`), and a run whose output hits the capture cap (to pin the truncated-tail behaviour).
+- [x] Write the failing golden-comparison test.
+- [x] Write the failing judge tests: the judge receives correctly grouped per-file results with counts and bounded summaries; a vetoed file is absent from every mode; cap boundary and footer; all-vetoed; judge error; `intent` in the schema.
+- [x] Replace the raw-JSON re-decode in `format` with a grouping pass. This is tractable because the rg invocation already passes `--sort path`, so records for one path are contiguous. Preserve exactly: per-line truncation at the existing limit, path ordering, `files_with_matches` deduplication, and the truncated-tail behaviour of the capture buffer. Then share the formatter with the other search tools rather than keeping a third copy.
+- [x] Re-run every test, including the golden comparison.
+- [x] Commit.
 
 ### Task 7: Wiring regressions and prompt reinforcement
 
@@ -180,12 +180,12 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Modify: `internal/tool/search_judge_test.go` if a shared assertion belongs there instead
 
 **Steps:**
-- [ ] Write the seam regression test: a parent agent, a sub-agent, and a transient advisor agent each have their searches judged by their own agent, and a child coming and going leaves the parent's judging intact. This pins the defect that ruled out a judge field on the tool struct — a child inheriting the parent's tool objects and overwriting the parent's judge.
-- [ ] Write the coverage regression test: scan the tree for non-agent code that calls `Execute` or `ExecuteCtx` on `grep`, `rgrep` or `glob` outside the agent dispatch chain, and fail loudly if any is found, since such a caller would silently bypass filtering.
-- [ ] Write the failing prompt test asserting the directive line instructs the model to pass `intent` on code-search calls.
-- [ ] Update the directive line to reinforce the required `intent`.
-- [ ] Re-run the focused tests, then the full `go test ./internal/agent/ ./internal/tool/` and `go build ./...`.
-- [ ] Commit.
+- [x] Write the seam regression test: a parent agent, a sub-agent, and a transient advisor agent each have their searches judged by their own agent, and a child coming and going leaves the parent's judging intact. This pins the defect that ruled out a judge field on the tool struct — a child inheriting the parent's tool objects and overwriting the parent's judge.
+- [x] Write the coverage regression test: scan the tree for non-agent code that calls `Execute` or `ExecuteCtx` on `grep`, `rgrep` or `glob` outside the agent dispatch chain, and fail loudly if any is found, since such a caller would silently bypass filtering.
+- [x] Write the failing prompt test asserting the directive line instructs the model to pass `intent` on code-search calls.
+- [x] Update the directive line to reinforce the required `intent`.
+- [x] Re-run the focused tests, then the full `go test ./internal/agent/ ./internal/tool/` and `go build ./...`.
+- [x] Commit.
 
 ### Task 8: Documentation and the deferred follow-up
 
@@ -194,12 +194,12 @@ Five input classes the spec implies but that are easy to leave untested. Each is
 - Modify: `skills/ocode-tools/SKILL.md`, `CHANGES.md`, `TODO.md`
 
 **Steps:**
-- [ ] Write the concept page through the context sub-agent (it is the sole writer of the `docs/` bundle): the operator-facing description of what is filtered, when the judge is live, the fail-open contract, the candidate cap and its disclosure, the footer strings, and the `list` deferral. Cover the code-search relevance dimensions a reader needs and cross-link `concepts/doc-search-relevance-judge.md`.
-- [ ] Update `skills/ocode-tools/SKILL.md` with the context seam, the `intent` argument, and the footer contract, and add the corresponding regression-test line to its test inventory.
-- [ ] Add a `CHANGES.md` entry describing the user-visible behaviour.
-- [ ] Confirm the `TODO.md` entry for the deferred `list` tool is present and still accurate (it was added during planning on 2026-09-28, before implementation, so the executor should verify rather than re-add it).
-- [ ] Re-derive every `file:line` anchor you cite in the new docs against the current source, and carry symbol names alongside the numbers so they survive later edits.
-- [ ] Commit.
+- [x] Write the concept page through the context sub-agent (it is the sole writer of the `docs/` bundle): the operator-facing description of what is filtered, when the judge is live, the fail-open contract, the candidate cap and its disclosure, the footer strings, and the `list` deferral. Cover the code-search relevance dimensions a reader needs and cross-link `concepts/doc-search-relevance-judge.md`.
+- [x] Update `skills/ocode-tools/SKILL.md` with the context seam, the `intent` argument, and the footer contract, and add the corresponding regression-test line to its test inventory.
+- [x] Add a `CHANGES.md` entry describing the user-visible behaviour.
+- [x] Confirm the `TODO.md` entry for the deferred `list` tool is present and still accurate (it was added during planning on 2026-09-28, before implementation, so the executor should verify rather than re-add it).
+- [x] Re-derive every `file:line` anchor you cite in the new docs against the current source, and carry symbol names alongside the numbers so they survive later edits.
+- [x] Commit.
 
 ---
 
