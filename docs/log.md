@@ -37,6 +37,10 @@
 
 ## 2026-09-29
 
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
+* **Update**: Stack Detection ([okf/_schema/stack-detection.md](/okf/_schema/stack-detection.md))
+* **Update**: Stack Detection ([okf/_schema/stack-detection.md](/okf/_schema/stack-detection.md))
 * **Update**: Advisor Claude Code CLI backend on web/desktop ([concepts/advisor-claude-code-backend.md](/concepts/advisor-claude-code-backend.md))
 * **Update**: Advisor Claude Code CLI backend on web/desktop ([concepts/advisor-claude-code-backend.md](/concepts/advisor-claude-code-backend.md))
 * **Update**: Chat transcript scroll-bounce: clamped pin vs. user intent ([gotchas/chat-scroll-bounce-clamped-pin-vs-user-intent.md](/gotchas/chat-scroll-bounce-clamped-pin-vs-user-intent.md))

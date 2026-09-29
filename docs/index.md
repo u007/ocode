@@ -11,7 +11,7 @@ okf_version: 0.1
 - [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
 - [Scheduled Jobs / Cron Dispatch](scheduled-jobs.md) - Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics.
 - [Session Title Generation & UI Update Root Cause Analysis](title-generation-analysis.md) - Root cause analysis of session title delay/mismatch between generation and UI rendering, covering regex anchoring, Anthropic thinking blocks, and rendering cycle timing.
-- [Speech playback](tts-speech-playback.md) - Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim.
+- [Speech playback](tts-speech-playback.md) - Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key.
 - [Terminal History Persistence and Restore](terminal-history-persistence-and-restore.md) - Accurate guide to ocode's terminal history persistence and restore mechanism, aligning with source implementation
 - [Using ocode with Zed](zed.md) - Setup guide and feature matrix for integrating ocode with the Zed editor via ACP (Agent Client Protocol).
 - [Zed-compatible ACP Mode Specification](acp-zed-spec.md) - Approved architecture spec for implementing 'ocode acp' using the Agent Client Protocol, enabling ocode as a Zed editor agent.
@@ -131,7 +131,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Mutation-check false verdicts: compile-broken mutants and equivalent mutants](gotchas/mutation-check-false-caught.md) - Two mutation-check verdict traps: compile-broken mutants misreported as CAUGHT (gate on go build, classify INVALID) and equivalent mutants misreported as coverage misses (replace with genuine semantic mutations); plus the expired-context regression test for corpusLockWaitFor.
 - [Mutation-check: mutants must compile; filelock non-positive timeout = 10s default; harness backup/trap/preflight hygiene](gotchas/mutation-check-mutants-must-compile.md) - Three mutation-check findings: a mutant that only breaks compilation is a false-positive kill (compile-check before tests, classify INVALID); filelock treats non-positive timeouts as the 10s package default so corpusLockWaitFor must floor at a positive wait; and harness hygiene — mktemp private backup dir, EXIT/INT/TERM trap, cmp-before-restore, dirty-tree preflight and post-restore git-diff guards (web/mutate_speech.sh). Cross-references concepts/discovery-corpus-cache.md and the sibling verdict-classification gotcha.
 - [ONNX Runtime POSIX telemetry writes `:memory:.ses` into process cwd](gotchas/onnx-runtime-telemetry-memory-ses.md) - ONNX Runtime POSIX telemetry writes `:memory:.ses` device-id sidecar into process cwd
-- [opencode-go per-model protocol routing & Anthropic tool schema flatness](gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md) - Retry policy updated: 500 and thinking-mode 400 now retried
+- [opencode-go per-model protocol routing & Anthropic tool schema flatness](gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md) - Retry policy: 500, thinking-mode 400, and non-standard 529 "Endpoint is unavailable" now retried (2026-09-29); opencode-go per-model protocol routing & Anthropic flat tool schemas
 - [PATH Shadowing Can Bypass Sandbox Discovery](gotchas/shell-sandbox-path-shadowing.md) - Gotcha: PATH-based sandbox-exec/bwrap discovery can be shadowed by user-writable executables, requiring hardening to prevent security bypasses.
 - [PDF preview fails on WebKit with `undefined is not a function (near '...e of t...')`](gotchas/pdf-preview-webkit-async-iterator.md) - WebKit ReadableStream async-iterator gap kills pdf.js text layer — feature-detected shim fix
 - [Pending ask recovery from live session state (sentinel-less transcript)](gotchas/pending-ask-recovery-live-session-state.md) - Added async turn_error bus event as a fourth recovery trigger for pending-ask hydration, updated sentinel names, updated timestamp.
@@ -377,6 +377,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/vbnet/scores/space-bunny-free.md](okf/vbnet/scores/space-bunny-free.md)
 - [okf/vbnet/scores/tencent__hy3.md](okf/vbnet/scores/tencent__hy3.md)
 - [OKF Naming Convention Enforcement](okf/_schema/naming-convention-enforcement.md) - OKF naming conventions for question IDs, bundle entries, and index format to maintain bundle integrity.
+- [Stack Detection](okf/_schema/stack-detection.md) - How ocode detects repo stacks from meta.yaml markers, and how derived Kaizen skills are gated — marker types, universal corpora (conduct/hallucination/pdf), canonical model ids, and delivery/admission rules.
 
 # superpowers
 
@@ -463,7 +464,6 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [vbnet.md](okf/_prompts/vbnet.md)
 - [question-format.md](okf/_schema/question-format.md)
 - [rubric-guide.md](okf/_schema/rubric-guide.md)
-- [stack-detection.md](okf/_schema/stack-detection.md)
 - [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
 - [deepseek-v4-flash.spotcheck.md](okf/conduct/answers/deepseek-v4-flash.spotcheck.md)
 - [deepseek-v4.1-flash.md](okf/conduct/answers/deepseek-v4.1-flash.md)

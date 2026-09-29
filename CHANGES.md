@@ -1,5 +1,52 @@
 # Changelog
 
+## 2026-09-29 - A long Speak summary now opens with a one-line recap
+
+Asking for a summary of a long reply gave two-to-five detail sentences with no
+way in: a listener who stopped halfway had no idea what the whole thing was
+about.
+
+- **The recap clause** (`internal/agent/speech_summary.go`). New
+  `speechSummaryRecapClause`, appended to the system prompt only at or above
+  `speechSummaryRecapMinChars = 1200` runes (~1 minute of speech at 160 wpm).
+  It asks for a one-line recap of the WHOLE reply as the FIRST sentence — what it
+  did or decided and what that means, self-contained and actionable. Two wording
+  choices are load-bearing: the "in addition to the two-to-five sentences above,
+  not one of them" line, without which a model treats the recap as sentence one
+  and shrinks the detail to compensate (losing more than the recap gains); and
+  requiring unlabelled prose with no heading/colon/line break, because
+  `cleanSpeechSummary` strips a recognised "Summary:"-style first line and would
+  delete a labelled recap along with its label — the one sentence the feature
+  exists to guarantee.
+- **One home for the length test.** `speechSummaryPromptFor(text)` is the only
+  place the test lives, so a future prompt variant cannot be added on a path
+  that forgot to ask whether it applies. It is measured on the FULL message, not
+  the possibly-truncated body: a truncated message is over
+  `speechSummaryMaxInputChars` (40000), far above the recap threshold, so the two
+  can only agree — reading the full text keeps the rule stated in terms of what
+  the user wrote.
+- **The threshold sits deliberately ABOVE the short-text skip gate.** 1200 > the
+  400-rune `speechSummarySkipChars`, and that ordering is now an invariant: at or
+  below the skip gate a message is spoken verbatim and never reaches the
+  summariser, so a recap threshold there would be unreachable on length and could
+  only fire for a short artifact-carrying message — precisely the case that does
+  not want an orientation line. Pinned by
+  `TestSpeechSummaryRecapMinCharsSitsAboveTheSkipGate`.
+- **The prompt version is salted into the summary cache key.** The cache is
+  keyed on text + model, which cannot see a PROMPT change: without the salt,
+  every summary written in the last `speechSummaryCacheTTL` (24h) would keep
+  serving the previous prompt's (no-recap) output. `speechSummaryCacheKey` now
+  hashes `speechSummaryPromptVersion` (currently `"2"`) as
+  `version || 0x00 || modelID || 0x00 || text`, via a version-parameterised
+  `speechSummaryCacheKeyFor` so a test proves the constant stays wired up rather
+  than trusting it. Cost is one paid round trip per recently summarised message,
+  which is the intended trade.
+- Tests: `TestSummarizeForSpeechAsksForAnOpeningRecapOnALongMessage`,
+  `TestSummarizeForSpeechOmitsTheRecapInstructionOnAShorterMessage`,
+  `TestSpeechSummaryRecapMinCharsSitsAboveTheSkipGate`,
+  `TestSpeechSummaryCacheKeyIncludesThePromptVersion`,
+  `TestSpeechSummaryCacheKeyShape`. Docs: `docs/tts-speech-playback.md`.
+
 ## 2026-09-29 - PDF tuning directives are now model-gated only, not repo-gated
 
 Asking "create a PDF" got none of the PDF corrections, because the gate that
@@ -4295,6 +4342,16 @@ Two follow-ups to the session-switch work.
 - **Fix.** `gitStatusForDir` now runs every probe under one `gitStatusTimeout` (10s) context via `exec.CommandContext(ctx, gitBinary, …)`, so a wedged repo fails fast to an empty non-repo status and the next poll retries. The emitter computes due projects in parallel through the new `forEachGitStatusConcurrently` helper, yielding each result as it arrives on the loop goroutine (so `lastGit` keeps single-writer semantics); a slow project now costs only itself instead of every other viewed project.
 
 - Tests: `internal/server/git_status_timeout_test.go` (`TestGitStatusForDirBoundedWhenGitHangs` — a hung git returns within the bound with an empty status) and `internal/server/emitters_isolation_test.go` (`TestForEachGitStatusConcurrentlyYieldsFastBeforeSlow`, `TestGitWatcherSlowProjectDoesNotDelayAnother` — a blocked project no longer delays another project's `git_status` envelope). Both regressions were verified failing against the pre-fix code by temporary revert; full `go test ./internal/server/` green. Docs: `AGENTS.md` (new "one project must never block another" rule).
+
+## 2026-09-29 — HTTP 529 "Endpoint is unavailable" provider errors now auto-retry
+
+- Reported: a turn hard-failed with `llm request failed after 1 attempt(s): opencode-go error (529): {"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}` and the user asked for a retry.
+
+- **Root cause.** Same shape as the 2026-09-18 `500` fix. `isServerUnavailableError` (`internal/agent/client.go`) listed only `500`/`502`/`503`/`504`, and `isRetryableLLMClientError` deliberately returns `false` for every typed `*providerStatusError` (classification is by HTTP code, never body text). `529` is a **non-standard** status — the overload/endpoint-unavailable code, popularised by Shopify and used by Anthropic as `overloaded_error` — so `net/http` has no `http.Status*` constant for it and it matched nothing. Both retry loops (`ChatWithContext` and the auto-permission judge loop, `internal/agent/agent.go`) therefore broke on the first attempt.
+
+- **Fix.** Added `statusEndpointUnavailable = 529` (declared in non-test code next to the classifier, since Go has no constant) and included it in the `isServerUnavailableError` switch, so a `529` takes the existing non-429 retry path: `llmMaxRetries` (3) more attempts with `(attempt+1) × llmRetryBaseDelay` backoff. No loop change was needed — only the classifier. All seven non-`200` provider paths (`client.go:1208/1309/1424/1530/3237/3916/5141`) construct their error with the generic `newProviderStatusError(provider, resp.StatusCode, …)`, so one classifier change covers every provider (openai-completions, anthropic, openai-responses, copilot, typesafe). Classification is by code only: no body-text heuristic was added, so an unrelated `5xx` such as `501 Not Implemented` still fails fast.
+
+- Tests: `TestChatRetriesTransientServerStatusCodes` now includes `529` (retried to success; subtest naming goes through a new `providerStatusCodeName` helper because `http.StatusText(529)` is `""`); new `TestChatRetries529EndpointUnavailable` and `TestChat529UsesUsualMaxRetries` pin the real opencode-go body, the `llmMaxRetries+1` budget, and the `opencode-go error (529)` message; `TestProviderStatusErrorClassification` expects `isServerUnavailableError(529) == true` and adds a `501` negative case so the 5xx set cannot silently widen. All four were verified **failing against the pre-fix classifier** by temporary revert (the mutant compiled and reproduced the exact reported error string), then green; full `go test ./internal/agent/` green.
 
 ## 2026-09-18 — HTTP 500 provider errors now auto-retry with the usual budget
 
