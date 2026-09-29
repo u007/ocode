@@ -1029,9 +1029,21 @@ func isRateLimitError(err error) bool {
 	return strings.Contains(lower, " (429)")
 }
 
+// statusEndpointUnavailable is the non-standard HTTP 529 ("Endpoint is
+// unavailable" / "overloaded") status. Go's net/http has no constant for it.
+// Observed from the opencode-go gateway (2026-09-29):
+//
+//	opencode-go error (529): {"error":{"type":"server_error",
+//	 "message":"Upstream request failed: Endpoint is unavailable."}}
+//
+// It is a capacity/availability signal of the same class as 503, so it belongs
+// in isServerUnavailableError rather than in a body-text heuristic.
+const statusEndpointUnavailable = 529
+
 // isServerUnavailableError reports whether err is a typed provider status
 // error with a transient server/gateway availability code that is safe to
-// retry with short backoff: 500 (Internal Server Error), 502, 503, 504.
+// retry with short backoff: 500 (Internal Server Error), 502, 503, 504, and the
+// non-standard 529 (Endpoint unavailable / overloaded).
 //
 // 500 is included deliberately (2026-09-18). Providers — opencode-go in
 // particular — return a generic 500 "Internal server error" for transient
@@ -1044,11 +1056,16 @@ func isRateLimitError(err error) bool {
 // usesAnthropicMessagesAPI. The deltaEmitted gate in the retry loop still
 // prevents duplicate streamed content, and empty-response errors keep their
 // own retry semantics.
+//
+// 529 is included for the same reason (2026-09-29): it is emitted by the
+// opencode-go gateway (and by Anthropic, as "overloaded_error") when the
+// upstream endpoint is momentarily unavailable, and previously hard-failed
+// the turn on the first attempt.
 func isServerUnavailableError(err error) bool {
 	var se *providerStatusError
 	if errors.As(err, &se) {
 		switch se.Code {
-		case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, statusEndpointUnavailable:
 			return true
 		}
 	}

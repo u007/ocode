@@ -1316,9 +1316,77 @@ func TestChatRetries503ThenSucceeds(t *testing.T) {
 	}
 }
 
+// providerStatusCodeName returns a readable subtest name for an HTTP status
+// code, falling back to the bare number for non-standard codes that
+// http.StatusText does not know (e.g. 529 returns "").
+func providerStatusCodeName(code int) string {
+	if text := http.StatusText(code); text != "" {
+		return text
+	}
+	return fmt.Sprintf("%d", code)
+}
+
+// openCodeGo529Body is the exact response the opencode-go gateway returns when
+// the upstream endpoint is momentarily unavailable (reported 2026-09-29).
+const openCodeGo529Body = `{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}`
+
+// TestChatRetries529EndpointUnavailable pins that the opencode-go 529
+// "Endpoint is unavailable" response is retried to success. Before the fix
+// this surfaced as
+//
+//	llm request failed after 1 attempt(s): opencode-go error (529): {...}
+//
+// because 529 matched neither isServerUnavailableError (500/502/503/504) nor
+// isRetryableLLMClientError (which deliberately rejects typed status errors).
+func TestChatRetries529EndpointUnavailable(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return statusResponse(statusEndpointUnavailable, openCodeGo529Body), nil
+		}
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "space-bunny-free", BaseURL: "https://example.test/v1"}
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected 529 to be retried to success, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 attempts (529 then success), got %d", got)
+	}
+	if msg == nil || msg.Content != "ok" {
+		t.Fatalf("expected final message content %q, got %+v", "ok", msg)
+	}
+}
+
+// TestChat529UsesUsualMaxRetries pins the budget for a persistent 529: the
+// non-429 path (llmMaxRetries retries, i.e. llmMaxRetries+1 attempts), the
+// same as 500/502/503/504 — not a fast fail after one attempt.
+func TestChat529UsesUsualMaxRetries(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return statusResponse(statusEndpointUnavailable, openCodeGo529Body), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "space-bunny-free", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(llmMaxRetries+1) {
+		t.Fatalf("expected %d attempts (usual max retry), got %d", llmMaxRetries+1, got)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("llm request failed after %d attempt(s)", llmMaxRetries+1)) ||
+		!strings.Contains(err.Error(), fmt.Sprintf("opencode-go error (%d)", statusEndpointUnavailable)) {
+		t.Fatalf("unexpected error format: %v", err)
+	}
+}
+
 func TestChatRetriesTransientServerStatusCodes(t *testing.T) {
-	for _, code := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
-		t.Run(http.StatusText(code), func(t *testing.T) {
+	for _, code := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, statusEndpointUnavailable} {
+		t.Run(providerStatusCodeName(code), func(t *testing.T) {
 			var calls int32
 			stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 				n := atomic.AddInt32(&calls, 1)
@@ -1606,6 +1674,12 @@ func TestProviderStatusErrorClassification(t *testing.T) {
 		{http.StatusBadGateway, true, false},
 		{http.StatusServiceUnavailable, true, false},
 		{http.StatusGatewayTimeout, true, false},
+		// 529 is non-standard, so it has no http.Status* constant; the
+		// opencode-go gateway uses it for "Endpoint is unavailable".
+		{statusEndpointUnavailable, true, false},
+		// 501 Not Implemented is a genuine permanent answer — it must NOT
+		// join the transient set even though it is a 5xx.
+		{http.StatusNotImplemented, false, false},
 	}
 	for _, tc := range cases {
 		err := &providerStatusError{Provider: "test-provider", Code: tc.code, Body: "boom"}

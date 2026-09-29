@@ -1,9 +1,9 @@
 ---
 type: Gotcha
 title: opencode-go per-model protocol routing & Anthropic tool schema flatness
-description: 'Retry policy updated: 500 and thinking-mode 400 now retried'
-tags: []
-timestamp: 2026-09-22T14:29:37Z
+description: 'Retry policy: 500, thinking-mode 400, and non-standard 529 "Endpoint is unavailable" now retried (2026-09-29); opencode-go per-model protocol routing & Anthropic flat tool schemas'
+tags: [gotcha, opencode-go, anthropic, tool-schema, models-registry, retry]
+timestamp: 2026-09-29T07:16:08Z
 ---
 # opencode-go per-model protocol routing & Anthropic tool schema flatness
 
@@ -69,7 +69,7 @@ When adding a new built-in tool, always return `{name, description, parameters}`
 
 ## 2026-09-18 — HTTP 500 now retried (transient server error)
 
-`isServerUnavailableError` in `internal/agent/client.go` now treats HTTP 500 (`StatusInternalServerError`) the same as 502/503/504: retried with the standard budget (`llmMaxRetries` = 3 attempts, `(attempt+1) × llmRetryBaseDelay` backoff). Previously 500 failed fast after a single attempt.
+`isServerUnavailableError` in `internal/agent/client.go` now treats HTTP 500 (`StatusInternalServerError`) the same as 502/503/504 (and, since 2026-09-29, the non-standard 529): retried with the standard budget (`llmMaxRetries` = 3 attempts, `(attempt+1) × llmRetryBaseDelay` backoff). Previously 500 failed fast after a single attempt.
 
 **Rationale.** Providers (opencode-go in particular) return a generic 500 "Internal server error" for transient upstream faults; hard-failing the turn on the first one is worse than retrying. Retrying a *deterministic* 500 (like the protocol-routing 500 described above) is harmless — it just spends the retry budget and surfaces the same error.
 
@@ -90,7 +90,7 @@ A thinking-mode conversation that omits the assistant `reasoning_content` to ech
 "message":"Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API."}}
 ```
 
-Previously this hard-failed the turn as "llm request failed after 1 attempt(s)" because 400 was not in `{429, 500, 502, 503, 504}`. 400 remains non-retryable by default — see the narrow exemption below.
+Previously this hard-failed the turn as "llm request failed after 1 attempt(s)" because 400 was not in `{429, 500, 502, 503, 504}` (the retryable set has since gained the non-standard 529, added 2026-09-29; 400 remains outside it). 400 remains non-retryable by default — see the narrow exemption below.
 
 ### New helper — `isRetryableThinkingModeRequestError(err)` (`internal/agent/client.go`)
 
@@ -128,4 +128,33 @@ Non-429 path: `llmMaxRetries` = 3 retries → 4 attempts total, delay `(attempt+
 
 ---
 
-**Cite:** `internal/agent/client.go` (`isServerUnavailableError`, `isRetryableThinkingModeRequestError`, `isRetryableLLMError`, `ChatWithContext` retry loop), `internal/agent/agent.go` (auto-permission judge outer retry loop), `internal/agent/client_test.go` (`TestIsRetryableThinkingModeRequestError`, `TestChatRetriesThinkingModeReasoningContent400`, `TestChatThinkingMode400UsesUsualMaxRetries`, `TestChatGenericInvalidRequest400DoesNotRetry`, `TestStatusErrorBodyTextDoesNotCauseRetry`, `TestChatRetriesTransientServerStatusCodes`, `TestChat500UsesUsualMaxRetries`, `TestProviderStatusErrorClassification`), `internal/agent/models_registry.go` (`modelEntry`, `ModelAPIPackageFromRegistry`), `internal/tool/preview.go`, `internal/tool/tool_test.go`, CHANGES.md entry "2026-09-17 — Union Alpha (opencode-go) works; Anthropic tool schemas fixed"
+## 2026-09-29 — HTTP 529 "Endpoint is unavailable" now retried
+
+**Reported symptom.** A turn against an opencode-go model hard-failed on the very first response with `llm request failed after 1 attempt(s)` even though the gateway's 529 is a transient "upstream momentarily overloaded" signal. The exact opencode-go gateway body:
+
+```json
+{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}
+```
+
+529 is the non-standard "Endpoint is unavailable" / overloaded code returned by the opencode-go gateway and used by Anthropic as `overloaded_error`.
+
+**Root cause.** 529 is non-standard, so `net/http` has no `http.Status*` constant for it, and nothing in the classifier matched it. Critically, `isRetryableLLMClientError` **deliberately returns `false` for every typed `*providerStatusError`** (its first check) so that typed status errors are classified **by code only, never by body text** — which leaves `isServerUnavailableError`'s status-code switch as the one and only place a 529 could ever become retryable. With 529 missing from that switch, the turn hard-failed.
+
+**Fix (classifier only).** In `internal/agent/client.go`:
+
+- `const statusEndpointUnavailable = 529` declared next to `isServerUnavailableError`, commented with the opencode-go 529 body and the Anthropic `overloaded_error` equivalence;
+- the classifier switch is now `case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, statusEndpointUnavailable`.
+
+No retry-loop change, no body-text heuristic, budget/delay unchanged (non-429 path: `llmMaxRetries` = 3 retries → 4 attempts total). Both retry loops get it through the shared policy — the main `ChatWithContext` retry loop (`client.go` ~:850) and the auto-permission judge loop in `internal/agent/agent.go` (~:4269), both calling `isRetryableLLMError` → `isServerUnavailableError`. All 7 non-200 provider paths in `client.go` build their error with the generic `newProviderStatusError`, so this one classifier change covers every provider.
+
+**Tests** (`internal/agent/client_test.go`, all verified failing against the pre-fix classifier by temporary revert, then green):
+
+- `TestChatRetries529EndpointUnavailable` — 529 (with the exact opencode-go body) then 200 → success in exactly 2 calls; pre-fix this surfaced as `llm request failed after 1 attempt(s): opencode-go error (529): {...}`.
+- `TestChat529UsesUsualMaxRetries` — persistent 529 → the usual `llmMaxRetries + 1` attempts (not a fast fail), with the standard error format preserved.
+- `providerStatusCodeName` (new test helper) — readable subtest names per status code, falling back to the bare number; needed because `http.StatusText(529)` returns `""`.
+- `TestChatRetriesTransientServerStatusCodes` — extended to include 529 alongside 500/502/503/504.
+- `TestProviderStatusErrorClassification` — gains a 529 positive case (`isServerUnavailableError` ⇒ true) plus a 501 Not Implemented negative case (a genuine permanent 5xx that must stay non-retryable).
+
+---
+
+**Cite:** `internal/agent/client.go` (`isServerUnavailableError`, `statusEndpointUnavailable`, `isRetryableThinkingModeRequestError`, `isRetryableLLMError`, `ChatWithContext` retry loop), `internal/agent/agent.go` (auto-permission judge outer retry loop), `internal/agent/client_test.go` (`TestIsRetryableThinkingModeRequestError`, `TestChatRetriesThinkingModeReasoningContent400`, `TestChatThinkingMode400UsesUsualMaxRetries`, `TestChatGenericInvalidRequest400DoesNotRetry`, `TestStatusErrorBodyTextDoesNotCauseRetry`, `TestChatRetriesTransientServerStatusCodes`, `TestChat500UsesUsualMaxRetries`, `TestChatRetries529EndpointUnavailable`, `TestChat529UsesUsualMaxRetries`, `TestProviderStatusErrorClassification`), `internal/agent/models_registry.go` (`modelEntry`, `ModelAPIPackageFromRegistry`), `internal/tool/preview.go`, `internal/tool/tool_test.go`, CHANGES.md entry "2026-09-17 — Union Alpha (opencode-go) works; Anthropic tool schemas fixed"
