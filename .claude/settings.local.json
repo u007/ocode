@@ -12,7 +12,9 @@
     "cognee": "off",
     "agentmail": "off",
     "aims-api": "name-only",
-    "compress": "off"
+    "compress": "off",
+    "caveman-help": "off",
+    "caveman-compress": "off"
   },
   "enabledPlugins": {
     "cognee-memory@cognee": false
