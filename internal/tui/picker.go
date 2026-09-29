@@ -32,6 +32,7 @@ func (m *model) prependClaudeCodeSection() {
 	claudeCodeModels := []string{
 		"claude-sonnet-4-6",
 		"claude-sonnet-5",
+		"claude-sonnet-5-5",
 		"claude-opus-4-8",
 		"claude-opus-4-7",
 		"claude-opus-5",

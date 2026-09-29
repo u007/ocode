@@ -44,6 +44,7 @@ export const CLAUDE_CODE_SECTION_TITLE = "Claude Code (Read-Only CLI)";
 export const CLAUDE_CODE_ADVISOR_MODELS: readonly string[] = [
   "claude-sonnet-4-6",
   "claude-sonnet-5",
+  "claude-sonnet-5-5",
   "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-opus-5",
