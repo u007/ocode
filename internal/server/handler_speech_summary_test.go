@@ -232,9 +232,13 @@ func TestHandleSessionSpeechSummaryEmptyOnSummariserFailure(t *testing.T) {
 	stub := &speechSummaryStubClient{err: errSpeechStub}
 	plantSpeechSummarySession(t, h, "sess-speak-fail", stub)
 
+	// codeBlockBody, not a short sentence: a short plain-prose message is now
+	// spoken verbatim without calling the model, so it would yield the same
+	// empty summary and this test would pass without ever reaching the failing
+	// client it exists to exercise.
 	w := httptest.NewRecorder()
 	h.HandleSessionSpeechSummary(w, httptest.NewRequest("POST", "/api/sessions/sess-speak-fail/speech-summary",
-		strings.NewReader(`{"text":"hello"}`)), "sess-speak-fail")
+		strings.NewReader(codeBlockBody)), "sess-speak-fail")
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("a summariser failure must not be an HTTP error, got %d body=%s", w.Code, w.Body.String())
@@ -245,6 +249,11 @@ func TestHandleSessionSpeechSummaryEmptyOnSummariserFailure(t *testing.T) {
 	}
 	if got["summary"] != "" {
 		t.Errorf("expected an empty summary, got %q", got["summary"])
+	}
+	if stub.replies != 1 {
+		t.Fatalf("the failing client must actually be reached; an empty summary "+
+			"also means \"spoken verbatim\", so replies=0 would pass this test for "+
+			"the wrong reason (replies=%d)", stub.replies)
 	}
 }
 
@@ -293,9 +302,11 @@ func TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive(t *testing.T) {
 	plantSpeechSummarySession(t, h, "sess-busy", stub)
 	h.sessions.setTurnActive("sess-busy", true)
 
+	// codeBlockBody reaches the model, so both halves of this test observe the
+	// turn guard rather than the short-message short circuit.
 	w := httptest.NewRecorder()
 	h.HandleSessionSpeechSummary(w, httptest.NewRequest("POST", "/api/sessions/sess-busy/speech-summary",
-		strings.NewReader(`{"text":"hello"}`)), "sess-busy")
+		strings.NewReader(codeBlockBody)), "sess-busy")
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -316,12 +327,15 @@ func TestHandleSessionSpeechSummarySkipsWhileTheTurnIsActive(t *testing.T) {
 	h.sessions.setTurnActive("sess-busy", false)
 	w2 := httptest.NewRecorder()
 	h.HandleSessionSpeechSummary(w2, httptest.NewRequest("POST", "/api/sessions/sess-busy/speech-summary",
-		strings.NewReader(`{"text":"hello"}`)), "sess-busy")
+		strings.NewReader(codeBlockBody)), "sess-busy")
 	var got2 map[string]string
 	if err := json.Unmarshal(w2.Body.Bytes(), &got2); err != nil {
 		t.Fatal(err)
 	}
 	if got2["summary"] != "must not run while busy" {
 		t.Errorf("after the turn ends the summary must run, got %q", got2["summary"])
+	}
+	if stub.replies != 1 {
+		t.Fatalf("exactly one call, after the turn ended, expected; got %d", stub.replies)
 	}
 }

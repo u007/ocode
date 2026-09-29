@@ -67,6 +67,21 @@ func newSpeechSummaryTestAgent(t *testing.T, stub LLMClient) *Agent {
 	}
 }
 
+// speechSummaryBody is a message long enough that the summariser's
+// short-message short circuit (speechTextNeedsRewrite) still runs the model.
+// It is plain prose on purpose — no backticks, no paths, no diff markers — so
+// the ONLY reason it reaches the model is its length.
+//
+// Every test that asserts on the LLM path must speak through it. A short
+// fixture is now returned verbatim, which returns "" for the same reason a
+// provider failure does: those tests would keep passing (or start failing) for
+// the wrong reason, and the timeout test could no longer observe a call at all.
+const speechSummaryBody = "The failing check is in the retry helper rather than in the HTTP client, " +
+	"so the fix belongs in the helper: it currently rebuilds the backoff on every attempt instead of " +
+	"carrying the previous delay forward, which is why one transient error from a flaky provider turns " +
+	"into five. It now seeds the delay from the last attempt and caps the growth at thirty seconds, " +
+	"and the test asserts the whole sequence rather than a single value."
+
 // TestSummarizeForSpeechReturnsTheModelsProse is the happy path: the model is
 // asked, its prose is returned, and the caller never sees the original markdown.
 func TestSummarizeForSpeechReturnsTheModelsProse(t *testing.T) {
@@ -85,6 +100,122 @@ func TestSummarizeForSpeechReturnsTheModelsProse(t *testing.T) {
 	}
 }
 
+// TestSpeechSummaryBodyStillReachesTheModel guards the fixture itself. If
+// speechSummaryBody ever became short or picked up a backtick, every test
+// using it would keep passing on the short-circuit instead of the behaviour it
+// names — the same vacuous-pass trap the short-circuit creates for any
+// short fixture.
+func TestSpeechSummaryBodyStillReachesTheModel(t *testing.T) {
+	if !speechTextNeedsRewrite(speechSummaryBody) {
+		t.Fatalf("the shared fixture must reach the model; it is %d chars", len([]rune(speechSummaryBody)))
+	}
+	stub := &speechSummaryTestClient{reply: "x"}
+	a := newSpeechSummaryTestAgent(t, stub)
+	if got := a.SummarizeForSpeech(speechSummaryBody); got != "x" {
+		t.Fatalf("the shared fixture must be summarised, got %q", got)
+	}
+}
+
+// TestSummarizeForSpeechSkipsTheLLMForShortPlainProse is the cost fix: a
+// message that is already short, plain prose is spoken verbatim, so the
+// summariser must not spend a model call (and its seconds of latency) on it.
+// The summariser's own prompt says as much — "If the reply is already short
+// plain prose, return it almost unchanged" — so skipping costs nothing in
+// output quality, and the empty return is the established "speak the original"
+// signal the web layer already handles.
+func TestSummarizeForSpeechSkipsTheLLMForShortPlainProse(t *testing.T) {
+	stub := &speechSummaryTestClient{reply: "should never be asked"}
+	a := newSpeechSummaryTestAgent(t, stub)
+
+	got := a.SummarizeForSpeech("Done — the retry limit is now three and the test passes.")
+
+	if got != "" {
+		t.Fatalf("a skipped short message must return \"\" so the caller speaks the original, got %q", got)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("a short plain-prose message must not call the model, calls=%d", stub.calls)
+	}
+}
+
+// TestSummarizeForSpeechStillSummarisesShortTextCarryingArtifacts is the
+// guard rail on the other side of that gate. A SHORT message can still be a
+// code block, a diff, a path or a URL — exactly the things the rewrite exists
+// to stop being read aloud verbatim — so length alone must never be the test.
+func TestSummarizeForSpeechStillSummarisesShortTextCarryingArtifacts(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"fenced code", "```go\nretries = 3\n```"},
+		{"inline code", "set `retries` to 3 first"},
+		{"added diff line", "+retries = 3"},
+		{"removed diff line", "-retries = 1"},
+		{"diff hunk header", "@@ -1,3 +1,3 @@"},
+		{"url", "see https://example.com/retries for details"},
+		{"relative path", "edited internal/agent/permissions.go"},
+		{"home path", "edited ~/www/aimsai2/main.go"},
+		{"windows path", `edited C:\src\main.go`},
+		{"markdown table row", "| file | change |\n| --- | --- |\n| a.go | +3 |"},
+		{"shell prompt", "$ go test ./internal/agent/"},
+		{"panic trace", "panic: runtime error: index out of range"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &speechSummaryTestClient{reply: "described, not quoted"}
+			a := newSpeechSummaryTestAgent(t, stub)
+
+			got := a.SummarizeForSpeech(tc.text)
+
+			if got != "described, not quoted" {
+				t.Fatalf("short text carrying %s must still be summarised, got %q", tc.name, got)
+			}
+			if stub.calls != 1 {
+				t.Fatalf("expected one model call for %s, got %d", tc.name, stub.calls)
+			}
+		})
+	}
+}
+
+// TestSpeechTextNeedsRewrite pins the gate itself, both directions: what is
+// short enough to skip, and what an artifact is. The false-positive cases
+// matter as much as the true ones — a gate that mistakes ordinary prose for
+// code is worse than no gate, because it silently reintroduces the round trip
+// it exists to remove.
+func TestSpeechTextNeedsRewrite(t *testing.T) {
+	long := strings.Repeat("prose. ", speechSummarySkipChars/6+2)
+
+	skip := []string{
+		"",
+		"Done.",
+		"Yes — I moved the helper and the test passes now.",
+		"Which branch should I use?",
+		"3/4 of the tests pass, and/or that is a useful default.",
+		"The cost is 5 * 3 items, not 5 + 3.",
+		"I bumped the limit -\nDone.",       // a line-initial "-" followed by EOL
+		"It went from 1.2.3 to 1.2.4 here.", // a version, not a path
+		"e.g. retries, then done.",          // "e.g" is not a path
+	}
+	for _, text := range skip {
+		if speechTextNeedsRewrite(text) {
+			t.Errorf("short plain prose must be spoken verbatim, but %q needs a rewrite", text)
+		}
+	}
+
+	rewrite := []string{
+		long,
+		"a message that is long enough to be worth compressing, " + long,
+		"see `retries`",
+		"run ./scripts/build.sh",
+		"the parser now rejects an empty key, which is in parse.go",
+		"read the trace at main.go:42",
+	}
+	for _, text := range rewrite {
+		if !speechTextNeedsRewrite(text) {
+			t.Errorf("%q needs a rewrite", text)
+		}
+	}
+}
+
 // TestSummarizeForSpeechSendsTheCodeDescribingPrompt pins the product
 // requirement: code is DESCRIBED, not omitted and not quoted. Losing this
 // wording silently regresses speech back to dictating diffs.
@@ -92,7 +223,7 @@ func TestSummarizeForSpeechSendsTheCodeDescribingPrompt(t *testing.T) {
 	stub := &speechSummaryTestClient{reply: "ok"}
 	a := newSpeechSummaryTestAgent(t, stub)
 
-	a.SummarizeForSpeech("some message")
+	a.SummarizeForSpeech(speechSummaryBody)
 
 	for _, want := range []string{
 		"SUMMARISE code",
@@ -113,7 +244,7 @@ func TestSummarizeForSpeechFailureReturnsEmpty(t *testing.T) {
 	stub := &speechSummaryTestClient{err: errors.New("provider exploded")}
 	a := newSpeechSummaryTestAgent(t, stub)
 
-	if got := a.SummarizeForSpeech("hello"); got != "" {
+	if got := a.SummarizeForSpeech(speechSummaryBody); got != "" {
 		t.Fatalf("a failed summary must return \"\", got %q", got)
 	}
 }
@@ -138,8 +269,8 @@ func TestSummarizeForSpeechReusesTheCache(t *testing.T) {
 	stub := &speechSummaryTestClient{reply: "cached prose"}
 	a := newSpeechSummaryTestAgent(t, stub)
 
-	first := a.SummarizeForSpeech("a message spoken twice")
-	second := a.SummarizeForSpeech("a message spoken twice")
+	first := a.SummarizeForSpeech(speechSummaryBody)
+	second := a.SummarizeForSpeech(speechSummaryBody)
 
 	if first != "cached prose" || second != first {
 		t.Fatalf("expected the cached summary back, got %q then %q", first, second)
@@ -155,12 +286,12 @@ func TestSummarizeForSpeechDoesNotCacheAFailure(t *testing.T) {
 	stub := &speechSummaryTestClient{err: errors.New("transient")}
 	a := newSpeechSummaryTestAgent(t, stub)
 
-	if got := a.SummarizeForSpeech("fails first"); got != "" {
+	if got := a.SummarizeForSpeech(speechSummaryBody); got != "" {
 		t.Fatalf("first call should fail, got %q", got)
 	}
 	stub.err = nil
 	stub.reply = "recovered"
-	if got := a.SummarizeForSpeech("fails first"); got != "recovered" {
+	if got := a.SummarizeForSpeech(speechSummaryBody); got != "recovered" {
 		t.Fatalf("a failed summary must not be cached: got %q", got)
 	}
 	if stub.calls != 2 {
@@ -174,7 +305,7 @@ func TestSummarizeForSpeechCacheIsPerModel(t *testing.T) {
 	stub := &speechSummaryTestClient{reply: "from the model"}
 	a := newSpeechSummaryTestAgent(t, stub)
 
-	if got := a.SummarizeForSpeech("same message"); got != "from the model" {
+	if got := a.SummarizeForSpeech(speechSummaryBody); got != "from the model" {
 		t.Fatalf("first summary = %q", got)
 	}
 	// A different model id must miss the cache. The stub's GetModel is fixed, so
@@ -423,7 +554,7 @@ func TestSummarizeForSpeechCancelsTheProviderCallOnTimeout(t *testing.T) {
 	stub := &blockingChatClient{cancelled: make(chan struct{})}
 	a := newSpeechSummaryTestAgent(t, stub)
 
-	if got := a.SummarizeForSpeech("anything"); got != "" {
+	if got := a.SummarizeForSpeech(speechSummaryBody); got != "" {
 		t.Fatalf("a timed-out summary must return \"\", got %q", got)
 	}
 	// Reading these is safe after the handshake below; contextUsed is written
@@ -448,7 +579,7 @@ func TestSummarizeForSpeechFallsBackToChatForContextlessClients(t *testing.T) {
 	stub := &speechSummaryTestClient{reply: "plain path"}
 	a := newSpeechSummaryTestAgent(t, stub)
 
-	if got := a.SummarizeForSpeech("hello"); got != "plain path" {
+	if got := a.SummarizeForSpeech(speechSummaryBody); got != "plain path" {
 		t.Fatalf("a contextless client must still be used, got %q", got)
 	}
 }

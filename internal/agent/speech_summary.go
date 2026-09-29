@@ -49,6 +49,16 @@ const (
 	// and repeated "speak this message" clicks are common, and each miss is a
 	// paid round trip.
 	speechSummaryCacheTTL = 24 * time.Hour
+	// speechSummarySkipChars is the length at or below which a message is
+	// treated as "already short plain prose" and spoken verbatim, with no
+	// summariser call at all. The summariser's own prompt asks the model to
+	// return such a message "almost unchanged" (speechSummarySystemPrompt), so
+	// the call buys no rewrite and costs a paid round trip plus its latency on
+	// what is usually a first, impatient click. The value is deliberately
+	// generous — roughly 20 seconds of speech at 160 words per minute — because
+	// a reply that short rarely hides a decision worth compressing. Length alone
+	// is NOT the test: see speechTextHasSpeakableArtifact.
+	speechSummarySkipChars = 400
 	// speechSummaryPruneInterval throttles the opportunistic sweep so a busy
 	// server does not rescan the cache directory on every write.
 	speechSummaryPruneInterval = time.Hour
@@ -107,14 +117,178 @@ func chatWithOptionalContext(ctx context.Context, client LLMClient, messages []M
 	return client.Chat(messages, nil)
 }
 
+// speechTextNeedsRewrite reports whether text is worth a summariser round
+// trip. False means "speak it as-is", which SummarizeForSpeech signals by
+// returning "" — the same signal every other early exit uses (no client,
+// timeout, provider error, empty model output), so no caller needs to know this
+// gate exists.
+//
+// The asymmetry is deliberate. Calling the model on a short message wastes a
+// paid round trip; NOT calling it on a short code block or diff reads source
+// code aloud, which is the exact failure the summariser was added to prevent.
+// So length is only half the test, and the artifact scan errs towards firing.
+func speechTextNeedsRewrite(text string) bool {
+	if len([]rune(text)) > speechSummarySkipChars {
+		return true
+	}
+	return speechTextHasSpeakableArtifact(text)
+}
+
+// speechTextHasSpeakableArtifact reports whether a short message carries
+// something that must not be dictated verbatim: code, a diff, a path, a URL, a
+// table or a crash trace. It is a cheap scan for syntax fingerprints, not a
+// parse — anything that would be read out as gibberish counts.
+//
+// Two known limits, stated rather than hidden:
+//
+//   - A table that reached us as RENDERED text has no pipes left to find. The
+//     normal path is rendered: web/src/components/Speech/speechUtils.ts takes
+//     textContent and the web strips markdown before synthesis, so a short
+//     table is read as its bare cell contents. Widening this to "many very
+//     short lines" would misread an ordinary bulleted answer, which speaks
+//     perfectly well, so it is left out.
+//   - The message may be raw markdown source (the at-bottom auto-speak
+//     fallback, or a terminal selection), which is why the backtick and pipe
+//     checks exist at all: on that path the fences and pipes are still intact.
+func speechTextHasSpeakableArtifact(text string) bool {
+	// One backtick covers both a fence and inline code.
+	if strings.Contains(text, "`") {
+		return true
+	}
+	if strings.Contains(text, "http://") || strings.Contains(text, "https://") {
+		return true
+	}
+	// A diff hunk header.
+	if strings.Contains(text, "@@") {
+		return true
+	}
+	// Crash output, which has no useful shape of its own to key on otherwise.
+	for _, marker := range []string{
+		"panic:",
+		"Traceback (most recent call last)",
+		"Exception in thread",
+		"fatal error:",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if speechLineIsCodeish(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// speechLineIsCodeish reports whether one line carries a code-shaped
+// fingerprint: a diff marker, a shell prompt, a markdown table row, or a
+// filesystem path.
+func speechLineIsCodeish(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" {
+		return false
+	}
+	// A diff marker with NO space after it. Markdown REQUIRES whitespace after
+	// "- " / "+ ", so a bare "-foo" is a diff and never a list item — this is
+	// what keeps an ordinary bulleted answer from reading as a diff.
+	if len(trimmed) >= 2 && (trimmed[0] == '+' || trimmed[0] == '-') && trimmed[1] != ' ' && trimmed[1] != '\t' {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "$ ") {
+		return true
+	}
+	// A table row has at least two cells, hence at least two pipes.
+	if strings.Count(trimmed, "|") >= 2 {
+		return true
+	}
+	for _, field := range strings.Fields(trimmed) {
+		if speechTokenLooksLikePath(field) {
+			return true
+		}
+	}
+	return false
+}
+
+// speechTokenLooksLikePath reports whether a whitespace-delimited token names a
+// file. It insists on a recognisable extension, because a slash alone is
+// ordinary prose: "3/4", "and/or", "on/off" and "input/output" all contain one
+// and none of them is a path.
+func speechTokenLooksLikePath(tok string) bool {
+	// Strip the quoting and sentence punctuation a token picks up when copied
+	// out of a sentence, so `internal/x.go`, "main.go" and (parse.go) are judged
+	// on content. A leading "~" is deliberately NOT stripped — it is how a
+	// home-relative path is spelled.
+	tok = strings.Trim(tok, "\"'`()[]{}<>,;:!?")
+	tok = strings.TrimRight(tok, ".")
+	// "main.go:42" is a stack-trace reference, not a filename with a colon
+	// extension. Only a purely numeric tail is dropped, so "C:\src" is safe.
+	if i := strings.IndexByte(tok, ':'); i > 1 && isAllDigits(tok[i+1:]) {
+		tok = tok[:i]
+	}
+	if tok == "" {
+		return false
+	}
+	if strings.HasPrefix(tok, "~/") || strings.HasPrefix(tok, "./") || strings.HasPrefix(tok, "../") {
+		return true
+	}
+	if strings.Contains(tok, `\`) {
+		// A Windows path or a Go import path. A backslash alone is not
+		// conclusive, so require an extension too.
+		return strings.Contains(tok, ".")
+	}
+	if last := strings.LastIndexByte(tok, '/'); last >= 0 {
+		// Path shape, so the extension only has to look like one.
+		return hasFileExtension(tok[last+1:])
+	}
+	// A BARE filename ("I edited main.go") is common enough in short replies to
+	// be worth catching, but "e.g", "U.S", "1.2.3" and "3.14" are not files. One
+	// dot, an alphabetic extension and a stem of at least two characters
+	// separate them.
+	if dot := strings.LastIndexByte(tok, '.'); strings.Count(tok, ".") == 1 &&
+		len(tok)-dot-1 >= 2 && hasFileExtension(tok) {
+		return true
+	}
+	return false
+}
+
+// hasFileExtension reports whether s ends in a plausible extension: one dot,
+// then up to eight letters, with a non-empty stem. Numeric tails ("3.14",
+// "v1.2") fail the letter test, which is what keeps versions out.
+func hasFileExtension(s string) bool {
+	dot := strings.LastIndexByte(s, '.')
+	if dot <= 0 {
+		return false
+	}
+	ext := s[dot+1:]
+	if ext == "" || len(ext) > 8 {
+		return false
+	}
+	for i := 0; i < len(ext); i++ {
+		c := ext[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // SummarizeForSpeech rewrites text into spoken prose via the speech-summary
-// model, caching the result. It returns "" when summarising is impossible
-// (no client, timeout, provider error, empty model output) — the caller is
-// expected to fall back to speaking the original text, so speech NEVER fails
-// because the summariser did.
+// model, caching the result. It returns "" when summarising is impossible or
+// pointless (no client, short plain prose, timeout, provider error, empty model
+// output) — the caller is expected to fall back to speaking the original text,
+// so speech NEVER fails because the summariser did.
 func (a *Agent) SummarizeForSpeech(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
+		return ""
+	}
+	// Checked before the client is resolved and before the cache is read: a
+	// short plain-prose message has no summary to look up (nothing ever writes
+	// one for it) and no client to pay for. See speechTextNeedsRewrite for why
+	// short-and-artifact-free, and not merely short, is the bar.
+	if !speechTextNeedsRewrite(text) {
+		a.emitDebug("SPEECH", fmt.Sprintf("speaking %d chars verbatim; no summary needed", len([]rune(text))))
 		return ""
 	}
 	client := a.speechSummaryClient()

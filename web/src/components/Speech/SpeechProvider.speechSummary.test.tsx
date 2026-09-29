@@ -338,6 +338,9 @@ describe("setSpeakMode", () => {
 describe("speak cancellation and replay", () => {
   const REPLAY_TEXT = "Already summarised prose.";
 
+  // "next" promotes the next queued item, standing in for a media element
+  // reaching its end. This suite drives promotion through the control; the
+  // queue suite drives it through the onended event.
   function FunnelConsumer() {
     const speech = useSpeech();
     return (
@@ -350,6 +353,9 @@ describe("speak cancellation and replay", () => {
         </button>
         <button type="button" onClick={() => speech.stop()}>
           stop
+        </button>
+        <button type="button" onClick={() => speech.next()}>
+          next
         </button>
         <span data-testid="current">{speech.currentText}</span>
       </div>
@@ -394,7 +400,16 @@ describe("speak cancellation and replay", () => {
     expect(ttsSpeak).not.toHaveBeenCalled();
   });
 
-  it("plays only the newest message when two summaries resolve out of order", async () => {
+  it("plays BOTH messages in click order when two speaks are queued", async () => {
+    // This replaced a "plays only the newest when two summaries resolve out of
+    // order" test. Newest-wins DISCARDED the older request, which is exactly
+    // what a queue exists to stop doing: clicking Speak on three messages while
+    // the first is still speaking must read all three.
+    //
+    // The out-of-order half is now impossible by construction rather than by a
+    // guard — only the item at the head of the queue summarises, so a second
+    // click cannot have a summary in flight to land late. Assert the ORDER,
+    // which is the property the drain loop is responsible for.
     const older = deferred<{ summary: string }>();
     const newer = deferred<{ summary: string }>();
     summarizeSpeech.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
@@ -407,18 +422,28 @@ describe("speak cancellation and replay", () => {
       screen.getByRole("button", { name: "speak" }).click();
     });
 
-    // The newer request resolves first and starts playing...
-    await act(async () => {
-      newer.resolve({ summary: "newer text" });
-    });
-    await waitFor(() => expect(ttsSpeak).toHaveBeenCalledTimes(1));
-    // ...then the older one lands and must be dropped, not played over it.
+    // Only the head item is summarised while it plays, so the second summary
+    // request is not even made yet: a five-item burst must not fire five
+    // concurrent 60s model calls.
+    expect(summarizeSpeech).toHaveBeenCalledTimes(1);
+
     await act(async () => {
       older.resolve({ summary: "older text" });
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(ttsSpeak).toHaveBeenCalledTimes(1);
-    expect(ttsSpeak.mock.calls[0][0]).toBe("newer text");
+    await waitFor(() => expect(ttsSpeak).toHaveBeenCalledTimes(1));
+    expect(ttsSpeak.mock.calls[0][0]).toBe("older text");
+
+    // Promoting the second item is what makes its summary request — it was
+    // never made while the first item held the head of the queue.
+    await act(async () => {
+      screen.getByRole("button", { name: "next" }).click();
+    });
+    expect(summarizeSpeech).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      newer.resolve({ summary: "newer text" });
+    });
+    await waitFor(() => expect(ttsSpeak).toHaveBeenCalledTimes(2));
+    expect(ttsSpeak.mock.calls[1][0]).toBe("newer text");
   });
 
   it("replays the prepared text without re-summarising it", async () => {

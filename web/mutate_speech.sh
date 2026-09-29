@@ -36,15 +36,33 @@ trap 'restore; rm -rf "$WORK"' EXIT INT TERM
 
 run() { npx vitest run src/components/Speech/SpeechProvider.speechSummary.test.tsx 2>&1 | grep -cE "^ FAIL|Tests .*failed"; }
 
-mutate() {
-  local label="$1" old="$2" new="$3"
-  python3 - "$SRC" "$old" "$new" <<'PY'
+# A STALE ANCHOR MUST NOT LOOK LIKE A PASSING MUTATION. When
+# resolveSpeechText was refactored, four anchors stopped matching; the python
+# assert fired, but the failure was swallowed here and each was reported
+# "SURVIVED <-- test gap" -- four phantom test gaps burying the real signal.
+# An anchor that does not apply is HARNESS ROT, a different (and louder)
+# failure than a mutant that survives, so it is reported separately.
+ANCHOR_ERRORS=0
+apply_mutation() {
+  local old="$1" new="$2"
+  python3 - "$SRC" "$old" "$new" <<'PYEOF'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
 old, new = sys.argv[2], sys.argv[3]
 assert s.count(old) == 1, f"anchor not unique/found: {old!r}"
 p.write_text(s.replace(old, new))
-PY
+PYEOF
+}
+
+mutate() {
+  local label="$1" old="$2" new="$3"
+  local err
+  if ! err=$(apply_mutation "$old" "$new" 2>&1); then
+    restore
+    ANCHOR_ERRORS=$((ANCHOR_ERRORS + 1))
+    echo "ANCHOR-FAILED $label  <-- HARNESS ROT, not a test gap: ${err##*: }"
+    return
+  fi
   local out
   out=$(run)
   restore
@@ -62,23 +80,23 @@ mutate "empty-summary fallback" \
 
 echo "=== M-P2: the full-text opt-out is ignored ==="
 mutate "speakMode === full bypass" \
-  'if (!summaryEnabled || speakMode === "full" || !sessionId) return text;' \
-  'if (!summaryEnabled || !sessionId) return text;'
+  'if (!gate.summaryEnabled || gate.speakMode === "full" || !gate.sessionId) return text;' \
+  'if (!gate.summaryEnabled || !gate.sessionId) return text;'
 
 echo "=== M-P3: an unbound session no longer bypasses ==="
 mutate "missing-session bypass" \
-  'if (!summaryEnabled || speakMode === "full" || !sessionId) return text;' \
-  'if (!summaryEnabled || speakMode === "full") return text;'
+  'if (!gate.summaryEnabled || gate.speakMode === "full" || !gate.sessionId) return text;' \
+  'if (!gate.summaryEnabled || gate.speakMode === "full") return text;'
 
 echo "=== M-P4: the server-side gate is ignored ==="
 mutate "summaryEnabled gate" \
-  'if (!summaryEnabled || speakMode === "full" || !sessionId) return text;' \
-  'if (speakMode === "full" || !sessionId) return text;'
+  'if (!gate.summaryEnabled || gate.speakMode === "full" || !gate.sessionId) return text;' \
+  'if (gate.speakMode === "full" || !gate.sessionId) return text;'
 
 echo "=== M-P5: the host is dropped from the summary request ==="
 mutate "host threading" \
-  'await api.summarizeSpeech(sessionId, text, host);' \
-  'await api.summarizeSpeech(sessionId, text, undefined);'
+  'await api.summarizeSpeech(gate.sessionId, text, gate.host);' \
+  'await api.summarizeSpeech(gate.sessionId, text, undefined);'
 
 echo "=== M-P6: a summariser failure silences speech instead of falling back ==="
 mutate "failure fallback" \
@@ -93,6 +111,9 @@ mutate "config load fallback" \
   'console.warn("speech summary config load failed", err);
         if (!cancelled) setSummaryConfig({ model: "", enabled: false });'
 
+if [ "$ANCHOR_ERRORS" -gt 0 ]; then
+  echo "=== $ANCHOR_ERRORS ANCHOR(S) FAILED: those mutants never applied. ==="
+fi
 echo "=== restore + confirm green ==="
 restore
 if ! git diff --quiet -- "$SRC"; then
