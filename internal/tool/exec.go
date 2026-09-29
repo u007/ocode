@@ -83,7 +83,7 @@ func (t BashTool) Parallel() bool      { return false }
 func (t BashTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "bash",
-		"description": fmt.Sprintf("Execute shell commands and return combined stdout and stderr. Timeout: %v (default).", bashDefaultTimeout),
+		"description": fmt.Sprintf("Execute shell commands and return combined stdout and stderr. Timeout: %v (default). For curl/wget, write the URL and every flag literally in each call (e.g. curl -u user:pass http://127.0.0.1:8080/x): a URL or flags passed through a shell variable or function argument cannot be verified and always prompts the user for approval.", bashDefaultTimeout),
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

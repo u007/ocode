@@ -983,20 +983,12 @@ func isExfiltrationRiskCurl(fields []string) bool {
 		i++
 	}
 
-	// Check non-flag args (URL position): env var in URL
-	// First non-flag arg is the URL
-	foundFlag := false
+	// Env-var expansion anywhere is exfiltration-capable (wget parity): in a
+	// URL it ships the value off-host, and quote context is gone after
+	// tokenizing, so an unquoted "$X" can word-split into injected flags.
 	for _, f := range fields[1:] {
-		if strings.HasPrefix(f, "-") {
-			foundFlag = true
-			continue
-		}
-		if !foundFlag || !strings.Contains(f, "://") {
-			// First positional arg that looks like a URL
-			if containsEnvVarRef(f) {
-				return true // curl $URL
-			}
-			break
+		if containsEnvVarRef(f) {
+			return true // curl -s "https://x/?k=$HOME", curl -o f $URL
 		}
 	}
 
@@ -1263,6 +1255,20 @@ func isExfiltrationRiskCommand(command string) bool {
 		return isExfiltrationRiskNetcat(fields)
 	}
 
+	return false
+}
+
+// isExfiltrationRiskBash reports whether any command the fragment really runs
+// (wrappers peeled, as in IsHarmfulBashCommand) is a curl/wget/httpie/nc
+// exfiltration risk. IsHarmfulBashCommand covers this family too; the sandbox
+// gate checks it first only so the Ask carries an accurate rule label
+// (sandbox.exfiltration_risk) instead of sandbox.harmful_git.
+func isExfiltrationRiskBash(command string) bool {
+	for _, words := range effectiveCommandWords(splitShellFields(strings.TrimSpace(command))) {
+		if isExfiltrationRiskCommand(rebuildCommandLine(words)) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -1686,6 +1692,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					// the write-wall is blind to them. Read-only stash
 					// inspection forms ("git stash list"/"show") are excluded
 					// from IsHarmfulBashCommand and still auto-allow below.
+					if isExfiltrationRiskBash(sub) {
+						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox exfiltration risk): tool=bash command=%q", sub))
+						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk")}
+					}
 					if IsHarmfulBashCommand(sub) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", sub))
 						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
@@ -1709,6 +1719,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				if isHarmfulForceCommand(command) {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful force): tool=bash command=%q", command))
 					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_force")}
+				}
+				if isExfiltrationRiskBash(command) {
+					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox exfiltration risk): tool=bash command=%q", command))
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk")}
 				}
 				if IsHarmfulBashCommand(command) {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", command))
@@ -5066,6 +5080,12 @@ func isLikelyPathArg(arg string) bool {
 	if dot := strings.Index(arg, "."); dot > 0 && dot < len(arg)-1 {
 		return true
 	}
+	// A dotfile (.env, .netrc, .npmrc): without this a bare `cat .env`
+	// yielded no path and slipped past the sandbox secret-material gate while
+	// `cat ./.env` asked.
+	if len(arg) > 1 && arg[0] == '.' {
+		return true
+	}
 	return false
 }
 
@@ -5343,6 +5363,10 @@ const (
 type shellToken struct {
 	typ   shellTokenType
 	value string
+	// glued: no whitespace separates this token from the previous one, so both
+	// are parts of one shell word (`DB="$(cmd)"` → word "DB=" + glued subst).
+	// Tracked only around substitutions, where the tokenizer splits a word.
+	glued bool
 }
 
 type parsedShellCommand struct {
@@ -5582,11 +5606,23 @@ func tokenizeShell(input string) ([]shellToken, error) {
 	inDouble := false
 	escaped := false
 
+	// pendingGlue: the last token was a substitution and no word boundary has
+	// been crossed since, so the next word continues the same shell word.
+	pendingGlue := false
 	emitWord := func() {
 		if current.Len() > 0 {
-			tokens = append(tokens, shellToken{typ: tokWord, value: current.String()})
+			tokens = append(tokens, shellToken{typ: tokWord, value: current.String(), glued: pendingGlue})
 			current.Reset()
 		}
+		pendingGlue = false
+	}
+	// emitExpansion emits a $(…)/`…`/$((…)) token, marking it glued when it
+	// continues a word in progress or directly follows another expansion.
+	emitExpansion := func(typ shellTokenType, value string) {
+		glued := current.Len() > 0 || pendingGlue
+		emitWord()
+		tokens = append(tokens, shellToken{typ: typ, value: value, glued: glued})
+		pendingGlue = true
 	}
 
 	for i := 0; i < n; i++ {
@@ -5624,32 +5660,29 @@ func tokenizeShell(input string) ([]shellToken, error) {
 
 		if inDouble {
 			if r == '$' && i+2 < n && runes[i+1] == '(' && runes[i+2] == '(' {
-				emitWord()
 				expr, endIdx, err := parseArithmetic(runes, i)
 				if err != nil {
 					return nil, err
 				}
-				tokens = append(tokens, shellToken{typ: tokArith, value: expr})
+				emitExpansion(tokArith, expr)
 				i = endIdx
 				continue
 			}
 			if r == '$' && i+1 < n && runes[i+1] == '(' {
-				emitWord()
 				sub, endIdx, err := parseParenthesis(runes, i+1)
 				if err != nil {
 					return nil, err
 				}
-				tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+				emitExpansion(tokSubst, sub)
 				i = endIdx
 				continue
 			}
 			if r == '`' {
-				emitWord()
 				sub, endIdx, err := parseBackticks(runes, i)
 				if err != nil {
 					return nil, err
 				}
-				tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+				emitExpansion(tokSubst, sub)
 				i = endIdx
 				continue
 			}
@@ -5667,29 +5700,26 @@ func tokenizeShell(input string) ([]shellToken, error) {
 		case '"':
 			inDouble = true
 		case '`':
-			emitWord()
 			sub, endIdx, err := parseBackticks(runes, i)
 			if err != nil {
 				return nil, err
 			}
-			tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+			emitExpansion(tokSubst, sub)
 			i = endIdx
 		case '$':
 			if i+2 < n && runes[i+1] == '(' && runes[i+2] == '(' {
-				emitWord()
 				expr, endIdx, err := parseArithmetic(runes, i)
 				if err != nil {
 					return nil, err
 				}
-				tokens = append(tokens, shellToken{typ: tokArith, value: expr})
+				emitExpansion(tokArith, expr)
 				i = endIdx
 			} else if i+1 < n && runes[i+1] == '(' {
-				emitWord()
 				sub, endIdx, err := parseParenthesis(runes, i+1)
 				if err != nil {
 					return nil, err
 				}
-				tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+				emitExpansion(tokSubst, sub)
 				i = endIdx
 			} else {
 				current.WriteRune(r)
@@ -5992,8 +6022,21 @@ func parseSingleCommandTokens(tokens []shellToken) *parsedShellCommand {
 	for idx < len(remaining) {
 		tok := remaining[idx]
 		if tok.typ == tokWord && strings.Contains(tok.value, "=") {
-			cmd.envVars = append(cmd.envVars, tok.value)
+			// Fold glued substitutions/words into the value: `DB="$(cmd)/x"`
+			// is one assignment, not `DB=` plus a command named `$(cmd)`.
+			// (The substitution's inner commands are already fragments.)
+			value := tok.value
 			idx++
+			for idx < len(remaining) && remaining[idx].glued {
+				switch next := remaining[idx]; next.typ {
+				case tokWord:
+					value += next.value
+				case tokSubst:
+					value += "$(" + next.value + ")"
+				}
+				idx++
+			}
+			cmd.envVars = append(cmd.envVars, value)
 		} else {
 			break
 		}

