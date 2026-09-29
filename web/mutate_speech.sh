@@ -5,10 +5,34 @@
 set -u
 cd "$(dirname "$0")"
 SRC=src/components/Speech/SpeechProvider.tsx
-BAK=/tmp/speechprovider.bak
+
+# Refuse to start if the file is already dirty. Otherwise a previous run that
+# died before this guard existed gets its mutated bytes baked into the backup
+# and then "restored" as if they were the original, and every CAUGHT below
+# becomes meaningless.
+if ! git diff --quiet -- "$SRC"; then
+  echo "ABORT: $SRC has uncommitted changes; commit or stash them first." >&2
+  exit 1
+fi
+
+# A private temp dir, not a fixed /tmp path. A shared one meant a stale backup
+# from an unrelated run could be restored OVER this source file, and a killed run
+# left the backup behind for the next one to trust. See
+# docs/gotchas/mutation-check-mutants-must-compile.md.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/mutate-speech.XXXXXX")
+BAK="$WORK/SpeechProvider.tsx"
 cp "$SRC" "$BAK"
 
-restore() { cp "$BAK" "$SRC"; }
+restore() {
+  # Compare before copying: a restore that silently writes the wrong bytes is
+  # worse than no restore, because it looks like a clean run afterwards.
+  cmp -s "$BAK" "$SRC" || cp "$BAK" "$SRC"
+}
+
+# Any exit path — success, a failing mutation, SIGINT, SIGTERM — puts the source
+# back. A harness killed mid-loop used to strand a MUTATED SpeechProvider.tsx in
+# the tree, and the next `go`/vitest run then failed for unrelated reasons.
+trap 'restore; rm -rf "$WORK"' EXIT INT TERM
 
 run() { npx vitest run src/components/Speech/SpeechProvider.speechSummary.test.tsx 2>&1 | grep -cE "^ FAIL|Tests .*failed"; }
 
@@ -71,4 +95,8 @@ mutate "config load fallback" \
 
 echo "=== restore + confirm green ==="
 restore
+if ! git diff --quiet -- "$SRC"; then
+  echo "ABORT: $SRC is still mutated after restore — do not commit." >&2
+  exit 1
+fi
 npx vitest run src/components/Speech/ 2>&1 | grep -E "Tests |Test Files"
