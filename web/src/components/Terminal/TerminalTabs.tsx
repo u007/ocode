@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, forwardRef } from "react";
+import { useEffect, useImperativeHandle, useRef, forwardRef } from "react";
 import TerminalPanel from "./TerminalPanel";
 import ProcessesPanel from "./ProcessesPanel";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
@@ -65,6 +65,16 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       },
     }));
 
+    // Lazy panel mount: a TerminalPanel attaches a WebSocket, restores its
+    // history and creates a WebGL context, and TerminalTabs is mounted
+    // (hidden) for EVERY project with terminals — so mounting every panel up
+    // front is what turned a restart with a dozen persisted terminals into a
+    // boot stall. A panel mounts the first time its terminal is the active
+    // one while this project's terminal pane is shown, and stays mounted
+    // (hidden) afterwards so switching back never re-restores it.
+    const shownRef = useRef<Set<string>>(new Set());
+    if (active && activeId && activeId !== PROCESSES_TAB_ID) shownRef.current.add(activeId);
+
     if (loading || (available && scrollbackLines <= 0)) {
       return <div className="p-4 text-sm text-muted-foreground">Checking terminal availability…</div>;
     }
@@ -90,7 +100,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
           </div>
         )}
 
-        {terminals.map((t) => (
+        {terminals.filter((t) => shownRef.current.has(t.id)).map((t) => (
           <div key={t.id} className={t.id === activeId ? "absolute inset-0" : "absolute inset-0 hidden"}>
             <TerminalPanel
               id={t.id}

@@ -1979,6 +1979,10 @@ export const api = {
       bootstrap_stage: string;
       turn_active: boolean;
       last_seq: number;
+      // Persisted session title, read server-side without the transcript.
+      // Lets a never-opened tab relabel from this poll alone (lazy tab
+      // hydration — see reconcileOpenSessions). Absent for legacy sessions.
+      title?: string;
       // Opaque stored-transcript token (see lib/sessionRevision). The
       // revalidation poll compares it against the revision the tab's
       // transcript was fetched at and refetches when it moved — the

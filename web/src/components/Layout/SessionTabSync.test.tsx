@@ -1,7 +1,7 @@
 import { act, render } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { ChatProvider, useChatState } from "../../stores/chatStore";
-import { RECONCILE_PAGE_SIZE, ROUTABLE_EVENTS, LIVE_DELTA_FLUSH_MS } from "../../lib/sessionEvents";
+import { ROUTABLE_EVENTS, LIVE_DELTA_FLUSH_MS } from "../../lib/sessionEvents";
 import { getCompactionState, noteCompactionFinishedGeneration, noteCompactionGeneration, resetCompactionGenerations } from "../../lib/compactionState";
 import SessionTabSync from "./SessionTabSync";
 
@@ -179,7 +179,11 @@ describe("SessionTabSync", () => {
     vi.useRealTimers();
   });
 
-  it("load-time reconcile fetches state + transcript once restored tabs appear", async () => {
+  it("load-time reconcile fetches state only for restored tabs nobody has opened yet", async () => {
+    // Lazy tab hydration: a restored tab's transcript is fetched by its
+    // ChatPanel on first activation, never by the boot reconcile — with a
+    // dozen restored tabs that was a dozen transcript pages parsed and
+    // rendered before the user could click anything.
     tabsByProject = { "/proj": [{ id: "s1", title: "t" }] };
     render(
       <ChatProvider>
@@ -190,26 +194,18 @@ describe("SessionTabSync", () => {
 
     expect(mockGetSessionState).toHaveBeenCalledTimes(1);
     expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
-    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
+    expect(mockGetSession).not.toHaveBeenCalled();
   });
 
-  it("refreshing mid-turn populates the transcript from disk despite turn_active=true", async () => {
-    // The exact refresh-mid-turn sequence: fresh page (empty store) →
-    // restored tab → load reconcile reports an active turn → the disk
-    // snapshot must still populate the slice (nothing in memory is newer).
+  it("refreshing mid-turn arms the running state from disk state without a transcript fetch", async () => {
+    // Fresh page (empty store) → restored, never-opened tab → the load
+    // reconcile reports an active turn: the slice must show the turn running
+    // while its transcript waits for the tab's first activation (ChatPanel).
     tabsByProject = { "/proj": [{ id: "s1", title: "t" }] };
     mockGetSessionState.mockResolvedValue({
       bootstrap_stage: "ready",
       turn_active: true,
       last_seq: 99,
-    });
-    mockGetSession.mockResolvedValue({
-      messages: [
-        { role: "user", content: "earlier question" },
-        { role: "assistant", content: "earlier answer" },
-        { role: "user", content: "follow-up" },
-      ],
-      total: 3,
     });
     const { getByTestId } = render(
       <ChatProvider>
@@ -219,9 +215,8 @@ describe("SessionTabSync", () => {
     );
     await act(async () => {}); // flush the reconcile promise chain
 
-    expect(getByTestId("messages").textContent).toBe(
-      "turnActive=true;count=3;earlier question|earlier answer|follow-up",
-    );
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(getByTestId("messages").textContent).toBe("turnActive=true;count=0;");
   });
 
   it("load-time reconcile runs once per page load, not on later tab changes", async () => {

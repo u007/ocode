@@ -67,6 +67,16 @@ func (h *Handler) HandleSessionState(w http.ResponseWriter, r *http.Request, id 
 	// "The previous reply was interrupted" notice. Fail-open (see
 	// sessionInterrupted).
 	resp.Interrupted = h.sessionInterrupted(id, entry.ProjectRoot)
+	// Persisted title, so a tab the client has never opened can relabel from
+	// this cheap poll instead of fetching its transcript (the web client
+	// hydrates never-visited tabs from state only — see reconcileOpenSessions).
+	if entry.ProjectRoot != "" {
+		if title, terr := session.StoredTitleForDir(entry.ProjectRoot, id); terr != nil {
+			log.Printf("serve: session %s title: %v", id, terr)
+		} else {
+			resp.Title = title
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -92,6 +102,10 @@ type sessionStateResponse struct {
 	// (false) whenever we cannot tell, so a session never invents an
 	// interruption.
 	Interrupted bool `json:"interrupted,omitempty"`
+	// Title is the persisted session title (auto fallback or LLM-generated),
+	// read without loading the transcript. Absent for a legacy/in-memory
+	// session; the client then keeps the tab's persisted label.
+	Title string `json:"title,omitempty"`
 }
 
 // PendingAsks is the unresolved permission/question prompt(s) a live agent

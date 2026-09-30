@@ -1,16 +1,15 @@
 import { useEffect, useRef } from "react";
-import { useChatDispatch, useChatStateRef, getSessionSlice } from "../../stores/chatStore";
+import { useChatDispatch, useChatStateRef } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
-import { api } from "../../api/client";
-import { applyReconcileState } from "../../hooks/useTurnWatchdog";
-import { getCompactionEventVersion, resetCompactionGenerations } from "../../lib/compactionState";
+import { resetCompactionGenerations } from "../../lib/compactionState";
 import {
   routeBusEnvelope,
   reconcileOpenSessions,
   ROUTABLE_EVENTS,
   type SessionEventRouter,
+  hydrateSessionOnActivation,
 } from "../../lib/sessionEvents";
 
 /**
@@ -132,25 +131,22 @@ export default function SessionTabSync({ onNewTab }: SessionTabSyncProps) {
     const prev = prevActiveRef.current;
     prevActiveRef.current = activeTabId;
     if (!activeTabId || activeTabId === prev || activeTabId.startsWith("new-")) return;
-    let cancelled = false;
-    const compactionVersion = getCompactionEventVersion(activeTabId);
-    api
-      .getSessionState(activeTabId, hostForRef.current(activeTabId))
-      .then((state) => {
-        if (!cancelled) {
-          const slice = getSessionSlice(chatStateRef.current, activeTabId);
-          const hasPendingAsk = !!(slice.pendingPermission || slice.pendingQuestion);
-          applyReconcileState(chatDispatch, activeTabId, state, hasPendingAsk, slice.turnActive, compactionVersion);
-        }
-      })
-      .catch(() => {
-        // Server unreachable / session gone — the watchdog retries while the
-        // tab is open and turn-active.
-      });
-    return () => {
-      cancelled = true;
+    // A never-opened tab (hydrated from state only at boot — lazy tab
+    // hydration) also gets its buffered mid-turn frames replayed here, on top
+    // of the turn-state sync every activation performs.
+    const router: SessionEventRouter = {
+      openSessionIds: openSessionIdsRef.current,
+      dispatch: chatDispatch,
+      projectDispatch,
+      getState: () => chatStateRef.current,
+      onNewTab,
+      hostFor: (id) => hostForRef.current(id),
     };
-  }, [activeTabId, chatDispatch]);
+    hydrateSessionOnActivation(activeTabId, router).catch(() => {
+      // Server unreachable / session gone — the watchdog retries while the
+      // tab is open and turn-active.
+    });
+  }, [activeTabId, chatDispatch, onNewTab, projectDispatch]);
 
   return null;
 }

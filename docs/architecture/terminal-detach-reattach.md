@@ -111,3 +111,16 @@ ranges, snapshot cursors, project ownership, and route authentication.
 DELETE.
 `web/src/components/Terminal/terminalHistory.test.ts` covers multi-page
 ordering, exact EOF, split UTF-8, 404 fallback, and malformed progression.
+
+## Lazy panel mount (2026-09-30)
+
+`TerminalTabs` is mounted (hidden) for **every** project that has terminals, and
+each `TerminalPanel` attaches a WebSocket, restores its on-disk history and
+creates a WebGL context. Mounting every restored terminal's panel up front
+therefore turned a desktop start with a dozen persisted terminals into a boot
+stall. A panel now mounts the first time its terminal is the active one while
+the project's terminal pane is shown (`shownRef` in `TerminalTabs.tsx`) and
+stays mounted (hidden) afterwards, so switching back never re-restores it. A
+restored terminal nobody selects is never attached by the browser; its shell
+stays alive server-side only for the detach TTL, exactly like the terminals of
+a project the user never switches to.

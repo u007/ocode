@@ -1,6 +1,6 @@
 import { pulseEventSink } from "../stores/pulseStore";
 import { api } from "../api/client";
-import { getSessionSlice, extractPendingFromMessages, type ChatAction, type ChatState } from "../stores/chatStore";
+import { getSessionSlice, extractPendingFromMessages, type ChatAction, type ChatState, type SessionSlice } from "../stores/chatStore";
 import type { ProjectAction } from "../stores/projectStore";
 import type { Message, SSEPermissionEvent, TUIStatus, AgentActivityEvent } from "../api/types";
 import type { BusEnvelope } from "./eventBus";
@@ -10,7 +10,7 @@ import { rekeyInputHistory } from "./tabInputHistory";
 import { rekeySidePaneState } from "./sidePaneState";
 import { clearPendingRewind, rekeyPendingRewind } from "./pendingRewindStore";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
-import { sessionRevisionMoved, clearSessionRevision } from "./sessionRevision";
+import { sessionRevisionMoved, clearSessionRevision, noteSessionRevision } from "./sessionRevision";
 import {
   clearCompaction,
   getCompactionEventVersion,
@@ -878,6 +878,16 @@ export async function reconcileOpenSessions(
       try {
         const host = router.hostFor?.(sessionId);
         const compactionVersion = getCompactionEventVersion(sessionId);
+        if (!sliceHydrated(getSessionSlice(router.getState(), sessionId))) {
+          // Never-opened tab: its transcript is ChatPanel's job on first
+          // activation (lazy tab hydration). Only the cheap state poll runs —
+          // turn state, live asks, and the persisted title for the tab label.
+          // Buffered live_frames are replayed when the tab is first opened
+          // (hydrateSessionOnActivation), once there is a transcript to
+          // attach them to.
+          hydrateSessionStateOnly(sessionId, await api.getSessionState(sessionId, host), router, compactionVersion);
+          return;
+        }
         const [state, detail] = await Promise.all([
           api.getSessionState(sessionId, host),
           api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }, host),
@@ -921,16 +931,76 @@ export async function reconcileOpenSessions(
         // dispatch before it would be clobbered. The reducer dedupes by
         // request_id, so an ask already set by the merge is unaffected.
         dispatchPendingAsks(sessionId, livePending, dispatch);
-        const watermark = lastAppliedSeq.get(sessionId) ?? 0;
-        for (const frame of state.live_frames ?? []) {
-          if (frame.seq <= watermark) continue;
-          routeBusEnvelope({ event: frame.event, session_id: sessionId, seq: frame.seq, data: frame.data }, router);
-        }
+        replayLiveFrames(sessionId, state.live_frames, router);
       } catch (err) {
         console.warn(`eventBus: reconcile failed for session ${sessionId}`, err);
       }
     }),
   );
+}
+
+/** True once a session slice holds a transcript (its tab has been opened, or
+ *  the bus mirrored committed messages into it). A slice that is not hydrated
+ *  belongs to a tab the user has never visited this page load: ChatPanel is
+ *  not mounted for it, so reconcile/revalidate must not fetch its transcript —
+ *  that page would be parsed, merged, and rendered for nothing, and with a
+ *  dozen open tabs it is what made the desktop boot stall. */
+export function sliceHydrated(slice: SessionSlice): boolean {
+  return slice.initialized || slice.messages.length > 0;
+}
+
+type SessionStateSnapshot = Awaited<ReturnType<typeof api.getSessionState>>;
+
+/** Replays the server's buffered mid-turn frames through the same reducer path
+ *  a live envelope takes, skipping anything already applied live. */
+function replayLiveFrames(
+  sessionId: string,
+  frames: SessionStateSnapshot["live_frames"],
+  router: SessionEventRouter,
+): void {
+  const watermark = lastAppliedSeq.get(sessionId) ?? 0;
+  for (const frame of frames ?? []) {
+    if (frame.seq <= watermark) continue;
+    routeBusEnvelope({ event: frame.event, session_id: sessionId, seq: frame.seq, data: frame.data }, router);
+  }
+}
+
+/** The transcript-free half of a reconcile: turn state, live pending asks and
+ *  the persisted title. Used for never-opened tabs at boot/reconnect and by
+ *  the revalidation poll when the stored transcript moved under such a tab. */
+function hydrateSessionStateOnly(
+  sessionId: string,
+  state: SessionStateSnapshot,
+  router: Pick<SessionEventRouter, "dispatch" | "getState" | "projectDispatch">,
+  compactionVersion: number | undefined,
+): void {
+  const slice = getSessionSlice(router.getState(), sessionId);
+  const livePending = state.pending_asks;
+  const hasLivePending =
+    (livePending?.permissions?.length ?? 0) > 0 ||
+    (livePending?.questions?.length ?? 0) > 0;
+  const hasPendingAsk = !!(slice.pendingPermission || slice.pendingQuestion || hasLivePending);
+  applyReconcileState(router.dispatch, sessionId, state, hasPendingAsk, slice.turnActive, compactionVersion);
+  applySessionTabTitle(router, sessionId, state.title);
+  dispatchPendingAsks(sessionId, livePending, router.dispatch);
+}
+
+/** First activation of a tab this page load: sync its turn state and, when
+ *  the slice had no transcript yet (a never-opened tab that reconcile
+ *  hydrated from state only), replay the server's buffered mid-turn frames so
+ *  the in-progress reply is not lost until turn_done. The transcript itself
+ *  is fetched by the ChatPanel mount; MERGE_SNAPSHOT's mid-turn guard keeps
+ *  the replayed live content whichever lands first. */
+export async function hydrateSessionOnActivation(sessionId: string, router: SessionEventRouter): Promise<void> {
+  const wasHydrated = sliceHydrated(getSessionSlice(router.getState(), sessionId));
+  const compactionVersion = getCompactionEventVersion(sessionId);
+  const state = await api.getSessionState(sessionId, router.hostFor?.(sessionId));
+  const slice = getSessionSlice(router.getState(), sessionId);
+  const hasPendingAsk = !!(slice.pendingPermission || slice.pendingQuestion);
+  applyReconcileState(router.dispatch, sessionId, state, hasPendingAsk, slice.turnActive, compactionVersion);
+  if (wasHydrated) return;
+  dispatchPendingAsks(sessionId, state.pending_asks, router.dispatch);
+  replayLiveFrames(sessionId, state.live_frames, router);
 }
 
 export const RECONCILE_PAGE_SIZE = 100;
@@ -1126,6 +1196,15 @@ export async function revalidateSession(
     return;
   }
 
+  if (!sliceHydrated(slice)) {
+    // Never-opened tab (lazy tab hydration): no transcript to converge, so a
+    // moved revision only relabels the tab and syncs turn/ask state. Note the
+    // revision so the next idle poll is a no-op; ChatPanel's first-open fetch
+    // reads the current transcript regardless.
+    noteSessionRevision(sessionId, host, state.revision);
+    hydrateSessionStateOnly(sessionId, state, router, compactionVersion);
+    return;
+  }
   const detail = await api.getSession(sessionId, { limit: RECONCILE_PAGE_SIZE }, host);
   // The fetched transcript notes the new revision (api.getSession), so the
   // next poll sees no movement unless another write lands.

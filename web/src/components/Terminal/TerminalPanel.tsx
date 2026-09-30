@@ -196,6 +196,18 @@ const TERMINAL_MOUSE_RESET =
 const TERMINAL_HISTORY_RESTORE_TIMEOUT_MS = 15000;
 
 /**
+ * Upper bound on history bytes replayed into xterm on (re)open. The on-disk
+ * log is unbounded (TUI redraws push a single terminal past 10 MB), and the
+ * restore used to grow `scrollback` to fit every row: each page re-allocated
+ * xterm's whole CircularList (O(n²) over the log), the buffer ignored the
+ * user's scrollback setting, and the 30s SerializeAddon snapshot copied the
+ * multi-MB result into localStorage — which is what drove the desktop
+ * renderer past 3 GB and hung it. Replaying only the tail keeps the buffer
+ * bounded by the user's scrollback; older output stays on disk.
+ */
+const TERMINAL_HISTORY_RESTORE_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
  * A single interactive terminal: one xterm.js instance bridged to one
  * pty-backed shell over /api/terminal/ws. Each panel owns its own WebSocket;
  * the server keys the shell by `id`, so a socket drop (reload, remount) only
@@ -1292,31 +1304,6 @@ export default function TerminalPanel({
       };
     };
 
-    // xterm's scrollback is a row count, while the history cursor is a byte
-    // count. Do not use snapshotEnd as scrollback: xterm allocates its
-    // CircularList to that size immediately, so a large byte log would cause
-    // a large, mostly empty allocation. Grow by the page's estimated row
-    // count before replaying it, then release unused headroom while retaining
-    // every row already rendered. Counting each code unit as up to two cells
-    // is conservative for wide characters and keeps the estimate bounded by
-    // the page size rather than the complete history size.
-    const prepareHistoryPage = (text: string) => {
-      const cols = Math.max(1, term.cols);
-      let newlineRows = 1;
-      for (let i = 0; i < text.length; i++) {
-        if (text[i] === "\n") newlineRows++;
-      }
-      const wrappedRows = Math.ceil((text.length * 2) / cols);
-      const pageRows = Math.max(1, newlineRows, wrappedRows);
-      const currentLines = term.buffer.active.length;
-      const requiredScrollback = currentLines - term.rows + pageRows;
-      term.options.scrollback = Math.max(scrollbackLines, requiredScrollback);
-    };
-    const trimHistoryHeadroom = () => {
-      const requiredScrollback = term.buffer.active.length - term.rows;
-      term.options.scrollback = Math.max(scrollbackLines, requiredScrollback);
-    };
-
     // The live socket is only opened after the REST restore settles, so a
     // restore that never settles would leave the terminal blank forever. Bound
     // it; each page re-arms the timer (see armRestoreTimeout below).
@@ -1348,21 +1335,17 @@ export default function TerminalPanel({
       projectPath,
       host,
       decoder: terminalDecoder,
+      maxBytes: TERMINAL_HISTORY_RESTORE_MAX_BYTES,
       signal: restoreController.signal,
       onText: (text) => {
         if (restoreCancelled || restoreController.signal.aborted) return;
         // Progress: the restore is alive, so give it another full window.
         armRestoreTimeout();
         serverHistoryPartial = true;
-        prepareHistoryPage(text);
-        // xterm parses writes asynchronously. Wait for the page callback
-        // before trimming headroom; doing it immediately would observe the
-        // pre-page buffer length and could evict the page just queued.
+        // xterm parses writes asynchronously; wait for the page callback so
+        // at most one page is queued in the parser at a time.
         return new Promise<void>((resolve) => {
-          term.write(text, () => {
-            trimHistoryHeadroom();
-            resolve();
-          });
+          term.write(text, () => resolve());
         });
       },
     }).then((result) => {

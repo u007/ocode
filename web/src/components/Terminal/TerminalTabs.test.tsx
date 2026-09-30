@@ -270,12 +270,18 @@ describe("TerminalTabs", () => {
     unmount();
 
     sockets.length = 0;
+    const ref2 = createRef<TerminalTabsHandle>();
     render(
       <TerminalProvider>
-        <TerminalTabs active projectPath="/project" />
+        <TerminalTabs ref={ref2} active projectPath="/project" />
       </TerminalProvider>,
     );
 
-    await waitFor(() => expect(sockets.length).toBe(2));
+    // Lazy panel mount: only the restored ACTIVE terminal attaches; the other
+    // restored tab exists in the store but opens its socket the first time it
+    // is selected (and then stays mounted).
+    await waitFor(() => expect(sockets.length).toBe(1));
+    // Both persisted tabs were restored: closing the active one leaves one.
+    expect(ref2.current?.closeActiveTerminal()).toBe(1);
   });
 });

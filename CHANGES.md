@@ -1,5 +1,100 @@
 # Changelog
 
+## 2026-09-30 — Desktop boot no longer stalls on restored tabs and terminals, and a big terminal log no longer pins the renderer
+
+Three related boot/renderer fixes, all in the same place: work the desktop app did
+eagerly for surfaces the user had not actually opened yet.
+
+- **Never-opened tabs are hydrated from state only, never from their transcript.** A tab
+  restored at boot has no `ChatPanel` mounted, so parsing, merging and rendering its
+  transcript page was pure waste — with a dozen restored tabs that was a boot stall
+  reported as "the app hangs" on WKWebView. `sliceHydrated` (`web/src/lib/sessionEvents.ts`)
+  marks a slice that holds a transcript; when it is false, both `reconcileOpenSessions` and
+  `revalidateSession` take a transcript-free path (`hydrateSessionStateOnly`): turn state,
+  live pending asks, and the tab label from a new `title` field on the state endpoint
+  (`session.StoredTitleForDir`, a `meta`-row read that never loads messages —
+  `internal/session/revision.go`). `revalidateSession` notes the moved revision so the next
+  idle poll is a no-op; the transcript itself is fetched by the ChatPanel mount on first
+  activation, and the new `hydrateSessionOnActivation` (now what `SessionTabSync`'s
+  activation effect calls, replacing an inline `getSessionState().then(...)`) replays the
+  server's buffered `live_frames` and live asks at that point, so a mid-turn reply in a
+  never-opened tab is not lost until `turn_done`. An already-hydrated tab keeps the old
+  behaviour: activation syncs turn state only.
+- **A restored terminal's panel mounts lazily instead of attaching every shell.** Each
+  `TerminalPanel` opens a WebSocket, replays its on-disk history and creates a WebGL
+  context, and `TerminalTabs` is mounted (hidden) for every project with terminals — so a
+  restart with a dozen persisted terminals mounted a dozen panels at once. `shownRef`
+  (`web/src/components/Terminal/TerminalTabs.tsx`) mounts a panel the first time its
+  terminal is the active one while the pane is shown, and keeps it mounted (hidden)
+  afterwards so switching back never re-restores it.
+- **Terminal history restore is capped at the last 2 MiB, and xterm's scrollback stops
+  growing to fit the log.** The on-disk log is unbounded, and the restore replayed all of
+  it while growing `term.options.scrollback` per page to hold every replayed row. That
+  re-allocated xterm's whole `CircularList` on each page (O(n²) over a multi-MB log),
+  overrode the user's configured scrollback, and made the 30s `SerializeAddon` snapshot
+  copy a multi-MB buffer into localStorage — the desktop renderer climbed past 3 GB and
+  hung on reopening a terminal with a large log. `restoreTerminalHistory` takes a new
+  `maxBytes`; when `snapshot_end` exceeds it the head page is discarded and paging
+  restarts at `snapshot_end - maxBytes`, advanced to the next newline so no partial escape
+  sequence is painted, and every later request stays pinned to that snapshot. `scrollback`
+  now stays at the configured line count and xterm evicts the oldest replayed rows itself;
+  older output remains on disk. `TERMINAL_HISTORY_RESTORE_TIMEOUT_MS` and the
+  `LocalStorage` fallback are unchanged.
+- **Tests.** Go: `internal/session/revision_test.go` (title read) plus the two cron-scope
+  files below. Web: 10 new/strengthened cases across `sessionEvents.test.ts` (state-only
+  reconcile, first-activation replay, hydrated-tab turn-state-only, revision relabel),
+  `SessionTabSync.test.tsx`, `TerminalTabs.test.tsx` (one socket, not two, after restore)
+  and `terminalHistory.test.ts` (tail replay on a line boundary; whole log under the cap).
+  `go build ./...`, `go vet`, the affected Go packages, the 4 affected web suites
+  (117 tests) and `tsgo --noEmit` are clean.
+- **Pre-existing, not touched.** `TestVersionMatchesChangelog` fails at HEAD for
+  `0.8.118` and fails identically at the working tree's `0.8.119` — the first
+  `## [Unreleased]` **Version Bump** line still reads `0.8.112 → 0.8.116`. Verified with a
+  throwaway `git worktree add --detach .worktrees/verify-head HEAD` baseline. Repairing it
+  means rewriting a historical bump line, which belongs with the next real bump
+  (`make up-patch` owns both files).
+- Bundle pages updated by `doc_write`: `docs/concepts/cross-process-session-sync.md` (lazy
+  tab hydration), `docs/architecture/terminal-detach-reattach.md` (lazy panel mount) and
+  `docs/terminal-history-persistence-and-restore.md` (byte cap, scrollback).
+
+## 2026-09-30 — The LLM `cron` tool is project-scoped, and idle eviction no longer kills boot-project delivery
+
+- **The `cron` tool now acts on the SESSION's project, not the server's boot project.** Until now
+  `buildAgentSession` injected one process-wide `h.scheduler` into every agent, so a chat on project B
+  that asked the agent to "schedule this nightly" filed the job in project A — where the Cron tab for
+  B would never show it. The REST surface had already been made per project; this closes the last
+  unscoped path into the same data. `Handler` carries a `cronServices` resolver installed by
+  `SetScheduler`, and `projectRoot` is now normalised (`"" -> h.workDir`) *before* any consumer keys
+  off it — it used to be normalised just above `SetWorkDir`, so everything built in between saw the
+  raw root.
+- **The tool holds a resolver and resolves on every call**, rather than capturing a service pointer
+  when the tool set is built. The per-project engines are stopped by an idle sweeper, so a captured
+  pointer would keep addressing a stopped engine for the rest of the session. A resolution failure
+  is surfaced to the model and is never satisfied from another project: falling back to the boot
+  project is precisely the bug this fixes. A host with no per-project scope keeps the old
+  single-service behaviour, and a host with no scheduler at all still gets no `cron` tool.
+- **Fixed a silent delivery outage introduced by the per-project cron work.** `evictIdleCronProjects`
+  had no exemption for the entry `SetScheduler` seeds with the HOST's engines, so about 30 minutes
+  after launch it stopped them and let the next resolve build a replacement without the Telegram
+  drainer sink and RC-bridge fan-out — the exact outcome the seeding code's own comment warns
+  against. Telegram and RC delivery for the boot project then never recovered, because nothing
+  re-seeds after boot. The seeded entry is now pinned against *idle* eviction only; shutdown still
+  stops it.
+- **Tests.** `internal/server/cron_scope_eviction_test.go` and
+  `internal/server/cron_tool_scope_test.go` (2 new files, 9 tests). Every one is mutation-verified —
+  12 mutants, all caught, each one compiled first so a build break was never mistaken for a catch.
+  Three tests were strengthened after a mutant survived them: the shutdown test was asserting on
+  registry bookkeeping that `stopAllCronServices` clears regardless (added `scheduler.Service.Stopped()`
+  so it can assert the engine actually stopped), the reclaim test could not tell a live engine from a
+  stale one (`AddJob` writes either way), and the no-fallback test was blind to a boot-project
+  fallback because it never set `h.scheduler`. A later review also found that the
+  `h.scheduler` fallback path itself had no test at all — `scheduler_rc_test.go` and
+  `scheduler_resolver_test.go` set the field but never build an agent session, so they never
+  reach `cronToolService` — so a test for it was added. `TestCronTargetsEndpoints` fails under `-count>1`;
+  verified pre-existing at HEAD via a `go test -overlay` baseline and left alone (recorded in
+  `TODO.md`). Doc line anchors across 25 bundle pages re-derived and independently audited: 92
+  anchors, 91 verified by content, 1 hand-corrected.
+
 ## 2026-09-30 — The root briefing is condensed: `CLAUDE.md` 1441 → 529 lines, detail moved into the knowledge bundle
 
 - **What changed.** `CLAUDE.md` shrank by 912 lines. Every one of its 26 sections survives, but each
