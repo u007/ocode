@@ -1,221 +1,255 @@
 ---
 name: ocode-remote-ssh
-description: How ocode Remote (SSH/WSL) is wired — connection identity, the ssh argv and ControlPath rules, the exec-slot pool, the path-spelling mismatch class, host-side provisioning, and where the remote agent actually runs. Use this when working on internal/remote, remote projects, remote git/terminal/files behaviour, remote SSH 502s, or anything under internal/server/remote_*.go.
-when_to_use: When the user asks about remote projects, SSH/WSL hosts, remote terminals, remote git or file operations, remote chat, 502s or hangs on a remote host, the host registry, SSH ports, or anything under internal/remote or internal/server/remote_hosts.go + handler_remote_*.go. Also triggered by: "remote ssh", "remote project", "connection refused remote", "wrong port remote", "remote 502", "remote agent runs where".
+description: How ocode's remote SSH projects are wired — connection identity, ssh argv construction, the per-connection exec slot pool, the project trust boundary, provisioning/launch, and profile routing. Use this whenever working on internal/remote, the remote host registry, remote git, remote terminals, or any /api/remote/{host}/ route.
+when_to_use: When the user asks about remote projects, SSH hosts, the remote registry, remote git/terminals, connection hangs, 502s from a remote route, port or profile mismatches on a remote project, or anything under internal/remote or internal/server/remote_*.go.
 ---
 
 # ocode Remote SSH Field Guide
 
-A dense map of the remote subsystem. **This skill is an index and an invariant
-list — the `docs/` pages and `AGENTS.md` own the detail.** Never copy their
-prose; link it.
+A short, dense map of the remote-SSH subsystem so you don't re-discover it from
+scratch. Every invariant below was read out of the current tree; every line
+anchor here was verified. The bundle pages listed in §9 own the narratives —
+this file is the index plus the rules the pages only imply.
 
-## 0. File map
+## 1. File map
 
 | Path | Role |
 |---|---|
-| `internal/remote/target.go` | `Target` (Kind/User/Host/Port/Distro, `Raw`), `ParseTarget`, `Validate`, `SSHArgs`, `String` |
-| `internal/remote/execcmd.go` | `ExecCommand` (non-interactive ssh builder), `ShellQuote`/`ShellQuotePath`, `sshControlSocket` |
-| `internal/remote/ssh.go` | `SSHTransport` (Exec/ExecStdin/scp upload), `commandArgs` |
-| `internal/remote/shell.go` | Interactive `ShellCommand` + the ssh option blocks (`sshFailFastArgs`, `sshKeepaliveArgs`) |
-| `internal/remote/connect.go`, `serve.go`, `provision.go` | Connect stages, detached server launch + tunnel, binary provisioning |
-| `internal/remote/portmap.go`, `workspace.go`, `sync.go` | `-L` forwards, remote workspace, credential sync payload |
-| `internal/server/remote_hosts.go` | The per-connection **registry** (workspaces + `registeredPaths`) |
-| `internal/server/handler_remote_work.go` | `remoteWorkFor` admission, `remoteGitCommand`, the **exec-slot pool** |
-| `internal/server/handler_remote_proxy.go` | `/api/remote/{host}/api/*` reverse proxy, profile stamping, project registration |
-| `internal/server/handler_remote_lifecycle.go` | status / connect / restart endpoints |
-| `internal/server/handler_remote_git*.go`, `handler_remote_fs.go`, `handler_remote_files.go` | Remote git + file endpoints |
+| `internal/remote/target.go` | `Target` (user/host/port/distro), `Validate`, `SSHArgs`, `ParseTarget`, `String` |
+| `internal/remote/ssh.go` | `SSHTransport`, `commandArgs` (the single argv builder), `Exec`/`ExecStdin` |
+| `internal/remote/shell.go` | `sshFailFastArgs`, keepalives, WSL/`wsl.exe` shell selection |
+| `internal/remote/execcmd.go` | Chooses ssh vs `wsl.exe` per target kind |
+| `internal/remote/wsl.go` | `wslExecArgs` / `wslInteractiveArgs`; WSL runs via `exec.Command("wsl.exe", …)` |
+| `internal/remote/connect.go`, `serve.go`, `workspace.go`, `provision.go` | Connect flow, server launch, binary upload/activate |
+| `internal/remote/sync.go` | `BuildSyncPayload` — credentials/config pushed to the host |
+| `internal/server/remote_hosts.go` | Connection registry: `remoteConnectionKey`, per-entry connect `sync.Cond` |
+| `internal/server/handler_remote_work.go` | `remoteGitCommand`, `remoteSafeSpec`, the exec slot pool |
+| `internal/server/handler_remote_proxy.go` | `HandleRemoteProxy` — the `/api/remote/{host}/…` entry |
 
-Also: `web/src/hooks/useSessionHost.ts` (`resolveSessionHost`) and
-`web/src/api/client.ts` (`remoteApiBase`) on the client side.
+## 2. The one invariant that matters most: connection identity
 
-## 1. Connection identity is user + host + port — never `Target.String()`
+**Identity is `user + host + port`. Never `Target.String()`** — `String()` is
+port-free, so keying anything on it silently merges two connections to the same
+host on different ports.
 
-**The rule.** `remote.Target.String()` returns `[user@]host` (or `wsl:<distro>`)
-and **deliberately omits the port**. That is correct for the *project identity*
-the store persists (`Project.Host` + a separate `RemotePort` field). It is the
-**wrong key for anything that caches a live connection.**
-
-Two projects on one host at different ports are two connections, two tunnels,
-two bearer tokens, two sshd `MaxSessions` budgets, two remote registrations.
-Keying any of them by `String()` silently makes one serve the other.
-
-The connection key appears in **three** places, in two packages:
-
-| Site | Key | Failure if it regresses |
+| Site | Helper | Anchor |
 |---|---|---|
-| `remoteConnectionKey(host, port)` — `internal/server/remote_hosts.go` | user+host+port | registry returns the wrong port's workspace (wrong token, wrong server) |
-| `sshControlSocket(t)` — `internal/remote/execcmd.go` | user+host+port | two ports share one `ControlPath`; ssh reuses a master **without verifying the destination**, so port 2222's commands run over port 22's connection |
-| `remoteSlotKey(t)` — `internal/server/handler_remote_work.go` | delegates to `remoteConnectionKey` | unrelated projects throttle each other's slots |
+| Registry / per-entry connect state | `remoteConnectionKey(host, port)` | `internal/server/remote_hosts.go:64` |
+| Exec slot pool | `remoteSlotKey(t)` → `remoteConnectionKey(t.String(), t.Port)` | `internal/server/handler_remote_work.go:405` |
+| Cross-package pin | `TestRemoteConnectionKeyAgreesWithMuxIdentity` | `internal/server/remote_hosts_test.go:1037` |
 
-`remoteSlotKey` **delegates** to `remoteConnectionKey` so the two cannot drift.
-`internal/remote` cannot import `internal/server`, so it exposes
-`SSHControlSocketIdentity`, and the agreement is pinned by
-`TestRemoteConnectionKeyAgreesWithMuxIdentity` in `internal/server/remote_hosts_test.go`.
+- `port <= 0` means "unspecified" and keys as the **bare host**. An unspecified
+  port is deliberately **not** equal to an explicit `22` — the safe direction is
+  more keys, never fewer.
+- WSL targets carry no port (`Validate` rejects one), so they also key as the
+  bare host.
+- **Two implementations exist on purpose:** `internal/server` imports
+  `internal/remote`, never the reverse. Change **both** or neither; the test
+  above is what stops them drifting.
+- Anything caching a workspace, socket, mutex, or "same connection?" decision
+  keys on this. Getting it wrong corrupts data *across* connections.
 
-**An unspecified port is deliberately NOT the same key as an explicit `:22`.**
-With no `-p`, ssh resolves the port from `~/.ssh/config`, which may remap the
-host's default away from 22. Folding "unspecified" into "22" would let a
-config-dialed connection share a master with an explicit `-p 22` command. More
-keys is the safe direction: splitting duplicates a master; merging runs commands
-on the wrong connection.
+## 3. ssh argv: two independent barriers
 
-Anything that asks *"have I already connected to this target?"* wants the
-connection key. Anything that asks *"is this the same project?"* wants
-`String()`.
+All non-interactive ssh goes through one builder, `commandArgs`
+(`internal/remote/ssh.go:114`):
 
-## 2. ssh argv invariants
+```go
+args := append(sshFailFastArgs(), s.Target.SSHArgs()...)
+return append(args, command)
+```
 
-- **`--` goes after `-p` and immediately before the destination.** ssh reads the
-  first non-option element as the hostname, so the reverse order makes it read
-  `-p` as the host. This lives inside `Target.SSHArgs()` so the ordering
-  invariant exists in one place, not per caller.
-- **A target beginning with `-` is rejected in BOTH `ParseTarget` and
-  `Validate`** — on the host *after* the `user@` split, and on the user. A
-  leading-dash token is parsed by ssh as an **OPTION**, which is a
-  local-command-execution primitive: verified against OpenSSH, an
-  `-oProxyCommand=…` host runs its command through a shell. Checking only the
-  whole string would miss `user@-oProxyCommand=…`, whose token starts with `-`
-  only after the user is prepended. `Validate` repeats the check because callers
-  that build a `Target` field-by-field from a request body never reach
-  `ParseTarget`.
-- **`BatchMode=yes` for every non-interactive path** (`sshFailFastArgs`), so a
-  cold connect fails fast instead of blocking on an invisible password prompt.
-  Interactive paths (`ShellCommand`, `ExecInteractive`) keep `-t` **without**
-  `BatchMode` so a real terminal can still prompt.
-- `scp` uses `-P` for the port where ssh uses `-p` (`scpFailFastArgs`).
+- `sshFailFastArgs()` (`internal/remote/shell.go:84`) = `-o BatchMode=yes` plus
+  keepalives. `BatchMode` stops ssh blocking on an invisible password/passphrase
+  prompt — without it a cold connect hangs the request goroutine forever,
+  because ssh falls back to `/dev/tty` even with a closed stdin.
+- `Target.SSHArgs()` (`internal/remote/target.go:83`) emits `-p <port>` **only
+  when `Port > 0`**, then `--`, then `t.String()`. The `--` lands **after**
+  every option, so a hostile host can never be read as an ssh flag.
 
-## 3. The exec-slot pool
+Two independent barriers, and you need both:
 
-- `remoteExecSlotsPerHost = 8` per **connection**: ssh execs share one
-  ControlMaster connection and sshd's `MaxSessions` (default 10) refuses new
-  sessions past it; 8 leaves headroom.
-- `remoteExecLongRunningSlotsPerHost = 6` is a **sub-cap**, not a second pool:
-  long-running work (remote shell commands, git network ops) is capped at 6 so
-  short-lived **foreground** work (git status, diff, file reads, shell probe)
-  always has room. Total concurrency still cannot exceed 8.
-- A long-running command is **refused at the sub-cap, not queued** — queueing
-  would let N long commands reclaim the whole pool as foreground work drains.
-  The refusal is a normal outcome and its message reaches the client in the
-  `error` field.
-- Rationale for the reserve: the `git_status` emitter polls every 10s per viewed
-  project, so a pool held entirely by long commands stales the whole Git panel
-  for that host while each starved poll burns its own 30s bound.
-
-## 4. Path spelling: the tilde / expanded mismatch class
-
-The **most recurring** remote bug family. Two spellings of one project circulate
-and silently disagree:
-
-- `projects.Add` **expands** `~` → `/home/user/www/x`
-- `projects.AddRemote` **keeps `~`** verbatim → `~/www/x` (the separator and `~`
-  belong to the remote shell)
-
-So the host's registry holds the expanded path while proxied requests arrive with
-the tilde form. The fingerprint: **two responses naming the same project
-differently in one round trip** (e.g. `/api/projects` reports
-`/home/.../x` while `/api/projects/sessions?path=~/www/x` 404s).
-
-The same root cause has surfaced as **three different HTTP failures on three
-endpoints**, each fixed in its own place:
-
-| Class | Endpoint | Resolution |
+| Barrier | Where | Rejects |
 |---|---|---|
-| 403 | terminal history / WS | host-side `projects.ExpandHome` in the `host == ""` branch |
-| 400 "unknown project" | git / fs / uploads | `resolveRegisteredProjectRoot` (verbatim first, `ExpandHome` fallback) |
-| 404 "project not found in saved list" | `/api/projects/sessions` | same helper, adopted by `HandleListProjectSessions` |
+| Leading-`-` on host/user | `Target.Validate` (`target.go:64`) **and** `ParseTarget` (`target.go:139`) | option injection at parse **and** at validate time |
+| `--` separator | `SSHArgs` (`target.go:83`) | anything that slips past the checks |
 
-Rules:
+`ExecInteractive` / `ShellCommand` intentionally do **not** use the fail-fast
+block — a real terminal must be able to prompt. Never add `BatchMode` there.
 
-- A handler that **lists by path** but never compares against a registry can
-  answer 200 for the project and 404 for its sessions in the same instant.
-- The **`?host=` branch must never expand** — a remote entry's path belongs to
-  another machine.
-- The fallback **narrows rather than widens**: unsaved paths and `~user` forms
-  still 404. Resolution only ever returns a *saved* project root.
-- **These fixes live on the HOST.** The failing comparison runs inside the
-  host's `ocode serve --remote`, so the fix takes effect only after a version
-  bump provisions the new binary (`EnsureBinary`). A newer local server cannot
-  compensate.
+## 4. The exec slot pool: two-phase admission
 
-## 5. Where the remote agent actually runs
+Per connection, from `remoteExecSlots` (`handler_remote_work.go:351`):
 
-**Remote-project chat runs on the HOST's `ocode serve --remote`**, not locally.
-`useChat.ts` passes `projectHost` to `api.chat`/`api.sendMessage`, and
-`fetchJSON` prefixes `/api/remote/{host}`. Only the proxy/tunnel is local.
+| Constant | Value | Meaning |
+|---|---|---|
+| `remoteExecSlotsPerHost` | 8 | Total concurrency (also the `sshd MaxSessions` budget) |
+| `remoteExecLongRunningSlotsPerHost` | 6 | Sub-cap for long-running work |
 
-- **Stale-comment trap:** comments on `projectHostFor`/`SetProjectHost` in
-  `agent_session.go` once claimed remote chat runs on the **local** server. That
-  is wrong. Ground truth is the client passing `projectHost` plus the proxy
-  prefix. Do not trust old comments asserting local execution.
-- **Profiles are stamped by the proxy, not synced.** `BuildSyncPayload` pushes
-  `auth.profiles.json` + `opencode.json` + `ocodeconfig.json` but **not**
-  `window-state.json`, and the remote launches without `OCODE_PROFILE`. So
-  `HandleRemoteProxy` reads `X-Window-Id` → `injectProxiedActiveProfile` strips
-  any client-supplied profile headers (a bare header is ignored — **no forge**)
-  then stamps `X-Ocode-Active-Profile` + `X-Ocode-Profile-Authoritative: 1`, or
-  `X-Ocode-Profile-Reset: 1` for Default. The remote's `applyProxiedActiveProfile`
-  consumes it from `HandleChat`/`HandleSendMessage`. Nothing is persisted on the
-  remote.
-- `resolveSessionProfile` precedence: `OCODE_PROFILE` > window profile > global
-  fallback. If a remote turn uses base keys, check the sync **and** whether the
-  window→profile mapping exists on the host.
+Admission is an **all-or-nothing pair**, and the order is the whole point
+(`acquireRemoteExecSlot`, `handler_remote_work.go:417`):
 
-## 6. Remote command construction is an injection surface
+1. **Long-running** takes the `long` token **first, non-blocking**. If the
+   sub-cap is full it is **refused immediately** — not queued. Queueing would
+   let N long commands reclaim the whole pool the instant foreground work
+   drained. The refusal is a normal outcome, not a transport fault.
+2. **Then both kinds block** for the whole-pool `all` token until one frees or
+   `ctx` ends. On `ctx` end the long-running path **hands the `long` token
+   back** before returning.
+3. The release closure drains `all`, and for long-running also `long`.
 
-`remoteGitCommand(dir, args...)` builds a **shell command line**
-(`cd "<dir>" && GIT_OPTIONAL_LOCKS=0 git <args…>`). It does **not** quote its
-arguments.
+So "refuse" and "queue" are both true, at different layers: the **sub-cap
+refuses**, the **pool queues**. Reserve is a sub-cap on the *same* pool, never
+a second pool. The reserve exists because the `git_status` emitter polls every
+10s per viewed project — a pool held entirely by long commands makes the whole
+Git panel go stale while every starved poll burns its own 30s bound.
 
-- **ANY free-form argument must be `remote.ShellQuote`d by the caller** — commit
-  message, stash message, ref, branch name. Unquoted, a message with `;` or
-  `$(...)` executes on the host.
-- **Pathspecs from `remoteSafeSpec` must NOT be pre-quoted** — they are already
-  metachar-free, and double-quoting breaks rev resolution.
-- Local mutations are unaffected: `gitRunInDir` passes argv straight to
-  `os/exec`, so quoting locally would embed literal quotes into the argument.
-- **Detach long-lived remote processes in a subshell.** `mkdir && nohup … &`
-  backgrounds the *whole* compound command, so the forked subshell waits on the
-  server and the ssh channel never closes (a ~10-minute connect-backstop 502).
-  The working shape is `mkdir DIR && (nohup BIN … </dev/null >LOG 2>&1 &); echo launched`.
+## 5. Project trust boundary
 
-## 7. Provisioning and versioning
+**A remote project's path must never enter a path-only local allowlist.**
 
-- `EnsureBinary` = upload → `ActivateAndVerify` (chmod + mv + `--version`).
-  Uploading without activating leaves `~/.ocode/bin/<ver>/.ocode.partial` and the
-  next stage exits 127 → 502 at stage `remote-connect`.
-- A fresh-server launch must return immediately; `StartFreshServer` blocks on
-  the ssh exec otherwise.
-- **Host-side behaviour only changes on a version bump.** Any fix whose failing
-  code runs on the host (path resolution, terminal admission) needs the new
-  binary provisioned before it takes effect. When debugging, check
-  `~/.ocode/remote/serve.json` and `~/.ocode/bin/<ver>/` on the host.
+- `allowedProjectRoots` (`internal/server/handler.go:626`) contains only the
+  workdir plus projects with `Host == ""`. Project identity is
+  `(host, path)` (+ port).
+- `resolveRegisteredProjectRoot` (`handler_git.go:136`) matches **verbatim
+  first**, then falls back to `ExpandHome`. The `?host=` branch keeps the exact
+  `(host, verbatim path)` match and **never expands** — a remote path is another
+  machine's filesystem.
+- Local and remote views of the same directory string stay distinct
+  (`TestSharedPathLocalAndRemoteStayDistinct`).
+- The `host` value is validated as ssh **destination syntax**; a leading `-`
+  would be a persisted local-command-execution primitive.
+- The remote token never reaches the browser; the proxy never consults
+  `allowedProjectRoots`.
+- Any new project-scoped endpoint must pick local-vs-remote mode **explicitly**.
 
-## 8. Doc index — read these, do not restate them
+Host-side `~` expansion belongs to the `host == ""` branch only
+(`handler_terminal.go:226`, `:728`) — expanding on the host side is a
+cross-machine path bug.
+
+## 6. Git over a remote connection
+
+Two complementary layers of the same function — don't merge them:
+
+| Layer | Owner | Rule |
+|---|---|---|
+| Lock/env | **`AGENTS.md` §"Git subprocesses: `gitexec`"** | leading `GIT_OPTIONAL_LOCKS=0` in `remoteGitCommand`; mutations via `remoteGitMutation` |
+| Quoting | `docs/gotchas/remote-git-shell-quoting.md` | see below |
+
+- `remoteGitCommand` (`handler_remote_work.go:527`) builds a **shell string**,
+  so quoting is the caller's job.
+- Any free-form argument (commit message, stash message, ref, branch) **must** be
+  wrapped in `remote.ShellQuote` by the caller.
+- A pathspec from `remoteSafeSpec` (`handler_remote_work.go:547`) **must not** be
+  pre-quoted — double-quoting breaks `^{commit}` rev resolution.
+- **Never** quote for the local `gitRunInDir` path: it's argv, no shell, so
+  quoting embeds literal `"` characters.
+
+## 7. Provisioning and launch (the three 502 causes)
+
+Fixed in-tree; each has a regression test (page in §9):
+
+1. **Upload must activate.** `ensureBinary` delegates to `EnsureBinary`
+   (upload → chmod/mv → `--version`). An uploaded-but-inactive binary leaves
+   `.ocode.partial` and the next stage exits 127.
+2. **Launch must detach in a subshell**:
+   `mkdir DIR && (nohup BIN … </dev/null >LOG 2>&1 &); echo launched`.
+   `A && nohup … &` backgrounds the *whole list*, so the ssh channel stays open
+   until the server dies and the connect times out.
+3. **Registration failure must call `remoteHosts.drop(host)`** — otherwise a
+   dead cached workspace makes every later request 502 until restart.
+
+`HandleRemoteProxy` resolves the saved project's `RemotePort` **server-side** and
+connects via `workspaceForPort(host, projectPath, remotePort)`. The web client
+sends **no** `host=`/`port=` query params for terminal history or the WS.
+
+### Terminal TAB LIST is local; terminal SHELLS are on the host
+
+These are two different things and conflating them caused a real bug:
+
+- The **shell** for a remote project's terminal is a pty child of the HOST's
+  `serve --remote`, reached through `/api/remote/{host}/api/terminal/*`. Shared
+  across every client, deliberately (it survives a laptop sleep or a desktop
+  restart).
+- The open-terminal **tab list** is state on the LOCAL server
+  (`GET/PUT /api/terminal-tabs` → `internal/termtabs`), keyed by the client's
+  `<host>::<path>` composite. It is NOT proxied — it describes what THIS server's
+  clients have open, so proxying it would be meaningless.
+
+A remote project's tab list was `localStorage`-only until 2026-09-30, so a
+terminal started in the desktop app showed an empty strip in a second browser
+even though the shell was running on the host the whole time. Session tabs had
+already been migrated server-side for the same reason; see `internal/tabs`' package
+doc. `GET /api/terminal?project_path=…` (the host's live-shell inventory) backs the
+sidebar reattach list and is a DIFFERENT question from the tab list — a shell that
+outlived its tab appears in the inventory but not in the strip.
+
+A terminal has ONE attachment slot even across clients: attaching the same
+`terminal_id` from a second client sends `{"type":"detached","reason":"superseded"}`
+on the first socket and closes it, and that client's panel parks with a **Take
+over** button rather than reconnecting. See `skills/ocode-web` (terminalStore) and
+`AGENTS.md`.
+
+## 8. Profile and credential routing
+
+Remote chat runs **on the host** (`ocode serve --remote`) — never locally.
+
+- `resolveSessionProfile` order: `OCODE_PROFILE` > window profile > global fallback.
+- The active profile is authoritative **only** when the local proxy stamps
+  `X-Ocode-Active-Profile` + `X-Ocode-Profile-Authoritative: 1`
+  (`injectProxiedActiveProfile`, `handler_remote_proxy.go:183`).
+  `applyProxiedActiveProfile` (`handler_profiles.go:218`) consumes it. A bare
+  client-supplied profile header is **ignored** — no forge. Nothing is persisted
+  on the remote.
+- `BuildSyncPayload` (`sync.go:57`) ships `auth.profiles.json` + `opencode.json`
+  + `ocodeconfig.json`, but **not** `window-state.json` — which is why the
+  profile must travel per-request rather than as synced state.
+- Remote and local projects must be prevented from sharing config: a
+  `web/src/api/client.ts` helper with an optional trailing `host` **must** be
+  given the session's remote host, or it silently writes the local server's
+  config and the toggle appears to do nothing.
+
+## 9. Bundle pages (link, don't duplicate)
 
 | Page | Owns |
 |---|---|
-| `gotchas/remote-connection-identity-includes-port.md` | The full §1 story + the 6-of-8 reserve |
-| `gotchas/remote-project-path-trust-boundary.md` | `(host, path)` identity, why remote paths are never local roots, the leading-`-` host rule |
-| `gotchas/remote-session-list-tilde-404.md` | The 404 class, the fingerprint, host-side-only fix, spinner ownership |
-| `gotchas/remote-session-config-host-routing.md` | Session-scoped config helpers must pass `host` ("toggle does nothing") |
-| `gotchas/remote-terminal-502-provisioning.md` | The three independent 502 causes (activation, launch detachment, `~` expansion) |
-| `gotchas/remote-terminal-custom-port-omitted.md` | **Frontend**: `TerminalPanel` omits `remotePort` from the live WS URL |
-| `gotchas/remote-ssh-chat-profile-not-applied.md` | Profile stamping via proxy headers |
-| `gotchas/remote-git-shell-quoting.md` | `ShellQuote` for remote git args + the pathspec exception |
-| `gotchas/tui-clipboard-remote-ssh-osc52.md` | TUI clipboard over a remote ssh pty |
-| `concepts/remote-mcp-oauth-compat.md` | MCP OAuth over a remote host (why the callback must run host-side) |
-| `concepts/web-session-host-scoping.md` | The `?host=` threading rule, client + server |
-| `AGENTS.md` §"Handler.mu is a map lock" | Locking rules for everything in `internal/server` |
-| `AGENTS.md` §"gitexec, never a bare exec.Command" | Bounded subprocesses; async `/api/chat`; emitter fan-out |
+| `docs/gotchas/remote-connection-identity-includes-port.md` | the identity invariant + its history (**untracked**; see §10) |
+| `docs/gotchas/remote-git-shell-quoting.md` | the quoting layer of `remoteGitCommand` |
+| `docs/gotchas/remote-project-path-trust-boundary.md` | allowlist boundary, ssh-destination validation |
+| `docs/gotchas/remote-session-list-tilde-404.md` | `resolveRegisteredProjectRoot` in list endpoints (**untracked**) |
+| `docs/gotchas/remote-ssh-chat-profile-not-applied.md` | profile stamping, `BuildSyncPayload` gap |
+| `docs/gotchas/remote-session-config-host-routing.md` | `host` threading in the web API client |
+| `docs/gotchas/remote-terminal-502-provisioning.md` | the three 502 causes above |
+| `docs/gotchas/tui-clipboard-remote-ssh-osc52.md` | `copyToClipboard` / OSC 52 |
+| `docs/concepts/remote-mcp-oauth-compat.md` | MCP credential bound to exact server URL |
+| `AGENTS.md` §885 | `gitexec`, `GIT_OPTIONAL_LOCKS=0`, `WithLockRetry` |
 
-## 9. Traps
+**TUI clipboard (page above):** never call `clipboard.WriteAll` from a TUI view —
+route every copy through `copyToClipboard` (`internal/tui/clipboard.go:26`), which
+emits OSC 52 via `tea.SetClipboard` and falls back to the local utility. Direct
+`clipboard.WriteAll` survives in exactly one place, `clipboard.go:39`. On a
+headless SSH host, direct calls silently do nothing. OSC 52 has no ack, so
+fallback errors are logged, never surfaced to the user.
 
-- **Do not "tidy" the unspecified-port key** to equal 22 — see §1.
-- **Do not compare remote project paths by string equality** without
-  `resolveRegisteredProjectRoot`, and never expand in the `?host=` branch.
-- **`Target.String()` as a cache key is the signature of this bug class.** Grep
-  for it before adding any new map keyed on a target.
-- Remote-project records are **persisted**, so an invalid target is a stored
-  payload that re-fires on every later connect — validate at both
-  `ParseTarget` and `Validate`.
+## 10. Known-bad page — do not trust
+
+**`docs/gotchas/remote-terminal-custom-port-omitted.md` is stale.** It describes
+`TerminalPanel` passing `remotePort`, which no longer exists in `web/src` (removed
+2026-09-18); its suggested fix would now be wrong, and its own test asserts the
+WS URL contains **no** `port=`. Port routing moved server-side (§7). Rewrite the
+page around proxy-side resolution or deprecate it — do not follow its guidance.
+
+Also: the identity page's frontmatter still says the registry is "still-unfixed"
+while its body and the code both document it as fixed, and it cites a test
+(`TestSSHControlSocketIdentityMatchesServerKey`) that does not exist — the real
+one is `TestRemoteConnectionKeyAgreesWithMuxIdentity` (§2).
+
+## 11. Quick greps
+
+- "How is a connection keyed?" → `grep -n "remoteConnectionKey\|remoteSlotKey" internal/server/`
+- "Where is the ssh argv built?" → `grep -n "commandArgs\|SSHArgs\|sshFailFastArgs" internal/remote/`
+- "Where is the pool cap?" → `grep -n "remoteExecSlotsPerHost\|acquireRemoteExecSlot" internal/server/handler_remote_work.go`
+- "What is in the local allowlist?" → `grep -n "allowedProjectRoots" internal/server/handler.go`
+- "Where does the proxy stamp the profile?" → `grep -n "injectProxiedActiveProfile" internal/server/handler_remote_proxy.go`
+- "Which routes are remote-proxied?" → `grep -n "api/remote" internal/server/server.go`
+- "Is this a remote or local path?" → check whether `host` is empty **before** touching any path allowlist
