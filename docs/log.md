@@ -38,6 +38,7 @@
 
 ## 2026-09-30
 
+* **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
 * **Creation**: Environment Prompt ([concepts/environment-prompt.md](/concepts/environment-prompt.md))
 * **Update**: Sandbox Permission Mode ([concepts/sandbox-permission-mode.md](/concepts/sandbox-permission-mode.md))
 * **Creation**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))

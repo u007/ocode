@@ -500,20 +500,6 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			SessionID: sessionID,
 		})
 	}
-	lspMgr := h.lspManagerFor(projectRoot)
-	var computerDriver tool.ComputerDriver
-	var computerDriverErr error
-	if effCfg != nil && effCfg.Ocode.ComputerUse.Enabled {
-		computerDriver, computerDriverErr = computer.New(h.computerSup)
-	}
-	tools := tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.scheduler, computerDriver, computerDriverErr)
-	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
-	ag.SetSessionID(sessionID)
-	// Replace the process-wide seed with THIS session's own advisor model and
-	// trigger set (pinning the current default if the session has none yet).
-	// effCfg may be a per-profile snapshot or a per-session copy, so without
-	// this the advisor would follow a global value the chat never chose.
-	ag.SetAdvisorConfig(h.advisorConfigSeed(sessionID))
 	// The agent's workdir comes from the registry entry's project root, not
 	// the process cwd — multi-project sessions run against their own repo
 	// (environment prompt, file-edit snapshots, permissions, discovery all
@@ -521,9 +507,31 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// dir", never the process cwd: the desktop .app launches with cwd "/", so
 	// leaving workDir empty made confinedPath resolve relative tool paths
 	// ("TODO.md") against "/" and reject them as outside the working directory.
+	//
+	// This normalisation is hoisted above every projectRoot consumer (the LSP
+	// manager, the cron tool) on purpose. It used to sit just above SetWorkDir,
+	// which meant everything built in between saw the RAW root — so a session
+	// with no project resolved its per-project cron engine against "", a
+	// different store directory from the default project's.
 	if projectRoot == "" {
 		projectRoot = h.workDir
 	}
+	lspMgr := h.lspManagerFor(projectRoot)
+	var computerDriver tool.ComputerDriver
+	var computerDriverErr error
+	if effCfg != nil && effCfg.Ocode.ComputerUse.Enabled {
+		computerDriver, computerDriverErr = computer.New(h.computerSup)
+	}
+	tools := tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.cronToolService(projectRoot), computerDriver, computerDriverErr)
+	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
+	ag.SetSessionID(sessionID)
+	// Replace the process-wide seed with THIS session's own advisor model and
+	// trigger set (pinning the current default if the session has none yet).
+	// effCfg may be a per-profile snapshot or a per-session copy, so without
+	// this the advisor would follow a global value the chat never chose.
+	ag.SetAdvisorConfig(h.advisorConfigSeed(sessionID))
+	// projectRoot was normalised to the server's own project dir above, before
+	// any consumer keyed off it.
 	ag.SetWorkDir(projectRoot)
 	// Apply this session's own persisted permission-mode override, if any, so
 	// every build path (bootstrap, profile reconcile, plugin reload) restores
@@ -2230,4 +2238,25 @@ func (h *Handler) loadSession(sessionID string) (*session.Session, error) {
 		return session.LoadForDir(e.ProjectRoot, sessionID)
 	}
 	return session.Load(sessionID)
+}
+
+// cronToolService picks the value handed to the tool registry as the cron engine.
+//
+// A per-project resolver wins, so the LLM `cron` tool manages the session's own
+// project's jobs. The single `scheduler` service is the fallback for a host that
+// never installed a per-project scope (and for tests that set that field
+// directly), which preserves the pre-existing single-project behaviour rather
+// than stripping the tool from those hosts.
+//
+// This is a fallback for a MISSING resolver, not for one that FAILS: a per-call
+// failure is surfaced to the model by the tool, because quietly using another
+// project's engine is the bug this whole path exists to fix.
+func (h *Handler) cronToolService(projectRoot string) any {
+	if h.cronServices != nil {
+		return &tool.ProjectCronService{Root: projectRoot, Resolve: h.cronServices}
+	}
+	if h.scheduler != nil {
+		return h.scheduler
+	}
+	return nil
 }

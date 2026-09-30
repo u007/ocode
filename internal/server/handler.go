@@ -74,6 +74,12 @@ type Handler struct {
 	cfg         *config.Config
 	rc          *RCBridge          // set when proxying to a TUI session
 	scheduler   *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	// cronServices resolves the cron engine for a project root, per call. It is
+	// installed by the Server (see Server.cronServiceResolver) so the LLM `cron`
+	// tool operates on the SESSION's project instead of the server's boot project.
+	// nil on a host that never installed a per-project scope, in which case the
+	// tool falls back to the single `scheduler` service above.
+	cronServices func(root string) (*scheduler.Service, error)
 	// sessions is the single authority for session ID → project root + agent
 	// lifecycle. Every session-scoped handler resolves through it, so sessions
 	// from any registered project load and run (no more cross-project 404s).

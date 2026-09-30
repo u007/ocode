@@ -107,7 +107,7 @@ func TestBrowseNavBridgedToBus(t *testing.T) {
 }
 ```
 
-**Test-helper note:** if `newTestServer` does not already exist in the `server` package tests, add a minimal one that mirrors how other `internal/server` tests build a `*Server` (grep existing `_test.go` for the constructor pattern — several call `New(...)` directly). It must return a `*Server` whose `handler.bus` is live (it is, because `NewEventBus()` runs in the handler constructor at `handler.go:281`). The `publishBrowseNav` helper is introduced in Step 3 so the test can drive emission deterministically without a real HTTP round-trip.
+**Test-helper note:** if `newTestServer` does not already exist in the `server` package tests, add a minimal one that mirrors how other `internal/server` tests build a `*Server` (grep existing `_test.go` for the constructor pattern — several call `New(...)` directly). It must return a `*Server` whose `handler.bus` is live (it is, because `NewEventBus()` runs in the handler constructor at `handler.go:287`). The `publishBrowseNav` helper is introduced in Step 3 so the test can drive emission deterministically without a real HTTP round-trip.
 
 - [ ] **Step 2: Run to verify it fails**
 

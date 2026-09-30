@@ -12,7 +12,7 @@ with idle agent eviction.
   (`internal/session/session.go:287 Load` → `GetStorageDir()` →
   `effectiveWorkDir()`), so sessions from other projects 404 on
   `GET /api/sessions/:id`, `.../context`, `POST .../message`
-  (`internal/server/handler.go:487, 552, 916`).
+  (`internal/server/handler.go:493, 552, 916`).
 - The persisted server-side project list already exists: `h.projects`
   (`internal/projects`), used by `HandleListProjects`.
 - Agent sessions are built per session in
@@ -63,7 +63,7 @@ with idle agent eviction.
   session belonging to a registered non-workdir project; 404 only for truly
   missing sessions. Wire the manager into `Handler`, replace
   `effectiveWorkDir()`-based lookup in the session-scoped handlers
-  (`handler.go:487, 552, 916` areas). `POST /api/chat` accepts a
+  (`handler.go:493, 552, 916` areas). `POST /api/chat` accepts a
   `project_path` field and calls `Register` for new sessions; the agent's
   workdir in `buildAgentSession` comes from the registry entry. Verify
   `go test ./internal/server/...`. Commit.

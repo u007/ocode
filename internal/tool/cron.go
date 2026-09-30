@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -9,10 +10,44 @@ import (
 	"github.com/u007/ocode/internal/scheduler"
 )
 
+// cronServiceResolver is satisfied by a host-supplied value that can hand out the
+// cron engine for ONE project root, resolved per call rather than captured once.
+type cronServiceResolver interface {
+	cronRoot() string
+	resolveCronService() (*scheduler.Service, error)
+}
+
+// ProjectCronService binds a project root to a resolver. Hosts pass one of these
+// as the `svc any` to InitBuiltinTools and the resulting `cron` tool acts on that
+// project instead of the server's boot project.
+//
+// Resolving on every call rather than capturing a service at build time is
+// deliberate: the per-project engines are stopped by an idle sweeper, so a
+// captured pointer would keep addressing a stopped engine for the rest of the
+// session's life. Re-resolving also keeps the project's entry warm.
+type ProjectCronService struct {
+	Root    string
+	Resolve func(root string) (*scheduler.Service, error)
+}
+
+func (p *ProjectCronService) cronRoot() string { return p.Root }
+
+func (p *ProjectCronService) resolveCronService() (*scheduler.Service, error) {
+	if p == nil || p.Resolve == nil {
+		return nil, errors.New("cron: no per-project scheduler resolver configured")
+	}
+	return p.Resolve(p.Root)
+}
+
 // newCronToolFromService resolves an `any` (passed through InitBuiltinTools to
 // avoid a tool ↔ scheduler import cycle) into a *CronTool wired to the
-// scheduler service. Returns nil if the value isn't a *scheduler.Service.
+// scheduler service. Returns nil if the value isn't a *scheduler.Service or a
+// per-project resolver.
 func newCronToolFromService(svc any) *CronTool {
+	// Project-scoped path: a host that can resolve an engine per project root.
+	if r, ok := svc.(cronServiceResolver); ok {
+		return &CronTool{resolve: r.resolveCronService, root: r.cronRoot()}
+	}
 	// Fast path: direct *scheduler.Service.
 	if s, ok := svc.(*scheduler.Service); ok {
 		return &CronTool{Service: s}
@@ -51,7 +86,40 @@ type cronServiceWrapper interface {
 // always-allowed, the agent turn that actually executes the prompt still goes
 // through the permission layer.
 type CronTool struct {
+	// Service is the single fixed engine, used by hosts that pass one directly.
+	// Mutually exclusive with resolve.
 	Service *scheduler.Service
+	// resolve yields the engine for this session's project on every call.
+	resolve func() (*scheduler.Service, error)
+	// root names the project in error messages; it is never used to look anything
+	// up directly, only to make a failure legible.
+	root string
+}
+
+// engine returns the cron engine this call must use, resolving per call when the
+// tool is project-scoped.
+//
+// A resolver failure is returned to the caller and is NEVER satisfied from
+// another project. Falling back to the boot project's engine would file a job
+// where the user is not looking, which is the bug project scoping exists to fix.
+func (t *CronTool) engine() (*scheduler.Service, error) {
+	if t == nil {
+		return nil, errors.New("cron: tool not initialised")
+	}
+	if t.resolve != nil {
+		svc, err := t.resolve()
+		if err != nil {
+			return nil, err
+		}
+		if svc == nil {
+			return nil, fmt.Errorf("cron: no scheduler engine for project %q", t.root)
+		}
+		return svc, nil
+	}
+	if t.Service == nil {
+		return nil, errors.New("cron: scheduler not attached (only available when running in serve/web/desktop hosts)")
+	}
+	return t.Service, nil
 }
 
 func (t *CronTool) Name() string { return "cron" }
@@ -136,8 +204,9 @@ func (t *CronTool) Definition() map[string]interface{} {
 }
 
 func (t *CronTool) Execute(args json.RawMessage) (string, error) {
-	if t == nil || t.Service == nil {
-		return "", fmt.Errorf("cron: scheduler not attached (only available when running in serve/web/desktop hosts)")
+	svc, err := t.engine()
+	if err != nil {
+		return "", err
 	}
 	var p struct {
 		Action    string                   `json:"action"`
@@ -162,7 +231,7 @@ func (t *CronTool) Execute(args json.RawMessage) (string, error) {
 
 	switch strings.ToLower(p.Action) {
 	case "list":
-		jobs := t.Service.ListJobs()
+		jobs := svc.ListJobs()
 		out, _ := json.MarshalIndent(map[string]any{
 			"count": len(jobs),
 			"jobs":  jobs,
@@ -190,7 +259,7 @@ func (t *CronTool) Execute(args json.RawMessage) (string, error) {
 				PermMode:  p.PermMode,
 			},
 		}
-		id, err := t.Service.AddJob(job)
+		id, err := svc.AddJob(job)
 		if err != nil {
 			return "", fmt.Errorf("cron: add: %w", err)
 		}
@@ -200,7 +269,7 @@ func (t *CronTool) Execute(args json.RawMessage) (string, error) {
 		if p.ID == "" {
 			return "", fmt.Errorf("cron: 'id' is required for remove")
 		}
-		if err := t.Service.RemoveJob(p.ID); err != nil {
+		if err := svc.RemoveJob(p.ID); err != nil {
 			return "", fmt.Errorf("cron: remove: %w", err)
 		}
 		return fmt.Sprintf("removed job %s", p.ID), nil
@@ -209,7 +278,7 @@ func (t *CronTool) Execute(args json.RawMessage) (string, error) {
 		if p.ID == "" {
 			return "", fmt.Errorf("cron: 'id' is required for describe")
 		}
-		j := t.Service.GetJob(p.ID)
+		j := svc.GetJob(p.ID)
 		if j == nil {
 			return "", fmt.Errorf("cron: job %s not found", p.ID)
 		}

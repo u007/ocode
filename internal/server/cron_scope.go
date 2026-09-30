@@ -51,6 +51,23 @@ type cronProjectEntry struct {
 	mu         sync.Mutex
 	svcs       *cronProjectServices
 	lastUsedNs atomic.Int64
+	// pinned exempts this entry from IDLE eviction. The default project's entry is
+	// pinned because its engines are the HOST's, not this scope's: they carry the
+	// Telegram drainer sink and the RC-bridge fan-out the host attached, and
+	// nothing re-seeds the entry after boot. Evicting it stops those engines and
+	// lets the next resolve start a twin without that wiring, so delivery would
+	// never come back.
+	//
+	// It is an atomic rather than a plain bool because the writer
+	// (`setCronScopeConfig`) holds the ENTRY's mutex while the reader
+	// (`evictIdleCronProjects`) holds the REGISTRY's, and this file's lock order is
+	// entry.mu -> scope.mu, so the eviction loop cannot take entry.mu to read it
+	// without inverting that order. `lastUsedNs` above is atomic for the same
+	// reason.
+	//
+	// Pinned is NOT an exemption from shutdown: `stopAllCronServices` stops every
+	// entry regardless, so a restart does not leak a run loop per boot.
+	pinned atomic.Bool
 }
 
 // cronProjectServices is everything one project owns. The three leaf stores are
@@ -322,6 +339,9 @@ func (s *Server) setCronScopeConfig(cfg *config.Config, notifier reminders.Notif
 		runs:      schedulerRuns,
 		targets:   schedulerTargets,
 	}
+	// This is the host's own engine pair, carrying the delivery sinks it attached,
+	// so it must outlive the idle sweeper. See cronProjectEntry.pinned.
+	entry.pinned.Store(true)
 	entry.touch()
 	entry.mu.Unlock()
 }
@@ -395,6 +415,13 @@ func (s *Server) evictIdleCronProjects() {
 
 	scope.mu.Lock()
 	for key, e := range scope.entries {
+		// A pinned entry (the host-seeded default project) keeps its engines for
+		// the life of the process — see cronProjectEntry.pinned. Everything else is
+		// reclaimable, because this scope started those engines itself and their
+		// stores are on disk.
+		if e.pinned.Load() {
+			continue
+		}
 		if e.idleFor(now) <= cronProjectIdleTimeout {
 			continue
 		}
@@ -438,6 +465,28 @@ func (s *Server) stopAllCronServices() {
 		e.svcs.stop()
 		e.svcs = nil
 		e.mu.Unlock()
+	}
+}
+
+// cronServiceResolver returns the per-project cron resolver for the LLM `cron`
+// tool, so a chat's agent manages THAT project's jobs rather than the server's
+// boot project's.
+//
+// It resolves on every call for the same reason the tool does not capture a
+// service: the engines are stopped by the idle sweeper, so a captured pointer
+// would outlive its engine. Resolution failures are returned, never satisfied
+// from another project — silently using the boot project's engine is the exact
+// bug this closes.
+func (s *Server) cronServiceResolver() func(root string) (*scheduler.Service, error) {
+	return func(root string) (*scheduler.Service, error) {
+		svcs, err := s.servicesFor(root)
+		if err != nil {
+			return nil, err
+		}
+		if svcs == nil || svcs.cron == nil {
+			return nil, fmt.Errorf("cron: no engine for project %q", root)
+		}
+		return svcs.cron, nil
 	}
 }
 

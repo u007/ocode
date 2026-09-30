@@ -126,7 +126,7 @@ Authoritative fields, embedded in `sessionStateResponse` from `SessionManager.St
 
 ## 7. Server: Manual Path
 
-The manual `/compact` endpoint handler (`HandleCompactSession`, `internal/server/handler.go:1779`):
+The manual `/compact` endpoint handler (`HandleCompactSession`, `internal/server/handler.go:1785`):
 
 1. Acquire the per-session agent lock (the lock that serializes turns and splices for that session).
 2. Only after acquiring it, call `beginCompaction`: **increment the counter** under the session manager lock (records `started_at` and bumps `compactionGeneration` on the 0→1 transition), then emit `compaction_started {started_at, generation}` (shared first-pass timestamp and unchanged generation when joining a group).
@@ -151,7 +151,7 @@ Registering the pass only after lock acquisition means a queued-but-not-yet-star
 
 ## 8. Server: Automatic Path
 
-Wire the existing agent callbacks (`wireCompactCallbacks`, `internal/server/agent_session.go:1975`):
+Wire the existing agent callbacks (`wireCompactCallbacks`, `internal/server/agent_session.go:1983`):
 
 - `Agent.OnCompactStart` → `beginCompaction`: increment the counter + emit `compaction_started {started_at, generation}` (first-pass timestamp/generation if this starts the group, otherwise the group's existing values). A legacy/internal path that has no registered lifecycle row is registered on the spot so the state is still authoritative (`compaction_events.go:26`).
 - `Agent.OnCompact` (terminal callback, via `applyCompactResult`) → **always retire the pass — decrement the counter — independently of transcript application** (a `defer` runs even for malformed/stale results), then emit `compaction_done {ok, error?, generation}` only if the counter hit zero (with the aggregate error).

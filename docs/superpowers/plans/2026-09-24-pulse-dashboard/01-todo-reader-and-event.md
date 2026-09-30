@@ -29,7 +29,7 @@ reader keyed by project root + session id. No SSE event exposes todos today.
   in the allowed event set; do NOT add it to `liveFrameEvents`
   (`session_manager.go:130` area) — not replayed, same as `agent_activity`.
 - Modify: `internal/server/tui_status.go` — add wire type `TodoUpdatedEvent`.
-- Modify: `internal/server/handler.go:777-800` — publish after `tool_result`
+- Modify: `internal/server/handler.go:783-806` — publish after `tool_result`
   when the tool is `todowrite`.
 - Test: `internal/server/todo_updated_event_test.go` (new).
 
@@ -63,7 +63,7 @@ reader keyed by project root + session id. No SSE event exposes todos today.
   todo file on disk; subscribe to the bus; expect one `todo_updated` with
   matching counts. Second case: a non-todo tool → no `todo_updated`.
 - [x] Run `go test ./internal/server -run TestTodoUpdatedEvent` → FAIL.
-- [x] **Implement**: in the message loop at `handler.go:777`, keep a
+- [x] **Implement**: in the message loop at `handler.go:783`, keep a
   per-batch map of `ToolCall.ID → name` from assistant messages; when a
   `tool` message's `ToolID` maps to `todowrite`, call `ReadTodoSummary`
   with the session's project root and publish `todo_updated` via

@@ -60,7 +60,7 @@ windows below are gated by different ones:
 
 - no active turn (`turnActive`);
 - **no turn job in flight** — the per-session turn lock (`h.turnLocks[id]`,
-  `agent_session.go:1271-1286`) can be taken. `executeTurnJob` holds that lock for its whole
+  `agent_session.go:1279-1294`) can be taken. `executeTurnJob` holds that lock for its whole
   duration (persist → bootstrap → turn), so it is the only probe that covers the
   pre-`turnActive` window; the agent lock is *not* held there.
 - **not parked on an ask** — the per-session agent lock can be taken **or no resident agent
@@ -74,7 +74,7 @@ both verified in source, both fixed by the gate above:
 
 | Window | Why the naive rule fires | Fix |
 |---|---|---|
-| `executeTurnJob` (`agent_session.go:1358-1386`) persists the user row and closes `persistAck` (the caller's 202) **before** bootstrap and before `runTurn` sets `turnActive` (`:828`); `as.mu` is not taken until `runTurn` (`:798`) | tail = user row, no ask, `turn_active:false` → "interrupted" on **every** normal send to a session with no resident agent | probe the **session turn lock**, which the job holds for its whole duration |
+| `executeTurnJob` (`agent_session.go:1366-1394`) persists the user row and closes `persistAck` (the caller's 202) **before** bootstrap and before `runTurn` sets `turnActive` (`:828`); `as.mu` is not taken until `runTurn` (`:798`) | tail = user row, no ask, `turn_active:false` → "interrupted" on **every** normal send to a session with no resident agent | probe the **session turn lock**, which the job holds for its whole duration |
 | `HandleAnswerQuestion` (`handler_questions.go:246-296`) holds `as.mu` and persists the answer at `:270`; `setTurnActive(true)` only at `:277` | same tail shape as the real bug, on the healthy path | the **agent-lock** probe fails while `as.mu` is held → busy |
 
 `livePendingAsks` (`handler_session_state.go:106-116`) collapses *"TryLock failed (busy)"* and
@@ -147,7 +147,7 @@ Both go through §3.1, so the rule cannot drift.
   action there. No suppression marker (would be speculative complexity).
 - **Failed bootstrap**: when the agent cannot be built, the job exits with the user row as the
   tail and the message left pending for retry (`h.sessions.PushPending`,
-  `agent_session.go:1385`), so an idle session reads as interrupted. The message is right
+  `agent_session.go:1393`), so an idle session reads as interrupted. The message is right
   ("no reply arrived"), but check the pending-message semantics before shipping: if a queued
   message already means work is in flight, exclude sessions with a pending message from the
   gate so Continue cannot double-queue alongside the retry.

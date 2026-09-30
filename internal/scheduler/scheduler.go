@@ -116,6 +116,20 @@ func (s *Service) Stop() {
 	s.stopDrainer()
 }
 
+// Stopped reports whether the service's scheduling loop is not running. It is
+// true for a service that was never started as well as one that has been stopped.
+//
+// This exists because `Stop` leaves no other public trace: a stopped engine and a
+// live one are indistinguishable from outside the package, yet a host that
+// forgets to stop one leaks a goroutine and a drainer per restart. It also lets a
+// test assert that shutdown genuinely stopped an engine instead of asserting on
+// registry bookkeeping that is cleared regardless.
+func (s *Service) Stopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.started
+}
+
 func (s *Service) stopDrainer() {
 	if s.Drainer != nil {
 		s.Drainer.Stop()

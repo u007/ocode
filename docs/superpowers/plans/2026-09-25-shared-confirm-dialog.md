@@ -958,7 +958,7 @@ onClick={(e) => {
 />
 ```
 
-Copy note: `Service.RemoveJob` (`internal/scheduler/scheduler.go:344`) only splices the job from its list and persists — it does NOT delete run history, so the copy must not claim it does.
+Copy note: `Service.RemoveJob` (`internal/scheduler/scheduler.go:358`) only splices the job from its list and persists — it does NOT delete run history, so the copy must not claim it does.
 
 - [x] **Step 4: Run the test to verify it passes**
 

@@ -27,7 +27,7 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
   `buildPulseRows(inputs, scope, now) []PulseRow`,
   `pagePulseRows(rows, cursor, limit) ([]PulseRow, string, error)`.
 - `scope=all` disk source: the same session-listing path used by
-  `GET /api/sessions` (`handler.go:1036`) — must NOT call the per-project
+  `GET /api/sessions` (`handler.go:1042`) — must NOT call the per-project
   list endpoint per project (see `docs/gotchas/web-all-sessions-dialog-slow.md`).
   Parent id for child detection comes from session refs (same source the
   web uses to hide children in `SessionDialog.tsx:42`).

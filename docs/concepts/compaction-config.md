@@ -60,7 +60,7 @@ So the semantics of an explicit `0` **for the two timeouts** are *"use the runti
 
 ```
 web /compact  →  POST /api/sessions/{id}/compact  (server.go:334)
-  → HandleCompactSession (handler.go:1865)
+  → HandleCompactSession (handler.go:1871)
   → Agent.CompactWithFocus → runCompact (agent.go:2625)
        resolveCompactRuntime → chunkMiddleByBudget (batches)
        operationCtx = newCompactOperationContext()   ← fixed 30-min cap
@@ -78,7 +78,7 @@ Key properties (all implemented, tested):
 1. **Fresh inactivity context per batch** — `agent.go:2726` constructs the window *inside* the batch loop, so batch N gets a full deadline instead of the residual of batch N-1 (`TestRunCompactGivesEachBatchFreshTimeout`).
 2. **First-token window, then idle window** — `inactivityContextWithParent` (`compact.go:1058`) starts at `initial` (first-token timeout) and, after the first delta-driven `reset()`, switches to `idle` (`summary_timeout_seconds`) for subsequent gaps (`TestInactivityContextGivesFirstTokenItsOwnWindow`). Retries within a single batch share that batch's first-token window; the first successful streamed token switches that batch to the configured idle timeout, and a new batch gets a new first-token window.
 3. **Fixed 30-minute overall cap** — `compactOverallCap = 30 * time.Minute` (`compact.go:164`, a var so tests can shorten it) bound via `context.WithTimeoutCause(..., ErrCompactionTimeout)` (`compact.go:183`). It is an *operation* bound, not an idle bound: per-batch contexts are its children, so a batch that is **still receiving tokens** is aborted at the cap (`TestRunCompactOverallCapStopsAnActiveBatch`).
-4. **No partial mutation** — `runCompact` returns `CompactResult{OK:false, Err}` before any splice; `HandleCompactSession` only rewrites `as.messages` when `result.OK` (the `!result.OK` early return is `handler.go:1915`, the splice `handler.go:1947-1953`). Failed compaction leaves the transcript byte-identical (asserted by `TestCompactSessionTimeoutReturns504AndLeavesTranscriptUnchanged`).
+4. **No partial mutation** — `runCompact` returns `CompactResult{OK:false, Err}` before any splice; `HandleCompactSession` only rewrites `as.messages` when `result.OK` (the `!result.OK` early return is `handler.go:1921`, the splice `handler.go:1953-1959`). Failed compaction leaves the transcript byte-identical (asserted by `TestCompactSessionTimeoutReturns504AndLeavesTranscriptUnchanged`).
 
 ## 3. Delta-callback ownership
 
@@ -101,22 +101,22 @@ The same change also closes the **other** side of the race the 2026-09-25 fix co
 
 **`drainBufferedSummary` must only be called once `ctx.Done()` has already fired**, which is its sole call site. With a still-live context and an empty channel it returns `("", nil)` — `summaryContextErr` reports nothing to cancel — so a caller reaching it on a live context would read "no summary yet" as "no cancellation" and treat an empty string as a successful summary. `usableSummary` is deliberately conservative: it rejects a transport error, an error delivered alongside content, and content that is empty, whitespace-only, or missing required template sections — returning a malformed summary from the drain would bypass the retry the normal path would still have performed (`compact.go:849`). A summary that has not landed when the cancel fires is genuinely unavailable, and a buffered transport error loses to the cancellation cause, which explains more.
 
-`HandleCompactSession` (`handler.go:1865`) classifies **by sentinel identity only**, never by message text or by "is this a `context.Canceled`":
+`HandleCompactSession` (`handler.go:1871`) classifies **by sentinel identity only**, never by message text or by "is this a `context.Canceled`":
 
 | Condition | Status | Response written? | Notes |
 |---|---|---|---|
-| Session not found | 404 | yes | `handler.go:1868` |
-| Compaction disabled in config | 422 | yes | `!enabled` at `handler.go:1910-1914` |
-| Nothing to compact (`!OK`, `Err == nil`) | 422 | yes | `handler.go:1942-1944` |
-| `errors.Is(Err, ErrCompactionTimeout)` (batch idle/first-token expiry **or** 30-min cap) | **504** | yes, **if the request ctx is alive** | `"compaction timed out; transcript unchanged; retry the command"` (`handler.go:1929`); disconnect check at `:1926-1928` |
-| Request already cancelled / client gone (`r.Context().Err() != nil`) | — | **no** | logged + `finish()` only; the client has disconnected, writing is pointless (timeout branch clears the banner at `handler.go:1919-1928`, otherwise `handler.go:1932-1936`) |
-| Any other error, request alive | 500 | yes | `handler.go:1937-1940`; includes bare `context.Canceled` that is *not* the sentinel |
+| Session not found | 404 | yes | `handler.go:1874` |
+| Compaction disabled in config | 422 | yes | `!enabled` at `handler.go:1916-1920` |
+| Nothing to compact (`!OK`, `Err == nil`) | 422 | yes | `handler.go:1948-1950` |
+| `errors.Is(Err, ErrCompactionTimeout)` (batch idle/first-token expiry **or** 30-min cap) | **504** | yes, **if the request ctx is alive** | `"compaction timed out; transcript unchanged; retry the command"` (`handler.go:1935`); disconnect check at `:1926-1928` |
+| Request already cancelled / client gone (`r.Context().Err() != nil`) | — | **no** | logged + `finish()` only; the client has disconnected, writing is pointless (timeout branch clears the banner at `handler.go:1925-1934`, otherwise `handler.go:1938-1942`) |
+| Any other error, request alive | 500 | yes | `handler.go:1943-1946`; includes bare `context.Canceled` that is *not* the sentinel |
 | Success | 200 | yes | original/compacted lengths |
 
 Two classification gotchas, both intentional:
 
 - **After the split, a "timed out" message implies the sentinel class — but keep classifying by `errors.Is`.** `summaryContextErr` labels the sentinel class `timed out` and every other cause `cancelled`, so a `compact: summary timed out:` string now reliably corresponds to `ErrCompactionTimeout`; the old mislabel (a plain `context.Canceled` reported as a timeout) is gone. Because all four dead-context sites now share one rule, the message agrees with the class in **both** directions — the retry-backoff wait used to be the counter-example, wrapping any cause as `compact: context cancelled during retry` even when it was the sentinel, but it too goes through `summaryContextErr` (`compact.go:819-820`) now. Treat that agreement as informational, not load-bearing: text is not the contract, it is trivially editable, and it says nothing about causes that arrive as `lastErr` (transport failures, `compact: empty summary response`) which are not classified at all. Only `errors.Is` yields 504.
-- **Bare cancellation ≠ timeout.** A request disconnect or any non-sentinel cancellation must **not** become 504 (`handler.go:1932-1936` logs `"compaction request cancelled"` and writes nothing). Pre-existing 404/422 mappings are unchanged.
+- **Bare cancellation ≠ timeout.** A request disconnect or any non-sentinel cancellation must **not** become 504 (`handler.go:1938-1942` logs `"compaction request cancelled"` and writes nothing). Pre-existing 404/422 mappings are unchanged.
 
 The transcript is never mutated on any of the failure rows, and `compaction_done` still fires with `ok:false` + the error via `finishCompaction` so clients reconcile.
 
@@ -133,7 +133,7 @@ Because a failed pass leaves the transcript untouched (§2 property 4), the cont
 ### Backend latch (`internal/agent`)
 
 - `Agent.compactFailed` (atomic.Bool, `internal/agent/agent.go:689-699`) latches **ON** when a pass returns a non-nil `CompactResult.Err` and **OFF** when a pass returns `OK: true` — both recorded by `recordCompactOutcome` (`agent.go:2172-2179`). A pass with `OK=false, Err=nil` (the "nothing to compact" short-circuit, §4's 422 row) does **not** touch the latch — otherwise a session that briefly had no compactible middle would silently lose auto-compaction forever.
-- While latched, `MaybeCompactAsync` (`agent.go:2123`) declines (returns false) after the enabled gate, logging `skipped: auto-compaction stopped after a failed pass; run /compact to retry` (`agent.go:2134-2137`). That single gate covers **every** auto trigger: the TUI `askAgent` pre-flight (`internal/tui/model.go:15375`), the TUI post-turn stream-done check (`model.go:5215`), the server's post-turn checks (`internal/server/agent_session.go:1286`, `handler_sse.go:294`), and the permission/question continuations (`handler_permissions_resolve.go:368`, `handler_questions.go:333`).
+- While latched, `MaybeCompactAsync` (`agent.go:2123`) declines (returns false) after the enabled gate, logging `skipped: auto-compaction stopped after a failed pass; run /compact to retry` (`agent.go:2134-2137`). That single gate covers **every** auto trigger: the TUI `askAgent` pre-flight (`internal/tui/model.go:15375`), the TUI post-turn stream-done check (`model.go:5215`), the server's post-turn checks (`internal/server/agent_session.go:1294`, `handler_sse.go:294`), and the permission/question continuations (`handler_permissions_resolve.go:368`, `handler_questions.go:333`).
 - `Agent.CompactFailed() bool` (`agent.go:2184-2186`) exposes the latch so a UI can explain why the session stopped compacting instead of leaving the user to guess.
 - **Re-arm:** any successful pass clears the latch (`recordCompactOutcome`, called from the async result path `agent.go:2233`, the panic/abort fallback `agent.go:2227`, and the synchronous manual paths `Compact`/`CompactWithFocus` at `agent.go:2281`/`:2295`). A manual `/compact` additionally re-arms unconditionally: `CompactAsync` → `startCompactAsync(force=true)` stores `false` (`agent.go:2209`) **after** the "no LLM client" and `compactMu.TryLock` guards (`agent.go:2194-2201`) — deliberately after them, so a `/compact` that could not start does not resume the loop it was meant to escape. The panic/abort fallback inside `startCompactAsync` (`agent.go:2221-2230`) latches instead, since that pass did not shrink the context either. The web/desktop HTTP path (`CompactWithFocus`, `agent.go:2288-2296`) records its outcome the same way, so a successful manual pass clears the latch there too.
 

@@ -87,7 +87,7 @@ dedupes by `request_id`, so an ask already set by the merge is unaffected.
 ### 3. Client: 409 error triggers live-state hydration
 
 `web/src/hooks/useChat.ts` — when `api.sendMessage` fails with HTTP 409
-(`ErrPermissionPending` from `run_states.go:20` → `handler.go:863`), the catch
+(`ErrPermissionPending` from `run_states.go:20` → `handler.go:869`), the catch
 block calls `hydratePendingAsks()` which fetches session state via
 `api.getSessionState` and dispatches `PERMISSION_REQUEST` / `QUESTION_REQUEST`
 for each pending ask, opening the dialog.

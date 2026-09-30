@@ -38,7 +38,7 @@ Four decisions were taken explicitly, and each constrains the rest of the design
 
 ## 3. Seam: the judge rides the execution context
 
-`internal/tool` cannot import `internal/agent` (the agent imports the tool package), and the built-ins are constructed by the *host*, not by the agent — `internal/server/agent_session.go:509` and `internal/tui/model.go:2244` both call `tool.InitBuiltinTools*` and then hand the resulting slice to `agent.NewAgent`.
+`internal/tool` cannot import `internal/agent` (the agent imports the tool package), and the built-ins are constructed by the *host*, not by the agent — `internal/server/agent_session.go:525` and `internal/tui/model.go:2244` both call `tool.InitBuiltinTools*` and then hand the resulting slice to `agent.NewAgent`.
 
 Two candidate seams were considered.
 

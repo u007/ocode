@@ -5,7 +5,7 @@ description: Persistent, disk-backed cron engine + headless agent dispatcher for
 tags: [scheduler, cron, dispatch, agent, automation]
 status: active
 created: 2026-07-17
-timestamp: 2026-09-29T17:41:41Z
+timestamp: 2026-09-30T14:23:10Z
 ---
 # Scheduled Jobs / Cron Dispatch
 
@@ -131,6 +131,78 @@ svc.UpdateJob(id, scheduler.JobPatch{Schedule: &newSchedule, Name: strPtr("weekd
 resolve)` for hosts that want to forward cron results to a Telegram chat
 (see `internal/telegram/bot.go::PushCronResult`).
 
+### LLM `cron` tool — scoped to the session's project
+The REST surface was already per project; the LLM-facing `cron` tool was not.
+`buildAgentSession` injected one process-wide `scheduler.Service`
+(`h.scheduler`, keyed on the server's boot directory) into every agent's tool
+set, so `cron add` from a chat in any project filed the job in the boot
+project's store — the last unscoped path into the same data.
+
+How it works:
+
+- `Handler` has a `cronServices func(root string) (*scheduler.Service, error)`
+  field (`internal/server/handler.go`), installed by `Server.SetScheduler`,
+  which builds it from `Server.cronServiceResolver()`
+  (`internal/server/cron_scope.go`).
+- `buildAgentSession` normalises `projectRoot` (`"" -> h.workDir`) BEFORE any
+  consumer keys off it. This ordering is load-bearing and was a real trap: the
+  normalisation used to sit just above `SetWorkDir`, so the LSP manager and the
+  cron tool — built in between — saw the RAW root. A session with no project
+  would resolve its engine against `""`, a different store directory from the
+  default project's.
+- The tool registry receives a `tool.ProjectCronService{Root, Resolve}`
+  (`internal/tool/cron.go`) rather than a service. It is still passed through
+  the existing `svc any` indirection, which exists to avoid a tool ↔ scheduler
+  import cycle.
+- **The tool resolves on EVERY `Execute`, not once at build time.** This is
+  deliberate: the per-project engines are stopped by an idle sweeper after 30
+  minutes (next subsection), so a captured service pointer would keep
+  addressing a stopped engine for the rest of the session's life.
+  Re-resolving per call also keeps the project's registry entry warm.
+- **A resolution failure is surfaced to the model and is never satisfied from
+  another project.** Falling back to the boot project's engine would file a job
+  where the user is not looking — the exact bug being fixed. The ONLY fallback
+  is for a host that has no per-project scope at all (it hands the tool a bare
+  `*scheduler.Service`), which keeps the previous single-service behaviour; a
+  host with no scheduler still gets no `cron` tool in its tool set (the
+  existing `if svc != nil` registration rule is unchanged).
+
+Tests: `internal/server/cron_tool_scope_test.go` — project isolation of
+tool-created jobs, the `"" -> h.workDir` fallback, the no-fallback-on-error
+rule, per-call re-resolution after a project's engines were reclaimed,
+omission when no scheduler is attached, and the `SetScheduler` wiring.
+
+### Host-seeded default project entry is pinned against idle eviction
+`SetScheduler` seeds the default project's registry entry with the HOST's own
+engines rather than letting the scope start its own, because those engines
+already carry the Telegram drainer sink and the RC-bridge fan-out.
+
+The idle sweeper (`evictIdleCronProjects`, `cronProjectIdleTimeout` = 30 min,
+both in `internal/server/cron_scope.go`) originally had no exemption for that
+entry. It stopped the host's engines ~30 minutes after launch, and the next
+resolve lazily started a replacement WITHOUT those sinks — the precise outcome
+the seeding code's comment warns against. Since nothing re-seeds after boot,
+Telegram and RC delivery for the boot project died permanently and silently.
+
+The fix: `cronProjectEntry.pinned`. Two non-obvious points:
+
+- **It is an `atomic.Bool`, not a plain bool**, because the writer
+  (`setCronScopeConfig`) holds the ENTRY's mutex while the sweeper holds the
+  REGISTRY's, and this file's lock order is `entry.mu -> scope.mu` — so the
+  sweeper cannot take `entry.mu` to read the flag without inverting that order.
+  (`lastUsedNs` is atomic for the same reason.)
+- **Pinned exempts an entry from IDLE eviction ONLY.** `stopAllCronServices`
+  still stops pinned entries, otherwise every server restart would leak a run
+  loop and a drainer.
+
+`scheduler.Service` gained a `Stopped()` accessor because `Stop()` otherwise
+leaves no public trace, making a stopped engine indistinguishable from a live
+one.
+
+Tests: `internal/server/cron_scope_eviction_test.go` — the pinned default entry
+survives idle eviction and is still the SAME engine (not a replacement), other
+projects are still reclaimed, and shutdown still stops it.
+
 ## File map
 | File | Purpose |
 |------|---------|
@@ -214,7 +286,7 @@ own run loop, and its own mutex.
 ### Why a separate store and engine, not a `kind` field on `scheduler.Job`
 Because `executeJob` hardcodes *delete on `KindAt` fire*: when a one-shot `at`
 job runs, the engine removes it from the store
-(`internal/scheduler/scheduler.go:291-292`, `case KindAt:` →
+(`internal/scheduler/scheduler.go:305-306`, `case KindAt:` →
 `s.removeJobLocked(j.ID)`). A reminder is one-shot by definition, so modelling
 it as an `at` job would erase the record on the very first fire — exactly the
 record the user opened the Cron tab to see (fired time, status, outcome).
@@ -352,9 +424,9 @@ no new plumbing:
 sink previously DROPPED any delivery whose `JobID` was not in the cron store —
 which would have silently lost every reminder push (visible locally in the
 Outbox panel, lost remotely). It now recognises a `"reminder:"`/`"task:"` id
-via `isReminderDeliveryID` (`internal/server/scheduler.go:482`; gate at
-`scheduler.go:462`) and resolves it with a **synthetic Job** carrying the
-delivery's `Owner` as `Payload.Owner` (`scheduler.go:466`) — the same
+via `isReminderDeliveryID` (`internal/server/scheduler.go:513`; gate at
+`scheduler.go:493`) and resolves it with a **synthetic Job** carrying the
+delivery's `Owner` as `Payload.Owner` (`scheduler.go:497`) — the same
 workdir hint `NewCronChatResolver` already reads. So a reminder is routed by
 exactly the same rule as a job, with no resolver contract change. Note:
 **`deliver_to` does NOT exist on an `Item`** — there is no per-item delivery

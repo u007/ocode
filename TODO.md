@@ -100,19 +100,101 @@ Neither is a bug; both are calls the user has not made yet.
   `executeToolCallWithContext`. That changes cancellation semantics for ALL tools, so it needs its
   own PR and its own tests — it must not ride along on a guardrail change.
 
+## Bundle code anchors are badly rotted, and a mechanical remap cannot detect it (2026-09-30)
+
+Found while doing the mandatory anchor maintenance for the cron change. **Pre-existing and much
+wider than that change** — recorded here because the maintenance tooling that would fix it is the
+useful part.
+
+- **A HEAD-relative remap audit is structurally incapable of catching a stale anchor.** The
+  per-project cron work (and most changes before it) shifts line numbers, and the rule in `CLAUDE.md`
+  is to re-derive the bundle's `file.go:NNN` anchors. The obvious way to do that — map HEAD line
+  numbers through the diff, then check each doc anchor points at the mapped line — only proves the
+  numbers moved *consistently with the diff*. It says nothing about whether the ORIGINAL number was
+  right. I ran exactly that audit, got "91 verified / 1 hand-corrected", and it was worthless: on the
+  same page, `isReminderDeliveryID` was cited as `internal/server/scheduler.go:482` and actually
+  lives at **513**. The remap dutifully shifted 482 to 488, the audit confirmed 488 was "correct",
+  and both were wrong. **Any anchor audit must be SEMANTIC — does the cited line contain what the
+  prose says it does — never diff-relative.**
+- **Scale — measured, not estimated.** 90 bundle anchors point into the 6 files this change
+  touched. I read 56 of them side by side (doc claim vs the real source line, both range
+  endpoints) and **30 of those 56 (54%) already pointed at unrelated code at HEAD.** Verified
+  wrong examples (cited → actual):
+  `reconcileProfileAgent` `agent_session.go:430` → **657** (4 pages);
+  `persistTurnTranscript` `:933-959` and `:1153` → **1425**;
+  `reconcileTurnSave` `:963-968` → **1475**; `dispatchTurn` `:1623` → **1655**;
+  `runTurn` `:1092` → **1049**; `turnBaseLen` capture `:623-629` → **1073**;
+  `buildAgentSession` `:566` → **437**; `ensureAgentSession` `:47-66` → **772**;
+  `allowedProjectRoots` `handler.go:632` → **644**; `SetWorkDir` `handler.go:1243` → **676**.
+  A bundle-wide sweep flagged 399 of 814 resolvable anchors as suspicious, but that number is
+  inflated — many legitimate anchors cite a line *inside* a function rather than its definition, so
+  the sweep is a triage aid, not a fix list.
+- **What was done about it.** Only the three anchors on `docs/scheduled-jobs.md` — the page the cron
+  change actually documents — were corrected, because that was in scope. The rest were deliberately
+  left alone: mass-rewriting ~30 anchors across unrelated gotcha/spec pages, several of which cite a
+  line *inside* a function, would very likely make the docs worse, and it belongs in its own change.
+- **Suggested fix, for whoever picks this up.** Per page, read each anchor's sentence and check the
+  cited line against the claim. The two mechanical aids worth keeping: resolve a bare basename
+  (`scheduler.go:NNN` is ambiguous across `internal/{server,scheduler,desktop}`) by reading the
+  sentence, and note that a `go test -overlay` JSON gives a pristine-HEAD baseline without touching
+  the working tree. Beware also that `docs/` is concurrently edited by other agents, so a
+  `git diff -- docs/` review mixes in other people's edits — check the FAIL/anchor sets, not the
+  diff.
+
+## Idle eviction silently killed Telegram/RC delivery for the boot project (2026-09-30, fixed)
+
+Found while scoping the LLM `cron` tool; a real regression in the per-project cron work committed
+earlier the same day (4a1c5a0c), not in the tool change.
+
+- **`evictIdleCronProjects` had no exemption for the host-seeded default project.** `SetScheduler`
+  deliberately seeds that entry with the HOST's own engines because they carry the Telegram drainer
+  sink and the RC-bridge fan-out, and its own comment says starting "a twin for the same project
+  would silently drop that wiring". But the idle sweeper iterated every entry, so ~30 minutes after
+  server start it stopped those engines and set `svcs = nil`; the next resolve then called
+  `startProjectServices` and produced exactly that sinkless twin — which nothing ever re-seeds,
+  since `setCronScopeConfig` only runs at wiring. **Net effect: Telegram and RC delivery for the boot
+  project died ~30 min after launch and never recovered, with no error anywhere.**
+  Fix: `cronProjectEntry.pinned` (`atomic.Bool` — the writer holds the ENTRY mutex while the sweeper
+  holds the REGISTRY one, and this file's lock order is `entry.mu -> scope.mu`, so the sweeper cannot
+  take `entry.mu` to read it). Set in `setCronScopeConfig`, honoured only by the idle sweeper;
+  `stopAllCronServices` still stops pinned entries, or every restart would leak a run loop and a
+  drainer. Tests: `internal/server/cron_scope_eviction_test.go`, 4 mutations all caught — including
+  "never evict anything", which the non-default half of the test exists to reject.
+- **`TestCronTargetsEndpoints` is not idempotent under `-count>1`** (pre-existing; **proved at HEAD**
+  with a `go test -overlay` baseline, identical failure). `setCronScopeConfig` seeds the default
+  entry under `canonicalCronProject("")` — which returns `""` — while a no-param request resolves to
+  `"."` and so canonicalises to the process CWD. The keys never match, so the handler lazily starts
+  engines against `DefaultStorePath(".")`: a real on-disk store under the per-process `TestMain`
+  data dir, shared by every `-count` iteration. Iteration 1 writes `/x:99`, iteration 2 reads it
+  back and fails "want empty initial targets". Harmless in production (a real server has a non-empty
+  `workDir`, so the seed key and the resolved key agree) but it means a `-count=2` run is not a valid
+  gate on this file. Fix when someone touches it: seed under the same key `resolveCronProject`
+  produces for a no-param request.
+
 ## Reminders and the task list are web/desktop-only (2026-09-30)
 
 Deferred from the Cron tab reminders/tasks work, deliberately, to keep that change contained. The
 engine (`internal/reminders`), its store, its REST surface and the web UI are all done.
 
-- **The LLM-facing `cron` tool is still bound to the DEFAULT project.** Now that the REST surface is
-  per project, a chat on project B asking the agent to "schedule this nightly" still gets a job in
-  the server's boot project. The cause is structural: `Handler` is built once and holds a single
-  `scheduler.Service` (`h.scheduler`), which `buildAgentSession` injects into every agent, so the
-  tool cannot know which project the session is on. Fix: thread the per-project service through
-  `buildAgentSession` (the resolver already exists — `Server.servicesFor(root)`), and have
-  `newCronToolFromService` receive that session's service. This is deferred because it touches agent
-  construction for every session, not because the scoping is unclear.
+- **DONE 2026-09-30 — the LLM-facing `cron` tool is now bound to the SESSION's project.** `Handler`
+  gained `cronServices func(root string) (*scheduler.Service, error)`, installed by
+  `Server.SetScheduler` from `Server.cronServiceResolver()`. `buildAgentSession` normalises
+  `projectRoot` (`"" -> h.workDir`) *before* every consumer keys off it, then hands the tool registry
+  a `tool.ProjectCronService{Root, Resolve}` instead of the single `h.scheduler`.
+  Three decisions worth keeping:
+  1. **The tool holds a RESOLVER, not a service pointer, and resolves on every `Execute`.** The
+     per-project engines are stopped by the idle sweeper, so a pointer captured at build time
+     outlives its engine for the rest of the session's life. Re-resolving also keeps the entry warm.
+  2. **A resolution failure is surfaced, never satisfied from another project.** Falling back to
+     `h.scheduler` would file the job in the boot project — the exact bug being fixed. The only
+     fallback is for a host with NO per-project scope at all, which keeps the tool absent rather than
+     stripping it from single-project hosts.
+  3. **A project that cannot start its engines gets no cron tool rather than a broken one** (the
+     pre-existing `if svc != nil` registration rule is unchanged).
+  Tests: `internal/server/cron_tool_scope_test.go` (7 tests, incl. per-call re-resolution, the
+  no-fallback rule, and the `h.scheduler` fallback for scope-less hosts), all mutation-verified. `scheduler.Service.Stopped()` was added so a test can
+  assert shutdown genuinely stopped an engine instead of asserting on registry bookkeeping that
+  `stopAllCronServices` clears unconditionally.
 - **The TUI has no way to see or change a reminder or task.** `/cron list|add|remove|describe`
   (`internal/tui/command_cron.go`) still knows only `scheduler.Job`. A user living in the TUI cannot
   add a reminder, and cannot tick off a task the web UI created. Fix: add `/reminder` and `/task`

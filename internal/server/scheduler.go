@@ -342,6 +342,12 @@ func (s *Server) SetScheduler(svc *scheduler.Service) {
 		// (and eagerly by WarmCronProjects, so a reminder in an unopened project
 		// still fires).
 		s.setCronScopeConfig(s.cronConfig(), nil, svc, s.reminders, s.workDir, s.schedulerOutbox, s.schedulerRuns, s.schedulerTargets)
+		// Give the handler a per-project resolver so the LLM `cron` tool follows the
+		// session's project. Installed here, next to the `s.handler.scheduler = svc`
+		// above, so both cron wirings are set from one place.
+		if s.handler != nil {
+			s.handler.cronServices = s.cronServiceResolver()
+		}
 		s.mux.HandleFunc("GET /api/cron/outbox", s.authMiddleware(s.handleCronOutbox))
 		s.mux.HandleFunc("GET /api/cron/targets", s.authMiddleware(s.handleCronTargetsList))
 		s.mux.HandleFunc("POST /api/cron/targets", s.authMiddleware(s.handleCronTargetsSet))
