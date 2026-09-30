@@ -204,6 +204,12 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool, 
 	if pluginInstr := plugins.LoadPluginInstructions(enabled); pluginInstr != "" {
 		context += pluginInstr
 	}
+	// Claude Code-format plugins carry their standing instructions in a
+	// SessionStart hook instead; the output is cached per process so the
+	// prefix stays stable across turns.
+	if hookCtx := plugins.SessionStartContext(enabled, root); hookCtx != "" {
+		context += hookCtx
+	}
 	// Skill catalog: when discovery is on, the volatile tail injector owns
 	// the catalog surface (name index + attached-skill descriptions, with
 	// fail-open re-emit of the full catalog). This guard is keyed on the

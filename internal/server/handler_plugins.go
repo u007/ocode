@@ -48,7 +48,7 @@ func (h *Handler) HandleListPlugins(w http.ResponseWriter, r *http.Request) {
 	// loader sees. We then merge with cfg.Plugins (source of truth for
 	// enabled/source/dir/ref) so unregistered disk plugins still appear
 	// (as enabled by default) and stale config entries remain visible.
-	loaded := plugins.LoadPluginsForProject(nil, h.workDir)
+	loaded := plugins.LoadAllPluginsForProject(h.workDir)
 	loadedByName := make(map[string]plugins.Plugin, len(loaded))
 	for _, pl := range loaded {
 		loadedByName[pl.Name] = pl
@@ -76,12 +76,17 @@ func (h *Handler) HandleListPlugins(w http.ResponseWriter, r *http.Request) {
 			}
 			entry.Enabled = pc.Enabled
 		} else {
-			// Disk-only plugin without a config entry: treat as enabled by
-			// default (mirrors LoadPlugins(nil) and the agent's enabled=nil
-			// path) so it is visible and toggle-able.
+			// Disk-only plugin without a config entry: it runs in its
+			// default state (enabled for ocode plugins; Claude Code's own
+			// state for a Claude Code install), and is visible and
+			// toggle-able here. Toggling writes only ocode's config.
 			entry.Source = ""
+			if pl.Source == plugins.SourceClaudeCode {
+				// Installed by Claude Code; labels it for the UI.
+				entry.Source = plugins.SourceClaudeCode
+			}
 			entry.Dir = pl.Dir
-			entry.Enabled = true
+			entry.Enabled = pl.DefaultEnabled
 		}
 		out = append(out, entry)
 		seen[pl.Name] = true
@@ -147,7 +152,7 @@ func (h *Handler) HandleGetPlugin(w http.ResponseWriter, r *http.Request, name s
 			return
 		}
 	}
-	for _, pl := range plugins.LoadPluginsForProject(nil, h.workDir) {
+	for _, pl := range plugins.LoadAllPluginsForProject(h.workDir) {
 		if pl.Name == name {
 			detail.Description = pl.Description
 			detail.Tools = pl.Tools
@@ -198,7 +203,7 @@ func (h *Handler) HandleSetPluginEnabled(w http.ResponseWriter, r *http.Request,
 	dir := plugins.FindPluginDirForProject(name, h.workDir)
 	// Also try the loaded scan which already resolved Dir.
 	if dir == "" {
-		for _, pl := range plugins.LoadPluginsForProject(nil, h.workDir) {
+		for _, pl := range plugins.LoadAllPluginsForProject(h.workDir) {
 			if pl.Name == name {
 				dir = pl.Dir
 				break
@@ -325,7 +330,7 @@ func (h *Handler) HandleRemovePlugin(w http.ResponseWriter, r *http.Request, nam
 	} else {
 		dir = plugins.FindPluginDirForProject(name, h.workDir)
 		if dir == "" {
-			for _, pl := range plugins.LoadPluginsForProject(nil, h.workDir) {
+			for _, pl := range plugins.LoadAllPluginsForProject(h.workDir) {
 				if pl.Name == name {
 					dir = pl.Dir
 					break
@@ -357,7 +362,7 @@ func (h *Handler) HandleRemovePlugin(w http.ResponseWriter, r *http.Request, nam
 	// Capture plugin metadata for MCP cleanup before deleting the directory
 	// (which destroys the plugin.json we'd need to read).
 	var loadedPlugin plugins.Plugin
-	for _, pl := range plugins.LoadPluginsForProject(nil, h.workDir) {
+	for _, pl := range plugins.LoadAllPluginsForProject(h.workDir) {
 		if pl.Name == name {
 			loadedPlugin = pl
 			break

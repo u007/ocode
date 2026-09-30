@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/bundled"
+	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/stackdetect"
 )
 
@@ -36,6 +37,11 @@ type Skill struct {
 	// overconfident model load the body. Empty when the skill has no such
 	// section (all normal skills, and any tuning skill that omits it).
 	Digest string
+	// Plugin is the name of the plugin that ships this skill, empty for
+	// skills from the ordinary skill dirs. A plugin skill's Name is
+	// "<Plugin>:<skill>", Claude Code's namespacing, so it never collides
+	// with (or shadows) a same-named user or project skill.
+	Plugin string
 }
 
 // skillCache caches LoadSkillsForRoot results keyed by the search-path set, so
@@ -59,7 +65,12 @@ const skillCacheTTL = 3 * time.Second
 // the current working directory.
 func LoadSkillsForRoot(root string) []Skill {
 	paths := SkillSearchPathsForRoot(root)
-	key := strings.Join(paths, "\x00")
+	pluginRoots := plugins.SkillRootsForProject(root)
+	keyParts := append([]string(nil), paths...)
+	for _, r := range pluginRoots {
+		keyParts = append(keyParts, r.Plugin+"="+r.Dir)
+	}
+	key := strings.Join(keyParts, "\x00")
 
 	skillCacheMu.Lock()
 	if e, ok := skillCache[key]; ok && time.Since(e.ts) < skillCacheTTL {
@@ -69,7 +80,8 @@ func LoadSkillsForRoot(root string) []Skill {
 	}
 	skillCacheMu.Unlock()
 
-	skills := loadSkillsFromPaths(paths)
+	skills := append(loadSkillsFromPaths(paths), loadPluginSkills(pluginRoots)...)
+	sortSkills(skills)
 
 	skillCacheMu.Lock()
 	skillCache[key] = skillCacheEntry{skills: skills, ts: time.Now()}
@@ -132,10 +144,33 @@ func loadSkillsFromPaths(paths []string) []Skill {
 		}
 	}
 
+	sortSkills(skills)
+	return skills
+}
+
+func sortSkills(skills []Skill) {
 	sort.Slice(skills, func(i, j int) bool {
 		return strings.ToLower(skills[i].Name) < strings.ToLower(skills[j].Name)
 	})
+}
 
+// loadPluginSkills loads the skills shipped by plugins, named
+// "<plugin>:<skill>". Roots arrive in plugin precedence order, so the first
+// plugin to provide a namespaced name wins.
+func loadPluginSkills(roots []plugins.SkillRoot) []Skill {
+	var skills []Skill
+	seen := make(map[string]bool)
+	for _, r := range roots {
+		for _, s := range loadSkillsFromPaths([]string{r.Dir}) {
+			s.Name = r.Plugin + ":" + s.Name
+			if seen[s.Name] {
+				continue
+			}
+			seen[s.Name] = true
+			s.Plugin = r.Plugin
+			skills = append(skills, s)
+		}
+	}
 	return skills
 }
 
@@ -557,10 +592,23 @@ func LoadSkill(name string) (*Skill, error) {
 	if cwd, err := os.Getwd(); err == nil {
 		root = cwd
 	}
-	for _, s := range LoadSkillsForRoot(root) {
-		if s.Name == name || filepath.Base(filepath.Dir(s.Source)) == name {
+	all := LoadSkillsForRoot(root)
+	// Exact name first ("superpowers:brainstorming" for a plugin skill), then
+	// the directory name, preferring an ordinary skill over a plugin one so a
+	// bare "brainstorming" still resolves to a plugin's skill only when no
+	// user/project skill has that name.
+	for _, s := range all {
+		if s.Name == name {
 			skill := s
 			return &skill, nil
+		}
+	}
+	for _, wantPlugin := range []bool{false, true} {
+		for _, s := range all {
+			if (s.Plugin != "") == wantPlugin && filepath.Base(filepath.Dir(s.Source)) == name {
+				skill := s
+				return &skill, nil
+			}
 		}
 	}
 	return nil, nil

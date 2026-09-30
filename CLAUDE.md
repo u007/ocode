@@ -1066,6 +1066,26 @@ to a provider reading.
   optional `report`.
 
 
+## Plugins: ocode and Claude Code formats share one namespace
+
+`internal/plugins` loads ocode plugins (`plugin.json`) and Claude Code plugins
+(`.claude-plugin/plugin.json`, including Claude Code's own installs from
+`~/.claude/plugins/installed_plugins.json`). Details: `docs/plugins.md`.
+
+- **One plugin per name, ocode first.** `LoadAllPluginsForProject` dedupes
+  before any enable filtering, so an ocode plugin shadows a Claude Code
+  install of the same name even when the ocode copy is disabled.
+- **ocode's config decides enablement; Claude Code's is only the default.**
+  Never write Claude Code's settings or delete from its plugin store —
+  `plugins.Remove` refuses paths under it.
+- **Listing vs loading.** UI lists and toggles must use
+  `LoadAllPluginsForProject` (it includes plugins that are off by default);
+  runtime paths use `LoadPluginsForProject(enabled, root)`.
+- **SessionStart hook output is cached per process** (`SessionStartContext`)
+  because it lands in the cached prompt prefix; re-running per turn would
+  both spawn subprocesses and risk busting the prefix. Invalidate on plugin
+  install/remove, never per turn.
+
 ## Data Storage
 All persistent state lives under a single cross-platform global directory
 resolved by `internal/paths.GlobalDataDir()`:
