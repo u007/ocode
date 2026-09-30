@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -45,6 +46,13 @@ func (t SkillTool) Definition() map[string]interface{} {
 }
 
 func (t SkillTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+// ExecuteCtx resolves the skill against the session's project root carried
+// by WithWorkDir — not the process cwd, which is "/" for the desktop app — and
+// returns it with its base directory (skill.ForModel).
+func (t SkillTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Name string `json:"name"`
 	}
@@ -56,7 +64,7 @@ func (t SkillTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("invalid skill name %q", params.Name)
 	}
 
-	s, err := skill.LoadSkill(params.Name)
+	s, err := skill.LoadSkillForRoot(workDirFromContext(ctx), params.Name)
 	if err != nil {
 		return "", err
 	}
@@ -64,7 +72,7 @@ func (t SkillTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("skill %s not found", params.Name)
 	}
 
-	return s.Content, nil
+	return s.ForModel(), nil
 }
 
 // SkillAliasTool registers "load_skill" as an alias for SkillTool. Models
