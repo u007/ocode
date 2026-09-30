@@ -122,7 +122,7 @@ trigger.
 **When reading `agentSession.messages` from an HTTP handler, use `TryLock` not
 `Lock`** because `runTurn` holds `as.mu` for the entire turn. A blocking lock
 in a reconcile/poll handler pins an HTTP connection behind the turn — the
-"stuck session" bug class documented in AGENTS.md.
+"stuck session" bug class documented in CLAUDE.md.
 
 **Ordering in reconcile:** live-pending-ask hydration must happen AFTER
 `MERGE_SNAPSHOT`, not before, because the merge overwrites pending fields from

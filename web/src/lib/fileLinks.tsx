@@ -20,7 +20,7 @@ const LINE = "(?::\\d+(?::\\d+)?)?";
 const GUARD = "(?<![\\w:/.\\-])";
 
 // Uploads are referenced in chat by the relative path `.ocode/uploads/<name>`
-// (see AGENTS.md "Web/Desktop Server"), and macOS screenshot names contain
+// (see CLAUDE.md "Web/Desktop Server"), and macOS screenshot names contain
 // spaces — even a narrow no-break space (U+202F). This branch allows spaces
 // ONLY inside an `.ocode/uploads/`-anchored path with an image/media
 // extension, so ordinary prose with spaces never becomes link-like. Image

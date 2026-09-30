@@ -60,4 +60,4 @@ answered in <60 ms at the same time — the server was not wedged.
   server at once; remote execs are therefore capped per host (see
   `project-endpoint-isolation.md` rule 4).
 - **Browsers on `ocode serve` still have the 6-connection cap** — the
-  AGENTS.md "do not pin a connection per turn" rule still applies.
+  CLAUDE.md "do not pin a connection per turn" rule still applies.

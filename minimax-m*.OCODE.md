@@ -64,7 +64,7 @@ Never run a destructive git command and then describe it as "I cleaned things up
 - Tool calls: when you emit an `assistant` message with `tool_calls`, the next `tool` message must carry the matching `tool_call_id` exactly. Mismatched ids cause Anthropic-format providers (the route used for `minimax-m*`) to reject the turn — see `internal/agent/client.go` and the strict-mode notes around it.
 
 ## Domain Knowledge
-- Repo: `ocode` — a Go 1.23 terminal coding agent built on Charm TUI (Bubble Tea / Lipgloss). See `AGENTS.md` and `CLAUDE.md` for repo-wide rules.
+- Repo: `ocode` — a Go 1.23 terminal coding agent built on Charm TUI (Bubble Tea / Lipgloss). See `CLAUDE.md` for repo-wide rules.
 - LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus `opencode-go` for DeepSeek V4 routing. The `minimax-m*` family is reached as `minimax/minimax-m*` in this codebase (see `internal/auth/providers.go`, `internal/agent/sampling_params_test.go`). The bare model id (the value returned by `client.GetModel()`) is what the `.OCODE.md` stem must match — so this file's stem is `minimax-m*`, not `minimax/minimax-m*`.
 - Subprocesses must capture stdout/stderr (`cmd.Stdout = &buf`); never inherit the terminal.
 - This file uses a wildcard stem so it covers the whole `minimax-m*` family. To override the policy for one specific model in the family, add an exact-match file (e.g. `minimax-m3.OCODE.md`) at the same priority; the exact match wins in the same directory.

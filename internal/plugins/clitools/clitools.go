@@ -5,7 +5,7 @@
 // Each tool carries per-platform install recipes. Detection uses
 // exec.LookPath against the agent's PATH; installation shells out to the
 // platform package manager. Output is captured, never inherited — the TUI
-// runs in alt-screen (see AGENTS.md, "TUI Output Safety").
+// runs in alt-screen (see CLAUDE.md, "TUI Output Safety").
 package clitools
 
 import (

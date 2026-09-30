@@ -118,7 +118,7 @@ func (s *SSHTransport) commandArgs(command string) []string {
 
 // Exec runs a single non-interactive command over ssh, capturing stdout and
 // stderr separately (never inheriting the terminal — house rule, see
-// AGENTS.md "capture subprocess output").
+// CLAUDE.md "capture subprocess output").
 func (s *SSHTransport) Exec(command string) (ExecResult, error) {
 	cmd := exec.Command("ssh", s.commandArgs(command)...)
 	stdout := &LimitedBuffer{Max: MaxExecOutput}

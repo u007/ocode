@@ -10,7 +10,7 @@ import (
 // model chain, which very often resolves to an opencode* provider
 // (SmallModelPriority leads with opencode-go/opencode). Each must inherit the
 // main conversation identity so the X-Opencode-Session header stays stable
-// across every request in the conversation (AGENTS.md prompt-cache /
+// across every request in the conversation (CLAUDE.md prompt-cache /
 // request-affinity contract). Compaction has coverage in agent_test.go; these
 // mirror it for the other bound helpers.
 //

@@ -37,7 +37,7 @@ const (
 )
 
 // String returns a single-character label for the status, used in the
-// changes-tab row rendering. Single-width per the AGENTS.md TUI rules.
+// changes-tab row rendering. Single-width per the CLAUDE.md TUI rules.
 func (s FileStatus) String() string {
 	switch s {
 	case FileAdded:

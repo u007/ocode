@@ -75,7 +75,7 @@ The others have corpora only — no evaluations run yet.
 fallbacks, no empty catch, always-log-errors, TDD, surgical changes, docs-first,
 verification, code-review rigor, root-cause debugging, git/db safety) rather than
 framework knowledge. It is anchored to this project's house rules
-(`CLAUDE.md` + `AGENTS.md`) and applies to **every** repo — so its derived skill
+(`CLAUDE.md`) and applies to **every** repo — so its derived skill
 activates for the tuned model universally, gated only on exact model id, not on a
 stack marker. This is the corpus that catches "different models behave
 differently while coding."

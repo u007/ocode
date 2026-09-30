@@ -119,7 +119,7 @@ When a second client sends `didOpen` for a URI already held by another client, `
 
 `spawnDaemonProcess` (`manager.go:396-398`) sets `cmd.Stdin = nil`, `cmd.Stdout = nil`, `cmd.Stderr = nil`. In Go's `exec` package, nil values cause the child to inherit the parent's file descriptors. The daemon runs `log.Printf` (e.g. in `broadcastDiagnostics`, line 144), which writes to stderr by default.
 
-**Impact:** The daemon's log output paints directly over the TUI's alt-screen, causing the "hairwire" rendering corruption described in AGENTS.md's TUI Output Safety section. This is a recurring bug class: any process spawned while the TUI is live that inherits stderr will corrupt the terminal.
+**Impact:** The daemon's log output paints directly over the TUI's alt-screen, causing the "hairwire" rendering corruption described in CLAUDE.md's TUI Output Safety section. This is a recurring bug class: any process spawned while the TUI is live that inherits stderr will corrupt the terminal.
 
 **Fix:** Set `cmd.Stdin = io.Discard`, `cmd.Stdout = io.Discard`, `cmd.Stderr = io.Discard` in `spawnDaemonProcess`, or redirect stderr to the agent's debug log. The daemon's `log.Printf` calls should use a `log.Logger` writing to `io.Discard` or a debug log file, not the inherited stderr fd.
 

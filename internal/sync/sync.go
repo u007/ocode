@@ -63,12 +63,12 @@ func LogBaseURLNotice(resolved string, src BaseURLSource) {
 		case BaseURLSourceDefault:
 			// No explicit override at all — resolved is the post-flip
 			// production default. Surface prominently: an unconfigured
-			// local kakiit dev now reaches production. See AGENTS.md
+			// local kakiit dev now reaches production. See CLAUDE.md
 			// "Backend / Sync URL Split" and CHANGES.md [Unreleased].
 			log.Printf("sync: WARNING no sync_url configured and OCODE_SYNC_URL unset — using production default %q. "+
 				"If you run a local kakiit dev server, set sync_url (Settings > Backend > Sync server, "+
 				"or PUT /api/config/ocode/sync-url) or OCODE_SYNC_URL to point at it. "+
-				"See AGENTS.md \"Backend / Sync URL Split\" / CHANGES.md [Unreleased].", resolved)
+				"See CLAUDE.md \"Backend / Sync URL Split\" / CHANGES.md [Unreleased].", resolved)
 		}
 	})
 }

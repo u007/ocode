@@ -48,6 +48,6 @@ Never run a destructive git command and then describe it as "I cleaned things up
 - Keep status / activity rows single-line and clamped with `.Width(w).MaxHeight(1)` so they cannot wrap and push the bottom chrome past the terminal height.
 
 ## Domain Knowledge
-- Repo: `ocode` — a Go 1.23 terminal coding agent built on Charm TUI (Bubble Tea / Lipgloss). See `AGENTS.md` and `CLAUDE.md` for repo-wide rules.
+- Repo: `ocode` — a Go 1.23 terminal coding agent built on Charm TUI (Bubble Tea / Lipgloss). See `CLAUDE.md` for repo-wide rules.
 - LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus `opencode-go` for DeepSeek V4 routing. The `deepseek-v4-flash` model in this codebase is reached as `opencode-go/deepseek-v4-flash` (see `internal/agent/small_model.go`).
 - Subprocesses must capture stdout/stderr (`cmd.Stdout = &buf`); never inherit the terminal.
