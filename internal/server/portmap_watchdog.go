@@ -52,6 +52,10 @@ type portMapRetry struct {
 	failures int
 	nextTry  time.Time
 	givenUp  bool
+	// openedAt is when the policy last re-opened this forward. noteHealthy uses
+	// it to tell a child that has settled from one that was only just reopened.
+	// Zero when the current child was not opened by the policy.
+	openedAt time.Time
 }
 
 // portMapPolicy decides when a dead forward may be re-opened. One per remote
@@ -120,6 +124,7 @@ func (p *portMapPolicy) noteExit(remotePort int, uptime time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	r := p.state(remotePort)
+	r.openedAt = time.Time{}
 	if uptime >= portMapSettleWindow {
 		// It ran long enough to count as healthy, so this death starts over.
 		r.failures = 0
@@ -132,14 +137,22 @@ func (p *portMapPolicy) noteExit(remotePort int, uptime time.Duration) {
 	r.nextTry = p.now().Add(p.backoff(r.failures))
 }
 
-// noteHealthy clears the bookkeeping for a forward that is currently live.
+// noteHealthy clears the bookkeeping for a forward that is currently live and
+// has stayed up for portMapSettleWindow. A child the policy reopened moments ago
+// is live but not yet proven, so it is left alone: clearing failures for it
+// would let a forward that dies after 10-30s restart its count on every cycle
+// and never reach the give-up limit.
 func (p *portMapPolicy) noteHealthy(remotePort int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	r := p.state(remotePort)
+	if !r.openedAt.IsZero() && p.now().Sub(r.openedAt) < portMapSettleWindow {
+		return
+	}
 	r.failures = 0
 	r.givenUp = false
 	r.nextTry = time.Time{}
+	r.openedAt = time.Time{}
 }
 
 // suppress marks remotePort as being torn down (disabled or removed). tryStart
@@ -167,6 +180,7 @@ func (p *portMapPolicy) reset(remotePort int) {
 	r.failures = 0
 	r.givenUp = false
 	r.nextTry = time.Time{}
+	r.openedAt = time.Time{}
 }
 
 // givenUp reports whether the monitor has stopped retrying this forward. The
@@ -223,6 +237,7 @@ func (p *portMapPolicy) tryStart(pm remote.ProjectPortMap) (bool, error) {
 			// real backoff), which is what keeps a flapping forward from
 			// hot-looping.
 			r.nextTry = now.Add(portMapSettleWindow)
+			r.openedAt = now
 		}
 	}
 	p.mu.Unlock()

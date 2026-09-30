@@ -239,6 +239,28 @@ func TestPortMapPolicyHealthyForwardClearsFailures(t *testing.T) {
 	}
 }
 
+// TestPortMapPolicyDoesNotForgiveAJustReopenedForward guards the give-up limit:
+// a child the policy reopened is live but unproven, so a watchdog pass that sees
+// it live must not clear failures until it has outlived the settle window.
+func TestPortMapPolicyDoesNotForgiveAJustReopenedForward(t *testing.T) {
+	p, clock, _ := newTestPortMapPolicy(nil)
+	p.noteExit(testPM.RemotePort, time.Second)
+	clock.advance(portMapBaseBackoff)
+	if ok, err := p.tryStart(testPM); !ok || err != nil {
+		t.Fatalf("tryStart: attempted=%v err=%v", ok, err)
+	}
+	clock.advance(portMapSettleWindow / 2)
+	p.noteHealthy(testPM.RemotePort)
+	if got := p.failures(testPM.RemotePort); got != 1 {
+		t.Fatalf("failures = %d for a child inside the settle window, want 1", got)
+	}
+	clock.advance(portMapSettleWindow)
+	p.noteHealthy(testPM.RemotePort)
+	if got := p.failures(testPM.RemotePort); got != 0 {
+		t.Fatalf("failures = %d for a settled child, want 0", got)
+	}
+}
+
 // installWatchdogFakeSSH puts a fake `ssh` on PATH that exits on its own after
 // lifetime, the shape of a real forward dying without anyone calling Stop.
 func installWatchdogFakeSSH(t *testing.T, lifetime time.Duration) {
