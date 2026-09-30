@@ -680,6 +680,11 @@ func renderSummaryPrompt(previousSummary, joined string, dropped int, focus stri
 	}
 	b.WriteString("Conversation segment:\n\n")
 	b.WriteString(joined)
+	// Restate the task after the (possibly huge) transcript: with the
+	// instructions only at the top, a long segment drowns them and the model
+	// answers the conversation instead of emitting the template.
+	b.WriteString("\n\n---\nEnd of conversation segment. Do not continue or answer it. ")
+	b.WriteString("Respond now with ONLY the summary, starting with the \"## Original Request\" header and containing every template section in order.")
 	return b.String()
 }
 
@@ -847,7 +852,7 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 				// A summary that completed before a racing cancel is still a
 				// good summary; only failures consult the cancellation cause.
 				if verr := validateSummary(r.content); verr != nil {
-					emitDebug("COMPACT", fmt.Sprintf("attempt %d: %v; retrying", attempt+1, verr))
+					emitDebug("COMPACT", fmt.Sprintf("attempt %d: %v; retrying (response %d chars, starts: %q)", attempt+1, verr, len(r.content), truncateForSummary(strings.TrimSpace(r.content), 200)))
 					malformed = r.content
 					lastErr = verr
 					continue

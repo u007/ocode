@@ -37,11 +37,17 @@ function formatDateTime(iso: string): string {
 export default function CronHistoryPanel({
   jobId,
   jobName,
+  project,
+  host,
   onClose,
   fetchRuns,
 }: {
   jobId: string;
   jobName: string;
+  /** The project this history belongs to, and the host it lives on. Run history
+   *  is per project, exactly like the jobs it describes. */
+  project?: string;
+  host?: string;
   onClose: () => void;
   /** Defaults to the cron route. Reminders/tasks pass their own. */
   fetchRuns?: RunHistoryFetcher;
@@ -61,7 +67,7 @@ export default function CronHistoryPanel({
         if (!append) setLoading(true);
         const res = fetchRuns
           ? await fetchRuns(limit, off)
-          : await api.getCronRuns(jobId, limit, off);
+          : await api.getCronRuns(jobId, limit, off, project, host);
         if (append) {
           setRuns((prev) => [...prev, ...(res.runs ?? [])]);
         } else {
@@ -75,7 +81,7 @@ export default function CronHistoryPanel({
         setLoading(false);
       }
     },
-    [jobId, fetchRuns],
+    [jobId, fetchRuns, project, host],
   );
 
   useEffect(() => {

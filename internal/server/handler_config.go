@@ -15,6 +15,7 @@ import (
 	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/ocr"
@@ -2541,22 +2542,32 @@ func (h *Handler) applyRedactionToLiveSessions(rc config.RedactionConfig) {
 		ids = append(ids, id)
 	}
 	h.mu.Unlock()
+	// The redaction setters are plain field writes the turn loop reads, so
+	// they need as.mu — but runTurn holds as.mu for the whole turn, and this
+	// runs inside the Settings save handler. Apply per session in the
+	// background so the HTTP response never waits for a running turn; a
+	// mid-turn session picks the change up as soon as its turn releases the
+	// lock.
 	for _, id := range ids {
 		as := h.lookupAgentSession(id)
 		if as == nil {
 			continue
 		}
-		as.mu.Lock()
-		h.applyRedactionToAgent(as.agent, rc)
-		as.mu.Unlock()
+		crashguard.Go(func() {
+			as.mu.Lock()
+			h.applyRedactionToAgent(as.agent, rc)
+			as.mu.Unlock()
+		})
 	}
 }
 
 // applyLimitsToLiveSessions propagates max-step and max-concurrent limits to
 // every resident agent session so runtime changes via the Settings UI take
 // effect without restarting the server or waiting for the next bootstrap. The
-// h.mu map lock is only held to snapshot ids; per-session updates take
-// as.mu only long enough to call SetMaxSteps / SetMaxConcurrent.
+// h.mu map lock is only held to snapshot ids. SetMaxSteps and SetMaxConcurrent
+// are atomic, so no as.mu is taken: runTurn holds as.mu for the whole turn and
+// a blocking Lock here froze the Settings save (and the desktop UI) until the
+// running turn finished.
 func (h *Handler) applyLimitsToLiveSessions(maxSteps, maxConcurrent int) {
 	h.mu.Lock()
 	ids := make([]string, 0, len(h.agents))
@@ -2569,12 +2580,10 @@ func (h *Handler) applyLimitsToLiveSessions(maxSteps, maxConcurrent int) {
 		if as == nil || as.agent == nil {
 			continue
 		}
-		as.mu.Lock()
 		as.agent.SetMaxSteps(maxSteps)
 		if as.agent.Runs() != nil {
 			as.agent.Runs().SetMaxConcurrent(maxConcurrent)
 		}
-		as.mu.Unlock()
 	}
 }
 

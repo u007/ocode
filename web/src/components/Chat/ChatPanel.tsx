@@ -1479,6 +1479,19 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       }
       setShowJumpToBottom(!atBottom);
       setShowJumpToTop(el.scrollTop > 200);
+      // Publish "the reader is away from the tail" to the composer, which is a
+      // SIBLING component (App.tsx) and cannot see this scroll state. Uses the
+      // same measured `!atBottom` as the jump-to-bottom affordance above, NOT
+      // the intent-gated `atBottomRef`: the intent gate exists to protect the
+      // autoscroll follow from a clamped pin, whereas this signal wants to be
+      // honest about the viewport — if a clamped pin really did leave the tail
+      // off-screen, the composer's "recent inputs" strip SHOULD appear. Deriving
+      // it from the existing measurement (rather than adding a second
+      // scroll-distance computation) also keeps the two affordances in lockstep.
+      //
+      // The reducer's identity guard makes the per-frame dispatch free when the
+      // boolean has not actually flipped.
+      dispatch({ type: "SET_TRANSCRIPT_SCROLLED_UP", sessionId, scrolledUp: !atBottom });
     });
 
     setReachedTop(el.scrollTop < 5);

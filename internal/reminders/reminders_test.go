@@ -318,8 +318,9 @@ func TestSetStatusUnmarkIsIdempotent(t *testing.T) {
 func TestSetStatusBackToPendingRearms(t *testing.T) {
 	h := newHarness(t)
 	h.now = fixedNow
-	h.addReminder("already rang", fixedNow.Add(-time.Minute).UnixMilli())
-	h.start()
+	h.addReminder("already rang", fixedNow.Add(-time.Minute).UnixMilli()) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	items, _ := h.svc.List(ListFilter{Kind: KindReminder})
@@ -355,8 +356,9 @@ func TestSetStatusBackToPendingRearms(t *testing.T) {
 func TestSetStatusBackToPendingClearsStaleError(t *testing.T) {
 	h := newHarness(t)
 	h.runner.err = errors.New("boom")
-	h.addTask("fails", fixedNow.Add(-time.Minute).UnixMilli(), ActionAgent, false)
-	h.start()
+	h.addTask("fails", fixedNow.Add(-time.Minute).UnixMilli(), ActionAgent, false) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	items, _ := h.svc.List(ListFilter{Kind: KindTask})
@@ -378,9 +380,9 @@ func TestSetStatusBackToPendingClearsStaleError(t *testing.T) {
 // delivery, then the reminder settles on completed.
 func TestReminderFiresOnceThenCompletes(t *testing.T) {
 	h := newHarness(t)
-	h.addReminder("stand up", fixedNow.Add(-time.Second).UnixMilli())
-	h.start()
-
+	h.addReminder("stand up", fixedNow.Add(-time.Second).UnixMilli()) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 	h.fireDue()
 	h.fireDue()
@@ -412,8 +414,9 @@ func TestReminderFiresOnceThenCompletes(t *testing.T) {
 func TestReminderNotDueYetDoesNotFire(t *testing.T) {
 	h := newHarness(t)
 	h.addReminder("later", fixedNow.Add(time.Hour).UnixMilli())
-	h.addTask("no due date", 0, ActionNotify, false)
-	h.start()
+	h.addTask("no due date", 0, ActionNotify, false) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 	if got := len(h.outbox.all()); got != 0 {
 		t.Fatalf("deliveries = %d, want 0", got)
@@ -424,8 +427,9 @@ func TestReminderNotDueYetDoesNotFire(t *testing.T) {
 // leaves the task pending so the user still decides, even though it "fired".
 func TestTaskDoesNotAutoCompleteWithoutTheFlag(t *testing.T) {
 	h := newHarness(t)
-	it := h.addTask("check the logs", fixedNow.Add(-time.Second).UnixMilli(), ActionNotify, false)
-	h.start()
+	it := h.addTask("check the logs", fixedNow.Add(-time.Second).UnixMilli(), ActionNotify, false) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	after, _ := h.svc.Get(it.ID)
@@ -446,8 +450,9 @@ func TestTaskDoesNotAutoCompleteWithoutTheFlag(t *testing.T) {
 // autocompletes" half of the request.
 func TestTaskAutoCompletesOnSuccessfulAgentRun(t *testing.T) {
 	h := newHarness(t)
-	it := h.addTask("fix the build", fixedNow.Add(-time.Second).UnixMilli(), ActionAgent, true)
-	h.start()
+	it := h.addTask("fix the build", fixedNow.Add(-time.Second).UnixMilli(), ActionAgent, true) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	after, _ := h.svc.Get(it.ID)
@@ -467,8 +472,9 @@ func TestTaskAutoCompletesOnSuccessfulAgentRun(t *testing.T) {
 func TestTaskStaysPendingWhenAgentFails(t *testing.T) {
 	h := newHarness(t)
 	h.runner.err = errors.New("model unavailable")
-	it := h.addTask("fix the build", fixedNow.Add(-time.Second).UnixMilli(), ActionAgent, true)
-	h.start()
+	it := h.addTask("fix the build", fixedNow.Add(-time.Second).UnixMilli(), ActionAgent, true) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	after, _ := h.svc.Get(it.ID)
@@ -489,8 +495,9 @@ func TestAgentActionWithoutRunnerRecordsError(t *testing.T) {
 	h := newHarness(t)
 	// Detach the runner the way a host that never wired one would be.
 	h.svc.SetAgentRunner(nil)
-	it := h.addTask("needs an agent", fixedNow.Add(-time.Second).UnixMilli(), ActionAgent, false)
-	h.start()
+	it := h.addTask("needs an agent", fixedNow.Add(-time.Second).UnixMilli(), ActionAgent, false) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	after, _ := h.svc.Get(it.ID)
@@ -515,8 +522,9 @@ func TestAgentActionWithoutRunnerRecordsError(t *testing.T) {
 func TestNotifierFailureDoesNotBlockCompletion(t *testing.T) {
 	h := newHarness(t)
 	h.notifier.err = errors.New("no notification service")
-	h.addReminder("notify fails", fixedNow.Add(-time.Second).UnixMilli())
-	h.start()
+	h.addReminder("notify fails", fixedNow.Add(-time.Second).UnixMilli()) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	items, _ := h.svc.List(ListFilter{Kind: KindReminder})
@@ -634,7 +642,10 @@ func TestCancelDuringAgentRunIsNotOverwritten(t *testing.T) {
 func TestFireOnceAbandonsUnarmedSnapshot(t *testing.T) {
 	h := newHarness(t)
 	it := h.addReminder("stale snapshot", fixedNow.Add(-time.Second).UnixMilli())
-	h.start()
+	// Deliberately NOT h.start(): see TestResetToPendingDuringAgentRunIsNotOverwritten.
+	// The background loop would fire this due item itself, in parallel with the
+	// fireOnce below, and the delivery this test asserts against would arrive from
+	// the WRONG firing path — intermittently, which is worse than not testing it.
 
 	// Take a snapshot while the item is genuinely due...
 	stale := it
@@ -710,8 +721,9 @@ func TestNextDelayAgreesWithDue(t *testing.T) {
 // become positive. A zero delay with nothing left to fire is the spin.
 func TestRunLoopDoesNotSpinWhenDueItemsAreFired(t *testing.T) {
 	h := newHarness(t)
-	h.addReminder("one shot", fixedNow.Add(-time.Minute).UnixMilli())
-	h.start()
+	h.addReminder("one shot", fixedNow.Add(-time.Minute).UnixMilli()) // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	h.svc.mu.Lock()
@@ -734,8 +746,9 @@ func TestInProgressItemStillFires(t *testing.T) {
 	it := h.addTask("started but not finished", fixedNow.Add(-time.Second).UnixMilli(), ActionNotify, false)
 	if _, err := h.svc.SetStatus(it.ID, StatusInProgress); err != nil {
 		t.Fatalf("mark in progress: %v", err)
-	}
-	h.start()
+	} // Deliberately NOT h.start(): the background run loop would fire this due item
+	// itself, in parallel with the manual fireDue() below, so the assertions would
+	// depend on which path won. (Same rule as the sibling race tests.)
 	h.fireDue()
 
 	if got := len(h.outbox.all()); got != 1 {

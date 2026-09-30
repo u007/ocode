@@ -38,6 +38,20 @@
 
 ## 2026-09-30
 
+* **Creation**: Environment Prompt ([concepts/environment-prompt.md](/concepts/environment-prompt.md))
+* **Update**: Sandbox Permission Mode ([concepts/sandbox-permission-mode.md](/concepts/sandbox-permission-mode.md))
+* **Creation**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Creation**: Knowledge System (OKF Bundle): Agents, Tools and Maintenance ([concepts/okf-knowledge-system.md](/concepts/okf-knowledge-system.md))
+* **Creation**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Creation**: Data Storage Layout ([concepts/data-storage-layout.md](/concepts/data-storage-layout.md))
+* **Creation**: Backend and Sync URL Split (2026-09-03) ([concepts/backend-sync-url-split.md](/concepts/backend-sync-url-split.md))
+* **Creation**: Web/Desktop Context Gauge Resolution ([concepts/web-context-gauge-resolution.md](/concepts/web-context-gauge-resolution.md))
+* **Creation**: Web/Desktop Server Project Scoping ([concepts/web-server-project-scoping.md](/concepts/web-server-project-scoping.md))
+* **Creation**: Web/Desktop Server Locking and Liveness Rules ([concepts/web-server-locking-and-liveness-rules.md](/concepts/web-server-locking-and-liveness-rules.md))
+* **Creation**: In-batch Task DAG (id / depends_on) ([concepts/task-dag.md](/concepts/task-dag.md))
+* **Creation**: Sub-agent Transcripts: OnSubAgentMessage and Child Sessions ([concepts/subagent-transcripts-child-sessions.md](/concepts/subagent-transcripts-child-sessions.md))
+* **Creation**: Persistent Todo Plan (todowrite / todoread / todo_update) ([concepts/persistent-todo-plan.md](/concepts/persistent-todo-plan.md))
+* **Creation**: Task Output Contracts (expected_output) ([concepts/task-output-contracts.md](/concepts/task-output-contracts.md))
 * **Creation**: Sidebar row stopPropagation breaks mobile drawer dismiss ([gotchas/sidebar-row-propagation-breaks-drawer-dismiss.md](/gotchas/sidebar-row-propagation-breaks-drawer-dismiss.md))
 * **Update**:  ([superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](/superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md))
 * **Update**: Remote Persistent Sessions and Terminals Design ([superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md](/superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md))

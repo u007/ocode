@@ -150,6 +150,8 @@ describe("CronPanel sub-views", () => {
     expect(mocks.listReminderItems).toHaveBeenCalledWith(
       "reminder",
       expect.objectContaining({ limit: 50, offset: 0 }),
+      undefined,
+      undefined,
     );
 
     fireEvent.click(screen.getByTestId("cron-subtab-tasks"));
@@ -159,6 +161,8 @@ describe("CronPanel sub-views", () => {
     expect(mocks.listReminderItems).toHaveBeenCalledWith(
       "task",
       expect.objectContaining({ limit: 50, offset: 0 }),
+      undefined,
+      undefined,
     );
   });
 
@@ -227,9 +231,13 @@ describe("ReminderTaskView status transitions", () => {
     // that the PATCH was SENT would pass with a chip frozen on "Pending".
     fireEvent.click(screen.getByTestId("task-complete-t-1"));
     await waitFor(() => {
-      expect(mocks.updateReminderItem).toHaveBeenCalledWith("task", "t-1", {
-        status: "completed",
-      });
+      expect(mocks.updateReminderItem).toHaveBeenCalledWith(
+        "task",
+        "t-1",
+        { status: "completed" },
+        undefined,
+        undefined,
+      );
     });
     await waitFor(() => {
       expect(screen.getByTestId("task-status-t-1")).toHaveTextContent("Completed");
@@ -239,9 +247,13 @@ describe("ReminderTaskView status transitions", () => {
     // again. This is the round trip the feature was asked for.
     fireEvent.click(screen.getByTestId("task-reopen-t-1"));
     await waitFor(() => {
-      expect(mocks.updateReminderItem).toHaveBeenLastCalledWith("task", "t-1", {
-        status: "pending",
-      });
+      expect(mocks.updateReminderItem).toHaveBeenLastCalledWith(
+        "task",
+        "t-1",
+        { status: "pending" },
+        undefined,
+        undefined,
+      );
     });
     await waitFor(() => {
       expect(screen.getByTestId("task-status-t-1")).toHaveTextContent("Pending");
@@ -263,9 +275,13 @@ describe("ReminderTaskView status transitions", () => {
     await openTasks();
     fireEvent.click(screen.getByTestId("task-cancel-t-1"));
     await waitFor(() => {
-      expect(mocks.updateReminderItem).toHaveBeenCalledWith("task", "t-1", {
-        status: "cancelled",
-      });
+      expect(mocks.updateReminderItem).toHaveBeenCalledWith(
+        "task",
+        "t-1",
+        { status: "cancelled" },
+        undefined,
+        undefined,
+      );
     });
   });
 
@@ -305,6 +321,8 @@ describe("ReminderTaskView status transitions", () => {
       expect(mocks.listReminderItems).toHaveBeenCalledWith(
         "task",
         expect.objectContaining({ status: "completed" }),
+        undefined,
+        undefined,
       );
     });
     await waitFor(() => {
@@ -319,6 +337,8 @@ describe("ReminderTaskView status transitions", () => {
       expect(mocks.listReminderItems).toHaveBeenCalledWith(
         "task",
         expect.objectContaining({ status: undefined }),
+        undefined,
+        undefined,
       );
     });
     await waitFor(() => {
@@ -353,7 +373,12 @@ describe("ReminderTaskView delete guard", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => {
-      expect(mocks.deleteReminderItem).toHaveBeenCalledWith("task", "t-1");
+      expect(mocks.deleteReminderItem).toHaveBeenCalledWith(
+        "task",
+        "t-1",
+        undefined,
+        undefined,
+      );
     });
   });
 
@@ -416,7 +441,12 @@ describe("ReminderTaskView polling", () => {
     renderPanel(true);
     fireEvent.click(screen.getByTestId("cron-subtab-tasks"));
     await vi.waitFor(() => {
-      expect(mocks.listReminderItems).toHaveBeenCalledWith("task", expect.anything());
+      expect(mocks.listReminderItems).toHaveBeenCalledWith(
+        "task",
+        expect.anything(),
+        undefined,
+        undefined,
+      );
     });
     // The poll interval is installed by an effect keyed on `ready`, which flips
     // in the load's .finally(). Advancing timers alone would not run that React
@@ -440,7 +470,12 @@ describe("ReminderTaskView polling", () => {
     // Now switch away to Reminders: the task pane must stop being re-read.
     fireEvent.click(screen.getByTestId("cron-subtab-reminders"));
     await vi.waitFor(() => {
-      expect(mocks.listReminderItems).toHaveBeenCalledWith("reminder", expect.anything());
+      expect(mocks.listReminderItems).toHaveBeenCalledWith(
+        "reminder",
+        expect.anything(),
+        undefined,
+        undefined,
+      );
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
@@ -471,9 +506,19 @@ describe("ReminderTaskView polling", () => {
 
     fireEvent.click(screen.getByTestId("cron-subtab-reminders"));
     await waitFor(() => {
-      expect(mocks.listReminderItems).toHaveBeenCalledWith("reminder", expect.anything());
+      expect(mocks.listReminderItems).toHaveBeenCalledWith(
+        "reminder",
+        expect.anything(),
+        undefined,
+        undefined,
+      );
     });
     // Showing Reminders still must not wake the Tasks pane.
-    expect(mocks.listReminderItems).not.toHaveBeenCalledWith("task", expect.anything());
+    expect(mocks.listReminderItems).not.toHaveBeenCalledWith(
+      "task",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 });

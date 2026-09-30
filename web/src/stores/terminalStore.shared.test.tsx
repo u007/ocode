@@ -115,14 +115,17 @@ it("shows a terminal opened by another client once the server announces it", asy
 
   await waitFor(() => expect(putCount).toBeGreaterThanOrEqual(0));
 
+  // Two opens rather than activate()+open(): activate() no longer seeds a
+  // terminal, and the point of this test is the cross-client hand-off of a
+  // TWO-terminal list, not how the first terminal came to exist.
   await act(async () => {
-    screen.getByText("a-activate").click();
+    screen.getByText("a-open").click();
   });
   await act(async () => {
     screen.getByText("a-open").click();
   });
 
-  // Client A's terminal reached the server.
+  // Client A's terminals reached the server.
   await waitFor(() => {
     expect(serverProjects.get("/srv/app")?.terminals.length).toBe(2);
   });

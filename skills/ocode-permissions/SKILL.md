@@ -323,6 +323,31 @@ Two distinct code paths implement the auto-permission judge, and they do **not**
 - **Credential material is withheld from Jev's context.** `buildPermissionContext` never embeds sensitive file contents — a sensitive target file gets a `(contents withheld: sensitive file)` marker, while executed custom scripts and referenced files matching the sensitive predicate are skipped entirely. See `docs/gotchas/auto-permission-judge-withholds-credentials.md`.
 - **The judge reasons about an expanded command, and the expansion is fail-closed.** `expandBashForJudge` (`internal/agent/permission_shellvars.go`) resolves in-command `NAME=value` assignments, environment references, and a fixed read-only `$(...)` allowlist (`pwd`, `git rev-parse --show-toplevel`, `npm root`/`prefix`, `go env <VAR>`, a few `python -c` path snippets). Three rules matter when editing it: a variable rebound in a form it does not model (`export`/`declare`/`local`, `NAME+=`, `for`/`read`/`unset`, an assignment buried in a `{ … }` group) is marked **opaque**, so `$NAME` reaches the judge unresolved rather than as the stale value the shell will not use; the allowlisted Python snippets run with `-I`, so a repo-local `sysconfig.py` cannot execute at judge-prep time; and a substitution that names a secret (`go env GITHUB_TOKEN`) or returns a URL userinfo (`GOPROXY=https://user:pass@…`) is withheld as `<redacted>` exactly like a secret-looking environment value. Pinned by `TestExpandBashForJudgeRebindingsAreOpaque` and `TestExpandBashForJudgeWithholdsSecretSubstitution`.
 
+- **Every Jev verdict is recorded durably at `<logsDir>/permission-judge.log`.** The
+  `emitDebug("PERMISSION", …)` verdict line reaches only the TUI or stderr, and the in-memory
+  debug ring holds 500 entries, so a below-floor deferral used to leave nothing to diagnose
+  afterwards — which is how a real `allow` at 0.21 went unexplained for an entire investigation.
+  `internal/agent/permission_judge_log.go` appends one JSON line per decision (`PERMJUDGE`
+  entry kind, `debuglog.MirrorKindToFile`, shared 2MB single-generation rotation) carrying
+  session id, tool, model, rule, scope, command, `working_directory`, `resolved_cd`, the
+  **relevant** `allowed_roots` plus `allowed_roots_total` / `allowed_roots_omitted`,
+  `allow_destructive`, choice, `confidence`, the full `probabilities` map, concern and its
+  confidence, the floor applied, and an `outcome`: `granted`, `deferred_below_floor`,
+  `refused_deterministic_guard`, `denied_by_judge`, `granted_relaxed_concern`, `transport_error`,
+  `no_verdict`, `unknown_choice`. **`outcome` is the field that makes a record actionable** — one
+  verdict can lead to several outcomes, and only it says which happened. Read this file first when
+  a verdict looks wrong; the fields it carries are the ones no other log retains.
+  Registration is lazy, `sync.Once`, and lives **in the judge** rather than in `tui/model.go` /
+  `server/handler.go`, so it behaves identically in TUI, server and headless modes; the record is
+  appended to `debuglog.Log` **directly** as well as through `emitDebug`, because the mirror only
+  fires for entries that reach that sink (routing solely through the `DebugAppend` hook makes the
+  file depend on a startup-time decision and silently produces nothing under test). A command that
+  trips `redact.Detect` is **withheld** (`command_withheld`, naming the matched detectors) rather
+  than span-substituted: the file outlives the session and is likely to be pasted into a report,
+  and the diagnosis needs the roots, working directory, floor, confidence and concern — not the
+  literal text. Mirror files are created `0600`. Diagnostics can never change a decision: a log
+  that cannot be opened reports once on `ERROR` and the permission outcome is untouched.
+
 ### AutoGrant persistence
 
 When the auto-permission model approves a request, Go derives a typed `AutoGrant` entry before persisting. Grants are narrow and durable:

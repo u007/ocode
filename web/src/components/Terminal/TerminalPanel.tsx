@@ -121,6 +121,17 @@ function markCopySeen(text: string): void {
   lastCopyAt = Date.now();
 }
 
+// Debounce window for a duplicate PASTE of the same text, the mirror of
+// DUPLICATE_COPY_WINDOW_MS. One physical paste can reach the terminal twice:
+// the desktop shell's native Edit ▸ Paste role and the Cmd/Ctrl+V keydown
+// default action are separate routes, and only the first is a paste the user
+// asked for. Deliberately much tighter than the copy window: the two
+// deliveries of one paste land within a few ms, while a longer window would
+// start swallowing a user's own rapid repeat (a held/repeated Cmd+V). A
+// dropped duplicate is the cheap mistake to make here; a swallowed paste
+// reads as "paste is broken".
+const DUPLICATE_PASTE_WINDOW_MS = 50;
+
 /**
  * Writes text to the system clipboard, falling back to the deprecated
  * execCommand path when the async Clipboard API is unavailable or denied
@@ -404,12 +415,15 @@ export default function TerminalPanel({
   }, []);
 
   const handlePaste = useCallback(async () => {
-    const sock = socketRef.current;
-    // Prefer async clipboard; fall back to letting the browser handle paste if denied.
+    // Read the clipboard, but feed it through term.paste like every other
+    // paste path: a raw sock.send skips bracketed-paste wrapping (a multiline
+    // payload would run line by line in a bracketed-paste app) and bypasses
+    // the attach-handshake and socket-state guard term.onData already applies.
+    // Not deduped against a clipboard event, and it must not be: this is a
+    // context-menu action, not a delivery of the Cmd/Ctrl+V keystroke.
     try {
       const text = await navigator.clipboard.readText();
-      if (text && sock && sock.readyState === WebSocket.OPEN) sock.send(text);
-      else if (text) termRef.current?.paste(text);
+      if (text) termRef.current?.paste(text);
     } catch {
       // Clipboard read requires a secure context / permission; hint the user.
       // As a fallback we focus the terminal so Ctrl+V / Cmd+V still works.
@@ -653,33 +667,16 @@ export default function TerminalPanel({
   //   - Cmd/Ctrl+C with a selection → copy (returning false from the key
   //     handler also stops xterm from emitting \x03 for that keydown). No
   //     selection → falls through so Ctrl+C still sends SIGINT.
-  //   - Cmd/Ctrl+V → blocked in keydown (no 0x16), pasted via the async
-  //     Clipboard API in pasteFromClipboard. The container `copy` listener
-  //     below is the extra fallback for native Edit-menu-driven copies.
+  //   - Cmd/Ctrl+V → return false only, to stop that \x16. The paste itself
+  //     comes from the browser's own `paste` event (see the container
+  //     listener below): the keydown must NOT read the clipboard as well, or
+  //     one Cmd/V pastes twice.
   const copyViaShortcut = useCallback(() => {
     const sel = selectedTextForCopy();
     if (!sel) return false;
     void writeClipboardText(sel);
     return true;
   }, [selectedTextForCopy]);
-
-  // Paste needs a Clipboard API read, which requires a user gesture and (in
-  // WebKit) can be denied; on denial the terminal is focused so the user's
-  // next native Cmd+V still works. term.paste() (not a raw socket write) so
-  // bracketed-paste mode is honored for multiline payloads; it flows through
-  // onData → the pty socket as usual.
-  const pasteFromClipboard = useCallback(async () => {
-    const term = termRef.current;
-    if (!term) return;
-    let text = "";
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      term.focus();
-      return;
-    }
-    if (text) term.paste(text);
-  }, []);
 
   // Container-level `copy` listener — the desktop-shell fallback. In the
   // Wails webview the native Edit-menu Copy role can consume Cmd+C before a
@@ -712,6 +709,54 @@ export default function TerminalPanel({
     el.addEventListener("copy", onCopy);
     return () => el.removeEventListener("copy", onCopy);
   }, [selectedTextForCopy]);
+
+  // Container-level `paste` listener, CAPTURE phase — the single paste path.
+  //
+  // A browser's Cmd/Ctrl+V default action is to dispatch a `paste`
+  // ClipboardEvent on the focused editable element, which for a terminal is
+  // xterm's hidden textarea, and xterm 6 listens for that event on BOTH the
+  // textarea and the element, pasting the clipboard itself. So the event
+  // arrives whether or not the keydown handler touches the clipboard — which
+  // is exactly why the keydown handler (below) must not read it: the read and
+  // xterm's listener each pasted the same text, so one Cmd+V pasted twice.
+  //
+  // Owning the event here (capture phase, so it runs BEFORE xterm's own
+  // target-phase listener, and stopPropagation keeps that listener from ever
+  // running) means this function is the only thing that turns a paste into
+  // terminal input. It also absorbs the desktop shell's second delivery route
+  // for a single physical paste — the native Edit ▸ Paste role plus the
+  // keydown default action, the same dual route the copy path has to dedupe —
+  // so a same-text paste inside a short window is dropped instead of reaching
+  // the pty twice.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let lastText = "";
+    let lastAt = 0;
+    const onPaste = (e: ClipboardEvent) => {
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (!text) return;
+      // Only pastes aimed at the TERMINAL. The container also holds the find
+      // bar's own search input, and a capture-phase listener on the panel root
+      // runs for that too — without this guard a Cmd+V into the find field
+      // would land in the shell.
+      const term = termRef.current;
+      if (!term?.element || !(e.target instanceof Node) || !term.element.contains(e.target)) return;
+      // Consume in both branches: xterm's own paste listener must never see
+      // the event, whether we paste it or drop it as a duplicate.
+      e.preventDefault();
+      e.stopPropagation();
+      const now = performance.now();
+      if (text === lastText && now - lastAt < DUPLICATE_PASTE_WINDOW_MS) return;
+      lastText = text;
+      lastAt = now;
+      // term.paste (not a raw socket write) so bracketed-paste mode is
+      // honored for multiline payloads; it flows through onData to the pty.
+      term.paste(text);
+    };
+    el.addEventListener("paste", onPaste, true);
+    return () => el.removeEventListener("paste", onPaste, true);
+  }, []);
 
   // Keep host in this lifecycle's dependencies. HomeApp gates startup on a
   // successful project-metadata snapshot, while a deliberate host identity
@@ -804,11 +849,12 @@ export default function TerminalPanel({
         }
         return true;
       }
-      // Cmd/Ctrl+V (and Ctrl+Shift+V): paste. Return false unconditionally so
-      // xterm's keydown never converts the key to a literal 0x16; the actual
-      // clipboard read runs in pasteFromClipboard (async Clipboard API).
+      // Cmd/Ctrl+V (and Ctrl+Shift+V): return false so xterm's keydown never
+      // converts the key into a literal \x16. Deliberately NOT preventDefault:
+      // the browser's default action (dispatching the `paste` event the
+      // container listener above owns) is what pastes. Reading the clipboard
+      // here too is the double paste — the event arrives either way.
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "v") {
-        void pasteFromClipboard();
         return false;
       }
       if (ev.key === "Enter" && ev.shiftKey) {
@@ -855,20 +901,6 @@ export default function TerminalPanel({
       markAlerted(projectPath, id, host);
       playAlertSound();
     };
-    // ── Cmd/Ctrl+C copy & Cmd/Ctrl+V paste ────────────────────────────
-    // xterm 6 never handles copy/paste shortcuts in keydown. Copy relies on
-    // the DOM `copy` event firing over a *browser text selection* — but
-    // xterm's selection is canvas-rendered with no DOM Selection, so browsers
-    // are not obliged to fire it (WKWebView in the desktop shell doesn't).
-    // And xterm's keyboard layer converts Ctrl+V to a literal 0x16 byte sent
-    // to the pty on non-mac. So the clipboard shortcuts are intercepted
-    // explicitly:
-    //   - Cmd/Ctrl+C with a selection → copy (returning false from the key
-    //     handler also stops xterm from emitting \x03 for that keydown). No
-    //     selection → falls through so Ctrl+C still sends SIGINT.
-    //   - Cmd/Ctrl+V → blocked in keydown (no 0x16), pasted via the async
-    //     Clipboard API in pasteFromClipboard. The container `copy` listener
-    //     below is the extra fallback for native Edit-menu-driven copies.
 
     // Copy-on-selection debounce: xterm fires onSelectionChange continuously
     // during a drag, so each event restarts the timer and the copy fires once

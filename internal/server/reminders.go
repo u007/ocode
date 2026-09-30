@@ -29,7 +29,7 @@ import (
 //
 // and the identical set under /api/tasks.
 type remindersHandler struct {
-	svc  *reminders.Service
+	srv  *Server
 	kind reminders.Kind
 }
 
@@ -62,6 +62,11 @@ type reminderListResponse struct {
 
 // list handles GET /api/{reminders,tasks}.
 func (h *remindersHandler) list(w http.ResponseWriter, r *http.Request) {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	svc := svcs.reminders
 	q := r.URL.Query()
 	filter := reminders.ListFilter{Kind: h.kind}
 
@@ -86,7 +91,7 @@ func (h *remindersHandler) list(w http.ResponseWriter, r *http.Request) {
 	filter.Limit = limit
 	filter.Offset = offset
 
-	items, total := h.svc.List(filter)
+	items, total := svc.List(filter)
 	writeJSON(w, http.StatusOK, reminderListResponse{
 		Items:  items,
 		Total:  total,
@@ -97,7 +102,12 @@ func (h *remindersHandler) list(w http.ResponseWriter, r *http.Request) {
 
 // get handles GET /api/{reminders,tasks}/{id}.
 func (h *remindersHandler) get(w http.ResponseWriter, r *http.Request) {
-	it, err := h.lookup(w, r)
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	svc := svcs.reminders
+	it, err := h.lookup(w, r, svc)
 	if err != nil {
 		return
 	}
@@ -106,6 +116,11 @@ func (h *remindersHandler) get(w http.ResponseWriter, r *http.Request) {
 
 // add handles POST /api/{reminders,tasks}.
 func (h *remindersHandler) add(w http.ResponseWriter, r *http.Request) {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	svc := svcs.reminders
 	req, err := decodeReminderBody(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -133,12 +148,12 @@ func (h *remindersHandler) add(w http.ResponseWriter, r *http.Request) {
 		DueAtMs:      derefInt64(req.DueAtMs),
 		PermMode:     derefPermMode(req.PermMode),
 	}
-	id, err := h.svc.Add(item)
+	id, err := svc.Add(item)
 	if err != nil {
 		writeError(w, statusForErr(err), err.Error())
 		return
 	}
-	created, err := h.svc.Get(id)
+	created, err := svc.Get(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -154,7 +169,12 @@ func (h *remindersHandler) add(w http.ResponseWriter, r *http.Request) {
 // rejected status change cannot leave the field edits half-applied: the
 // service is asked nothing until the transition is known to be legal.
 func (h *remindersHandler) update(w http.ResponseWriter, r *http.Request) {
-	cur, err := h.lookup(w, r)
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	svc := svcs.reminders
+	cur, err := h.lookup(w, r, svc)
 	if err != nil {
 		return
 	}
@@ -188,14 +208,14 @@ func (h *remindersHandler) update(w http.ResponseWriter, r *http.Request) {
 
 	updated := cur
 	if patch := req.toPatch(); patch != nil {
-		updated, err = h.svc.Update(cur.ID, *patch)
+		updated, err = svc.Update(cur.ID, *patch)
 		if err != nil {
 			writeError(w, statusForErr(err), err.Error())
 			return
 		}
 	}
 	if req.Status != nil {
-		updated, err = h.svc.SetStatus(cur.ID, *req.Status)
+		updated, err = svc.SetStatus(cur.ID, *req.Status)
 		if err != nil {
 			writeError(w, statusForErr(err), err.Error())
 			return
@@ -206,15 +226,20 @@ func (h *remindersHandler) update(w http.ResponseWriter, r *http.Request) {
 
 // remove handles DELETE /api/{reminders,tasks}/{id}.
 func (h *remindersHandler) remove(w http.ResponseWriter, r *http.Request) {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	svc := svcs.reminders
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	if _, err := h.lookup(w, r); err != nil {
+	if _, err := h.lookup(w, r, svc); err != nil {
 		return
 	}
-	if err := h.svc.Remove(id); err != nil {
+	if err := svc.Remove(id); err != nil {
 		writeError(w, statusForErr(err), err.Error())
 		return
 	}
@@ -226,15 +251,20 @@ func (h *remindersHandler) remove(w http.ResponseWriter, r *http.Request) {
 // gate: firing a cancelled item would deliver a notification the user
 // explicitly turned off.
 func (h *remindersHandler) runNow(w http.ResponseWriter, r *http.Request) {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	svc := svcs.reminders
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	if _, err := h.lookup(w, r); err != nil {
+	if _, err := h.lookup(w, r, svc); err != nil {
 		return
 	}
-	it, err := h.svc.FireNow(id)
+	it, err := svc.FireNow(id)
 	if err != nil {
 		writeError(w, statusForErr(err), err.Error())
 		return
@@ -246,13 +276,13 @@ func (h *remindersHandler) runNow(w http.ResponseWriter, r *http.Request) {
 // the other kind is reported as 404: from this route's point of view it does
 // not exist, and saying "that is a task, not a reminder" leaks the other
 // collection for no benefit.
-func (h *remindersHandler) lookup(w http.ResponseWriter, r *http.Request) (reminders.Item, error) {
+func (h *remindersHandler) lookup(w http.ResponseWriter, r *http.Request, svc *reminders.Service) (reminders.Item, error) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return reminders.Item{}, errors.New("id is required")
 	}
-	it, err := h.svc.Get(id)
+	it, err := svc.Get(id)
 	if err != nil {
 		if errors.Is(err, reminders.ErrNotFound) {
 			writeError(w, http.StatusNotFound, fmt.Sprintf("item %s not found", id))
@@ -320,7 +350,7 @@ func (s *Server) attachReminders(svc *reminders.Service) {
 		{"/reminders", reminders.KindReminder},
 		{"/tasks", reminders.KindTask},
 	} {
-		h := &remindersHandler{svc: svc, kind: route.kind}
+		h := &remindersHandler{srv: s, kind: route.kind}
 		base := "/api" + route.segment
 		s.mux.HandleFunc("GET "+base, s.authMiddleware(h.list))
 		s.mux.HandleFunc("POST "+base, s.authMiddleware(h.add))

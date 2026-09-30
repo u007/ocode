@@ -3,6 +3,7 @@ import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
 import { PanelRight, Mic, MicOff, Activity, ChevronDown, ChevronUp } from "lucide-react";
+import { CopyableValue } from "./CopyValueButton";
 import { useSpeech } from "../../components/Speech/SpeechProvider";
 import {
   loadStatusBarCollapsed,
@@ -355,9 +356,12 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
             </span>
           )}
           {sessionId && (
-            <span className="text-foreground" title="Session ID">
-              {sessionId}
-            </span>
+            <CopyableValue
+              value={sessionId}
+              label="Copy session ID"
+              valueClassName="text-foreground"
+              testId="statusbar-copy-session-id"
+            />
           )}
           {displayCwd && (
             <span className="text-foreground truncate max-w-[18rem]" title={cwd}>

@@ -100,6 +100,13 @@ type Server struct {
 	schedulerRuns    *scheduler.RunHistory
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
 	reminders        *reminders.Service // optional; set via SetReminders
+	// cronScopeMu guards the per-project cron registry (cron_scope.go). It is a
+	// MAP lock, never held while an engine starts or while an agent turn runs.
+	cronScopeMu sync.Mutex
+	cron        *cronScope
+	// cronHasReminders records that a reminders engine was attached, which is
+	// what makes the per-project machinery eligible to start anything at all.
+	cronHasReminders bool
 	frontendStats    *frontendStatsRing
 	startedAt        time.Time
 
@@ -1643,6 +1650,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.tsShare != nil {
 		s.tsShare.cleanup()
 	}
+	// Stop every per-project cron engine this server started. Before cron became
+	// project-scoped there was a single scheduler that was never stopped at all;
+	// now there is one engine pair per project, so leaving them running would
+	// leak a run loop and a drainer goroutine per project the user ever opened.
+	s.stopAllCronServices()
 	s.shutdownMu.Lock()
 	hs := s.httpServer
 	ln := s.ln

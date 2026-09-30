@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import { render, screen, fireEvent, act, within, cleanup } from "@testing-library/react";
-import { useLayoutEffect, useEffect } from "react";
+import { useLayoutEffect, useEffect, useRef } from "react";
 import ChatPanel from "./ChatPanel";
 import { ChatProvider, useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { dropPrefetchedSession, prefetchSession } from "../../lib/sessionPrefetch";
@@ -309,6 +309,26 @@ function LiveSeed({
 }
 
 /** Exposes the store dispatch so tests can drive live/append mutations. */
+/** Exposes a live read of one session slice's `transcriptScrolledUp` so a test
+ *  can assert what ChatPanel PUBLISHED to the store. Defaults to the same
+ *  session the panel under test uses. */
+function SliceRead({
+  sessionId,
+  onRead,
+}: {
+  sessionId: string;
+  onRead: (read: () => boolean) => void;
+}) {
+  const value = useChatSelector((s) => getSessionSlice(s, sessionId).transcriptScrolledUp);
+  const ref = useRef(value);
+  ref.current = value;
+  useEffect(() => {
+    onRead(() => ref.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
+
 function DispatchCapture({ onCapture }: { onCapture: (d: (a: unknown) => void) => void }) {
   const dispatch = useChatDispatch();
   useEffect(() => {
@@ -944,6 +964,83 @@ describe("ChatPanel", () => {
       });
       await flushRAF();
       expect(top).toBe(5000);
+    });
+  });
+
+  describe("publishes transcriptScrolledUp for the composer's recent-inputs strip", () => {
+    /** ChatInput is a SIBLING of ChatPanel under App.tsx, so the per-session
+     *  slice is the only channel between the transcript's scroll state and the
+     *  composer. This pins the publish half of that contract: without it the
+     *  composer's strip can never appear (and the store field would be dead
+     *  code that only its own reducer test exercises). */
+    async function renderSignal(sessionId: string) {
+      let read: (() => boolean) | null = null;
+      const utils = render(
+        <ChatProvider>
+          <SliceRead sessionId={sessionId} onRead={(fn) => (read = fn)} />
+          <LiveSeed sessionId={sessionId} messages={[mk("user", "an earlier ask"), mk("assistant", "b")]} />
+          <ChatPanel sessionId={sessionId} />
+        </ChatProvider>,
+      );
+      await tick();
+      act(() => {
+        hoisted.resolve.current({ messages: [], total: 0, title: "" });
+      });
+      await tick();
+      await advanceFrame();
+      return { ...utils, scrolledUp: () => read!() };
+    }
+
+    it("flips to true when the reader is more than 200px above the tail", async () => {
+      const { container, scrolledUp } = await renderSignal("sess-scrolled-up");
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 0, 5000); // 5000 - 0 - 600 = 4400px below the fold
+      expect(scrolledUp()).toBe(false);
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(true);
+      f.set(4400); // exactly 0px below the fold
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(false);
+    });
+
+    it("flips back to false when the reader returns to the tail", async () => {
+      const { container, scrolledUp } = await renderSignal("sess-scrolled-back");
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 0, 5000);
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(true);
+      f.set(5000); // pinned at the bottom
+      fireEvent.scroll(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(false);
+    });
+
+    it("does not publish for a DIFFERENT session's slice", async () => {
+      // Per-session, or one tab's scroll would light up every other composer's
+      // strip (every tab keeps its composer mounted, hidden via CSS).
+      const sessionId = "sess-scoped";
+      let readOther: (() => boolean) | null = null;
+      const { container } = render(
+        <ChatProvider>
+          <SliceRead sessionId="sess-other" onRead={(fn) => (readOther = fn)} />
+          <LiveSeed sessionId={sessionId} messages={[mk("user", "ask"), mk("assistant", "b")]} />
+          <ChatPanel sessionId={sessionId} />
+        </ChatProvider>,
+      );
+      await tick();
+      act(() => {
+        hoisted.resolve.current({ messages: [], total: 0, title: "" });
+      });
+      await tick();
+      await advanceFrame();
+      const el = scrollElOf(container);
+      fakeScroll(el, 0, 5000);
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(readOther!()).toBe(false);
     });
   });
 

@@ -8,6 +8,7 @@ import { eventBus } from "@/lib/eventBus";
 import { tabFocusActions } from "@/lib/tabFocus";
 import { projectSessionKey, useProjectState } from "@/stores/projectStore";
 import { getProjectTerminals, terminalDisplayTitle, useTerminalState } from "@/stores/terminalStore";
+import { CopyValueButton } from "../common/CopyValueButton";
 
 function anyRunRunning(runs: AgentRun[]): boolean {
   return runs.some((run) => run.status === "running" || anyRunRunning(run.children ?? []));
@@ -225,11 +226,21 @@ export function RemoteProjectStatus({
             {visibleSessions.length === 0 ? (
               <div className="text-xs text-muted-foreground">No open chats</div>
             ) : (
-              visibleSessions.map((s) => (
-                <button
+              visibleSessions.map((s) => {
+                const open = () => {
+                  revealTab({ kind: "chat" });
+                  openSessionTab(s.id, s.title || s.id, project.path, project.host);
+                };
+                // A <div role="button">, not a <button>: the row hosts the
+                // session-ID copy control, and a real <button> inside a real
+                // <button> is invalid HTML. The Terminals row below already
+                // uses this outer-div shape for the same reason.
+                return (
+                <div
                   key={s.id}
-                  type="button"
-                  className="flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-accent"
+                  role="button"
+                  tabIndex={0}
+                  className="group flex w-full cursor-pointer items-center gap-1 truncate rounded px-1 py-0.5 text-left text-xs hover:bg-accent"
                   onClick={stop}
                   onDoubleClick={stop}
                   onMouseDown={stop}
@@ -237,16 +248,31 @@ export function RemoteProjectStatus({
                   onPointerDown={stop}
                   onPointerUp={(e) => {
                     e.stopPropagation();
-                    revealTab({ kind: "chat" });
-                    openSessionTab(s.id, s.title || s.id, project.path, project.host);
+                    open();
+                  }}
+                  onKeyDown={(e) => {
+                    // The row opens on pointer-UP, which a native <button> would
+                    // have covered with a synthetic click — so keyboard
+                    // activation has to be wired explicitly here.
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    open();
                   }}
                 >
                   <MessageSquare className="w-3 h-3 shrink-0" />
                   <span className="truncate">{s.title || s.id}</span>
                   {running.has(s.id) && <Play className="w-2.5 h-2.5 shrink-0 text-emerald-500" aria-label="running" />}
-                  {openSessionIds.has(s.id) && <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">open</span>}
-                </button>
-              ))
+                  <CopyValueButton
+                    value={s.id}
+                    label="Copy session ID"
+                    className="ml-auto"
+                    testId={`sidebar-copy-session-id-${s.id}`}
+                  />
+                  {openSessionIds.has(s.id) && <span className="shrink-0 text-[10px] text-muted-foreground">open</span>}
+                </div>
+                );
+              })
             )}
           </div>
           <div>

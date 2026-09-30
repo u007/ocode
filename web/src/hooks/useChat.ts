@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { recentUserInputs } from "../lib/recentInputs";
 import {
   useChatSelector,
   useChatDispatch,
@@ -78,6 +79,22 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   );
   const hiddenQuestionRequestId = useChatSelector(
     (s) => getSessionSlice(s, sessionId).hiddenQuestionRequestId,
+  );
+  // True while this session's transcript is scrolled away from its tail.
+  // Written by ChatPanel's scroll handler (they are siblings under App.tsx, so
+  // the per-session slice is the only channel between them).
+  const transcriptScrolledUp = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).transcriptScrolledUp,
+  );
+  // The last couple of REAL typed inputs, oldest → newest, for the composer's
+  // recall strip. `recentUserInputs` allocates a fresh array per call, so the
+  // shallow comparator is load-bearing: without it every store update (a
+  // streamed token, a status frame) would hand the composer a new array and
+  // re-render it for unchanged text. The walk stops at 2, so the comparator is
+  // O(1)-ish regardless of transcript length.
+  const recentInputs = useChatSelector(
+    (s) => recentUserInputs(getSessionSlice(s, sessionId).messages),
+    (a, b) => a.length === b.length && a.every((text, i) => text === b[i]),
   );
   // The assistant message (prose + reasoning) behind the pending ask, shown
   // inside the permission/question dialogs. Shallow-compared so streamed
@@ -492,6 +509,12 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     pendingQuestion,
     hiddenQuestionRequestId,
     askContext,
+    // Consumed by the composer's "recent inputs" strip. Both are narrow
+    // selectors: `transcriptScrolledUp` is a boolean that only flips when the
+    // reader crosses the tail threshold, and `recentInputs` is shallow-compared
+    // so streamed deltas never hand the composer a new array.
+    transcriptScrolledUp,
+    recentInputs,
     hideQuestion,
     showQuestion,
   };

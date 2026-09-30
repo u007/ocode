@@ -92,6 +92,12 @@ func (s *Server) RunStates() []RunState {
 // Each session's messages are read under its own as.mu (not h.mu): a running
 // turn mutates as.messages concurrently, so a snapshot taken under h.mu alone
 // would race — see findPendingSession's comment for the same hazard.
+//
+// The read is a non-blocking TryLock: runTurn holds as.mu for the whole turn,
+// and this is polled by the desktop badge watcher and the quit dialog, so a
+// blocking Lock parks the caller until that turn ends. A session that is
+// mid-turn cannot be parked on an ask (the turn returns before the pause), so
+// a failed TryLock means "not pending".
 func (h *Handler) PendingPermissionAsks() int {
 	h.mu.Lock()
 	sessions := make([]*agentSession, 0, len(h.agents))
@@ -102,7 +108,9 @@ func (h *Handler) PendingPermissionAsks() int {
 
 	count := 0
 	for _, as := range sessions {
-		as.mu.Lock()
+		if !as.mu.TryLock() {
+			continue
+		}
 		pending := tailIsPermissionAsk(as.messages)
 		as.mu.Unlock()
 		if pending {

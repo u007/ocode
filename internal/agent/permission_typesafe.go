@@ -252,6 +252,10 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 	resp, err := client.Decide(state, questions)
 	if err != nil {
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_fail tool=%s model=%s err=%v", toolName, modelLabel, err))
+		a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, permissionJudgeRecord{
+			Outcome: outcomeTransportError,
+			Error:   err.Error(),
+		}))
 		return false, "TypeSafe judge request failed: " + err.Error(), false
 	}
 	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)
@@ -259,6 +263,10 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 	ans, ok := resp.Answers[typesafeJudgeVerdictKey]
 	if !ok || ans.Type != "choice" {
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_fail tool=%s model=%s err=missing_verdict answers=%d", toolName, modelLabel, len(resp.Answers)))
+		a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, permissionJudgeRecord{
+			Outcome: outcomeNoVerdict,
+			Reason:  fmt.Sprintf("no verdict answer among %d answers", len(resp.Answers)),
+		}))
 		return false, "TypeSafe judge returned no verdict", false
 	}
 
@@ -283,14 +291,31 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 		concern = "; concern: " + typesafeConcernLabel(concernKey)
 	}
 
+	// The part of the durable record that is the same for every outcome; each
+	// branch below merges its own outcome and reason on top.
+	verdict := permissionJudgeRecord{
+		Choice:        ans.Choice,
+		Confidence:    ans.Confidence,
+		Probabilities: ans.Probabilities,
+		Concern:       concernKey,
+		ConcernConf:   concernConf,
+	}
+
 	switch ans.Choice {
 	case "allow":
 		if ans.Confidence < floor {
-			return false, fmt.Sprintf("TypeSafe judge leaned allow but confidence %.2f is below the %.2f floor%s", ans.Confidence, floor, concern), true
+			reason := fmt.Sprintf("TypeSafe judge leaned allow but confidence %.2f is below the %.2f floor%s", ans.Confidence, floor, concern)
+			a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, verdict,
+				permissionJudgeRecord{Outcome: outcomeBelowFloor, Reason: reason, Floor: floor}))
+			return false, reason, true
 		}
 		if ok, why := a.verifyAutoGrant(toolName, args, req); !ok {
+			a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, verdict,
+				permissionJudgeRecord{Outcome: outcomeGuardRefused, Reason: why, Floor: floor}))
 			return false, why, true
 		}
+		a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, verdict,
+			permissionJudgeRecord{Outcome: outcomeGranted, Floor: floor}))
 		return true, "", true
 	case "deny":
 		// Deterministic backstop for the user's opt-outs: the rubric already
@@ -304,16 +329,27 @@ func (a *Agent) askPermissionModelTypesafe(client *TypesafeClient, toolName stri
 		if concernKey != "" && concernKey != "none" && a.relaxedConcernSet()[concernKey] {
 			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_relaxed tool=%s model=%s choice=deny concern=%s", toolName, modelLabel, concernKey))
 			if ok, why := a.verifyAutoGrant(toolName, args, req); !ok {
+				a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, verdict,
+					permissionJudgeRecord{Outcome: outcomeGuardRefused, Reason: why, Floor: floor}))
 				return false, why, true
 			}
+			a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, verdict,
+				permissionJudgeRecord{Outcome: outcomeRelaxedAllow, Floor: floor,
+					Reason: "deny converted to allow: concern " + concernKey + " is switched off"}))
 			return true, "", true
 		}
 		if concern == "" {
 			concern = "; concern: " + typesafeConcernLabel("none") + " (model gave no category)"
 		}
-		return false, fmt.Sprintf("TypeSafe judge chose deny (confidence %.2f)%s", ans.Confidence, concern), true
+		reason := fmt.Sprintf("TypeSafe judge chose deny (confidence %.2f)%s", ans.Confidence, concern)
+		a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, verdict,
+			permissionJudgeRecord{Outcome: outcomeJudgeDenied, Reason: reason, Floor: floor}))
+		return false, reason, true
 	default:
-		return false, fmt.Sprintf("TypeSafe judge returned unknown choice %q", ans.Choice), false
+		reason := fmt.Sprintf("TypeSafe judge returned unknown choice %q", ans.Choice)
+		a.logPermissionJudge(a.newJudgeRecord(toolName, client.Model, args, req, verdict,
+			permissionJudgeRecord{Outcome: outcomeUnknownChoice, Reason: reason, Floor: floor}))
+		return false, reason, false
 	}
 }
 

@@ -1953,9 +1953,22 @@ func (h *Handler) bootstrapEntryAgent(entry *sessionEntry, model string) (*agent
 	if model == "" {
 		model = h.effectiveSessionModel(entry.SessionID)
 	}
+	// A missing transcript is a brand-new session (empty history). Any other
+	// load failure (e.g. SQLITE_BUSY under machine load) must fail the
+	// bootstrap: building the agent on an empty history makes it diverge from
+	// the stored rows, so every live snapshot is dropped and every turn-end
+	// save conflicts — the turn's output is discarded and the session reverts
+	// to its last stored input row.
 	var history []agent.Message
-	if s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID); err == nil {
+	s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID)
+	switch {
+	case err == nil:
 		history = s.Messages
+	case errors.Is(err, os.ErrNotExist):
+		// new session: nothing persisted yet
+	default:
+		log.Printf("serve error: load transcript for %s in %s: %v", entry.SessionID, entry.ProjectRoot, err)
+		return nil, "history", fmt.Errorf("load session transcript: %w", err)
 	}
 	if n := pendingStripLen(history, h.sessions.PendingContents(entry.SessionID)); n > 0 {
 		history = history[:len(history)-n]

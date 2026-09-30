@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -700,4 +702,42 @@ func mustMarshal(t *testing.T, v any) []byte {
 		t.Fatalf("marshal %T: %v", v, err)
 	}
 	return b
+}
+
+// TestBootstrapEntryAgentFailsOnUnreadableTranscript pins that a transcript
+// load failure (e.g. SQLITE_BUSY under machine load) fails the bootstrap
+// instead of building the agent on an empty history. An agent built that way
+// diverges from the stored rows: every live snapshot is dropped and every
+// turn-end save conflicts, so the turn's output is discarded and the session
+// reverts to its last stored input row.
+func TestBootstrapEntryAgentFailsOnUnreadableTranscript(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	entry := h.sessions.Register(id, proj)
+
+	dir, err := session.GetStorageDirForPath(proj)
+	if err != nil {
+		t.Fatalf("storage dir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".sqlite"), []byte("not a sqlite database"), 0o644); err != nil {
+		t.Fatalf("write corrupt session: %v", err)
+	}
+
+	as, stage, err := h.bootstrapEntryAgent(entry, "opencode-go/deepseek-v4-flash")
+	if err == nil {
+		if as != nil && as.agent != nil {
+			as.agent.Shutdown()
+		}
+		t.Fatal("bootstrapEntryAgent succeeded on an unreadable transcript, want error")
+	}
+	if stage != "history" {
+		t.Fatalf("stage = %q, want history", stage)
+	}
+	if h.lookupAgentSession(id) != nil {
+		t.Fatal("an agent was registered despite the failed transcript load")
+	}
 }

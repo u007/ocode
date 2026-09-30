@@ -21,11 +21,15 @@ func TestCronTargetsEndpoints(t *testing.T) {
 	t.Cleanup(svc.Stop)
 
 	srv := &Server{
+		// No workDir and no projects store, so the project boundary is empty and
+		// the no-param default is accepted — the same shape as a server that has
+		// not been told about any project.
 		scheduler:        svc,
 		schedulerOutbox:  scheduler.NewOutbox(storePath),
 		schedulerTargets: scheduler.NewTargets(storePath),
 		mux:              http.NewServeMux(),
 	}
+	srv.setCronScopeConfig(nil, nil, svc, nil, "", srv.schedulerOutbox, nil, srv.schedulerTargets)
 	srv.mux.HandleFunc("GET /api/cron/targets", srv.handleCronTargetsList)
 	srv.mux.HandleFunc("POST /api/cron/targets", srv.handleCronTargetsSet)
 

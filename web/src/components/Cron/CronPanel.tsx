@@ -36,6 +36,17 @@ interface Props {
   active?: boolean;
   loadingKey?: string;
   onLoadingEvent?: LoadingEventHandler;
+  /**
+   * The project this panel shows, and the host it lives on.
+   *
+   * Both are REQUIRED in practice, not optional convenience: the whole cron
+   * surface is per project, and the panel is already keyed per project
+   * (`tabLoadKey(host, path, "cron")`), so a panel that loaded without them
+   * would reset its loading state on a project switch while continuing to
+   * display the previous project's jobs, outbox, targets and reminders.
+   */
+  project?: string;
+  host?: string;
 }
 
 type CronLoadData = {
@@ -44,7 +55,13 @@ type CronLoadData = {
   targets: Record<string, number>;
 };
 
-export default function CronPanel({ active = true, loadingKey, onLoadingEvent }: Props) {
+export default function CronPanel({
+  active = true,
+  loadingKey,
+  onLoadingEvent,
+  project,
+  host,
+}: Props) {
   const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [outbox, setOutbox] = useState<CronDelivery[]>([]);
@@ -77,16 +94,16 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
 
   const loadAll = useCallback(async (): Promise<CronLoadData> => {
     const [jobsRes, outboxRes, targetsRes] = await Promise.all([
-      api.listCronJobs(),
-      api.getCronOutbox(),
-      api.getCronTargets(),
+      api.listCronJobs(project, host),
+      api.getCronOutbox(project, host),
+      api.getCronTargets(project, host),
     ]);
     return {
       jobs: jobsRes.jobs ?? [],
       outbox: outboxRes.entries ?? [],
       targets: targetsRes.targets,
     };
-  }, []);
+  }, [project, host]);
 
   // Every path — initial load, manual refresh, mutations, and polling — uses
   // this one latest-wins request. A poll therefore cannot leave a half-loaded
@@ -164,18 +181,18 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
   const submitJob = useCallback(
     async (request: CronJobWriteRequest) => {
       if (editingJob) {
-        await api.updateCronJob(editingJob.id, request);
+        await api.updateCronJob(editingJob.id, request, project, host);
       } else {
-        await api.addCronJob(request);
+        await api.addCronJob(request, project, host);
       }
       await refreshAll();
     },
-    [editingJob, refreshAll],
+    [editingJob, refreshAll, project, host],
   );
 
   const toggleEnabled = async (job: CronJob) => {
     try {
-      await api.updateCronJob(job.id, { enabled: !job.enabled });
+      await api.updateCronJob(job.id, { enabled: !job.enabled }, project, host);
       await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to toggle job");
@@ -186,7 +203,7 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
   // which renders the reason inline and keeps the confirm open — closing it
   // would make a failed delete look like a completed one.
   const deleteJob = async (job: CronJob) => {
-    await api.deleteCronJob(job.id);
+    await api.deleteCronJob(job.id, project, host);
     await refreshAll();
   };
 
@@ -200,7 +217,7 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
   // which shows the reason inline and keeps the confirm open — a swallowed
   // failure would empty the list on screen while the entries are still queued.
   const drainOutbox = async () => {
-    await api.drainCronOutbox();
+    await api.drainCronOutbox(project, host);
     await refreshAll();
   };
 
@@ -209,12 +226,12 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
     const ops: Promise<unknown>[] = [];
     for (const [workdir, chatId] of Object.entries(nextTargets)) {
       if (current[workdir] !== chatId) {
-        ops.push(api.setCronTarget(workdir, chatId));
+        ops.push(api.setCronTarget(workdir, chatId, project, host));
       }
     }
     for (const workdir of Object.keys(current)) {
       if (!(workdir in nextTargets)) {
-        ops.push(api.setCronTarget(workdir, 0));
+        ops.push(api.setCronTarget(workdir, 0, project, host));
       }
     }
     await Promise.all(ops);
@@ -419,6 +436,8 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
               panelId="cron-subpanel-reminders"
               active={active && subView === "reminders"}
               loadingKey={loadingKey}
+              project={project}
+              host={host}
               onTotalChange={handleCountChange}
             />
           </div>
@@ -428,6 +447,8 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
               panelId="cron-subpanel-tasks"
               active={active && subView === "tasks"}
               loadingKey={loadingKey}
+              project={project}
+              host={host}
               onTotalChange={handleCountChange}
             />
           </div>
@@ -436,6 +457,8 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
             <CronHistoryPanel
               jobId={historyJob.id}
               jobName={historyJob.name || historyJob.payload.message}
+              project={project}
+              host={host}
               onClose={() => setHistoryJob(null)}
             />
           )}

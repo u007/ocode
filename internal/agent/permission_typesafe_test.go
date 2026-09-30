@@ -268,3 +268,41 @@ func TestConsultPermissionModelTypesafeAllowedPrefixesInState(t *testing.T) {
 		t.Fatalf("verdict instructions must exclude path-qualified binaries from allowed_command_prefixes trust")
 	}
 }
+
+// End-to-end through the real judge entry point: whatever the permission layer
+// decides, exactly one durable judge record is emitted, and its outcome field
+// says which of the four things happened. This is the assertion that the log is
+// actually wired, rather than merely constructible.
+func TestPermissionJudgeLog_RecordsOutcomeEndToEnd(t *testing.T) {
+	cases := []struct {
+		name    string
+		reply   string
+		allowed bool
+		outcome judgeOutcome
+	}{
+		{"granted", typesafeChoiceReply("allow", 0.97), true, outcomeGranted},
+		{"below floor", typesafeChoiceReply("allow", 0.21), false, outcomeBelowFloor},
+		{"denied", typesafeChoiceReply("deny", 0.99), false, outcomeJudgeDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := captureDebug(t)
+			a, _ := newTypesafeJudge(t, tc.reply)
+			allowed, _, _, _ := a.consultPermissionModel("bash",
+				json.RawMessage(`{"command":"cd /tmp && ls drizzle"}`), nil)
+			if allowed != tc.allowed {
+				t.Errorf("allowed = %v, want %v", allowed, tc.allowed)
+			}
+			recs := decodeRecords(t, lines())
+			if len(recs) != 1 {
+				t.Fatalf("expected exactly 1 judge record, got %d", len(recs))
+			}
+			if recs[0].Outcome != tc.outcome {
+				t.Errorf("outcome = %q, want %q", recs[0].Outcome, tc.outcome)
+			}
+			if recs[0].Model != "jev-latest" || recs[0].Tool != "bash" {
+				t.Errorf("record lost model/tool: %+v", recs[0])
+			}
+		})
+	}
+}

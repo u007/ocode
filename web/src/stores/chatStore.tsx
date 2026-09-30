@@ -289,6 +289,16 @@ export interface SessionSlice {
   // streamWasInterrupted which prevents drainQueuedItems on cancel). Cleared
   // when the user resumes or starts a new turn.
   wasInterrupted: boolean;
+  // True while this session's transcript is scrolled away from its tail
+  // (>= 200px of content below the fold — the same threshold that drives
+  // ChatPanel's jump-to-bottom affordance). Drives the composer's "recent
+  // inputs" strip, which is the recall affordance for exactly the state where
+  // your own prompts are no longer on screen.
+  //
+  // Written by ChatPanel's scroll handler and read by ChatInput. They are
+  // SIBLINGS under App.tsx, so this per-session slice is the only channel
+  // between them; ChatInput carries no scroll props and must not grow any.
+  transcriptScrolledUp: boolean;
   // Server-derived "settled on an unfinished turn" flag (GET /state). Distinct
   // from `wasInterrupted`, which is the live user-Stop signal that BLOCKS
   // sending — reusing it would disable the Continue action this flag drives.
@@ -349,6 +359,7 @@ export const emptySessionSlice: SessionSlice = {
   statusLoading: false,
   wasInterrupted: false,
   interrupted: false,
+  transcriptScrolledUp: false,
   model: undefined,
 };
 
@@ -471,6 +482,7 @@ export type ChatAction =
   | { type: "QUESTION_DISMISSED"; sessionId: string; requestId: string }
   | { type: "PREPEND_MESSAGES"; sessionId: string; messages: Message[]; total: number }
   | { type: "SET_LOADING_MORE"; sessionId: string; loading: boolean }
+  | { type: "SET_TRANSCRIPT_SCROLLED_UP"; sessionId: string; scrolledUp: boolean }
   | { type: "MERGE_SNAPSHOT"; sessionId: string; messages: Message[]; total: number }
   | { type: "SET_TOTAL"; sessionId: string; total: number }
   | { type: "SET_SPENDING"; spendingUSD: number | null }
@@ -1218,6 +1230,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     case "SET_LOADING_MORE":
       return updateSession(state, action.sessionId, (s) => ({ ...s, loadingMore: action.loading }));
+    case "SET_TRANSCRIPT_SCROLLED_UP":
+      // Identity guard: the scroll handler dispatches on every animation frame
+      // while the reader scrolls, and `updateSession` replaces the slice object.
+      // Without this, a scroll that does not cross the threshold would still
+      // re-render every subscriber of the slice on every frame.
+      return updateSession(state, action.sessionId, (s) =>
+        s.transcriptScrolledUp === action.scrolledUp ? s : { ...s, transcriptScrolledUp: action.scrolledUp },
+      );
     case "MERGE_SNAPSHOT":
       // Merge snapshot into current state.
       // If action.messages is a full snapshot (length == total), replace all.

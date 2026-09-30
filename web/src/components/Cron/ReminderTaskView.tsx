@@ -45,6 +45,9 @@ interface Props {
   active: boolean;
   /** Changes when the project changes; resets the list and the filter. */
   loadingKey?: string;
+  /** The project this list belongs to, and the host it lives on. */
+  project?: string;
+  host?: string;
   /** Called with the total so the parent can badge the sub-tab. */
   onTotalChange?: (kind: ReminderItemKind, total: number) => void;
 }
@@ -67,6 +70,8 @@ export default function ReminderTaskView({
   panelId,
   active,
   loadingKey,
+  project,
+  host,
   onTotalChange,
 }: Props) {
   const [items, setItems] = useState<ReminderItem[]>([]);
@@ -124,7 +129,7 @@ export default function ReminderTaskView({
     if (inFlight.current) return inFlight.current;
     const params = buildParams();
     const run = api
-      .listReminderItems(kind, params)
+      .listReminderItems(kind, params, project, host)
       .then((res) => {
         setItems(res.items ?? []);
         setTotal(res.total ?? 0);
@@ -142,7 +147,7 @@ export default function ReminderTaskView({
       });
     inFlight.current = run;
     return run;
-  }, [kind, plural, buildParams, onTotalChange]);
+  }, [kind, plural, buildParams, onTotalChange, project, host]);
 
   /**
    * Everything that must trigger a re-read, as explicit inputs to ONE effect.
@@ -190,13 +195,13 @@ export default function ReminderTaskView({
         // status is deliberately NOT sent here: saving an item's fields must
         // never silently move it back to pending. The two operations are
         // separate on the server too (Update vs SetStatus).
-        await api.updateReminderItem(kind, editing.id, request);
+        await api.updateReminderItem(kind, editing.id, request, project, host);
       } else {
-        await api.addReminderItem(kind, request);
+        await api.addReminderItem(kind, request, project, host);
       }
       await refresh();
     },
-    [editing, kind, refresh],
+    [editing, kind, refresh, project, host],
   );
 
   /**
@@ -209,7 +214,7 @@ export default function ReminderTaskView({
     async (item: ReminderItem, status: ReminderItemStatus) => {
       setBusyId(item.id);
       try {
-        await api.updateReminderItem(kind, item.id, { status });
+        await api.updateReminderItem(kind, item.id, { status }, project, host);
         await refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : `Failed to set ${noun} status`);
@@ -217,14 +222,14 @@ export default function ReminderTaskView({
         setBusyId(null);
       }
     },
-    [kind, noun, refresh],
+    [kind, noun, refresh, project, host],
   );
 
   const runNow = useCallback(
     async (item: ReminderItem) => {
       setBusyId(item.id);
       try {
-        await api.runReminderItem(kind, item.id);
+        await api.runReminderItem(kind, item.id, project, host);
         await refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : `Failed to run ${noun}`);
@@ -232,15 +237,15 @@ export default function ReminderTaskView({
         setBusyId(null);
       }
     },
-    [kind, noun, refresh],
+    [kind, noun, refresh, project, host],
   );
 
   const deleteItem = useCallback(
     async (item: ReminderItem) => {
-      await api.deleteReminderItem(kind, item.id);
+      await api.deleteReminderItem(kind, item.id, project, host);
       await refresh();
     },
-    [kind, refresh],
+    [kind, refresh, project, host],
   );
 
   const rows = useMemo(() => items, [items]);
@@ -536,7 +541,11 @@ export default function ReminderTaskView({
           jobId={api.reminderDeliveryId(kind, historyItem.id)}
           jobName={historyItem.title}
           onClose={() => setHistoryItem(null)}
-          fetchRuns={(limit, offset) => api.getReminderItemRuns(kind, historyItem.id, limit, offset)}
+          project={project}
+          host={host}
+          fetchRuns={(limit, offset) =>
+            api.getReminderItemRuns(kind, historyItem.id, limit, offset, project, host)
+          }
         />
       )}
     </section>

@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, waitFor, act } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRef } from "react";
 import { TerminalProvider } from "../../stores/terminalStore";
@@ -131,7 +131,12 @@ async function renderTabs(projectPath = "/project", host?: string) {
       <TerminalTabs ref={ref} active projectPath={projectPath} host={host} />
     </TerminalProvider>,
   );
-  // First terminal is opened lazily once the panel becomes active.
+  // activate() no longer auto-seeds a shell (see the B change in
+  // terminalStore.activate), so the fixture opens one explicitly — the same
+  // path the ⌨️+ button and Cmd/Ctrl+T take. These tests assert socket
+  // behaviour per terminal, so they need a terminal to exist; the seeding
+  // policy itself is covered in terminalStore.test.tsx.
+  act(() => ref.current?.openTerminal());
   await waitFor(() => expect(sockets.length).toBe(1));
   return { ref, ...utils };
 }
@@ -176,9 +181,13 @@ describe("TerminalTabs", () => {
 
     first.rerender(
       <TerminalProvider>
-        <TerminalTabs active projectPath="/remote" host="new@example.com" />
+        <TerminalTabs ref={first.ref} active projectPath="/remote" host="new@example.com" />
       </TerminalProvider>,
     );
+    // A different host is a DIFFERENT store key, so activate() finds nothing
+    // persisted for it and — since it no longer seeds — opens no terminal. Open
+    // one explicitly so there is a pty lifecycle to tear down and rebuild.
+    act(() => first.ref.current?.openTerminal());
 
     await waitFor(() => expect(sockets).toHaveLength(2));
     expect(oldSocket.close).toHaveBeenCalled();
@@ -201,9 +210,10 @@ describe("TerminalTabs", () => {
     await waitFor(() => expect(sockets.length).toBe(2));
     const secondSocket = sockets[1]; // newest terminal becomes active
 
-    const closed = ref.current?.closeActiveTerminal();
+    // One terminal remains after closing the second of two.
+    const remaining = ref.current?.closeActiveTerminal();
 
-    expect(closed).toBe(true);
+    expect(remaining).toBe(1);
     await waitFor(() => expect(secondSocket.close).toHaveBeenCalled());
     // Closing the socket only detaches the shell; an explicit tab close must
     // also kill it server-side.
@@ -218,7 +228,9 @@ describe("TerminalTabs", () => {
     const secondSocket = sockets[1];
     const secondId = new URL(secondSocket.url).searchParams.get("terminal_id");
 
-    expect(ref.current?.closeActiveTerminal()).toBe(true);
+    // Two terminals are open here (the fixture plus the one opened above), so
+    // closing the active one leaves 1.
+    expect(ref.current?.closeActiveTerminal()).toBe(1);
     await waitFor(() =>
       expect(authedFetchMock).toHaveBeenCalledWith(
         `/api/remote/${encodeURIComponent("dev@example.com")}/api/terminal/${secondId}`,
@@ -230,11 +242,14 @@ describe("TerminalTabs", () => {
     expect(headers.get("X-Ocode-Project")).toBe("/remote");
   });
 
-  it("closeActiveTerminal() returns false once no terminal remains", async () => {
+  it("closeActiveTerminal() returns 0 then null once no terminal remains", async () => {
     const { ref } = await renderTabs();
 
-    expect(ref.current?.closeActiveTerminal()).toBe(true);
-    expect(ref.current?.closeActiveTerminal()).toBe(false);
+    // 0 = this close emptied the project; null = nothing left to close. The
+    // second call must not remove a neighbour (there is none) nor re-fire the
+    // shell kill.
+    expect(ref.current?.closeActiveTerminal()).toBe(0);
+    expect(ref.current?.closeActiveTerminal()).toBeNull();
   });
 
   it("restores the same number of terminal tabs (fresh sockets) after remount", async () => {
@@ -245,6 +260,7 @@ describe("TerminalTabs", () => {
         <TerminalTabs ref={ref} active projectPath="/project" />
       </TerminalProvider>,
     );
+    act(() => ref.current?.openTerminal());
     await waitFor(() => expect(sockets.length).toBe(1));
     ref.current?.openTerminal();
     await waitFor(() => expect(sockets.length).toBe(2));

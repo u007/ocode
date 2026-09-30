@@ -24,6 +24,7 @@ import { useTerminalState, getProjectTerminals, terminalDisplayTitle, PROCESSES_
 import { useBrowserTabs } from "../../stores/browserTabsStore";
 import { useBrowserPersistence } from "../Browser/browserPersistence";
 import { browserActions, useBrowserStore, type StateKey } from "../../lib/browserStore";
+import { shouldLeaveTerminalView } from "../../lib/terminalFocusExit";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
@@ -36,6 +37,7 @@ import { focusTerminalById } from "../Terminal/terminalFocus";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { CopyValueButton } from "../common/CopyValueButton";
 
 function truncateTitle(s: string, maxLen: number): string {
   s = s.replace(/\n/g, " ").trim();
@@ -121,6 +123,10 @@ interface TabPillProps {
   /** Terminal-only: a backgrounded terminal emitted a bell/notification. Drives
    *  the "unread activity" badge above the pill. */
   hasAlert?: boolean;
+  /** Chat-only: the session ID this pill opens, exposed through a hover copy
+   *  button. Absent for an unsaved draft tab and for non-chat kinds, so the
+   *  button is only mounted where a real, copyable ID exists. */
+  copyValue?: string;
   isEditing: boolean;
   editValue: string;
   onEditValueChange: (v: string) => void;
@@ -145,6 +151,7 @@ function TabPill({
   hasPending,
   turnState,
   hasAlert,
+  copyValue,
   isEditing,
   editValue,
   onEditValueChange,
@@ -192,7 +199,12 @@ function TabPill({
           onClick({ button: 0, detail: 1 } as unknown as React.MouseEvent);
         }
       }}
-      className={`relative flex w-full lg:w-52 items-center gap-1 overflow-hidden px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+      // `group` is load-bearing: the session-ID copy button reveals via
+      // `group-hover:opacity-100` / `group-hover:pointer-events-auto`. Without
+      // the class on this root the button stays at opacity 0 with pointer
+      // events disabled — invisible AND unclickable, which jsdom cannot detect
+      // because it has no CSS engine. Verified in a real browser.
+      className={`group relative flex w-full lg:w-52 items-center gap-1 overflow-hidden px-2.5 py-1 rounded-md text-[13px] leading-4 cursor-pointer shrink-0 touch-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
         isActive ? "bg-muted/80 text-foreground border border-border/70 shadow-sm" : "bg-card/20 text-muted-foreground border border-transparent hover:bg-muted/50 hover:text-foreground"
       }`}
     >
@@ -266,6 +278,9 @@ function TabPill({
       >
         <TurnStateGlyph state={turnState ?? "idle"} />
       </span>
+      {copyValue && (
+        <CopyValueButton value={copyValue} label="Copy session ID" testId={`tab-copy-session-id-${sortId}`} />
+      )}
       <span
         role="button"
         tabIndex={0}
@@ -708,8 +723,15 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   }, [closeBrowserTab]);
 
   const doCloseTerminal = useCallback((id: string) => {
-    closeTerminal(activeProjectPath, id, activeProjectHost);
-  }, [closeTerminal, activeProjectPath, activeProjectHost]);
+    // The store reports the POST-close remaining count, so there is no
+    // pre-close snapshot to go stale between this render and the click (a
+    // cross-client `terminal_tabs_changed` refetch can land in that window).
+    // `remaining` is 0 only when this close actually emptied the project.
+    const remaining = closeTerminal(activeProjectPath, id, activeProjectHost);
+    if (shouldLeaveTerminalView({ remaining, focusedKind })) {
+      onFocusKindChange("chat");
+    }
+  }, [closeTerminal, activeProjectPath, activeProjectHost, focusedKind, onFocusKindChange]);
 
   const confirmPendingClose = useCallback(() => {
     if (!pendingClose) return;
@@ -930,6 +952,9 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           isLoading={isLoadingChatTab(id, derived?.initialized ?? false)}
           hasPending={derived?.hasPending ?? false}
           turnState={derived?.turnState ?? "idle"}
+          // A `new-*` id is a client-side draft placeholder, not a stored
+          // session — there is no ID to copy until the first turn persists it.
+          copyValue={id.startsWith("new-") ? undefined : id}
           isEditing={editing?.kind === "chat" && editing.id === id}
           editValue={editValue}
           onEditValueChange={setEditValue}

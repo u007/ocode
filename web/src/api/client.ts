@@ -469,12 +469,24 @@ import { getWindowId } from "../lib/windowId";
 
 // projQuery appends ?project=<root> for endpoints that select a registered
 // project root via the query string (git + fs mutation endpoints).
-function projQuery(project?: string, host?: string): string {
+function projQuery(
+  project?: string,
+  host?: string,
+  extra?: Record<string, string>,
+): string {
   const params = new URLSearchParams();
   if (project) params.set("project", project);
   if (host) params.set("host", host);
+  for (const [k, v] of Object.entries(extra ?? {})) params.set(k, v);
   const q = params.toString();
   return q ? `?${q}` : "";
+}
+
+/** projQuery for a URL that ALREADY carries a query string: the separator has
+ *  to be "&", not a second "?". */
+function projQueryAppend(project?: string, host?: string): string {
+  const q = projQuery(project, host);
+  return q ? `&${q.slice(1)}` : "";
 }
 
 /** Non-2xx response from fetchJSON. Carries the HTTP status so callers can
@@ -531,12 +543,25 @@ export async function fetchJSON<T>(
   }
 }
 
-async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
+/**
+ * A 204-style call. `host` mirrors `fetchJSON`'s third argument so a DELETE can
+ * be routed to a remote project's server like every other verb — without it, a
+ * project-scoped delete would silently hit the LOCAL server for a remote
+ * project, which is the exact class of bug the host threading exists to prevent.
+ */
+async function fetchEmpty(
+  path: string,
+  init?: RequestInit,
+  host?: string,
+  projectPath?: string,
+): Promise<void> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type"))
     headers.set("Content-Type", "application/json");
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
-  const res = await fetch(apiPath(path), { ...init, headers });
+  if (host && projectPath) headers.set("X-Ocode-Project", projectPath);
+  const prefixed = host ? `${remoteApiBase(host)}${path}` : path;
+  const res = await fetch(apiPath(prefixed), { ...init, headers });
   if (!res.ok) {
     reportAuthFailure(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -1621,88 +1646,164 @@ export const api = {
         body: JSON.stringify({ path }),
       },
     ),
-  listCronJobs: () => fetchJSON<CronJobsResponse>("/api/cron"),
-  getCronJob: (id: string) => fetchJSON<CronJob>(`/api/cron/${id}`),
-  addCronJob: (job: CronJobWriteRequest) =>
-    fetchJSON<{ id: string }>("/api/cron", {
+  // --- Cron (jobs, outbox, runs, targets) + reminders and tasks ------------
+  //
+  // Every method on this surface is PROJECT-SCOPED, and every one therefore
+  // takes `project` (and `host`, for a remote project). The panel is already
+  // keyed per project (`tabLoadKey(host, path, "cron")`), so before this the Cron
+  // tab reset its loading state on a project switch while continuing to show the
+  // previous project's jobs and reminders. Both args are optional so an
+  // uncalled site still resolves to the server's default project rather than
+  // 403-ing — but a caller in the web UI should always pass them.
+  listCronJobs: (project?: string, host?: string) =>
+    fetchJSON<CronJobsResponse>(`/api/cron${projQuery(project, host)}`, undefined, host),
+  getCronJob: (id: string, project?: string, host?: string) =>
+    fetchJSON<CronJob>(
+      `/api/cron/${encodeURIComponent(id)}${projQuery(project, host)}`,
+      undefined,
+      host,
+    ),
+  addCronJob: (job: CronJobWriteRequest, project?: string, host?: string) =>
+    fetchJSON<{ id: string }>(`/api/cron${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify(job),
-    }),
-  updateCronJob: (id: string, patch: CronJobPatchRequest) =>
-    fetchJSON<CronJob>(`/api/cron/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(patch),
-    }),
-  deleteCronJob: (id: string) =>
-    fetchEmpty(`/api/cron/${id}`, {
-      method: "DELETE",
-    }),
-  getCronOutbox: () => fetchJSON<CronOutboxResponse>("/api/cron/outbox"),
-  drainCronOutbox: () =>
-    fetchJSON<CronOutboxResponse>("/api/cron/outbox?drain=true"),
-  getCronRuns: (jobId: string, limit = 50, offset = 0) =>
+    }, host),
+  updateCronJob: (
+    id: string,
+    patch: CronJobPatchRequest,
+    project?: string,
+    host?: string,
+  ) =>
+    fetchJSON<CronJob>(
+      `/api/cron/${encodeURIComponent(id)}${projQuery(project, host)}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+      host,
+    ),
+  deleteCronJob: (id: string, project?: string, host?: string) =>
+    fetchEmpty(
+      `/api/cron/${encodeURIComponent(id)}${projQuery(project, host)}`,
+      { method: "DELETE" },
+      host,
+      project,
+    ),
+  getCronOutbox: (project?: string, host?: string) =>
+    fetchJSON<CronOutboxResponse>(`/api/cron/outbox${projQuery(project, host)}`, undefined, host),
+  drainCronOutbox: (project?: string, host?: string) =>
+    fetchJSON<CronOutboxResponse>(
+      `/api/cron/outbox${projQuery(project, host, { drain: "true" })}`,
+      undefined,
+      host,
+    ),
+  getCronRuns: (jobId: string, limit = 50, offset = 0, project?: string, host?: string) =>
     fetchJSON<CronRunsResponse>(
-      `/api/cron/${encodeURIComponent(jobId)}/runs?limit=${limit}&offset=${offset}`,
+      `/api/cron/${encodeURIComponent(jobId)}/runs?limit=${limit}&offset=${offset}${projQueryAppend(project, host)}`,
+      undefined,
+      host,
     ),
-  getCronRun: (jobId: string, runId: string) =>
+  getCronRun: (jobId: string, runId: string, project?: string, host?: string) =>
     fetchJSON<CronRun>(
-      `/api/cron/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}`,
+      `/api/cron/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}${projQuery(project, host)}`,
+      undefined,
+      host,
     ),
-  getCronTargets: () => fetchJSON<CronTargetsResponse>("/api/cron/targets"),
-  setCronTarget: (workdir: string, chatId: number) =>
-    fetchJSON<{ ok: boolean }>("/api/cron/targets", {
+  getCronTargets: (project?: string, host?: string) =>
+    fetchJSON<CronTargetsResponse>(`/api/cron/targets${projQuery(project, host)}`, undefined, host),
+  setCronTarget: (workdir: string, chatId: number, project?: string, host?: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/cron/targets${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ workdir, chat_id: chatId }),
-    }),
+    }, host),
 
   // --- Reminders and tasks -------------------------------------------------
   //
   // One implementation, two base paths: the server derives the kind from the
   // collection, so `kind` never travels on the wire. The paging params are
   // always explicit (offset is never omitted) so paging cannot silently
-  // restart at 0 when a caller forgets one of them.
+  // restart at 0 when a caller forgets one of them. Project scoping matches the
+  // cron methods above.
   listReminderItems: (
     kind: ReminderItemKind,
     params: ReminderItemListParams = {},
+    project?: string,
+    host?: string,
   ) => {
     const q = new URLSearchParams();
     if (params.status) q.set("status", params.status);
     q.set("limit", String(params.limit ?? 0));
     q.set("offset", String(params.offset ?? 0));
-    return fetchJSON<ReminderItemListResponse>(`/api/${kind}s?${q.toString()}`);
+    if (project) q.set("project", project);
+    return fetchJSON<ReminderItemListResponse>(`/api/${kind}s?${q.toString()}`, undefined, host);
   },
-  getReminderItem: (kind: ReminderItemKind, id: string) =>
-    fetchJSON<ReminderItem>(`/api/${kind}s/${encodeURIComponent(id)}`),
-  addReminderItem: (kind: ReminderItemKind, item: ReminderItemWriteRequest) =>
-    fetchJSON<ReminderItem>(`/api/${kind}s`, {
+  getReminderItem: (kind: ReminderItemKind, id: string, project?: string, host?: string) =>
+    fetchJSON<ReminderItem>(
+      `/api/${kind}s/${encodeURIComponent(id)}${projQuery(project, host)}`,
+      undefined,
+      host,
+    ),
+  addReminderItem: (
+    kind: ReminderItemKind,
+    item: ReminderItemWriteRequest,
+    project?: string,
+    host?: string,
+  ) =>
+    fetchJSON<ReminderItem>(`/api/${kind}s${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify(item),
-    }),
+    }, host),
   updateReminderItem: (
     kind: ReminderItemKind,
     id: string,
     patch: ReminderItemPatchRequest,
+    project?: string,
+    host?: string,
   ) =>
-    fetchJSON<ReminderItem>(`/api/${kind}s/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify(patch),
-    }),
-  deleteReminderItem: (kind: ReminderItemKind, id: string) =>
-    fetchEmpty(`/api/${kind}s/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    fetchJSON<ReminderItem>(
+      `/api/${kind}s/${encodeURIComponent(id)}${projQuery(project, host)}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+      host,
+    ),
+  deleteReminderItem: (
+    kind: ReminderItemKind,
+    id: string,
+    project?: string,
+    host?: string,
+  ) =>
+    fetchEmpty(
+      `/api/${kind}s/${encodeURIComponent(id)}${projQuery(project, host)}`,
+      { method: "DELETE" },
+      host,
+      project,
+    ),
   /** Fire an item now, bypassing the due-time gate. */
-  runReminderItem: (kind: ReminderItemKind, id: string) =>
-    fetchJSON<ReminderItem>(`/api/${kind}s/${encodeURIComponent(id)}/run`, {
-      method: "POST",
-    }),
+  runReminderItem: (
+    kind: ReminderItemKind,
+    id: string,
+    project?: string,
+    host?: string,
+  ) =>
+    fetchJSON<ReminderItem>(
+      `/api/${kind}s/${encodeURIComponent(id)}/run${projQuery(project, host)}`,
+      { method: "POST" },
+      host,
+    ),
   /**
    * Run history for a reminder/task. It is the SAME runs.jsonl cron writes, so
    * the caller passes the BARE item id and this prefixes it — the server keys
    * those rows by "<kind>:<id>", and making every caller remember that
    * invariant is how a history panel ends up silently empty.
    */
-  getReminderItemRuns: (kind: ReminderItemKind, id: string, limit = 20, offset = 0) =>
+  getReminderItemRuns: (
+    kind: ReminderItemKind,
+    id: string,
+    limit = 20,
+    offset = 0,
+    project?: string,
+    host?: string,
+  ) =>
     fetchJSON<CronRunsResponse>(
-      `/api/${kind}s/${encodeURIComponent(`${kind}:${id}`)}/runs?limit=${limit}&offset=${offset}`,
+      `/api/${kind}s/${encodeURIComponent(`${kind}:${id}`)}/runs?limit=${limit}&offset=${offset}${projQueryAppend(project, host)}`,
+      undefined,
+      host,
     ),
   /** The delivery-log id the server writes for an item: "<kind>:<id>". */
   reminderDeliveryId: (kind: ReminderItemKind, id: string) => `${kind}:${id}`,

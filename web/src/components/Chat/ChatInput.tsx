@@ -23,6 +23,7 @@ import { describeActionError, reportActionErrorMessage } from "../../lib/actionE
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
 import { getCompactionState, isCompactCommand, useCompactionState } from "../../lib/compactionState";
 import CompactionStatus from "./CompactionStatus";
+import RecentInputsStrip from "./RecentInputsStrip";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. */
@@ -132,7 +133,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const delayedInputsRef = useRef<string[]>([]);
   const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const delayedGenerationRef = useRef(0);
-  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost, transcriptScrolledUp, recentInputs } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -1075,6 +1076,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <span className="text-blue-300 text-sm font-medium">Drop files here</span>
         </div>
       )}
+      {/* Recent inputs: a read-only reminder of the last couple of things the
+          user typed, shown ONLY while the transcript is scrolled away from its
+          tail (the state where your own prompts are off-screen). First in the
+          stack, above the attach/context pills, so it reads as ambient context
+          for the block rather than as part of the next message's send flow.
+          RecentInputsStrip renders null when there is nothing to show, so an
+          at-the-tail transcript reserves no chrome. */}
+      {transcriptScrolledUp && <RecentInputsStrip inputs={recentInputs} />}
       {showSlashMenu && (
         <SlashCommandMenu
           query={slashQuery}

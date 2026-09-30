@@ -136,6 +136,106 @@ describe("useChat render cost", () => {
     expect(counts.renders).toBe(before);
   });
 
+  it("does not re-render for the recent-inputs fields on unrelated dispatches", async () => {
+    // `recentInputs` is the one returned field whose selector allocates a FRESH
+    // array on every call (recentUserInputs builds it), so it is the one that
+    // genuinely needs a shallow comparator: without it, every streamed token
+    // would hand the composer a new array identity and re-render it. The store
+    // field it reads, `transcriptScrolledUp`, is a boolean that only flips when
+    // the reader crosses the tail threshold.
+    const { counts, hook } = setup("sess-recent");
+    act(() => {
+      hook.result.current.dispatch({
+        type: "SET_MESSAGES",
+        sessionId: "sess-recent",
+        messages: [
+          { role: "user", content: "first ask" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "second ask" },
+        ],
+      });
+    });
+    await settle(counts);
+    const before = counts.renders;
+
+    act(() => {
+      hook.result.current.dispatch({
+        type: "LIVE_DELTA",
+        sessionId: "sess-recent",
+        kind: "text",
+        delta: "working…",
+      });
+      hook.result.current.dispatch({
+        type: "SET_TOTAL",
+        sessionId: "sess-recent",
+        total: 3,
+      });
+    });
+    expect(counts.renders).toBe(before);
+  });
+
+  it("re-renders when the recent inputs themselves change, and hides injections", async () => {
+    const { counts, hook } = setup("sess-recent-2");
+    act(() => {
+      hook.result.current.dispatch({
+        type: "SET_MESSAGES",
+        sessionId: "sess-recent-2",
+        messages: [{ role: "user", content: "first ask" }],
+      });
+    });
+    await settle(counts);
+    expect(hook.result.current.chat.recentInputs).toEqual(["first ask"]);
+
+    // A NEW input must re-render and be reflected.
+    const before = counts.renders;
+    act(() => {
+      hook.result.current.dispatch({
+        type: "SET_MESSAGES",
+        sessionId: "sess-recent-2",
+        messages: [
+          { role: "user", content: "first ask" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "second ask" },
+        ],
+      });
+    });
+    expect(counts.renders).toBeGreaterThan(before);
+    expect(hook.result.current.chat.recentInputs).toEqual(["first ask", "second ask"]);
+
+    // A system-injected user-role message must NOT enter the strip, and must not
+    // cost a render (the visible texts are unchanged).
+    const afterInputs = counts.renders;
+    act(() => {
+      hook.result.current.dispatch({
+        type: "SET_MESSAGES",
+        sessionId: "sess-recent-2",
+        messages: [
+          { role: "user", content: "first ask" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "second ask" },
+          { role: "user", content: "[advisor plan checkpoint] An advisor reviewed the changes:" },
+        ],
+      });
+    });
+    expect(hook.result.current.chat.recentInputs).toEqual(["first ask", "second ask"]);
+    expect(counts.renders).toBe(afterInputs);
+  });
+
+  it("re-renders when transcriptScrolledUp flips", async () => {
+    const { counts, hook } = setup("sess-scrolled-flag");
+    await settle(counts);
+    const before = counts.renders;
+    act(() => {
+      hook.result.current.dispatch({
+        type: "SET_TRANSCRIPT_SCROLLED_UP",
+        sessionId: "sess-scrolled-flag",
+        scrolledUp: true,
+      });
+    });
+    expect(hook.result.current.chat.transcriptScrolledUp).toBe(true);
+    expect(counts.renders).toBeGreaterThan(before);
+  });
+
   it("still re-renders when a returned field changes", async () => {
     const { counts, hook } = setup("sess-2");
     await settle(counts);

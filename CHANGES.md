@@ -1,5 +1,353 @@
 # Changelog
 
+## 2026-09-30 — The root briefing is condensed: `CLAUDE.md` 1441 → 529 lines, detail moved into the knowledge bundle
+
+- **What changed.** `CLAUDE.md` shrank by 912 lines. Every one of its 26 sections survives, but each
+  now carries only the load-bearing rules; the long-form explanation moved into 13 new
+  `docs/concepts/*.md` bundle pages (`prompt-cache-stability.md`, `task-dag.md`,
+  `persistent-todo-plan.md`, `web-server-locking-and-liveness-rules.md`,
+  `web-server-project-scoping.md`, `subagent-transcripts-child-sessions.md`,
+  `task-output-contracts.md`, `okf-knowledge-system.md`, `tui-slash-command-queuing.md`,
+  `environment-prompt.md`, `data-storage-layout.md`, `backend-sync-url-split.md`,
+  `web-context-gauge-resolution.md`), with the existing `sandbox-permission-mode.md` extended by 86
+  lines. Every mutation is recorded in `docs/log.md` and indexed from `docs/index.md`, both
+  maintained by `doc_write`.
+- **Why now.** The file states its own contract — "cross-cutting rules that affect more than one
+  file … Feature descriptions belong in `README.md` or the `skills/ocode-*` catalog, not here" —
+  and it had drifted well past it. It is injected into **every** session's cached system prompt
+  unconditionally (`internal/agent/context.go`), so its length is a per-turn context tax on every
+  chat, TUI and web alike. With an OKF bundle active the detail is one `doc_search` away.
+- **The rule that matters for the move:** a bundle page's `file.go:123` anchors go stale silently
+  the moment a line is inserted above them. Every moved citation was re-derived against the live
+  source before the section was dropped from `CLAUDE.md`; the surviving short versions keep the
+  citations that still resolve.
+- **Backward compatible.** `LoadContext` still prefers `CLAUDE.md` over `AGENTS.md`, and a repo with
+  only `AGENTS.md` is unaffected. Nothing reads a line offset or a section count.
+
+## 2026-09-30 — Compaction: restate the task after the transcript, and log what a malformed summary actually said
+
+- **The ask was a symptom, not a bug report:** compaction produced prose instead of a summary —
+  the model *answered* the conversation segment instead of emitting the template.
+- **Cause.** `renderSummaryPrompt` put the instructions and the template at the **top** of a prompt
+  whose second half is a (possibly very large) joined transcript. Instructions at the head of a long
+  prompt get drowned: the last thing the model reads is a conversation with no request in it.
+  Fix: close the prompt with an explicit terminator restating the contract — end-of-segment marker,
+  "do not continue or answer it", and the required header (`## Original Request`). The template at
+  the top is kept; this is an addition, not a relocation.
+- **Diagnosability, same pass.** A malformed summary was retried with only `attempt N: <error>` on
+  the debug channel, which cannot distinguish an empty response from one missing a section from one
+  that opened with a preamble — the three cases need different fixes. The retry line now carries the
+  response length and its first 200 characters (`truncateForSummary`).
+
+## 2026-09-30 — Recent inputs: the last 2 things you typed, shown above the composer
+
+- **The ask.** "on desktop ui and web ui need to show the last 2 input messages as small texts
+  above the input on chat session." One implementation covers both surfaces, because the desktop
+  app is this same SPA (`internal/desktop` boots a local server and loads `web/dist`). The TUI is a
+  separate surface and was not part of the ask.
+- **What it is.** A read-only, single-row-per-input band rendered as the first in-flow child of
+  the composer block (above the file/context pills), showing the last two real typed prompts,
+  oldest → newest so the newest sits nearest the caret. Full text is on the `title` tooltip;
+  newlines are collapsed and the row is `truncate`d so the band can never grow past one row per
+  input. Deliberately **not** interactive — the transcript's per-message "Restore to input"
+  button and the composer's `↑`/`↓` input history are already the restore paths, and a third one
+  would compete with them.
+- **Shown only while the transcript is scrolled off its tail** (≥200px below the fold — the same
+  measurement that drives the existing jump-to-bottom button), i.e. exactly the state where your
+  own prompts are no longer on screen. At the tail it renders `null` and reserves no chrome.
+- **The scroll signal is new and minimal.** `transcriptScrolledUp` on `SessionSlice`, written from
+  the single place in `ChatPanel.handleScroll`'s rAF that already computes `!atBottom` (the line
+  beside `setShowJumpToBottom`). ChatPanel and ChatInput are **siblings** under `App.tsx`, so the
+  per-session slice is the only channel between them; ChatInput grew no scroll props. The
+  delicate `atBottomRef` tail-follow machinery is **untouched** — this reuses its measurement
+  rather than adding a second scroll-distance computation, and deliberately uses the raw measured
+  value rather than the intent-gated ref (the intent gate exists to protect the autoscroll
+  follow; this signal wants to be honest about the viewport).
+- **Filtering: not every `role: "user"` message is something you typed.** System-injected
+  user-role messages are persisted and, in real transcripts, dominate: measured over 400 recent
+  session files, 113 × `[advisor plan checkpoint]`, 82 × `[advisor completion checkpoint]`, 7 ×
+  `[ocode:event]`. Showing those would fill a two-line strip with advisor prose.
+  `lib/recentInputs.ts` therefore composes the existing `isCountableUserMessage` (slash-command
+  echoes) **and** adds a marker denylist. The two predicates are deliberately NOT unified — the
+  jump readout's cross-surface consistency with the TUI is worth more than the duplication — and
+  the module says so at the top. `[ocode:` is a prefix rule, so future injected tails are covered
+  without another edit.
+- **Known limitation (found by a live browser probe, then pinned by a test).** The strip reads the
+  client's **loaded window**, not the whole transcript. A long agent turn can push every prompt
+  out of that window — the session this feature was built in has 351 messages, only 2 of them
+  user messages, both at the very start, so its tail window legitimately yields nothing and the
+  strip stays hidden. Scrolling up pages older messages in (`PREPEND_MESSAGES`), which usually
+  recovers it, but a server-side "last N user inputs" endpoint would be the real fix.
+- **Tests (all mutation-verified, 8/8 caught).** `lib/recentInputs.test.ts` (marker filtering,
+  ordering, limit, empty, whitespace); `chatStore.test.tsx` (per-session, **plus an identity
+  guard** — the scroll handler dispatches per frame, and without the guard every frame would
+  replace the slice and re-render the composer); `ChatPanel.test.tsx` (a real scroll gesture flips
+  the published flag, and does not touch another session's slice); `useChat.rerender.test.tsx`
+  (streamed deltas cost zero renders — `recentInputs` is the one returned field whose selector
+  allocates a fresh array, so its shallow comparator is load-bearing); `ChatInput.recentInputs`
+  (gating + placement); `RecentInputsStrip.test.tsx` (rendering); `RecentInputsStrip.seam.test.tsx`
+  (real store + real hook + real `ChatInput` — the path every other suite mocks out).
+
+## 2026-09-30 — Desktop app hang: Settings save and badge poll blocked on a running turn's `as.mu`
+
+- **The ask.** "it hang again ocode app, i cant even save setting" — the `PUT` limits-config
+  request never returned and the desktop badge stopped updating.
+- **Root cause, from the live goroutine dump.** `runTurn` holds `as.mu` for the whole turn.
+  `applyLimitsToLiveSessions` (called synchronously by the Settings save handler) and
+  `PendingPermissionAsks` (polled by the desktop badge watcher and the quit dialog) both did
+  `as.mu.Lock()` on every resident session, so they parked until the running turn finished
+  (39 minutes in the dump). `applyRedactionToLiveSessions` had the same shape.
+- **Fix.** `applyLimitsToLiveSessions` takes no `as.mu` (the setters are atomic);
+  `PendingPermissionAsks` uses `TryLock` (mid-turn ⇒ not pending); redaction applies per
+  session in a background goroutine. Regression tests hold `as.mu` and assert neither call
+  blocks. Rule recorded in `docs/concepts/web-server-locking-and-liveness-rules.md`.
+
+## 2026-09-30 — Terminal paste pasted twice: the keydown and xterm were both writing the clipboard
+
+- **The ask.** "paste on terminal tab on web and desktop ui still causes double paste" — one
+  `Cmd/Ctrl+V` delivered the clipboard text to the pty twice, in the browser and in the desktop
+  shell alike. ("still" pointed at the 2026-09-15 clipboard-shortcuts fix, which had made *copy*
+  correct and left paste with two live paths.)
+- **Root cause, from the installed `@xterm/xterm` 6.0.0 bundle.** Two facts, both load-bearing:
+  1. xterm registers a native `paste` listener on **both** its hidden textarea and its element
+     (`handlePasteEvent` → `paste(clipboardData.getData("text/plain"))` → `triggerDataEvent`), and a
+     browser's `Cmd/Ctrl+V` **default action** is to dispatch exactly that event on the focused
+     editable element — which for a terminal is xterm's textarea. Paste therefore already worked
+     with no help from us.
+  2. xterm's `_keyDown` returns early **without `preventDefault`** the moment a custom key handler
+     answers `false`. Returning `false` stops xterm; it does not stop the browser.
+  So the 2026-09-15 `pasteFromClipboard` (async `navigator.clipboard.readText()` → `term.paste`)
+  ran *in addition to* xterm's own listener: two pastes, not a fallback. The old comment claimed
+  returning `false` "blocked" the key — true for xterm, false for the browser.
+  (Also checked rather than assumed: xterm's `_inputEvent` only emits for `inputType ===
+  "insertText"`, so the browser's own `insertFromPaste` into the textarea is not a third paste.)
+- **Fix (`web/src/components/Terminal/TerminalPanel.tsx`).** Delete `pasteFromClipboard`. The
+  `Cmd/Ctrl+V` branch of `attachCustomKeyEventHandler` now only `return false` — the one thing it
+  must still do is stop xterm's keyboard layer turning a non-mac `Ctrl+V` into a literal `\x16`
+  byte — and deliberately does **not** `preventDefault`, because that would suppress the `paste`
+  event and with it the only paste. A new container-level `paste` listener in **capture phase**
+  (`term.open(containerRef.current)`, so the panel root is an ancestor of the textarea) owns the
+  event: `getData("text/plain")`, early return when empty (image-only clipboard), then
+  `preventDefault()` + `stopPropagation()` so xterm's own listener never runs, and `term.paste(text)`
+  — never a raw `sock.send`, so bracketed-paste is still honored for multiline payloads. That makes
+  this function the single place a paste becomes terminal input.
+- **Plus a paste-side dedupe, mirroring the copy side.** In the desktop shell one physical paste can
+  arrive twice — the native `application.EditMenu` role (`cmd/ocode-desktop/main.go`) *and* the
+  keydown default action — the same dual route the copy path already had to absorb. A same-text
+  paste inside `DUPLICATE_PASTE_WINDOW_MS` is dropped rather than reaching the pty
+  twice. Different text, or the same text after the window, always pastes. The window is **50ms**,
+  much tighter than the copy one on purpose: the two deliveries of one paste land within a few ms,
+  while a longer window starts swallowing a user's own rapid repeat — and a dropped duplicate is the
+  cheap mistake, a swallowed paste reads as "paste is broken". It reads `performance.now()`, not
+  `Date.now()`, so a wall-clock jump cannot silently disable it.
+- **The listener is scoped to the terminal, not the panel.** A capture-phase listener on the panel
+  root also sees pastes aimed at the panel's *other* inputs — `TerminalFindBar` renders its search
+  field inside that same container — so a `Cmd+V` into the find box would have landed in the shell
+  and the find box would have stayed empty (and the event would have been `preventDefault`ed, so
+  not even a browser paste would land in the field). The handler now bails unless
+  `term.element.contains(e.target)`. The context menu is unaffected either way: it renders through
+  a portal on `document.body`, outside the container.
+- **The right-click menu's Paste now uses the same path.** `handlePaste` was doing
+  `navigator.clipboard.readText()` + a raw `sock.send(text)`, which skips bracketed-paste wrapping
+  (a multiline payload would run line by line in a bracketed-paste app such as `vim`) and bypasses
+  the attach-handshake and socket-state guard that `term.onData` already applies. It now calls
+  `term.paste(text)`. It is deliberately *not* deduped against a clipboard event: a context-menu
+  item is not a delivery of the `Cmd/Ctrl+V` keystroke.
+- **Tests** (`web/src/components/Terminal/TerminalPanel.copyOnSelect.test.tsx`, 7 new; 30 in file,
+  142 across `src/components/Terminal`). The tests model the real DOM instead of just calling the
+  handler: xterm's `element` containing a `<textarea>` that carries its own paste listener (calling
+  the same `term.paste` mock), inside the panel root, plus a `paste` event with a stubbed
+  `clipboardData` — the exact shape that produced the bug. Three of the original five fail against
+  the pre-fix code (the keydown read the clipboard; the event was not consumed; two events → two
+  pastes). Mutation-verified, five mutants each caught by a named test: dropping `stopPropagation`
+  (fails all five), dropping the dedupe's text comparison (fails the different-text case), dropping
+  the terminal-subtree guard (fails the find-bar case), reverting `handlePaste` to a raw
+  `sock.send` (fails the context-menu case), and widening the window back to 250ms (fails the
+  100ms re-paste case).
+- **The advisor's suggested "use the real xterm `Terminal` in jsdom" test was not taken**: every
+  suite in this directory stubs xterm precisely because it needs canvas/layout that jsdom lacks
+  (see the note at the top of the file). The bundle was read directly instead, and the DOM model
+  reproduces the registration that causes the bug.
+- **Also removed** a stale duplicated copy of the clipboard-shortcuts comment block that had been
+  left inside the terminal-creation effect and still referenced the deleted `pasteFromClipboard`.
+- `npm run typecheck` (tsgo) clean; `vite build` clean; full `web` vitest suite green.
+
+## 2026-09-30 — No minimum-one terminal: closing them all now stays closed
+
+- **The ask.** "Why does ocode desktop seem to enforce a minimum of 1 terminal tab? It should not."
+  There was no such guard. The minimum was an emergent artifact of a **collapsed persisted state**:
+  closing the last terminal makes both persistence layers record *absence* rather than *emptiness* —
+  `saveProjectTerminals` deletes the localStorage mirror key on an empty list
+  (`web/src/components/Terminal/terminalPersistence.ts`), and the server treats an empty
+  `PUT /api/terminal-tabs` as a delete (`internal/termtabs`). So "the user closed them all" and "this
+  project never had a terminal" were byte-identical. Because `focusedKind` is persisted per project
+  (`App.tsx` → `lib/viewPersistence.ts`), a restart that restored the terminal view re-ran
+  `activate()`, found nothing persisted, and minted a shell the user had deliberately closed. The
+  in-session case was already correct (a live-but-empty entry short-circuits `activate`'s guard),
+  which is why the symptom only appeared on relaunch.
+- **Fix 1 — `activate()` never spawns** (`web/src/stores/terminalStore.tsx`). With nothing persisted
+  it now dispatches `terminals: [], activeId: ""`, still `live: true`. That is what makes the empty
+  state a *decided* state: the `live` flag stops `activate` re-entering the branch, and `TerminalTabs`
+  renders its existing "No terminals open. Use ⌨️+ in the tab bar to start one." panel. A terminal is
+  created only by an explicit `openTerminal()` (the ⌨️+ button or Cmd/Ctrl+T). No storage or wire
+  format change — the empty list meaning "delete" is now correct rather than lossy. This also matches
+  what the original plan expected: its verification step already called for the "No terminals open"
+  state on a project that never had a terminal activated, which the seed made unreachable.
+- **Fix 2 — closing the last terminal hands back to the chat** (new pure helper
+  `web/src/lib/terminalFocusExit.ts`, `shouldLeaveTerminalView`). Left alone, the persisted
+  `focusedKind` would restore the now-empty terminal panel on every launch — the user closed the
+  terminal to get it out of the way and would get an empty terminal screen instead of their chat.
+  Wired at exactly the two user-gesture close sites: `UnifiedTabBar.doCloseTerminal` (tab X /
+  middle-click) and the Cmd+W path in `App.tsx`. Deliberately **not** wired to the sidebar inventory
+  kill (`killTerminal`) or to cross-client closes via the `terminal_tabs_changed` refetch — neither is
+  a gesture in the view being left, and yanking the user to a chat they did not act in would be a
+  surprise. Processes is covered by the same `focusedKind === "terminal"` gate; closing *from*
+  Processes is a no-op because the handle short-circuits the sentinel.
+- **Fix 2b — the count is supplied by the store, not measured by the caller.** The first cut of this
+  change read the terminal count at render time, before calling the close, on the reasoning that
+  `closeTerminal` dispatches synchronously so reading afterwards "would still be the pre-close
+  snapshot". That reasoning was wrong in the direction that actually hurts, which is the *opposite* of
+  the one it assumed: if a cross-client refetch adds a terminal between a component's last render and
+  the click running its handler, the caller's snapshot says "1" while the store says "2" — closing the
+  visible terminal then looks like the last one and hands the user back to the chat **with a shell
+  still running**. `closeTerminal` and `TerminalTabsHandle.closeActiveTerminal` therefore now return
+  the remaining count themselves (`null` = nothing removed, `0` = the close emptied the project),
+  read from `store.state` after the synchronous removal, and `shouldLeaveTerminalView` takes only
+  that. This makes the mistake unrepresentable rather than merely unlikely: a caller holding a
+  pre-close snapshot no longer type-checks, because the helper's input has no field for one. Two
+  details fell out: `closeActiveTerminal` no longer re-checks the rendered `terminals` list before
+  delegating (that snapshot is the stale one) and lets the store re-check against live state, and
+  `null` is kept distinct from `0` so a close that removed nothing is never read as "now empty".
+- **Tests.** The obvious test — close a terminal, expect zero — *passed before the fix*, so it proves
+  nothing. The regression lives in the `describe("no minimum-one terminal")` block in
+  `web/src/stores/terminalStore.test.tsx`, whose main case crosses a **reload boundary** (`cleanup()`
+  plus a fresh provider against the same persisted state, which is what an app restart does) and waits
+  past both the 200ms mirror and 400ms server debounces before asserting — asserting earlier would
+  read the pre-close state and let it pass for the wrong reason. C is covered by
+  `describe("leaving the terminal view on the last close")` in
+  `web/src/components/Layout/UnifiedTabBar.test.tsx` (last-one leaves; one-of-two does not; a close
+  while the chat is focused does not) plus the `shouldLeaveTerminalView` matrix in
+  `web/src/lib/terminalFocusExit.test.ts`. Fix 2b is pinned by
+  `describe("closeTerminal reports the post-close remaining count")` in `terminalStore.test.tsx` —
+  closing one of two reports `1` (not the `2` a pre-close read gives), emptying reports `0`, an absent
+  id reports `null`, and two synchronous closes report `[1, null]` rather than taking out two
+  terminals. All three changes are **mutation-verified**: restoring the `newTerminal()` call, forcing
+  the helper to `return false`, and restoring a pre-close read inside `closeTerminal` each fail their
+  tests, with every mutant confirmed to compile first (a build-only failure is INVALID, not CAUGHT).
+- **Test-fixture conversions, not deletions.** `activate()` was widely used as a "give me a terminal"
+  convenience, so 15 existing assertions in four suites depended on the seed. They were converted to
+  `openTerminal()` (the real user-facing path) or given an explicit seeded terminal; the one test that
+  *asserted the seed* — "activate() with nothing persisted creates one fresh terminal and goes live" —
+  was rewritten to pin the new behavior and states what it used to guard. No test was deleted or
+  weakened.
+
+## 2026-09-30 — Copy a session ID from the web/desktop sidebar and status bar
+
+- **The ask.** The session ID was visible in the bottom status bar as plain, unselectable-by-accident
+  text and was otherwise unreachable — a user pasting it into a bug report or an
+  `/api/sessions/{id}/…` call had to go and read it off a status bar whose layout makes selecting a
+  string awkward. It is now copyable from all three places a chat session appears in the SPA.
+- **`web/src/components/common/CopyValueButton.tsx` (new).** One shared control —
+  `CopyValueButton` (the button) plus `CopyableValue` (a `group` span that reveals it on hover over
+  the value it belongs to). It writes through the existing `lib/clipboard.ts`
+  `copyTextToClipboard`, so the desktop shell and plain-HTTP LAN origins keep the `execCommand`
+  fallback. Three contracts are load-bearing and are why this is a component rather than a snippet:
+  1. **Always mounted, opacity-only.** The tab strip is a wrapping grid of fixed `lg:w-52` pills and
+     the status bar is a `flex-wrap` row, so a conditionally rendered button reflows both on
+     pointer-arrival — the same rule the tab bar already follows for its spinner, pending-dot and
+     turn-state slots. Verified in a real browser: pill width 208 → 208 and the status-bar segment
+     227.6 → 227.6 across the hover. The cost is ~16px of permanently reserved title truncation.
+  2. **`pointer-events-none` while hidden**, `group-hover:pointer-events-auto` when shown, so the
+     invisible slot can never be clicked by accident. (`ProjectSidebar`'s remove-trash button is
+     hover-revealed but stays clickable while invisible; tolerable behind a confirm dialog, not for a
+     control the user cannot see.) The button stays keyboard-reachable via `focus-visible:`.
+  3. **Pointer-down, pointer-up AND click are all stopped.** The pill switches sessions on click and
+     the sidebar chat row opens on **`onPointerUp`**, so stopping only the click still navigates away
+     from the session whose ID was just copied. Both are pinned by tests.
+- **Three surfaces.** The **chat tab pill** (`UnifiedTabBar`), the **sidebar's remote-project chat
+  rows** (`RemoteProjectStatus`), and the **status bar's session-ID segment** (`StatusBar`, which
+  already showed the ID and now gains the button beside it). A `new-*` tab id is a client-side draft
+  placeholder with no stored session behind it, so unsaved draft tabs — and terminal/browser pills,
+  which have no session at all — deliberately get no button.
+- **Two real defects fixed on the way, both of which the first version had.**
+  - **The tab pill was missing the `group` class**, so `group-hover:opacity-100` never resolved and
+    the button shipped **permanently invisible and unclickable** — a 100%-passing jsdom suite, because
+    jsdom has no CSS engine and every class-string assertion still held. It was caught only by
+    driving the built app in Chromium and seeing `elementFromPoint` report the pill intercepting the
+    click. Fixed, and there is now a test asserting the **ancestor** carries `group`, not just that the
+    button carries `group-hover:`.
+  - **The clipboard helper returns a success boolean and resolves `false`** on the
+    insecure-origin/unfocused `execCommand` fallback path. The first version discarded it and flashed
+    "copied" unconditionally — a confirmation the user only discovers was a lie at paste time. The
+    state is now derived from the return value, with a distinct failure state.
+- **The sidebar's chat row is now a `<div role="button">`, not a `<button>`.** It hosts the copy
+  control and a real `<button>` cannot nest one (React logs `<button> cannot contain a nested
+  <button>`); the terminals row directly below already uses that outer-div shape. Because the row
+  opens on `onPointerUp`, the native `<button>`'s synthetic keyboard click is gone, so Enter/Space
+  activation is wired explicitly — without it the row would have become mouse-only.
+- Tests: `common/CopyValueButton.test.tsx` (9), `Layout/UnifiedTabBar.copySessionId.test.tsx` (6),
+  `common/StatusBar.copySessionId.test.tsx` (4), plus 3 added to `Layout/RemoteProjectStatus.test.tsx`.
+  Four load-bearing guards were **mutation-verified** (each guard removed → the pinning test fails):
+  the `onPointerUp` stop, the success-boolean mapping, the `new-*` draft exclusion, and the `group`
+  ancestor. Full web suite 320 files / 2817 tests green; `tsgo --noEmit` and `vite build` clean.
+
+## 2026-09-30 — Cron is now scoped per PROJECT, not per server process
+
+- **The bug.** Every part of the Cron surface — jobs, the delivery outbox, run history, the Telegram
+  targets registry, reminders and tasks — was one process-wide service keyed on the **server's boot
+  directory**. The stores were always per project (`scheduler.DefaultStorePath(workDir)` →
+  `<GlobalDataDir>/scheduler/<base>-<slug>/jobs.json`); only the running service was shared. The web
+  panel was already keyed per project (`tabLoadKey(host, path, "cron")`), so switching projects reset
+  the loading state while continuing to show the previous project's jobs, reminders and tasks. One
+  `serve` process served one project's schedule no matter which project the sidebar was on.
+- **`internal/server/cron_scope.go`** — a per-project registry mirroring the two patterns already in
+  this package: `Handler.lspManagerFor` (a canonical-root-keyed map) and
+  `Handler.resolveTerminalHistoryProject` (the trust boundary for a project param). One
+  `cronProjectServices` per project holds the cron engine, the reminders engine, and the three leaf
+  stores that share that project's store path.
+- **The trust boundary.** `?project=` (or `?project_path=`) is `~`-expanded against THIS host and then
+  must be an exact member of `allowedProjectRoots()` — the same workDir + saved-local-projects rule
+  the terminal endpoints use. An unregistered project is **403**. Two deliberate carve-outs, both
+  needed: an **empty** boundary (a server told about no project at all, which is the shape of most
+  package tests and an embedded server) accepts the resolved default, because a boundary with nothing
+  in it cannot refuse anything; and no param at all still resolves to the server's default project, so
+  every pre-existing caller keeps working. Verified live: an unregistered project 403s, and a job in
+  A is not readable, patchable or deletable from B.
+- **Remote projects need no extra server-side handling.** A remote project's traffic is
+  reverse-proxied to that host's own `serve --remote`, which validates against ITS roots, so the local
+  server never resolves a remote project's cron. Only the client threads `host`.
+- **Eager, not lazy, for saved local projects** (`Server.WarmCronProjects`, called by both hosts).
+  With lazy start, a reminder in a project nobody had opened would silently never fire and would never
+  reach the Telegram drainer. A reminder system that only works once you look at it is not one. The
+  cost is one idle goroutine loop per project.
+- **Lifecycle: idle-evict *and* stop-all.** Each project owns a run loop plus a drainer goroutine, so
+  a sweeper stops engines untouched for 30 min (matching `defaultSessionIdleTimeout`) and
+  `Server.Shutdown` now stops all of them — before this change the single scheduler was never stopped
+  at all. Eviction is lossless: the store is on disk and reloads on next touch.
+- **Concurrency.** The registry mutex covers map access only, never a start and never an agent turn,
+  so a cron request cannot stall an unrelated project (the rule `Handler.mu` already follows). Each
+  project has its own entry mutex, so concurrent first touches of the *same* project produce one engine
+  pair while a different project is unaffected. It is a plain mutex rather than a `sync.Once` on
+  purpose: a `Once` would make a failed start permanently sticky.
+- **Frontend.** All 15 cron/reminder client methods now take `project` and `host`, threaded from
+  `App.tsx`'s `activeProjectPath`/`activeProjectHost` through `CronPanel` → `ReminderTaskView` /
+  `CronHistoryPanel`. `fetchEmpty` gained the same `host`/`projectPath` arguments `fetchJSON` already
+  had — without it a DELETE would silently hit the local server for a remote project.
+- **Pre-existing tests updated, not weakened:** `scheduler_runs_test.go` and
+  `scheduler_targets_http_test.go` now name the project they operate on, which is the change's whole
+  point. Their `toHaveBeenCalledWith` arity assertions in the Cron vitest suites gained the explicit
+  trailing `undefined`s, so they now pin the project argument rather than ignoring it.
+- **Still deferred (in `TODO.md`):** the LLM-facing `cron` tool and the TUI `/cron` command remain
+  bound to the default project, because the `Handler` — and therefore every agent built from it —
+  holds one scheduler, and making that per session means threading a service into
+  `buildAgentSession`. The REST surface and the web UI are fully per project.
+- Verified: 4/4 compiling mutants of the isolation logic caught, and the one that survived was checked
+  and found to be a semantically equivalent mutation (retry already happens because `entry.svcs` is only
+  set on success). Full `internal/server` green; `internal/reminders` green under `-race`; `gofmt`,
+  `go vet`, `go build ./...` clean; web `tsgo --noEmit` and `vite build` clean; 43/43 Cron vitest and
+  2791/2791 of the full web suite pass; and a live two-project run against a throwaway `serve`
+  confirmed isolation across jobs, reminders, tasks, outbox and targets, plus the 403 boundary.
+
 ## 2026-09-30 - Claude Code plugins load in ocode; CLAUDE.md is the single repo briefing
 
 - **Claude Code plugin format** (`internal/plugins/claude.go`). A plugin dir is
@@ -23,6 +371,54 @@
 
 ## 2026-09-30 — The auto-permission judge is no longer asked to resolve `cd`, which was the whole cause of its low-confidence false prompts
 
+- **Durable judge log.** `internal/agent/permission_judge_log.go` records one JSON line per judge
+  decision to `<logsDir>/permission-judge.log`, reusing `debuglog.MirrorKindToFile` (existing 2MB
+  single-generation rotation — no new rotation scheme) and the new `PERMJUDGE` entry kind. The record
+  carries what was previously unrecoverable and is what made the 0.21 above undiagnosable: session
+  id, tool, model, rule, scope, command, `working_directory`, `resolved_cd`, `allowed_roots`,
+  `allow_destructive`, choice, `confidence`, the full `probabilities` map, concern and its
+  confidence, the floor applied, and an `outcome` (`granted`, `deferred_below_floor`,
+  `refused_deterministic_guard`, `denied_by_judge`, `granted_relaxed_concern`, `transport_error`,
+  `no_verdict`, `unknown_choice`) with the reason. Wired at every terminal branch of
+  `askPermissionModelTypesafe`.
+  - **Registration is lazy and lives in the judge**, not in `tui/model.go` or `server/handler.go`, so
+    it behaves identically in TUI, server and headless modes instead of only where startup wiring
+    remembered it. The record is appended to `debuglog.Log` **directly** as well as through
+    `emitDebug`, because the mirror only fires for entries that reach that sink — routing solely
+    through the `DebugAppend` hook made the file depend on a startup-time decision and silently
+    produced nothing under test.
+  - **Redaction is two-layer.** The session masking registry (authoritative when `/mask` is on, the
+    same substitution the judge request uses) plus an unconditional backstop for when `/mask` is
+    off, since a bash command can carry a literal credential and this file outlives the session.
+    The backstop uses `redact.Detect`, not `redact.QuickSecretPatterns`: the latter matches only a
+    fixed list of vendor formats and misses, for example, a `curl -H "Authorization: Bearer <opaque>"`
+    whose token shape it does not know. A matching command is **withheld** rather than
+    span-substituted — diagnosing a low-confidence verdict needs the roots, working directory, floor,
+    confidence and concern, not the literal text.
+  - **`allowed_roots` are trimmed to the roots that bear on the call.** Recording the full list
+    (~100 roots on a typical machine) made each record ~100KB and left only ~20 records inside the
+    shared 2MB cap — a log that cannot hold a session is worse than useless, because it looks like
+    it is recording something. `relevantAllowedRoots` keeps only roots matching the working
+    directory, the folded `cd` target, or a path the command mentions; candidates are drawn from
+    **both** the original and the folded command, because folding is precisely what removes the
+    `cd`. The kept roots are capped at `judgeMaxLoggedRoots` (12), and `allowed_roots_total` plus
+    `allowed_roots_omitted` are always reported so "the target was in none of the N roots" — the
+    diagnosis the 0.21 above actually needed — stays answerable when nothing matched. Root
+    comparison goes through `resolveForScopeCheck` rather than `EvalSymlinks`, which fails outright
+    on a path that does not exist yet (a command routinely names a not-yet-created target, and on
+    macOS `/var/folders/...` is a link to `/private/var/folders/...`).
+  - **Tests** (`permission_judge_log_test.go`, 8 functions): the diagnostic fields are all present;
+    the record shows the `cd` fold; a secret-bearing command is withheld with the token absent from
+    the serialised record, as is one carrying URL credentials; **a benign command is still recorded
+    verbatim** — without that, an over-eager detector that withheld everything would pass the suite
+    while destroying the log's whole purpose; the roots list is trimmed while the total survives; a
+    nil agent does not panic; registration is one-shot. `TestPermissionJudgeLog_RecordsOutcomeEndToEnd`
+    (`permission_typesafe_test.go`) additionally drives the real judge entry point through granted /
+    below-floor / denied and asserts **exactly one** record with the matching `outcome` — the
+    assertion that the log is actually wired, not merely constructible. `-race` green.
+- **Mirror files are created `0600`, not `0644`** (`internal/debuglog/mirror.go`). Every mirrored
+  kind — `COMPACT`, `TOKENS`, and now `PERMJUDGE` — carries turn and command text, which can include
+  a credential literal; a debug log does not need to be world-readable.
 - **Traceability.** The implementation is `internal/agent/permission_cdfold.go` (`foldTopLevelCds`),
   its tests `internal/agent/permission_cdfold_test.go`, and the wiring in
   `internal/agent/permission_typesafe.go` (`buildTypesafePermissionState`). **These landed in commit
@@ -6484,6 +6880,7 @@ Two follow-ups to the session-switch work.
 
 ## [Unreleased]
 
+- **Server: transcript load failure no longer bootstraps an empty agent (2026-09-30)** — `bootstrapEntryAgent` (`internal/server/agent_session.go`) swallowed any `session.LoadForDir` error and built the agent on an empty history (e.g. SQLITE_BUSY under machine load). The agent then diverged from the stored rows, so every live snapshot was dropped ("stored rows are not a prefix of the snapshot"), every turn-end save conflicted, and the session reverted to its last stored input row. A non-`ErrNotExist` load error now fails the bootstrap loudly (`turn_error` stage `history`, message stays pending) and is logged; regression `TestBootstrapEntryAgentFailsOnUnreadableTranscript`.
 - **Remote web session routing (2026-09-17)** — open tabs register their remote hosts with the event bus; session model selection, command context, and agent-run seed requests follow the session host. Agent-run caches are host-scoped, unresolved project snapshots defer seed requests, and clearing the active project clears the event bus's active host. Regression coverage includes host inventory, model-dialog routing, command context, project-store state, and agent-run loading.
 - **Version workflow** — added `make up-patch` and `make up-minor` to update the canonical version and changelog entry, then install the CLI and build the macOS desktop app with the new version.
 - **Version Bump** — 0.8.112 → 0.8.116

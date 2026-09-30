@@ -119,6 +119,12 @@ func schedulerSetup() func(*server.Server) error {
 		}
 		rstore, _ := reminders.DefaultStorePath(wd)
 		log.Printf("serve: reminders attached (store: %s)", rstore)
+
+		// Cron is per PROJECT, so arm every saved local project now rather than
+		// waiting for someone to open its Cron tab. Without this a reminder in a
+		// project nobody has looked at would silently never fire, and would never
+		// reach the Telegram drainer either.
+		srv.WarmCronProjects()
 		return nil
 	}
 }

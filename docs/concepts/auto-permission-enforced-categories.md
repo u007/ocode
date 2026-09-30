@@ -145,6 +145,29 @@ Shell-variable expansion above resolves *names*. It never resolved a `cd`, and t
 
 **Not fixed here.** `OutOfScopePath` is still never populated for compound commands, because `shellCompound` (`internal/agent/permissions.go`) makes `firstOutOfScopePath` bail, so `verifyAutoGrant`'s scope guard remains unreachable for them. Folding improves what the judge sees; it does not add a deterministic scope check. Tracked in `TODO.md`.
 
+## Durable judge log (PERMJUDGE, 2026-09-30)
+
+Every auto-permission decision writes one JSON record to `permission-judge.log` under the global logs dir, so a below-floor deferral is diagnosable after the fact instead of arriving as a bare banner with no category and no evidence.
+
+**Path and shape.** `ensurePermissionJudgeLog` mirrors the `PERMJUDGE` debug kind through the existing `debuglog.MirrorKindToFile` (2 MB, single generation — no hand-rolled rotation), and `logPermissionJudge` appends to `debuglog.Log` *directly* rather than only via `emitDebug`, so the file does not depend on the debug sink being wired. The file is created **0600**: it carries command text, which can include a credential literal. Records are append-only and every branch is a terminal outcome, so exactly one record exists per judge call.
+
+**`outcome` is the field to read first** — it is what the deferral banner does not tell you:
+
+| `outcome` | meaning |
+|---|---|
+| `granted` | allow at/above the floor, `verifyAutoGrant` passed |
+| `granted_relaxed_concern` | allow under a relaxed concern, on the opaque floor |
+| `deferred_below_floor` | **leaned allow, confidence below the floor** — the case that produced the unexplained 0.21 |
+| `refused_deterministic_guard` | the judge allowed, but a Go guard refused |
+| `denied_by_judge` | the judge denied |
+| `transport_error` / `no_verdict` / `unknown_choice` | never reached a decision |
+
+Supporting fields: `choice`, `confidence`, `probabilities`, `concern`, `concern_confidence`, `floor`, `resolved_cd`, `working_directory`, `allow_destructive`, `rule`, `scope`, `error`. `reason` carries the human-readable string the banner shows, so the log and the prompt cannot disagree.
+
+**Secrets are withheld, not logged in the clear.** A command containing detected secret material is replaced by `command_withheld` plus a `reason`; `command` is then empty. Detection uses `redact.Detect` (keyword + entropy, so it catches `Bearer …` and `https://user:pass@host` shapes that a fixed vendor-format list misses) plus the `/mask` registry.
+
+**`allowed_roots` is trimmed, and the total is preserved.** Logging all ~100 roots made each record ~100 KB, which left only ~20 records inside the 2 MB cap — a log that cannot hold a session. `relevantAllowedRoots` keeps the roots relevant to the workdir and to the paths the command names, capped at 12, and reports `allowed_roots_total` and `allowed_roots_omitted` so "the target was in none of the N roots" stays answerable. Comparison runs through `resolveForScopeCheck`, not `EvalSymlinks` directly: roots are symlink-resolved by construction, and `EvalSymlinks` fails outright on a path that does not exist yet (on macOS `/var/folders/…` is a link to `/private/var/folders/…`). Candidates are collected from **both** the original and the folded command, since the folded-away `cd` target is precisely the path whose containment decides the outcome.
+
 ## UI
 
 `PermissionsForm.tsx` loads the catalog and the auto-permission config in parallel. Each category is a checkbox with `aria-label="Enforce <key>"`; **ticked = enforced**, and saving writes `relaxed_concerns` = the **unticked** keys. `All` / `None` buttons set the array to `[]` / every key. The block renders a server-unavailable fallback when the catalog is empty.
@@ -156,6 +179,8 @@ For the interpreter path the judge prompt gained a guidance bullet (opt-out cate
 - `internal/agent/permission_relaxed_concerns_test.go` — catalog/rubric parity, clause emptiness when nothing is relaxed, wire state + both question instructions, relaxed-deny honoured, deny stands when not attributable, out-of-scope guard still wins, dangerous rm refused on both the relaxed-deny and plain judge-allow routes (`TestRelaxedDestructiveCannotGrantDangerousRm`), chat prompt carries the section.
 - `internal/agent/permission_typesafe_opaque_test.go` — opaque allow@0.80 grants; boundary 0.75 grants / 0.74 defers; none/secrets/network at 0.80 still defer at 0.85; a configured 0.95 still governs an opaque allow that would otherwise clear 0.75; resolver table (unset uses the 0.75 default, 0.5/0.75/0.85/0.95 configured values all govern); mutation-verified.
 - `internal/agent/permission_interpreter_relaxed_test.go` — per-category strict-refuses / relaxed-allows table (plus "a different category must not allow it"), safety-floor subtests (model decision ask, confidence floor, hard-blocked raw command, hard-blocked/harmful subprocesses), config wiring via the `verifyInterpreterEffectsWith` wrapper, and the end-to-end grant rule through the `OnPermissionGrant` sink (`TestInterpreterRelaxedAllowDoesNotPersistGrant` — a relaxation-load-bearing allow does **not** persist a durable grant; `TestInterpreterStrictPathStillRefusesAndPersists` — strict refusal refuses and a clean strict allow persists its grant). Two mutations were verified to fail: removing the network relaxation, and letting relaxed grants persist.
+- `internal/agent/permission_judge_log_test.go` — record carries its diagnostic fields; the fold is recorded (`resolved_cd`); a secret-bearing command is withheld; a **benign command is kept verbatim** (anti-vacuity: without it a test asserting only "redacted" passes while the log records nothing); nil agent does not panic; mirror registration is idempotent; `allowed_roots` is trimmed to the cap with the total preserved and a record under 4 KB; a URL-credential command is withheld.
+- `internal/agent/permission_typesafe_test.go` — `TestPermissionJudgeLog_RecordsOutcomeEndToEnd` drives the real `askPermissionModelTypesafe` over a stubbed transport and asserts exactly one record with the right `outcome` for granted / below-floor / denied. This is what proves the log is *wired*, not merely constructible.
 - `internal/config/relaxed_concerns_test.go` — round-trip, replace-not-merge, explicit-empty clear, nil-safety.
 - `internal/server/handler_config_test.go` — catalog endpoint and `permissions-auto` PUT round-trip.
 - `web/src/components/Settings/PermissionsForm.concerns.test.tsx` — default-all-ticked, unticking sends the negative set.

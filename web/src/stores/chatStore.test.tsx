@@ -323,6 +323,30 @@ describe("chatStore Part 05 turn/status state", () => {
     expect(getSessionSlice(state, "a").bootstrapStage).toBe("mcp");
   });
 
+  it("SET_TRANSCRIPT_SCROLLED_UP is per-session and starts false", () => {
+    let state = initial();
+    expect(getSessionSlice(state, "a").transcriptScrolledUp).toBe(false);
+    state = chatReducer(state, { type: "SET_TRANSCRIPT_SCROLLED_UP", sessionId: "a", scrolledUp: true });
+    expect(getSessionSlice(state, "a").transcriptScrolledUp).toBe(true);
+    // Per-session: scrolling one transcript up must not light up another's strip.
+    expect(getSessionSlice(state, "b").transcriptScrolledUp).toBe(false);
+    state = chatReducer(state, { type: "SET_TRANSCRIPT_SCROLLED_UP", sessionId: "a", scrolledUp: false });
+    expect(getSessionSlice(state, "a").transcriptScrolledUp).toBe(false);
+  });
+
+  it("SET_TRANSCRIPT_SCROLLED_UP returns the SAME slice object when unchanged", () => {
+    // ChatPanel's scroll handler runs on every animation frame while the reader
+    // scrolls. Without this guard each frame would replace the slice and
+    // re-render the composer (and every subscriber) for a value that did not
+    // change — the store-churn class the narrow-selector design exists to avoid.
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TRANSCRIPT_SCROLLED_UP", sessionId: "a", scrolledUp: true });
+    const before = getSessionSlice(state, "a");
+    const after = chatReducer(state, { type: "SET_TRANSCRIPT_SCROLLED_UP", sessionId: "a", scrolledUp: true });
+    expect(getSessionSlice(after, "a").transcriptScrolledUp).toBe(true);
+    expect(getSessionSlice(after, "a")).toBe(before);
+  });
+
   it("SET_TUI_STATUS is per-session and marks status ready", () => {
     let state = initial();
     state = chatReducer(state, { type: "SET_TUI_STATUS", sessionId: "a", status: { session_title: "T" } });

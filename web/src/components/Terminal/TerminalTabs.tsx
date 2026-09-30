@@ -7,9 +7,13 @@ import { focusTerminalById } from "./terminalFocus";
 
 export interface TerminalTabsHandle {
   openTerminal: () => void;
-  /** Close the active terminal instance. Returns false when there is none,
-   *  so the caller (Cmd/Ctrl+W) can fall through to closing the session tab. */
-  closeActiveTerminal: () => boolean;
+  /** Close the active terminal instance. Returns `null` when there was none to
+   *  close (no active terminal, or the Processes sentinel), so the caller
+   *  (Cmd/Ctrl+W) can fall through to closing the session tab; otherwise the
+   *  number of terminals the project has LEFT, `0` meaning this close emptied
+   *  it. The count comes from the store after the removal, so callers never
+   *  have to reconcile it against a pre-close snapshot. */
+  closeActiveTerminal: () => number | null;
   /** Focus the xterm of the given terminal id, or the currently active one if omitted. */
   focusTerminal: (id?: string) => void;
 }
@@ -43,10 +47,15 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
     useImperativeHandle(ref, () => ({
       openTerminal: () => openTerminal(projectPath, host),
       closeActiveTerminal: () => {
-        if (!activeId || !terminals.some((t) => t.id === activeId)) return false;
-        // `closeTerminal` (the store action) returns false if the live terminal
-        // is already gone — so a second synchronous call (same render tick)
-        // falls through to false instead of removing a neighbour.
+        // Only the Processes sentinel (and "no active terminal") short-circuits
+        // here. Whether the id is actually still open is deliberately NOT
+        // checked against the rendered `terminals`: that snapshot can be one
+        // commit behind the store when a cross-client refetch lands just before
+        // the click, and `closeTerminal` re-checks against live state anyway
+        // (returning null rather than removing a neighbour). Two synchronous
+        // calls in one tick therefore behave the same: the first closes, the
+        // second returns null.
+        if (!activeId || activeId === PROCESSES_TAB_ID) return null;
         return closeTerminal(projectPath, activeId, host);
       },
       focusTerminal: (id?: string) => {

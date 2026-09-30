@@ -283,17 +283,22 @@ export function getProjectTerminals(
 
 interface TerminalContextType {
   state: TerminalStoreState;
-  /** Idempotent: restores this project's persisted terminals (or spawns one
-   *  fresh terminal if none were persisted) and marks it live. No-op if
-   *  already live. */
+  /** Idempotent: restores this project's persisted terminals and marks it
+   *  live. With nothing persisted it goes live with ZERO terminals — it never
+   *  spawns one, so a project whose terminals were all closed (or which has
+   *  never had any) does not get a shell on activation. Use `openTerminal` to
+   *  actually create one. No-op if already live. */
   activate: (projectPath: string, host?: string) => void;
   /** Ensures the project is live (seeding from disk first if it wasn't yet
    *  live), then appends and activates one new terminal. */
   openTerminal: (projectPath: string, host?: string) => void;
-  /** Closes the given terminal for a project. Returns `false` (and is a no-op)
+  /** Closes the given terminal for a project. Returns `null` (and is a no-op)
    *  when that terminal is not currently open in this window's live state, so a
-   *  repeated close of an already-removed terminal does not fall through. */
-  closeTerminal: (projectPath: string, id: string, host?: string) => boolean;
+   *  repeated close of an already-removed terminal does not fall through;
+   *  otherwise the number of terminals the project has LEFT after the close
+   *  (`0` = this close emptied it). The count is read from the store after the
+   *  removal, so it is never a stale pre-close snapshot. */
+  closeTerminal: (projectPath: string, id: string, host?: string) => number | null;
   /** Kills a terminal on the host even when this window has no live tab for
    *  it (the sidebar inventory's kill X). Removes any local tab/persisted
    *  entry first — so the panel cannot reattach and respawn the shell after
@@ -341,8 +346,23 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_PROJECT_TERMINALS", projectPath, host, terminals: saved.terminals, activeId });
         return;
       }
-      const term = newTerminal();
-      dispatch({ type: "SET_PROJECT_TERMINALS", projectPath, host, terminals: [term], activeId: term.id });
+      // Nothing persisted: go live with ZERO terminals rather than minting one.
+      //
+      // This branch used to create a fresh terminal, which made "the user
+      // closed every terminal" and "this project has never had a terminal"
+      // indistinguishable — both persist as an absent key. The localStorage
+      // mirror deletes the project on an empty list (saveProjectTerminals) and
+      // the server treats an empty PUT as a delete, so a reload could not tell
+      // them apart, and since App persists focusedKind per project, a restart
+      // that restored the terminal view re-ran this branch and resurrected a
+      // shell the user had deliberately closed. That read as a "minimum 1
+      // terminal" rule.
+      //
+      // Going live with an empty list is what makes the empty state a DECIDED
+      // state: the entry is `live`, so the guard above stops re-entering here,
+      // and TerminalTabs renders its "No terminals open" panel. A terminal is
+      // created only by an explicit openTerminal() (the ⌨️+ button or Cmd/Ctrl+T).
+      dispatch({ type: "SET_PROJECT_TERMINALS", projectPath, host, terminals: [], activeId: "" });
     },
     [store, dispatch],
   );
@@ -364,17 +384,32 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     [store, dispatch],
   );
 
-  // Returns true only if a terminal with that id actually existed (live or
-  // peeked) and was removed. Reading `store.state` (not the captured `state`)
-  // keeps the check correct within a single tick — e.g. two synchronous
-  // closeActiveTerminal() calls: the first removes the terminal and returns
-  // true; the second sees it already gone and returns false instead of
-  // removing a neighbour or double-firing.
+  // Closes a terminal and reports how many the project has LEFT.
+  //
+  // Returns `null` when the id was not open here (live or peeked) and nothing
+  // was removed; otherwise the post-close remaining count, `0` meaning this
+  // close emptied the project.
+  //
+  // The count is read AFTER `removeTerminalLocally`, which dispatches
+  // synchronously, so `store.state` is the post-close truth. Returning it —
+  // rather than making each caller supply a pre-close count — is the point: a
+  // cross-client `terminal_tabs_changed` refetch can land between a
+  // component's last render and the click that runs the handler, so a count
+  // captured at render time can disagree with the store. A stale snapshot in
+  // that window made the caller believe the terminal it just closed was the
+  // only one and hand the user back to the chat with a shell still running.
+  // With the count in the return value that mistake is not expressible.
+  //
+  // Reading `store.state` (not the captured `state`) also keeps this correct
+  // within a single tick — e.g. two synchronous closeActiveTerminal() calls:
+  // the first removes the terminal and returns 0 (or 1); the second sees it
+  // already gone and returns null instead of removing a neighbour or
+  // double-firing the shell kill.
   const closeTerminal = useCallback(
-    (projectPath: string, id: string, host?: string): boolean => {
-      if (!removeTerminalLocally(store, dispatch, projectPath, id, host)) return false;
+    (projectPath: string, id: string, host?: string): number | null => {
+      if (!removeTerminalLocally(store, dispatch, projectPath, id, host)) return null;
       void killTerminalShell(id, host, projectPath);
-      return true;
+      return getProjectTerminals(store.state, projectPath, host).terminals.length;
     },
     [store, dispatch],
   );

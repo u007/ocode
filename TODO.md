@@ -105,6 +105,14 @@ Neither is a bug; both are calls the user has not made yet.
 Deferred from the Cron tab reminders/tasks work, deliberately, to keep that change contained. The
 engine (`internal/reminders`), its store, its REST surface and the web UI are all done.
 
+- **The LLM-facing `cron` tool is still bound to the DEFAULT project.** Now that the REST surface is
+  per project, a chat on project B asking the agent to "schedule this nightly" still gets a job in
+  the server's boot project. The cause is structural: `Handler` is built once and holds a single
+  `scheduler.Service` (`h.scheduler`), which `buildAgentSession` injects into every agent, so the
+  tool cannot know which project the session is on. Fix: thread the per-project service through
+  `buildAgentSession` (the resolver already exists — `Server.servicesFor(root)`), and have
+  `newCronToolFromService` receive that session's service. This is deferred because it touches agent
+  construction for every session, not because the scoping is unclear.
 - **The TUI has no way to see or change a reminder or task.** `/cron list|add|remove|describe`
   (`internal/tui/command_cron.go`) still knows only `scheduler.Job`. A user living in the TUI cannot
   add a reminder, and cannot tick off a task the web UI created. Fix: add `/reminder` and `/task`
@@ -132,7 +140,7 @@ engine (`internal/reminders`), its store, its REST surface and the web UI are al
 ## A below-floor `allow` that names no concern reports nothing (2026-09-29)
 
 - **The hesitant-but-unexplained deferral is unreported, not just un-granted.** In
-  `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:280`) the concern suffix is
+  `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:290`) the concern suffix is
   appended only when `concernKey != "" && concernKey != "none"`. Observed live: Jev leaned ALLOW at
   0.72 against the 0.85 floor and answered the concern question `none`, so the human saw only
   "TypeSafe judge leaned allow but confidence 0.72 is below the 0.85 floor" — no category, no
@@ -174,7 +182,7 @@ engine (`internal/reminders`), its store, its REST surface and the web UI are al
   a static path would falsely reject), but the consequence is that compound commands are
   entirely dependent on the judge for path scope.
 - **Compounding it: the floor check returns before `verifyAutoGrant` runs**
-  (`permission_typesafe.go:288` returns, `:291` verifies). A below-floor `allow` is
+  (`permission_typesafe.go:310` returns, `:312` verifies). A below-floor `allow` is
   therefore **unverified** — for compound commands *no* deterministic guard has run at
   all, yet the banner presents the objection as model confidence alone.
 - Fix, in order: (1) resolve `cd` targets and substitution outputs to a concrete path set

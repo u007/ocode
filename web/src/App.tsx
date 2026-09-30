@@ -53,6 +53,7 @@ import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import { shouldRenderCoworkSidebar } from "./components/Layout/coworkSidebarVisibility";
 import { shouldRenderSidePane } from "./lib/sidePaneVisibility";
+import { shouldLeaveTerminalView } from "./lib/terminalFocusExit";
 import { basename } from "./lib/utils";
 import ModelDialog from "./components/Layout/ModelDialog";
 import ShareDialog from "./components/Layout/ShareDialog";
@@ -869,7 +870,13 @@ function HomeApp() {
       // currently has focus. Mirrors each tab bar's X button.
       if (activeView === "sessions" && focusedKind === "terminal") {
         const proj = projectState.activeProject?.path ?? "";
-        if (terminalRefs.current.get(proj)?.closeActiveTerminal()) return;
+        // The handle reports the POST-close remaining count from the store, so
+        // this does not depend on a count captured at render time going stale
+        // against a cross-client sync.
+        const remaining = terminalRefs.current.get(proj)?.closeActiveTerminal() ?? null;
+        if (shouldLeaveTerminalView({ remaining, focusedKind })) {
+          setFocusedKind("chat");
+        }
         return;
       }
       if (activeView === "files") {
@@ -1597,6 +1604,8 @@ function HomeApp() {
               <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0" aria-busy={cronBusy}>
                 <div className="relative h-full">
                   <CronPanel
+                    project={activeProjectPath}
+                    host={activeProjectHost}
                     active={activeView === "cron"}
                     loadingKey={cronLoadingKey}
                     onLoadingEvent={handleTabLoadingEvent}
