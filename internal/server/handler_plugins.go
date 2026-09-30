@@ -66,6 +66,12 @@ func (h *Handler) HandleListPlugins(w http.ResponseWriter, r *http.Request) {
 		}
 		if inCfg {
 			entry.Source = pc.Source
+			if pl.Source == plugins.SourceClaudeCode {
+				// Toggling a Claude Code install creates a config entry with
+				// no source; keep the label so the UI still knows it cannot
+				// be removed from ocode.
+				entry.Source = plugins.SourceClaudeCode
+			}
 			// Prefer the on-disk Dir when available so the UI can act on the
 			// real location; fall back to the config Dir for bundled entries
 			// where Dir may have been materialized elsewhere.
@@ -341,6 +347,12 @@ func (h *Handler) HandleRemovePlugin(w http.ResponseWriter, r *http.Request, nam
 	if dir == "" {
 		writeError(w, http.StatusNotFound, "plugin not found")
 		return
+	}
+	for _, pl := range plugins.LoadAllPluginsForProject(h.workDir) {
+		if pl.Name == name && pl.Source == plugins.SourceClaudeCode {
+			writeError(w, http.StatusBadRequest, "plugin "+name+" was installed by Claude Code; uninstall it there, or disable it here")
+			return
+		}
 	}
 
 	// Path-containment check: the resolved dir must be inside the approved

@@ -9221,7 +9221,11 @@ func (m model) renderPluginList() string {
 		b.WriteString(fmt.Sprintf("    %s\n", desc))
 
 		// Source
-		b.WriteString(fmt.Sprintf("    Source: %s\n", cfg.Source))
+		source := cfg.Source
+		if meta.Source == plugins.SourceClaudeCode {
+			source = "Claude Code (installed there; disable here, uninstall in Claude Code)"
+		}
+		b.WriteString(fmt.Sprintf("    Source: %s\n", source))
 
 		// Ref (if pinned)
 		if cfg.Ref != "" {
