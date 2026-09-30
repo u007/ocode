@@ -454,7 +454,22 @@ func (h *Handler) HandleSetPermissionModel(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// HandleGetAdvisor reports the advisor's model, backend and trigger set. With
+// ?session_id=<id> it reports THAT CHAT's own pinned values (pinned from the
+// process-wide default on first use), so the per-chat picker and sidebar show
+// what the chat will actually use. Without a session_id it reports the
+// process-wide default that seeds NEW chats.
 func (h *Handler) HandleGetAdvisor(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID != "" {
+		if h.sessionProjectRoot(sessionID) == "" {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		cfg := h.pinSessionAdvisorConfig(sessionID)
+		writeJSON(w, http.StatusOK, advisorConfigResponse(cfg, h.effectiveSessionAdvisorEnabled(sessionID, h.processAdvisorEnabled())))
+		return
+	}
 	h.mu.Lock()
 	cfg := config.AdvisorConfig{}
 	if h.cfg != nil {
@@ -473,12 +488,36 @@ func (h *Handler) HandleGetAdvisor(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// advisorConfigResponse renders a resolved per-session advisor config in the
+// wire shape the web already consumes. The qualified model is split back into
+// provider/model so the Settings form keeps working unchanged.
+func advisorConfigResponse(cfg agent.AdvisorConfig, enabled bool) map[string]any {
+	provider, model := config.SplitProviderModel(cfg.Model)
+	if cfg.Checkpoints == nil {
+		cfg.Checkpoints = []string{}
+	}
+	return map[string]any{
+		"enabled":     enabled,
+		"provider":    provider,
+		"model":       model,
+		"claude_code": cfg.ClaudeCode,
+		"checkpoints": cfg.Checkpoints,
+	}
+}
+
+// HandleSetAdvisor changes the advisor's model, backend and trigger set. With a
+// session_id it is scoped to that ONE chat: the value is pinned in that
+// session's transcript metadata and applied to its live agent, and no other
+// session and no global config file is touched. Without a session_id it keeps
+// the original process-wide behavior — that value is the DEFAULT NEW CHATS
+// START WITH, not a value pushed onto existing chats.
 func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider    *string  `json:"provider"`
 		Model       *string  `json:"model"`
 		ClaudeCode  *bool    `json:"claude_code"`
 		Checkpoints []string `json:"checkpoints"`
+		SessionID   string   `json:"session_id"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -486,6 +525,46 @@ func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model == nil && req.Provider == nil && req.ClaudeCode == nil && req.Checkpoints == nil {
 		writeError(w, http.StatusBadRequest, "no advisor fields provided")
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(r.URL.Query().Get("session_id"))
+	}
+
+	// Per-session: merge onto THAT session's own config so a partial PUT (the
+	// web sends model only, or checkpoints only) cannot clear its other fields.
+	if sessionID != "" {
+		// A typo would otherwise persist an orphan pin that can never take
+		// effect; require the session to resolve.
+		if h.sessionProjectRoot(sessionID) == "" {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		cur := h.pinSessionAdvisorConfig(sessionID)
+		qualified := cur.Model
+		provider, model := config.SplitProviderModel(qualified)
+		if req.Provider != nil {
+			provider = *req.Provider
+			cur.ClaudeCode = (*req.Provider == "claude-code")
+		}
+		if req.Model != nil {
+			model = *req.Model
+		}
+		if req.ClaudeCode != nil {
+			cur.ClaudeCode = *req.ClaudeCode
+		}
+		if req.Checkpoints != nil {
+			cur.Checkpoints = req.Checkpoints
+		}
+		cur.Model = (config.AdvisorConfig{Provider: provider, Model: model}).QualifiedModel()
+		if err := h.applySessionAdvisorConfig(sessionID, cur); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Session-tagged push: only the requesting chat re-renders.
+		h.pushSessionStatusSnapshot(sessionID)
+		writeJSON(w, http.StatusOK, advisorConfigResponse(cur, h.effectiveSessionAdvisorEnabled(sessionID, h.processAdvisorEnabled())))
 		return
 	}
 

@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/session"
 )
 
 func testProjectHandler(t *testing.T) *Handler {
@@ -283,13 +286,105 @@ func TestHandleAddProjectRemoteTildeNotExpanded(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s, want 200", rr.Code, rr.Body.String())
 	}
-
 	// Remote path must be stored VERBATIM — no expansion.
 	got := projectByRef(t, h, "devbox", "~/webapp")
 	if got.Path != "~/webapp" {
 		t.Errorf("stored path = %q, want ~/webapp", got.Path)
 	}
 }
+
+// A tilde-keyed remote project must still list its sessions on the host.
+//
+// The desktop registers the project remotely VERBATIM ("~/www/aimsai2"), so the
+// request it later proxies to the host's `ocode serve --remote` carries the
+// tilde form. That host saved the project through the LOCAL branch of
+// HandleAddProject, which expands "~" (TestHandleAddProjectExpandHome), so its
+// registry holds "/home/james/www/aimsai2". An exact-match gate therefore 404s
+// every tilde-keyed remote project and the session list never loads.
+//
+// Reproduces the live failure: GET
+// /api/remote/james@217.216.72.49/api/projects/sessions?path=~/www/aimsai2
+// returned {"error":"project not found in saved list"} while the host reported
+// the project as /home/james/www/aimsai2.
+func TestHandleListProjectSessionsResolvesTildeProject(t *testing.T) {
+	h := testProjectHandler(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// The host's registry holds the expanded form, exactly as HandleAddProject
+	// would have written it.
+	want := filepath.Join(home, "www", "aimsai2")
+	if err := h.projects.Add(want); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real session on disk under the EXPANDED path. Sessions were created with
+	// that cwd, so this is the only spelling ListRefsForDir can find them by.
+	id := session.NewSessionID()
+	if err := session.SaveForDir(want, id, "Real remote chat", []agent.Message{
+		{Role: "user", Content: "hi"},
+	}, nil); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// The proxied request carries the verbatim tilde form the desktop registered.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/projects/sessions?path="+url.QueryEscape("~/www/aimsai2"), nil)
+	h.HandleListProjectSessions(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 (a tilde-keyed remote project must not 404)", rr.Code, rr.Body.String())
+	}
+	var got []SessionInfo
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, rr.Body.String())
+	}
+	if got == nil {
+		t.Fatal("body decoded to nil, want an array so an empty project reads as \"No sessions yet\"")
+	}
+
+	// The session must actually be LISTED, not merely 200-with-nothing. A fix
+	// that resolved the path only to satisfy the registry gate — then scanned the
+	// raw "~/..." string — would pass a status-only assertion and still leave the
+	// user staring at an empty list, which is the same bug in a new disguise.
+	found := false
+	for _, s := range got {
+		if s.ID == id {
+			found = true
+			if s.Title != "Real remote chat" {
+				t.Errorf("title = %q, want %q", s.Title, "Real remote chat")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("session %s not listed; got %+v — the RESOLVED path must be the one scanned", id, got)
+	}
+}
+
+// The tilde fallback must NOT widen the accepted set: an unsaved path is still
+// rejected, and a "~user" form (which ExpandHome leaves alone) is not guessed at.
+func TestHandleListProjectSessionsTildeFallbackStillRequiresSavedProject(t *testing.T) {
+	h := testProjectHandler(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	for _, tc := range []struct{ name, query string }{
+		{"unsaved tilde path", "~/www/never-added"},
+		{"tilde-user form is not expanded", "~bob/www/app"},
+		{"unsaved absolute path", "/definitely/not/a/saved/project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/projects/sessions?path="+url.QueryEscape(tc.query), nil)
+			h.HandleListProjectSessions(rr, req)
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("status = %d, body = %s, want 404 — the fallback must not accept unsaved roots", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+// Duplicating a local project as remote creates a new (host, path) entry that
 
 // Duplicating a local project as remote creates a new (host, path) entry that
 // inherits the display name and group, leaving the local source untouched.

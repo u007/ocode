@@ -25,6 +25,7 @@ import (
 	"github.com/u007/ocode/internal/lsp"
 	_ "github.com/u007/ocode/internal/plugin/codex"
 	_ "github.com/u007/ocode/internal/plugin/grok"
+	"github.com/u007/ocode/internal/reminders"
 	"github.com/u007/ocode/internal/runcli"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretcli"
@@ -107,6 +108,17 @@ func schedulerSetup() func(*server.Server) error {
 		srv.SetScheduler(svc)
 		store, _ := scheduler.DefaultStorePath(wd)
 		log.Printf("serve: scheduler attached (store: %s)", store)
+
+		// Reminders and the task list share the cron service's outbox and run
+		// history, so one drainer fans out both kinds of result to Telegram /
+		// the RC bridge / the web Outbox panel. Non-fatal for the same reason
+		// the scheduler is: a broken reminder list must not stop the HTTP API.
+		if err := srv.AttachReminders(wd, cfg, nil); err != nil {
+			log.Printf("serve: reminders disabled (start: %v)", err)
+			return nil
+		}
+		rstore, _ := reminders.DefaultStorePath(wd)
+		log.Printf("serve: reminders attached (store: %s)", rstore)
 		return nil
 	}
 }

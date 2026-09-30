@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -200,7 +201,7 @@ func TestDrop_TriggersReconnect(t *testing.T) {
 	}
 
 	// Drop.
-	reg.drop("h")
+	reg.drop("h", 0)
 
 	// Next call should reconnect.
 	got, err = reg.workspaceFor("h", "/p")
@@ -233,7 +234,7 @@ func TestDrop_DisconnectsWorkspace(t *testing.T) {
 		t.Fatalf("workspaceFor: %v", err)
 	}
 
-	reg.drop("h")
+	reg.drop("h", 0)
 
 	if c := disconnected.Load(); c != 1 {
 		t.Fatalf("expected Disconnect called once, got %d", c)
@@ -259,7 +260,7 @@ func TestDrop_DisconnectErrorLogged(t *testing.T) {
 	}
 
 	// drop should not panic; it logs the error internally.
-	reg.drop("h")
+	reg.drop("h", 0)
 }
 
 func TestCloseAll_DisconnectsAll(t *testing.T) {
@@ -321,7 +322,7 @@ func TestCloseAll_SkipsAlreadyDisconnected(t *testing.T) {
 	}
 
 	// Drop first — disconnects once.
-	reg.drop("h")
+	reg.drop("h", 0)
 
 	// closeAll should not disconnect again (entry was removed).
 	reg.closeAll(context.Background())
@@ -337,24 +338,24 @@ func TestMarkRegistered(t *testing.T) {
 		return &fakeWorkspace{apiURL: "http://127.0.0.1:9989", token: "tok11"}, nil
 	})
 
-	first := reg.markRegistered("h", "/p")
+	first := reg.markRegistered("h", 0, "/p")
 	if !first {
 		t.Fatal("expected first=true")
 	}
 
-	second := reg.markRegistered("h", "/p")
+	second := reg.markRegistered("h", 0, "/p")
 	if second {
 		t.Fatal("expected second=false")
 	}
 
 	// Different path on the same host — should be first.
-	first2 := reg.markRegistered("h", "/q")
+	first2 := reg.markRegistered("h", 0, "/q")
 	if !first2 {
 		t.Fatal("expected first2=true for different path")
 	}
 
 	// Different host — should be first.
-	first3 := reg.markRegistered("h2", "/p")
+	first3 := reg.markRegistered("h2", 0, "/p")
 	if !first3 {
 		t.Fatal("expected first3=true for different host")
 	}
@@ -365,16 +366,16 @@ func TestMarkRegistered_DifferentHostsIndependent(t *testing.T) {
 		return &fakeWorkspace{apiURL: "http://127.0.0.1:9988", token: "tok12"}, nil
 	})
 
-	if !reg.markRegistered("hostA", "/p") {
+	if !reg.markRegistered("hostA", 0, "/p") {
 		t.Fatal("expected first for hostA")
 	}
-	if !reg.markRegistered("hostB", "/p") {
+	if !reg.markRegistered("hostB", 0, "/p") {
 		t.Fatal("expected first for hostB")
 	}
-	if reg.markRegistered("hostA", "/p") {
+	if reg.markRegistered("hostA", 0, "/p") {
 		t.Fatal("expected second for hostA")
 	}
-	if reg.markRegistered("hostB", "/p") {
+	if reg.markRegistered("hostB", 0, "/p") {
 		t.Fatal("expected second for hostB")
 	}
 }
@@ -471,7 +472,7 @@ func TestDropDuringConnectDoesNotEvictReplacement(t *testing.T) {
 	<-entered
 
 	// Drop the in-flight entry, then connect a replacement.
-	reg.drop("h")
+	reg.drop("h", 0)
 	if _, err := reg.workspaceFor("h", "/p"); err != nil {
 		t.Fatalf("replacement connect: %v", err)
 	}
@@ -483,7 +484,7 @@ func TestDropDuringConnectDoesNotEvictReplacement(t *testing.T) {
 	}
 
 	reg.mu.Lock()
-	e := reg.byHost["h"]
+	e := reg.byConn["h"]
 	reg.mu.Unlock()
 	if e == nil {
 		t.Fatal("replacement entry was evicted by the superseded failed connect")
@@ -566,10 +567,10 @@ func TestConnectTimeoutReleasesWaiters(t *testing.T) {
 	// The timed-out entry must be evicted so a later call retries instead of
 	// joining a dead in-flight connect.
 	reg.mu.Lock()
-	_, present := reg.byHost["h"]
+	_, present := reg.byConn["h"]
 	reg.mu.Unlock()
 	if present {
-		t.Fatal("timed-out connect left its entry in byHost; later callers would wait on it")
+		t.Fatal("timed-out connect left its entry in byConn; later callers would wait on it")
 	}
 
 	close(block)
@@ -610,7 +611,7 @@ func TestConnectTimeoutDisconnectsLateWorkspace(t *testing.T) {
 // using fake connect; the realConnect factory errors loudly if reached.
 func newTestRegistry(connectFn func(remote.Target, string) (remoteHostWorkspace, error)) *remoteHostRegistry {
 	return &remoteHostRegistry{
-		byHost:          make(map[string]*remoteHostEntry),
+		byConn:          make(map[string]*remoteHostEntry),
 		registeredPaths: make(map[string]map[string]struct{}),
 		connect:         connectFn,
 		factory: func(remote.Target, string, *tool.ProcessSupervisor) (remoteHostWorkspaceConnector, error) {
@@ -683,7 +684,7 @@ func TestMarkRegisteredDoesNotPoisonWorkspaceFor(t *testing.T) {
 		return &fakeWorkspace{apiURL: "http://127.0.0.1:1", token: "t"}, nil
 	})
 
-	if !reg.markRegistered("h", "/p") {
+	if !reg.markRegistered("h", 0, "/p") {
 		t.Fatal("first markRegistered = false, want true")
 	}
 
@@ -709,11 +710,11 @@ func TestDropWithoutEntryClearsRegisteredPaths(t *testing.T) {
 	reg := newTestRegistry(func(remote.Target, string) (remoteHostWorkspace, error) {
 		return &fakeWorkspace{}, nil
 	})
-	if !reg.markRegistered("h", "/p") {
+	if !reg.markRegistered("h", 0, "/p") {
 		t.Fatal("first markRegistered = false, want true")
 	}
-	reg.drop("h") // no live entry for this host
-	if !reg.markRegistered("h", "/p") {
+	reg.drop("h", 0) // no live entry for this host
+	if !reg.markRegistered("h", 0, "/p") {
 		t.Fatal("markRegistered after drop = false, want true (drop must clear the path set)")
 	}
 }
@@ -764,7 +765,7 @@ func TestStatus_NeverConnected(t *testing.T) {
 		t.Fatal("status must not connect")
 		return nil, nil
 	})
-	st := reg.status("h")
+	st := reg.status("h", 0)
 	if st.Connected {
 		t.Error("expected connected=false for a host that never connected")
 	}
@@ -791,7 +792,7 @@ func TestStatus_ConnectedReportsVersionAndOutdated(t *testing.T) {
 	if _, err := reg.workspaceForPort("h", "/p", 0); err != nil {
 		t.Fatalf("workspaceForPort: %v", err)
 	}
-	st := reg.status("h")
+	st := reg.status("h", 0)
 	if !st.Connected || st.Version != "1.0.0" || !st.Outdated || st.PID != 42 {
 		t.Fatalf("status = %+v, want connected version=1.0.0 outdated=true pid=42", st)
 	}
@@ -841,7 +842,7 @@ func TestRestart_KillsDropsReconnectsAndReregisters(t *testing.T) {
 	})
 
 	// Seed a registered path so restart has something to re-register.
-	reg.markRegistered("h", "/p1")
+	reg.markRegistered("h", 0, "/p1")
 	if _, err := reg.workspaceForPort("h", "/p1", 0); err != nil {
 		t.Fatalf("initial connect: %v", err)
 	}
@@ -893,9 +894,167 @@ func TestRestart_KillFailureLeavesEntryDropped(t *testing.T) {
 		t.Fatalf("error %v does not carry remote-kill stage", err)
 	}
 	reg.mu.Lock()
-	_, present := reg.byHost["h"]
+	_, present := reg.byConn["h"]
 	reg.mu.Unlock()
 	if present {
 		t.Fatal("restart failure left a live registry entry; want dropped")
+	}
+}
+
+// Two projects on the SAME host at different SSH ports are two different
+// servers with two different tunnels. The registry used to key entries on the
+// host string alone, so the second port's request was served the first port's
+// workspace: its API URL, its token, and its remote project registration all
+// belonged to the wrong connection. That is silent cross-connection data
+// exposure, not just an extra tunnel.
+func TestWorkspaceForPort_TwoPortsOnOneHostAreDistinct(t *testing.T) {
+	var mu sync.Mutex
+	seenPorts := []int{}
+
+	reg := newTestRegistry(func(target remote.Target, path string) (remoteHostWorkspace, error) {
+		mu.Lock()
+		seenPorts = append(seenPorts, target.Port)
+		mu.Unlock()
+		return &fakeWorkspace{
+			apiURL: "http://127.0.0.1:" + strconv.Itoa(target.Port),
+			token:  "tok-" + strconv.Itoa(target.Port),
+		}, nil
+	})
+
+	wsA, err := reg.workspaceForPort("user@host", "/a", 22)
+	if err != nil {
+		t.Fatalf("port 22 connect: %v", err)
+	}
+	wsB, err := reg.workspaceForPort("user@host", "/b", 2222)
+	if err != nil {
+		t.Fatalf("port 2222 connect: %v", err)
+	}
+
+	if wsA == wsB {
+		t.Fatal("both ports were served the SAME workspace; the registry key ignores the port")
+	}
+	if got := wsB.APIURL(); got != "http://127.0.0.1:2222" {
+		t.Fatalf("port 2222 workspace APIURL = %q, want the 2222 tunnel", got)
+	}
+	if got := wsB.Token(); got != "tok-2222" {
+		t.Fatalf("port 2222 workspace token = %q, want the 2222 server's token", got)
+	}
+	// A repeat request for an already-connected port must be a cache hit, not a
+	// second tunnel to the same server.
+	wsB2, err := reg.workspaceForPort("user@host", "/b", 2222)
+	if err != nil {
+		t.Fatalf("port 2222 re-request: %v", err)
+	}
+	if wsB2 != wsB {
+		t.Fatal("re-requesting a connected port opened a second workspace")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenPorts) != 2 {
+		t.Fatalf("connect called %d times for %v, want exactly one per port", len(seenPorts), seenPorts)
+	}
+}
+
+// A drop for one port must not tear down another port's live connection to the
+// same host: they are separate tunnels and only the failing one is suspect. It
+// must also actually drop the named port — a host-wide key (the pre-fix
+// behaviour) would delete nothing, silently keeping the failed tunnel alive.
+func TestRegistryDrop_IsScopedToOnePort(t *testing.T) {
+	var mu sync.Mutex
+	connects := map[int]int{}
+	reg := newTestRegistry(func(target remote.Target, path string) (remoteHostWorkspace, error) {
+		mu.Lock()
+		connects[target.Port]++
+		mu.Unlock()
+		return &fakeWorkspace{apiURL: "http://127.0.0.1:" + strconv.Itoa(target.Port)}, nil
+	})
+
+	firstA, err := reg.workspaceForPort("user@host", "/a", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstB, err := reg.workspaceForPort("user@host", "/b", 2222)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reg.drop("user@host", 2222)
+
+	// Port 22 is untouched: same cached workspace, no extra connect.
+	againA, err := reg.workspaceForPort("user@host", "/a", 22)
+	if err != nil {
+		t.Fatalf("port 22 was dropped along with port 2222: %v", err)
+	}
+	if againA != firstA {
+		t.Fatal("port 22 reconnected after a drop aimed at port 2222")
+	}
+	// The dropped port must RECONNECT to a NEW workspace, not hand back the
+	// stale entry that drop was supposed to evict.
+	againB, err := reg.workspaceForPort("user@host", "/b", 2222)
+	if err != nil {
+		t.Fatalf("dropped port did not reconnect: %v", err)
+	}
+	if againB == firstB {
+		t.Fatal("the dropped port reused its stale workspace; drop did not evict it")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if connects[22] != 1 {
+		t.Fatalf("port 22 connected %d times, want 1 (it must not be disturbed)", connects[22])
+	}
+	if connects[2222] != 2 {
+		t.Fatalf("port 2222 connected %d times, want 2 (initial + reconnect after drop)", connects[2222])
+	}
+}
+
+// Registration is per server, so the same path on two ports must be registered
+// on each. Sharing the set would make the second port skip registration and
+// leave its remote without the project.
+func TestRegisteredPaths_AreScopedByPort(t *testing.T) {
+	reg := newTestRegistry(nil)
+
+	if !reg.markRegistered("user@host", 22, "/p") {
+		t.Fatal("first registration for port 22 reported already-registered")
+	}
+	if !reg.isRegistered("user@host", 22, "/p") {
+		t.Fatal("port 22 registration not recorded")
+	}
+	if reg.isRegistered("user@host", 2222, "/p") {
+		t.Fatal("port 2222 inherited port 22's registration; it must register on its own server")
+	}
+	if !reg.markRegistered("user@host", 2222, "/p") {
+		t.Fatal("port 2222 registration was treated as a duplicate of port 22")
+	}
+}
+
+// The cross-package contract: the mux ControlPath identity (internal/remote)
+// and the registry/exec-pool key (internal/server) must be the same string for
+// the same target. They are derived in two packages because internal/server
+// imports internal/remote and never the reverse, so nothing but a test stops
+// them drifting — and a drift means the sockets and the caches disagree about
+// what "the same connection" is.
+func TestRemoteConnectionKeyAgreesWithMuxIdentity(t *testing.T) {
+	for _, tgt := range []remote.Target{
+		{Kind: remote.KindSSH, Host: "h"},
+		{Kind: remote.KindSSH, User: "u", Host: "h"},
+		{Kind: remote.KindSSH, User: "u", Host: "h", Port: 2222},
+		{Kind: remote.KindSSH, User: "a-b", Host: "my-host.example.com", Port: 22},
+		{Kind: remote.KindWSL, Distro: "Ubuntu"},
+	} {
+		got := remoteConnectionKey(tgt.String(), tgt.Port)
+		want := remote.SSHControlSocketIdentity(tgt)
+		if got != want {
+			t.Errorf("target %+v: registry key %q != mux identity %q", tgt, got, want)
+		}
+	}
+	// The exec pool must share the registry's key, not re-derive it.
+	for _, tgt := range []remote.Target{
+		{Kind: remote.KindSSH, User: "u", Host: "h", Port: 2222},
+		{Kind: remote.KindSSH, Host: "h"},
+	} {
+		if got, want := remoteSlotKey(tgt), remoteConnectionKey(tgt.String(), tgt.Port); got != want {
+			t.Errorf("slot key %q != registry key %q for %+v", got, want, tgt)
+		}
 	}
 }

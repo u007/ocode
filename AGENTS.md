@@ -80,6 +80,29 @@ developer-local state and must never be committed.
 git worktree add .worktrees/feature-branch feature-branch
 ```
 
+A fresh worktree will not build until you copy the two **gitignored embed
+inputs** out of the main checkout. `internal/agent/models-snapshot.json` and
+`internal/browse/cdp/htr-assets.zip` are `//go:embed` targets that are
+deliberately untracked, so the worktree has no copy at all and the build
+fails with `pattern models-snapshot.json: no matching files found` — which names
+the file but not the reason (it is a build input, not a source file):
+
+```bash
+git worktree add .worktrees/feature-branch feature-branch
+cp internal/agent/models-snapshot.json .worktrees/feature-branch/internal/agent/
+cp internal/browse/cdp/htr-assets.zip .worktrees/feature-branch/internal/browse/cdp/
+```
+
+Two testing notes for a worktree (or any checkout) used as a regression
+baseline: `go test -race ./...` is a real gate here, not a formality, and a
+mutation-testing result is only meaningful if the mutant **compiles** — a mutant
+that only breaks the build is `INVALID`, never `CAUGHT`. See
+`docs/gotchas/mutation-check-mutants-must-compile.md`. When comparing failures
+against a pristine baseline, note that a session-local sandbox may deny
+`/dev/ptmx`, which fails every pty-dependent test (e.g. `TestTerminalWS*`) at
+pristine HEAD too — that is an environment limit, not a regression from your
+diff.
+
 ## Coding Standards
 - Use modular packages in `internal/`.
 - Respect `.gitignore` and `watcher.ignore`.
@@ -1027,7 +1050,55 @@ Rules:
   `projectTerminalsKey(path, host)` is `<host>::<path>` for remote projects and
   the bare path for local ones, so a local and a remote project at the same
   path cannot share terminal tabs. `GET /api/terminal?project_path=…` backs the
-  sidebar's reattach list when localStorage is empty.
+  sidebar's reattach list when the tab list is empty.
+
+### The open-terminal TAB LIST is server state, like session tabs
+
+```
+GET /api/terminal-tabs   → {projects: {"<host::path>": {terminals: [{id,title,renamed,osc_title}]}}}
+PUT /api/terminal-tabs   → {projects: {...}}   (merge; empty list deletes; publishes terminal_tabs_changed)
+```
+
+`internal/termtabs` (`terminals.json` under the global data dir, cross-process
+lock + mtime reload + atomic rename) mirrors `internal/tabs` for session tabs, and
+for the same reason: **localStorage is per-origin**, so a terminal started in the
+desktop app was invisible to a second browser even though a remote project's pty
+is a child of the HOST's `serve --remote` and was perfectly shared. The list was
+the only thing that could not cross. `tabs.json`'s package doc records the same
+failure for session tabs.
+
+Rules:
+
+- **Keys are opaque.** A key is the client's `<host::path>` composite and is
+  stored verbatim — never `filepath.Clean`, which would mangle `wsl:Ubuntu::/home/x`
+  and `C:\Users\dev\app`.
+- **The PUT is a MERGE.** A provided key replaces that project, an empty
+  `terminals` list deletes it, and keys ABSENT from the body are preserved. A
+  client must therefore emit an explicit empty entry for a project whose last tab
+  it just closed (same trap as `toServerTabs`).
+- **`activeId` is NOT shared.** Which tab a window has focused is per-client view
+  state, it can be `PROCESSES_TAB_ID` (not a terminal at all), and sharing it
+  would let one window yank another's selection. It stays in the local mirror.
+- **localStorage is a MIRROR, not a source.** `terminalPersistence.ts` keeps
+  `ocode.ui.terminals.project.v1` so `getProjectTerminals` can answer a synchronous
+  *peek* before hydration (and so `TopTabs`/`ProcessesPanel` can read a count
+  without an await). Every server read overwrites it; the store's write-through is
+  suppressed until the initial restore settles, so a mirror-derived list can never
+  clobber the server. The pre-server state is written through once, per project
+  the server has never seen.
+- **`state.revision` exists so a peek can re-render.** A peeked project reads the
+  mirror out of localStorage, which is not reactive; without the counter a
+  hydrating server read would write the mirror and change nothing the store
+  exposes, and the second client would keep showing an empty strip.
+- **One attachment slot per terminal; the loser is told why.** `attach()` sends
+  `{"type":"detached","reason":"superseded"}` on the displaced socket before
+  closing it. The close is clean (1000), byte-identical to a shell exiting, so
+  without the frame `TerminalPanel` would print "[terminal session ended]" for a
+  live shell — and both auto-reconnect paths (backoff timer, `onWake`) would
+  re-attach, evicting the new client, whose own wake evicts it again. That
+  ping-pong is the same shape as the 2026-09-19 two-sockets-per-terminal loop.
+  `TerminalPanel` therefore parks in a takeover state with a **Take over** button
+  and reconnects nothing until the user asks.
 
 
 ## Web/Desktop Context gauge: provider-reported first, estimate as fallback

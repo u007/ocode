@@ -238,11 +238,30 @@ func (m *model) jumpToChatMatch(msgIdx int) {
 	if msgIdx < 0 || msgIdx >= len(m.messages) {
 		return
 	}
+	m.flashAndScrollToMessage(msgIdx)
+}
+
+// flashAndScrollToMessage is the shared "put message msgIdx on screen and
+// highlight it" primitive. Both the chat-search jump (jumpToChatMatch) and
+// the alt+up/alt+down user-message jump call it.
+//
+// The ordering here is load-bearing and must not be duplicated per caller:
+// the explicit YOffset has to be re-applied AFTER the re-render, because
+// renderTranscript -> shouldAutoScrollTranscript -> GotoBottom would
+// otherwise stomp it (and the flash is what we want the user to see, not
+// the sticky-bottom follow). The flash is painted via the existing
+// selection machinery, which works for every message kind (user,
+// assistant, tool, thinking, compaction) without each renderer having to
+// know about either feature.
+func (m *model) flashAndScrollToMessage(msgIdx int) {
+	if msgIdx < 0 || msgIdx >= len(m.messages) {
+		return
+	}
 	// The target may sit in the hidden window prefix. Expand first so the
 	// message is rendered; otherwise transcriptMsgStartLine[msgIdx] is -1 and
 	// the jump would land at the top notice instead of the match.
 	m.ensureTranscriptMessageVisible(msgIdx)
-	// Clamp in case the cache hasn't been built yet (e.g. /search during a
+	// Clamp in case the cache hasn't been built yet (e.g. a jump during a
 	// fresh session where the transcript was never re-rendered). Falling back
 	// to 0 keeps the viewport in a sane place rather than panicking.
 	target := 0
@@ -251,10 +270,6 @@ func (m *model) jumpToChatMatch(msgIdx int) {
 	}
 	// SetYOffset clamps to [0, TotalLines-Visible] internally; passing
 	// target puts the message's first wrapped line at the top of the viewport.
-	// We set it AFTER the re-render below, because renderTranscript ->
-	// shouldAutoScrollTranscript -> GotoBottom would otherwise stomp the
-	// explicit YOffset on a fresh viewport (and the flash is what we want
-	// the user to see, not the sticky-bottom follow).
 	m.chatSearchFlashMsg = msgIdx
 	// Paint the flash via the existing selection machinery (Selected
 	// background on the first wrapped line of the message). The flash

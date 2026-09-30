@@ -178,6 +178,9 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	// advisor guard so a /btw query cannot run an advisor concurrently with the
 	// main agent or a task child.
 	child.SetParentAdvisorInFlight(a.advisorGuard())
+	// The side query belongs to this chat, so it consults the advisor with this
+	// chat's own model and triggers, not the process-wide seed.
+	child.SetParentAdvisorConfig(&a.advisorConfig)
 	// Enforce the caller's exclusion list on the FINAL tool map: NewAgent
 	// unconditionally registers wait/task/task_status/agent_status/task_cancel
 	// (+ advisor/knowledge_lookup) regardless of the Tools slice, so a side

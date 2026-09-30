@@ -35,7 +35,7 @@ Use `/mem` to inspect, toggle, or update the memory layer.
 - `/mem` or `/mem status` prints the current status plus file previews for user, project, and global scopes.
 - `/mem on` enables memory context injection (also accepts `true`, `yes`, `enable`).
 - `/mem off` disables memory context injection (also accepts `false`, `no`, `disable`).
-- `/mem update [user|project|global] [focus]` triggers a focused update of the named scope (defaults to project). The focus arg is an optional hint for what to capture. The update runs as a sub-agent turn using the configured small model.
+- `/mem update [user|project|global] [focus]` triggers a focused update of the named scope (defaults to project). The focus arg is an optional hint for what to capture. The update runs on the **main agent using the session's primary model** (`runMemCmd` → `buildMemUpdatePrompt` → `sendCustomCommandPrompt` → `streamStep` on `m.agent`) — not a sub-agent and not the small model. The small model is used only by the maintenance worker below.
 
 ## Precedence order
 

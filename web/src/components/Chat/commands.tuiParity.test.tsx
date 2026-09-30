@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { COMMANDS, dispatchCommand } from "./commands";
+import { COMMANDS, type CommandContext, dispatchCommand } from "./commands";
 
 /**
  * TUI-parity slash-command suite.
@@ -12,10 +12,12 @@ import { COMMANDS, dispatchCommand } from "./commands";
  *   2. the newly-added handlers persist through the same endpoints the
  *      Settings forms use.
  */
-function ctx(api: Record<string, unknown> = {}) {
+function ctx(api: Record<string, unknown> = {}): CommandContext {
   // A remote session's host: purpose-model/effort/model-slash reads/writes must
   // be routed to the server that runs the session, never the local one.
-  return { commandName: "test", args: "", host: "devbox", api } as never;
+  // The api bag is intentionally partial per test, hence the double cast — but
+  // the return type is CommandContext (not `never`) so callers can spread it.
+  return { commandName: "test", args: "", host: "devbox", api } as unknown as CommandContext;
 }
 
 describe("COMMANDS registry ⇄ dispatch alignment", () => {
@@ -156,8 +158,25 @@ describe("/small-model and /advisor reads route to the session host", () => {
   it("reads the advisor model from the session's host", async () => {
     const getAdvisor = vi.fn(async () => ({ model: "anthropic/claude" }));
     const result = await dispatchCommand("/advisor", ctx({ getAdvisor }));
-    expect(getAdvisor).toHaveBeenCalledWith("devbox");
+    // Explicit undefined: no session in this context, so the read is the
+    // new-chat default. The trailing arg is the session id.
+    expect(getAdvisor).toHaveBeenCalledWith("devbox", undefined);
     expect(result.messages?.[0]?.content).toContain("anthropic/claude");
+  });
+
+  it("reads the advisor model scoped to the current session, not the default", async () => {
+    // The advisor model is PER CHAT, so /advisor inside a conversation must ask
+    // for that session's own value rather than the process-wide default.
+    const getAdvisor = vi.fn(async () => ({ model: "openai/gpt-5.1" }));
+    const result = await dispatchCommand(
+      "/advisor",
+      // Spread LAST-wins: ctx never sets getSessionId, so this override is the
+      // one the handler sees.
+      { ...ctx({ getAdvisor }), getSessionId: () => "sess-1" },
+    );
+    expect(getAdvisor).toHaveBeenCalledWith("devbox", "sess-1");
+    expect(result.messages?.[0]?.content).toContain("openai/gpt-5.1");
+    expect(result.messages?.[0]?.content).toContain("this session");
   });
 
   it("routes the /localmodel registry read/write to the session's host", async () => {

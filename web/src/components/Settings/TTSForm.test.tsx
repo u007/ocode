@@ -8,6 +8,7 @@ import { api } from "../../api/client";
 const engines = [
   { id: "browser-native", label: "Browser Native", availability: "ready", browser_only: true },
   { id: "piper", label: "Piper", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "en_US-joe-medium", manifest_version: "piper-1.8.0-joe-1", license_name: "piper-tts GPL-3.0-or-later", license_text: "piper-tts GPL-3.0-or-later", license_hash: "piper-license-hash" },
+  { id: "melo", label: "MeloTTS", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "EN-US", voices: ["EN-US", "EN-BR", "EN_INDIA", "EN-AU", "EN-Default"], manifest_version: "melo-0.1.2-en-v2-2091453", license_name: "MeloTTS MIT", license_text: "MeloTTS: MIT", license_hash: "melo-license-hash" },
   { id: "kokoro", label: "Kokoro", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "af_sarah", voices: ["af_sarah", "af_bella"], manifest_version: "kokoro-v1.0-voices-v1.0", license_name: "kokoro-onnx MIT; kokoro model Apache-2.0", license_text: "kokoro-onnx: MIT\nkokoro model: Apache-2.0", license_hash: "kokoro-license-hash" },
 ];
 
@@ -54,6 +55,66 @@ describe("TTSForm licensing and selection", () => {
     const kokoro = within(await screen.findByTestId("tts-engine-kokoro"));
     expect(kokoro.getByText(/kokoro-onnx: MIT/i)).toBeDefined();
     expect(kokoro.getByRole("button", { name: "Accept License" })).toBeDefined();
+  });
+
+  it("renders MeloTTS between Piper and Kokoro", async () => {
+    // The engine order comes straight from the server catalog (internal/tts
+    // Catalog()) because TTSForm maps the response without re-sorting, so the
+    // rendered order is the presentation contract.
+    renderTTSForm();
+    await screen.findByTestId("tts-engine-melo");
+    const order = ["tts-engine-browser-native", "tts-engine-piper", "tts-engine-melo", "tts-engine-kokoro"];
+    const positions = await Promise.all(
+      order.map(async (testid) => {
+        const card = await screen.findByTestId(testid);
+        expect(card).toBeDefined();
+        return Array.from(document.querySelectorAll("[data-testid]")).indexOf(card);
+      }),
+    );
+    const sorted = [...positions].sort((a, b) => a - b);
+    expect(positions).toEqual(sorted);
+    expect(positions.every((p) => p >= 0)).toBe(true);
+  });
+
+  it("offers the MeloTTS license, manifest and accent voices", async () => {
+    renderTTSForm();
+    const melo = within(await screen.findByTestId("tts-engine-melo"));
+    expect(melo.getByText(/License: MeloTTS: MIT/i)).toBeDefined();
+    expect(melo.getByText(/melo-0\.1\.2-en-v2-2091453/)).toBeDefined();
+    expect(melo.getByRole("button", { name: "Accept License" })).toBeDefined();
+    const voiceSelect = melo.getByDisplayValue("EN-US") as HTMLSelectElement;
+    for (const accent of ["EN-US", "EN-BR", "EN_INDIA", "EN-AU", "EN-Default"]) {
+      expect(Array.from(voiceSelect.options).map((o) => o.value)).toContain(accent);
+    }
+  });
+
+  it("installs MeloTTS only after the license is accepted", async () => {
+    let state = {} as Record<string, unknown>;
+    vi.mocked(api.getTTSState).mockImplementation(async () => state as never);
+    const accept = vi.spyOn(api, "ttsAcceptLicense").mockImplementation(async () => {
+      state = { melo: { engine_id: "melo", state: "license-accepted", progress: 0, pinned: false } };
+      return { state: "license-accepted" };
+    });
+    const pin = vi.spyOn(api, "ttsPin").mockResolvedValue({ state: "pinned" });
+    const download = vi.spyOn(api, "ttsDownload").mockResolvedValue({ state: "downloading" });
+
+    renderTTSForm();
+    const melo = within(await screen.findByTestId("tts-engine-melo"));
+    fireEvent.click(melo.getByRole("button", { name: "Accept License" }));
+
+    await waitFor(() => {
+      expect(accept).toHaveBeenCalledWith("melo", "melo-license-hash", "MeloTTS MIT");
+    });
+    // Accepting consent is not installing: no pin or download until asked.
+    expect(pin).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+
+    const installButton = await waitFor(() => melo.getByRole("button", { name: "Install" }));
+    fireEvent.click(installButton);
+    await waitFor(() => {
+      expect(pin).toHaveBeenCalledWith("melo", "melo-0.1.2-en-v2-2091453");
+    });
+    expect(download).toHaveBeenCalledWith("melo");
   });
 
   it("accepts a license and shows the install button without installing", async () => {

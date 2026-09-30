@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import type { CronRun } from "@/api/types";
+import type { CronRun, CronRunsResponse } from "@/api/types";
 import { api } from "@/api/client";
 import { Clock, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+
+/**
+ * Fetches one page of run history. Injectable so a REMINDER or TASK can reuse
+ * this panel: the runs live in the same runs.jsonl cron writes, but they are
+ * addressed under /api/reminders/{id}/runs and /api/tasks/{id}/runs, not under
+ * /api/cron. Registering the reminder id under the cron route instead would
+ * have worked mechanically, but it would make a cron route answer for
+ * non-cron ids — the kind of thing that reads fine in the router and confuses
+ * everyone who later greps for cron jobs.
+ */
+export type RunHistoryFetcher = (limit: number, offset: number) => Promise<CronRunsResponse>;
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -27,10 +38,13 @@ export default function CronHistoryPanel({
   jobId,
   jobName,
   onClose,
+  fetchRuns,
 }: {
   jobId: string;
   jobName: string;
   onClose: () => void;
+  /** Defaults to the cron route. Reminders/tasks pass their own. */
+  fetchRuns?: RunHistoryFetcher;
 }) {
   const [runs, setRuns] = useState<CronRun[]>([]);
   const [total, setTotal] = useState(0);
@@ -40,24 +54,29 @@ export default function CronHistoryPanel({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const limit = 20;
 
-  const load = useCallback(async (off = 0, append = false) => {
-    try {
-      setError(null);
-      if (!append) setLoading(true);
-      const res = await api.getCronRuns(jobId, limit, off);
-      if (append) {
-        setRuns((prev) => [...prev, ...(res.runs ?? [])]);
-      } else {
-        setRuns(res.runs ?? []);
+  const load = useCallback(
+    async (off = 0, append = false) => {
+      try {
+        setError(null);
+        if (!append) setLoading(true);
+        const res = fetchRuns
+          ? await fetchRuns(limit, off)
+          : await api.getCronRuns(jobId, limit, off);
+        if (append) {
+          setRuns((prev) => [...prev, ...(res.runs ?? [])]);
+        } else {
+          setRuns(res.runs ?? []);
+        }
+        setTotal(res.total);
+        setOffset(off + (res.runs ?? []).length);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load run history");
+      } finally {
+        setLoading(false);
       }
-      setTotal(res.total);
-      setOffset(off + (res.runs ?? []).length);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load run history");
-    } finally {
-      setLoading(false);
-    }
-  }, [jobId]);
+    },
+    [jobId, fetchRuns],
+  );
 
   useEffect(() => {
     setRuns([]);

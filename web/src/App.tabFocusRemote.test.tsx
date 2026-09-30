@@ -14,6 +14,10 @@ const appApi = vi.hoisted(() => ({
   listProjectSessions: vi.fn(),
   listGroups: vi.fn(),
   getSpending: vi.fn(),
+  // Server-persisted open tabs. The sidebar's chat inventory is a LIVE view
+  // (open ∪ running), so a chat only appears here once it is an open tab —
+  // this is how the reveal tests seed "Remote one" into the list.
+  getTabs: vi.fn(async () => ({ projects: {} })),
 }));
 
 beforeAll(() => {
@@ -39,6 +43,7 @@ vi.mock("./api/client", () => {
     listProjectSessions: appApi.listProjectSessions,
     listGroups: appApi.listGroups,
     getSpending: appApi.getSpending,
+    getTabs: appApi.getTabs,
   };
   const api = new Proxy({} as Record<string, unknown>, {
     get: (target, prop: string) => {
@@ -212,11 +217,34 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation(async (_path: string, host?: string) =>
       host === "dev@box"
-        ? [{ id: "remote-s1", title: "Remote one", created_at: "", updated_at: "" }]
+        ? [
+            // The sidebar chat inventory is a LIVE view: a chat must be open as
+            // a tab or running an agent turn on the host to appear. local-s1 is
+            // neither, so it stays hidden and "Remote one" is the only row.
+            { id: "remote-s1", title: "Remote one", created_at: "", updated_at: "" },
+            { id: "local-s1", title: "Remote idle", created_at: "", updated_at: "" },
+          ]
         : [],
     );
   appApi.listGroups.mockReset().mockResolvedValue([]);
   appApi.getSpending.mockReset().mockResolvedValue({ spending_usd: 0 });
+  // "Remote one" is already an open tab on the remote project, so it is part
+  // of the live inventory the row renders (it would otherwise be hidden as a
+  // closed, non-running session — the sidebar is not a history browser). The
+  // LOCAL project also carries an open tab, so boot still auto-selects it and
+  // the remote row stays the non-active case the binding/kill rules cover.
+  appApi.getTabs.mockReset().mockResolvedValue({
+    projects: {
+      "/proj": {
+        tabs: [{ id: "local-s1", title: "Local one", sub_tab: "chat" }],
+        active: "local-s1",
+      },
+      "/remote": {
+        tabs: [{ id: "remote-s1", title: "Remote one", sub_tab: "chat" }],
+        active: "remote-s1",
+      },
+    },
+  });
 });
 
 describe("App end-to-end: revealing a tab from a remote project's inventory", () => {
@@ -252,9 +280,12 @@ describe("App end-to-end: revealing a tab from a remote project's inventory", ()
 
     // The tab is owned by the REMOTE project (which is what makes
     // resolveSessionHost route it through dev@box) and is the active tab, so
-    // App renders its chat panel with that session id.
+    // App renders a chat panel for that session id. (Other projects keep their
+    // own mounted panels, hence querying by id rather than the bare testid.)
     await waitFor(() =>
-      expect(screen.getByTestId("chat-panel").getAttribute("data-session-id")).toBe("remote-s1"),
+      expect(
+        screen.getAllByTestId("chat-panel").some((el) => el.getAttribute("data-session-id") === "remote-s1"),
+      ).toBe(true),
     );
   });
 

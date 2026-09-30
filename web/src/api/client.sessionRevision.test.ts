@@ -51,3 +51,31 @@ describe("api.getSession records the stored revision", () => {
     expect(sessionRevisionMoved("s1", undefined, "rev-local")).toBe(false);
   });
 });
+
+describe("api.getSession opt-out from the revision baseline", () => {
+  it("leaves an existing baseline alone when noteRevision is false", async () => {
+    // A speculative read (the Pulse dashboard hovering a card) must not stamp a
+    // fresh revision over an OPEN TAB that is still showing older content:
+    // the poll would then see "no change" and never repair the stale tab.
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(detailBody("rev-1"))));
+    await api.getSession("s1");
+    expect(sessionRevisionMoved("s1", undefined, "rev-1")).toBe(false);
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(detailBody("rev-2"))));
+    await api.getSession("s1", { noteRevision: false });
+
+    // The baseline is still rev-1, so a rev-2 poll is still seen as a move.
+    expect(sessionRevisionMoved("s1", undefined, "rev-2")).toBe(true);
+  });
+
+  it("a normal fetch still records, so the opt-out cannot disable the feature", async () => {
+    // No baseline yet, so nothing to detect. One normal fetch must establish it.
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(detailBody("rev-1"))));
+    await api.getSession("s1", { noteRevision: false });
+    expect(sessionRevisionMoved("s1", undefined, "rev-1")).toBe(false);
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(detailBody("rev-1"))));
+    await api.getSession("s1");
+    expect(sessionRevisionMoved("s1", undefined, "rev-2")).toBe(true);
+  });
+});

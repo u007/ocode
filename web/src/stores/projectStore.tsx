@@ -37,6 +37,16 @@ export function projectSessionKey(path: string, host?: string): string {
   return host ? `${host}::${path}` : path;
 }
 
+/** Turn a session-list failure into one readable line for the Sessions dialog.
+ *  `ApiError` already carries the route, status and a content-type hint (see
+ *  api/client.ts fetchJSON), so a message is preferred over a bare fallback; an
+ *  empty or whitespace-only one is ignored so we never render a blank error. */
+function sessionListErrorText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  const text = raw.trim();
+  return text || "Could not reach the server.";
+}
+
 export interface ProjectState {
   projects: Project[];
   loading: boolean;
@@ -48,6 +58,10 @@ export interface ProjectState {
    *  list without a lookup. */
   projectSessions: SessionInfo[];
   sessionsLoading: boolean;
+  /** Why the active project's session list could not be loaded, or null. Set
+   *  only by the caller that raised the spinner, so the Sessions dialog can say
+   *  "couldn't load" instead of the indistinguishable "No sessions yet". */
+  sessionsError: string | null;
   /** Per-project session-list cache keyed by `projectSessionKey(path, host)`.
    *  Lets a project switch paint from the last-known list immediately and
    *  revalidate in the background, instead of blocking on a round-trip. */
@@ -79,6 +93,7 @@ export type ProjectAction =
   | { type: "SET_PROJECT_SESSIONS"; sessions: SessionInfo[] }
   | { type: "SET_PROJECT_SESSIONS_CACHE"; key: string; sessions: SessionInfo[]; fetchedAt: number }
   | { type: "SET_SESSIONS_LOADING"; loading: boolean }
+  | { type: "SET_SESSIONS_ERROR"; error: string | null }
   | { type: "ADD_TAB"; tab: Tab }
   | { type: "REMOVE_TAB"; id: string }
   | { type: "SET_ACTIVE_TAB"; id: string | null }
@@ -104,6 +119,7 @@ const initialState: ProjectState = {
   activeProject: null,
   projectSessions: [],
   sessionsLoading: false,
+  sessionsError: null,
   sessionsByProject: {},
   tabsByProject: {},
   activeTabByProject: {},
@@ -178,6 +194,15 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         ...state,
         activeProject: action.project,
         projectSessions: cached?.sessions ?? [],
+        // A new active project starts with no fetch of its own in flight, so
+        // any pending spinner belongs to the project we just left. Carrying it
+        // over stranded the "Sessions" dialog: selecting a project with a warm
+        // cache returns early without raising a spinner, so nothing would ever
+        // clear the previous project's flag. Its error is stale for the same
+        // reason, and the dialog prefers the error over the list, so a failure
+        // on a project the user has left must not cover the new one's sessions.
+        sessionsLoading: false,
+        sessionsError: null,
       };
     }
     case "SET_PROJECT_SESSIONS":
@@ -198,12 +223,18 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
           sessionsByProject,
           projectSessions: action.sessions,
           sessionsLoading: false,
+          // The list is now real, so a recorded failure no longer describes it.
+          // Without this a hover warm or the dialog's forced revalidation
+          // recovered the list but left the error panel on top of it.
+          sessionsError: null,
         };
       }
       return { ...state, sessionsByProject };
     }
     case "SET_SESSIONS_LOADING":
       return { ...state, sessionsLoading: action.loading };
+    case "SET_SESSIONS_ERROR":
+      return { ...state, sessionsError: action.error };
     case "ADD_TAB": {
       const key = action.tab.projectPath || path;
       const list = state.tabsByProject[key] || [];
@@ -743,9 +774,16 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   /** Fetch a project's session list into the cache. Deduped per project, so a
    *  hover prefetch already in flight is joined rather than duplicated.
-   *  `background` keeps a failure from clearing a loading state it never set. */
+   *
+   *  This deliberately never touches `sessionsLoading`. The spinner is owned by
+   *  the caller that RAISED it (selectProject), which is the only place that
+   *  knows whether a failure is user-visible. Clearing it here instead — keyed
+   *  on the initiating caller's own "background" flag — strands the spinner
+   *  whenever a foreground caller JOINS a run a background caller started,
+   *  because the joined run keeps the background caller's flag and so stays
+   *  silent on error. A failed remote listing then spun forever. */
   const refreshProjectSessions = useCallback(
-    async (project: Project, opts?: { background?: boolean }): Promise<void> => {
+    async (project: Project): Promise<void> => {
       const key = projectSessionKey(project.path, project.host);
       const inflight = sessionsInflightRef.current.get(key);
       if (inflight) return inflight;
@@ -759,8 +797,13 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
             fetchedAt: Date.now(),
           });
         } catch (err) {
+          // Logged here so every caller gets the reason even when it only
+          // swallows the rejection, then rethrown so the caller that owns the
+          // spinner can decide whether the failure is user-visible. Swallowing
+          // it here is what made a failed listing indistinguishable from an
+          // empty one.
           console.error("Failed to load project sessions:", err);
-          if (!opts?.background) dispatch({ type: "SET_SESSIONS_LOADING", loading: false });
+          throw err;
         } finally {
           sessionsInflightRef.current.delete(key);
         }
@@ -781,7 +824,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         const cached = store.state.sessionsByProject[key];
         if (cached && Date.now() - cached.fetchedAt < SESSION_LIST_TTL_MS) return;
       }
-      void refreshProjectSessions(project, { background: true });
+      // Intentionally not rethrown: a hover warm has no UI to fail. The reason is
+      // already logged inside refreshProjectSessions, and selectProject runs its
+      // own reporting when it is the one that raised the spinner.
+      void refreshProjectSessions(project).catch(() => {});
     },
     [refreshProjectSessions, store],
   );
@@ -791,13 +837,43 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     // A cache hit (warm or stale) paints the last-known list immediately and
     // revalidates silently, so the switch never blocks on a round-trip. Only a
     // true miss shows the loading state.
-    const cached = store.state.sessionsByProject[projectSessionKey(project.path, project.host)];
-    if (cached) {
-      void refreshProjectSessions(project, { background: true });
+    const key = projectSessionKey(project.path, project.host);
+    if (store.state.sessionsByProject[key]) {
+      // Intentionally not rethrown, same as the hover warm: a silent
+      // revalidation of an already-painted list has no spinner to clear and no
+      // empty state to explain. The reason is logged in refreshProjectSessions,
+      // and a failed cold fetch below does report it.
+      void refreshProjectSessions(project).catch(() => {});
       return;
     }
+    // This is the only place the spinner is raised, so this is the only place
+    // that clears it — on success, on failure, and when the fetch was deduped
+    // into a run someone else started. `refreshProjectSessions` deliberately
+    // stays out of it: a run's error path cannot know whether the spinner on
+    // screen was raised by its initiator or by a later joiner, so clearing
+    // there stranded the "Sessions" dialog spinning forever on a failed remote
+    // listing.
     dispatch({ type: "SET_SESSIONS_LOADING", loading: true });
-    await refreshProjectSessions(project);
+    // Only the project still on screen may report a result. A superseded
+    // selection must not stamp its failure — or its recovery — onto whatever the
+    // user switched to while the round-trip was in the air, and clearing the
+    // spinner here would cut short the successor's own.
+    const stillActive = () => {
+      const active = store.state.activeProject;
+      return !!active && projectSessionKey(active.path, active.host) === key;
+    };
+    try {
+      await refreshProjectSessions(project);
+      if (stillActive()) dispatch({ type: "SET_SESSIONS_ERROR", error: null });
+    } catch (err) {
+      // Fail loudly: the dialog shows this instead of a misleading
+      // "No sessions yet" for a project that was never actually listed.
+      if (stillActive()) {
+        dispatch({ type: "SET_SESSIONS_ERROR", error: sessionListErrorText(err) });
+      }
+    } finally {
+      if (stillActive()) dispatch({ type: "SET_SESSIONS_LOADING", loading: false });
+    }
     // No auto-ensured "New session" tab: the frontend must not force a tab
     // into existence. A New tab is created only on explicit user action
     // ("+" button, Cmd/Ctrl+N, /new) via openNewSessionTab.

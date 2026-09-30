@@ -8,6 +8,7 @@ import (
 	"net/http/httputil"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -51,10 +52,27 @@ type remoteHostStageError struct {
 func (e *remoteHostStageError) Error() string { return e.Err.Error() }
 func (e *remoteHostStageError) Unwrap() error { return e.Err }
 
-// remoteHostEntry holds a connected workspace for a single host. The per-entry
-// mutex serializes concurrent connect attempts for the same host without
-// blocking requests for other hosts. The registry-wide mutex protects the
-// byHost map; the per-entry mutex protects the workspace and connecting state.
+// remoteConnectionKey is the registry's identity for ONE SSH connection: the
+// host string PLUS the port. The host string is "[user@]host" (or
+// "wsl:<distro>") and does not carry the port, so two projects on one host
+// reached over different ports would otherwise share a single entry — and with
+// it one tunnel, one bearer token and one remote registration, silently serving
+// each other's data across connections. WSL targets cannot carry a port
+// (Target.Validate rejects it), and a zero port means "unspecified/default", so
+// both leave the key as the bare host string. Mirrors remoteSlotKey, the exec
+// pool's version of the same identity.
+func remoteConnectionKey(host string, port int) string {
+	if port <= 0 {
+		return host
+	}
+	return host + ":" + strconv.Itoa(port)
+}
+
+// remoteHostEntry holds a connected workspace for a single CONNECTION
+// (host + port, see remoteConnectionKey). The per-entry mutex serializes
+// concurrent connect attempts for the same connection without blocking
+// requests for other hosts or ports. The registry-wide mutex protects the
+// byConn map; the per-entry mutex protects the workspace and connecting state.
 type remoteHostEntry struct {
 	mu         sync.Mutex
 	workspace  remoteHostWorkspace
@@ -67,22 +85,26 @@ type remoteHostEntry struct {
 	proxy *httputil.ReverseProxy
 }
 
-// remoteHostRegistry owns one remote.RemoteWorkspace per remote host, keyed by
-// the raw host string. Entries are created lazily on first use and torn down
-// at shutdown or on drop. Mirrors the portMapRegistry pattern in
-// handler_portmaps.go.
+// remoteHostRegistry owns one remote.RemoteWorkspace per remote CONNECTION,
+// keyed by remoteConnectionKey (host + port — NOT the bare host string, which
+// would conflate two ports on one host into a single tunnel). Entries are
+// created lazily on first use and torn down at shutdown or on drop. Mirrors the
+// portMapRegistry pattern in handler_portmaps.go.
 type remoteHostRegistry struct {
 	sup *tool.ProcessSupervisor
 
 	mu     sync.Mutex
-	byHost map[string]*remoteHostEntry
+	byConn map[string]*remoteHostEntry
 
-	// registeredPaths tracks (host, path) pairs already registered on the
+	// registeredPaths tracks (connection, path) pairs already registered on the
 	// remote, so Task 5 registers a project exactly once per process. Keyed by
-	// host first so drop/closeAll can clear a host's set atomically. Guarded by
-	// mu. It deliberately lives on the registry, not on remoteHostEntry: a
-	// placeholder entry with no connect in flight would make a later
-	// workspaceFor wait forever on a Cond nobody clears.
+	// connection (host + port) first, because registration happens on a SPECIFIC
+	// server: the same path on a second port has NOT been registered there and
+	// must be POSTed again. Connection-first ordering lets drop/closeAll clear
+	// one connection's set atomically. Guarded by mu. It deliberately lives on
+	// the registry, not on remoteHostEntry: a placeholder entry with no connect
+	// in flight would make a later workspaceFor wait forever on a Cond nobody
+	// clears.
 	registeredPaths map[string]map[string]struct{}
 
 	// connect is the injectable constructor used by workspaceFor. nil means
@@ -108,7 +130,7 @@ type remoteHostWorkspaceConnector interface {
 func newRemoteHostRegistry(sup *tool.ProcessSupervisor) *remoteHostRegistry {
 	reg := &remoteHostRegistry{
 		sup:             sup,
-		byHost:          make(map[string]*remoteHostEntry),
+		byConn:          make(map[string]*remoteHostEntry),
 		registeredPaths: make(map[string]map[string]struct{}),
 	}
 	reg.factory = func(target remote.Target, path string, sup *tool.ProcessSupervisor) (remoteHostWorkspaceConnector, error) {
@@ -148,10 +170,10 @@ func (reg *remoteHostRegistry) realConnect(target remote.Target, path string) (w
 // registered on the remote. It is a read-only check — it does NOT mark
 // the pair as registered. Task 5 uses this to avoid marking before a
 // POST succeeds.
-func (reg *remoteHostRegistry) isRegistered(host, path string) bool {
+func (reg *remoteHostRegistry) isRegistered(host string, port int, path string) bool {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	paths, ok := reg.registeredPaths[host]
+	paths, ok := reg.registeredPaths[remoteConnectionKey(host, port)]
 	if !ok {
 		return false
 	}
@@ -159,11 +181,12 @@ func (reg *remoteHostRegistry) isRegistered(host, path string) bool {
 	return exists
 }
 
-// workspaceFor returns a connected workspace for the given host, creating one
-// lazily if needed. Concurrent callers for the same host share one connect
-// attempt; callers for different hosts proceed in parallel. A failed connect
-// is not cached — the next call retries. It delegates to workspaceForPort
-// with port 0 (meaning: no explicit port override).
+// workspaceFor returns a connected workspace for the given host at its default
+// port, creating one lazily if needed. Concurrent callers for the same
+// CONNECTION share one connect attempt; callers for different hosts or ports
+// proceed in parallel. A failed connect is not cached — the next call retries.
+// It delegates to workspaceForPort with port 0 (meaning: no explicit port
+// override).
 func (reg *remoteHostRegistry) workspaceFor(host, path string) (remoteHostWorkspace, error) {
 	return reg.workspaceForPort(host, path, 0)
 }
@@ -187,9 +210,14 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 		return nil, err
 	}
 
+	// One entry per CONNECTION. target.Port is the effective port (parsed
+	// target, then the explicit override above), so the key matches the port
+	// the connect actually dials.
+	key := remoteConnectionKey(host, target.Port)
+
 	// Fast path: entry already connected.
 	reg.mu.Lock()
-	if e, ok := reg.byHost[host]; ok {
+	if e, ok := reg.byConn[key]; ok {
 		e.mu.Lock()
 		if e.connected {
 			ws := e.workspace
@@ -202,7 +230,7 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	}
 
 	// Slow path: create or wait on entry.
-	e, created := reg.getOrCreateEntry(host)
+	e, created := reg.getOrCreateEntry(key)
 	reg.mu.Unlock()
 
 	if !created {
@@ -223,9 +251,9 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 
 	// We own the connect. Run it outside the registry-wide mutex. A panic in
 	// the connect implementation is converted to an error so the entry is
-	// always resolved; otherwise it would stay in byHost with nobody to
-	// broadcast and every later caller for this host would block forever.
-	log.Printf("remote: connecting to host %s", host)
+	// always resolved; otherwise it would stay in byConn with nobody to
+	// broadcast and every later caller for this connection would block forever.
+	log.Printf("remote: connecting to %s", key)
 	start := time.Now()
 	ws, err := reg.connectBounded(target, path, host)
 	if err != nil {
@@ -238,13 +266,13 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 		e.failed = true
 		e.connectErr = err
 		e.connecting.Broadcast()
-		if reg.byHost[host] == e {
-			delete(reg.byHost, host)
+		if reg.byConn[key] == e {
+			delete(reg.byConn, key)
 		}
 		e.mu.Unlock()
 		reg.mu.Unlock()
 
-		log.Printf("remote: connect to host %s failed after %v: %v", host, time.Since(start), err)
+		log.Printf("remote: connect to %s failed after %v: %v", key, time.Since(start), err)
 		return nil, err
 	}
 
@@ -256,16 +284,16 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	// made under e.mu before the broadcast.
 	reg.mu.Lock()
 	e.mu.Lock()
-	if reg.byHost[host] != e {
+	if reg.byConn[key] != e {
 		e.failed = true
 		e.connectErr = errConnectSuperseded
 		e.connecting.Broadcast()
 		e.mu.Unlock()
 		reg.mu.Unlock()
 		if derr := ws.Disconnect(); derr != nil {
-			log.Printf("remote: disconnect superseded workspace for host %s: %v", host, derr)
+			log.Printf("remote: disconnect superseded workspace for %s: %v", key, derr)
 		}
-		log.Printf("remote: connect to host %s superseded by drop after %v", host, time.Since(start))
+		log.Printf("remote: connect to %s superseded by drop after %v", key, time.Since(start))
 		return nil, errConnectSuperseded
 	}
 	e.workspace = ws
@@ -276,19 +304,19 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	// I/O), so building it here under the locks is safe. On failure the entry
 	// is resolved exactly like a connect failure (mark failed, broadcast,
 	// evict) so waiters are not stranded and the workspace's tunnel is closed.
-	p, perr := remote.NewAPIProxy(ws.APIURL(), ws.Token(), func(err error) { reg.drop(host) })
+	p, perr := remote.NewAPIProxy(ws.APIURL(), ws.Token(), func(err error) { reg.drop(host, target.Port) })
 	if perr != nil {
 		e.failed = true
 		e.connectErr = perr
 		e.connecting.Broadcast()
-		if reg.byHost[host] == e {
-			delete(reg.byHost, host)
+		if reg.byConn[key] == e {
+			delete(reg.byConn, key)
 		}
 		e.mu.Unlock()
 		reg.mu.Unlock()
-		log.Printf("remote: build proxy for host %s: %v", host, perr)
+		log.Printf("remote: build proxy for %s: %v", key, perr)
 		if derr := ws.Disconnect(); derr != nil {
-			log.Printf("remote: disconnect after proxy build failure for host %s: %v", host, derr)
+			log.Printf("remote: disconnect after proxy build failure for %s: %v", key, derr)
 		}
 		return nil, perr
 	}
@@ -298,17 +326,17 @@ func (reg *remoteHostRegistry) workspaceForPort(host, path string, port int) (re
 	e.mu.Unlock()
 	reg.mu.Unlock()
 
-	log.Printf("remote: connected to host %s at %s (took %v)", host, ws.APIURL(), time.Since(start))
+	log.Printf("remote: connected to %s at %s (took %v)", key, ws.APIURL(), time.Since(start))
 	return ws, nil
 }
 
 // status reports what the registry knows about host without connecting. A host
 // that has never connected (or was dropped) reports connected=false and no
 // version; LocalVersion is always the local build's version.
-func (reg *remoteHostRegistry) status(host string) remoteHostStatus {
+func (reg *remoteHostRegistry) status(host string, port int) remoteHostStatus {
 	st := remoteHostStatus{Host: host, LocalVersion: version.Version}
 	reg.mu.Lock()
-	if e, ok := reg.byHost[host]; ok {
+	if e, ok := reg.byConn[remoteConnectionKey(host, port)]; ok {
 		e.mu.Lock()
 		if e.connected && e.workspace != nil {
 			ws := e.workspace.ServeState()
@@ -328,19 +356,20 @@ func (reg *remoteHostRegistry) status(host string) remoteHostStatus {
 // connectHost, not connect, because the registry already has a connect field.
 func (reg *remoteHostRegistry) connectHost(host, path string, port int) (remoteHostStatus, error) {
 	if _, err := reg.workspaceForPort(host, path, port); err != nil {
-		return reg.status(host), &remoteHostStageError{Stage: "remote-connect", Err: err}
+		return reg.status(host, port), &remoteHostStageError{Stage: "remote-connect", Err: err}
 	}
-	return reg.status(host), nil
+	return reg.status(host, port), nil
 }
 
 // snapshotForRestart reads the connected workspace's transport and pid and the
 // set of paths registered on the host, all before drop clears them.
-func (reg *remoteHostRegistry) snapshotForRestart(host string) (remote.Transport, int, []string) {
+func (reg *remoteHostRegistry) snapshotForRestart(host string, port int) (remote.Transport, int, []string) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
+	key := remoteConnectionKey(host, port)
 	var transport remote.Transport
 	pid := 0
-	if e, ok := reg.byHost[host]; ok {
+	if e, ok := reg.byConn[key]; ok {
 		e.mu.Lock()
 		if e.connected && e.workspace != nil {
 			transport = e.workspace.ServeTransport()
@@ -348,8 +377,8 @@ func (reg *remoteHostRegistry) snapshotForRestart(host string) (remote.Transport
 		}
 		e.mu.Unlock()
 	}
-	paths := make([]string, 0, len(reg.registeredPaths[host]))
-	for p := range reg.registeredPaths[host] {
+	paths := make([]string, 0, len(reg.registeredPaths[key]))
+	for p := range reg.registeredPaths[key] {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
@@ -363,27 +392,27 @@ func (reg *remoteHostRegistry) snapshotForRestart(host string) (remote.Transport
 // entry is left dropped so the next request reconnects; the returned error
 // carries the stage that failed.
 func (reg *remoteHostRegistry) restart(host, path string, port int) (remoteHostStatus, error) {
-	transport, pid, savedPaths := reg.snapshotForRestart(host)
+	transport, pid, savedPaths := reg.snapshotForRestart(host, port)
 	// Kill over the still-live transport, then drop unconditionally so a
 	// failure at any stage leaves no half-live entry.
 	var killErr error
 	if transport != nil && pid > 0 {
 		killErr = remote.KillServer(transport, pid)
 	}
-	reg.drop(host)
+	reg.drop(host, port)
 	if killErr != nil {
-		return reg.status(host), &remoteHostStageError{Stage: "remote-kill", Err: killErr}
+		return reg.status(host, port), &remoteHostStageError{Stage: "remote-kill", Err: killErr}
 	}
 	ws, err := reg.workspaceForPort(host, path, port)
 	if err != nil {
-		return reg.status(host), &remoteHostStageError{Stage: "remote-connect", Err: err}
+		return reg.status(host, port), &remoteHostStageError{Stage: "remote-connect", Err: err}
 	}
 	for _, p := range savedPaths {
-		if err := ensureRemoteProject(context.Background(), ws, reg, host, p); err != nil {
-			return reg.status(host), &remoteHostStageError{Stage: "remote-register", Err: err}
+		if err := ensureRemoteProject(context.Background(), ws, reg, host, port, p); err != nil {
+			return reg.status(host, port), &remoteHostStageError{Stage: "remote-register", Err: err}
 		}
 	}
-	return reg.status(host), nil
+	return reg.status(host, port), nil
 }
 
 // errConnectSuperseded is returned when a drop()/closeAll() removed the entry
@@ -466,31 +495,36 @@ func (reg *remoteHostRegistry) connectBounded(target remote.Target, path, host s
 	}
 }
 
-// getOrCreateEntry returns the entry for host. If none exists, a new one is
-// created with connecting state and created=true. If an existing entry is
-// connected, it returns that entry with created=false. Callers MUST hold
-// reg.mu.
-func (reg *remoteHostRegistry) getOrCreateEntry(host string) (*remoteHostEntry, bool) {
-	if e, ok := reg.byHost[host]; ok {
+// getOrCreateEntry returns the entry for a connection key (see
+// remoteConnectionKey). If none exists, a new one is created with connecting
+// state and created=true. If an existing entry is connected, it returns that
+// entry with created=false. Callers MUST hold reg.mu.
+func (reg *remoteHostRegistry) getOrCreateEntry(key string) (*remoteHostEntry, bool) {
+	if e, ok := reg.byConn[key]; ok {
 		return e, false
 	}
 	e := &remoteHostEntry{}
 	e.connecting.L = &e.mu
-	reg.byHost[host] = e
+	reg.byConn[key] = e
 	return e, true
 }
 
-// drop removes the entry for host and disconnects its workspace outside the
-// lock. This prevents a tunnel leak when Task 5's proxy error handler calls
-// it. The entry is removed from the map first so concurrent workspaceFor
-// calls see it gone and create a fresh entry.
-func (reg *remoteHostRegistry) drop(host string) {
+// drop removes the entry for ONE connection (host + port) and disconnects its
+// workspace outside the lock. This prevents a tunnel leak when Task 5's proxy
+// error handler calls it. The entry is removed from the map first so concurrent
+// workspaceFor calls see it gone and create a fresh entry.
+//
+// It is deliberately scoped to a single port: another port on the same host is
+// a separate tunnel and must not be torn down because one connection failed.
+func (reg *remoteHostRegistry) drop(host string, port int) {
+	key := remoteConnectionKey(host, port)
 	reg.mu.Lock()
-	e, ok := reg.byHost[host]
-	delete(reg.byHost, host)
-	// Clear unconditionally: markRegistered may have recorded paths for a host
-	// with no live entry yet, and a reconnect must re-register the project.
-	delete(reg.registeredPaths, host)
+	e, ok := reg.byConn[key]
+	delete(reg.byConn, key)
+	// Clear unconditionally: markRegistered may have recorded paths for a
+	// connection with no live entry yet, and a reconnect must re-register the
+	// project.
+	delete(reg.registeredPaths, key)
 	reg.mu.Unlock()
 
 	if !ok {
@@ -504,7 +538,7 @@ func (reg *remoteHostRegistry) drop(host string) {
 
 	if ws != nil {
 		if err := ws.Disconnect(); err != nil {
-			log.Printf("remote: disconnect host %s: %v", host, err)
+			log.Printf("remote: disconnect %s: %v", key, err)
 		}
 	}
 }
@@ -512,23 +546,23 @@ func (reg *remoteHostRegistry) drop(host string) {
 // closeAll disconnects every live entry. It is called from Handler.Shutdown.
 func (reg *remoteHostRegistry) closeAll(ctx context.Context) {
 	reg.mu.Lock()
-	entries := make(map[string]*remoteHostEntry, len(reg.byHost))
-	for k, v := range reg.byHost {
+	entries := make(map[string]*remoteHostEntry, len(reg.byConn))
+	for k, v := range reg.byConn {
 		entries[k] = v
 	}
 	// Clear the map so no new connects reuse stale entries.
-	reg.byHost = make(map[string]*remoteHostEntry)
+	reg.byConn = make(map[string]*remoteHostEntry)
 	reg.registeredPaths = make(map[string]map[string]struct{})
 	reg.mu.Unlock()
 
-	for host, e := range entries {
+	for key, e := range entries {
 		e.mu.Lock()
 		ws := e.workspace
 		e.mu.Unlock()
 
 		if ws != nil {
 			if err := ws.Disconnect(); err != nil {
-				log.Printf("remote: shutdown disconnect host %s: %v", host, err)
+				log.Printf("remote: shutdown disconnect %s: %v", key, err)
 			}
 		}
 	}
@@ -540,14 +574,15 @@ func (reg *remoteHostRegistry) closeAll(ctx context.Context) {
 // exactly once per process. It never creates a connection entry — the path set
 // is registry-level, so calling it before workspaceFor cannot leave a
 // placeholder that blocks a later connect.
-func (reg *remoteHostRegistry) markRegistered(host, path string) bool {
+func (reg *remoteHostRegistry) markRegistered(host string, port int, path string) bool {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 
-	paths := reg.registeredPaths[host]
+	key := remoteConnectionKey(host, port)
+	paths := reg.registeredPaths[key]
 	if paths == nil {
 		paths = make(map[string]struct{})
-		reg.registeredPaths[host] = paths
+		reg.registeredPaths[key] = paths
 	}
 	if _, exists := paths[path]; exists {
 		return false
@@ -556,12 +591,13 @@ func (reg *remoteHostRegistry) markRegistered(host, path string) bool {
 	return true
 }
 
-// proxyFor returns the cached reverse proxy for host. It must be called on a
-// connected entry — callers obtain the proxy under e.mu (see
-// HandleRemoteProxy).
-func (reg *remoteHostRegistry) proxyFor(host string) (*httputil.ReverseProxy, bool) {
+// proxyFor returns the cached reverse proxy for a connection (host + port). It
+// must be called on a connected entry — callers obtain the proxy under e.mu
+// (see HandleRemoteProxy). Keyed like every other registry lookup so the proxy
+// handed back belongs to the connection the caller asked for.
+func (reg *remoteHostRegistry) proxyFor(host string, port int) (*httputil.ReverseProxy, bool) {
 	reg.mu.Lock()
-	e, ok := reg.byHost[host]
+	e, ok := reg.byConn[remoteConnectionKey(host, port)]
 	reg.mu.Unlock()
 	if !ok {
 		return nil, false

@@ -46,6 +46,7 @@ vi.mock("../stores/projectStore", () => ({
 let openSpy: ReturnType<typeof vi.spyOn>;
 
 let exitPulseCalls = 0;
+let exitPulsePaths: string[] = [];
 let jump: (t: { projectPath: string; host: string; sessionId: string; title: string }) => void;
 let jumpAsk: (t: {
   projectPath: string;
@@ -63,8 +64,9 @@ function Probe() {
 function mount() {
   return render(
     <PulseJumpProvider
-      exitPulse={() => {
+      exitPulse={(targetPath) => {
         exitPulseCalls += 1;
+        exitPulsePaths.push(targetPath);
       }}
     >
       <Probe />
@@ -77,6 +79,7 @@ beforeEach(() => {
   mockOpenSessionTab.mockReset();
   openSpy = vi.spyOn(browserActions, "open");
   exitPulseCalls = 0;
+  exitPulsePaths = [];
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -128,6 +131,10 @@ describe("useJumpToSession", () => {
       jump({ projectPath: "/proj-b", host: "", sessionId: "ses_2", title: "two" });
     });
     await waitFor(() => expect(exitPulseCalls).toBe(1));
+    // App keys the forced destination on the project being landed on, so the
+    // target path has to be threaded through — the source project (what the
+    // user was viewing before the dashboard) is the wrong one to pass.
+    expect(exitPulsePaths).toEqual(["/proj-b"]);
   });
 
   it("refuses to jump to an unknown project and says why", async () => {

@@ -270,10 +270,14 @@ func (s *Supervisor) runSynth(ctx context.Context, cancel context.CancelFunc, m 
 
 // synthText dispatches synthesis to the engine-specific function.
 func synthText(ctx context.Context, sup *tool.ProcessSupervisor, root string, m Manifest, id string, text, outPath string, voice string) error {
-	if m.Engine == EngineKokoro {
+	switch m.Engine {
+	case EngineKokoro:
 		return kokoroSynth(ctx, sup, root, m, id, text, outPath, voice)
+	case EngineMelo:
+		return meloSynth(ctx, sup, root, m, id, text, outPath, voice)
+	default:
+		return piperSynth(ctx, sup, root, m, id, text, outPath)
 	}
-	return piperSynth(ctx, sup, root, m, id, text, outPath)
 }
 
 func (s *Supervisor) failSynth(generation uint64, err error) {

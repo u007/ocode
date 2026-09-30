@@ -1,5 +1,264 @@
 # TODO
 
+## Skill-doc audit follow-ups: four deferred items (2026-09-30)
+
+A read-only audit of `skills/` found 17 stale line anchors and ~10 false claims across the
+`ocode-*` skills; the seven files below were corrected. Four items were NOT done and are tracked
+here rather than left implicit.
+
+- **Divergent user-level copies of the project skills shadow `skills/`.**
+  `~/.config/opencode/skills/` holds real directories (not symlinks) for
+  `ocode-{agent-architecture,desktop,mem,permissions,tools,tui,usage}` and `team-onboarding`, each
+  a much OLDER fork: `ocode-permissions` is 279 lines there vs 441 in the project (the user copy
+  predates the whole TypeSafe/Jev section), `ocode-tools` 134 vs 272 (predates the search-judge
+  section). `~/.claude/skills/ocode-usage` is a symlink into that same stale tree.
+  `SkillSearchPathsForRoot` (`internal/skill/loader.go:366-385`) appends the user-level roots
+  BEFORE `ProjectLocalSkillDirs(root)`, and a comment at ~L394 states "first-wins-on-name", so the
+  precedence order is genuinely ambiguous. Empirically the project copies are what get served (the
+  /learn inventory reported `source: skills/…` for all of them, and a live `skill` tool load
+  returned the 440-line project version), so the forks are not currently shadowing anything — but
+  that was inferred, not proven, and the next copy or search-path change could flip it. Decide:
+  delete the user-level forks, or replace each with a symlink to `skills/<name>`. Do NOT silently
+  leave two divergent trees.
+- **`ocode-web` (626 lines) and `ocode-usage` (768 lines) exceed the 500-line guideline** from
+  `skill-creator`. Neither was split: `ocode-web` has uncommitted concurrent WIP in the working
+  tree, and restructuring a file another session is editing risks clobbering it. Re-run the split
+  once the tree is quiet. (`make skill-audit` will keep flagging nothing here — it checks age, not
+  size.)
+- **`code-review` (20 days) and `frontend-design` (104 days) have never been reviewed.** Both are
+  generic meta/tooling skills, not `ocode-*`, so they fell outside the domain audit. `frontend-design`
+  is the stalest file in the repo by `make skill-audit`.
+- **The 45 `gws-*` skills (all 85 days old) have never been reviewed** and dominate the catalog
+  (59% of 75). They are Google Workspace CLI docs, unrelated to this repo's domain. They may be
+  legitimately reachable from here (the repo does AIMS billing work), so removal is the user's
+  call, not a cleanup to perform unattended. If they stay, a routing line in `AGENTS.md` would stop
+  them crowding the trigger surface.
+
+## docs/ bundle: 2 of 3 writes still missing (2026-09-30)
+
+**Done:** `gotchas/remote-session-list-tilde-404.md` — written by the `context` sub-agent's `doc_write`,
+and correctly indexed/logged by the auto-generated `docs/index.md` and `docs/log.md`. Content verified
+accurate: the 76 ms 404 vs the 200 that names the same project differently, the three stacking facts, why
+it hits the listing specifically, and that the fix is host-side.
+
+**Tooling note worth keeping:** the agent reported `invalid tool call arguments for doc_write` on **all
+three** attempts (an identical 1095-byte failure each time) — **yet the first write actually landed.** So
+that error is not a reliable signal that nothing was written. Always `git status docs/` before concluding a
+write failed; I wrongly reported the bundle as untouched on the strength of the error alone.
+
+**Still missing** — the gotcha cross-references both, so the bundle has dangling forward-references until
+they land:
+
+- **`concepts/web-tab-loading-indicators.md`** — amend. Its contract already says a spinner must resolve on
+  success, empty, *or* error; the session list violated it. Add the generalisable rule: a deduped/shared
+  fetch must not decide whether to clear a loading flag, because the joining caller and the initiating
+  caller are different callers — ownership belongs to whoever RAISED it. Plus the `SET_ACTIVE_PROJECT`
+  reset for the superseded-selection case.
+- **`gotchas/project-endpoint-isolation.md`** — one short note. This symptom was NOT the "everything
+  hangs" class it documents: the request completed in 76 ms with a 404, never touching
+  `remoteConnectTimeout`. So a future reader does not go hunting for a hang.
+
+## Residual: a non-tilde remote path with a trailing slash still 404s the session listing (2026-09-30)
+
+Found while fixing the tilde 404 (see the CHANGES.md entry). `projects.AddRemote` stores the remote path
+**verbatim** — no `filepath.Clean` — while the host's own `projects.Add` does `Clean`. So a project
+registered as `/home/x/www/app/` (trailing slash) is held verbatim on the desktop but stored cleaned on
+the host, and `HandleListProjectSessions` still cannot match it. A **tilde** path with a trailing slash is
+already fine, because `projects.ExpandHome` uses `filepath.Join`, which cleans.
+
+Left unfixed: `Clean`-ing the query before comparing would fix it, but it interacts with the deliberate
+"remote paths are stored verbatim" contract, and the reported bug did not involve it. Worth a decision
+rather than a drive-by change — either normalise on `AddRemote` too, or add a `filepath.Clean` candidate
+to the resolution in `HandleListProjectSessions`. Note the same asymmetry applies to any other
+exact-match-on-verbatim-path gate.
+
+## Two open decisions from the outbound-network guardrail (2026-09-30)
+
+Deferred from the TypeSafe egress guardrail (`internal/agent/network_guard_typesafe.go`,
+`docs/concepts/webfetch-websearch-guardrails.md`), deliberately, so that change stayed reviewable.
+Neither is a bug; both are calls the user has not made yet.
+
+- **In YOLO mode the guardrail is the only egress guard, and it fails open.**
+  `PermissionManager.Decide` returns a bare `PermissionAllow` for bash at
+  `internal/agent/permissions.go:1639` and for every tool at `:1793` — both BEFORE
+  `isExfiltrationRiskBash` (`:1695`, `:1723`) and before the webfetch domain check (`:1905`). So in
+  YOLO neither the exfiltration detector nor the domain policy ever runs. Separately, a persisted
+  `curl` bash-prefix allow only trips `isExfiltrationRiskCurl` (`:920`) on its risky flag forms, so a
+  plain `curl 'https://host/?k=…'` rides through unexamined even outside YOLO. The guardrail's
+  user-chosen fail-open behaviour means a TypeSafe outage there falls back to YOLO semantics — which
+  is coherent with the mode, but is not what most people mean by "YOLO". **Decision needed:** leave
+  fail-open (status quo, YOLO users keep YOLO semantics minus this layer), or fail closed in YOLO
+  only (safer, but prompts users who asked never to be prompted). Do not resolve this by editing the
+  fail-open table without the user's answer — the table is the shipped contract.
+- **`handleToolCallWithImages` takes no context, so no tool is cancellable on an ordinary turn.**
+  It hardcodes `context.Background()` at `internal/agent/agent.go:3181`, and the main dispatch sites
+  (`:1756`, `:1852`, `:1910`) all route through it. The guardrail honours a caller ctx and is
+  cancellable on the orphan-recovery path (`:6209`), but an abort on a normal turn does not reach an
+  in-flight call — it runs to its own timeout instead. This is **pre-existing and agent-wide**, not
+  introduced by the guardrail: every tool behaves the same way. Fix: give
+  `handleToolCallWithImages` a ctx parameter and derive it from the turn, then thread it into
+  `executeToolCallWithContext`. That changes cancellation semantics for ALL tools, so it needs its
+  own PR and its own tests — it must not ride along on a guardrail change.
+
+## Reminders and the task list are web/desktop-only (2026-09-30)
+
+Deferred from the Cron tab reminders/tasks work, deliberately, to keep that change contained. The
+engine (`internal/reminders`), its store, its REST surface and the web UI are all done.
+
+- **The TUI has no way to see or change a reminder or task.** `/cron list|add|remove|describe`
+  (`internal/tui/command_cron.go`) still knows only `scheduler.Job`. A user living in the TUI cannot
+  add a reminder, and cannot tick off a task the web UI created. Fix: add `/reminder` and `/task`
+  subcommands, or extend `cronDescribe` to render an `Item` when the id resolves in the reminders
+  store. The service is already reachable from the TUI process — it reads the same
+  `<GlobalDataDir>/scheduler/<slug>/reminders.json` and `syncFromDisk` already reconciles a second
+  process's writes.
+- **The LLM-facing `cron` tool cannot create one either.** `internal/tool/cron.go` exposes only
+  `scheduler.Service`. An agent asked to "remind me tomorrow at 9" has to fall back on `at`-kind cron
+  jobs, which DELETES themselves on firing (`executeJob` → `removeJobLocked`) — so the user loses the
+  record of whether it ever ran. Fix: add the reminders service to the tool's resolution (it is
+  already built to take an `any`, like the cron one) and expose add/status/remove.
+- **A firing is an in-app event, not an OS notification.** `busNotifier`
+  (`internal/server/reminders_host.go`) publishes `reminder_fired` on the event bus, which the web
+  app can turn into a toast. There is no Wails notification bridge wired, so with the app closed a
+  reminder still fires and still lands in the outbox, but the user gets no desktop banner. Note the
+  deliberate non-goal: the drainer only fans out to Telegram/RC when a chat is registered for the
+  project, so with neither configured a firing is visible only in the web UI's outbox panel.
+- **`maxItems` is 500 per project, and there is no pruning.** Unlike a cron job — which is capped at
+  50 and auto-expires — a completed task stays forever. That is deliberate (the list IS the record),
+  but a project that accumulates hundreds of finished tasks will eventually hit the cap and start
+  rejecting new ones with "reminder/task limit (500) reached". Fix if it bites: archive completed
+  items older than N days, or make the limit per-status.
+
+## A below-floor `allow` that names no concern reports nothing (2026-09-29)
+
+- **The hesitant-but-unexplained deferral is unreported, not just un-granted.** In
+  `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:280`) the concern suffix is
+  appended only when `concernKey != "" && concernKey != "none"`. Observed live: Jev leaned ALLOW at
+  0.72 against the 0.85 floor and answered the concern question `none`, so the human saw only
+  "TypeSafe judge leaned allow but confidence 0.72 is below the 0.85 floor" — no category, no
+  indication of what the judge was unsure about. Two costs in one answer: the prompt explains
+  nothing, and because the concern is not `truncated_or_unknown` the opaque 0.75 relief
+  (`resolveAutoJudgeOpaqueMinConfidence`, `permissions.go:6422`) never engages. The rubric already
+  instructs against this ("Reserve \"none\" for a call that gives you no pause", line 202) and the
+  model ignored it, so prompting harder is not the fix. Fix belongs in the FALLBACK reason: when an
+  `allow` lands below the floor, treat the absence of a usable concern as its own signal and say so
+  (e.g. "the judge did not name a concern"), so the deferral is at least legible, and consider
+  deriving the floor-eligibility from the same place rather than trusting an advisory answer. Pin
+  with a test asserting the reason is non-empty for a below-floor allow carrying concern `none` —
+  the rubric test suite cannot catch this, it lives in the verdict branch.
+- Related, still unconfirmed: whether the `env` pipeline or the repo-wide `grep -ri` caused the
+  hesitation. Untested — grep `auto_typesafe_verdict` (which logs `confidence`/`p_allow`/`concern`)
+  from `GET /api/logs` immediately after a repro; the 500-entry in-memory ring is unforgiving.
+
+## Compound / substituted bash commands bypass EVERY deterministic scope check (2026-09-30)
+
+- **A real below-floor TypeSafe `allow` traced to a structural gap, not judge
+  miscalibration.** A read-only one-liner (`ls|wc` + `grep -l`, two `$(...)` assignments,
+  a `for` loop) scored `allow@0.21` against the 0.85 floor. Live probes against the real
+  rubric (3 repeats/case, `jev-latest`) ruled the command *shape* out: the identical
+  compound command scores **allow@1.00** when `cwd` sits inside `allowed_roots`, and
+  0.92–1.00 across real-newline, populated-`project_context`, and populated-prefix-list
+  variants. n=3, one alias — not statistically bounded.
+- **The out-of-roots variant returned `deny@0.42`** (concern `outside_allowed_roots`,
+  `p_allow` 0.29) — a different verdict, so **the original 0.21 was never reproduced.**
+  The `cd`-crossing-roots theory remains a guess; the original session's roots are
+  unrecoverable (judge debug goes to the TUI/stderr, never to a file — no persisted log
+  contains `auto_typesafe_verdict`).
+- **The real defect: for any command containing `&&`, `||`, `;`, `|`, `` ` ``, `$(`, `>` or
+  `<`, NO deterministic scope check runs anywhere.** `shellCompound`
+  (`permissions.go:4849`) makes `canAutoAllowInRoot` return false (`:4929`) and
+  `firstOutOfScopePath` return `""` (`:4989`). So `req.OutOfScopePath` is never populated
+  and `verifyAutoGrant`'s scope guard (`agent.go:4051`) is **structurally unreachable**.
+  The command takes a generic bash Ask and the LLM's scope reading is the *only* scope
+  signal before a human. The bail is deliberate (a substitution's path is runtime-only, so
+  a static path would falsely reject), but the consequence is that compound commands are
+  entirely dependent on the judge for path scope.
+- **Compounding it: the floor check returns before `verifyAutoGrant` runs**
+  (`permission_typesafe.go:288` returns, `:291` verifies). A below-floor `allow` is
+  therefore **unverified** — for compound commands *no* deterministic guard has run at
+  all, yet the banner presents the objection as model confidence alone.
+- Fix, in order: (1) resolve `cd` targets and substitution outputs to a concrete path set
+  and populate `OutOfScopePath` from *that*, so the deterministic guard actually fires for
+  compound commands — this fills a real gap rather than removing redundant work; (2) reorder
+  so `verifyAutoGrant` runs before the floor return, so a below-floor allow still reports
+  which deterministic guards passed; (3) persist judge request/response (state, rubric,
+  verdict, confidence, concern) so the next below-floor allow is diagnosable at all —
+  today the evidence does not survive the process.
+- **Do NOT reach for `permissions.auto.min_confidence`.** It would not have auto-granted
+  this call (correctly) and weakens gates that matter.
+- `confidence` vs `probabilities[choice]`: gap was exactly 0.00 in every confident case and
+  only opened under uncertainty (0.42 vs `p(deny)` 0.71). So the "systematically below"
+  claim at `autocontinue_typesafe.go:25` holds only in the uncertain band, not as a
+  constant bias. Gating on `probabilities` would be **more permissive for allows** (for the
+  out-of-roots case `p_allow` was 0.29, lower than confidence, so denies get stricter) —
+  a risk to be measured on a labeled corpus, not a free win.
+- Negative controls stayed correct: literal secret in a curl URL → `deny@1.00`
+  (`secrets`); `rm -rf` → `deny@1.00` (`destructive`).
+- Related: the opaque-relief item above. It did not apply here — the concern came back
+  `none`, and 0.21 is below the 0.75 opaque floor anyway.
+
+### MEASURED (2026-09-30, later) — the real cause is `cd`, not the root count
+
+Rebuilt the true effective state (workDir + 17 global `extra_allowed_paths` + 24 from
+`.ocode/settings.json` = **37 roots**, plus **148** `allowed_command_prefixes`) and replayed the
+exact command against the live API, 5 repeats/case, varying one thing at a time:
+
+| state | choice | confidence | p_allow | concern |
+|---|---|---|---|---|
+| 37 roots + 148 prefixes | deny | 0.14 [0.12-0.20] | 0.43 | `outside_allowed_roots` |
+| 37 roots, no prefixes | deny | 0.28 [0.16-0.35] | 0.36 | `outside_allowed_roots` |
+| collapsed to 2 roots | allow | 0.33-0.37 | 0.67 | none |
+| single root `/Users/james/www` | allow | 0.54 [0.53-0.59] | 0.77 | none |
+| single root, **same command minus the `cd`** | allow | **1.00** [1.00-1.00] | 1.00 | none |
+| workDir = `/Users/james/www/kakiit` (so `cd` is a no-op) | allow | 0.90 [0.83-0.92] | 0.95 | none |
+
+**The `cd` is the dominant factor, not the root count.** Deleting only
+`cd /Users/james/www/kakiit && ` — same roots, same command otherwise — moves 0.54 → **1.00**.
+And when the `cd` target is already the working directory (a no-op) it is 0.90.
+
+**Jev does not resolve a `cd` target against `allowed_roots`.** It cannot do the path-containment
+reasoning, so it either guesses `outside_allowed_roots` (wrongly — `/Users/james/www` is in the
+roots and contains `kakiit`) or simply loses confidence. **5/5 runs below the 0.85 floor in every
+variant that contains a `cd`**, making every `cd`-bearing command a systematic false-ask.
+
+This supersedes the earlier "cd left allowed_roots" guess: scope was never the issue, because
+`.ocode/settings.json` already grants `/Users/james/www`. The original 0.21 falls inside the
+0.14-0.35 band this reproduces, with the same `outside_allowed_roots` concern.
+
+**Consequence for the fix:** the judge must not be asked to evaluate scope for `cd` commands at
+all. Resolve the `cd` target in Go (sequentially, per segment) and hand the judge the resolved
+answer — plan Change 2, now evidence-backed rather than speculative. Collapsing the root list and
+dropping the 148-entry prefix list are worthwhile secondary wins (0.14 → 0.37), but neither
+recovers 0.85 on its own.
+
+
+## Git follow-up status probe errors a mutation that succeeded (2026-09-29)
+
+- **A completed git mutation can report HTTP 500/502.** The action handlers
+  (`internal/server/handler_git_actions.go`, `handler_git_conflicts.go`,
+  `handler_remote_git_conflicts.go`) end by probing git status
+  (`writeLocalGitStatus`/`writeRemoteGitStatus`). If the commit/reset/pull
+  already succeeded but the follow-up status probe times out — or git errors —
+  the response is an error (`writeLocalGitError` → 500) for a change that went
+  through, and the user may retry. Deferred from the agent/TTS/server review-fix
+  batch (files under concurrent edit). Fix: reply with the mutation success and
+  surface the probe failure separately (e.g. 200 with a stale-status warning the
+  frontend can show), and pin it with a test that fails the probe after a
+  successful mutation.
+
+## Permission prompt hides the env assignment that triggered the ask (2026-09-29)
+
+- **A `bash.env.*` ask renders a command with the assignment stripped.** `envVarPermissionRequest`
+  (`internal/agent/permissions.go:6360`) sets `Command: rebuildCommandLine(cmd.cmdWords)`, and
+  `cmdWords` excludes the leading `NAME=value` tokens (they are folded into `cmd.envVars`,
+  `permissions.go:6024‑6043`). So an ask whose rule is `bash.env.out_of_scope` is shown as the bare
+  remaining command, with no hint of which variable/path pushed it out of scope. Observed live:
+  `SQLACC_IT_DB=/var/lib/firebird/data/ods12.fdb … SQLACC_IT_PASSWORD=masterkey go test … ./internal/runner/`
+  surfaced as `go test -p 1 -count=1 -v -run Integration ./internal/runner/`, which reads as an
+  inexplicable denial (the raw args are still in the "Tool execution parameters" block). Fix: include
+  the env assignments in the env/redirection rule's `Command` (or carry them in a dedicated field),
+  and pin it with a permissions test.
+
 ## Review-fix follow-ups: three deferred items (2026-09-29)
 
 From the broad review of the `dd431b4a` batch. These three were deferred because
@@ -2795,3 +3054,392 @@ scope:
 - [ ] **Prove the control.** Any future browser assertion for the above should also run against a pre-fix
   build (`git show HEAD:web/src/components/Chat/ChatPanel.tsx`, built separately, no stash) and FAIL there.
   An assertion that passes on both builds is not measuring the fix.
+
+## Pulse dashboard review (2026-09-29) — deferred items
+
+Fixed in this pass: the Pulse card jump landing on the wrong view (App.tsx +
+`resolveViewOnProjectSwitch` in viewPersistence.ts), `session_rekeyed` never
+reaching `pulseEventSink`, `MarkdownLink` letting relative links navigate the
+app away, the remote-host `/api/pulse` refetch storm, `setScope` swallowing a
+rapid toggle back, the `usePulseTail` seed/live ordering race, the
+Pulse-hover revision-baseline overwrite, and the SpeechProvider post-Stop stall.
+
+- [ ] **App-level test for the Pulse jump landing view.** The precedence is unit
+  tested (`viewPersistence.switch.test.ts`) and the provider contract is pinned
+  (`jumpToSession.test.tsx` asserts the TARGET path is threaded), but the ref
+  LIFECYCLE in App is not covered end to end: that `pendingJumpViewRef` is armed
+  on exit, honoured on the next commit, and cleared on a path mismatch so a
+  same-project jump's leftover arm cannot dictate a later switch. Needs a real
+  App render with the real project store (pattern: `App.tabFocusRemote.test.tsx`),
+  with `PulseView` stubbed to a button that calls `useJumpToSession`, a target
+  project whose stored view is `files`, and assertions on both the resulting
+  view AND the target project's persisted view.
+- [ ] **Idle Pulse cards' "Xm ago" label goes stale.** `PulseCard` only ticks its
+  clock while `row.status === "running"`; the comment's claim that a settled row
+  "refreshes on the next render (any bus event touches the dashboard)" is an
+  unverified assumption — on a fully idle dashboard no event arrives, so the
+  label freezes. The 50-intervals-per-dashboard concern is real but the fix is a
+  single shared coarse clock in PulseView, not per-card intervals. Cosmetic.
+- [ ] **A relative markdown link is now a no-op — decide whether that is final.**
+  Stopping it was necessary (it navigated the app away), but the chosen outcome
+  is that `[foo.go](internal/x/foo.go)` in assistant prose now does *nothing* on
+  click: no navigation, no file open, no toast. That is safe and predictable,
+  but silent. The useful behaviour is probably to resolve the path against the
+  session's project root and open it in the existing file viewer / editor tab,
+  with a visible fallback when the path does not exist. Deliberately NOT done
+  here: it needs a decision about which viewer surface wins, and a wrong guess
+  turns a harmless no-op into a wrong-file bug. Until then, silent is the right
+  default — a link must never navigate the shell.
+- [ ] **Pulse `getPulse` is host-blind by design (NOT a regression from this
+  pass).** Remote sessions were never listed and still are not: `/api/pulse`
+  reads the in-process registry plus local project dirs, `gatherDiskPulseInputs`
+  skips `p.Host != ""`, and `PulseRow` has no `host` field. What this pass
+  removed is the *pointless polling* — a remote turn used to re-arm the
+  unknown-session refetch continuously even though the response could never
+  contain it. Nothing became less visible; it just stopped costing ~3 requests a
+  second. Real remote fan-out is still a separate feature: it needs `host` on
+  `PulseRow` and a per-host fetch in the client.
+## Remote target hardening (2026-09-29)
+
+Fixed in this pass: ssh option injection via a leading-`-` host
+(`ParseTarget` + `Target.Validate` + the `--` terminator in `SSHArgs`), the
+port-blind exec-slot pool key, the 6-of-8 foreground reserve, and
+`gitStatusForDir` classifying a probe fault as "not a repository". See the
+2026-09-29 CHANGES.md entry.
+
+Also fixed in the follow-up pass: **the remote host registry keyed connections
+on the bare host string, so the first port to connect served every later
+request for that host.** `workspaceForPort` applied the port only on entry
+creation; the fast path then returned that entry regardless of the port, so a
+project on port 2222 was proxied to the port-22 server with the wrong token and
+never had its path registered remotely. The registry is now keyed by
+`remoteConnectionKey` (user + host + port), mirrors `remoteSlotKey` for the exec
+pool (both delegate to one helper so they cannot drift), and `drop`, `status`,
+`snapshotForRestart`, `proxyFor`, `isRegistered` and `markRegistered` all take
+the port. `sshControlSocket` in `internal/remote` was the same defect in the
+`ControlPath` hash — also fixed. Regression coverage:
+`internal/server/remote_hosts_test.go` (`TestWorkspaceForPort_TwoPortsOnOneHostAreDistinct`,
+`TestRegistryDrop_IsScopedToOnePort`, `TestRegisteredPaths_AreScopedByPort`) and
+`internal/remote/execcmd_test.go`
+(`TestSSHControlSocketSeparatesPortsAndUsers`,
+`TestSSHControlSocketIdentityMatchesServerKey`), all mutation-verified.
+
+## Open gaps — alt+up/down user-message jump (`Alt+↑`/`Alt+↓`)
+
+Shipped 2026-09-29 for TUI + web/desktop: `internal/tui/user_jump.go`,
+`internal/server/handler_session_user_messages.go`,
+`web/src/lib/userMessageNav.ts`, wired in `ChatPanel.tsx`. Three follow-ups
+(re-added after an unrelated TODO.md rewrite dropped them):
+
+- [ ] **The user-message jump can still race the find bar's prefix fetch in one
+  direction.** Both features backfill an off-window target by fetching a
+  contiguous older prefix and dispatching `PREPEND_MESSAGES`, and
+  `PREPEND_MESSAGES` subtracts its own length from `windowStartServerIndex`. Two
+  overlapping prepends double-count the overlap and leave the window anchor too
+  low until the next transcript refetch. `ChatPanel.tsx` guards the jump against
+  the find bar's in-flight fetch (`pendingJumpRef` check in the jump's prefix
+  effect); once the find bar's fetch lands, the jump effect re-runs because
+  `PREPEND_MESSAGES` changes `windowStartServerIndex`, which IS in that effect's
+  dependency array. (`entryPosByServerIndex` is deliberately NOT a dependency —
+  keying on its Map identity would re-run the effect on every transcript
+  change.) **The reverse is still unfixed**: clicking a find-bar match while a
+  jump fetch is in flight can start a second one, because the find bar's guard
+  only consults its own ref. Needs one shared "prefix fetch in flight" latch
+  consulted by both paths. Regression test: click a match mid-jump, assert
+  `windowStartServerIndex` afterwards.
+
+- [ ] **TUI: the jump lands at line 0 if `transcriptMsgStartLine` was never
+  built.** `flashAndScrollToMessage` (`internal/tui/chat_search.go`) reads
+  `transcriptMsgStartLine[msgIdx]` BEFORE calling
+  `rerenderTranscriptAndMaybeScroll()`, falling back to target 0 when the entry
+  is not `> 0`. With a never-rendered (all-zero) table a jump scrolls to the top
+  instead of the target message. Not reachable in production (frames have already
+  populated the table) but reachable in a fresh session and in unit tests — the
+  TUI jump test pre-renders deliberately to assert a real offset. Fix: read the
+  target AFTER the re-render (the ordering that already applies to the
+  `SetYOffset` call). The chat-search jump shares the code path, so one fix covers
+  both; needs a regression test (jump with an unbuilt table, assert the offset is
+  the target line, not 0).
+
+- [ ] **The desktop app has NOT been rebuilt, so the feature is inert there.**
+  `web/dist` is embedded into the desktop binary; this requires
+  `make desktop-app`. **Blocked as of 2026-09-29:** `desktop-app` depends on
+  `web-build`, which runs `tsgo && vite build`, and `tsgo` currently fails on
+  `src/components/Chat/commands.tuiParity.test.tsx:171` (`TS2698`, from the
+  advisor host/session-threading work in another session) — so `make desktop-app`
+  exits 2 before reaching the Wails build. Unblock by fixing that type error, then
+  rebuild and confirm the new `bin/ocode-desktop` is newer than `web/dist` and
+  contains the `user-messages` route string.
+
+## Remote target hardening — hand-offs (2026-09-29)
+
+Both found while fixing the port-blind registry key (see the 2026-09-29 CHANGES
+entries). Neither is a regression from that work.
+
+- [x] ~~**`docs/log.md` had no entries for the two gotchas added 2026-09-29.**~~
+  LANDED. The context agent failed to do it twice (one network error, one that
+  spent 11+ minutes exploring `internal/knowledge/doc.go` without writing), so
+  the two `Creation` lines were appended by hand, matching the file's existing
+  format exactly and placed with the other 2026-09-29 entries. Justification for
+  hand-editing despite `log.md` being a reserved file: other sessions in this
+  repo append to it the same way (the concurrent session's own
+  `concepts/user-message-jump.md` and `gotchas/cowork-sidebar-lsp-status-overflow.md`
+  are both present as hand-style entries), and the index side is already
+  automatic. If the bundle generator ever rewrites this file, re-check that both
+  entries survive.
+- [ ] **`projectHostFor` resolves a session's remote host by PATH alone
+  (`internal/server/agent_session.go:416`), so with two remote projects sharing
+  one path on different hosts, a session can be attributed to whichever entry
+  `projects.List()` returns first.** Port is then resolved from that entry, so
+  this is a host-selection ambiguity, not the port bug fixed here — and the
+  store does not prevent `(hostA, /p)` and `(hostB, /p)` from coexisting.
+  Pre-existing; needs a decision about which identity a session carries (it
+  currently persists only the project path). NOTE the related store limitation
+  is by design and should stay: `DuplicateAsRemote` refuses a second
+  `(host, path)` regardless of port, so the same path on one host at two ports
+  cannot be saved — which is also what keeps `remoteProjectEntry(host, path)`
+  unambiguous.
+- [ ] **The knowledge bundle has no page for the per-session advisor contract** (2026-09-29).
+  The change is recorded in `CHANGES.md`, `skills/ocode-web/SKILL.md` and
+  `skills/ocode-agent-architecture/SKILL.md`, but `docs/` has no concepts page
+  describing the pin-on-first-use policy or the three metadata keys. `docs/log.md`
+  and `docs/index.md` are auto-generated by `doc_write`, so they must not be
+  hand-edited — this needs a context-agent `doc_write` (pass `concepts/<name>.md`,
+  not `docs/concepts/<name>.md`; it prepends `docs/` itself).
+
+- [ ] **The TUI's `/advisor` sets the process default, not the bridged chat's own
+  value** (2026-09-29). The web can now write a per-session advisor model for the
+  bridged RC session (via `applySessionAdvisorConfig` → the bridge's agent), and
+  the TUI applies its own config to that same agent via `applyAdvisorConfigToAgent`
+  — so the two surfaces fight over one value, last writer wins, and the TUI has no
+  session-scoped store to persist its pick into (the server deliberately skips the
+  metadata write for a bridged session because the TUI owns that storage). Needs a
+  decision: either the TUI persists its pick as the session's pin, or the server
+  takes ownership of the bridged session's advisor metadata.
+
+## Pre-existing race-detector failures in `internal/server` (found 2026-09-29, NOT caused by the remote-target work)
+
+**STATUS: BOTH fixed 2026-09-30; the race gate now reports ZERO data races.**
+Not "green" — one test still fails for an unrelated reason (below). Verified after the
+fixes: `go test -race ./internal/agent` 0 races / all pass (161s);
+`go test -race ./internal/server` 0 races (was 2); `internal/tui` and
+`internal/remote` -race clean. The one remaining `internal/server` failure,
+`TestUnknownStatusIsRejected`, is NOT this and NOT a race: it lives in the
+concurrent session's untracked `reminders*.go` / `reminders_test.go`, which fail
+3/3 with and without `-race` because that feature is mid-development. Re-verify
+both suites after that work lands.
+
+`go test -race ./internal/server` was RED. Proven pre-existing: a pristine
+`HEAD` worktree (`git worktree add .worktrees/racebase HEAD`) fails the same
+gate with **13 `WARNING: DATA RACE` reports**, a superset of the 2 seen on the
+working tree. Because the count varies run to run, these are latent races
+exposed by test ordering/timing, not something introduced by any recent change.
+`internal/remote` is race-clean, and the remote registry/slot tests added on
+2026-09-29 pass under `-race`.
+
+Two independent latent races, both in code untouched by the remote work:
+
+- [x] ~~**`AgentRegistry` reload vs read.**~~ FIXED 2026-09-30. `AgentRegistry`
+  had NO lock at all: `reloadMarkdownAgents` nils and repopulates `defs`/
+  `diagnostic` while readers walk them. Added `mu sync.RWMutex`; the WRITE lock
+  spans a whole rebuild (so no reader can see a half-built list) and every reader
+  takes the read lock. `Get` now returns a pointer to a COPY — defence in depth,
+  because `addLoaded` mutates `r.defs[i]` in place, so the first future
+  post-publication update API would otherwise mutate values callers already hold;
+  `TestAgentRegistryGetIsStableAcrossUpdate` pins that contract. `Diagnostics()`
+  keeps its read lock but NOT a copy: nothing mutates that slice in place after
+  publication, so a copy could be justified by neither a bug nor a test (an
+  attempted copy was reverted after the mutation check showed no test could catch
+  it). New `internal/agent/agent_registry_race_test.go`, mutation-verified three
+  ways: removing the write lock, removing a read lock, and reverting the `Get`
+  copy each fail it; all three mutants compile, so none is a false kill. Before
+  the fix the new test reports 5 `DATA RACE`s; after, `-count=20` is clean.
+
+- [x] ~~**`gitStatusFn` test global vs the emitter goroutine.**~~ FIXED 2026-09-30.
+  `gitStatusFn` is now guarded: `setGitStatusFn` (write) / `currentGitStatusFn`
+  (read) over an `sync.RWMutex` in `internal/server/emitters.go`, and the three
+  tests in `emitters_isolation_test.go` use the accessors.
+  The non-obvious part, which is the whole fix: `forEachGitStatusConcurrently`
+  reads the seam under the read lock and then **invokes it after releasing it**.
+  Holding the lock across the call would deadlock — a substituted stub blocks
+  until its test releases it, and the restoring test needs the write lock to
+  put the original back. Verified by mutation: deleting only the `RLock` (the
+  code still compiles) brings `WARNING: DATA RACE` straight back in
+  `TestGitWatcherSlowProjectDoesNotDelayAnother`, so the read-side lock is
+  load-bearing rather than incidentally green.
+  No behaviour change — the same function is called, with the same concurrency
+  — so no CHANGES.md entry. The three test assertions are untouched: the diff
+  is only the accessor swap plus the three `}` -> `})` closures it requires.
+
+## /learn skill-inventory follow-ups (2026-09-30)
+
+A `/learn` pass over `skills/` produced a plan (create `ocode-remote-ssh`,
+rescope a server HTTP/SSE skill, fold the `AgentRegistry` lock contract into
+`ocode-agent-architecture`, add the worktree embed copies to AGENTS.md). Nothing
+was written to `skills/`. Partial work left open, deliberately:
+
+- [ ] **7 of the 9 `docs/gotchas/remote-*.md` pages are unread.** The proposed
+  `ocode-remote-ssh` skill was justified from first-hand source work on
+  `internal/remote` + `internal/server/remote_*.go`, NOT from those pages. They
+  are step 0 of the skill draft, not optional. Pages:
+  `remote-git-shell-quoting`, `remote-session-config-host-routing`,
+  `remote-session-list-tilde-404`, `remote-ssh-chat-profile-not-applied`,
+  `remote-terminal-502-provisioning`, `remote-terminal-custom-port-omitted`,
+  `tui-clipboard-remote-ssh-osc52`.
+- [ ] **6 of the 8 `ocode-*` skills are unaudited** (only `ocode-permissions`
+  was read, for house style). They may contain drifted anchors or claims; the
+  audit is what decides whether the proposed new skills duplicate them.
+- [ ] **`AGENTS.md` gaps found but not filled.** (a) §Git Worktrees does not
+  mention that a fresh worktree needs `cp internal/agent/models-snapshot.json`
+  and `cp internal/browse/cdp/htr-assets.zip` (gitignored embeds) or the build
+  fails; (b) the `AgentRegistry` concurrency contract is documented nowhere
+  (`AgentRegistry` 0 hits in AGENTS.md) even though it shipped with no lock and
+  produced 13 race reports at HEAD; (c) the `turn_heartbeat` contract and
+  `ViewedProjects` push-gating are likewise 0-hit in AGENTS.md. Decide per item:
+  AGENTS.md or skill, then write it once.
+- [ ] **Unresolved question for the repo owner: 45 `gws-*` skills (~59% of the
+  76 project-local skill dirs) are Google Workspace skills in a Go agent
+  repo.** If they are intentional (shipped to ocode users) they should arguably
+  not live in the project-local catalog that every session loads; if accidental
+  they dilute discovery. Not actioned — needs an owner decision.
+- [ ] **Hypotheses to check, not yet checked:** `nextjs-to-tanstack` may be stale
+  (migration-into skill in a repo that already consumes TanStack, and
+  `tanstack-react-19-compat` may cover the live need); `code-review` and
+  `review-changes` may be consolidatable; `use-modern-go` may not match the Go
+  version in `go.mod`. None were inspected.
+
+## MeloTTS local TTS engine — known limitations (2026-09-30)
+
+The `melo` engine is registered, pinned, installable and verified end to end on
+`darwin/arm64`. These are the boundaries it was deliberately shipped with:
+
+- [ ] **Non-English MeloTTS voices are not supported offline.** `melo/text/cleaner.py`
+  imports every language backend, and six call `AutoTokenizer.from_pretrained` at
+  *module scope*. Only `bert-base-uncased` is staged; every other id is served by a
+  stub that raises `RuntimeError("MeloTTS tokenizer %r is not bundled; this engine is
+  English-only")` on first use. Supporting a language means adding its tokenizer
+  artifacts to `meloManifest` with verified SHA-256s and widening `meloSynthScript`'s
+  `_resolve` to map that id to a staged directory. Note `english.py` genuinely calls
+  `distribute_phone()` from `japanese.py`, so the *module* must stay importable even
+  when its tokenizer is stubbed — do not stub `melo.text.japanese` wholesale.
+- [ ] **Host matrix is `darwin/arm64` only.** Verified end to end (real download,
+  SHA-256 + size verify, venv build, offline synthesis). Other hosts report
+  `unavailable` with a reason instead of being offered and failing mid-install, per the
+  phase-0 rule that a host is advertised as installable only once its runtime is
+  verified. Before adding `linux/*` or `windows/amd64`: the default torch wheels there
+  pull multi-gigabyte CUDA runtime packages, so each host needs either a CPU-only index
+  (`PythonRuntime` currently has no way to express one — see the next item) or a vetted
+  pin set, plus a real `MELO_TTS_E2E=1` run on that platform.
+- [ ] **`PythonRuntime` cannot express a custom pip index.** `piperInstaller` builds
+  `pip install <requirements...>` with no `--index-url`/`--extra-index-url`. MeloTTS
+  needs a CPU-only torch index on Linux/Windows. Adding the field is the clean fix;
+  the alternative (pinning the CUDA-suffixed torch packages by hand) is far more
+  fragile.
+- [ ] **Install footprint is large**: ~650 MB of checksummed artifacts (of which
+  ~440 MB is `bert-base-uncased` weights) plus a torch venv. Consider whether the
+  settings copy should say so before a user commits to it, since Piper and Kokoro are
+  roughly an order of magnitude smaller.
+- [ ] **MeloTTS' repository is dormant** (last commit 2024-12-24). The manifest pins a
+  commit, so an upstream fix cannot arrive on its own; revisiting this engine means
+  re-verifying the dependency set, and `nltk==3.8.1` in particular is a pin that
+  exists only to keep `g2p_en` working (see the comment in `meloRequirements`).
+
+## Session stuck "interrupted" — shipped fix, trigger still unproven (2026-09-30)
+
+- [ ] **The trigger that produced the original wedge is still unidentified, so a
+  recurrence will be self-healing but not explained.** Shipped: `pendingStripLen` matches
+  pending content against the transcript tail (was: strip by `PendingCount`), and a
+  turn-end `ErrTranscriptConflict` now schedules the agent for release so the next turn
+  re-bootstraps from disk. Observed on `ses_2026-09-29-144236-b0b55a6a` (project
+  `fa5eaa6e229b` = `/Users/james/www/proposal`): resident agent 28–70 msgs vs 540 stored
+  rows, 280+ dropped snapshots, `history_gen=0`, and **no** `shrink … stored rows` line
+  for that session. Two earlier instances the same day (15:38, 55 vs 282; 19:35, 50 vs
+  440) match **no** logged compaction, so a single cause does not explain all three.
+  Settled: it is NOT a context-length limit (1M window vs ~303k tokens), NOT a parked
+  ask (no `PERMISSION_ASK`/`QUESTION_PROMPT` sentinel anywhere), and NOT a second writer
+  — `lsof` proved the only other live server (PID 12356, `go run … serve --port 4096`)
+  holds handles solely under `dcd5a911f8bd` = `/Users/james/www/ocode`, never this
+  session's store. The `diverged from a concurrent writer` log line is just the
+  `IsConflictErr` label for "disk and memory disagree"; it does not imply a second
+  process.
+- [ ] **Instrument the pending-queue length.** `PendingCount` is in-memory only and the
+  `/state` payload does not expose it, so the hypothesis "the queue inflated and the
+  count-based strip truncated real history" could not be confirmed on the live process.
+  Surfacing `pending_count` on `GET /api/sessions/{id}/state` (diagnostic only) would make
+  the next occurrence a 10-second diagnosis instead of an hour of log archaeology.
+- [ ] **`persistTurnTranscript` still logs "diverged from a concurrent writer"** for what
+  is a same-process structural divergence. Now that the conflict self-heals, reword it to
+  say the transcript diverged and the agent is being released — the current wording sent
+  this investigation down a two-process dead end.
+- [ ] **No `docs/` page for this.** It is a server-side persistence invariant, not a
+  user-facing feature, and no existing bundle page covers turn-end conflict recovery.
+  Candidate home if one is wanted: a `gotchas/` page on "a resident agent shorter than
+  the stored transcript is unrecoverable in place".
+
+## Terminal tab list is now server-shared (2026-09-30)
+- [ ] **A stale shared tab id still respawns a killed shell.** `HandleTerminalWS`
+  → `terminalSessions.reserveForProject` hands the spawn right to any caller whose
+  `terminal_id` has no live session, so if client B still shows a tab that client A
+  closed (the `terminal_tabs_changed` refetch has not landed yet), B's panel
+  reattaches and starts a NEW shell under the same id. This is PRE-EXISTING
+  semantics — the removed same-browser `storage` sync had the identical property —
+  but the server-shared list makes the window cross-client and therefore wider.
+  Not changed here on purpose: a client that still has the tab open arguably wants
+  its shell back, and narrowing it means a tombstone with a TTL, which is a
+  behavioural decision, not a bug fix. Revisit if it shows up as shells reappearing
+  after a close.
+- [ ] **`internal/termtabs` duplicates `internal/tabs`.** The two stores are near
+  identical (~290 lines: file lock, mtime stamp reload, atomic rename). They were
+  kept separate because session tabs are the critical path and genericizing
+  `tabs.Store` into `Store[V]` with an injected key normalizer (terminal keys are
+  opaque `host::path` and must NOT be `filepath.Clean`d — `wsl:Ubuntu::/home/x`
+  and `C:\…` would be mangled) is a bigger blast radius than the duplication is
+  worth today. Unify when a third store appears, or when `tabs` needs a change
+  that must land in both.
+- [ ] **Opening a project's terminal region in a second client takes ALL of that
+  project's terminal slots, not just the focused one.** `TerminalTabs` mounts a
+  `TerminalPanel` for every terminal in the list (backgrounded ones are CSS-hidden,
+  not unmounted), and a panel holds its socket regardless of its own `active` prop
+  — the socket effect's deps are `[projectPath, host, id]`, deliberately, so a
+  backgrounded tab keeps its shell. With a shared list that means client B taking
+  the terminal region once evicts client A from every shell in it.
+  **Verified safe on page load**: activation is gated on the region being `active`,
+  so hydrating the list opens ZERO sockets — pinned by
+  `TerminalTabs.crossClient.test.tsx` (mutation-verified: removing the gate opens
+  2 sockets with no user action). So the residual needs a deliberate click, and the
+  displaced client gets the takeover banner + **Take over** button.
+  **Not changed here on purpose.** Gating the socket on the panel's own `active`
+  would fix it, but backgrounded tabs would then detach and be killed by the
+  **30-minute local** detach TTL (24 h remote) — a real regression for anyone who
+  keeps several terminals open in one project. The clean fix needs the server to
+  track an owner per session (it already records `attached` in the inventory) and the
+  client to attach only when it is the owner or the user asks, so a background tab
+  never displaces a live viewer. Needs a product decision, not a patch.
+- [ ] **The sidebar's remote-terminal count and the shared tab list are two
+  sources.** `RemoteProjectStatus` shows `terminals.length` from the HOST
+  inventory (`GET /api/terminal` on the host = live shells), while the tab strip
+  shows the shared LIST (`/api/terminal-tabs`). They agree in the normal case but
+  can differ: a shell that outlived its tab (closed in one client, detach TTL
+  still running on the host) counts in the first and not the second. Not a bug —
+  they answer different questions — but worth a comment in the UI if anyone
+  reports the mismatch as one.
+- [ ] **The TUI cannot restore the caret to a mid-draft position after a failed
+  compaction; web can.** After a failed pass, queued messages are merged into the
+  TUI composer ahead of the user's draft (`restoreQueuedMessagesToComposer` in
+  `internal/tui/model.go`) and the caret is placed at the end. The bubbles textarea
+  exposes no way to address an arbitrary caret — `Cursor()` returns a *screen*
+  position and only `CursorStart`/`CursorEnd`/`SetCursorColumn` are settable — so a
+  caret sitting mid-draft jumps to the end. The web does it exactly, by adding the
+  inserted `draftStart` offset to `selectionStart`/`selectionEnd` in a layout effect.
+  Not fixed here because it needs a bubbles API that does not exist; revisit if
+  upstream adds a settable rune offset, and keep the two surfaces' behaviour
+  documented as deliberately different until then.
+- [ ] **`act()` warnings in `ChatInput.compactionRestore.test.tsx` are pre-existing
+  harness noise, not from the compaction-restore effect.** 14 "not wrapped in act"
+  warnings fire from the component's mount path under this file's harness. Verified
+  by disabling the new effect entirely (early return before any `setState`): the
+  count stays at 14, so the new code contributes none. The sibling
+  `ChatInput.compaction.test.tsx` reports zero with a different harness, so the
+  cause is this file's setup, not the component. Left alone rather than
+  restructuring the composer's mount effects; worth a cleanup pass on the harness if
+  the noise starts masking a real warning.

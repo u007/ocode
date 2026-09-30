@@ -54,7 +54,7 @@ describe("routeBusEnvelope → pulse forward", () => {
       env("turn_started", { session_id: "ses_unopened", data: { model: "m" } }),
       router,
     );
-    expect(mockSink).toHaveBeenCalledWith("turn_started", "ses_unopened", { model: "m" });
+    expect(mockSink).toHaveBeenCalledWith("turn_started", "ses_unopened", { model: "m" }, "");
     // …and the chat store is still untouched for that session.
     expect(actions.filter((a) => JSON.stringify(a).includes("ses_unopened"))).toHaveLength(0);
   });
@@ -72,13 +72,14 @@ describe("routeBusEnvelope → pulse forward", () => {
       "todo_updated",
       "ses_unopened",
       expect.objectContaining({ current: "x" }),
+      "",
     );
   });
 
   it("still forwards for a tracked session, and the normal routing is unchanged", () => {
     const { router, actions } = makeRouter(["s1"]);
     routeBusEnvelope(env("turn_started", { data: { model: "m" } }), router);
-    expect(mockSink).toHaveBeenCalledWith("turn_started", "s1", { model: "m" });
+    expect(mockSink).toHaveBeenCalledWith("turn_started", "s1", { model: "m" }, "");
     expect(actions.some((a) => a.type === "SET_TURN_STATE" && a.turnActive)).toBe(true);
   });
 
@@ -93,6 +94,49 @@ describe("routeBusEnvelope → pulse forward", () => {
       router,
     );
     expect(mockSink.mock.calls.map((c) => c[0])).toEqual(["permission", "question"]);
+  });
+
+  it("forwards a rekey so the dashboard card follows the session to its new id", () => {
+    // /reset-id rebinds open tabs AND must rebind the Pulse row. The rekey
+    // handler in routeBusEnvelope returns before the generic session-scoped
+    // path (which is where the sink call lives), so without an explicit
+    // forward the card kept the dead old id and the next click opened a
+    // session that no longer exists.
+    const { router } = makeRouter([]);
+    routeBusEnvelope(
+      env("session_rekeyed", {
+        session_id: "ses_new",
+        data: { session_id: "ses_new", old_id: "ses_old" },
+      }),
+      router,
+    );
+    expect(mockSink).toHaveBeenCalledWith(
+      "session_rekeyed",
+      "ses_new",
+      expect.objectContaining({ old_id: "ses_old" }),
+      "",
+    );
+  });
+
+  it("forwards the originating host so Pulse can ignore sessions it cannot list", () => {
+    // The dashboard's row list is served by the LOCAL /api/pulse. Without the
+    // host, a remote host's session looks like an unknown one forever and every
+    // frame of its turn re-arms the 300ms unknown-session refetch.
+    const { router } = makeRouter([]);
+    routeBusEnvelope(
+      env("turn_started", {
+        session_id: "ses_remote",
+        host: "james@example.com",
+        data: { model: "m" },
+      }),
+      router,
+    );
+    expect(mockSink).toHaveBeenCalledWith(
+      "turn_started",
+      "ses_remote",
+      { model: "m" },
+      "james@example.com",
+    );
   });
 
   it("does not forward a non-session-scoped event", () => {

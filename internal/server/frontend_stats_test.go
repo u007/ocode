@@ -100,3 +100,30 @@ func TestFrontendStatsRequiresAuthAndDesktopHeader(t *testing.T) {
 		})
 	}
 }
+
+func TestFrontendStallLogged(t *testing.T) {
+	s := New("localhost:0", "", "", nil)
+	post := func(header string, body map[string]any) int {
+		b, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/api/debug/frontend-stall", bytes.NewReader(b))
+		if header != "" {
+			r.Header.Set("X-Ocode-Desktop", header)
+		}
+		s.mux.ServeHTTP(w, r)
+		return w.Code
+	}
+	ok := map[string]any{"window_id": "main", "stall_ms": 9800, "dom_node_count": 18000, "active_compactions": 2}
+	if got := post("1", ok); got != 204 {
+		t.Fatalf("valid stall status = %d, want 204", got)
+	}
+	if got := post("", ok); got != 404 {
+		t.Fatalf("non-desktop status = %d, want 404", got)
+	}
+	if got := post("1", map[string]any{"window_id": "", "stall_ms": 1}); got != 400 {
+		t.Fatalf("missing window_id status = %d, want 400", got)
+	}
+	if got := post("1", map[string]any{"window_id": "main", "stall_ms": -1}); got != 400 {
+		t.Fatalf("negative stall status = %d, want 400", got)
+	}
+}

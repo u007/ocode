@@ -373,20 +373,11 @@ func startRemoteServer(webFS fs.FS, workspace *remote.RemoteWorkspace, localToke
 	fm := remote.NewForwardManager(workspace.Sup, workspace.Target)
 	pmHandler := &portMapsHandler{fm: fm, store: store, ref: ref, localToken: localToken}
 	pmHandler.register(mux)
-	if store != nil {
-		if maps, err := store.PortMaps(ref); err != nil {
-			log.Printf("desktop: port maps: load: %v", err)
-		} else {
-			for _, pm := range maps {
-				if !pm.Enabled {
-					continue
-				}
-				if err := fm.Start(remote.ProjectPortMap{RemotePort: pm.RemotePort, LocalPort: pm.LocalPort, Enabled: true}); err != nil {
-					log.Printf("desktop: port maps: auto-start remote:%d: %v", pm.RemotePort, err)
-				}
-			}
-		}
-	}
+	// Background: autoStartEnabled blocks ~5s per forward whose tunnel cannot
+	// come up, and this runs BEFORE net.Listen — inline, a single dead forward
+	// delayed the window appearing by that much. remote.RunAsync also keeps a
+	// panic here from killing the process.
+	remote.RunAsync("desktop port maps auto-start", pmHandler.autoStartEnabled)
 	// Serve SPA (fallback to index.html for client-side routing)
 	mux.Handle("/", remoteSPAHandler(webFS))
 

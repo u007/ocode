@@ -4498,6 +4498,25 @@ func (pm *PermissionManager) SetWebfetchDomain(domain string, level PermissionLe
 	}
 }
 
+// AllowedWebfetchDomains returns the domains the user has explicitly allowed
+// this session, sorted for a stable judge state. Only explicit allows are
+// reported: a cached Deny is not a vouched-for destination, and including it
+// would read to the egress guardrail as permission. The set is in-memory and
+// per-session — a domain appears here only after an "always allow" click.
+func (pm *PermissionManager) AllowedWebfetchDomains() []string {
+	if pm == nil || len(pm.webfetchDomains) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(pm.webfetchDomains))
+	for domain, level := range pm.webfetchDomains {
+		if level == PermissionAllow {
+			out = append(out, domain)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (pm *PermissionManager) Mode() PermissionMode {
 	if pm.mode == "" {
 		return PermissionModeNormal

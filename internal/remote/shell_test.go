@@ -16,7 +16,7 @@ var keepaliveArgs = []string{
 
 func TestShellCommandSSH(t *testing.T) {
 	cmd := ShellCommand(Target{Kind: KindSSH, User: "u", Host: "h"}, "~/proj dir")
-	want := append(append([]string{"ssh", "-t"}, keepaliveArgs...), "u@h", launchScriptWithCd("~/proj dir"))
+	want := append(append([]string{"ssh", "-t"}, keepaliveArgs...), "--", "u@h", launchScriptWithCd("~/proj dir"))
 	if !reflect.DeepEqual(cmd.Args, want) {
 		t.Fatalf("args = %q, want %q", cmd.Args, want)
 	}
@@ -34,7 +34,7 @@ func TestShellCommandSSH(t *testing.T) {
 
 func TestShellCommandSSHAbsolutePath(t *testing.T) {
 	cmd := ShellCommand(Target{Kind: KindSSH, Host: "h"}, "/srv/it's")
-	want := append(append([]string{"ssh", "-t"}, keepaliveArgs...), "h", launchScriptWithCd("/srv/it's"))
+	want := append(append([]string{"ssh", "-t"}, keepaliveArgs...), "--", "h", launchScriptWithCd("/srv/it's"))
 	if !reflect.DeepEqual(cmd.Args, want) {
 		t.Fatalf("args = %q, want %q", cmd.Args, want)
 	}
@@ -42,7 +42,7 @@ func TestShellCommandSSHAbsolutePath(t *testing.T) {
 
 func TestShellCommandSSHPort(t *testing.T) {
 	cmd := ShellCommand(Target{Kind: KindSSH, User: "u", Host: "h", Port: 2222}, "/srv/app")
-	want := append(append([]string{"ssh", "-t"}, keepaliveArgs...), "-p", "2222", "u@h", launchScriptWithCd("/srv/app"))
+	want := append(append([]string{"ssh", "-t"}, keepaliveArgs...), "-p", "2222", "--", "u@h", launchScriptWithCd("/srv/app"))
 	if !reflect.DeepEqual(cmd.Args, want) {
 		t.Fatalf("args = %q, want %q", cmd.Args, want)
 	}

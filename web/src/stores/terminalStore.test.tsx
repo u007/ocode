@@ -1,6 +1,57 @@
 import { render, screen, act } from "@testing-library/react";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { TerminalProvider, useTerminalState, getProjectTerminals, terminalDisplayTitle, PROCESSES_TAB_ID } from "./terminalStore";
+
+/** Fake terminal-tab server. The tab LIST is server state now, so anything that
+ *  changes it from "another window" has to arrive through here rather than a
+ *  localStorage `storage` event (which never crossed browser profiles anyway). */
+const serverProjects = new Map<string, { terminals: { id: string; title: string }[] }>();
+const busHandlers = new Map<string, Set<(env: unknown) => void>>();
+
+vi.mock("../api/client", async () => {
+  const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
+  return {
+    ...actual,
+    remoteApiBase: () => "",
+    authedFetch: () => Promise.resolve({ ok: true, status: 200 }),
+    api: {
+      ...actual.api,
+      getTerminalTabs: () =>
+        Promise.resolve({
+          projects: Object.fromEntries([...serverProjects].map(([k, v]) => [k, v])),
+        }),
+      setTerminalTabs: (projects: Record<string, { terminals: { id: string; title: string }[] }>) => {
+        for (const [k, v] of Object.entries(projects)) {
+          if (v.terminals.length === 0) serverProjects.delete(k);
+          else serverProjects.set(k, v);
+        }
+        return Promise.resolve({ status: "ok" });
+      },
+    },
+  };
+});
+
+vi.mock("../lib/eventBus", () => ({
+  eventBus: {
+    on: (event: string, handler: (env: unknown) => void) => {
+      let set = busHandlers.get(event);
+      if (!set) {
+        set = new Set();
+        busHandlers.set(event, set);
+      }
+      set.add(handler);
+      return () => set!.delete(handler);
+    },
+    onReconnect: () => () => {},
+  },
+}));
+
+/** The server publishes this after every PUT; the store refetches on it. */
+async function publishTerminalTabsChanged() {
+  for (const handler of busHandlers.get("terminal_tabs_changed") ?? []) {
+    handler({ event: "terminal_tabs_changed", seq: 1, data: null });
+  }
+}
 
 function Harness({ projectPath }: { projectPath: string }) {
   const { state, activate, openTerminal, closeTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert, attachTerminal } =
@@ -39,6 +90,8 @@ function Harness({ projectPath }: { projectPath: string }) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  serverProjects.clear();
+  busHandlers.clear();
 });
 
 function seedPersisted(projectPath: string, terminals: { id: string; title: string }[], activeId: string) {
@@ -149,7 +202,7 @@ describe("terminalStore", () => {
     expect(screen.getByTestId("alerted").textContent).toBe("");
   });
 
-  it("prunes alerts for terminals a cross-window sync removed", () => {
+  it("prunes alerts for terminals another client removed", async () => {
     // Regression: SET_PROJECT_TERMINALS used to carry the whole `alerts` map
     // over to the new terminal list, so an alert for a terminal closed in
     // another window stayed truthy forever. The project sidebar counts every
@@ -172,11 +225,11 @@ describe("terminalStore", () => {
     act(() => screen.getByText("mark-term-A").click());
     act(() => screen.getByText("mark-term-B").click());
     expect(screen.getByTestId("raw-alert-count").textContent).toBe("2");
-    // Another window closes term-B; its storage write replaces the persisted
-    // list and fires this window's storage handler with the shrunken set.
-    seedPersisted("/proj", [{ id: "term-A", title: "A" }], "term-A");
-    act(() => {
-      window.dispatchEvent(new StorageEvent("storage", { key: "ocode.ui.terminals.project.v1" }));
+    // Another client closes term-B: the server holds the shrunken list and
+    // announces it, and this window re-seeds from that.
+    serverProjects.set("/proj", { terminals: [{ id: "term-A", title: "A" }] });
+    await act(async () => {
+      await publishTerminalTabsChanged();
     });
     expect(screen.getByTestId("count").textContent).toBe("1");
     expect(screen.getByTestId("raw-alert-count").textContent).toBe("1");

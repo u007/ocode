@@ -70,11 +70,11 @@ func injectProxy(t *testing.T, reg *remoteHostRegistry, host string, ws *fakeTes
 	}
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	e, ok := reg.byHost[host]
+	e, ok := reg.byConn[host]
 	if !ok {
 		e = &remoteHostEntry{}
 		e.connecting.L = &e.mu
-		reg.byHost[host] = e
+		reg.byConn[host] = e
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -524,7 +524,7 @@ func TestHandleRemoteProxy_RegistrationFailureThenRetry(t *testing.T) {
 	// unusable. The entry must be dropped so the next request reconnects
 	// rather than reusing a dead tunnel forever (the stale-502 loop).
 	h.remoteHosts.mu.Lock()
-	_, exists := h.remoteHosts.byHost["user@realhost"]
+	_, exists := h.remoteHosts.byConn["user@realhost"]
 	h.remoteHosts.mu.Unlock()
 	if exists {
 		t.Fatal("expected the host entry to be dropped after a registration failure")
@@ -649,18 +649,18 @@ func TestHandleRemoteProxy_ReconnectAfterDrop(t *testing.T) {
 
 	// Verify the entry exists.
 	h.remoteHosts.mu.Lock()
-	_, exists := h.remoteHosts.byHost["user@realhost"]
+	_, exists := h.remoteHosts.byConn["user@realhost"]
 	h.remoteHosts.mu.Unlock()
 	if !exists {
 		t.Fatal("expected entry to exist after first request")
 	}
 
 	// Drop the entry (simulating what onError does after a proxy error).
-	h.remoteHosts.drop("user@realhost")
+	h.remoteHosts.drop("user@realhost", 0)
 
 	// Verify the entry is gone.
 	h.remoteHosts.mu.Lock()
-	_, exists = h.remoteHosts.byHost["user@realhost"]
+	_, exists = h.remoteHosts.byConn["user@realhost"]
 	h.remoteHosts.mu.Unlock()
 	if exists {
 		t.Fatal("expected entry to be gone after drop")

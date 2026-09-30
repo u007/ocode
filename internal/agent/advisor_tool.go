@@ -143,8 +143,12 @@ func (t AdvisorTool) Definition() map[string]interface{} {
 }
 
 // resolveModel returns the model string to use for the advisor.
-// Priority: OPENCODE_ADVISOR_MODEL env var > config > default.
-// The model is preset via the /advisor command or config, not per-call.
+// Priority: OPENCODE_ADVISOR_MODEL env var > the calling SESSION's own advisor
+// model > the process-wide config > built-in default.
+// The session's value is authoritative even when EMPTY: that means the session
+// is pinned to the built-in default, and it must not fall through to a
+// process-wide default that may since have changed. The model is preset via
+// the /advisor command, the config, or the per-chat picker — not per-call.
 func (t AdvisorTool) resolveModel() string {
 	// 1. OPENCODE_ADVISOR_MODEL env var.
 	envModel := os.Getenv("OPENCODE_ADVISOR_MODEL")
@@ -152,7 +156,17 @@ func (t AdvisorTool) resolveModel() string {
 		return envModel
 	}
 
-	// 2. Config from ocode.json [advisor] section.
+	// 2. The calling session's own pinned advisor model.
+	if t.mainAgent != nil {
+		if cfg, ok := t.mainAgent.ResolvedAdvisorConfig(); ok {
+			if cfg.Model != "" {
+				return cfg.Model
+			}
+			return defaultAdvisorModel
+		}
+	}
+
+	// 3. Config from ocode.json [advisor] section.
 	if t.cfg != nil {
 		ac := t.cfg.Ocode.Advisor
 		if ac.Provider != "" && ac.Model != "" {
@@ -163,7 +177,7 @@ func (t AdvisorTool) resolveModel() string {
 		}
 	}
 
-	// 3. Built-in default.
+	// 4. Built-in default.
 	return defaultAdvisorModel
 }
 
@@ -228,12 +242,12 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	defer guard.Store(false)
 
 	// Claude Code path: use the Claude Code CLI (claude -p) instead of an
-	// LLM API client when the advisor is configured for claude-code.
-	if t.cfg != nil && t.cfg.Ocode.Advisor.ClaudeCode {
-		modelName := t.cfg.Ocode.Advisor.Model
-		if modelName == "" {
-			modelName = "claude-sonnet-4-6"
-		}
+	// LLM API client when the advisor is configured for claude-code. The
+	// session's own config decides, so one chat using the Claude Code backend
+	// does not drag every other chat onto it.
+	ac := t.advisorEffectiveConfig()
+	if ac.ClaudeCode {
+		modelName := claudeCodeModelName(ac.Model)
 		emitDebug("ADVISOR", fmt.Sprintf("calling Claude Code CLI with model: %s", modelName))
 		result, err := executeClaudeCodeAdvisor(ctx, modelName, params.Prompt, t.workDir)
 		if err != nil {

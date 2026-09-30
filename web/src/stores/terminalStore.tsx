@@ -1,7 +1,13 @@
 import { createContext, useContext, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { Store, useSelector } from "@tanstack/react-store";
-import { authedFetch, remoteApiBase } from "@/api/client";
-import { loadProjectTerminals, saveProjectTerminals, projectTerminalsKey } from "../components/Terminal/terminalPersistence";
+import { api, authedFetch, remoteApiBase } from "@/api/client";
+import { eventBus } from "@/lib/eventBus";
+import {
+  loadProjectTerminals,
+  saveProjectTerminals,
+  projectTerminalsKey,
+  readAllMirrorProjects,
+} from "../components/Terminal/terminalPersistence";
 
 export const PROCESSES_TAB_ID = "processes";
 
@@ -49,6 +55,14 @@ interface ProjectTerminalState {
 
 export interface TerminalStoreState {
   byProject: Record<string, ProjectTerminalState>;
+  /** Bumped whenever the local mirror is rewritten from a server read.
+   *
+   *  A project this window never activated is a cheap "peek": `getProjectTerminals`
+   *  answers it by reading the mirror out of localStorage, which is NOT reactive.
+   *  Without this counter a server read that hydrates a peeked project would write
+   *  the mirror but change nothing the store exposes, so nothing re-rendered and
+   *  the second client kept showing an empty strip — the exact reported bug. */
+  revision: number;
 }
 
 type TerminalAction =
@@ -58,9 +72,10 @@ type TerminalAction =
   | { type: "RENAME_TERMINAL"; projectPath: string; host?: string; id: string; title: string }
   | { type: "SET_OSC_TITLE"; projectPath: string; host?: string; id: string; title: string }
   | { type: "MARK_ALERTED"; projectPath: string; host?: string; id: string }
-  | { type: "CLEAR_ALERT"; projectPath: string; host?: string; id: string };
+  | { type: "CLEAR_ALERT"; projectPath: string; host?: string; id: string }
+  | { type: "BUMP_REVISION" };
 
-const initialState: TerminalStoreState = { byProject: {} };
+const initialState: TerminalStoreState = { byProject: {}, revision: 0 };
 
 let nextTerminalSeq = 1;
 
@@ -153,11 +168,15 @@ function pruneAlerts(
 }
 
 function terminalReducer(state: TerminalStoreState, action: TerminalAction): TerminalStoreState {
+  // BUMP_REVISION is not project-scoped, so the key is derived per case rather
+  // than once up front (it read action.projectPath off every action).
+  if (action.type === "BUMP_REVISION") return { ...state, revision: state.revision + 1 };
   const key = projectTerminalsKey(action.projectPath, action.host);
   switch (action.type) {
     case "SET_PROJECT_TERMINALS": {
       const cur = state.byProject[key];
       return {
+        ...state,
         byProject: {
           ...state.byProject,
           [key]: {
@@ -189,31 +208,32 @@ function terminalReducer(state: TerminalStoreState, action: TerminalAction): Ter
             : ""
           : cur.activeId;
       return {
+        ...state,
         byProject: { ...state.byProject, [key]: { ...cur, terminals, activeId, alerts } },
       };
     }
     case "SET_ACTIVE_ID": {
       const cur = state.byProject[key];
       if (!cur) return state;
-      return { byProject: { ...state.byProject, [key]: { ...cur, activeId: action.id } } };
+      return { ...state, byProject: { ...state.byProject, [key]: { ...cur, activeId: action.id } } };
     }
     case "MARK_ALERTED": {
       const cur = state.byProject[key];
       if (!cur) return state;
       const alerts = { ...cur.alerts, [action.id]: true };
-      return { byProject: { ...state.byProject, [key]: { ...cur, alerts } } };
+      return { ...state, byProject: { ...state.byProject, [key]: { ...cur, alerts } } };
     }
     case "CLEAR_ALERT": {
       const cur = state.byProject[key];
       if (!cur || !cur.alerts || !cur.alerts[action.id]) return state;
       const alerts = { ...cur.alerts, [action.id]: false };
-      return { byProject: { ...state.byProject, [key]: { ...cur, alerts } } };
+      return { ...state, byProject: { ...state.byProject, [key]: { ...cur, alerts } } };
     }
     case "RENAME_TERMINAL": {
       const cur = state.byProject[key];
       if (!cur) return state;
       const terminals = cur.terminals.map((t) => (t.id === action.id ? { ...t, title: action.title, renamed: true } : t));
-      return { byProject: { ...state.byProject, [key]: { ...cur, terminals } } };
+      return { ...state, byProject: { ...state.byProject, [key]: { ...cur, terminals } } };
     }
     case "SET_OSC_TITLE": {
       const cur = state.byProject[key];
@@ -229,7 +249,7 @@ function terminalReducer(state: TerminalStoreState, action: TerminalAction): Ter
         }
         return { ...t, oscTitle };
       });
-      return { byProject: { ...state.byProject, [key]: { ...cur, terminals } } };
+      return { ...state, byProject: { ...state.byProject, [key]: { ...cur, terminals } } };
     }
     default:
       return state;
@@ -422,9 +442,236 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     [store, dispatch],
   );
 
-  // Persist every live project's terminals/activeId (debounced), mirroring
-  // TerminalTabs.tsx's original per-project persistence effect.
+  // ── Server-backed terminal tab list ───────────────────────────────────────
+  //
+  // The open-terminal LIST is server state (GET/PUT /api/terminal-tabs →
+  // internal/termtabs, terminals.json under the global data dir), for the same
+  // reason session tabs are (internal/tabs): localStorage is per-origin, so a
+  // terminal started in the desktop app was invisible to a second browser even
+  // though a remote project's shell is a child of the HOST's serve --remote and
+  // was perfectly shared. The list was the only thing that could not cross.
+  //
+  // localStorage is kept only as a MIRROR of the last server state (rewritten
+  // on every server read and every local mutation). It is what lets
+  // getProjectTerminals answer a synchronous "peek" before hydration lands, and
+  // what TopTabs/ProcessesPanel read. It is never authoritative: a server read
+  // always overwrites it, and the pre-hydration persist is suppressed so a
+  // mirror-derived list can never clobber the server.
+  //
+  // `activeId` is deliberately NOT shared — which tab a window has focused is
+  // per-client view state (it can be PROCESSES_TAB_ID, which is not a terminal),
+  // and sharing it would let one window yank another's selection.
   const skipNextSaveRef = useRef<Set<string>>(new Set());
+  /** Keys whose next mirror→server PUT would be a pure echo of state this
+   *  client just read back from the server. Separate from skipNextSaveRef so the
+   *  two effects can't consume each other's marker. */
+  const skipNextPutRef = useRef<Set<string>>(new Set());
+  /** restored = the initial server read settled. Writes are suppressed until
+   *  then so a mint-then-fetch race cannot replace the server's list with a
+   *  locally-derived one (which would spawn a phantom shell). */
+  const restoredRef = useRef(false);
+  const syncRef = useRef({ dirty: false, writing: false, refetchQueued: false });
+
+  /** Applies a server list to one already-live project. Ids only: a rename or an
+   *  OSC title is owned by whichever client has the panel open and lands in the
+   *  server on the next write, so comparing ids avoids fighting over titles. */
+  const adoptServerList = useCallback(
+    (key: string, incoming: TerminalInstance[]) => {
+      const cur = store.state.byProject[key];
+      if (!cur?.live) return;
+      const same =
+        cur.terminals.length === incoming.length && cur.terminals.every((t, i) => t.id === incoming[i]?.id);
+      if (same) return;
+      // Two independent skips. The mirror write is redundant (refetchTerminalTabs
+      // already wrote it), and the server PUT is an ECHO: this state came FROM
+      // the server, so writing it straight back would trigger another
+      // terminal_tabs_changed on every client and an extra round-trip per change.
+      skipNextSaveRef.current.add(key);
+      skipNextPutRef.current.add(key);
+      // Keep a still-valid focus; the shared list may not carry this window's
+      // active id (another window closed it), so fall back to the last tab.
+      const activeId =
+        cur.activeId && (cur.activeId === PROCESSES_TAB_ID || incoming.some((t) => t.id === cur.activeId))
+          ? cur.activeId
+          : incoming[incoming.length - 1]?.id ?? "";
+      bumpSeqPast(incoming.map((t) => t.title));
+      dispatch({
+        type: "SET_PROJECT_TERMINALS",
+        projectPath: cur.path,
+        host: cur.host,
+        terminals: incoming,
+        activeId,
+      });
+    },
+    [store, dispatch],
+  );
+
+  /** Pull the server's list, rewrite the local mirror from it, and re-seed live
+   *  projects. A failed read leaves the mirror alone (a transient blip must not
+   *  empty the tab strip) and is retried on the next bus reconnect. */
+  const refetchTerminalTabs = useCallback(async () => {
+    const sync = syncRef.current;
+    if (sync.dirty || sync.writing) {
+      sync.refetchQueued = true;
+      return;
+    }
+    try {
+      const res = await api.getTerminalTabs();
+      if (sync.dirty || sync.writing) {
+        sync.refetchQueued = true;
+        return;
+      }
+      for (const [key, entry] of Object.entries(res.projects ?? {})) {
+        const terminals = (entry?.terminals ?? [])
+          .filter((t) => t && typeof t.id === "string" && t.id)
+          .map((t) => ({
+            id: t.id,
+            title: typeof t.title === "string" ? t.title : t.id,
+            ...(t.renamed ? { renamed: true } : {}),
+            ...(t.osc_title ? { oscTitle: t.osc_title } : {}),
+          }));
+        // The mirror carries activeId too; keep whatever this window had.
+        // `key` IS the host::path composite, and projectTerminalsKey(key, undefined)
+        // is `key`, so this reads that project's mirror without re-splitting it.
+        const current = loadProjectTerminals(key);
+        saveProjectTerminals(key, terminals, current?.activeId ?? "");
+        adoptServerList(key, terminals);
+      }
+      // Peeked projects read the mirror out of localStorage, which is not
+      // reactive; bump so the provider re-renders and they pick the list up.
+      dispatch({ type: "BUMP_REVISION" });
+    } catch (err) {
+      console.error("Failed to refetch terminal tabs from server:", err);
+    }
+  }, [adoptServerList, dispatch]);
+
+  /** One mirror → server write of every live project. Callers debounce it (or
+   *  flush it once after the restore settles) — this is the unit, not the timer.
+   *
+   *  Every live project is sent, INCLUDING ones left empty by a close: the server
+   *  treats an empty list as a delete, and OMITTING a project reads as "this
+   *  client has never heard of it", which would preserve a closed terminal
+   *  forever. */
+  const pushTerminalTabs = useCallback(async () => {
+    const sync = syncRef.current;
+    sync.dirty = false;
+    sync.writing = true;
+    try {
+      const projects: Record<string, { terminals: { id: string; title: string; renamed?: boolean; osc_title?: string }[] }> = {};
+      for (const [key, entry] of Object.entries(store.state.byProject)) {
+        if (!entry.live) continue;
+        if (skipNextPutRef.current.delete(key)) continue; // echo of a server read
+        projects[projectTerminalsKey(entry.path, entry.host)] = {
+          terminals: entry.terminals.map((term) => ({
+            id: term.id,
+            title: term.title,
+            ...(term.renamed ? { renamed: true } : {}),
+            ...(term.oscTitle ? { osc_title: term.oscTitle } : {}),
+          })),
+        };
+      }
+      // Every live project was an echo → send nothing rather than an empty merge
+      // (which the server would read as "delete every project").
+      if (Object.keys(projects).length === 0) return;
+      await api.setTerminalTabs(projects);
+    } catch (err) {
+      console.error("Failed to persist terminal tabs to server:", err);
+    } finally {
+      sync.writing = false;
+      if (sync.refetchQueued && !sync.dirty) {
+        sync.refetchQueued = false;
+        void refetchTerminalTabs();
+      }
+    }
+  }, [store, refetchTerminalTabs]);
+
+  // One-time migration + restore. If the server holds nothing for a project this
+  // client has a local mirror for, the mirror is written THROUGH (so an existing
+  // user's terminals survive the move off localStorage) and then cleared. The
+  // server is consulted first, so a second browser adopts the desktop app's list
+  // instead of racing it with its own.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await api.getTerminalTabs();
+        if (cancelled) return;
+        const projects = res.projects ?? {};
+        let migrated = false;
+        for (const [key, entry] of Object.entries(projects)) {
+          const terminals = (entry?.terminals ?? [])
+            .filter((t) => t && typeof t.id === "string" && t.id)
+            .map((t) => ({
+              id: t.id,
+              title: typeof t.title === "string" ? t.title : t.id,
+              ...(t.renamed ? { renamed: true } : {}),
+              ...(t.osc_title ? { oscTitle: t.osc_title } : {}),
+            }));
+          saveProjectTerminals(
+            key,
+            terminals,
+            loadProjectTerminals(key)?.activeId ?? terminals[terminals.length - 1]?.id ?? "",
+          );
+          adoptServerList(key, terminals);
+        }
+        dispatch({ type: "BUMP_REVISION" });
+        // Write through any project the server has never seen. Keys are opaque
+        // (host::path), so the mirror's own key is the lookup key.
+        const legacy: Record<string, { terminals: TerminalInstance[] }> = {};
+        for (const [key, saved] of Object.entries(readAllMirrorProjects())) {
+          if (key in projects) continue;
+          if (!saved || saved.length === 0) continue;
+          legacy[key] = { terminals: saved };
+          migrated = true;
+        }
+        if (migrated) {
+          await api.setTerminalTabs(legacy);
+          for (const key of Object.keys(legacy)) saveProjectTerminals(key, [], "");
+        }
+      } catch (err) {
+        // Intentionally not rethrown: the store stays usable on the local
+        // mirror and the next bus reconnect retries the server read.
+        console.error("Failed to restore terminal tabs from server:", err);
+      } finally {
+        if (cancelled) return;
+        restoredRef.current = true;
+        // A terminal opened BEFORE this restore settled (the restore read is
+        // async; the "+" button is not) is live but the server never mentioned
+        // its project, so adoptServerList did not fire and no state change would
+        // ever re-trigger the debounced write effect. Flush it now, or it would
+        // sit in the local mirror until the next reload and no other client
+        // would see it.
+        const hasLive = Object.values(store.state.byProject).some((entry) => entry.live);
+        if (hasLive) void pushTerminalTabs();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [adoptServerList, dispatch, store, pushTerminalTabs]);
+
+  // Keep the strip converged across every client on this server — the desktop
+  // shell, a second browser, a shared URL. The server publishes an unscoped
+  // `terminal_tabs_changed` after each PUT; on it (and on every bus reconnect,
+  // which may have missed one) refetch.
+  useEffect(() => {
+    // Deliberately NOT gated on restoredRef: a refetch is idempotent and reads
+    // only the server, so one arriving before the initial restore settles just
+    // applies the same state twice. Only the WRITE path is gated, because that
+    // is the one that could replace the server's list with a locally-minted one.
+    const onChanged = () => {
+      void refetchTerminalTabs();
+    };
+    const offEvent = eventBus.on("terminal_tabs_changed", onChanged);
+    const offReconnect = eventBus.onReconnect(() => void refetchTerminalTabs());
+    return () => {
+      offEvent();
+      offReconnect();
+    };
+  }, [refetchTerminalTabs]);
+
+  // Debounced persistence of every live project's terminal list to the server.
+  // Suppressed until the initial restore settles (see restoredRef).
   useEffect(() => {
     const timers: ReturnType<typeof setTimeout>[] = [];
     for (const [key, entry] of Object.entries(state.byProject)) {
@@ -438,6 +685,18 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     return () => timers.forEach(clearTimeout);
   }, [state.byProject]);
 
+  // Debounced persistence of every live project's terminal list to the server.
+  // Suppressed until the initial restore settles (see restoredRef).
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    const sync = syncRef.current;
+    sync.dirty = true;
+    const t = setTimeout(() => {
+      void pushTerminalTabs();
+    }, 400);
+    return () => clearTimeout(t);
+  }, [state.byProject, pushTerminalTabs]);
+
   // Flush any pending debounced save synchronously when the provider unmounts
   // (e.g. a test remount, or the app tearing down) so a live project's terminal
   // layout is never lost because its 200ms timer was still pending. Reads the
@@ -450,47 +709,13 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     };
   }, [store]);
 
-  // Cross-window sync: another window's terminal open/close/rename updates
-  // this window's already-live projects too. A project this window never
-  // activated stays a cheap peek and picks up the change next render.
-  useEffect(() => {
-    const handler = (e: StorageEvent) => {
-      if (e.key !== "ocode.ui.terminals.project.v1") return;
-      for (const key of Object.keys(store.state.byProject)) {
-        const cur = store.state.byProject[key];
-        if (!cur.live) continue;
-        const saved = loadProjectTerminals(cur.path, cur.host);
-        if (!saved) {
-          if (cur.terminals.length !== 0) {
-            skipNextSaveRef.current.add(key);
-            dispatch({ type: "SET_PROJECT_TERMINALS", projectPath: cur.path, host: cur.host, terminals: [], activeId: "" });
-          }
-          continue;
-        }
-        const same =
-          saved.terminals.length === cur.terminals.length &&
-          saved.terminals.every(
-            (t, i) =>
-              t.id === cur.terminals[i]?.id &&
-              t.title === cur.terminals[i]?.title &&
-              !!t.renamed === !!cur.terminals[i]?.renamed &&
-              (t.oscTitle ?? "") === (cur.terminals[i]?.oscTitle ?? ""),
-          ) &&
-          saved.activeId === cur.activeId;
-        if (same) continue;
-        bumpSeqPast(saved.terminals.map((t) => t.title));
-        skipNextSaveRef.current.add(key);
-        const activeId =
-          saved.activeId &&
-          (saved.activeId === PROCESSES_TAB_ID || saved.terminals.some((t) => t.id === saved.activeId))
-            ? saved.activeId
-            : (saved.terminals[saved.terminals.length - 1]?.id ?? "");
-        dispatch({ type: "SET_PROJECT_TERMINALS", projectPath: cur.path, host: cur.host, terminals: saved.terminals, activeId });
-      }
-    };
-    window.addEventListener("storage", handler);
-    return () => window.removeEventListener("storage", handler);
-  }, [store, dispatch]);
+  // The former `storage`-event cross-window sync is gone on purpose. It only
+  // ever worked between tabs of ONE browser profile (the `storage` event does
+  // not cross profiles), which is exactly the reported bug: a second browser
+  // kept its own copy and never converged. The server-backed
+  // `terminal_tabs_changed` bus event covers both cases — same-profile tabs
+  // included — because every write now goes through the server, which
+  // broadcasts to every connected client.
 
   return (
     <TerminalContext.Provider value={{ state, activate, openTerminal, closeTerminal, killTerminal, setActiveId, renameTerminal, setOscTitle, markAlerted, clearAlert, attachTerminal }}>

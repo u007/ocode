@@ -4,6 +4,20 @@ import { TerminalProvider, useTerminalState, getProjectTerminals } from "./termi
 import { loadProjectTerminals, projectTerminalsKey } from "../components/Terminal/terminalPersistence";
 
 const authedFetchMock = vi.fn((..._args: unknown[]) => Promise.resolve({ ok: true, status: 204 }));
+// terminalStore subscribes to the server's `terminal_tabs_changed` bus event,
+// and the real eventBus auto-starts an SSE stream on the first on(), which calls
+// remoteApiBase() from @/api/client — absent in this suite's partial mock, so the
+// stream threw an unhandled rejection. Mirrors the real bus surface the store
+// uses (on/off/onReconnect/offReconnect).
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: () => () => {},
+    off: () => {},
+    onReconnect: () => () => {},
+    offReconnect: () => {},
+  },
+}));
+
 vi.mock("@/api/client", () => ({
   authedFetch: (...a: unknown[]) => authedFetchMock(...a),
   remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),

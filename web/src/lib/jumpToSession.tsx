@@ -43,20 +43,25 @@ export interface JumpTarget {
  * How the dashboard is left. App owns `activeView`, so the provider supplies the
  * transition rather than this module reaching into it — that keeps the jump
  * helper testable and keeps one owner of the view state.
+ *
+ * `targetPath` is the project the jump landed on, NOT the one the user was
+ * looking at before the dashboard. App needs it because the project-switch
+ * restore effect runs on the commit AFTER `selectProject` resolves and would
+ * otherwise overwrite the jump's destination with the target's saved view.
  */
-const PulseJumpContext = createContext<{ exitPulse: () => void } | null>(null);
+const PulseJumpContext = createContext<{ exitPulse: (targetPath: string) => void } | null>(null);
 
 export function PulseJumpProvider({
   exitPulse,
   children,
 }: {
-  exitPulse: () => void;
+  exitPulse: (targetPath: string) => void;
   children: ReactNode;
 }) {
   return <PulseJumpContext.Provider value={{ exitPulse }}>{children}</PulseJumpContext.Provider>;
 }
 
-function usePulseJumpContext(): { exitPulse: () => void } {
+function usePulseJumpContext(): { exitPulse: (targetPath: string) => void } {
   const ctx = useContext(PulseJumpContext);
   if (!ctx) {
     throw new Error("useJumpToSession/useJumpToPendingAsk must be used within PulseJumpProvider");
@@ -95,7 +100,7 @@ function useJump(openSidePane: boolean) {
       if (openSidePane) {
         browserActions.open(sideChatKey(target.sessionId), "");
       }
-      exitPulse();
+      exitPulse(target.projectPath);
     },
     [state.projects, selectProject, openSessionTab, exitPulse, openSidePane],
   );

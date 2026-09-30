@@ -1,6 +1,17 @@
+---
+type: Guide
+title: Web/Desktop UI Parity — Current Status
+description: Current web/desktop vs TUI parity status — achieved items and remaining gaps, including the Cron tab's Jobs/Reminders/Tasks sub-views and dated correction notes for stale plans.
+tags:
+  - parity
+  - web
+  - tui
+  - cron
+timestamp: 2026-09-29T17:46:12Z
+---
 # Web/Desktop UI Parity — Current Status
 
-Last updated: 2026-08-22. Desktop (`cmd/ocode-desktop`, Wails) embeds the same
+Last updated: 2026-09-30. Desktop (`cmd/ocode-desktop`, Wails) embeds the same
 `web/` React app, so "web" and "desktop" are the same UI surface — gaps
 below apply to both.
 
@@ -8,10 +19,25 @@ below apply to both.
 
 ### 1. Cron / scheduling ✅
 
-- Backend: `GET/POST /api/cron/*`, outbox, targets (`internal/server/scheduler.go`).
-- Web: `CronPanel`, `CronJobDialog`, `CronOutboxPanel`, `CronTargetsPanel` (`web/src/components/Cron/`).
+- Backend (jobs): `GET/POST /api/cron/*`, outbox, targets (`internal/server/scheduler.go`).
+- Backend (reminders/tasks): the identical `GET|POST /api/reminders`,
+  `GET|PATCH|DELETE /api/reminders/{id}`, `POST .../run`, `GET .../runs` set
+  under `/api/reminders` and `/api/tasks` (`internal/server/reminders.go`,
+  engine in `internal/reminders/`).
+- Web — the Cron tab has three sub-views, `Jobs | Reminders | Tasks`:
+  - switcher: `CronSubTabs` (`web/src/components/Cron/CronSubTabs.tsx`);
+  - **Jobs:** `CronPanel`, `CronJobDialog`, `CronOutboxPanel`, `CronTargetsPanel`;
+  - **Reminders / Tasks:** `ReminderTaskView` (one component serving both
+    kinds via its `kind` prop), `ReminderTaskDialog`, `reminderFormat` —
+    all in `web/src/components/Cron/`;
+  - `CronHistoryPanel` (run history) is shared: it gained an optional
+    `fetchRuns` prop so a reminder renders its runs against the shared
+    `runs.jsonl`;
+  - `CronPanel` holds `SUB_VIEW_FOR_KIND` (singular→plural kind→collection
+    map); all three panes stay mounted, load lazily on first show, and only
+    the front pane polls.
 - TUI: `/cron` command (`internal/tui/command_cron.go`).
-- Docs: `docs/scheduled-jobs.md`.
+- Docs: `docs/scheduled-jobs.md` (reminders/tasks section added 2026-09-30).
 
 ### 2. Per-session Changes tab ✅
 
@@ -103,3 +129,14 @@ below apply to both.
 ## Not started (neither TUI nor web)
 
 None — all TUI features have at least partial web coverage or are non-interactive (Kaizen).
+
+## Correction notes
+
+- **2026-09-30** — The Cron-parity plan
+  `docs/superpowers/plans/2026-07-24-web-cron-parity.md` (line 13) references
+  a design spec `docs/superpowers/specs/2026-07-24-web-cron-parity-design.md`
+  that does not exist, and its constraint "no frontend test runner exists in
+  this project" (line 16) is now false: the Cron components ship `*.test.tsx`
+  (e.g. `CronPanel.loading.test.tsx`, `CronPanel.confirm.test.tsx`,
+  `ReminderTaskView.test.tsx`). Recorded here rather than rewriting the
+  historical plan.

@@ -85,6 +85,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | **Slash Command Queue** | Commands entered while streaming/compacting are queued and drained automatically — only instant UI commands bypass (see [Slash Commands](#-slash-commands)) |
 | **Persistent Todo Plans** | `todowrite` / `todoread` / `todo_update` backed by `.ocode/todo/<session>.md` (revision + flock, snapshot-captured, re-anchored every turn) |
 | **In-Chat Find Bar** | `Ctrl+F` / `/search` / `/find` on the chat tab — server-side over the **whole transcript**, not just the loaded window ("N total, M in view"), with prefix backfill when jumping to an older match |
+| **Jump Between Your Prompts** | `Alt+↑` / `Alt+↓` (TUI and web/desktop) step between the user messages of one chat session with a `msg N/M` readout; counts the whole transcript, not the loaded window, and clamps at the ends instead of wrapping. Distinct from the composer's plain `↑`/`↓` prompt-history recall |
 | **Auto-Continue** | `/autocontinue` auto-resumes a turn cut off by `/max-step` (optionally judged by a small model); persists across TUI and web turns |
 | **Interrupted-Turn Notice** | A turn cut off after an answered ask surfaces a Continue action in the transcript |
 | **Chat Display Controls** | Web/desktop Settings → Chat display offers Full, Balanced, and Quiet presets plus per-category expand/collapse overrides; display changes never alter the transcript or model context |

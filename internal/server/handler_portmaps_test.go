@@ -2,12 +2,17 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
@@ -323,4 +328,131 @@ func TestRemovePortMapUnknownPortDoesNotSuppress(t *testing.T) {
 	if suppressed {
 		t.Fatal("failed removal left the port suppressed; the watchdog can never restart it")
 	}
+}
+
+// The first list for a project auto-starts its persisted enabled forwards, and
+// ForwardManager.Start's readiness probe is ~5s of dialing (25 x 200ms,
+// connect.go tunnelReadyAttempts/tunnelReadyInterval) when the forward cannot
+// come up. That open runs on its own goroutine, so the list answers from
+// persisted state immediately instead of stalling on the tunnel.
+//
+// The canary is a SECOND project: its list also goes through
+// portMapRegistry.entry, so it takes the same reg.mu the auto-start would take
+// if a future change held the registry lock across the open. It must answer
+// immediately too. Both halves are asserted; the isolation is mutation-verified
+// (holding reg.mu across autoStart makes the canary take ~4.7s).
+func TestPortMapsListDoesNotBlockOnAutoStart(t *testing.T) {
+	const slowHost = "user@no-such-host.invalid"
+	const fastHost = "user@other.invalid"
+	h, mux := newTestPortMapsHandler(t, slowHost, "/srv/app")
+
+	// A second registered project, no forwards: its list is pure bookkeeping.
+	fastTarget, err := remote.ParseTarget(fastHost)
+	if err != nil {
+		t.Fatalf("parse target %q: %v", fastHost, err)
+	}
+	if err := h.projects.AddRemote(fastTarget.String(), "/srv/other"); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+
+	// One enabled forward on a local port nothing listens on: its open cannot
+	// succeed, so the readiness probe runs its full budget in the background.
+	slowTarget, err := remote.ParseTarget(slowHost)
+	if err != nil {
+		t.Fatalf("parse target %q: %v", slowHost, err)
+	}
+	ref := projects.ProjectRef{Host: slowTarget.String(), Path: "/srv/app"}
+	if err := h.projects.AddPortMap(ref, 3000, freeLocalPort(t)); err != nil {
+		t.Fatalf("AddPortMap: %v", err)
+	}
+
+	start := time.Now()
+	rec := doPortMaps(t, mux, "GET", "/api/portmaps?host="+url.QueryEscape(slowHost)+"&project=%2Fsrv%2Fapp", nil)
+	elapsed := time.Since(start)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET list = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	// The persisted row is still reported even though its open has not run yet.
+	got := decodePortMaps(t, rec)
+	if len(got) != 1 || got[0].RemotePort != 3000 || !got[0].Enabled || got[0].Live {
+		t.Fatalf("list = %+v, want one enabled, not-yet-live entry for remote 3000", got)
+	}
+	// ~5s of readiness probing used to happen inline here.
+	if elapsed > 2*time.Second {
+		t.Fatalf("list took %s; the auto-start is running inline instead of in the background", elapsed)
+	}
+	t.Logf("list answered in %s while the forward open runs in the background", elapsed.Round(time.Millisecond))
+
+	// The canary: another project's list must not be affected either way.
+	start = time.Now()
+	rec = doPortMaps(t, mux, "GET", "/api/portmaps?host="+url.QueryEscape(fastHost)+"&project=%2Fsrv%2Fother", nil)
+	elapsed = time.Since(start)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("concurrent list = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("another project's list took %s while a port-map auto-start was probing; "+
+			"the slow open is holding the registry lock", elapsed)
+	}
+}
+
+// A fast-returning list is only correct if the open still HAPPENS. This pins
+// that: the auto-start runs after the response, and the forward reaches live.
+//
+// The readiness probe only dials 127.0.0.1:<localPort>, so a listener bound
+// here satisfies it immediately — which is what lets the fake ssh (a plain
+// sleep, never connecting anywhere) leave the forward live and observable.
+func TestPortMapsAutoStartRunsAfterListResponds(t *testing.T) {
+	const host = "user@devbox"
+	installSleepingSSH(t, 30*time.Second)
+	h, mux := newTestPortMapsHandler(t, host, "/srv/app")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = h.procSup.TerminateAll(ctx)
+	})
+
+	local := freeLocalPort(t)
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", local))
+	if err != nil {
+		t.Fatalf("bind local forward port: %v", err)
+	}
+	defer ln.Close()
+
+	ref := projects.ProjectRef{Host: host, Path: "/srv/app"}
+	if err := h.projects.AddPortMap(ref, 3000, local); err != nil {
+		t.Fatalf("AddPortMap: %v", err)
+	}
+
+	rec := doPortMaps(t, mux, "GET", "/api/portmaps?host="+url.QueryEscape(host)+"&project=%2Fsrv%2Fapp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET list = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	target, err := remote.ParseTarget(host)
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	fm := h.portMaps.entry(target, "/srv/app").fm
+
+	deadline := time.Now().Add(15 * time.Second)
+	for !fm.IsLive(3000) {
+		if time.Now().After(deadline) {
+			t.Fatal("forward never went live; the async auto-start did not run")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// installSleepingSSH puts a fake ssh on PATH that ignores its arguments and
+// sleeps, so a port forward's child stays alive (and therefore "live") without
+// contacting anything.
+func installSleepingSSH(t *testing.T, d time.Duration) {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nsleep %d\n", int(d.Seconds()))
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

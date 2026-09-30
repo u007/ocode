@@ -20,7 +20,7 @@ export const SESSION_DIALOG_PAGE_SIZE = 50;
 export default function SessionDialog() {
   const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab, prefetchProjectSessions } = useProjectState();
   const chatDispatch = useChatDispatch();
-  const { projectSessions, sessionsLoading, sessionPickerOpen, activeProject } = projectState;
+  const { projectSessions, sessionsLoading, sessionsError, sessionPickerOpen, activeProject } = projectState;
 
   const [searchQuery, setSearchQuery] = useState("");
   const [pendingClose, setPendingClose] = useState<{ tabId: string; title: string } | null>(null);
@@ -200,6 +200,13 @@ export default function SessionDialog() {
           {sessionsLoading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : sessionsError ? (
+            // The list could not be loaded, so "No sessions yet" would be a lie.
+            // role="alert" so a screen reader announces it too.
+            <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <p className="font-medium">Couldn&apos;t load sessions</p>
+              <p className="mt-1 break-words text-xs opacity-90">{sessionsError}</p>
             </div>
           ) : filteredSessions.length === 0 ? (
             <div className="text-center py-8 text-sm text-muted-foreground">

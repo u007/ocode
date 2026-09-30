@@ -24,6 +24,16 @@ The output can be written to `CLAUDE.md`, `TEAM_ONBOARDING.md`, or printed to th
 
 First, run the discovery commands to gather facts about this ocode codebase.
 
+> **The `!\`cmd\`` lines below are NOT auto-executed.** ocode's skill loader
+> (`internal/skill/loader.go`) reads only the frontmatter; the SKILL.md body is handed to the model
+> as plain text, and `internal/skill/loader.go` has no hook that inspects body lines. So each of
+> these is an instruction the *model* must recognise and run itself as a normal `bash` call.
+>
+> Do not confuse this with the TUI, which *does* execute `!`-prefixed input: `internal/tui/model.go`
+> (the `enter` key handler, ~L6593, and the transcript-replay paths ~L9001/L9067) treats a leading
+> `!` in the **input box** as "run this as a shell command" via `startShellExecution`. That is a user
+> input affordance and has nothing to do with skill bodies.
+
 ### 1.1 Project identity
 
 !`cat go.mod | head -3`
@@ -117,7 +127,7 @@ After gathering the data above, synthesize it into structured onboarding documen
 - **Quick Start**: Build and run instructions
 - **Architecture Overview**: Package map and data flow (main → TUI → agent → LLM providers → tools)
 - **Configuration**: Config file location, structure, environment variables
-- **LLM Providers**: Supported providers are the registry `var providers = map[string]providerInfo{…}` in `internal/agent/client.go` — OpenAI, Anthropic, Google, Z.AI (`zai`/`z.ai`/`zai-coding`), Alibaba (`alibaba`/`alibaba-coding`), Moonshot, MiniMax, DeepSeek, xAI/Grok, Groq, Mistral, OpenRouter, Requesty, DeepInfra, Novita, Ollama Cloud, GitHub Copilot, LM Studio + `local`, Cloudflare Workers/Gateway, plus the `opencode` / `opencode-go` (Zen/Go) routes. Document each provider's API-key env var from that map, and note the two mandatory session headers: `opencode*` requests need `X-Opencode-Session`, and `openrouter` needs `x-session-id` + the `HTTP-Referer`/`X-Title` attribution headers
+- **LLM Providers**: Supported providers are exactly the keys of `var providers = map[string]providerInfo{…}` in `internal/agent/client.go` (39 keys as of 2026-09-29). **Read that map rather than listing them here** — enumerated lists rot: a prior version of this skill omitted `typesafe`, `orcarouter`, `aihubmix`, `chutes`, `chutes-coding`, `runinfra`, `nvidia`, `302ai`, `codex`, the `xiaomi*` variants and `novita-ai`, and named a `novita` key that does not exist. Note `novita-ai` is the real key, and `typesafe` is the decision-only judge provider (see `skills/ocode-permissions` §7). Document each provider's API-key env var from that map, and note the two mandatory session headers: `opencode*` requests need `X-Opencode-Session`, and `openrouter` needs `x-session-id` + the `HTTP-Referer`/`X-Title` attribution headers
 - **Agent System**: The agent registry, modes (build/plan/review/debug/docs), sub-agents
 - **Tools**: Available tools (read, write, edit, bash, glob, grep, lsp, websearch, webfetch, skill, agent, etc.)
 - **TUI Architecture**: Layout, mouse/selection, themes, keyboard shortcuts

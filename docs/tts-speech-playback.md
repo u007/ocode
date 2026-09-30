@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Speech playback
-description: 'Speech playback — user-facing doc covering engine availability, installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key.'
+description: 'Speech playback — user-facing doc covering engine availability (Browser Native, Piper, MeloTTS, Kokoro), installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key. Amended 2026-09-30: added the MeloTTS local engine (id `melo`, darwin/arm64 only, card order Piper → MeloTTS → Kokoro), its per-host Python range, install specifics (unpacked source, shared offline import check) and child-process environment (set by ocode, no .env entry).'
 tags:
   - speech
   - tts
@@ -12,7 +12,9 @@ tags:
   - DOM-extraction
   - speech-summary
   - fail-open
-timestamp: 2026-09-29T07:16:45Z
+  - melo
+  - local-engine
+timestamp: 2026-09-29T21:53:33Z
 ---
 # Speech playback
 
@@ -39,6 +41,51 @@ embeds the same React application.
   |------|-------------|---------------------|
   | darwin/arm64, linux/amd64, linux/arm64, windows/amd64 | 3.11–3.14 | onnxruntime 1.30.0 ships cp311–cp314 wheels; piper-tts is cp39-abi3 (wider) |
   | darwin/amd64 | 3.10–3.13 | onnxruntime 1.22.1 universal2 ships cp310–cp313 wheels only |
+
+- **MeloTTS** (engine id `melo`) is installable on darwin/arm64 only. It
+  appears in Settings > Speech playback **between the Piper and Kokoro
+  cards**: the card order is the `Catalog()` return order
+  (`internal/tts/manifest.go:564`) because `TTSForm` maps the server response
+  without re-sorting (`web/src/components/Settings/TTSForm.tsx:235`). The
+  placement is pinned by `TestMeloCatalogSitsBetweenPiperAndKokoro`
+  (`internal/tts/melo_test.go:169`) and the web test `renders MeloTTS between
+  Piper and Kokoro` (`web/src/components/Settings/TTSForm.test.tsx:60`).
+
+  Like the other local engines it follows the same lifecycle — license
+  acceptance (MIT) → pin → download → install → enable — and voice selection
+  is per model via the existing `model_voice` override. Voices are the
+  speakers in the MeloTTS-English-v2 config: EN-US (default), EN-BR,
+  EN_INDIA, EN-AU, EN-Default.
+
+  The manifest (`internal/tts/manifest.go:331`) pins TEN artifacts, each with
+  an exact byte size and SHA-256: the MeloTTS source archive pinned to commit
+  `209145371cff8fc3bd60d7be902ea69cbdb7965a`, the MeloTTS-English-v2
+  `config.json` + `checkpoint.pth`, five `bert-base-uncased` files, and two
+  NLTK archives (`averaged_perceptron_tagger.zip`, `cmudict.zip`) — about
+  650 MB of artifacts plus a torch venv of install footprint.
+
+  MeloTTS is **not pip-installed**: its setup.py has a post-install hook
+  running `python -m unidic download` (unpinned, writes into the user's home)
+  and its install_requires reads requirements.txt verbatim (torch unpinned).
+  The verified archive is unpacked into the cache and imported via PYTHONPATH;
+  dependencies are pinned exactly in the manifest (`meloRequirements()`,
+  `internal/tts/manifest.go:435`), including `nltk==3.8.1` — deliberately:
+  from nltk 3.9 the POS tagger resource was renamed
+  `averaged_perceptron_tagger_eng` but g2p_en still probes the legacy name, so
+  a newer nltk fails at synthesis after silently re-downloading.
+
+  **Supported Python range:**
+
+  | Host | MeloTTS range | Binding constraint |
+  |------|---------------|--------------------|
+  | darwin/arm64 | 3.11–3.12 | The only host where the full install was exercised end to end (venv build, checksum-verified artifacts, offline synthesis); 3.13+ was never verified and is excluded by `TestMeloInstallUsesAPinnedPythonRange` |
+  | all other hosts | — | No pinned runtime verified: reported unavailable **with a reason** rather than offered and failing mid-install (in particular linux/* and windows/* default torch wheels drag in multi-gigabyte CUDA runtimes) |
+
+  The engine is English-only: only `bert-base-uncased` is staged, and every
+  other language tokenizer MeloTTS loads at import time is served by a stub
+  that raises a named error on first use. The module-import networking traps
+  this engine closed (and how to detect them) are documented in
+  `gotchas/python-module-scope-network-fetch.md`.
 
 - **Kokoro** is installable on the same supported host matrix. Its manifest
   pins `kokoro-onnx==0.6.1`, a host-compatible onnxruntime release, the
@@ -99,6 +146,31 @@ enabled`):
 State persists in `<data>/models/tts/install-state.json`. At startup the
 cache is re-verified: a complete cache is recognized as installed and a
 missing/corrupt cache demotes an installed/enabled record to `failed`.
+
+**MeloTTS install specifics:** The source tree is not pip-installed; the
+checksum-verified archive is unpacked into `<cache>/melo-src` and imported via
+PYTHONPATH (only the pinned requirements are pip-installed into the venv). The
+install-time import check (`verifyRuntime`, `internal/tts/piper.go:286`) runs
+`melo_import_check.py` — the **same offline preamble** synthesis will use —
+under `meloEnv` via `runCmdEnv` (`internal/tts/piper.go:444`), so the check
+and the runtime cannot drift apart. A bare `python -c "import melo.api"` would
+reach the Hugging Face Hub, because `melo/text/cleaner.py` eagerly imports all
+six language backends and each loads a tokenizer at module scope. Because the
+MeloTTS package lives outside the venv, `Verify()` additionally checks that
+`melo/api.py` exists in the unpacked source — an artifact set plus a venv
+alone does not prove this engine runnable.
+
+**MeloTTS child-process environment (no `.env` entry needed):** The MeloTTS
+synthesis child gets `PYTHONPATH`, `NLTK_DATA`, `HF_HUB_OFFLINE=1`,
+`TRANSFORMERS_OFFLINE=1`, `TOKENIZERS_PARALLELISM=false`, `HF_HOME` and
+`ORT_DISABLE_TELEMETRY=1` from ocode itself (`meloEnv`,
+`internal/tts/melo.go:58`, pinned by `TestMeloEnvPinsOfflineAndCacheLocations`)
+plus a pinned `cmd.Dir` from the shared cwd/telemetry hardening
+(`applySynthProcessEnv`, `internal/tts/synth_env.go:22`). These are set **on
+the child process by ocode**, not read from the user's environment, so no
+`.env` entry is needed. `ORT_DISABLE_TELEMETRY` and the pinned cwd belong to
+the broader child-process env hardening covered by
+`gotchas/onnx-runtime-telemetry-memory-ses.md`.
 
 **Interpreters and install failures:** The installer probes candidate
 interpreters newest-supported-minor first, including versioned names
@@ -186,6 +258,19 @@ at the bottom. Browser Native pause, resume, stop, and replay are local to the
 browser tab; duration and seek are intentionally best-effort because browser
 speech implementations do not expose a reliable audio timeline.
 
+### Speak button states (added 2026-09-29)
+
+Every Speak surface goes through the shared `SpeakButton` (`web/src/components/Speech/SpeakButton.tsx`, with `useSpeakAction`): the per-message button in `AssistantText`, the thinking button in `ThinkingBlock`, and ChatPanel's "Speak selection" / "Speak visible". Pressing it disables the button (`aria-busy="true"`), swaps the icon for a spinner and the label for "Speaking…"; it re-enables on the request's outcome and shows the failure reason inline (`role="status"`) and in the `title`. A handler-level `pendingRef` guard drops a second click before React re-renders. There is no silent engine fallback — a failed local-engine read reports the error.
+
+This relies on an outcome contract:
+- `requestSpeech(text)` (and `useSpeech().speak` / `replay`) returns `Promise<SpeechOutcome>` where `SpeechOutcome = { ok: boolean, error?: string }` (exported from `SpeechProvider.tsx`). It RESOLVES rather than rejects, so fire-and-forget callers (terminal selections, "Speak visible") cannot leak unhandled rejections.
+- The queue item settles the caller's promise when playback STARTS — browser-native: after the first utterance is queued; local engine: after `audio.play()` resolves — not at the end of a long read. A failure before playback resolves `{ ok: false, error }`.
+- `stop` / `next` / `clearQueue` and provider unmount settle all outstanding waiters (resolve), so a button can never stay disabled.
+- Summariser failures remain non-fatal (the full text is spoken, `ok: true`).
+- The `ocode:speak` window event detail carries `handled` (set synchronously by the provider) and `onOutcome`; with no provider mounted, `requestSpeech` resolves `{ ok: false, error: "Speech is unavailable" }`.
+
+Regression tests: `web/src/components/Speech/SpeakButton.test.tsx` and the `speak outcomes` block in `web/src/components/Speech/SpeechProvider.queue.test.tsx`.
+
 ## Spoken summaries (fail-open) — updated 2026-09-28, amended 2026-09-29
 
 Optional prose rewriting sits between text extraction and synthesis. When the
@@ -227,23 +312,25 @@ prerequisite for speech.** Concretely, since the 2026-09-28 fix:
   `TestSpeechTextNeedsRewrite`.
 - **A long message opens with a one-line recap before the detail (added
   2026-09-29).** When the message is at or above
-  `speechSummaryRecapMinChars = 1200` runes (roughly one minute of speech at
+  `speechSummaryRecapMinChars = 800` runes (roughly half a minute of speech at
   160 wpm), `speechSummaryPromptFor` appends `speechSummaryRecapClause` to
-  the system prompt. The clause requires a one-line recap of the whole reply
-  — what it did or decided, and what that means, as one self-contained
-  sentence — written as the FIRST sentence, *in addition to* the usual
-  two-to-five detail sentences rather than as one of them, with the detail
-  not restating it. Two wording choices are load-bearing: without the "in
-  addition to" line a model treats the recap as sentence one and shrinks the
-  detail to compensate, losing more than the recap gains; and the recap must
-  be unlabelled plain prose with no heading, colon or line break, because
+  the system prompt. The clause opens with the big picture: one sentence on
+  what the whole reply did or decided AND what it means for the listener, in
+  words that stand on their own — then the usual two-to-five detail sentences,
+  whose detail must not restate it. The threshold was lowered from 1200 (about
+  a minute of speech) because by that point the listener has stopped
+  orienting and is only waiting for the point. Two wording choices are
+  load-bearing: without the "detail must not restate it" clause a model treats
+  the opener as sentence one and shrinks the detail to compensate, losing more
+  than the opener gains; and the opener must be unlabelled plain prose with no
+  heading, colon or line break, because
   `cleanSpeechSummary` strips a recognised "Summary:"-style first line and
   would delete a labelled recap along with its label. Below the threshold no
   recap is requested at all — a recap of a short reply just restates the
   summary's only sentence, and a short reply carrying an artifact needs the
   description, not an orientation line.
 - **The recap threshold must sit ABOVE the short-text skip gate.** The
-  1200-rune recap threshold is deliberately well above the 400-rune
+  800-rune recap threshold is deliberately well above the 400-rune
   `speechSummarySkipChars` gate, and that ordering is an invariant: at or
   below the skip gate a message is spoken verbatim without ever reaching the
   summariser, so a recap threshold there would be unreachable on length and
@@ -255,7 +342,7 @@ prerequisite for speech.** Concretely, since the 2026-09-28 fix:
   `TestSummarizeForSpeechOmitsTheRecapInstructionOnAShorterMessage`.
 - **The prompt version is salted into the summary cache key (added
   2026-09-29).** `speechSummaryCacheKey` hashes `speechSummaryPromptVersion`
-  (currently `"2"`) together with the model id and the message text —
+  (currently `"3"`) together with the model id and the message text —
   sha256 over `version || 0x00 || modelID || 0x00 || text`, via
   `speechSummaryCacheKeyFor` (`internal/agent/speech_summary.go`). The cache
   is otherwise keyed on text + model, which cannot see a PROMPT change:

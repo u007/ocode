@@ -86,6 +86,19 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   const activeModel = useChatSelector((s) => s.model);
   const smallModel = useChatSelector((s) => s.smallModel);
   const advisorModel = useChatSelector((s) => s.advisorModel);
+  // The advisor model is PER CHAT. For a real session the server stamps that
+  // chat's own model into its status snapshot (advisor_model), and a just-made
+  // pick lives in the slice override until the snapshot confirms it. Falling
+  // back to the global only makes sense when no real session is in scope —
+  // that global is the default a NEW chat starts with, not this chat's value.
+  const realSessionId =
+    sessionId && !sessionId.startsWith("new-") ? sessionId : undefined;
+  const sessionAdvisorModel = useChatSelector((s) => {
+    if (!realSessionId) return "";
+    const slice = getSessionSlice(s, realSessionId);
+    return slice.advisorModel ?? slice.tuiStatus?.advisor_model ?? "";
+  });
+  const effectiveAdvisorModel = sessionAdvisorModel || advisorModel || "";
   // Per-session main model used to highlight the active model in the picker
   // when a session is scoped. For a real session the status snapshot's
   // main_model (the server's effective model) wins; for a draft tab the
@@ -232,8 +245,17 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     api.getSmallModel(...hostArgs).then((res) => {
       dispatch({ type: "SET_SMALL_MODEL", model: res.model });
     }).catch(console.error);
-    api.getAdvisor(...hostArgs).then((res) => {
-      dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
+    api.getAdvisor(host, realSessionId).then((res) => {
+      if (realSessionId) {
+        dispatch({
+          type: "SET_SESSION_ADVISOR_CONFIG",
+          sessionId: realSessionId,
+          model: res.model,
+          checkpoints: res.checkpoints,
+        });
+      } else {
+        dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
+      }
     }).catch(console.error);
     if (purpose === "permission") {
       api.getPermissionModel(...hostArgs).then((res) => {
@@ -369,7 +391,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       case "small":
         return smallModel;
       case "advisor":
-        return advisorModel;
+        return effectiveAdvisorModel;
       case "permission":
         return currentValues?.permission ?? permissionModelState;
       case "explorer":
@@ -400,7 +422,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       case "advisor":
         {
           const selection = advisorSelectionPayload(selectedModel);
-          dispatch({ type: "SET_ADVISOR_MODEL", model: selection.model });
+          const claudeCode = selectedModel.provider === CLAUDE_CODE_PROVIDER;
           onPick?.(purpose, selection.model, selectedModel);
           // Mirror the TUI (`/advisor <provider/model>` → SaveAdvisorModel):
           // the Claude Code CLI backend is ON exactly when the picked provider
@@ -410,11 +432,29 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // prevents claude_code from staying true after a registry pick (the
           // advisor would otherwise shell out to `claude -p --model <non-claude
           // -model>` instead of calling the picked provider's API).
-          persist("Changing the advisor model", () =>
-            api.setAdvisorFull(
-              { ...selection, claude_code: selectedModel.provider === CLAUDE_CODE_PROVIDER },
-              ...hostArgs,
-            ),
+          if (realSessionId) {
+            // This chat's own advisor model. The server pins it to the session
+            // and pushes a session-tagged status snapshot, so no other chat
+            // moves — the same scoping the main-model pick uses.
+            dispatch({
+              type: "SET_SESSION_ADVISOR_CONFIG",
+              sessionId: realSessionId,
+              model: selection.model,
+            });
+            persist("Changing this session's advisor model", () =>
+              api.setAdvisorFull(
+                { ...selection, claude_code: claudeCode },
+                host,
+                realSessionId,
+              ),
+            );
+            break;
+          }
+          // Draft tab or no session: move the default that NEW chats start
+          // with. Existing chats keep their own pinned model.
+          dispatch({ type: "SET_ADVISOR_MODEL", model: selection.model });
+          persist("Changing the default advisor model", () =>
+            api.setAdvisorFull({ ...selection, claude_code: claudeCode }, host),
           );
         }
         break;

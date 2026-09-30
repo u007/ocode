@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { api } from "../../api/client";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
+import { isDelimitedTextPath } from "../../lib/previewKind";
 
 // Caps so a huge spreadsheet can't freeze the tab: we render the leading
 // window and say so, instead of dumping 100k rows into the DOM. Full
@@ -84,9 +85,10 @@ export default function ExcelViewer({
         if (cancelled) return;
         // sheetRows caps parsing itself (not just rendering) so a 100k-row
         // workbook can't freeze the tab during SheetJS parsing either.
-        // CSV has no binary magic for format sniffing — decode and parse
-        // it as text instead.
-        const wb = path.toLowerCase().endsWith(".csv")
+        // Delimited text has no binary magic, so it must be decoded as UTF-8
+        // before SheetJS sees it: `type: "array"` reads raw bytes as latin-1
+        // and mojibakes every non-ASCII cell. See isDelimitedTextPath.
+        const wb = isDelimitedTextPath(path)
           ? XLSX.read(new TextDecoder().decode(buf), { type: "string", sheetRows: MAX_ROWS })
           : XLSX.read(buf, { type: "array", sheetRows: MAX_ROWS });
         parseWorkbook(wb);

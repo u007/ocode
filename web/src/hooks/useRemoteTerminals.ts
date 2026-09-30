@@ -57,9 +57,15 @@ export function useRemoteTerminals(
     if (!enabled || !host) return;
     void fetchTerminals();
     const off = eventBus.onReconnect(() => void fetchTerminals());
+    // A terminal opened in ANOTHER client (the desktop app) is announced by the
+    // server's terminal_tabs_changed. Without this the list was fetched once on
+    // mount and then never again, so a browser that was already open showed
+    // "0 terminals" indefinitely — the count could never catch up.
+    const offChanged = eventBus.on("terminal_tabs_changed", () => void fetchTerminals());
     return () => {
       cancelledRef.current = true;
       off();
+      offChanged();
     };
   }, [enabled, host, fetchTerminals]);
 

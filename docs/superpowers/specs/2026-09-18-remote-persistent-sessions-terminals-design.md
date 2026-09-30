@@ -1,7 +1,7 @@
 ---
 type: Decision
 title: Remote Persistent Sessions and Terminals Design
-description: 'Approved design: remote (SSH/WSL) project terminals run inside the host ocode serve --remote and survive laptop sleep/restart; version-mismatched remote servers are reused, surfaced, and restartable; sidebar lists remote chats and terminals for reattach.'
+description: 'Approved design: remote (SSH/WSL) project terminals run inside the host ocode serve --remote and survive laptop sleep/restart; version-mismatched remote servers are reused, surfaced, and restartable; sidebar shows a live (open∪running) chat inventory plus terminals for reattach.'
 tags:
   - remote
   - terminal
@@ -10,13 +10,21 @@ tags:
   - implemented
   - web
   - server
-timestamp: 2026-09-18T17:06:20Z
+timestamp: 2026-09-30T04:22:08Z
 ---
+# Remote Persistent Sessions and Terminals Design
+
+**Type:** Decision  
+**Description:** Approved design: remote (SSH/WSL) project terminals run inside the host ocode serve --remote and survive laptop sleep/restart; version-mismatched remote servers are reused, surfaced, and restartable; sidebar shows a live (open∪running) chat inventory plus terminals for reattach.  
+**Tags:** remote, terminal, sessions, design, implemented, web, server  
+
+---
+
 
 # Remote Persistent Sessions and Terminals Design
 
 **Date:** 2026-09-18
-**Status:** Implemented — 2026-09-19
+**Status:** Implemented — 2026-09-19; sidebar chat inventory revised to a live (open∪running) view 2026-09-30
 **Scope:** Remote (SSH/WSL) projects only. Local projects are untouched.
 
 ## Problem
@@ -175,7 +183,21 @@ sessions may be left in a confusing state but are not lost.
 Clicking the status line expands the row:
 
 - **Chats**: session title, running badge, click opens the session as a tab
-  (existing open-session action). Already-open sessions are marked.
+  (existing open-session action). Open sessions are marked. **Revised
+  2026-09-30 — this is a LIVE view, not a listing of every persisted
+  session:** a session is shown only if it is **open as a tab in this
+  window OR running an agent turn on the host** (`openSessionIds.has(s.id) ||
+  running.has(s.id)` in `RemoteProjectStatus.tsx`; `running` comes from the
+  per-host `runs` bus, so a remote session running with no local tab still
+  appears). The collapsed `N chats (R running)` count is computed over the
+  same filtered set, and the empty state reads "No open chats". Originally
+  the design listed ALL of the host's sessions; once listing actually
+  loaded, that flooded the row with past chats and buried the ones in
+  progress. **Closed, non-running remote chats are reached through the
+  Sessions dialog** (`SessionDialog.tsx`, the full browser), not the
+  sidebar. Pinned by `RemoteProjectStatus.test.tsx` (open-only,
+  running-only, both, neither, empty) and `SessionDialog.test.tsx` ("opens
+  a closed remote session with its host bound").
 - **Terminals**: title (OSC title or shell name), click attaches it as a
   terminal tab by id using the existing reattach. Already-open ids are
   marked. A small kill icon calls the proxied DELETE.
@@ -255,7 +277,13 @@ Web:
 - `RemoteProjectStatus.test.tsx`: status row shows outdated badge with
   Restart action; not-connected row shows Connect action; click Connect
   triggers status refresh; expanded row lists terminals with kill icons;
-  kill calls DELETE and refreshes list.
+  kill calls DELETE and refreshes list. Live-chat-view cases (added
+  2026-09-30): a session shows only when open, only when running, when
+  both, never when neither; empty state reads "No open chats".
+- `SessionDialog.test.tsx`: "opens a closed remote session with its host
+  bound" (2026-09-30) — the dialog is the path to a closed remote chat.
+- `App.tabFocusRemote.test.tsx`: seeds the remote chat as an open tab (the
+  inventory is a live view and no longer opens closed chats).
 - `TerminalPanel.wake.test.tsx`: visibilitychange and online events reset
   backoff and reconnect immediately.
 - `terminalStore.closeKill.test.tsx`: killTerminal removes local tab and

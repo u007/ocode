@@ -12,6 +12,19 @@ const webglRegistry = vi.hoisted(() => ({ instances: [] as Array<{ dispose: Retu
 // re-acquire it on activation. Titles and shell output keep flowing through
 // the unchanged data handlers in both states — only the GPU renderer cycles.
 
+// terminalStore subscribes to the server's `terminal_tabs_changed` bus event;
+// the real eventBus auto-starts an SSE stream on the first on(), calling
+// remoteApiBase() from this suite's partial api mock. Mirrors the real bus
+// surface the store uses (on/off/onReconnect/offReconnect).
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: () => () => {},
+    off: () => {},
+    onReconnect: () => () => {},
+    offReconnect: () => {},
+  },
+}));
+
 vi.mock("@xterm/xterm", () => {
   class Terminal {
     cols = 80;

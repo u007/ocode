@@ -149,30 +149,66 @@ export function usePulseTail(
 
     if (status === "running") {
       setLoading(true);
+      // The "text" subscription below is installed synchronously, so chunks
+      // arrive while the seed request is still in flight. Appending them
+      // straight to the buffer put them BEFORE the seed's own live_frames —
+      // out of order, and showing twice any frame present in both. Hold them
+      // until the seed lands, then replay seed-then-held in that order.
+      let seeding = true;
+      let heldLive = "";
+      const cap = (text: string) =>
+        text.length > TEXT_BUFFER_CAP ? text.slice(-TEXT_BUFFER_CAP) : text;
+
       api
         .getSessionState(sessionId)
         .then((state) => {
           settle();
           if (stale()) return;
+          let seedText = "";
           for (const frame of state.live_frames ?? []) {
             if (frame.event !== "text") continue;
-            bufferRef.current += textDelta(frame.data);
+            seedText += textDelta(frame.data);
           }
+          if (!seeding) return; // the failure path already released the buffer
+          seeding = false;
+          bufferRef.current = cap(seedText + heldLive);
+          heldLive = "";
           publish();
         })
         .catch((err) => {
+          // Stop holding chunks back: the overlay now carries the error, and a
+          // subscriber that never flushes would show an empty card forever.
+          seeding = false;
+          if (heldLive) {
+            bufferRef.current = cap(heldLive);
+            heldLive = "";
+            publish();
+          }
           settle();
           fail("session state", err);
         });
 
       unsubscribe = eventBus.on("text", (env) => {
         if (env.session_id !== sessionId) return;
-        append(textDelta(env.data));
+        const chunk = textDelta(env.data);
+        if (seeding) {
+          heldLive += chunk;
+          return;
+        }
+        append(chunk);
       });
     } else {
       setLoading(true);
       api
-        .getSession(sessionId, { limit: IDLE_FETCH_LIMIT })
+        .getSession(sessionId, {
+          limit: IDLE_FETCH_LIMIT,
+          // Opt out of the revision baseline: this is a speculative read of a
+          // card the user is only hovering, not an open tab's transcript load.
+          // Recording one would stamp a FRESH revision over an open tab that is
+          // still showing older content, and the revalidation poll would then
+          // see "no change" and never repair it.
+          noteRevision: false,
+        })
         .then((detail) => {
           settle();
           if (stale()) return;

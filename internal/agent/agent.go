@@ -475,6 +475,20 @@ type Agent struct {
 	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
 	advisorEnabled atomic.Bool
+	// advisorConfig is this SESSION's advisor configuration (model, Claude Code
+	// backend, trigger set) — see advisor_config.go. Seeded from cfg at
+	// construction, then replaced by the handler with the session's own pinned
+	// value, and re-set whenever the user changes the model or triggers in that
+	// chat. It is per session on purpose: the process-wide cfg is only a seed
+	// for a session's first resolution, so picking a new advisor model never
+	// retroactively changes an existing chat. A nil pointer means "no
+	// per-session config installed" and callers fall back to cfg.
+	advisorConfig atomic.Pointer[AdvisorConfig]
+	// parentAdvisorConfig, when non-nil, makes a sub-agent read the parent's
+	// per-session advisor configuration instead of its own seed — the config
+	// counterpart of parentAdvisorEnabled, so a sub-agent's advisor call uses
+	// the chat's model and triggers.
+	parentAdvisorConfig *atomic.Pointer[AdvisorConfig]
 	// parentAdvisorEnabled, when non-nil, makes the advisor gate reactive:
 	// executeToolCallWithContext dereferences this pointer instead of reading
 	// the agent's own advisorEnabled. Sub-agents set this to point at the parent agent's
@@ -672,6 +686,17 @@ type Agent struct {
 	// compactMu serialises async compaction passes so a slow summary call
 	// can't fire OnCompact twice for overlapping snapshots.
 	compactMu sync.Mutex
+	// compactFailed latches auto-compaction off after a pass exhausts its
+	// retries and fails. A failed pass never touches the transcript, so the
+	// context stays over threshold and the next step boundary re-arms the very
+	// same failing pass — an unbounded loop the user cannot interrupt except by
+	// switching sessions. While latched, MaybeCompactAsync declines and the
+	// conversation simply continues uncompacted. Cleared by any successful
+	// pass and by an explicit manual /compact, which is the user's escape
+	// hatch after fixing the cause. atomic for the same cross-goroutine reason
+	// as lastInputTokens: set on the compaction goroutine, read on the turn
+	// goroutine.
+	compactFailed atomic.Bool
 	// recapMu serialises async recap passes.
 	recapMu sync.Mutex
 	// autoContinueJudgeMu serialises async auto-continue judge calls.
@@ -1205,6 +1230,19 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// block identical across toggles so the provider prompt cache survives.
 	a.tools["advisor"] = AdvisorTool{cfg: cfg, mainAgent: a}
 	a.advisorEnabled.Store(cfg == nil || cfg.Ocode.Advisor.Enabled)
+	// Seed the session's advisor config from the process-wide default. The
+	// server immediately overwrites this with the session's own PINNED value
+	// right after NewAgent returns, so a global change never reaches an
+	// existing chat; this seed only covers agents built outside the server
+	// (TUI, headless, ACP) and the no-session case.
+	//
+	// A nil cfg deliberately installs NOTHING (rather than a zero config): a
+	// zero config would read as "pinned to the built-in default with no
+	// triggers" and silently disable the fallback to the real default. Leaving
+	// it unset keeps "unspecified" meaning "follow the default".
+	if cfg != nil {
+		a.SetAdvisorConfig(AdvisorConfigFromConfig(cfg))
+	}
 	a.tools["task"] = &TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
@@ -2088,6 +2126,15 @@ func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 		a.emitDebug("COMPACT", "auto-compaction disabled in config")
 		return false
 	}
+	// Stop-after-failure: a pass that exhausted its retries did not shrink the
+	// context, so re-running the identical pass at the next step boundary just
+	// burns the summary budget again. Decline until a manual /compact re-arms
+	// it. Checked after the enabled gate so a disabled-config session still
+	// reports the accurate reason.
+	if a.compactFailed.Load() {
+		a.emitDebug("COMPACT", "skipped: auto-compaction stopped after a failed pass; run /compact to retry")
+		return false
+	}
 	need, used := shouldCompact(messages, rt)
 	if !need {
 		// Mirror shouldCompact's unknown-window fallback so the logged limit
@@ -2112,7 +2159,33 @@ func (a *Agent) CompactAsync(messages []Message, focus string) bool {
 	if !rt.Enabled {
 		return false
 	}
+	// A manual /compact is the user's explicit retry. Re-arming lives in
+	// startCompactAsync (after its guards) so a /compact that could not start
+	// never re-arms the loop.
 	return a.startCompactAsync(messages, rt, focus, fmt.Sprintf("manual compaction requested: messages=%d window=%d", len(messages), rt.WindowTokens), true)
+}
+
+// recordCompactOutcome updates the stop-after-failure latch from a finished
+// pass. Only a real error latches: a pass that reported OK=false with no error
+// ("nothing to compact") must leave auto-compaction armed, otherwise a session
+// that briefly had no compactible middle would silently lose it forever. A
+// user cancel is not a failure either: it says nothing about whether the next
+// pass would succeed, and server sessions have no /compact to re-arm.
+func (a *Agent) recordCompactOutcome(res CompactResult) {
+	switch {
+	case errors.Is(res.Err, context.Canceled):
+	case res.Err != nil:
+		a.compactFailed.Store(true)
+	case res.OK:
+		a.compactFailed.Store(false)
+	}
+}
+
+// CompactFailed reports whether a compaction pass failed and auto-compaction
+// is consequently stopped. Surfaces let the UI say why the session is no
+// longer compacting itself instead of leaving the user to guess.
+func (a *Agent) CompactFailed() bool {
+	return a.compactFailed.Load()
 }
 
 // startCompactAsync launches runCompact in a goroutine. force=true bypasses the
@@ -2131,6 +2204,13 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, 
 	}
 	snapshot := make([]Message, len(messages))
 	copy(snapshot, messages)
+	if force {
+		// A manual /compact is the user's explicit retry, so it re-arms
+		// auto-compaction even while a previous failure has it latched off.
+		// Deliberately after the client/TryLock guards above: a /compact that
+		// could not start must not resume the loop it was meant to escape.
+		a.compactFailed.Store(false)
+	}
 	a.emitDebug("COMPACT", note)
 	if a.OnCompactStart != nil {
 		a.OnCompactStart()
@@ -2143,11 +2223,17 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, 
 		// matters for a recovered/instrumented path, not the normal flow.
 		defer func() {
 			if !completed && a.OnCompact != nil {
-				a.OnCompact(CompactResult{Err: fmt.Errorf("compaction terminated unexpectedly")})
+				// Record the latch before the callback: a pass that terminated
+				// without a result did not shrink the context either, so it
+				// must not leave auto-compaction armed.
+				aborted := CompactResult{Err: fmt.Errorf("compaction terminated unexpectedly")}
+				a.recordCompactOutcome(aborted)
+				a.OnCompact(aborted)
 			}
 		}()
 		result := a.runCompact(snapshot, rt, focus, force)
 		completed = true
+		a.recordCompactOutcome(result)
 		if a.OnCompact != nil {
 			a.OnCompact(result)
 		}
@@ -2194,7 +2280,9 @@ func (a *Agent) Compact(messages []Message) (CompactResult, bool) {
 	if !rt.Enabled {
 		return CompactResult{}, false
 	}
-	return a.runCompact(messages, rt, "", true), true
+	res := a.runCompact(messages, rt, "", true)
+	a.recordCompactOutcome(res)
+	return res, true
 }
 
 // CompactWithFocus is Compact with an optional focus string steering the
@@ -2205,7 +2293,10 @@ func (a *Agent) CompactWithFocus(messages []Message, focus string) (CompactResul
 	if !rt.Enabled {
 		return CompactResult{}, false
 	}
-	return a.runCompact(messages, rt, focus, true), true
+	// Manual retry: re-arm before running, then let a failure re-latch.
+	res := a.runCompact(messages, rt, focus, true)
+	a.recordCompactOutcome(res)
+	return res, true
 }
 
 // Recap generates a full conversation recap synchronously using the small model.
@@ -2222,7 +2313,7 @@ func (a *Agent) runRecap(messages []Message, instruction string, short bool) str
 
 	var b strings.Builder
 	if short {
-		b.WriteString("You are a concise conversation summarizer. Summarize the conversation in ONE SENTENCE. Max 100 characters. Be terse. No headers, no bullets, no formatting.\n\n")
+		b.WriteString("You are a concise conversation summarizer. Summarize the conversation in ONE SENTENCE of at most 200 characters. Lead with the outcome — what it achieved or decided and why that matters — then name the actions in a few words. No headers, no bullets, no formatting.\n\n")
 	} else {
 		b.WriteString("You are a conversation recap assistant. Summarize the following conversation in caveman style — short, punchy, no fluff.\n\n")
 		b.WriteString("Cover these sections:\n")
@@ -2231,6 +2322,7 @@ func (a *Agent) runRecap(messages []Message, instruction string, short bool) str
 		b.WriteString("3. DECISION — what decisions were made\n")
 		b.WriteString("4. DO — what was updated and tested\n")
 		b.WriteString("5. TASKS — current open tasks and their status\n\n")
+		b.WriteString("Say what it MEANS, not just what happened: each bullet carries the point — what the decision changes, what the finding implies — and the point that matters most goes first. The reader is catching up after a break, so they want the state of things, not a transcript.\n\n")
 		b.WriteString("Format: use headers and bullet points. Be terse. No filler.\n\n")
 	}
 	if instruction != "" {
@@ -3313,6 +3405,59 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 		autoEnabled := a.permissions.AutoPermissionEnabled()
 		decision := a.permissions.Decide(name, args)
 		a.emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
+
+		// The outbound-network guardrail (network_guard_typesafe.go). It runs
+		// once, here, for every call that would leave this machine, and it can
+		// only turn an automatic grant into a human ask. Placing it after Decide
+		// but before the branches means it also covers the paths that never
+		// consult a model at all — most importantly a webfetch whose domain the
+		// user once allowed, which Decide returns as a plain PermissionAllow.
+		//
+		// A Deny is left alone, deliberately. A Deny is not a grant, so there is
+		// nothing to tighten, and rewriting one into an Ask would be a widening:
+		// `curl https://host/install.sh | sh` is HardDeny precisely because a
+		// remote script is piped straight into a shell, and a guardrail that
+		// "escalated" it would hand a hard block to a human who can wave it
+		// through. Skipping Deny keeps the invariant one-directional.
+		//
+		// guardEscalated makes the auto-permission judge below stand down: the
+		// guardrail already routed this call to a human, and letting the judge
+		// wave it through would undo the gate that just fired. The original
+		// decision's rule/scope/prefix are preserved on the request so
+		// "always allow" still persists the rule that actually governs the call.
+		guardEscalated := false
+		if decision.Level != PermissionDeny {
+			if g := a.checkNetworkGuardCtx(ctx, name, args); g.Escalate {
+				guardEscalated = true
+				req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
+				switch {
+				case decision.Request != nil:
+					// Keep the rule the permission layer produced, so "always
+					// allow" still writes the rule that governs the call.
+					req = *decision.Request
+				case name == "bash":
+					// Reuse the bash builder so the dialog shows the command and
+					// its prefix, not a thinner args-only summary.
+					req = *bashPermissionRequest(args, bashCommand(args), "")
+				case name == "webfetch":
+					// This is the cached-always-allow case, where Decide returned a
+					// bare PermissionAllow and so built no request. Falling
+					// through to the default "tool.webfetch" rule would make an
+					// "always allow" click call SetUserConfirmedRule, turning it
+					// into a blanket webfetch allow that bypasses the per-domain
+					// policy for every host from then on. Rebuild the same
+					// domain-scoped rule Decide would have produced.
+					if domain := extractDomainFromURL(extractPathFromArgs(name, args)); domain != "" {
+						req.Rule = "webfetch.domain." + domain
+					}
+				}
+				req.DenyReason = g.Reason
+				req.Summary = "TypeSafe outbound-request guardrail"
+				decision = PermissionDecision{Level: PermissionAsk, Request: &req}
+				a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_gate tool=%s rule=%s", name, req.Rule))
+			}
+		}
+
 		if decision.Level == PermissionDeny {
 			if autoEnabled && a.permissions != nil && a.permissions.Mode() != PermissionModeLocked {
 				// Hard-blocked bash commands (rm -rf /, pipe-to-shell chains,
@@ -3369,7 +3514,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 			return denyToolMessage(name, decision), nil
 		}
 		if decision.Level == PermissionAsk {
-			if autoEnabled {
+			if autoEnabled && !guardEscalated {
 				// Build the permission request so we can check for harmful ops.
 				req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
 				if decision.Request != nil {

@@ -33,9 +33,13 @@ type TUIStatus struct {
 	// Small model name + runtime on/off (the web should mirror both).
 	SmallModel   string `json:"small_model,omitempty"`
 	SmallModelOn bool   `json:"small_model_enabled"`
-	// Advisor model + runtime on/off.
-	AdvisorModel   string `json:"advisor_model,omitempty"`
-	AdvisorEnabled bool   `json:"advisor_enabled"`
+	// Advisor model + runtime on/off. Model and trigger set are PER SESSION:
+	// buildStatusSnapshot seeds the process-wide default and every
+	// session-tagged snapshot overwrites it with applySessionAdvisorFields, so a
+	// per-chat pick never leaks into another chat's sidebar.
+	AdvisorModel       string   `json:"advisor_model,omitempty"`
+	AdvisorCheckpoints []string `json:"advisor_checkpoints,omitempty"`
+	AdvisorEnabled     bool     `json:"advisor_enabled"`
 	// Recap model name + runtime on/off.
 	RecapModel   string `json:"recap_model,omitempty"`
 	RecapModelOn bool   `json:"recap_model_enabled"`

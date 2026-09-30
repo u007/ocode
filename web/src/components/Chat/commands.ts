@@ -351,7 +351,9 @@ export interface CommandContext {
      *  read/write to the server that runs it. */
     getSmallModelWithEnabled?: (host?: string) => Promise<{ model: string; enabled: boolean }>;
     /** Advisor model (/advisor). */
-    getAdvisor?: (host?: string) => Promise<{ model: string }>;
+    /** Advisor model. With a sessionId it reports THAT chat's own model (the
+     *  advisor is per chat); without one, the default new chats start with. */
+    getAdvisor?: (host?: string, sessionId?: string) => Promise<{ model: string }>;
 
     // ── Slash-command parity additions ──
     getLimitsConfig?: () => Promise<{ max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }>;
@@ -3193,12 +3195,16 @@ async function handleSmallModel(ctx: CommandContext): Promise<CommandResult> {
 
 async function handleAdvisor(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const cfg = await ctx.api.getAdvisor?.(ctx.host);
+    // Report THIS chat's advisor model: the model is per session, so the
+    // process-wide default would be the wrong answer inside a conversation.
+    const sessionId = activeSessionId(ctx);
+    const cfg = await ctx.api.getAdvisor?.(ctx.host, sessionId);
+    const where = sessionId ? "this session" : "new chats";
     return {
       handled: true,
       messages: [{
         role: "assistant",
-        content: `**Advisor model:** ${cfg?.model || "default"}\n\nSet it with \`/advisor <model>\` or from settings.`,
+        content: `**Advisor model** (${where}): ${cfg?.model || "default"}\n\nSet it with \`/advisor <model>\` or from settings.`,
       }],
     };
   } catch {

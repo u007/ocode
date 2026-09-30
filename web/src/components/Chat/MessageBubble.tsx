@@ -13,7 +13,7 @@ import { renderedSpeechText } from "../Speech/speechUtils";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 import { dispatchRestore } from "../../lib/inputRestore";
-import { RotateCcw, Volume2 } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -25,6 +25,7 @@ import {
 import { Button } from "../ui/button";
 import MarkdownLink from "../common/MarkdownLink";
 import { requestSpeech } from "../Speech/SpeechProvider";
+import { SpeakButton, type SpeakAction } from "../Speech/SpeakButton";
 import { renderedCopyText } from "../../lib/copyText";
 import { BlockCopyControl } from "./BlockCopyControl";
 
@@ -68,7 +69,7 @@ export function hasRenderableText(content: string | undefined | null): boolean {
 // `onSpeak` receives the RENDERED text of this block (extracted from the DOM in
 // `speechRef`), never the raw markdown `content`: speaking the source would read
 // heading hashes, `**` markers, backticks and link targets aloud.
-export function AssistantText({ content, onSpeak }: { content: string; onSpeak?: (text: string) => void }) {
+export function AssistantText({ content, onSpeak }: { content: string; onSpeak?: SpeakAction }) {
   const speechRef = useRef<HTMLDivElement>(null);
   return (
     <div className="flex justify-start mb-3">
@@ -171,19 +172,15 @@ export function AssistantText({ content, onSpeak }: { content: string; onSpeak?:
           // extractor reads `[data-speech-content]`, so a control inside that
           // subtree would have its own label ("Speak") read aloud. The button
           // also opts out explicitly for any container-wide extraction.
-          <button
-            type="button"
-            aria-label="Speak message"
+          // SpeakButton disables itself and shows a spinner while the request
+          // is prepared, and re-enables with an inline error if it fails.
+          <SpeakButton
+            getText={() => renderedSpeechText(speechRef.current)}
+            onSpeak={onSpeak}
+            ariaLabel="Speak message"
             title="Speak message"
-            data-speech-exclude=""
-            onClick={() => {
-              const text = renderedSpeechText(speechRef.current);
-              if (text) onSpeak(text);
-            }}
-            className="mt-2 mr-2 inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
-          >
-            <Volume2 className="h-3.5 w-3.5" /> Speak
-          </button>
+            className="mt-2 mr-2 inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+          />
         )}
         <BlockCopyControl
           rawText={content}

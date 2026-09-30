@@ -11,8 +11,8 @@ import (
 // unit-level guard: results are yielded as they arrive, not in input order, so
 // a blocked project cannot hold back a ready one.
 func TestForEachGitStatusConcurrentlyYieldsFastBeforeSlow(t *testing.T) {
-	old := gitStatusFn
-	defer func() { gitStatusFn = old }()
+	old := currentGitStatusFn()
+	defer setGitStatusFn(old)
 
 	release := make(chan struct{})
 	var once sync.Once
@@ -20,12 +20,12 @@ func TestForEachGitStatusConcurrentlyYieldsFastBeforeSlow(t *testing.T) {
 	defer releaseSlow()
 	go func() { time.Sleep(2 * time.Second); releaseSlow() }()
 
-	gitStatusFn = func(project string) (GitStatus, error) {
+	setGitStatusFn(func(project string) (GitStatus, error) {
 		if project == "slow" {
 			<-release
 		}
 		return GitStatus{Branch: project}, nil
-	}
+	})
 
 	var order []string
 	forEachGitStatusConcurrently([]string{"slow", "fast"}, func(project string, _ GitStatus, _ error) {
@@ -45,8 +45,8 @@ func TestForEachGitStatusConcurrentlyYieldsFastBeforeSlow(t *testing.T) {
 func TestGitWatcherSlowProjectDoesNotDelayAnother(t *testing.T) {
 	h := NewHandler()
 
-	old := gitStatusFn
-	defer func() { gitStatusFn = old }()
+	old := currentGitStatusFn()
+	defer setGitStatusFn(old)
 	release := make(chan struct{})
 	var once sync.Once
 	releaseSlow := func() { once.Do(func() { close(release) }) }
@@ -55,13 +55,13 @@ func TestGitWatcherSlowProjectDoesNotDelayAnother(t *testing.T) {
 
 	const slow = "/proj/slow"
 	const fast = "/proj/fast"
-	gitStatusFn = func(project string) (GitStatus, error) {
+	setGitStatusFn(func(project string) (GitStatus, error) {
 		if project == slow {
 			<-release
 			return GitStatus{}, nil
 		}
 		return GitStatus{Branch: "fast"}, nil
-	}
+	})
 
 	ch := h.bus.Subscribe([]string{slow, fast})
 	defer h.bus.Unsubscribe(ch)
@@ -93,16 +93,16 @@ func TestGitWatcherSlowProjectDoesNotDelayAnother(t *testing.T) {
 func TestGitWatcherFailedStatusPublishesNothing(t *testing.T) {
 	h := NewHandler()
 
-	old := gitStatusFn
-	defer func() { gitStatusFn = old }()
+	old := currentGitStatusFn()
+	defer setGitStatusFn(old)
 	const broken = "/proj/broken"
 	const ok = "/proj/ok"
-	gitStatusFn = func(project string) (GitStatus, error) {
+	setGitStatusFn(func(project string) (GitStatus, error) {
 		if project == broken {
 			return GitStatus{}, errors.New("git status for /proj/broken timed out after 10s")
 		}
 		return GitStatus{Branch: "main", IsRepo: true}, nil
-	}
+	})
 
 	ch := h.bus.Subscribe([]string{broken, ok})
 	defer h.bus.Unsubscribe(ch)

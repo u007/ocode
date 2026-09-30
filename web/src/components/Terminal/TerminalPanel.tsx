@@ -278,6 +278,16 @@ export default function TerminalPanel({
   // Set true when the close was intentional (user closed the tab or the
   // server confirmed the shell is gone) so we don't try to reconnect.
   const manualCloseRef = useRef(false);
+  // Set when the server sent `detached: superseded` — another client took this
+  // terminal id's single attachment slot. Ref (not state) so the onclose path
+  // and the reconnect backoff can read it without re-rendering mid-teardown;
+  // `takenOver` is the rendered form.
+  const takeoverRef = useRef(false);
+  const [takenOver, setTakenOver] = useState(false);
+  const takenOverRef = useRef(false);
+  /** The effect's connectSocket, reachable from the Take over button (which
+   *  renders outside the effect). Set when the socket effect runs. */
+  const connectSocketRef = useRef<(() => void) | null>(null);
 
   const findOpenRef = useRef(findOpen);
   const findQueryRef = useRef(findQuery);
@@ -1034,6 +1044,7 @@ export default function TerminalPanel({
       // an unreachable remote. onopen resets it once a socket actually opens.
       attachedRef.current = false;
 
+      connectSocketRef.current = () => connectSocket();
       nextSocket.onopen = () => {
         // A superseded socket can still fire onopen (it was CONNECTING when
         // replaced). Ignore it so the supersede can't steal the fit/resize or
@@ -1049,6 +1060,12 @@ export default function TerminalPanel({
           reconnectTimerRef.current = null;
         }
         reconnectAttemptRef.current = 0;
+        // A fresh socket owns the terminal again; drop the takeover banner.
+        if (takenOverRef.current) {
+          takeoverRef.current = false;
+          takenOverRef.current = false;
+          setTakenOver(false);
+        }
       };
       // Chunk large live writes to prevent memory spikes from one-shot decode+write.
       // This cap only applies after the complete server restore has finished;
@@ -1091,11 +1108,22 @@ export default function TerminalPanel({
         // output was replaced by the new socket's own replay.
         if (socketRef.current !== nextSocket) return;
         if (typeof ev.data === "string") {
-          let msg: { type?: string; resumed?: boolean };
+          let msg: { type?: string; resumed?: boolean; reason?: string };
           try {
             msg = JSON.parse(ev.data);
           } catch (err) {
             console.error("terminal: unparseable control frame", ev.data, err);
+            return;
+          }
+          if (msg.type === "detached") {
+            // Another client attached this terminal id and took the single
+            // attachment slot. The server closes this socket immediately after,
+            // so without recording the reason the close is indistinguishable
+            // from a shell exit — and both auto-reconnect paths (backoff timer,
+            // onWake) would re-attach, taking the slot back and starting a
+            // two-client ping-pong that also respawns the shell after a close.
+            // Arm the takeover state; onclose turns it into the UI below.
+            takeoverRef.current = true;
             return;
           }
           if (msg.type === "attach") {
@@ -1167,6 +1195,24 @@ export default function TerminalPanel({
         // buffer contains the complete last output.
         flushChunksSync();
         const finalize = () => {
+          if (takeoverRef.current) {
+            // Another client owns this terminal now. Show the takeover state
+            // and reconnect NOTHING: both auto-reconnect paths would take the
+            // slot back, and the two clients would ping-pong. The user takes it
+            // back deliberately via the button.
+            // takeoverRef STAYS set for the lifetime of the takeover state —
+            // it is the guard onWake reads. It is cleared only by the Take over
+            // button or by a successful reopen, so clearing it here would let
+            // the next wake steal the terminal straight back.
+            takenOverRef.current = true;
+            reconnectingRef.current = false;
+            setTakenOver(true);
+            term.write(
+              "\r\n\x1b[33m[another client took over this terminal — reconnecting is paused]\x1b[0m\r\n",
+            );
+            doSave();
+            return;
+          }
           if (manualCloseRef.current || (ev.wasClean && ev.code === 1000)) {
             // Intentional close (user tab close, server kill) or natural
             // shell exit: session is definitively over — show ended banner,
@@ -1346,6 +1392,9 @@ export default function TerminalPanel({
     // slept mid-backoff can wait up to 30s before the first retry.
     const offWake = onWake(() => {
       if (disposed) return;
+      // A taken-over terminal stays taken until the user asks for it back;
+      // reconnecting here would evict the other client on every wake.
+      if (takeoverRef.current) return;
       if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return;
       if (reconnectTimerRef.current !== null) {
         clearTimeout(reconnectTimerRef.current);
@@ -1582,6 +1631,28 @@ export default function TerminalPanel({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      {takenOver && (
+        <div
+          role="status"
+          className="absolute inset-x-0 bottom-2 z-10 mx-auto flex w-fit max-w-[90%] items-center gap-3 rounded-md border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs text-amber-200 shadow-lg"
+        >
+          <span>Taken over by another client — reconnecting is paused.</span>
+          <button
+            type="button"
+            className="rounded border border-amber-500/50 px-2 py-0.5 font-medium hover:bg-amber-500/10"
+            onClick={() => {
+              // Deliberate hand-back: clear the guard, then reconnect, which
+              // evicts the other client's socket (single attachment slot).
+              takeoverRef.current = false;
+              takenOverRef.current = false;
+              setTakenOver(false);
+              connectSocketRef.current?.();
+            }}
+          >
+            Take over
+          </button>
+        </div>
+      )}
       {findOpen && (
         <TerminalFindBar
           query={findQuery}

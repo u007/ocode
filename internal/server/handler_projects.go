@@ -156,18 +156,43 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Verify this is a saved project.
+	// Resolve the query path to a saved project root, and keep the resolved form
+	// for the directory scan below.
+	//
+	// A remote project is registered with its path verbatim ("~/www/aimsai2" —
+	// the separator and "~" belong to the remote shell, see projects.AddRemote),
+	// but the host-side `ocode serve --remote` expands "~" when it saves that
+	// project (projects.Add, via the local branch of HandleAddProject). A
+	// request proxied through /api/remote/{host}/ therefore arrives carrying the
+	// tilde form while the host's registry holds the expanded path, so a plain
+	// exact-match gate 404s every tilde-keyed remote project and its session
+	// list never loads. resolveRegisteredProjectRoot tries the verbatim form
+	// first and falls back to the home-expanded one — the same trust decision
+	// the git/fs endpoints already make, and one that narrows rather than
+	// widens the accepted set.
+	listPath := projectPath
 	if h.projects != nil {
-		found := false
-		for _, p := range h.projects.List() {
-			if p.Path == projectPath && p.Host == projectHost {
-				found = true
-				break
+		if projectHost != "" {
+			// A remote entry is keyed by (host, verbatim path) — no expansion,
+			// because the path belongs to another machine.
+			found := false
+			for _, p := range h.projects.List() {
+				if p.Path == projectPath && p.Host == projectHost {
+					found = true
+					break
+				}
 			}
-		}
-		if !found {
-			writeError(w, http.StatusNotFound, "project not found in saved list")
-			return
+			if !found {
+				writeError(w, http.StatusNotFound, "project not found in saved list")
+				return
+			}
+		} else {
+			resolved, ok := h.resolveRegisteredProjectRoot(projectPath)
+			if !ok {
+				writeError(w, http.StatusNotFound, "project not found in saved list")
+				return
+			}
+			listPath = resolved
 		}
 	}
 	// Remote sessions live on the remote ocode instance, not in this server's
@@ -178,7 +203,7 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	refs, err := session.ListRefsForDir(projectPath)
+	refs, err := session.ListRefsForDir(listPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list sessions: %v", err))
 		return

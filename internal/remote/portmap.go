@@ -3,7 +3,9 @@ package remote
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -11,6 +13,29 @@ import (
 
 	"github.com/u007/ocode/internal/tool"
 )
+
+// RunAsync runs fn on its own goroutine and returns immediately.
+//
+// It exists for the callers that open persisted forwards as a side effect of
+// answering something else (a list request, server boot). A forward that cannot
+// come up spends ~5s in Start's readiness probe, and neither the caller nor the
+// app should wait on that — a boot path that blocks here delays the window, and
+// a request path that blocks here stalls the response.
+//
+// The recover is not defensive padding: an unrecovered panic on ANY goroutine
+// terminates the whole process, so a background forward open that panicked would
+// take down the app and every session in it. The stack is logged because the
+// panic value alone rarely explains an open failure.
+func RunAsync(what string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("port forwards: %s panicked: %v\n%s", what, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
 
 // ForwardManager supervises user-added extra SSH -L forwards for one
 // connected --web session, on top of the fixed api/browse tunnel StartTunnel

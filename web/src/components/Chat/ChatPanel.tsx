@@ -23,9 +23,16 @@ import {
   serverIndexToLocal,
   type ServerSearchResult,
 } from "../../lib/sessionSearch";
+import {
+  NO_USER_JUMP,
+  loadedUserMessageIndices,
+  nextUserJumpCursor,
+  userJumpLabel,
+} from "../../lib/userMessageNav";
 import { requestSpeech } from "../Speech/SpeechProvider";
+import { SpeakButton } from "../Speech/SpeakButton";
 import { lastRenderedSpeechText, renderedSpeechTexts } from "../Speech/speechUtils";
-import { ArrowDown, ArrowUp, Volume2 } from "lucide-react";
+import { ArrowDown, ArrowUp } from "lucide-react";
 
 /** Rough per-row height for an unmeasured virtualized transcript row. Real
  *  heights vary a lot (code blocks vs. one-line replies); `measureElement`
@@ -215,6 +222,25 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   // scroll-up pagination loader (which would shift every message index and
   // land the highlight on the wrong bubble).
   const searchJumpRef = useRef(false);
+
+  // ── alt+up / alt+down: jump between the user's own messages ──────────────
+  // Distinct from the composer's plain up/down input-history walk: that moves
+  // the caret through what you TYPED, this moves the viewport through what you
+  // SENT. The TUI counterpart is internal/tui/user_jump.go and both surfaces
+  // share one definition of a countable user message so the "msg 3/17" readout
+  // means the same thing on each.
+  const [userJumpCursor, setUserJumpCursor] = useState(NO_USER_JUMP);
+  // Authoritative server index list, fetched lazily on the first key press so
+  // opening a session does not pay for a request nobody asked for. `null`
+  // means "not fetched yet"; an empty array means "fetched, no user messages".
+  const [userJumpIndices, setUserJumpIndices] = useState<number[] | null>(null);
+  const [userJumpTotal, setUserJumpTotal] = useState(0);
+  // In-flight list fetch + the refetch guard for targets outside the loaded
+  // window. Mirrors pendingJumpRef/attemptedJumpsRef for the find bar.
+  const userJumpFetchRef = useRef(false);
+  const userJumpPendingRef = useRef<number | null>(null);
+  const userJumpAttemptedRef = useRef<Set<number>>(new Set());
+  const userJumpRequestRef = useRef(0);
 
   // Debounced full-transcript search. The local matcher above keeps typing
   // instant; this fills in the hits the loaded window does not contain. A
@@ -1169,6 +1195,171 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     );
   }, [jumpTargets.length]);
 
+  // ── alt+up / alt+down jump implementation ─────────────────────────────────
+
+  // The list of server indices to walk. Falls back to the loaded window when
+  // the server list is unavailable, so the feature degrades to "the messages
+  // already on screen" instead of going dead against an older server.
+  const userJumpList = useMemo<number[]>(() => {
+    if (userJumpIndices) return userJumpIndices;
+    return loadedUserMessageIndices(messages);
+  }, [userJumpIndices, messages]);
+
+  const userJumpTargetIndex = useMemo(() => {
+    if (userJumpCursor < 0 || userJumpCursor >= userJumpList.length) return -1;
+    return userJumpList[userJumpCursor];
+  }, [userJumpCursor, userJumpList]);
+
+  const userJumpEntryPos = useMemo(() => {
+    if (userJumpTargetIndex < 0) return -1;
+    return entryPosByServerIndex.get(userJumpTargetIndex) ?? -1;
+  }, [userJumpTargetIndex, entryPosByServerIndex]);
+
+  // Reset the walk when the tab switches to a different session. Without this
+  // the cursor (a position in the OLD session's list) would be applied to the
+  // new one, and the readout would describe a message that does not exist here.
+  useEffect(() => {
+    setUserJumpCursor(NO_USER_JUMP);
+    setUserJumpIndices(null);
+    setUserJumpTotal(0);
+    userJumpFetchRef.current = false;
+    userJumpPendingRef.current = null;
+    userJumpAttemptedRef.current = new Set();
+  }, [sessionId]);
+
+  // Lazily fetch the authoritative index list on the first key press.
+  //
+  // Deliberately NOT on mount: most sessions are opened and read without
+  // anyone ever jumping, and this would add a request per session open.
+  useEffect(() => {
+    if (userJumpIndices !== null) return;
+    if (userJumpCursor === NO_USER_JUMP) return;
+    if (!sessionId || sessionId.startsWith("new-")) return;
+    if (userJumpFetchRef.current) return;
+    userJumpFetchRef.current = true;
+    const request = ++userJumpRequestRef.current;
+    api
+      .userMessages(sessionId, undefined, host)
+      .then((res) => {
+        // A response for a session we have since left must not land.
+        if (request !== userJumpRequestRef.current) return;
+        setUserJumpIndices(res.indices);
+        setUserJumpTotal(res.total);
+      })
+      .catch((err) => {
+        if (request !== userJumpRequestRef.current) return;
+        // Keep the loaded-window fallback: userJumpList falls back to
+        // loadedUserMessageIndices whenever userJumpIndices is still null, so
+        // the jump stays usable and simply cannot reach off-window messages.
+        console.warn("user message jump list fetch failed", err);
+      });
+  }, [userJumpCursor, userJumpIndices, sessionId, host]);
+
+  // Scroll the target into view. Mirrors the find-bar scroll effect: pin the
+  // follow-tail, flag the jump so the scroll handler ignores the smooth-scroll
+  // deltas, and let the virtualizer handle a target it has not measured yet.
+  useEffect(() => {
+    if (userJumpEntryPos < 0) return;
+    atBottomRef.current = false;
+    setShowJumpToBottom(true);
+    searchJumpRef.current = true;
+    virtualizer.scrollToIndex(userJumpEntryPos, { align: "center", behavior: "smooth" });
+    const t = setTimeout(() => {
+      searchJumpRef.current = false;
+    }, 600);
+    return () => clearTimeout(t);
+  }, [userJumpEntryPos, virtualizer]);
+
+  // When the target sits OUTSIDE the loaded window its entryPos is -1, so the
+  // scroll effect above has nothing to do. Load the contiguous prefix from the
+  // target up to the window start; PREPEND_MESSAGES places it at local 0, the
+  // target recomputes with a resolved entryPos, and the scroll effect runs.
+  useEffect(() => {
+    if (userJumpTargetIndex < 0) return;
+    if (userJumpEntryPos >= 0) return; // already loaded — scroll effect handles it
+    // Bail on ANY in-flight prefix fetch: two overlapping fetches would race
+    // and both prepend, duplicating ranges and driving the window anchor
+    // negative. The user can press the key again once this one settles.
+    if (userJumpPendingRef.current !== null) return;
+    if (userJumpAttemptedRef.current.has(userJumpTargetIndex)) return;
+    // Also defer while the find bar's own prefix fetch is in flight. Two
+    // overlapping PREPEND_MESSAGES would each subtract their own length from
+    // the window anchor, double-counting the overlap and leaving
+    // windowStartServerIndex too low until the next refetch. The effect re-runs
+    // when entryPosByServerIndex changes identity, so this self-heals as soon
+    // as the find bar's fetch lands.
+    if (pendingJumpRef.current !== null) return;
+    const fetch = olderPrefixFetch(userJumpTargetIndex, windowStartServerIndex, totalMessages);
+    if (!fetch) return;
+    userJumpPendingRef.current = userJumpTargetIndex;
+    userJumpAttemptedRef.current.add(userJumpTargetIndex);
+    dispatch({ type: "SET_LOADING_MORE", sessionId, loading: true });
+    api
+      .getSession(sessionId, fetch, host)
+      .then((detail) => {
+        if (detail.messages.length === 0) return;
+        dispatch({
+          type: "PREPEND_MESSAGES",
+          sessionId,
+          messages: detail.messages,
+          total: detail.total,
+        });
+      })
+      .catch((err) => {
+        // A failed jump must not break the transcript; the readout still shows
+        // the position, it just cannot scroll there. Drop the attempted marker
+        // so a transient error does not permanently dead-end this target.
+        console.warn("user message jump fetch failed", err);
+        userJumpAttemptedRef.current.delete(userJumpTargetIndex);
+      })
+      .finally(() => {
+        userJumpPendingRef.current = null;
+        dispatch({ type: "SET_LOADING_MORE", sessionId, loading: false });
+      });
+  }, [userJumpTargetIndex, userJumpEntryPos, windowStartServerIndex, totalMessages, sessionId, host, dispatch]);
+
+  const stepUserJump = useCallback(
+    (dir: -1 | 1) => {
+      const total = userJumpTotal || userJumpList.length;
+      setUserJumpCursor((c) => nextUserJumpCursor(c, total, dir));
+    },
+    [userJumpTotal, userJumpList.length],
+  );
+
+  // Window-level binding for alt+up / alt+down.
+  //
+  // Guarded so it cannot fire while the find bar input has focus (its Enter /
+  // arrows belong to match navigation) or inside any text field — a textarea
+  // caret is the user's business, and alt+arrow is not bound to anything the
+  // browser uses for a single-line/multiline caret in a webview.
+  //
+  // Side effect worth knowing: the follow-tail listener below treats a bare
+  // ArrowUp as scroll intent, so jumping also un-pins the auto-scroll pin.
+  // That is what we want — streaming must not yank the view back down after
+  // the user has deliberately jumped to an older message.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        if (target.isContentEditable) return;
+        // Any text field owns these arrows, which also covers the find bar's
+        // input (an <Input>, i.e. tagName INPUT) where Enter/arrows belong to
+        // match navigation. No special case needed for it.
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      }
+      if (!sessionId || sessionId.startsWith("new-")) return;
+      e.preventDefault();
+      stepUserJump(e.key === "ArrowUp" ? -1 : 1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [stepUserJump, sessionId]);
+
+  const userJumpText = userJumpLabel(userJumpCursor, userJumpTotal || userJumpList.length);
+
   // Record genuine user scroll gestures so handleScroll can tell a reader
   // scrolling up apart from one of our own clamped pins moving the offset down.
   // Wheel, touch, scrollbar drag (pointerdown on the element itself — content
@@ -1361,23 +1552,23 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       <div className="relative flex shrink-0 items-center justify-end gap-2 border-b border-border px-3 py-1">
         {messages.length > 0 && (
           <>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+            <SpeakButton
+              getText={() => selectedText}
+              onSpeak={requestSpeech}
               disabled={!selectedText}
+              ariaLabel="Speak selection"
               title="Speak selected chat text"
-              onClick={() => requestSpeech(selectedText)}
-            >
-              <Volume2 className="h-3.5 w-3.5" /> Speak selection
-            </button>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+              idleLabel="Speak selection"
+              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+            />
+            <SpeakButton
+              getText={() => renderedSpeechTexts(scrollRef.current)}
+              onSpeak={requestSpeech}
+              ariaLabel="Speak visible"
               title="Speak visible chat text"
-              onClick={() => requestSpeech(renderedSpeechTexts(scrollRef.current))}
-            >
-              <Volume2 className="h-3.5 w-3.5" /> Speak visible
-            </button>
+              idleLabel="Speak visible"
+              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+            />
           </>
         )}
         {/* Anchored to the header's bottom edge (top-full) so the "scroll to
@@ -1395,6 +1586,23 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           </button>
         )}
       </div>
+      {/* alt+up/alt+down position readout. Sits just above the scroll-to-bottom
+          button in the same corner so it reads as part of the same control
+          cluster, and carries the shortcut hint so the feature is
+          discoverable without reading the docs. */}
+      {userJumpText && (
+        <div
+          className="absolute bottom-16 right-4 z-10"
+          data-testid="user-jump-indicator"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex items-center gap-2 rounded-full bg-accent px-3 py-1.5 text-xs text-accent-foreground shadow-lg">
+            <span className="font-medium tabular-nums">{userJumpText}</span>
+            <span className="opacity-70">⌥↑/⌥↓</span>
+          </div>
+        </div>
+      )}
       <div
         ref={scrollRef}
         className="relative flex-1 min-h-0 overflow-y-auto p-4 [overflow-anchor:none]"

@@ -33,7 +33,7 @@ type Tool interface {
 
 The agent loop checks for these extensions at dispatch time and calls the appropriate method. `ContextualStreamingTool` is checked first (highest priority), then `StreamingTool`, then `ContextualTool`, then plain `Execute`.
 
-**Parallel tools** (read, glob, grep, rgrep, list, lsp, ast, skill, lsp_diagnostics, GitHub tools, repo_overview, todo_read, preview_open) run in goroutines. **Sequential tools** (bash, write, edit, delete, apply_patch, webfetch, websearch, etc.) block the loop — each runs to completion before the next starts.
+**Parallel tools** (read, glob, grep, rgrep, list, lsp, ast, skill, lsp_diagnostics, GitHub tools, repo_overview, todo_read, preview_open) run in goroutines. **Sequential tools** (bash, write, edit, delete, apply_patch, etc.) block the loop — each runs to completion before the next starts.
 
 **`NoticedError`** — tools that encounter a recoverable problem (e.g. LSP server not installed) wrap their error with a user-facing notice:
 ```go
@@ -44,14 +44,14 @@ type NoticedError struct {
 ```
 The agent extracts `NoticedError.Notice` into `Message.Notice`; the TUI renders it as a transient non-LLM message in the transcript.
 
-## 2. Tool registration (`tool.go:100:InitBuiltinTools`)
+## 2. Tool registration (`tool.go:120:InitBuiltinTools`)
 
 ```go
 func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool
 func LoadBuiltins(cfg *config.Config, svc any) ([]Tool, *lsp.Manager)
 ```
 
-Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Manager` (lives as long as the session) and registers built-in tools. `svc` is an optional `*scheduler.Service` — when non-nil, the `cron` tool is included.
+Called from each process entry point, not from the agent: `internal/runcli/run.go:245`, `internal/server/scheduler_runner.go:43`, `internal/cli/goal.go:126`, `internal/acp/bridge.go:54` (TUI uses `InitBuiltinToolsWithComputerDriver` via `getInitialTools`, `tui/model.go:2270`). `NewAgent` only *receives* the resulting `[]tool.Tool`. Creates one shared `lsp.Manager` (lives as long as the session) and registers built-in tools. `svc` is an optional `*scheduler.Service` — when non-nil, the `cron` tool is included.
 
 ### Complete tool registry
 
@@ -65,7 +65,7 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | 5 | `EditTool` | `file.go` | `edit` | ❌ | allow |
 | 6 | `MultiEditTool` | `file.go` | `multiedit` | ❌ | allow |
 | 7 | `MultiFileEditTool` | `file.go` | `multi_file_edit` | ❌ | allow |
-| 8 | `UndoTool` | `undo.go` | `undo_file_change` | ❌ | allow |
+| 8 | `UndoTool` | `undo.go` | `undo_file_change` | ❌ | ask |
 | | **Search** | | | | |
 | 9 | `GlobTool` | `search.go` | `glob` | ✅ | allow |
 | 10 | `GrepTool` | `search.go` | `grep` | ✅ | allow |
@@ -83,7 +83,7 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | | **Interaction** | | | | |
 | 19 | `QuestionTool` | `misc.go` | `question` | ❌ | allow |
 | | **Web** | | | | |
-| 20 | `WebFetchTool` | `web.go` | `webfetch` | ❌ | ask |
+| 20 | `WebFetchTool` | `web.go` | `webfetch` | ✅ | ask |
 | 21 | `WebSearchTool` | `web.go` | `websearch` | ✅ | ask |
 | | **Repo** | | | | |
 | 22 | `RepoCloneTool` | `repo.go` | `repo_clone` | ❌ | ask |
@@ -105,7 +105,7 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | 34 | `PreviewOpenTool` | `preview.go` | `preview_open` | ✅ | ask |
 | | **Opt-in** | | | | |
 | 35 | `AstTool` | `ast.go` | `ast` | ✅ | allow |
-| 36 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | allow |
+| 36 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | ask |
 | | **Conditional** | | | | |
 | 37 | `RgrepTool` | `rgrep.go` | `rgrep` | ✅ | allow |
 | 38 | `ComputerTool` | `computer.go` | `computer` | ❌ | ask |
@@ -142,13 +142,18 @@ agent.go:Step()
   → hooks.RunPreHook(name, args)        — user-configured pre-tool shell hooks
   → a.pipeline.RunToolBefore(name, args) — in-process transform
   → tool.Execute(args)                  — actual implementation
-  → TruncateToolResult(result)          — truncate.go (cap large output)
-  → hooks.RunPostHook(name, args, result)
+  → hooks.RunPostHook(name, args, result)   ← sees the UNtruncated result
   → a.pipeline.RunToolAfter(name, result)
+  → TruncateToolResult(result)          — truncate.go, runs later in Step()
   → append to messages, continue loop
 ```
 
-Permission defaults are defined in `permissions.go:NewPermissionManager()`:
+Permission defaults are defined in `permissions.go:NewPermissionManager()`, then overlaid by
+`defaultPermissionConfig()` (applied by `NewAgent` via `LoadFromOcode`) and finally by the user's
+`permissions.tools`. The lists below are the **`NewPermissionManager` baseline only** — where they
+differ, the effective default wins. Known divergences: `task` is allow in the baseline but
+`defaultPermissionConfig` sets it to `ask`; `ast` and `imagegen` are allow only via config, not via
+`NewPermissionManager`.
 - **Always allow** (no prompt): read, glob, grep, rgrep, list, lsp, lsp_diagnostics, skill, load_skill, question, todoread, todowrite, todo_update, advisor, task, task_status, agent_status, repo_overview, plan_enter, plan_exit, wait, bash_output, kill_shell, list_processes, ocr, cron
 - **Default allow**: write, edit, multiedit, multi_file_edit, replace_lines, apply_patch, format, imagegen
 - **Default ask**: delete, bash, webfetch, websearch, repo_clone, mcp_*, computer
@@ -261,7 +266,7 @@ permission checks), which still fall back to the process cwd.
 
 1. **Choose the right file** — file operations go in `file.go`, search in `search.go`, web in `web.go`, process in `process_tools.go`, etc. If none fit, create a new file.
 2. **Implement `Tool` interface** — all 5 methods: `Name()`, `Description()`, `Definition()`, `Execute(json.RawMessage)`, `Parallel()`. Optionally implement `ContextualTool`, `StreamingTool`, `ContextualStreamingTool`, `ImageResultTool`, or `ImageProducingTool` extensions.
-3. **Register in `InitBuiltinTools()`** — add to the `builtins` slice in `tool.go:126`.
+3. **Register in `InitBuiltinTools()`** — add to the `builtins` slice in `tool.go:137`.
 4. **Set permission default** — add to the default rules table in `permissions.go:NewPermissionManager()`.
 5. **Add to the skill catalog** if it's a tool the LLM should discover via the skill tool.
 6. **Update this skill's table** above.

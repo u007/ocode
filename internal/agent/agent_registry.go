@@ -2,6 +2,7 @@ package agent
 
 import (
 	"sort"
+	"sync"
 
 	"github.com/u007/ocode/internal/config"
 )
@@ -60,7 +61,21 @@ type LoadDiagnostic struct {
 	Message string
 }
 
+// AgentRegistry holds the agent definitions. ReloadMarkdownAgents REPLACES the
+// whole list (it clears defs/diagnostic, re-registers the built-ins, then
+// re-adds the markdown entries), so every read and every reload must be
+// serialized: without this, a background goroutine resolving an agent (e.g.
+// title generation) reads the slice while a config reload repopulates it, which
+// is a data race and a torn read.
+//
+// The write lock is held for a WHOLE reload so no reader can observe a
+// half-built list. Readers copy what they need under the read lock and then
+// work on the copy, so a slow or re-entrant caller never blocks a reload. Get
+// hands back a pointer to a COPY for the same reason: callers keep the pointer
+// and read its fields after the call returns, so it must not alias the
+// registry's live slice.
 type AgentRegistry struct {
+	mu         sync.RWMutex
 	defs       []AgentDefinition
 	diagnostic []LoadDiagnostic
 }
@@ -71,6 +86,8 @@ func NewAgentRegistry() *AgentRegistry {
 	return r
 }
 
+// registerBuiltins seeds the built-in definitions. Callers must hold the write
+// lock, or be the constructor before the registry is published.
 func (r *AgentRegistry) registerBuiltins() {
 	r.defs = []AgentDefinition{
 		{
@@ -151,16 +168,30 @@ func (r *AgentRegistry) registerBuiltins() {
 	)
 }
 
+// Get returns a pointer to a COPY of the named definition, or nil.
+//
+// The copy is DEFENCE IN DEPTH, not a fix for a live bug: under the current
+// write discipline (every reload starts by clearing defs, so a published array
+// is never written again) a pointer into the slice would happen to stay valid.
+// It is copied anyway because addLoaded mutates in place, so the first caller
+// to add a post-publication update path would silently start mutating values
+// callers already hold. TestAgentRegistryGetIsStableAcrossUpdate pins the
+// contract so that path cannot regress unnoticed.
 func (r *AgentRegistry) Get(name string) *AgentDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for i := range r.defs {
 		if r.defs[i].Name == name {
-			return &r.defs[i]
+			def := r.defs[i]
+			return &def
 		}
 	}
 	return nil
 }
 
 func (r *AgentRegistry) SubAgents() []AgentDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	var result []AgentDefinition
 	for _, d := range r.defs {
 		if d.Mode == AgentModeSubagent || d.Mode == AgentModeAll {
@@ -172,6 +203,8 @@ func (r *AgentRegistry) SubAgents() []AgentDefinition {
 }
 
 func (r *AgentRegistry) PrimaryAgents() []AgentDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	var result []AgentDefinition
 	for _, d := range r.defs {
 		if d.Mode == AgentModePrimary || d.Mode == AgentModeAll {
@@ -183,15 +216,30 @@ func (r *AgentRegistry) PrimaryAgents() []AgentDefinition {
 }
 
 func (r *AgentRegistry) All() []AgentDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	result := make([]AgentDefinition, len(r.defs))
 	copy(result, r.defs)
 	return result
 }
 
+// Diagnostics returns the load diagnostics. The read lock is load-bearing: a
+// rebuild reassigns r.diagnostic several times, so an unguarded read can observe
+// a half-built value. The returned slice is NOT copied — unlike Get, nothing
+// mutates the diagnostic slice in place after publication (each reload builds a
+// fresh one), so aliasing it is safe today and a copy could not be justified by
+// any test. Callers must treat it as read-only, which is the pre-existing
+// contract.
 func (r *AgentRegistry) Diagnostics() []LoadDiagnostic {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.diagnostic
 }
 
+// addLoaded inserts or replaces one definition, preserving precedence order. It
+// mutates in place, so callers must hold the write lock AND the slice must not
+// be published yet — the only caller is reloadMarkdownAgents, which builds the
+// new list under the lock before any reader can see it.
 func (r *AgentRegistry) addLoaded(def AgentDefinition) {
 	for i := range r.defs {
 		if r.defs[i].Name == def.Name {

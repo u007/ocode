@@ -459,3 +459,60 @@ describe("speak cancellation and replay", () => {
     expect(ttsSpeak.mock.calls[0][0]).toBe(REPLAY_TEXT);
   });
 });
+
+describe("stopping while the worker is summarising", () => {
+  function StopConsumer() {
+    const speech = useSpeech();
+    return (
+      <div>
+        <button type="button" onClick={() => void speech.speak(SOURCE)}>
+          speak
+        </button>
+        <button type="button" onClick={() => speech.stop()}>
+          stop
+        </button>
+      </div>
+    );
+  }
+
+  it("frees the worker so the next Speak is not stuck behind the abandoned summary", async () => {
+    // Regression: the worker awaited the summary request with no abort signal,
+    // so Stop left it parked until the request timed out (~60s). Anything spoken
+    // in that window waited behind an item the user had already cancelled.
+    vi.spyOn(api, "getSpeechSummaryConfig").mockResolvedValue({ model: "", enabled: true });
+    vi.spyOn(api, "summarizeSpeech").mockImplementation(
+      (_id, _text, _host, signal) =>
+        new Promise((_resolve, reject) => {
+          const abort = () => reject(new DOMException("aborted", "AbortError"));
+          if (signal?.aborted) return abort();
+          signal?.addEventListener("abort", abort);
+        }),
+    );
+    const summary = vi.mocked(api.summarizeSpeech);
+
+    render(
+      <SpeechProvider sessionId="ses_1">
+        <StopConsumer />
+      </SpeechProvider>,
+    );
+    await waitFor(() => {
+      expect(vi.mocked(api.getSpeechSummaryConfig).mock.calls.length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      screen.getByText("speak").click();
+    });
+    await waitFor(() => expect(summary).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      screen.getByText("stop").click();
+    });
+
+    // The second Speak must reach the summariser — that is only possible if the
+    // worker was released from the first (abandoned) item.
+    await act(async () => {
+      screen.getByText("speak").click();
+    });
+    await waitFor(() => expect(summary).toHaveBeenCalledTimes(2));
+  });
+});

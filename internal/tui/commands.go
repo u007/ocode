@@ -278,6 +278,7 @@ func buildCommandHelpText(specs []commandSpec) string {
 	b.WriteString("Enter          : Send message\n")
 	b.WriteString("Shift+Enter    : New line in input\n")
 	b.WriteString("Up/Down        : Navigate input history\n")
+	b.WriteString("Alt+Up/Down    : Jump between your messages in the transcript\n")
 	b.WriteString("Tab            : Autocomplete slash commands\n")
 	b.WriteString("Shift+Tab      : Toggle agent strip focus (cycle through running agents)\n")
 	b.WriteString("Ctrl+P         : Search and open files\n")

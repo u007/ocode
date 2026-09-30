@@ -34,6 +34,7 @@ import (
 	ocodesync "github.com/u007/ocode/internal/sync"
 	"github.com/u007/ocode/internal/sysperm"
 	"github.com/u007/ocode/internal/tabs"
+	"github.com/u007/ocode/internal/termtabs"
 	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/vault"
 )
@@ -132,7 +133,12 @@ type Handler struct {
 	projects         *projects.Store
 	projectGroups    *projects.GroupStore
 	tabsStore        *tabs.Store
-	monaco           *monaco.Store
+	// termTabsStore persists which terminal tabs are open, so a terminal
+	// started in one client is visible in another (the session-tab store above
+	// does the same for session tabs). Nil when the data dir could not be
+	// resolved; its handlers then 500 rather than silently losing the list.
+	termTabsStore *termtabs.Store
+	monaco        *monaco.Store
 	// vault is the password vault backed by <GlobalDataDir>/browse/vault.json;
 	// nil when the data dir could not be resolved (its handlers then 500).
 	// vaultGrants records which client surfaces have unlocked it; guarded by
@@ -512,6 +518,11 @@ func NewHandler() *Handler {
 		log.Printf("handler: init tab store: %v (open-tab persistence disabled)", err)
 	}
 
+	termTabsStore, err := termtabs.NewStore()
+	if err != nil {
+		log.Printf("handler: init terminal tab store: %v (shared terminal-tab persistence disabled)", err)
+	}
+
 	monacoStore, err := monaco.NewStore()
 	if err != nil {
 		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
@@ -525,6 +536,7 @@ func NewHandler() *Handler {
 		projects:            projStore,
 		projectGroups:       projGroupStore,
 		tabsStore:           tabsStore,
+		termTabsStore:       termTabsStore,
 		monaco:              monacoStore,
 		vaultGrants:         make(map[string]bool),
 		headlessSubs:        make(map[chan SSEEvent]struct{}),

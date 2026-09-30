@@ -21,39 +21,39 @@ import (
 // existing speech path already avoids reading markdown *syntax* (it speaks the
 // rendered DOM), but it still reads code, diffs and paths aloud verbatim —
 // which is what this rewrite exists to fix.
-const speechSummarySystemPrompt = `You rewrite a coding assistant's reply so it can be READ ALOUD to a developer who is listening, not reading.
+//
+// Kept deliberately short. A long rule list costs the small summariser model
+// more attention than the rules earn, and every rule has to win against the
+// ones above it; four plain rules carry the same contract as the previous,
+// longer form. The bigger-picture opener is deliberately NOT here: it lives in
+// speechSummaryRecapClause so it stays gated on message length.
+const speechSummarySystemPrompt = `Rewrite a coding assistant's reply so a developer can LISTEN to it instead of reading it.
 
-Rewrite it as spoken prose:
-- Keep the meaning: decisions, conclusions, caveats, and any numbers the listener needs.
-- SUMMARISE code and technical artifacts instead of quoting them. Never read out source code, diffs, patch hunks, stack traces, command lines, log dumps, file paths, URLs or table rows. Where such an artifact matters, say in one short clause what it does or what changed, e.g. "it raises the retry limit to three" or "the parser now rejects an empty key".
-- Name files by their short name without a directory path, and only when which file matters.
-- Plain sentences only: no markdown, no headings, no bullet characters, no asterisks, no emoji, no code formatting, no URLs.
-- Prefer two to five short sentences. If the reply is already short plain prose, return it almost unchanged.
-- If the reply is only a question or a request for the listener, keep it as that question or request.
+- Talk about code, never read it: no source, diffs, stack traces, command lines, paths, URLs or tables. Say what changed instead, e.g. "the retry limit is now three".
+- Plain spoken sentences only: no markdown, no headings, no bullets, no emoji.
+- Two to five short sentences. Keep what matters: decisions, conclusions, caveats, numbers. Name a file by its short name, and only when which file matters.
+- If the reply is already short plain prose, return it unchanged. If it is only a question or a request, keep it as that.
 
-Output ONLY the spoken text, with no preamble, labels or quotation marks.`
+Output only the spoken text, with no preamble, labels or quotation marks.`
 
 // speechSummaryRecapClause is appended to the system prompt when, and only
-// when, the message is long (speechSummaryRecapMinChars). It exists because a
-// long reply summarised as a flat two-to-five sentences leaves the listener
-// without a way in: the opening recap answers "what was this whole thing about"
-// in one sentence BEFORE the detail, so a listener who stopped listening halfway
-// still caught the point.
+// when, the message is long (speechSummaryRecapMinChars). It is the
+// bigger-picture half of the feature: a long reply summarised as a flat
+// two-to-five sentences leaves the listener with no way in, so the opening
+// sentence answers "what was this whole thing about, and what does it mean for
+// me" BEFORE the detail — a listener who stopped halfway still caught the point.
 //
 // Two wording choices are load-bearing:
 //
-//   - "The recap is in addition to the two-to-five sentences above, not one of
-//     them." Without that, a model treats the recap as sentence one and shrinks
-//     the summary to compensate, which loses more detail than the recap gains.
-//   - The recap is prose with no label. cleanSpeechSummary strips a recognised
-//     "Summary:"-style first line, so a labelled recap would be deleted along
+//   - "the detail must not restate it". Without that, a model treats the opener
+//     as sentence one and shrinks the summary to compensate, which loses more
+//     detail than the opener gains.
+//   - The opener is prose with no label. cleanSpeechSummary strips a recognised
+//     "Summary:"-style first line, so a labelled opener would be deleted along
 //     with its label — the one sentence the feature exists to guarantee.
 const speechSummaryRecapClause = `
 
-This reply is LONG, so it must open with a recap:
-- Write a one-line recap of the WHOLE reply as the FIRST sentence: what it did or decided, and what that means, in one self-contained sentence the listener can act on.
-- Then write the summary as instructed above. The recap is in addition to the two-to-five sentences above, not one of them, and the detail must not restate it.
-- The recap is plain prose, continuous with the rest. No label, heading or colon before it, and no line break between the recap and what follows.`
+This reply is long, so open with the big picture: one sentence on what the whole reply did or decided and what it means for the listener, in words that stand on their own. Then the summary above, whose detail must not restate it. Write it as plain prose, with no label, heading or line break before what follows.`
 
 const (
 	// speechSummaryTimeoutSeconds bounds one rewrite. Generous relative to
@@ -86,13 +86,18 @@ const (
 	// (speechSummaryRecapClause). Below it the recap is not requested: a recap
 	// of a short reply just restates the summary's only sentence, and a short
 	// reply carrying an artifact needs the description, not an orientation
-	// line. The value is roughly one minute of speech at 160 words per minute —
-	// long enough that a listener needs orienting, short enough that a two
-	// sentence summary still fits. It must stay ABOVE speechSummarySkipChars:
-	// at or below that a message is spoken verbatim, so a recap threshold there
-	// would be unreachable on length and could only fire for a short artifact
-	// message, which is precisely the case that does not want one.
-	speechSummaryRecapMinChars = 1200
+	// line. The value is roughly half a minute of speech at 160 words per
+	// minute — long enough that a listener needs orienting, short enough that a
+	// two-to-five sentence summary plus the opener still fits. It was lowered
+	// from 1200 (about a minute of speech) because by a minute in the listener
+	// has usually stopped orienting and is only waiting for the point; 800 is
+	// where the point still arrives before the attention is gone. It must stay
+	// ABOVE speechSummarySkipChars: at or below that a message is spoken
+	// verbatim, so a recap threshold there would be unreachable on length and
+	// could only fire for a short artifact message, which is precisely the case
+	// that does not want one. TestSpeechSummaryRecapMinCharsSitsAboveTheSkipGate
+	// holds that ordering.
+	speechSummaryRecapMinChars = 800
 	// speechSummaryPromptVersion is salted into the summary cache key. The
 	// cache is keyed on the message text and the model id, so a PROMPT change
 	// is invisible to it: without a salt, every summary written in the last
@@ -100,7 +105,7 @@ const (
 	// (here: no recap) for up to 24 hours. Bump it whenever the prompt or the
 	// recap threshold changes; the cost is one paid round trip per recently
 	// summarised message, which is the intended trade.
-	speechSummaryPromptVersion = "2"
+	speechSummaryPromptVersion = "3"
 	// speechSummaryPruneInterval throttles the opportunistic sweep so a busy
 	// server does not rescan the cache directory on every write.
 	speechSummaryPruneInterval = time.Hour

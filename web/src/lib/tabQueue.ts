@@ -153,3 +153,58 @@ export function clearQueue(tabId: string | null | undefined) {
   if (!tabId) return;
   queues.delete(tabId);
 }
+
+export interface MergedDraft {
+  /** The new composer text: queued messages, then the user's own draft. */
+  value: string;
+  /** Where the user's own draft starts in `value`. The composer shifts the
+   *  caret by this many units so it stays anchored to their text. */
+  draftStart: number;
+}
+
+/** Merge queued message text into the composer draft, queued first.
+ *
+ * A compaction pass that fails never reaches the LLM, so anything the user
+ * submitted while it was running still exists ONLY in this queue. Dropping it
+ * would lose input with no trace, so the failure path moves it back into the
+ * composer.
+ *
+ * Order is deliberate: queued messages were submitted earlier, so restoring them
+ * in submission order keeps the block chronological, and the user's own draft
+ * stays the suffix — the text they are looking at and about to keep typing is
+ * not buried under restored history.
+ *
+ * Blank entries are dropped rather than turned into blank lines, so a
+ * whitespace-only item cannot leave a leading or doubled separator behind. */
+export function mergeQueuedIntoDraft(queued: string[], draft: string): MergedDraft {
+  const parts = queued.filter((q) => q.trim() !== "").map((q) => q.trim());
+  if (parts.length === 0) return { value: draft, draftStart: 0 };
+  const block = parts.join("\n");
+  if (draft === "") return { value: block, draftStart: block.length };
+  return { value: `${block}\n${draft}`, draftStart: block.length + 1 };
+}
+
+/** Remove every queued MESSAGE (leaving commands queued and dispatchable) and
+ *  return the composer text they should be merged into, or null when there was
+ *  nothing to restore.
+ *
+ * Commands are deliberately left alone: a "/compact" or "!ls" is not composer
+ * prose, inlining it would corrupt the merged block, and it stays available for
+ * the user to run. */
+export function drainQueuedMessagesIntoDraft(
+  tabId: string | null | undefined,
+  draft: string,
+): MergedDraft | null {
+  if (!tabId) return null;
+  const list = queues.get(tabId);
+  if (!list || list.length === 0) return null;
+  const texts: string[] = [];
+  const keep: QueuedItem[] = [];
+  for (const item of list) {
+    if (item.kind === "command") keep.push(item);
+    else texts.push(item.text);
+  }
+  if (texts.length === 0) return null;
+  queues.set(tabId, keep);
+  return mergeQueuedIntoDraft(texts, draft);
+}

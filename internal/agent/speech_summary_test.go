@@ -146,13 +146,22 @@ func TestSummarizeForSpeechAsksForAnOpeningRecapOnALongMessage(t *testing.T) {
 		t.Fatalf("a long message must be summarised, got %q", got)
 	}
 
+	// Presence is asserted against the clause CONSTANT, never a phrase copied
+	// out of it. A hardcoded phrase stops existing the moment the clause is
+	// reworded, and the paired absence check below then passes no matter what
+	// the code does — a test that can only go green.
+	if !strings.Contains(stub.gotSystem, speechSummaryRecapClause) {
+		t.Errorf("a long message's system prompt must carry the recap clause; got:\n%s", stub.gotSystem)
+	}
+	// The clause must still ask for the bigger picture, not merely be present:
+	// a gutted clause that ships would otherwise satisfy the check above.
 	for _, want := range []string{
-		"LONG",
-		"one-line recap",
-		"FIRST sentence",
+		"big picture",
+		"what it means for the listener",
+		"must not restate it",
 	} {
-		if !strings.Contains(stub.gotSystem, want) {
-			t.Errorf("a long message's system prompt must contain %q; got:\n%s", want, stub.gotSystem)
+		if !strings.Contains(speechSummaryRecapClause, want) {
+			t.Errorf("the recap clause must still ask for %q; got:\n%s", want, speechSummaryRecapClause)
 		}
 	}
 }
@@ -183,7 +192,7 @@ func TestSummarizeForSpeechOmitsTheRecapInstructionOnAShorterMessage(t *testing.
 			if stub.calls != 1 {
 				t.Fatalf("expected one model call for %s, got %d", tc.name, stub.calls)
 			}
-			if strings.Contains(stub.gotSystem, "one-line recap") {
+			if strings.Contains(stub.gotSystem, speechSummaryRecapClause) {
 				t.Errorf("%s is %d chars, under speechSummaryRecapMinChars=%d, so no recap may be requested; got:\n%s",
 					tc.name, len([]rune(tc.text)), speechSummaryRecapMinChars, stub.gotSystem)
 			}
@@ -314,9 +323,9 @@ func TestSummarizeForSpeechSendsTheCodeDescribingPrompt(t *testing.T) {
 	a.SummarizeForSpeech(speechSummaryBody)
 
 	for _, want := range []string{
-		"SUMMARISE code",
-		"Never read out source code",
-		"spoken prose",
+		"never read it",
+		"no source, diffs",
+		"Plain spoken sentences",
 		"no markdown",
 	} {
 		if !strings.Contains(stub.gotSystem, want) {

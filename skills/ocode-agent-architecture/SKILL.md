@@ -74,9 +74,9 @@ LOOP (unbounded; maxSteps configurable via config):
          (StreamingTool → ExecuteStream)
          (ContextualTool → ExecuteCtx)
         → appendEditDiagnostics()            — LSP diagnostics appended to tool result
-        → TruncateToolResult(result)          — truncate.go (cap large output)
-        → hooks.RunPostHook(name, args, result)
+        → hooks.RunPostHook(name, args, result)   ← sees the UNtruncated result
         → a.pipeline.RunToolAfter(name, result)
+        → TruncateToolResult(result)          — truncate.go, runs later in Step()
         → append to messages, continue loop
   4. If no tool calls → break (turn complete)
   ↓
@@ -86,7 +86,7 @@ a.MaybeCompactAsync()                     → compact.go (async context compacti
 ## 3. LLM client (`client.go`)
 
 ```
-LLMClient interface (client.go:155):
+LLMClient interface (`internal/agent/client.go`, `type LLMClient`):
     Chat(messages, tools) → (Message, error)
     GetProvider() string
     GetModel() string
@@ -96,7 +96,7 @@ StreamingLLMClient interface (llm_contract.go):
     Stream(messages, tools, emit) → (Message, error)
 ```
 
-`GenericClient` (client.go:161) is the concrete implementation. Key fields:
+`GenericClient` (`internal/agent/client.go`, `type GenericClient`) is the concrete implementation. Key fields:
 
 | Field | Purpose |
 |-------|---------|
@@ -111,9 +111,9 @@ StreamingLLMClient interface (llm_contract.go):
 | `Temperature` | Optional temperature override (`*float64`, nil = unset) |
 | `TopP` / `TopK` | Optional sampling params |
 
-Provider routing: `NewClient()` (client.go:4292) constructs the client; `ChatWithContext()` (client.go:690) dispatches by provider type → `chatAnthropic()` (client.go:3638) if Anthropic Messages API, `chatCopilot()` (client.go:997) if copilot, `chatGoogle()` (client.go:1293) if Google provider, else `chatOpenAI()` (client.go:1176). `chatOpenAI` internally routes to `chatOpenAIResponses()` (client.go:2803) for OAuth/Responses-only models, `chatOpenAIWebSocket()` (client.go:4767) when WebSocket enabled, or `chatOpenAIHTTP()` (client.go:4821) for the regular HTTP path. Each builds the provider's native request format, calls the API, and maps the response back to the generic `Message`/`ToolCall` types.
+Provider routing: `NewClient()` constructs the client; `ChatWithContext()` dispatches by provider type → `chatAnthropic()` if Anthropic Messages API, `chatCopilot()` if copilot, `chatGoogle()` if Google provider, else `chatOpenAI()`. `chatOpenAI` internally routes to `chatOpenAIResponses()` for OAuth/Responses-only models, `chatOpenAIWebSocket()` when WebSocket enabled, or `chatOpenAIHTTP()` for the regular HTTP path. All in `internal/agent/client.go` — look the functions up by name, the file shifts often. Each builds the provider's native request format, calls the API, and maps the response back to the generic `Message`/`ToolCall` types.
 
-Model metadata: `models_registry.go` provides `ModelWindow(modelID)` (line 763) for context-window sizes, pricing info from an embedded `models-snapshot.json` (regenerated periodically via `make models-snapshot`).
+Model metadata: `models_registry.go` provides `ModelWindow(modelID)` for context-window sizes, pricing info from an embedded `models-snapshot.json` (regenerated periodically via `make models-snapshot`).
 
 Small model resolution: `small_model.go:ResolveSmallModel()` (line 29) selects a cheaper model for compaction, title generation, and sub-agents like `explore`/`general`. Falls back to the primary model if no small model is configured.
 
@@ -143,7 +143,7 @@ Custom agents loaded from `.opencode/agents/*.md` or `~/.config/opencode/agents/
 ```
 TaskTool.Execute(args):
   1. Parse agent name + prompt from args
-  2. Find agent spec via registry (t.findAgent, subagent.go:1085)
+  2. Find agent spec via registry (`internal/agent/subagent.go`, `findAgent`)
   3. Check dispatch guard (anti-runaway prevention, subagentDispatchLimit = 3)
   4. Check duplicate-active dispatch guard (acquireActiveDispatch)
   5. Get tools for that agent type from spec
@@ -156,9 +156,25 @@ TaskTool.Execute(args):
   12. Verify result against expected_output contract (task_contract.go) if set
 ```
 
-**AdvisorTool** (`advisor_tool.go:99`) — separate sub-agent using its own LLM client (a different model) for exploratory codebase analysis. Used by the `/advisor` command.
+**AdvisorTool** (`internal/agent/advisor_tool.go`, `type AdvisorTool`) — separate sub-agent using its own LLM client (a different model) for exploratory codebase analysis. Used by the `/advisor` command.
 
-**AgentRunRegistry** (`agent_runs.go:531`) — tracks all async sub-agent runs. Polled by `WaitTool` and the TUI for status.
+**Advisor config is PER SESSION** (`advisor_config.go`) — `Agent.SetAdvisorConfig` /
+`ResolvedAdvisorConfig` carry the model, the Claude Code backend flag and the
+checkpoint (trigger) set. The agent does NOT read these from `cfg` live: the
+server installs the session's own value at build time (`agent_session.go`, from
+the pin in the session's transcript metadata) and re-installs it when the user
+changes the model or triggers in that chat. Precedence in `resolveModel` is
+`OPENCODE_ADVISOR_MODEL` > the session's own value > `cfg` > built-in default,
+and a session's EMPTY model is honored as "use the built-in default" rather than
+falling through. Consequences: (1) a change to the global config no longer
+reaches an already-built agent, so any TUI-side advisor change must push the new
+value through `SetAdvisorConfig` (see `applyAdvisorConfigToAgent`); (2) a
+sub-agent must inherit the parent's value via `SetParentAdvisorConfig`, or its
+own `cfg` seed would leak the global into the chat's advisor calls. The on/off
+gate is a separate field (`advisorEnabled`, seeded from `cfg` and overridable per
+session) — model/triggers and the gate are independent.
+
+**AgentRunRegistry** (`internal/agent/agent_runs.go`, `type AgentRunRegistry`) — tracks all async sub-agent runs. Polled by `WaitTool` and the TUI for status.
 **TaskCancelTool** (`task_cancel.go`) — cancels a background task by run ID.
 **Task DAG** (`task_dag.go`) — in-batch dependency scheduling when `task` calls declare `id`/`depends_on`.
 
@@ -200,4 +216,4 @@ main.go
   └─ internal/snapshot/   (file write snapshots for undo/changes-tab)
 ```
 
-**Key data flow boundary:** `agent.go` owns the `map[string]tool.Tool` (builtins + MCP tools + custom tools). When `Step()` executes a tool call, it looks up the matching `Tool` by name in the map, then calls the appropriate interface method. The `PermissionManager.Decide()` gate (permissions.go:1399) happens before execution. Permission asks are routed via `OnPermissionAsk` (agent.go:503) which connects to the TUI's synchronous permission dialog.
+**Key data flow boundary:** `agent.go` owns the `map[string]tool.Tool` (builtins + MCP tools + custom tools). When `Step()` executes a tool call, it looks up the matching `Tool` by name in the map, then calls the appropriate interface method. The `PermissionManager.Decide()` gate (`internal/agent/permissions.go`, `Decide`) happens before execution. Permission asks reach the TUI through the `PERMISSION_ASK:` pause-and-resume sentinel path, **not** through `OnPermissionAsk` — that field is set only on sub-agents; the main agent leaves it nil.

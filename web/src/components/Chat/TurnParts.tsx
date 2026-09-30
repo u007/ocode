@@ -1,11 +1,12 @@
 import { memo, useRef, useSyncExternalStore } from "react";
-import { CheckCircle2, Volume2 } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 import type { QuestionAnswerPayload } from "@/api/types";
 import { highlightMatches } from "./ChatSearchBar";
 import HighlightedCode from "./HighlightedCode";
 import { bashCommandFromArgs, formatToolArgsHint } from "./toolHint";
 import { useChatDisplay } from "./chatDisplayContext";
 import { renderedCopyText } from "../../lib/copyText";
+import { SpeakButton, type SpeakAction } from "../Speech/SpeakButton";
 import { BlockCopyControl } from "./BlockCopyControl";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 20;
@@ -62,7 +63,7 @@ export function ThinkingBlock({
 }: {
   text: string;
   highlight?: string;
-  onSpeak?: () => void;
+  onSpeak?: SpeakAction;
   blockKey?: string;
   isLatest?: boolean;
   forceOpen?: boolean;
@@ -92,15 +93,13 @@ export function ThinkingBlock({
           </button>
           <div className="flex items-center gap-1">
             {onSpeak && (
-              <button
-                type="button"
-                aria-label="Speak thinking"
+              <SpeakButton
+                getText={() => text}
+                onSpeak={onSpeak}
+                ariaLabel="Speak thinking"
                 title="Speak thinking"
-                onClick={onSpeak}
-                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
-              >
-                <Volume2 className="h-3.5 w-3.5" /> Speak
-              </button>
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+              />
             )}
             <BlockCopyControl
               rawText={text}

@@ -1,7 +1,7 @@
 import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
-import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
+import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, drainQueuedMessagesIntoDraft, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
 import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
@@ -189,6 +189,60 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       textareaRef.current.focus();
     }
   }, [isActive]);
+
+  // A compaction pass that fails never reaches the LLM, and the server has
+  // stopped re-arming it (the agent latches auto-compaction off), so anything
+  // the user submitted while it was running still exists ONLY in the queue.
+  // Move it back into the composer rather than dropping it, and keep the caret
+  // anchored to the user's own draft instead of jumping to the top.
+  //
+  // Fires once per distinct failure: /state reconciliation re-publishes the
+  // same error on every poll, and re-merging each time would duplicate text.
+  const handledCompactErrorRef = useRef<string | null>(null);
+  const pendingCaretRef = useRef<{ start: number; end: number; shift: number } | null>(null);
+  useEffect(() => {
+    if (compaction?.status !== "error") {
+      handledCompactErrorRef.current = null;
+      return;
+    }
+    if (handledCompactErrorRef.current === compaction.error) return;
+    handledCompactErrorRef.current = compaction.error;
+    if (!sessionTabId) return;
+
+    const el = textareaRef.current;
+    const merged = drainQueuedMessagesIntoDraft(sessionTabId, getDraft(sessionTabId));
+    if (!merged) return;
+
+    if (el) {
+      pendingCaretRef.current = {
+        start: el.selectionStart,
+        end: el.selectionEnd,
+        shift: merged.draftStart,
+      };
+    }
+    setInput(merged.value);
+    setDraft(sessionTabId, merged.value);
+    setQueuedItems([...getQueue(sessionTabId)]);
+    // A programmatic restore is a fresh edit, not a history walk.
+    historyIndexRef.current = -1;
+    historyDraftRef.current = "";
+  }, [compaction, sessionTabId]);
+
+  // Re-anchor the caret after the merge commits. A layout effect (not rAF) so the
+  // shift lands in the same commit as the new value — scheduling it later let the
+  // browser paint the caret at the old offset first.
+  useLayoutEffect(() => {
+    const pending = pendingCaretRef.current;
+    if (!pending) return;
+    pendingCaretRef.current = null;
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(
+      Math.min(pending.start + pending.shift, input.length),
+      Math.min(pending.end + pending.shift, input.length),
+    );
+  }, [input]);
 
   // Per-tab draft: restore this tab's typed-but-unsent text whenever the active
   // session tab changes (the draft map also lets the "New session" button tell

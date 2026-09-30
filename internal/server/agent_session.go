@@ -509,6 +509,11 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	tools := tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.scheduler, computerDriver, computerDriverErr)
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
 	ag.SetSessionID(sessionID)
+	// Replace the process-wide seed with THIS session's own advisor model and
+	// trigger set (pinning the current default if the session has none yet).
+	// effCfg may be a per-profile snapshot or a per-session copy, so without
+	// this the advisor would follow a global value the chat never chose.
+	ag.SetAdvisorConfig(h.advisorConfigSeed(sessionID))
 	// The agent's workdir comes from the registry entry's project root, not
 	// the process cwd — multi-project sessions run against their own repo
 	// (environment prompt, file-edit snapshots, permissions, discovery all
@@ -1436,6 +1441,22 @@ func (h *Handler) persistTurnTranscript(sessionID string, as *agentSession, base
 		}
 		log.Printf("serve: %s save for %s diverged from a concurrent writer; re-synced to disk (stored %d msgs, in-memory %d msgs, dropped suffix %d msgs)", label, sessionID, len(s.Messages), len(as.messages), max(0, len(as.messages)-len(s.Messages)))
 		as.messages = s.Messages
+		// Syncing memory to disk is NOT sufficient recovery. The next turn
+		// re-derives its base from the RESIDENT agent, so an agent whose view
+		// diverged can re-diverged on every subsequent turn — each one
+		// conflicting and discarding its own output, which is how a session
+		// ends up permanently stuck on an unanswered user row and reported by
+		// /state as `interrupted`. Schedule the teardown: executeTurnJob's
+		// drainPendingClose (deferred, so it runs after this turn unwinds)
+		// releases the agent, and the next turn re-bootstraps from disk, where
+		// memory and the stored transcript agree by construction.
+		h.cancelMu.Lock()
+		if h.closePending == nil {
+			h.closePending = make(map[string]bool)
+		}
+		h.closePending[sessionID] = true
+		h.cancelMu.Unlock()
+		log.Printf("serve: %s save for %s hit a transcript conflict; releasing the agent so the next turn re-bootstraps from disk", label, sessionID)
 		return
 	}
 	log.Printf("serve: %s save for %s: %v", label, sessionID, err)
@@ -1891,6 +1912,39 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	}
 }
 
+// pendingStripLen reports how many trailing stored rows must be withheld from
+// a freshly bootstrapped agent's context because they are persisted but not yet
+// turned (runTurn re-appends them at turn time).
+//
+// It matches pending CONTENT against the tail of history and stops at the first
+// mismatch, rather than trusting len(pending) as a count. The pending queue is
+// in-memory and a cancel deliberately RETAINS its message "for retry after
+// Resume" (see executeTurnJob), so it can hold entries that have no matching
+// trailing row on disk — after a rewind, or once a turn-end conflict has
+// re-synced memory to disk. Stripping by count then deletes SETTLED history and
+// leaves the resident agent permanently shorter than the stored transcript,
+// which is unrecoverable in place: every live snapshot is dropped ("stored rows
+// are not a prefix of the snapshot") and every turn-end save conflicts, so each
+// turn's output is discarded and the session settles forever on an unanswered
+// user row — reported by /state as `interrupted`.
+//
+// Matching the tail also keeps the queue honest rather than hiding a leak: an
+// entry with no matching row is simply not withheld, and PendingCount still
+// reports it.
+func pendingStripLen(history []agent.Message, pending []string) int {
+	// pending is oldest-first, so its LAST entry corresponds to the LAST
+	// stored row. Walk both from the tail and stop at the first mismatch.
+	n := 0
+	for i := len(pending) - 1; i >= 0 && n < len(history); i-- {
+		row := history[len(history)-1-n]
+		if row.Role != "user" || row.Content != pending[i] {
+			break
+		}
+		n++
+	}
+	return n
+}
+
 // bootstrapEntryAgent builds the agent for a registry entry from the
 // session's on-disk transcript, stripping the trailing messages that are
 // still pending (persisted but not yet turned — runTurn re-appends them at
@@ -1903,7 +1957,7 @@ func (h *Handler) bootstrapEntryAgent(entry *sessionEntry, model string) (*agent
 	if s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID); err == nil {
 		history = s.Messages
 	}
-	if n := h.sessions.PendingCount(entry.SessionID); n > 0 && n <= len(history) {
+	if n := pendingStripLen(history, h.sessions.PendingContents(entry.SessionID)); n > 0 {
 		history = history[:len(history)-n]
 	}
 	as, stage, err := h.buildAgentSession(entry.SessionID, model, history, entry.ProjectRoot)

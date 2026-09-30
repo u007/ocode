@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AssistantText } from "./MessageBubble";
 
@@ -15,9 +15,13 @@ function speakSpoken() {
 }
 
 describe("AssistantText speak", () => {
-  it("speaks rendered markdown, not the raw source", () => {
+  it("speaks rendered markdown, not the raw source", async () => {
     render(<AssistantText content={"# Title\n\nSome **bold** text with `code`."} onSpeak={requestSpeech} />);
-    fireEvent.click(screen.getByRole("button", { name: /speak message/i }));
+    // SpeakButton is now async (it disables while processing), so let its
+    // state updates settle inside act before asserting.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /speak message/i }));
+    });
 
     expect(requestSpeech).toHaveBeenCalledTimes(1);
     const spoken = speakSpoken();
@@ -28,17 +32,21 @@ describe("AssistantText speak", () => {
     expect(spoken).not.toContain("`");
   });
 
-  it("does not read the Speak button's own label aloud", () => {
+  it("does not read the Speak button's own label aloud", async () => {
     render(<AssistantText content={"just text"} onSpeak={requestSpeech} />);
-    fireEvent.click(screen.getByRole("button", { name: /speak message/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /speak message/i }));
+    });
     expect(speakSpoken()).toBe("just text");
   });
 
-  it("drops markdown link targets but keeps the link text", () => {
+  it("drops markdown link targets but keeps the link text", async () => {
     render(
       <AssistantText content={"Open [the device page](https://hub.mercstudio.com/device)."} onSpeak={requestSpeech} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: /speak message/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /speak message/i }));
+    });
     const spoken = speakSpoken();
     expect(spoken).toBe("Open the device page.");
     expect(spoken).not.toContain("https://");

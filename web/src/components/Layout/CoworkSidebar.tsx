@@ -105,6 +105,11 @@ export default function CoworkSidebar({
   isMobile,
 }: Props) {
   const [titleExpanded, setTitleExpanded] = useState(false);
+  // Per-server "reveal the full failure detail" toggle for the LSP section, keyed
+  // by the same string as the row key (`root-cmd`). Mirrors the session-title
+  // expand above; per-server rather than one global flag so expanding one
+  // server's error does not expand every other row.
+  const [expandedLspDetails, setExpandedLspDetails] = useState<Record<string, boolean>>({});
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [config, setConfig] = useState<ConfigState>({
     model: "",
@@ -1366,15 +1371,51 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                       label = `${warns} ${warns === 1 ? "warning" : "warnings"}`;
                       color = "text-yellow-400";
                     }
+                    // Row key doubles as the expand-toggle key.
+                    const rowKey = `${s.root || "."}-${s.cmd}`;
+                    // A FAILED server's `label` is its `detail` (assigned above):
+                    // an unbounded exec/stderr string such as
+                    // `failed to start gopls: exec: "gopls": executable file not
+                    // found in $PATH`. That was the one unbounded string in this
+                    // row, and it sat in a `flex-shrink-0` span, so the row could
+                    // not shrink below the text's width and grew past the 288px
+                    // pane. The sidebar scroller is `overflow-y-auto` with no
+                    // overflow-x guard, so overflow-x computes to `auto` and the
+                    // pane grew a horizontal scrollbar — only on chats that have
+                    // a broken language server, which is why it looked
+                    // chat-specific. Truncate it and let the click toggle
+                    // reveal the whole message.
+                    const canExpand = isFailed && !!s.detail;
+                    const expanded = !!expandedLspDetails[rowKey];
+                    const statusText = `${sym} ${label}`;
                     return (
-                      <div key={`${(s.root || ".")}-${s.cmd}`} className="rounded bg-muted p-2">
+                      <div key={rowKey} className="rounded bg-muted p-2">
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-mono text-muted-foreground truncate flex-1">
+                          <span className="min-w-0 flex-1 truncate text-xs font-mono text-muted-foreground">
                             {s.cmd}
                           </span>
-                          <span className={`text-xs font-mono flex-shrink-0 ${color}`}>
-                            {sym} {label}
-                          </span>
+                          {canExpand ? (
+                            <button
+                              type="button"
+                              aria-expanded={expanded}
+                              onClick={() =>
+                                setExpandedLspDetails((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }))
+                              }
+                              title={expanded ? "Click to collapse" : `${label}\n\n(click to expand)`}
+                              className={`min-w-0 cursor-pointer text-left font-mono text-xs ${color} ${
+                                expanded ? "whitespace-pre-wrap break-words" : "truncate"
+                              }`}
+                            >
+                              {statusText}
+                            </button>
+                          ) : (
+                            // Truncated, never `flex-shrink-0`: the short
+                            // labels (clean / N errors) fit today, and this keeps
+                            // a future long one from widening the row either.
+                            <span className={`min-w-0 truncate font-mono text-xs ${color}`}>
+                              {statusText}
+                            </span>
+                          )}
                         </div>
                         {s.lang_id && (
                           <div className="text-[11px] text-muted-foreground truncate">
@@ -1382,9 +1423,9 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                             {s.root ? ` · ${s.root}` : ""}
                           </div>
                         )}
-                        {isFailed && s.detail && (
-                          <div className="text-[11px] text-red-400/70 truncate mt-0.5">{s.detail}</div>
-                        )}
+                        {/* A failed server's `detail` used to repeat here on its
+                            own line. The toggle above now owns the full text, so
+                            keeping it would just print the same error twice. */}
                       </div>
                     );
                   })}

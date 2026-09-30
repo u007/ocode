@@ -12,7 +12,7 @@ tags:
   - responsive
   - side-pane
   - preview
-timestamp: 2026-09-24T04:41:08Z
+timestamp: 2026-09-29T08:39:14Z
 resource: https://github.com/aimsai2/ocode/blob/main/web/src/lib/sidePaneVisibility.ts
 ---
 ## Root Cause
@@ -81,3 +81,5 @@ The same pattern applies to floating fixed-position UI elements like toolbars an
 Feature panes that assume a wide viewport follow the same discipline problem: any component gated to a side-pane position must check `isMobile` and route to a tab-based equivalent rather than silently no-oping. The 767px breakpoint is the shared contract across Rules 1–8.
 
 Interactive controls that survive only in a side pane (a chat's 🌐 toggle, the file tree's Open button) must have a tab-based equivalent for mobile or they become invisible. The side pane's open/collapsed state is session-scoped (`side:chat:<id>` in `ocode.ui.sidebarPreview.v2`), not global per project — the pane a user left open in one chat is not expected to appear in another.
+
+**See also:** `gotchas/cowork-sidebar-lsp-status-overflow.md` — the other horizontal-overflow class in this UI (flex `min-width:auto` + unshrinkable child, not a narrow-viewport issue).

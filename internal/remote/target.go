@@ -55,20 +55,37 @@ func (t Target) Validate() error {
 	if strings.ContainsAny(t.User, "@/ \t\n") || strings.ContainsAny(t.Host, "@/ \t\n") {
 		return fmt.Errorf("invalid SSH user or host")
 	}
+	// A host (or user) starting with "-" would be parsed by ssh as an OPTION,
+	// not a destination: every ssh invocation here passes the target as a bare
+	// argv element with no "--" separator. Reject it — see
+	// ParseTargetRejectsLeadingDashHost for the verified ProxyCommand proof.
+	// The user half matters too, because the user@host form is one token: a
+	// leading-dash user makes the WHOLE token start with "-".
+	if strings.HasPrefix(t.Host, "-") || strings.HasPrefix(t.User, "-") {
+		return fmt.Errorf("invalid SSH user or host: must not begin with '-'")
+	}
 	if t.Port < 0 || t.Port > 65535 {
 		return fmt.Errorf("SSH port must be between 1 and 65535")
 	}
 	return nil
 }
 
-// SSHArgs returns the target portion of an ssh command, including the
-// optional port flag. Callers prepend command-specific flags such as -t.
+// SSHArgs returns the target portion of an ssh command: the optional port
+// flag, then the "--" option terminator, then the [user@]host destination.
+// Callers prepend command-specific flags such as -t.
+//
+// The "--" belongs HERE rather than in each caller so the ordering invariant
+// lives in one place: ssh reads the first non-option element as the hostname,
+// so the terminator must sit after -p but immediately before the destination.
+// Getting that backwards makes ssh read "-p" as a hostname. Validate and
+// ParseTarget reject a leading "-" on the target; the separator is the
+// independent second barrier at the point the argv is built.
 func (t Target) SSHArgs() []string {
-	args := make([]string, 0, 3)
+	args := make([]string, 0, 4)
 	if t.Port > 0 {
 		args = append(args, "-p", strconv.Itoa(t.Port))
 	}
-	return append(args, t.String())
+	return append(args, "--", t.String())
 }
 
 // String returns the canonical [user@]host form for an SSH target, or
@@ -111,6 +128,16 @@ func ParseTarget(s string) (Target, error) {
 	}
 	if hasUser && user == "" {
 		return Target{}, fmt.Errorf("invalid remote target %q: empty user before '@'", s)
+	}
+	// Reject a leading "-" on the host AFTER the user@ split, and on the user:
+	// ssh receives "[user@]host" as one bare argv element with no "--"
+	// separator, so a leading dash makes ssh parse it as an OPTION. Checking
+	// the whole string instead of the host would miss "user@-oProxyCommand=id",
+	// whose token only starts with "-o" after the user is prepended.
+	// Validate repeats this because callers that build a Target field-by-field
+	// from a request body never reach here.
+	if strings.HasPrefix(host, "-") || strings.HasPrefix(user, "-") {
+		return Target{}, fmt.Errorf("invalid remote target %q: must not begin with '-'", s)
 	}
 
 	return Target{Kind: KindSSH, User: user, Host: host, Raw: s}, nil

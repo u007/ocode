@@ -134,3 +134,10 @@ export function __resetCompactionStateForTests() {
   localPending.clear();
   resetCompactionGenerations();
 }
+
+/** Number of sessions with an in-flight compaction; stall diagnostics only. */
+export function activeCompactionCount() {
+  let n = 0;
+  states.forEach((s) => { if (s.status === "active") n++; });
+  return n;
+}

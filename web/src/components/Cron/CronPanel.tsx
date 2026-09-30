@@ -8,6 +8,9 @@ import CronJobDialog from "./CronJobDialog";
 import CronOutboxPanel from "./CronOutboxPanel";
 import CronTargetsPanel from "./CronTargetsPanel";
 import CronHistoryPanel from "./CronHistoryPanel";
+import CronSubTabs, { type CronSubView } from "./CronSubTabs";
+import ReminderTaskView from "./ReminderTaskView";
+import type { ReminderItemKind } from "@/api/types";
 import { CalendarClock, PencilLine, Pause, Play, Plus, RefreshCcw, Trash2, History } from "lucide-react";
 import {
   useKeyedLoad,
@@ -16,6 +19,18 @@ import {
 } from "@/hooks/useKeyedLoad";
 
 const REFRESH_INTERVAL = 10_000;
+
+/** The one-line explanation shown beside the sub-tab switcher. */
+function subViewBlurb(view: CronSubView): string {
+  switch (view) {
+    case "jobs":
+      return "Recurring and one-shot agent jobs that run on a schedule.";
+    case "reminders":
+      return "One-shot nudges. Each rings once at its due time, then completes.";
+    case "tasks":
+      return "Checklist items. A due date and an agent run are both optional.";
+  }
+}
 
 interface Props {
   active?: boolean;
@@ -45,6 +60,18 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
   // which made deleting a job impossible there.
   const [pendingDelete, setPendingDelete] = useState<CronJob | null>(null);
   const [pendingOutboxClear, setPendingOutboxClear] = useState(false);
+  // Which of the three collections the table area is showing. The sub-view is
+  // local state, NOT persisted: it is a view preference, and a stale one would
+  // hide the jobs list behind a reminder list on the next launch.
+  const [subView, setSubView] = useState<CronSubView>("jobs");
+  // Totals for the sub-tab badges. Kept here because the two list views own
+  // their own fetching and must not poll just to feed a badge.
+  //
+  // Deliberately keyed as a plain string map: the jobs view reports under
+  // "jobs" while the two list views report under their KIND ("reminder",
+  // "task"), so a single strict union of sub-view ids would force one of the
+  // two spellings to lie. CronSubTabs simply looks up whatever is present.
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const initialReadyRef = useRef(false);
   const refreshAllRef = useRef<(() => Promise<KeyedLoadResult<CronLoadData>>) | null>(null);
 
@@ -79,6 +106,11 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
     }).then((result) => {
       if (result.status === "success" || result.status === "empty") {
         setJobs(result.value.jobs);
+        setCounts((prev) =>
+          prev.jobs === result.value.jobs.length
+            ? prev
+            : { ...prev, jobs: result.value.jobs.length },
+        );
         setOutbox(result.value.outbox);
         setTargets(result.value.targets);
         setError(null);
@@ -189,26 +221,55 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
     await refreshAll();
   };
 
+  // The two list views report their totals so the sub-tab badges stay accurate
+  // without the Jobs view having to fetch on their behalf.
+  //
+  // The two spellings differ on purpose: a list view knows its collection as
+  // "reminder"/"task" (the API path segment and the Kind type), while the
+  // switcher knows its views as "reminders"/"tasks". Mapping here — explicitly,
+  // once — beats either side deriving the other's name from a string, which is
+  // what silently produced badges that never appeared.
+  const SUB_VIEW_FOR_KIND: Record<ReminderItemKind, CronSubView> = {
+    reminder: "reminders",
+    task: "tasks",
+  };
+  const handleCountChange = useCallback((kind: ReminderItemKind, total: number) => {
+    const view = SUB_VIEW_FOR_KIND[kind];
+    setCounts((prev) => (prev[view] === total ? prev : { ...prev, [view]: total }));
+  }, []);
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
-      <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold">
             <CalendarClock className="h-4 w-4 text-blue-400" />
             Cron
           </div>
-          <div className="text-xs text-muted-foreground">Schedule jobs, manage delivery history, and map Telegram targets.</div>
+          <div className="text-xs text-muted-foreground">Schedule jobs and reminders, track tasks, and map Telegram targets.</div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void refreshAll()}>
-            <RefreshCcw className="mr-2 h-4 w-4" />
-            Refresh
-          </Button>
-          <Button size="sm" onClick={openAddDialog}>
-            <Plus className="mr-2 h-4 w-4" />
-            Add job
-          </Button>
-        </div>
+        {/*
+          The jobs toolbar is part of the Jobs view, not the tab chrome: the
+          Reminders and Tasks views bring their own Add/Refresh controls, and
+          leaving these here would put an "Add job" button over a task list.
+        */}
+        {subView === "jobs" && (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => void refreshAll()}>
+              <RefreshCcw className="mr-2 h-4 w-4" />
+              Refresh
+            </Button>
+            <Button size="sm" onClick={openAddDialog}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add job
+            </Button>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
+        <CronSubTabs value={subView} onChange={setSubView} counts={counts} />
+        <div className="text-xs text-muted-foreground">{subViewBlurb(subView)}</div>
       </div>
 
       <div className="flex-1 overflow-hidden p-4">
@@ -219,124 +280,156 @@ export default function CronPanel({ active = true, loadingKey, onLoadingEvent }:
             </div>
           )}
 
-          <div className="overflow-hidden rounded-lg border border-border bg-card/80">
-            <div className="overflow-auto">
-              <table className="min-w-full border-collapse text-sm">
-                <thead className="sticky top-0 bg-card text-xs uppercase tracking-wide text-muted-foreground">
-                  <tr>
-                    <th className="px-4 py-3 text-left font-medium">Name</th>
-                    <th className="px-4 py-3 text-left font-medium">Schedule</th>
-                    <th className="px-4 py-3 text-left font-medium">Next Run</th>
-                    <th className="px-4 py-3 text-left font-medium">Last Run</th>
-                    <th className="px-4 py-3 text-left font-medium">Last Status</th>
-                    <th className="px-4 py-3 text-left font-medium">Runs</th>
-                    <th className="px-4 py-3 text-left font-medium">Enabled</th>
-                    <th className="px-4 py-3 text-right font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {loading ? (
+          {/*
+            All three panes stay MOUNTED so their filters, dialogs and scroll
+            position survive a switch back and forth. Only the front pane is
+            visible, and each one gates its own polling on `active`, so a hidden
+            pane costs nothing.
+          */}
+          <div
+            id="cron-subpanel-jobs"
+            role="tabpanel"
+            aria-labelledby="cron-subtab-jobs"
+            hidden={subView !== "jobs"}
+            data-testid="cron-subpanel-jobs"
+          >
+            <div className="overflow-hidden rounded-lg border border-border bg-card/80">
+              <div className="overflow-auto">
+                <table className="min-w-full border-collapse text-sm">
+                  <thead className="sticky top-0 bg-card text-xs uppercase tracking-wide text-muted-foreground">
                     <tr>
-                      <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
-                        Loading cron jobs…
-                      </td>
+                      <th className="px-4 py-3 text-left font-medium">Name</th>
+                      <th className="px-4 py-3 text-left font-medium">Schedule</th>
+                      <th className="px-4 py-3 text-left font-medium">Next Run</th>
+                      <th className="px-4 py-3 text-left font-medium">Last Run</th>
+                      <th className="px-4 py-3 text-left font-medium">Last Status</th>
+                      <th className="px-4 py-3 text-left font-medium">Runs</th>
+                      <th className="px-4 py-3 text-left font-medium">Enabled</th>
+                      <th className="px-4 py-3 text-right font-medium">Actions</th>
                     </tr>
-                  ) : jobs.length === 0 ? (
-                    <tr>
-                      <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
-                        No cron jobs yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    jobs.map((job) => {
-                      const status = job.state.last_status || "—";
-                      const lastStatusClass =
-                        status === "error"
-                          ? "text-red-300"
-                          : status === "ok"
-                            ? "text-emerald-300"
-                            : "text-muted-foreground";
-                      return (
-                        <tr
-                          key={job.id}
-                          className="cursor-pointer bg-background/40 hover:bg-muted/70"
-                          onClick={() => openEditDialog(job)}
-                        >
-                          <td className="px-4 py-3 align-top">
-                            <div className="font-medium text-foreground">{job.name || job.payload.message}</div>
-                            <div className="mt-1 text-xs text-muted-foreground">{job.payload.message}</div>
-                          </td>
-                          <td className="px-4 py-3 align-top text-foreground">{describeSchedule(job.schedule)}</td>
-                          <td className="px-4 py-3 align-top text-foreground">{nextRunLabel(job.state.next_run_at_ms)}</td>
-                          <td className="px-4 py-3 align-top text-foreground">{lastRunLabel(job.state.last_run_at_ms)}</td>
-                          <td className={`px-4 py-3 align-top ${lastStatusClass}`} title={job.state.last_error || undefined}>
-                            {status}
-                          </td>
-                          <td className="px-4 py-3 align-top text-foreground">{job.state.runs ?? 0}</td>
-                          <td className="px-4 py-3 align-top">
-                            <button
-                              type="button"
-                              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                                job.enabled
-                                  ? "border-emerald-700 bg-emerald-950/70 text-emerald-300 hover:bg-emerald-900"
-                                  : "border-border bg-card text-muted-foreground hover:bg-muted"
-                              }`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void toggleEnabled(job);
-                              }}
-                            >
-                              {job.enabled ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-                              {job.enabled ? "On" : "Off"}
-                            </button>
-                          </td>
-                          <td className="px-4 py-3 align-top text-right">
-                            <div className="flex items-center justify-end gap-2">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 px-2 text-muted-foreground hover:text-blue-300"
-                                title="View run history"
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {loading ? (
+                      <tr>
+                        <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
+                          Loading cron jobs…
+                        </td>
+                      </tr>
+                    ) : jobs.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
+                          No cron jobs yet.
+                        </td>
+                      </tr>
+                    ) : (
+                      jobs.map((job) => {
+                        const status = job.state.last_status || "—";
+                        const lastStatusClass =
+                          status === "error"
+                            ? "text-red-300"
+                            : status === "ok"
+                              ? "text-emerald-300"
+                              : "text-muted-foreground";
+                        return (
+                          <tr
+                            key={job.id}
+                            className="cursor-pointer bg-background/40 hover:bg-muted/70"
+                            onClick={() => openEditDialog(job)}
+                          >
+                            <td className="px-4 py-3 align-top">
+                              <div className="font-medium text-foreground">{job.name || job.payload.message}</div>
+                              <div className="mt-1 text-xs text-muted-foreground">{job.payload.message}</div>
+                            </td>
+                            <td className="px-4 py-3 align-top text-foreground">{describeSchedule(job.schedule)}</td>
+                            <td className="px-4 py-3 align-top text-foreground">{nextRunLabel(job.state.next_run_at_ms)}</td>
+                            <td className="px-4 py-3 align-top text-foreground">{lastRunLabel(job.state.last_run_at_ms)}</td>
+                            <td className={`px-4 py-3 align-top ${lastStatusClass}`} title={job.state.last_error || undefined}>
+                              {status}
+                            </td>
+                            <td className="px-4 py-3 align-top text-foreground">{job.state.runs ?? 0}</td>
+                            <td className="px-4 py-3 align-top">
+                              <button
+                                type="button"
+                                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                                  job.enabled
+                                    ? "border-emerald-700 bg-emerald-950/70 text-emerald-300 hover:bg-emerald-900"
+                                    : "border-border bg-card text-muted-foreground hover:bg-muted"
+                                }`}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setHistoryJob(job);
+                                  void toggleEnabled(job);
                                 }}
                               >
-                                <History className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 px-2 text-muted-foreground hover:text-foreground"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openEditDialog(job);
-                                }}
-                              >
-                                <PencilLine className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 px-2 text-muted-foreground hover:text-red-300"
-                                title={`Delete ${job.name || "this job"}`}
-                                aria-label={`Delete ${job.name || "this job"}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setPendingDelete(job);
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
+                                {job.enabled ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+                                {job.enabled ? "On" : "Off"}
+                              </button>
+                            </td>
+                            <td className="px-4 py-3 align-top text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-muted-foreground hover:text-blue-300"
+                                  title="View run history"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setHistoryJob(job);
+                                  }}
+                                >
+                                  <History className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-muted-foreground hover:text-foreground"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openEditDialog(job);
+                                  }}
+                                >
+                                  <PencilLine className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-muted-foreground hover:text-red-300"
+                                  title={`Delete ${job.name || "this job"}`}
+                                  aria-label={`Delete ${job.name || "this job"}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setPendingDelete(job);
+                                  }}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
+          </div>
+          <div hidden={subView !== "reminders"} className="contents">
+            <ReminderTaskView
+              kind="reminder"
+              panelId="cron-subpanel-reminders"
+              active={active && subView === "reminders"}
+              loadingKey={loadingKey}
+              onTotalChange={handleCountChange}
+            />
+          </div>
+          <div hidden={subView !== "tasks"} className="contents">
+            <ReminderTaskView
+              kind="task"
+              panelId="cron-subpanel-tasks"
+              active={active && subView === "tasks"}
+              loadingKey={loadingKey}
+              onTotalChange={handleCountChange}
+            />
           </div>
 
           {historyJob && (

@@ -1,3 +1,11 @@
+---
+type: Plan
+timestamp: 2026-09-30T04:24:49Z
+---
+# 
+
+---
+
 # Part 4: Frontend — Sidebar Inventory, Connect, Restart, Wake
 
 **Spec:** `docs/superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md`, Sections 3 and 4.
@@ -53,10 +61,11 @@ Constraints: use existing UI primitives (`Button`, context menu, dialog componen
 - `RemoteProjectStatus({ project })` uses `useRemoteHostStatus(project.host, true)` and, when expanded, `useRemoteTerminals(project.host, project.path, expanded)` plus the project's cached session list (`prefetchProjectSessions(project)` on expand, sessions read from `sessionsByProject[projectSessionKey(path, host)]`) and running state from the `runs` bus events for that host.
 - Collapsed line text, in order: version (amber dot before it when `outdated`), `N chats (R running)`, `M terminals`. When `connected` is false the line reads `not connected` and shows a **Connect** button. When `outdated` it shows an inline **Restart** button. While `busy` is `connecting` or `restarting` the line reads `connecting…` / `restarting…` and both buttons are disabled.
 - Clicking the line toggles expansion. Expanded: a **Chats** list (title, running badge, click → `openSessionTab`, already-open sessions marked) and a **Terminals** list (title or shell name fallback, click → `attachTerminal`, already-open ids marked, a small kill icon that DELETEs via the proxied URL then refreshes).
+- **Amended 2026-09-30 — the Chats list and the collapsed `N chats` / `(R running)` counts are a LIVE view, not all of the host's persisted sessions.** A session is shown only if it is open as a tab in this window (`tabsByProject[project.path]`) OR running an agent turn on the host (the per-host `runs` bus — a remote session running with no local tab still appears): `visibleSessions = sessions.filter((s) => openSessionIds.has(s.id) || running.has(s.id))` (`RemoteProjectStatus.tsx:92`), with the count (`:128`/`:134`), the expanded list, and the empty state ("No open chats", `:225-228`) all derived from it. Rationale: once remote session listing loaded, listing every session flooded the row with past chats and buried the ones in progress. **Closed, non-running remote chats are reached through the Sessions dialog (`SessionDialog.tsx`), the full browser — not this inventory.** This supersedes the original "lists all sessions" wording above and in the spec.
 - Context menu item "Restart remote server" calls the same `restart` as the inline button.
 - `attachTerminal` reuses the tab shape `openTerminal` builds and persists it through the same save path so a reload restores it.
 
-- [x] **Step 1: Write failing tests**: renders `not connected` + Connect when status is disconnected; renders `v1.2.3 · 2 chats (1 running) · 3 terminals` for a connected status with mocked hooks; amber marker and Restart appear only when `outdated`; clicking Restart calls the hook's `restart`; expanding lists chats and terminals and clicking a terminal calls `attachTerminal` with the id; `attachTerminal` in the store adds a tab with the given id once and ignores a second call; `ProjectSidebar` shows the status component only for host projects and its context menu contains the restart item only for hosts.
+- [x] **Step 1: Write failing tests**: renders `not connected` + Connect when status is disconnected; renders `v1.2.3 · 2 chats (1 running) · 3 terminals` for a connected status with mocked hooks; amber marker and Restart appear only when `outdated`; clicking Restart calls the hook's `restart`; expanding lists chats and terminals and clicking a terminal calls `attachTerminal` with the id; `attachTerminal` in the store adds a tab with the given id once and ignores a second call; `ProjectSidebar` shows the status component only for host projects and its context menu contains the restart item only for hosts. **Live-view cases (added with the 2026-09-30 amendment):** a session appears when open-only, when running-only, and when both; never when neither; empty expanded state reads "No open chats".
 - [x] **Step 2: Run** the test files. Expected: FAIL.
 - [x] **Step 3: Implement** the component, the store action, and the sidebar wiring using existing `ui` primitives.
 - [x] **Step 4: Run** `cd web && pnpm test -- Layout terminalStore`. Expected: PASS, including existing `ProjectSidebar.test.tsx` cases.

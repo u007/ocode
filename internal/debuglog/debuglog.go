@@ -19,6 +19,16 @@ const (
 	KindDiscovery EntryKind = "DISCOVERY"
 	KindProfile   EntryKind = "PROFILE"
 	KindMCP       EntryKind = "MCP"
+	// KindPermissionJudge carries one TypeSafe auto-permission judge decision:
+	// the state that produced it (command, working directory, allowed roots), the
+	// model's choice with its confidence and probability distribution, the floor
+	// applied, and which deterministic guard — if any — spoke afterwards. These
+	// are rare (at most a few per turn) but they are the only record of WHY a
+	// tool call was auto-approved, deferred to a human, or refused, and that
+	// record does not survive anywhere else: the verdict line below reaches only
+	// the TUI or stderr, and the in-memory ring holds just the last 500 entries.
+	// Mirrored to <logsDir>/permission-judge.log — see mirror.go.
+	KindPermissionJudge EntryKind = "PERMJUDGE"
 )
 
 type Entry struct {

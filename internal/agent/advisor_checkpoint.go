@@ -63,7 +63,10 @@ func (st *advisorCheckpointState) countBatch(calls []ToolCall) {
 // the agent must be the top-level agent (sub-agents never checkpoint —
 // parallel sub-agents would contend on the advisor recursion guard), the
 // advisor must be enabled (runtime gate, reactive to mid-run toggles),
-// and the checkpoint must be listed in cfg.Ocode.Advisor.Checkpoints.
+// and the checkpoint must be in the SESSION's own trigger set
+// (a.advisorCheckpoints, seeded from the session's pinned AdvisorConfig — not
+// the process-wide config, so changing the global triggers never changes an
+// existing chat's).
 // The advisor model is resolved by AdvisorTool.resolveModel() with a
 // built-in default fallback, so absence of an explicit model is not a
 // gate — the advisor call itself handles client creation failure gracefully.
@@ -78,10 +81,7 @@ func (a *Agent) advisorCheckpointEnabled(name string) bool {
 	if !enabled {
 		return false
 	}
-	if a.config == nil {
-		return false
-	}
-	for _, c := range a.config.Ocode.Advisor.Checkpoints {
+	for _, c := range a.AdvisorCheckpoints() {
 		if strings.EqualFold(strings.TrimSpace(c), name) {
 			return true
 		}

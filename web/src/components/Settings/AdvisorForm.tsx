@@ -19,6 +19,8 @@ export default function AdvisorForm() {
   // The advisor model is picked through the ModelDialog (which persists
   // immediately on select); the chat store is the live value, with the
   // API-loaded copy as fallback so the display/save never revert a fresh pick.
+  // This is the GLOBAL default (new chats); a real chat's own model lives in
+  // its session slice and is edited from the picker/sidebar, not here.
   const advisorModel = useChatSelector((s) => s.advisorModel);
   const currentModel = advisorModel || model;
 
@@ -71,11 +73,16 @@ export default function AdvisorForm() {
   return (
     <div className="p-6 max-w-lg space-y-4">
       <h2 className="text-sm font-semibold text-foreground">Advisor</h2>
+      <p className="text-xs text-muted-foreground">
+        Defaults for NEW chats. Each existing chat keeps the advisor model,
+        triggers and on/off state it was created with — change those per chat
+        with the model picker or the chat's sidebar row.
+      </p>
       {error && <div className="text-xs text-red-400">{error}</div>}
 
       <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input type="checkbox" checked={runtimeEnabled} onChange={(e) => setRuntimeEnabled(e.target.checked)} />
-        Enabled for this session (not persisted)
+        Advisor on by default for new chats
       </label>
 
       <div className="space-y-1.5">

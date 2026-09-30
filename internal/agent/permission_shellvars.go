@@ -76,8 +76,11 @@ var (
 var (
 	shellVarNameRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*`)
 	shellAssignRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+	shellAssignAnyRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*\+?=`)
+	shellIdentRe     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	goEnvVarRe       = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 	secretVarNameRe  = regexp.MustCompile(`(?i)(KEY|TOKEN|SECRET|PASSW|AUTH|CREDENTIAL|COOKIE|SESSION|PRIVATE|SIGNATURE)`)
+	urlUserinfoRe    = regexp.MustCompile(`://[^/@\s]+:[^/@\s]+@`)
 	pythonSnippetsOK = map[string]bool{
 		"import sys;print(sys.prefix)":                             true,
 		"import sys;print(sys.base_prefix)":                        true,
@@ -166,7 +169,13 @@ func (e *judgeExpander) expandCommand(cmd string) string {
 		}
 		// The rest of the statement, up to its terminator.
 		end := scanShellStatement(r, i)
-		expanded, _, _ := e.expandWord(string(r[i:end]))
+		rest := string(r[i:end])
+		// A rebinding the expander does not model (export/declare/local, NAME+=,
+		// for/read/unset, an assignment buried in a pipeline or group) makes the
+		// variable opaque, so a later $NAME is shown unresolved rather than as
+		// the stale value the shell will no longer use.
+		e.markStatementRebindings(rest)
+		expanded, _, _ := e.expandWord(rest)
 		out.WriteString(expanded)
 		pureAssignment := len(assigns) > 0 && strings.TrimSpace(string(r[i:end])) == ""
 		i = end
@@ -187,6 +196,42 @@ func (e *judgeExpander) expandCommand(cmd string) string {
 		}
 	}
 	return out.String()
+}
+
+// markStatementRebindings marks variables rebound by stmt in a form
+// expandCommand does not model. It is deliberately over-inclusive: a false
+// positive only makes the judge see $NAME unresolved (a fail-closed extra
+// confirmation), while a miss would let the judge reason about a value the
+// shell will not use.
+func (e *judgeExpander) markStatementRebindings(stmt string) {
+	for _, m := range shellAssignAnyRe.FindAllString(stmt, -1) {
+		e.markOpaque(strings.TrimSuffix(strings.TrimSuffix(m, "="), "+"))
+	}
+	fields := strings.Fields(stmt)
+	if len(fields) == 0 {
+		return
+	}
+	switch fields[0] {
+	case "for", "read", "unset", "declare", "local", "readonly", "typeset", "mapfile", "readarray":
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "-") {
+				continue
+			}
+			name := f
+			if i := strings.IndexByte(name, '='); i >= 0 {
+				name = name[:i]
+			}
+			e.markOpaque(name)
+		}
+	}
+}
+
+func (e *judgeExpander) markOpaque(name string) {
+	if name == "" || !shellIdentRe.MatchString(name) {
+		return
+	}
+	delete(e.vars, name)
+	e.opaque[name] = true
 }
 
 // expandWord expands $NAME, ${NAME} and allowlisted $(...) in text, honouring
@@ -267,6 +312,13 @@ func (e *judgeExpander) expandDollar(r []rune, i int) (raw, value string, resolv
 			inner = string(r[i+2 : end-1])
 		}
 		if v, ok := e.resolveJudgeSubstitution(inner); ok {
+			if secretVarNameRe.MatchString(inner) || judgeValueLooksSecret(v) {
+				// A substitution can name a secret (go env GITHUB_TOKEN) or return
+				// one in a URL userinfo; withhold it from the remote judge exactly
+				// as a secret-looking environment value is withheld.
+				e.record(raw, redactedShellValue, "command")
+				return raw, "", false, end - i
+			}
 			e.record(raw, v, "command")
 			return raw, v, true, end - i
 		}
@@ -297,6 +349,13 @@ func (e *judgeExpander) expandDollar(r []rune, i int) (raw, value string, resolv
 	}
 }
 
+// judgeValueLooksSecret reports whether a resolved value must not reach the
+// remote judge: a known secret format, or credentials embedded in a URL's
+// userinfo (which QuickScan does not match — there is no keyword).
+func judgeValueLooksSecret(v string) bool {
+	return redact.QuickScan(v) || urlUserinfoRe.MatchString(v)
+}
+
 func (e *judgeExpander) lookup(name string) (string, bool) {
 	if v, ok := e.vars[name]; ok {
 		return v, true
@@ -308,7 +367,7 @@ func (e *judgeExpander) lookup(name string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if secretVarNameRe.MatchString(name) || redact.QuickScan(v) {
+	if secretVarNameRe.MatchString(name) || judgeValueLooksSecret(v) {
 		e.record(name, redactedShellValue, "environment")
 		return "", false
 	}
@@ -339,7 +398,9 @@ func (e *judgeExpander) resolveJudgeSubstitution(inner string) (string, bool) {
 		if bin, snippet, ok := parsePythonSnippet(inner); ok {
 			// Canonical snippets hold no double quotes or $, so double-quoting
 			// is literal under both sh -c and cmd /C.
-			run = bin + ` -c "` + snippet + `"`
+			// -I (isolated) keeps the project directory off sys.path, so a
+			// repo-local sysconfig.py/site.py cannot execute during judge prep.
+			run = bin + ` -I -c "` + snippet + `"`
 		}
 	}
 	if run == "" {

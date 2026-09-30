@@ -366,6 +366,13 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
     // tab rekeys from the command result; this handler covers every OTHER tab
     // and window: if we are tracking the old id, rebind to the new one with the
     // same store plumbing a `new-*` tab uses on first send.
+    //
+    // Forward to Pulse explicitly. This branch returns before the generic
+    // session-scoped path (routeSessionScoped), which is where the sink call
+    // normally lives, so the dashboard's rekey handling in pulseStore was
+    // unreachable: the card kept the dead old id and its next click opened a
+    // session that no longer exists on disk.
+    pulseEventSink(event, eventSessionId ?? "", data, env.host ?? "");
     const rekeyed = data as { session_id?: string; old_id?: string };
     const oldId = rekeyed.old_id;
     const newId = rekeyed.session_id || eventSessionId || "";
@@ -406,7 +413,21 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       r.dispatch({ type: "SET_ADVISOR_ENABLED", enabled: !!status.advisor_enabled });
     }
     if (status.advisor_model !== undefined) {
-      r.dispatch({ type: "SET_ADVISOR_MODEL", model: status.advisor_model });
+      // Same rule for the advisor MODEL: a session-tagged snapshot reports
+      // THAT chat's model (the server stamps it per session), so it must go to
+      // the owning session only. Only an untagged snapshot may write the
+      // global, which is the default new chats start with. Without the guard
+      // one chat's advisor pick repainted every other tab's picker.
+      if (eventSessionId && sessionIsTracked(r, eventSessionId)) {
+        r.dispatch({
+          type: "SET_SESSION_ADVISOR_CONFIG",
+          sessionId: eventSessionId,
+          model: status.advisor_model,
+          checkpoints: status.advisor_checkpoints,
+        });
+      } else if (!eventSessionId) {
+        r.dispatch({ type: "SET_ADVISOR_MODEL", model: status.advisor_model });
+      }
     }
     if (status.small_model !== undefined) {
       r.dispatch({ type: "SET_SMALL_MODEL", model: status.small_model });
@@ -790,7 +811,7 @@ function routeSessionScoped(
   // so it must see the event before the tracked-session gate below. The sink is
   // a no-op when no PulseProvider is mounted, and it never routes into the chat
   // store — it only patches the dashboard's own row list.
-  pulseEventSink(event, eventSessionId, env.data);
+  pulseEventSink(event, eventSessionId, env.data, env.host ?? "");
 
   // Tracked-session gate (see the module docstring): maintain slices only
   // for open tabs and already-known sessions — never create one for a

@@ -112,6 +112,10 @@ func scpFailFastArgs(t Target) []string {
 // hanging the request goroutine on an invisible password prompt or an
 // unreachable host (see sshFailFastArgs).
 func (s *SSHTransport) commandArgs(command string) []string {
+	// SSHArgs supplies the "--" separator immediately before the destination,
+	// after every option (including -p), so a host is never mistaken for an
+	// ssh option. Validate/ParseTarget already reject a leading "-"; the
+	// separator is the independent second barrier.
 	args := append(sshFailFastArgs(), s.Target.SSHArgs()...)
 	return append(args, command)
 }

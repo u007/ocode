@@ -45,6 +45,13 @@ export interface BusEnvelope<T = unknown> {
   session_id?: string;
   seq: number;
   data: T;
+  /** The host this frame arrived from: "" for the local server, the remote
+   *  host string otherwise. Stamped by the connection, not by the server,
+   *  because the server has no idea it is being proxied. Consumers that
+   *  aggregate across hosts (e.g. the Pulse dashboard, whose list is built from
+   *  the LOCAL server alone) need it to tell "unknown session" apart from
+   *  "a session this client has no way of listing". */
+  host?: string;
 }
 
 type EnvelopeHandler = (env: BusEnvelope) => void;
@@ -283,6 +290,10 @@ class EventBus {
               console.error("eventBus: malformed envelope", env);
               return;
             }
+            // Stamp the originating host before dispatch: every host's frames
+            // feed the same handlers, and only the connection knows which is
+            // which. Mutated rather than copied — the bus is the hot path.
+            env.host = conn.host;
             this.trackSeq(conn, env.seq);
             this.handlers.get(env.event)?.forEach((h) => {
               try {

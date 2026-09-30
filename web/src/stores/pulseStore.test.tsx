@@ -62,8 +62,8 @@ function mount() {
 }
 
 /** Drive the module-level sink the SSE router calls. */
-function emit(event: string, sessionId: string, data: unknown) {
-  act(() => pulseEventSink(event, sessionId, data));
+function emit(event: string, sessionId: string, data: unknown, host = "") {
+  act(() => pulseEventSink(event, sessionId, data, host));
 }
 
 beforeEach(() => {
@@ -403,6 +403,35 @@ describe("pulseStore scope and paging", () => {
     expect(getPulse).not.toHaveBeenCalled();
   });
 
+  it("setScope toggled back mid-flight is not swallowed as a no-op", async () => {
+    // The no-op guard used to compare against the last APPLIED scope, which
+    // only updates when a response lands. Toggling live→all→live inside one
+    // tick therefore dropped the second click: the "all" response landed last
+    // and the UI sat on "all" even though the user had asked for "live".
+    let resolveAll: ((v: ReturnType<typeof page>) => void) | undefined;
+    getPulse.mockResolvedValue(page([row({ session_id: "a" })]));
+    mount();
+    await waitFor(() => expect(latest.scope).toBe("live"));
+
+    getPulse.mockClear();
+    getPulse.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveAll = resolve; }),
+    );
+    act(() => {
+      latest.setScope("all");
+      latest.setScope("live"); // same tick, before "all" has resolved
+    });
+    // Both clicks must reach the network; the second is a real change of mind.
+    expect(getPulse).toHaveBeenCalledTimes(2);
+    expect(getPulse).toHaveBeenLastCalledWith("live", null, 50);
+
+    await act(async () => {
+      resolveAll?.(page([row({ session_id: "a" })]));
+    });
+    // The superseded "all" response must not win, and the requested scope does.
+    await waitFor(() => expect(latest.scope).toBe("live"));
+  });
+
   it("loadMore appends using the previous cursor and reports hasMore", async () => {
     getPulse.mockResolvedValue(page([row({ session_id: "a" })], "cur1"));
     mount();
@@ -463,6 +492,50 @@ describe("sortPulseRows", () => {
 });
 
 describe("pulseStore known-session no-refetch", () => {
+  it("does not refetch for a remote host's events — its sessions are not in this list", async () => {
+    vi.useFakeTimers();
+    getPulse.mockResolvedValue(page([row({ session_id: "a" })]));
+    mount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    getPulse.mockClear();
+
+    // GET /api/pulse is LOCAL-only by design (v1 of the dashboard): it lists
+    // the in-process registry and local project dirs, and PulseRow has no host
+    // field. A remote host's session id therefore looks permanently "unknown"
+    // here, so every frame of a streaming remote turn re-armed the 300ms
+    // debounce — ~3 wasted fetches/second, each of which still cannot learn
+    // about the remote session.
+    for (let i = 0; i < 20; i++) {
+      emit("text", "ses_remote", { delta: "x" }, "james@example.com");
+      emit("turn_heartbeat", "ses_remote", {}, "james@example.com");
+    }
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(getPulse).not.toHaveBeenCalled();
+  });
+
+  it("still refetches for an unknown session on the LOCAL host", async () => {
+    // Control for the test above: the unknown-session refetch is not disabled,
+    // only withheld for hosts this list can never describe.
+    vi.useFakeTimers();
+    getPulse.mockResolvedValue(page([row({ session_id: "a" })]));
+    mount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    getPulse.mockClear();
+
+    emit("turn_started", "ses_local", { model: "m" });
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(getPulse).toHaveBeenCalledTimes(1);
+  });
+
   it("does not refetch for a known session's unhandled event", async () => {
     vi.useFakeTimers();
     getPulse.mockResolvedValue(page([row({ session_id: "a" }), row({ session_id: "b" })]));

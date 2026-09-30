@@ -113,6 +113,18 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 - `httpie`/`http`/`https` with `file@` pattern, env var headers, or `--auth`/`-a` + env var
 - `nc`/`ncat` with host+port (no `-z` scan flag) or stdin redirect `< file`
 
+**Loopback carve-out requires that nothing redirects the request.** A
+curl/wget/httpie command counts as local-only (`isLoopbackNetworkCommand`
+auto-allows it and the exfiltration check exempts it, `permissions.go:1218` /
+`:1232`) only when every visible token is a loopback target **and** no
+connection-redirecting flag is present. `--connect-to`, `--resolve`,
+proxy/socks/unix-socket flags, `--config`/`-K`, `--doh-url`, and wget
+`-e`/`--execute` void it — they can keep `http://localhost/` as the URL while
+sending the request elsewhere. Matching is exact, `=`-attached, or (for
+single-letter options) any character of a token cluster, so `-xhost` and `-sx`
+are rejected; the check is deliberately over-inclusive (fail-closed). Pinned by
+`TestLoopbackCarveOutRejectsConnectionRedirectFlags`.
+
 **Sandbox extension (HEAD `760b2037`):** in sandbox mode `Decide()` also returns `ask` for the force-flagged git push/pull forms (`isHarmfulForceCommand()`) and for any `IsHarmfulBashCommand()` match. The OS write-wall confines *file* writes but is blind to a repo mutation that stays inside the workdir (history rewrite, branch switch, stash create/drop, untracked removal), so those do not ride the sandbox auto-allow. Read-only `git stash list`/`show` are excluded from the harmful set and still auto-allow. Normal mode is unchanged; YOLO remains the promptless escape hatch.
 
 **Sandbox sensitive split (read vs write):** the sandbox sensitive gate distinguishes *secret material* from *repo metadata*. `.env`/keys/certs/`.aws/` and `~/.ssh`/`auth.json` ask on read or write; `.git/` and `.github/workflows/` ask only on write (a planted hook/workflow is the threat), so `ls .git/`, `cat .git/config`, and `ls .github/workflows/` auto-allow like any in-workdir read. The per-target write map from `sandboxSensitiveTargets` is fail-closed — an unrecognized command (e.g. `truncate`, `chmod`, a custom script) marks its path args as writes, and a parse failure marks every target as a write. `git ls-files` and `git status` were already in `bashSubcommandAllow` and are unaffected.
@@ -288,7 +300,8 @@ apply, so relaxing a category can never auto-grant those. Catalog: `agent.Relaxa
 
 ### Key constraints
 
-- The auto-permission model can only emit `allow` or `ask` — it **cannot** emit `deny` or widen scope.
+- The **chat** judge (`askPermissionModel`) can only emit `allow` or `ask` — it **cannot** emit `deny` or widen scope.
+- The **TypeSafe/Jev** judge is different: `askPermissionModelTypesafe` answers a typed `choice` of `allow`/`deny` (see the Jev subsection below). Do not carry the chat judge's allow/ask-only limit over to it — a Jev `deny` is a real verdict, and a Jev `allow` must clear the confidence floor before it grants.
 - Hard blocks (`IsHarmfulBashCommand`) are **deterministic and final** — the auto layer cannot override them.
 - The auto layer cannot escalate the permission mode or widen past static guardrails.
 - `allow_destructive: false` instructs the model to conservatively deny operations it cannot confidently approve.
@@ -306,7 +319,9 @@ Two distinct code paths implement the auto-permission judge, and they do **not**
 - Editing the bundled prompt body does **not** change Jev's behaviour — update `typesafeJudgeInstructions` (and the `concern` labels) instead, and vice versa.
 - The confidence floor means Jev must reach ≥ `min_confidence` on the `allow` choice to auto-grant; a request it merely leans-allowed on falls through to the human. Rules that remove hesitation (explicit "this is ordinary and allowed") raise that confidence. An **opaque** request — one whose effects Jev could not establish, so its `concern` answer is `truncated_or_unknown` (an undefined-variable command head like `$g --version`, an unreadable script, a flag whose effect is unknown) — clears a lower floor instead: `autoJudgeOpaqueMinConfidenceDefault` (0.75). That 0.75 is only a DEFAULT: an explicitly configured `min_confidence` (higher or lower) governs opaque requests too, so the relaxation never tightens or loosens the user's own bar. Every other concern (`none`, `secrets`, `network`, …) keeps the normal floor.
 - **Reading a credential file is not, by itself, a deny reason.** The `secrets` concern is about *exposure* — the value printed to the command's output, written/redirected to a file, or sent off-host in a URL/header/body/upload. A local read whose value is consumed as an argument (`DBURL=$(grep '^DATABASE_URL=' .env | cut -d= -f2-) && psql "$DBURL" -c "\dt"`) stays on-host and must ALLOW. Without this carve-out Jev leaned allow at ~0.5 on that shape, fell below the 0.85 floor, and ordinary DB tooling surfaced as a spurious "Auto-denied by LLM permission model" banner (the human was still prompted). Pinned by `internal/agent/permission_typesafe_rubric_test.go`; the static sandbox gate still Asks on a `.env` read, so the carve-out changes only whether the judge auto-approves it.
+- **Enumerating the environment is subject to the same rule, not a stricter one.** What makes it a concern is a secret's VALUE reaching the output, a file, or another process — never the existence of a variable. Listing variable NAMES, or redacting values per line, is ordinary debugging and must ALLOW even when a later filter would match a credential-bearing key: `env | cut -d= -f1`, `compgen -v`, `env | sed 's/=.*/=<set>/'`, and `env | grep -i TOKEN | sed 's/=.*/=/'` are all allowed, because `sed` rewrites every line before anything is displayed and `grep` only narrows which keys are shown. Judge the pipeline in order; do not deny a command merely because it contains the word `env`. A bare `env`, `printenv` or `set` with no filter that prints every value at once IS the concern. Pinned by `TestTypesafeJudgeInstructionsCarveOutEnvironmentNameListing` and `TestTypesafeEnvironmentCarveOutIsInVerdictRubric`.
 - **Credential material is withheld from Jev's context.** `buildPermissionContext` never embeds sensitive file contents — a sensitive target file gets a `(contents withheld: sensitive file)` marker, while executed custom scripts and referenced files matching the sensitive predicate are skipped entirely. See `docs/gotchas/auto-permission-judge-withholds-credentials.md`.
+- **The judge reasons about an expanded command, and the expansion is fail-closed.** `expandBashForJudge` (`internal/agent/permission_shellvars.go`) resolves in-command `NAME=value` assignments, environment references, and a fixed read-only `$(...)` allowlist (`pwd`, `git rev-parse --show-toplevel`, `npm root`/`prefix`, `go env <VAR>`, a few `python -c` path snippets). Three rules matter when editing it: a variable rebound in a form it does not model (`export`/`declare`/`local`, `NAME+=`, `for`/`read`/`unset`, an assignment buried in a `{ … }` group) is marked **opaque**, so `$NAME` reaches the judge unresolved rather than as the stale value the shell will not use; the allowlisted Python snippets run with `-I`, so a repo-local `sysconfig.py` cannot execute at judge-prep time; and a substitution that names a secret (`go env GITHUB_TOKEN`) or returns a URL userinfo (`GOPROXY=https://user:pass@…`) is withheld as `<redacted>` exactly like a secret-looking environment value. Pinned by `TestExpandBashForJudgeRebindingsAreOpaque` and `TestExpandBashForJudgeWithholdsSecretSubstitution`.
 
 ### AutoGrant persistence
 

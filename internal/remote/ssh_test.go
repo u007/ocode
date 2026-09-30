@@ -21,7 +21,7 @@ func TestSSHTransportExecHasFailFastArgs(t *testing.T) {
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "ConnectTimeout=15",
-		"u@h", "true",
+		"--", "u@h", "true",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("commandArgs = %q, want %q", got, want)
@@ -36,7 +36,7 @@ func TestSSHTransportExecArgsIncludePort(t *testing.T) {
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "ConnectTimeout=15",
-		"-p", "2222", "u@h", "uname -sm",
+		"-p", "2222", "--", "u@h", "uname -sm",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("commandArgs = %q, want %q", got, want)
@@ -93,5 +93,31 @@ func TestExecInteractiveKeepsPrompting(t *testing.T) {
 	args := append([]string{"-t"}, tr.Target.SSHArgs()...)
 	if strings.Contains(strings.Join(args, " "), "BatchMode") {
 		t.Fatalf("interactive ssh must not force BatchMode: %q", args)
+	}
+}
+
+// Every ssh argv must carry a "--" immediately before the target, so a host is
+// read as a destination and never as an option. This is the second barrier
+// behind Validate/ParseTarget: verified against real ssh, an option-shaped
+// token is executed (ProxyCommand runs through a shell), while the same token
+// after "--" is rejected as an invalid hostname.
+func TestSSHArgsAlwaysSeparateTargetWithDoubleDash(t *testing.T) {
+	tr := NewSSHTransport(Target{Kind: KindSSH, User: "u", Host: "h"}, nil)
+	args := tr.commandArgs("true")
+	idx := -1
+	for i, a := range args {
+		if a == "--" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("commandArgs has no -- separator: %q", args)
+	}
+	// Everything after -- must be target + command only, never an option.
+	for _, a := range args[idx+1:] {
+		if strings.HasPrefix(a, "-") && a != "--" {
+			t.Fatalf("option %q appears after the -- separator: %q", a, args)
+		}
 	}
 }

@@ -825,6 +825,15 @@ func normalizeNetworkEffectHost(target string) string {
 // --proxy — or a whole-word "$"/backtick expansion now voids it.
 func subprocessTargetsLocalhost(command string) bool {
 	fields := splitShellFields(command)
+	// A connection-redirecting flag points the request at a host other than the
+	// URL's, so "http://localhost/" can still send data off-machine (curl
+	// --connect-to/--resolve/-x, wget -e setting a proxy). Any such flag voids
+	// the carve-out outright.
+	for _, token := range fields[1:] {
+		if isLoopbackRedirectFlag(token) {
+			return false
+		}
+	}
 	sawLoopback := false
 	for i, token := range fields[1:] {
 		if isLocalhostSubprocessToken(token) {
@@ -842,6 +851,40 @@ func subprocessTargetsLocalhost(command string) bool {
 		}
 	}
 	return sawLoopback
+}
+
+// loopbackRedirectFlags name the flags that redirect a request away from the
+// URL host (curl connection routing, proxies and config files; wget's
+// -e/--execute which can set a proxy). Matching is exact or "=" attached; the
+// single-letter forms are handled separately because they can be clustered
+// (-sx host is -s -x) or carry an attached value (-xhost).
+var loopbackRedirectFlags = []string{
+	"--connect-to", "--resolve", "--preproxy", "--proxy", "--config",
+	"--socks4", "--socks4a", "--socks5", "--socks5-hostname",
+	"--unix-socket", "--abstract-unix-socket", "--doh-url",
+	"--execute",
+}
+
+// loopbackRedirectShort are the single-letter options whose presence anywhere
+// in a single-dash cluster must void the carve-out: -x (curl proxy), -e
+// (wget --execute), -K (curl --config). The check is deliberately
+// over-inclusive — a false positive only costs the auto-allow, never safety.
+const loopbackRedirectShort = "xeK"
+
+func isLoopbackRedirectFlag(token string) bool {
+	for _, f := range loopbackRedirectFlags {
+		if token == f || strings.HasPrefix(token, f+"=") {
+			return true
+		}
+	}
+	if len(token) > 1 && token[0] == '-' && token[1] != '-' {
+		for _, r := range token[1:] {
+			if strings.ContainsRune(loopbackRedirectShort, r) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // loopbackDataValueFlags are curl/wget/httpie flags whose value is request

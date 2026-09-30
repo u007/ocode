@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/u007/ocode/internal/reminders"
 	"github.com/u007/ocode/internal/scheduler"
 )
 
@@ -445,8 +447,23 @@ func (s *Server) SetTelegramCronSink(pusher cronPusher, resolve CronChatResolver
 			}
 		}
 		if job == nil {
-			log.Printf("server: cron drain: job %s not found in store; dropping delivery", d.JobID)
-			return
+			// NOT a cron job. Reminders and tasks append to this SAME shared
+			// outbox with a "<kind>:<id>" JobID, so their delivery lands here
+			// with no id match. Dropping it — which is what this branch used to
+			// do unconditionally — would silently swallow every reminder push
+			// while still showing it in the web Outbox panel, which is the worst
+			// possible split: visible locally, lost remotely.
+			//
+			// The resolver is handed a synthetic Job carrying the delivery's
+			// Owner, because Payload.Owner IS the workdir hint the resolver
+			// already reads (see NewCronChatResolver). So a reminder routes by
+			// exactly the same rule as a job, with no resolver contract change
+			// and no nil-Job dereference for a host-supplied resolver.
+			if !isReminderDeliveryID(d.JobID) {
+				log.Printf("server: cron drain: job %s not found in store; dropping delivery", d.JobID)
+				return
+			}
+			job = &scheduler.Job{ID: d.JobID, Name: d.JobName, Payload: scheduler.Payload{Owner: d.Owner}}
 		}
 		chatID, deliver := resolve(job)
 		if !deliver {
@@ -456,6 +473,15 @@ func (s *Server) SetTelegramCronSink(pusher cronPusher, resolve CronChatResolver
 		}
 		pusher.PushCronResult(chatID, d.JobID, d.JobName, d.Owner, d.Result, d.Error)
 	})
+}
+
+// isReminderDeliveryID reports whether a shared-outbox JobID belongs to the
+// reminders engine rather than the cron store. Reminders prefix their id with
+// their kind ("reminder:" / "task:"), which is what lets the drainer tell a
+// routable reminder delivery from a genuinely orphaned cron delivery.
+func isReminderDeliveryID(jobID string) bool {
+	return strings.HasPrefix(jobID, string(reminders.KindReminder)+":") ||
+		strings.HasPrefix(jobID, string(reminders.KindTask)+":")
 }
 
 // AttachTelegramBot is the canonical one-line wiring for cron

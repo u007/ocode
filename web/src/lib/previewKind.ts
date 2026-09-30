@@ -213,6 +213,20 @@ export function splitPreviewKindForPath(path: string): PreviewKind | null {
 }
 
 /**
+ * True for a DELIMITED TEXT table (CSV / TSV) rather than a real workbook.
+ *
+ * These have no binary magic, so a reader handed raw bytes will treat them as
+ * latin-1 and mojibake every non-ASCII cell — "café" becomes "cafÃ©". They must
+ * be decoded as UTF-8 first. The extension set lives here rather than being
+ * spelled out at the read site so the two cannot drift: a format routed to the
+ * Excel viewer is exactly the set that has to be decoded.
+ */
+export function isDelimitedTextPath(path: string): boolean {
+  const ext = extensionOf(path);
+  return ext === ".csv" || ext === ".tsv";
+}
+
+/**
  * PreviewSurface kind for a path the Files-tab editor must NOT open in Monaco,
  * or null when the path is text-like (or not previewable). Callers use this to
  * auto-default PDFs, Office documents, and media to a preview.

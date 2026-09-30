@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockedFunction } from "vitest";
 import { api } from "../../api/client";
-import { SpeechProvider, useSpeech } from "./SpeechProvider";
+import { SpeechProvider, requestSpeech, useSpeech, type SpeechOutcome } from "./SpeechProvider";
 
 // The provider only reads the session's model for the TTS voice-map lookup, so
 // a stub selector keeps this suite off the real chat store.
@@ -365,5 +365,89 @@ describe("a failing item", () => {
 
     await waitFor(() => expect(ttsSpeak).toHaveBeenCalledTimes(2));
     expect(textsSpoken()[1]).toBe("summary of second message");
+  });
+});
+
+describe("speak outcomes", () => {
+  function OutcomeConsumer({ onOutcome }: { onOutcome: (outcome: SpeechOutcome) => void }) {
+    const speech = useSpeech();
+    return (
+      <div>
+        <span data-testid="outcome-engine">{speech.config.engine}</span>
+        <button type="button" onClick={() => void speech.speak("outcome message").then(onOutcome)}>speak outcome</button>
+        <button type="button" onClick={() => speech.stop()}>stop all</button>
+      </div>
+    );
+  }
+
+  async function renderOutcome() {
+    const outcomes: SpeechOutcome[] = [];
+    render(
+      <SpeechProvider sessionId="sess-1">
+        <OutcomeConsumer onOutcome={(outcome) => outcomes.push(outcome)} />
+      </SpeechProvider>,
+    );
+    await waitFor(() => {
+      expect(vi.mocked(api.getSpeechSummaryConfig).mock.calls.length).toBeGreaterThan(0);
+      // Wait for the engine selection too: an unloaded provider is still on
+      // browser-native, which would fail for a different reason than the
+      // behaviour under test.
+      expect(screen.getByTestId("outcome-engine")).toHaveTextContent("kokoro");
+    });
+    return outcomes;
+  }
+
+  it("resolves ok once playback starts, not when the clip ends", async () => {
+    const outcomes = await renderOutcome();
+    await act(async () => {
+      screen.getByRole("button", { name: "speak outcome" }).click();
+    });
+    await waitFor(() => expect(outcomes).toHaveLength(1));
+    // No finishCurrentAudio() call below: the clip is still open, proving the
+    // button is released at the START of the read rather than at its end.
+    expect(outcomes[0]).toEqual({ ok: true });
+    expect(ttsSpeak).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a synthesis failure as ok:false instead of hanging", async () => {
+    ttsSpeak.mockRejectedValueOnce(new Error("synthesis exploded"));
+    const outcomes = await renderOutcome();
+    await act(async () => {
+      screen.getByRole("button", { name: "speak outcome" }).click();
+    });
+    await waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]).toEqual({ ok: false, error: "synthesis exploded" });
+  });
+
+  it("settles a still-waiting item when the user presses Stop", async () => {
+    // Park the item in the summariser so it never reaches playback, then Stop:
+    // the button must be released even for an item that never started.
+    summarizeSpeech.mockImplementationOnce(() => new Promise(() => {}));
+    const outcomes = await renderOutcome();
+    await act(async () => {
+      screen.getByRole("button", { name: "speak outcome" }).click();
+    });
+    await waitFor(() => expect(summarizeSpeech).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      screen.getByRole("button", { name: "stop all" }).click();
+    });
+    await waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]).toEqual({ ok: true });
+  });
+
+  it("resolves an error outcome through requestSpeech when no provider is mounted", async () => {
+    await expect(requestSpeech("nobody is listening")).resolves.toEqual({
+      ok: false,
+      error: "Speech is unavailable",
+    });
+  });
+
+  it("resolves ok through the ocode:speak bridge when a provider is mounted", async () => {
+    const outcomes = await renderOutcome();
+    await act(async () => {
+      void requestSpeech("bridged").then((outcome) => outcomes.push(outcome));
+    });
+    await waitFor(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]).toEqual({ ok: true });
   });
 });

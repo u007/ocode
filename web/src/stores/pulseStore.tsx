@@ -229,11 +229,15 @@ export interface PulseApi extends PulseState {
 // component to receive props from, and it no-ops until a provider mounts so the
 // router never has to know whether the dashboard is rendered.
 
-let sink: ((event: string, sessionId: string, data: unknown) => void) | null = null;
+let sink: ((event: string, sessionId: string, data: unknown, host: string) => void) | null = null;
 
-/** The SSE router's entry point. Safe to call before/after a provider mounts. */
-export function pulseEventSink(event: string, sessionId: string, data: unknown): void {
-  sink?.(event, sessionId, data);
+/** The SSE router's entry point. Safe to call before/after a provider mounts.
+ *
+ *  `host` is the originating host ("" for local). The dashboard's list comes
+ *  from the LOCAL /api/pulse, so a remote host's session can never be in it —
+ *  see the refetch guard in the sink. */
+export function pulseEventSink(event: string, sessionId: string, data: unknown, host = ""): void {
+  sink?.(event, sessionId, data, host);
 }
 
 const PulseContext = createContext<PulseApi | null>(null);
@@ -252,10 +256,18 @@ function usePulseState(): PulseApi {
   // not land its rows, or switching Live→All would flash the old list.
   const generationRef = useRef(0);
   const unknownRef = useRef<number | undefined>(undefined);
+  // The scope the user has ASKED for, as opposed to state.scope, which only
+  // advances when a response lands. setScope's no-op guard has to compare
+  // against this: two clicks inside one tick would both see the stale applied
+  // scope, and the second (a real change of mind) was silently dropped.
+  const requestedScopeRef = useRef<"live" | "all">(initialPulseState.scope);
 
   const fetchPage = useCallback(
     async (scope: "live" | "all", cursor: string | null, append: boolean) => {
       const gen = ++generationRef.current;
+      // Record the request synchronously, before the await, so a second click
+      // in the same tick can tell it apart from a genuine no-op.
+      requestedScopeRef.current = scope;
       setState((s) => ({ ...s, loading: true }));
       try {
         const res = (await api.getPulse(scope, cursor, PAGE_SIZE)) as PulsePage | undefined;
@@ -313,8 +325,16 @@ function usePulseState(): PulseApi {
   }, [fetchPage]);
 
   useEffect(() => {
-    sink = (event, sessionId, data) => {
+    sink = (event, sessionId, data, host) => {
       if (!sessionId) return;
+      // A row is keyed by session id alone because /api/pulse is LOCAL-only
+      // (see gatherLivePulseInputs / gatherDiskPulseInputs on the server, which
+      // skip remote projects). A remote host's session is therefore unknown to
+      // this list for as long as the turn runs, and each of its streaming
+      // frames would re-arm the debounce below — a sustained ~3 GET
+      // /api/pulse/second that can never succeed. Only a LOCAL unknown session
+      // is worth learning about.
+      if (host) return;
       // Read the current list out here, not inside a setState updater: updaters
       // must stay pure (React invokes them twice in StrictMode), and the
       // unknown-session branch has a side effect (arming a timer).
@@ -347,7 +367,7 @@ function usePulseState(): PulseApi {
 
   const setScope = useCallback(
     (scope: "live" | "all") => {
-      if (scope === stateRef.current.scope) return;
+      if (scope === requestedScopeRef.current) return;
       void fetchPage(scope, null, false);
     },
     [fetchPage],

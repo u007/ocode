@@ -1,4 +1,4 @@
-import { render, act } from "@testing-library/react";
+import { render, act, screen } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel from "./TerminalPanel";
@@ -9,6 +9,19 @@ import TerminalPanel from "./TerminalPanel";
 const h = vi.hoisted(() => ({
   terminals: [] as Array<{ write: ReturnType<typeof vi.fn> }>,
   sockets: [] as MockSocket[],
+}));
+
+// terminalStore subscribes to the server's `terminal_tabs_changed` bus event;
+// the real eventBus auto-starts an SSE stream on the first on(), calling
+// remoteApiBase() from this suite's partial api mock. Mirrors the real bus
+// surface the store uses (on/off/onReconnect/offReconnect).
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: () => () => {},
+    off: () => {},
+    onReconnect: () => () => {},
+    offReconnect: () => {},
+  },
 }));
 
 vi.mock("@xterm/xterm", () => {
@@ -40,6 +53,12 @@ vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize = v
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose = vi.fn(); onContextLoss = vi.fn(); } }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
+  // The open-terminal list is server state; the store hydrates from it on mount.
+  api: {
+    getTerminalTabs: () => Promise.resolve({ projects: {} }),
+    setTerminalTabs: () => Promise.resolve({ status: "ok" }),
+  },
+  authedFetch: () => Promise.resolve({ ok: true, status: 204 }),
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
   remoteApiBase: (host?: string) => (host ? `/api/remote/${encodeURIComponent(host)}` : ""),
@@ -55,6 +74,9 @@ vi.mock("./terminalFocus", () => ({
 vi.mock("./terminalPersistence", () => ({
   loadProjectTerminals: () => ({ terminals: [{ id: "t1", title: "Terminal 1" }], activeId: "t1" }),
   saveProjectTerminals: vi.fn(),
+  // The store's server-restore sweep calls this; a missing fixture would make
+  // the migration throw inside a catch and silently skip, so declare it.
+  readAllMirrorProjects: () => ({}),
   projectTerminalsKey: (path: string, host?: string) => (host ? `${host}::${path}` : path),
   loadTerminalBuffer: () => null,
   saveTerminalBuffer: vi.fn(),
@@ -196,5 +218,59 @@ describe("TerminalPanel wake reconnect", () => {
       vi.advanceTimersByTime(5000);
     });
     expect(h.sockets.length).toBe(1);
+  });
+});
+
+/**
+ * The terminal websocket has ONE attachment slot: when a second client attaches
+ * the same terminal id the server closes the first socket with a
+ * `detached: superseded` frame. The close is clean (1000) and indistinguishable
+ * from a shell exit, so without handling the frame both auto-reconnect paths
+ * (the backoff timer and onWake) would evict the new client, and the two
+ * clients would ping-pong — the same failure shape as the 2026-09-19
+ * two-sockets-per-terminal reconnect loop.
+ */
+describe("TerminalPanel takeover", () => {
+  async function superseded(): Promise<MockSocket> {
+    const first = await mountAndOpen();
+    act(() => {
+      first.onmessage?.({ data: JSON.stringify({ type: "detached", reason: "superseded" }) });
+      first.readyState = MockSocket.CLOSED;
+      first.onclose?.({ wasClean: true, code: 1000, reason: "" });
+    });
+    return first;
+  }
+
+  it("does not reconnect on the backoff timer after being superseded", async () => {
+    await superseded();
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(h.sockets.length).toBe(1);
+  });
+
+  it("does not steal the terminal back on wake", async () => {
+    await superseded();
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(h.sockets.length).toBe(1);
+  });
+
+  it("explains the takeover instead of claiming the session ended", async () => {
+    await superseded();
+    const term = h.terminals[0];
+    const written = term.write.mock.calls.map((c) => String(c[0])).join("");
+    expect(written).toContain("another client took over");
+    expect(written).not.toContain("[terminal session ended]");
+    expect(screen.getByText(/Taken over by another client/)).toBeTruthy();
+  });
+
+  it("reconnects only when the user explicitly takes the terminal back", async () => {
+    await superseded();
+    act(() => {
+      screen.getByText("Take over").click();
+    });
+    expect(h.sockets.length).toBe(2);
   });
 });

@@ -810,4 +810,242 @@ describe("project session-list cache (snappy project switching)", () => {
     expect(resolveSessionHost(result.current.state, "remote-s2")).toBe("dev@example.com");
     expect(result.current.state.tabsByProject["/proj-a"] ?? []).toHaveLength(0);
   });
+
+  it("clears the spinner when a joined in-flight fetch fails", async () => {
+    // Why this is reachable for a REMOTE project specifically: the listing is a
+    // proxied round-trip, so it is routinely still in flight when the click
+    // lands. `selectProject` raises the spinner and then JOINS the hover run
+    // instead of issuing its own, so the run's captured `background: true`
+    // decides the error path — and a background failure deliberately skips
+    // `SET_SESSIONS_LOADING false`. Nobody else clears the flag, so the
+    // "Sessions — <project>" dialog spins forever and never even shows an
+    // error. Reported against "dev aims" (~/www/aimsai2 @ 217.216.72.49).
+    let rejectHover!: (e: unknown) => void;
+    projectApi.listProjectSessions.mockImplementationOnce(
+      () => new Promise((_res, rej) => { rejectHover = rej; }),
+    );
+    const { result } = setup();
+    await act(async () => {});
+
+    // Hover-warm the remote project (ProjectSidebar / RemoteProjectStatus).
+    await act(async () => {
+      result.current.prefetchProjectSessions(testRemoteProject);
+    });
+
+    // The user clicks the row before that fetch lands. Hold the returned
+    // promise open so the click is still parked on the hover run.
+    let click!: Promise<void>;
+    await act(async () => {
+      click = result.current.selectProject(testRemoteProject);
+    });
+    expect(result.current.state.sessionsLoading).toBe(true);
+
+    // The remote listing fails (502 at remote-connect/remote-register, or the
+    // host dropping between the hover and the click).
+    await act(async () => {
+      rejectHover(new Error("remote connect failed"));
+      await click;
+    });
+
+    // Must settle, not spin: the picker shows "No sessions yet".
+    expect(result.current.state.sessionsLoading).toBe(false);
+  });
+
+  it("records the failure reason so the dialog can report it", async () => {
+    projectApi.listProjectSessions.mockRejectedValueOnce(new Error("remote connect failed"));
+    const { result } = setup();
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.selectProject(testRemoteProject);
+    });
+
+    // Without this the dialog said "No sessions yet" for a project whose
+    // listing was never actually retrieved.
+    expect(result.current.state.sessionsError).toBe("remote connect failed");
+    expect(result.current.state.sessionsLoading).toBe(false);
+  });
+
+  it("clears a previous failure once a later fetch succeeds", async () => {
+    projectApi.listProjectSessions.mockRejectedValueOnce(new Error("boom"));
+    const { result } = setup();
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.selectProject(testRemoteProject);
+    });
+    expect(result.current.state.sessionsError).toBe("boom");
+
+    // A second, different project succeeds — the stale error must not follow
+    // the user to an unrelated project's list.
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("ok-1", "Fine")]);
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+    expect(result.current.state.sessionsError).toBeNull();
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["ok-1"]);
+  });
+
+  it("does not strand the spinner when a slow selection is superseded by a cached one", async () => {
+    // The superseded fetch's `finally` deliberately declines to clear (its
+    // project is no longer on screen), and the successor takes the cache-hit
+    // branch, which raises no spinner of its own. So the flag has to be reset
+    // by the project change itself or the new project spins forever too.
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("warm-1", "Warm")]);
+    const { result } = setup();
+    await act(async () => {});
+
+    // Warm B's cache.
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+
+    // A's fetch is slow and uncached.
+    let resolveA!: (v: unknown) => void;
+    projectApi.listProjectSessions.mockImplementationOnce(
+      () => new Promise((res) => { resolveA = res as (v: unknown) => void; }),
+    );
+    await act(async () => {
+      result.current.selectProject(testRemoteProject);
+    });
+    expect(result.current.state.sessionsLoading).toBe(true);
+
+    // B is already cached, so selecting it returns early and raises nothing.
+    // Its revalidation is parked unresolved on purpose: a revalidation that
+    // SUCCEEDS clears the flag as a side effect of the cache-key match, which
+    // would hide the very thing under test. The project change itself is the
+    // only thing that must clear the abandoned flag here.
+    projectApi.listProjectSessions.mockImplementationOnce(() => new Promise(() => {}));
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+
+    // A's fetch finally lands.
+    await act(async () => {
+      resolveA([]);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    // B is on screen and settled — not stuck on A's abandoned spinner.
+    expect(result.current.state.activeProject?.path).toBe("/proj-a");
+    expect(result.current.state.sessionsLoading).toBe(false);
+  });
+
+  it("does not show the previous project's error over the new project's list", async () => {
+    // The dialog prefers the error panel over the list, so an error left behind
+    // by a project the user has left would cover the new project's valid
+    // sessions — the same "confident lie", inverted.
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("b-1", "B one")]);
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+
+    projectApi.listProjectSessions.mockRejectedValueOnce(new Error("remote blew up"));
+    await act(async () => {
+      await result.current.selectProject(testRemoteProject);
+    });
+    expect(result.current.state.sessionsError).toBe("remote blew up");
+
+    // Switch to the project that is already cached. Its revalidation is made to
+    // FAIL on purpose: a revalidation that SUCCEEDS writes the cache and clears
+    // the error as a side effect, which would hide the thing under test. With it
+    // failing, the cached list is still on screen and the project change is the
+    // only thing that can drop the stale error.
+    projectApi.listProjectSessions.mockRejectedValueOnce(new Error("revalidation failed"));
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(result.current.state.sessionsError).toBeNull();
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["b-1"]);
+  });
+
+  it("a superseded failure does not stamp its error onto the project now on screen", async () => {
+    // The slow selection fails only AFTER the user has moved on. Reporting it
+    // would put an error for project A on top of project B's sessions.
+    let rejectA!: (e: unknown) => void;
+    projectApi.listProjectSessions.mockImplementationOnce(
+      () => new Promise((_res, rej) => { rejectA = rej; }),
+    );
+    const { result } = setup();
+    await act(async () => {});
+
+    let pendingA!: Promise<void>;
+    await act(async () => {
+      pendingA = result.current.selectProject(testRemoteProject);
+    });
+
+    // Move to a different project while A's fetch is still in the air.
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("b-1", "B one")]);
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+
+    await act(async () => {
+      rejectA(new Error("late failure from the project the user left"));
+      await pendingA;
+    });
+
+    expect(result.current.state.activeProject?.path).toBe("/proj-a");
+    expect(result.current.state.sessionsError).toBeNull();
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["b-1"]);
+    expect(result.current.state.sessionsLoading).toBe(false);
+  });
+
+  it("a background revalidation that recovers the list drops the error", async () => {
+    // The dialog's forced prefetch and a hover warm are background calls: they
+    // cannot clear the spinner, but a success DOES mean the recorded failure no
+    // longer describes the list, so the error panel must not sit on top of it.
+    projectApi.listProjectSessions.mockRejectedValueOnce(new Error("host blip"));
+    const { result } = setup();
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.selectProject(testRemoteProject);
+    });
+    expect(result.current.state.sessionsError).toBe("host blip");
+
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("r-1", "Recovered")]);
+    await act(async () => {
+      result.current.prefetchProjectSessions(testRemoteProject, { force: true });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(result.current.state.sessionsError).toBeNull();
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["r-1"]);
+  });
+
+  it("a silent revalidation failure never rejects unhandled", async () => {
+    // The cache-hit branch revalidates in the background with nothing to show
+    // for it. refreshProjectSessions rethrows so the cold path can report, so
+    // this branch must swallow explicitly or the window gets an unhandled
+    // rejection every time a remote host blips.
+    projectApi.listProjectSessions.mockResolvedValueOnce([mkSession("s1", "One")]);
+    const { result } = setup();
+    await act(async () => {});
+    await act(async () => {
+      await result.current.selectProject(testProjectA);
+    });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: PromiseRejectionEvent) => unhandled.push(e.reason);
+    window.addEventListener("unhandledrejection", onUnhandled);
+    try {
+      projectApi.listProjectSessions.mockRejectedValueOnce(new Error("host blip"));
+      await act(async () => {
+        await result.current.selectProject(testProjectA);
+        await new Promise((r) => setTimeout(r, 20));
+      });
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
+    // The cached list stays painted and no error is shown: a background
+    // revalidation of a warm cache is not a user-visible failure.
+    expect(result.current.state.sessionsError).toBeNull();
+    expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["s1"]);
+  });
 });

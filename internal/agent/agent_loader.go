@@ -35,6 +35,13 @@ func (r *AgentRegistry) ReloadMarkdownAgents(enabled map[string]bool) []LoadDiag
 }
 
 func (r *AgentRegistry) reloadMarkdownAgents(enabled map[string]bool) []LoadDiagnostic {
+	// The write lock spans the WHOLE rebuild, not just the final assignment: a
+	// reader that arrived mid-reload would otherwise see a half-built list (or
+	// race on the slice header). registerBuiltins and addLoaded below are
+	// therefore only ever called with the lock held, and take no lock themselves.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.diagnostic = nil
 	r.defs = nil
 	r.registerBuiltins()

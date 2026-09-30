@@ -576,7 +576,7 @@ The **recommended** way to cut down on permission interruptions. An LLM-based la
 ```
 
 **Key constraints:**
-- The auto-permission model can only emit `allow` or `ask` — it **cannot** emit `deny` or widen scope
+- The **chat** auto-permission judge can only emit `allow` or `ask` — it **cannot** emit `deny` or widen scope. (The TypeSafe/Jev judge is different: it emits a typed `allow`/`deny` choice gated by a confidence floor — see `skills/ocode-permissions` §7.)
 - Hard blocks (destructive git, data exfiltration) are deterministic and final — the auto layer cannot override them
 - `allow_destructive: false` instructs the model to conservatively deny operations it cannot confidently approve
 - **Unavailable judge ≠ denial:** if the auto-permission LLM can't be reached, the prompt shows a neutral "permission model unavailable — asking you instead" notice and falls back to the ordinary allow/deny prompt

@@ -1,11 +1,22 @@
 // Persists which terminal tabs were open per session tab (legacy) and per
 // project (current), and each terminal's rendered scrollback text, across
-// page reloads. The terminal id is also the server's reattach key: while the
-// server is still running, restoring a tab resumes its live shell (and the
-// server replays recent output over the saved text). The saved text is what
-// survives when the shell is gone — server restart or detach TTL expired.
-// The project-scoped key is the current source of truth: terminals survive
-// switching chat sessions within the same project. The session-scoped key is
+// page reloads.
+//
+// IMPORTANT: the per-project terminal LIST is now server state
+// (GET/PUT /api/terminal-tabs → internal/termtabs). What lives here is a local
+// MIRROR of the last server state, plus the per-window `activeId` that is
+// deliberately not shared. The mirror exists so a synchronous "peek" can answer
+// before hydration lands (getProjectTerminals) and so TopTabs/ProcessesPanel can
+// read a count without an await. It is never authoritative — the store
+// overwrites it from every server read, and only writes through to the server
+// after the initial restore settles.
+//
+// The terminal id is also the server's reattach key: while the server is still
+// running, restoring a tab resumes its live shell (and the server replays recent
+// output over the saved text). The saved text is what survives when the shell is
+// gone — server restart or detach TTL expired.
+// The project-scoped mirror key makes terminals survive switching chat
+// sessions within the same project. The session-scoped key is
 // retained for backward compat and GC.
 
 export interface PersistedTerminal {
@@ -62,6 +73,21 @@ function readProjectTabsFile(): PersistedProjectTabsFile {
     console.error("Failed to load project terminal tabs:", err);
     return { version: 1, projects: {} };
   }
+}
+
+/** Every project's mirrored terminal list, keyed by the same opaque
+ *  `host::path` key the server uses. Read once for the one-time write-through of
+ *  local state the server has never seen (the migration off localStorage-only
+ *  persistence). */
+export function readAllMirrorProjects(): Record<string, PersistedTerminal[]> {
+  const file = readProjectTabsFile();
+  const out: Record<string, PersistedTerminal[]> = {};
+  for (const [key, entry] of Object.entries(file.projects)) {
+    if (Array.isArray(entry?.terminals) && entry.terminals.length > 0) {
+      out[key] = entry.terminals;
+    }
+  }
+  return out;
 }
 
 export function loadSessionTerminals(sessionTabId: string): PersistedSessionTerminals | null {

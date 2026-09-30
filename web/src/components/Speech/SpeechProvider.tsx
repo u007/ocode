@@ -12,6 +12,15 @@ import {
 } from "./speechToolbarPersistence";
 import { DEFAULT_SPEECH_SUMMARY_CONFIG } from "../../lib/speechSummaryConfig";
 
+/** Result of a speak request. Never rejects, so fire-and-forget callers
+ *  (terminal selections, "Speak visible") cannot leave an unhandled promise,
+ *  while the per-message Speak button reads `ok`/`error` to drive its loading
+ *  and fallback states. */
+export interface SpeechOutcome {
+  ok: boolean;
+  error?: string;
+}
+
 interface SpeechContextValue {
   engines: TTSEngine[];
   status: TTSStatus | null;
@@ -20,11 +29,11 @@ interface SpeechContextValue {
   paused: boolean;
   error: string | null;
   currentText: string;
-  speak: (text: string) => Promise<void>;
+  speak: (text: string) => Promise<SpeechOutcome>;
   /** Re-speak text that was ALREADY prepared for speech (the toolbar's Replay).
    *  Bypasses the summary model: re-summarising a summary wastes an LLM call
    *  and reads a summary of a summary. */
-  replay: (text: string) => Promise<void>;
+  replay: (text: string) => Promise<SpeechOutcome>;
   stop: () => void;
   pause: () => void;
   resume: () => void;
@@ -95,6 +104,10 @@ interface SpeechQueueItem extends SpeechItemLabels {
   host?: string;
   summaryEnabled: boolean;
   speakMode: SpeechSpeakMode;
+  /** Settles the caller's promise when this item reaches playback (ok) or is
+   *  abandoned, or reports a failure before playback. Idempotent: every
+   *  teardown path (Stop/Next/clear/unmount) can call it safely. */
+  finish: (error?: string) => void;
 }
 
 const defaultConfig: TTSConfig = { engine: "browser-native", voice: "", mode: "manual" };
@@ -161,6 +174,11 @@ export function SpeechProvider({
   // 60s) summary wait cancels the pending playback rather than letting it
   // start after the user asked for silence.
   const queueRun = useRef(0);
+  // In-flight speech-summary request for the item the worker is summarising.
+  // haltCurrent aborts it: without that, Stop (or Next) left the worker parked
+  // on a request that can take the full summary timeout, so anything enqueued
+  // in the meantime waited behind an item the user had already abandoned.
+  const summaryAbortRef = useRef<AbortController | null>(null);
   const selectionRequestGeneration = useRef(0);
   const localMutationTail = useRef(Promise.resolve());
   const chunks = useRef<string[]>([]);
@@ -173,6 +191,9 @@ export function SpeechProvider({
   // costs one render rather than one per item.
   const queue = useRef<SpeechQueueItem[]>([]);
   const queueSeq = useRef(0);
+  // The item the worker is currently on. It has already been shifted out of
+  // `queue`, so Stop/Next/unmount must settle it separately from the backlog.
+  const currentItemRef = useRef<SpeechQueueItem | null>(null);
   // Single-flight latch for the drain loop. Without it, an item's natural end
   // and a user pressing Next in the same tick would start two workers, and
   // both would shift items — the same audio playing twice.
@@ -235,6 +256,11 @@ export function SpeechProvider({
   useEffect(() => () => {
     generation.current++;
     queueRun.current++;
+    // Release every pending Speak button instead of leaving it disabled
+    // forever on a provider that no longer exists.
+    currentItemRef.current?.finish();
+    currentItemRef.current = null;
+    for (const item of queue.current) item.finish();
     queue.current = [];
     // Release the worker before the teardown continues: it is parked on this
     // promise, and leaving it unsettled would keep a stale `finally` alive that
@@ -259,6 +285,10 @@ export function SpeechProvider({
    * releasing the blob URL — lives here.
    */
   const haltCurrent = useCallback(() => {
+    // Abandon the summary request first, so the worker's await settles at once
+    // instead of blocking the next item for the rest of the model timeout.
+    summaryAbortRef.current?.abort();
+    summaryAbortRef.current = null;
     generation.current++;
     localRequestGeneration.current++;
     chunks.current = [];
@@ -279,6 +309,9 @@ export function SpeechProvider({
     // Cancel whatever the queue is doing: a drain parked on a summary call, a
     // synthesised clip about to start, and the pending items themselves.
     queueRun.current++;
+    currentItemRef.current?.finish();
+    currentItemRef.current = null;
+    for (const item of queue.current) item.finish();
     queue.current = [];
     setQueuedCount(0);
     settleCurrent.current?.();
@@ -399,13 +432,20 @@ export function SpeechProvider({
     async (
       text: string,
       gate: { summaryEnabled: boolean; speakMode: SpeechSpeakMode; sessionId?: string; host?: string },
+      signal?: AbortSignal,
     ): Promise<string> => {
       if (!gate.summaryEnabled || gate.speakMode === "full" || !gate.sessionId) return text;
       try {
-        const { summary } = await api.summarizeSpeech(gate.sessionId, text, gate.host);
+        const { summary } = await api.summarizeSpeech(gate.sessionId, text, gate.host, signal);
         const trimmed = typeof summary === "string" ? summary.trim() : "";
         return trimmed || text;
       } catch (err) {
+        // An abort is the user pressing Stop/Next, not a failure: return empty
+        // so the worker's run check discards the item instead of speaking the
+        // full message the user just cancelled.
+        // intentionally not logged: an aborted request is the expected outcome
+        // of haltCurrent, and a console warning per cancel is noise.
+        if (signal?.aborted) return "";
         // Non-fatal by design: the summary is an optimisation, not a
         // prerequisite. Logged so the reason is visible in the console rather
         // than silently reading the full message.
@@ -424,7 +464,8 @@ export function SpeechProvider({
    * external (Stop, Next, engine switch) tears the playback down. It never
    * rejects — a failed item must not stall the items behind it.
    */
-  const playItem = useCallback((text: string): Promise<void> => {
+  const playItem = useCallback(
+    (text: string, onStart?: () => void, onError?: (message: string) => void): Promise<void> => {
     const normalized = sanitizeSpeechText(text);
     if (!normalized) {
       setError("Nothing to speak");
@@ -450,10 +491,15 @@ export function SpeechProvider({
     if (config.engine === "browser-native") {
       try {
         speakBrowser(normalized);
+        // Playback has started: the caller can leave its loading state now
+        // rather than waiting for the whole read to finish.
+        onStart?.();
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
         setIsSpeaking(false);
         setPaused(false);
+        onError?.(message);
         settleCurrent.current?.();
       }
       return done;
@@ -511,13 +557,16 @@ export function SpeechProvider({
           settleCurrent.current?.();
         };
         await audio.play();
+        if (current()) onStart?.();
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         if (current()) {
           // Deliberately do not switch to Browser Native on local-engine failure.
-          setError(err instanceof Error ? err.message : String(err));
+          setError(message);
           setIsSpeaking(false);
           setPaused(false);
         }
+        onError?.(message);
         // Either the error is ours to report, or the item was superseded. Both
         // ways the item is over, so the queue must move on.
         settleCurrent.current?.();
@@ -548,24 +597,44 @@ export function SpeechProvider({
       while (queue.current.length > 0) {
         const run = queueRun.current;
         const item = queue.current.shift()!;
+        currentItemRef.current = item;
         setQueuedCount(queue.current.length);
         // Labels come from the ITEM, not from the current props: a queue
         // outlives a tab switch, and the whole point of the label is to say
         // which project/session this particular audio belongs to.
         setNowPlaying({ projectTitle: item.projectTitle, sessionTitle: item.sessionTitle });
-        // Summarise HERE, not at enqueue time. Resolving on arrival is what
-        // keeps a five-item burst from firing five concurrent 60s model calls
-        // that would all land out of order.
-        const spoken = item.prepared
-          ? item.text
-          : await resolveSpeechText(item.text, item);
-        // Stop (or Next) landed while this item was summarising: abandon it
-        // rather than starting audio the user already cancelled. `continue`
-        // rather than `return`, because Next is precisely the case where the
-        // remaining items must still play.
-        if (run !== queueRun.current) continue;
-        if (!spoken) continue;
-        await playItem(spoken);
+        try {
+          // Summarise HERE, not at enqueue time. Resolving on arrival is what
+          // keeps a five-item burst from firing five concurrent 60s model calls
+          // that would all land out of order.
+          // One controller per item: haltCurrent aborts whichever is current.
+          const summaryAbort = new AbortController();
+          summaryAbortRef.current = summaryAbort;
+          let spoken: string;
+          try {
+            spoken = item.prepared
+              ? item.text
+              : await resolveSpeechText(item.text, item, summaryAbort.signal);
+          } finally {
+            if (summaryAbortRef.current === summaryAbort) summaryAbortRef.current = null;
+          }
+          // Stop (or Next) landed while this item was summarising: abandon it
+          // rather than starting audio the user already cancelled. `continue`
+          // rather than `return`, because Next is precisely the case where the
+          // remaining items must still play.
+          if (run !== queueRun.current) continue;
+          if (!spoken) continue;
+          await playItem(
+            spoken,
+            () => item.finish(),
+            (message) => item.finish(message),
+          );
+        } finally {
+          if (currentItemRef.current === item) currentItemRef.current = null;
+          // Settles the caller's promise even when the item was abandoned
+          // before playback; a no-op once onStart/onError already fired.
+          item.finish();
+        }
       }
     } finally {
       draining.current = false;
@@ -596,7 +665,18 @@ export function SpeechProvider({
    * the summary pass instead of summarising a summary.
    */
   const enqueue = useCallback(
-    (text: string, prepared?: boolean) => {
+    (text: string, prepared?: boolean): Promise<SpeechOutcome> => {
+      let settle!: (outcome: SpeechOutcome) => void;
+      const result = new Promise<SpeechOutcome>((resolve) => {
+        settle = resolve;
+      });
+      // Idempotent so every teardown path can settle the caller safely.
+      let finished = false;
+      const finish = (error?: string) => {
+        if (finished) return;
+        finished = true;
+        settle(error ? { ok: false, error } : { ok: true });
+      };
       queue.current.push({
         id: ++queueSeq.current,
         text,
@@ -609,29 +689,25 @@ export function SpeechProvider({
         speakMode,
         projectTitle,
         sessionTitle,
+        finish,
       });
       setQueuedCount(queue.current.length);
       void drain();
+      return result;
     },
     [drain, host, projectTitle, sessionId, sessionTitle, speakMode, summaryEnabled],
   );
 
-  const speak = useCallback(async (text: string) => {
-    enqueue(text);
-  }, [enqueue]);
+  const speak = useCallback((text: string) => enqueue(text), [enqueue]);
 
   // Replay the already-prepared text verbatim, WITHOUT another summary pass.
   // The toolbar's Replay hands back `currentText`, which is the summarised
   // prose (or the full text when that mode is on); summarising it again would
   // cost an extra LLM call and read a summary of a summary.
-  const replay = useCallback(
-    async (text: string) => {
-      enqueue(text, true);
-    },
-    [enqueue],
-  );
+  const replay = useCallback((text: string) => enqueue(text, true), [enqueue]);
 
   const clearQueue = useCallback(() => {
+    for (const item of queue.current) item.finish();
     queue.current = [];
     setQueuedCount(0);
   }, []);
@@ -650,6 +726,7 @@ export function SpeechProvider({
   const next = useCallback(() => {
     if (queue.current.length === 0) return;
     queueRun.current++;
+    currentItemRef.current?.finish();
     settleCurrent.current?.();
     settleCurrent.current = null;
     haltCurrent();
@@ -660,8 +737,13 @@ export function SpeechProvider({
 
   useEffect(() => {
     const onRequest = (event: Event) => {
-      const text = (event as CustomEvent<{ text?: string }>).detail?.text;
-      if (text) void speak(text);
+      const detail = (event as CustomEvent<SpeechRequestDetail>).detail;
+      if (!detail?.text || detail.handled) return;
+      // Claim the request synchronously: requestSpeech uses this to tell "no
+      // provider mounted" from "accepted", and a second mounted provider must
+      // not speak the same request twice.
+      detail.handled = true;
+      void speak(detail.text).then((outcome) => detail.onOutcome?.(outcome));
     };
     window.addEventListener("ocode:speak", onRequest as EventListener);
     return () => window.removeEventListener("ocode:speak", onRequest as EventListener);
@@ -734,7 +816,7 @@ export function SpeechProvider({
     if (config.engine === "browser-native" && lastText.current) {
       // Back through the queue rather than speaking around it: a bare
       // speakBrowser here would play on top of whatever the worker is parked on.
-      enqueue(lastText.current, true);
+      void enqueue(lastText.current, true);
       return;
     }
     try {
@@ -795,6 +877,32 @@ export function playbackLabel(playback: TTSPlayback | undefined) {
   return playback.status === "playing" ? "Playing" : playback.status;
 }
 
-export function requestSpeech(text: string) {
-  window.dispatchEvent(new CustomEvent("ocode:speak", { detail: { text } }));
+/** Payload for the `ocode:speak` window event that decouples requestSpeech
+ *  from the React provider tree (AssistantText is rendered provider-free in
+ *  isolated tests). */
+export interface SpeechRequestDetail {
+  text: string;
+  /** Set synchronously by the provider that takes the request. */
+  handled?: boolean;
+  /** Called once with the request's outcome. */
+  onOutcome?: (outcome: SpeechOutcome) => void;
+}
+
+/**
+ * Ask the mounted SpeechProvider to speak `text`.
+ *
+ * Resolves with the request's outcome rather than rejecting: fire-and-forget
+ * callers (terminal selections, "Speak visible") must not produce unhandled
+ * rejections, while the per-message Speak button reads `ok`/`error` to drive
+ * its loading and fallback UI. The outcome arrives when playback STARTS (or
+ * the request is abandoned/fails), so a failure before audio leaves the
+ * button usable.
+ */
+export function requestSpeech(text: string): Promise<SpeechOutcome> {
+  return new Promise<SpeechOutcome>((resolve) => {
+    const detail: SpeechRequestDetail = { text, onOutcome: resolve };
+    // dispatchEvent is synchronous, so `handled` is final once it returns.
+    window.dispatchEvent(new CustomEvent<SpeechRequestDetail>("ocode:speak", { detail }));
+    if (!detail.handled) resolve({ ok: false, error: "Speech is unavailable" });
+  });
 }

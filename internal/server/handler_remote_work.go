@@ -151,7 +151,7 @@ func remoteRunRaw(ctx context.Context, rw remoteWork, command string) (string, e
 // leave an ssh child running; without a deadline (plain requests) the exec
 // is bounded by remoteExecTimeout anyway.
 func runWithContext(ctx context.Context, t remote.Target, cmd *exec.Cmd) error {
-	return runBounded(ctx, t, cmd, remoteExecTimeout)
+	return runBounded(ctx, t, cmd, remoteExecTimeout, remoteExecForeground)
 }
 
 // remoteShellResult is the outcome of running one shell command on a remote
@@ -185,7 +185,7 @@ func remoteShellRun(ctx context.Context, rw remoteWork, command string, timeout 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := runBounded(ctx, rw.Target, cmd, timeout); err != nil {
+	if err := runBounded(ctx, rw.Target, cmd, timeout, remoteExecLongRunning); err != nil {
 		out := joinedShellOutput(stdout.String(), stderr.String())
 		// A remote command that ran and exited non-zero is reported via
 		// ExitCode with its output, never Err — the same contract
@@ -244,7 +244,7 @@ var remoteShellProbeFn = func(ctx context.Context, t remote.Target) (string, err
 	stdout := &remote.LimitedBuffer{Max: remote.MaxExecOutput}
 	cmd.Stdout = stdout
 	cmd.Stderr = &remote.LimitedBuffer{Max: remote.MaxExecOutput}
-	if err := runBounded(ctx, t, cmd, remoteShellProbeTimeout); err != nil {
+	if err := runBounded(ctx, t, cmd, remoteShellProbeTimeout, remoteExecForeground); err != nil {
 		return "", err
 	}
 	return stdout.String(), nil
@@ -307,15 +307,17 @@ func (h *Handler) remoteShellInfo(ctx context.Context, rw remoteWork) remote.Rem
 // which os/exec only honors on CommandContext-created commands).
 //
 // At most remoteExecSlotsPerHost commands run against one target at a time
-// (see remoteExecSlot); waiting for a slot counts toward timeout, so the
-// caller's bound still holds.
-func runBounded(ctx context.Context, t remote.Target, cmd *exec.Cmd, timeout time.Duration) error {
+// (see acquireRemoteExecSlot); waiting for a slot counts toward timeout, so the
+// caller's bound still holds. kind selects the foreground/long-running side of
+// the cap, so a pile of long-running shell commands cannot starve the git
+// status poll.
+func runBounded(ctx context.Context, t remote.Target, cmd *exec.Cmd, timeout time.Duration, kind remoteExecKind) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	release, err := acquireRemoteExecSlot(ctx, t, timeout)
+	release, err := acquireRemoteExecSlot(ctx, t, timeout, kind)
 	if err != nil {
 		return err
 	}
@@ -348,31 +350,122 @@ func runBounded(ctx context.Context, t remote.Target, cmd *exec.Cmd, timeout tim
 // headroom under 10 for anything else sharing the connection.
 const remoteExecSlotsPerHost = 8
 
-var (
-	remoteExecSlotsMu sync.Mutex
-	remoteExecSlots   = map[string]chan struct{}{}
+// remoteExecLongRunningSlotsPerHost is the sub-cap for LONG-RUNNING work
+// (remote shell commands, which a user can leave running for minutes). A share
+// of the cap is held back for short-lived FOREGROUND work — git status, diff,
+// file reads — because starving those is far more damaging. The git_status
+// emitter polls every 10s per viewed project, so a pool held entirely by long
+// commands makes the whole Git panel for that host go stale while every starved
+// poll burns its own 30s bound.
+//
+// The reserve is a SUB-CAP layered on the same pool, not a second pool: total
+// concurrency still cannot exceed remoteExecSlotsPerHost (and so sshd's
+// MaxSessions). The reserve only decides who may take the last slots.
+const remoteExecLongRunningSlotsPerHost = 6
+
+// remoteExecKind selects which side of the cap a command competes for.
+type remoteExecKind int
+
+const (
+	// remoteExecForeground is short-lived work the user is waiting on right now
+	// (git status/diff, file reads, the shell probe). May use every slot.
+	remoteExecForeground remoteExecKind = iota
+	// remoteExecLongRunning is a command that may legitimately occupy its slot
+	// for minutes, and is capped at remoteExecLongRunningSlotsPerHost.
+	remoteExecLongRunning
 )
 
-// acquireRemoteExecSlot blocks until t has a free exec slot or ctx ends. The
-// returned release must be called exactly once.
-func acquireRemoteExecSlot(ctx context.Context, t remote.Target, timeout time.Duration) (func(), error) {
-	key := t.String()
+var (
+	remoteExecSlotsMu sync.Mutex
+	// remoteExecSlots holds one entry per CONNECTION, keyed by remoteSlotKey.
+	// Each entry carries both the overall cap and the long-running sub-cap.
+	remoteExecSlots = map[string]*remoteSlotPools{}
+)
+
+// remoteSlotPools is one connection's capacity.
+type remoteSlotPools struct {
+	// all admits any kind, up to remoteExecSlotsPerHost.
+	all chan struct{}
+	// long counts long-running holders, up to
+	// remoteExecLongRunningSlotsPerHost. It gates admission; the token is held
+	// for the command's lifetime so the sub-cap is a true occupancy limit.
+	long chan struct{}
+}
+
+// remoteSlotKey is the per-connection identity for the exec slot pools: user,
+// host AND port. Target.String() alone is NOT a safe key — it drops the SSH
+// port and is identical for two users, so one pool covered several independent
+// connections (each with its own sshd MaxSessions budget) and let unrelated
+// projects throttle one another.
+//
+// It delegates to remoteConnectionKey so the exec pool and the host registry
+// cannot drift apart: they are two caches of the same thing (a live connection)
+// and a disagreement between their keys is exactly the bug class this
+// indirection exists to prevent.
+func remoteSlotKey(t remote.Target) string {
+	return remoteConnectionKey(t.String(), t.Port)
+}
+
+// acquireRemoteExecSlot blocks until t has a free exec slot for kind, or ctx
+// ends. The returned release must be called exactly once.
+//
+// Admission is an all-or-nothing pair: a long-running command must take its
+// `long` token AND an `all` token, and it takes `long` FIRST and
+// non-blockingly. Taking `long` first is what actually enforces the reserve —
+// a long command that cannot get a sub-cap slot is refused rather than queued
+// behind foreground work, because queueing would let N long commands reclaim
+// the whole pool the moment foreground work drained.
+func acquireRemoteExecSlot(ctx context.Context, t remote.Target, timeout time.Duration, kind remoteExecKind) (func(), error) {
+	key := remoteSlotKey(t)
 	remoteExecSlotsMu.Lock()
-	slots, ok := remoteExecSlots[key]
+	pools, ok := remoteExecSlots[key]
 	if !ok {
-		slots = make(chan struct{}, remoteExecSlotsPerHost)
-		remoteExecSlots[key] = slots
+		pools = &remoteSlotPools{
+			all:  make(chan struct{}, remoteExecSlotsPerHost),
+			long: make(chan struct{}, remoteExecLongRunningSlotsPerHost),
+		}
+		remoteExecSlots[key] = pools
 	}
 	remoteExecSlotsMu.Unlock()
-	select {
-	case slots <- struct{}{}:
-		return func() { <-slots }, nil
-	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return nil, &remoteTransportError{msg: "remote command cancelled while waiting for a free " + key + " exec slot"}
+
+	if kind == remoteExecLongRunning {
+		select {
+		case pools.long <- struct{}{}:
+		default:
+			// Sub-cap full: a foreground slot is reserved for git status. This
+			// is a normal, expected outcome, not a transport fault.
+			return nil, fmt.Errorf("remote command refused: %s already has %d long-running commands (cap %d); retry when one finishes",
+				key, remoteExecLongRunningSlotsPerHost, remoteExecLongRunningSlotsPerHost)
 		}
-		return nil, &remoteTransportError{msg: fmt.Sprintf("remote command timed out after %s waiting for a free %s exec slot", timeout, key)}
+		// Now take a whole-pool slot, waiting if needed. If we give up, the
+		// sub-cap token must be handed back.
+		select {
+		case pools.all <- struct{}{}:
+			return func() {
+				<-pools.all
+				<-pools.long
+			}, nil
+		case <-ctx.Done():
+			<-pools.long
+			return nil, remoteSlotWaitErr(ctx, key, timeout)
+		}
 	}
+
+	select {
+	case pools.all <- struct{}{}:
+		return func() { <-pools.all }, nil
+	case <-ctx.Done():
+		return nil, remoteSlotWaitErr(ctx, key, timeout)
+	}
+}
+
+// remoteSlotWaitErr explains that the caller ran out of time waiting for
+// capacity, naming the connection so a timeout is attributable.
+func remoteSlotWaitErr(ctx context.Context, key string, timeout time.Duration) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return &remoteTransportError{msg: "remote command cancelled while waiting for a free " + key + " exec slot"}
+	}
+	return &remoteTransportError{msg: fmt.Sprintf("remote command timed out after %s waiting for a free %s exec slot", timeout, key)}
 }
 
 // remoteExecTimeout bounds every remote exec. Git status/diff on a modest
@@ -397,7 +490,7 @@ func remoteRunNetwork(ctx context.Context, rw remoteWork, command string) error 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := runBounded(ctx, rw.Target, cmd, remoteNetworkTimeout); err != nil {
+	if err := runBounded(ctx, rw.Target, cmd, remoteNetworkTimeout, remoteExecLongRunning); err != nil {
 		if isRemoteTransportError(err) {
 			return err
 		}

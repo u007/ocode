@@ -75,6 +75,49 @@ describe("usePulseTail", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
+  // Regression: the live "text" subscription is installed synchronously after
+  // the seed request is fired, so chunks arriving before the seed resolves were
+  // appended FIRST and the seed's own live_frames appended after them — showing
+  // the same frame twice and reading out of order.
+  describe("seed / live ordering", () => {
+    it("orders the seed before live chunks and does not duplicate a frame", async () => {
+      const seed = deferred<{ live_frames?: { event: string; data: unknown }[] }>();
+      mockGetSessionState.mockReturnValue(seed.promise);
+
+      const { result } = renderHook(() => usePulseTail("s1", true, "running"));
+
+      // The subscription is live before the seed lands, so this chunk is
+      // already in flight when the seed resolves.
+      emitText("s1", "world");
+
+      await act(async () => {
+        seed.resolve({
+          live_frames: [
+            { event: "text", data: { delta: "hello " } },
+            { event: "tool_start", data: { tool: "bash" } },
+          ],
+        });
+      });
+
+      await waitFor(() => expect(result.current.lines.length).toBeGreaterThan(0));
+      const text = result.current.lines.join("");
+      expect(text).toBe("hello world");
+    });
+
+    it("keeps appending live chunks normally once the seed has landed", async () => {
+      const seed = deferred<{ live_frames?: { event: string; data: unknown }[] }>();
+      mockGetSessionState.mockReturnValue(seed.promise);
+
+      const { result } = renderHook(() => usePulseTail("s1", true, "running"));
+      await act(async () => {
+        seed.resolve({ live_frames: [{ event: "text", data: { delta: "one " } }] });
+      });
+      emitText("s1", "two ");
+
+      await waitFor(() => expect(result.current.lines.join("")).toBe("one two "));
+    });
+  });
+
   describe("disabled", () => {
     it("subscribes to nothing, fetches nothing, and stays empty", async () => {
       const { result } = renderHook(() => usePulseTail("s1", false, "running"));
@@ -157,7 +200,13 @@ describe("usePulseTail", () => {
       const { result } = renderHook(() => usePulseTail("s1", true, status));
 
       await waitFor(() => expect(result.current.lines).toEqual(["old", "reply"]));
-      expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: 200 });
+      // `noteRevision: false` is load-bearing, not incidental: this is a
+      // speculative read of a card, and recording a baseline would stamp a
+      // fresh revision over an open tab that is still showing older content.
+      expect(mockGetSession).toHaveBeenCalledWith(
+        "s1",
+        expect.objectContaining({ limit: 200, noteRevision: false }),
+      );
       expect(mockGetSessionState).not.toHaveBeenCalled();
       expect(textHandlerCount()).toBe(0);
     });

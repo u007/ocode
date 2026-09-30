@@ -3466,11 +3466,27 @@ func DefaultAdvisorModelName() string {
 
 // SplitProviderModel splits "provider/model" into (provider, model).
 // If no "/" separator is present, provider is empty.
+
 func SplitProviderModel(s string) (string, string) {
 	if parts := strings.SplitN(s, "/", 2); len(parts) == 2 {
 		return parts[0], parts[1]
 	}
 	return "", s
+}
+
+// QualifiedModel renders the advisor's model as the single "provider/model"
+// string the runtime resolves with. An empty result means "use the built-in
+// default" — callers must treat that as a real value, not as "unset", because
+// a session pinned to the default must not fall through to whatever the
+// process-wide default has since become.
+func (a AdvisorConfig) QualifiedModel() string {
+	if a.Model == "" {
+		return ""
+	}
+	if a.Provider != "" {
+		return a.Provider + "/" + a.Model
+	}
+	return a.Model
 }
 
 func SaveSmallModel(model string) error {

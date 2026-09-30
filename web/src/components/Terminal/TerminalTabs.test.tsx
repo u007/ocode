@@ -52,6 +52,11 @@ vi.mock("@/api/client", () => ({
     getTerminalConfig: () => Promise.resolve({ available: true, scrollback_lines: 9999, work_dir: "/project" }),
     getTerminalProcesses: () => Promise.resolve([]),
     getBrowseProcesses: () => Promise.resolve([]),
+    // The open-terminal LIST is server state now; these suites drive it through
+    // localStorage, so the server answers "nothing persisted" and the mirror
+    // they seeded is what the store reads.
+    getTerminalTabs: () => Promise.resolve({ projects: {} }),
+    setTerminalTabs: () => Promise.resolve({ status: "ok" }),
   },
   apiPath: (p: string) => p,
   apiWsPath: (p: string) => `ws://localhost${p}`,
@@ -79,7 +84,7 @@ vi.mock("../../stores/chatStore", () => ({
   useChatStateRef: () => ({ current: { sessions: {} } }),
 }));
 vi.mock("@/lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, handlers: new Map() },
+  eventBus: { on: () => () => {}, onReconnect: () => () => {}, handlers: new Map() },
 }));
 
 const authedFetchMock = vi.fn((..._args: unknown[]) => Promise.resolve({ ok: true, status: 204 }));

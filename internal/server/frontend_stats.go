@@ -109,3 +109,35 @@ func (s *Server) handleGetFrontendStats(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, http.StatusOK, s.frontendStats.snapshot())
 }
+
+// handlePostFrontendStall logs a renderer main-thread stall. WebKit (the
+// desktop shell's engine) has no Long Tasks API, so the frontend detects
+// stalls by timer drift and reports each one after it ends. The line is the
+// evidence for attributing a UI freeze: stall_ms against whatever the log was
+// doing at that timestamp (compaction, SSE snapshot replacement, ...).
+func (s *Server) handlePostFrontendStall(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Ocode-Desktop") != "1" {
+		http.NotFound(w, r)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	var in struct {
+		WindowID          string `json:"window_id"`
+		StallMS           int    `json:"stall_ms"`
+		DOMNodeCount      int    `json:"dom_node_count"`
+		ActiveCompactions int    `json:"active_compactions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		log.Printf("frontend-stall: decode request: %v", err)
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if in.WindowID == "" || in.StallMS < 0 || in.DOMNodeCount < 0 ||
+		in.ActiveCompactions < 0 {
+		http.Error(w, "invalid stall", http.StatusBadRequest)
+		return
+	}
+	log.Printf("frontend-stall: window=%s stall=%dms dom_nodes=%d active_compactions=%d",
+		in.WindowID, in.StallMS, in.DOMNodeCount, in.ActiveCompactions)
+	w.WriteHeader(http.StatusNoContent)
+}

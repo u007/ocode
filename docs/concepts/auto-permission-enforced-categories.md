@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Auto-Permission Enforced Categories
-description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, and the opaque-floor override for truncated_or_unknown.'
+description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, and the 2026-09-29 environment-enumeration rubric carve-out.'
 resource: internal/agent/permission_typesafe.go
 tags:
   - permissions
@@ -12,7 +12,7 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-09-21T10:49:52Z
+timestamp: 2026-09-29T15:56:49Z
 ---
 # Auto-Permission Enforced Categories
 
@@ -147,3 +147,28 @@ For the interpreter path the judge prompt gained a guidance bullet (opt-out cate
 - Modes and how the auto-permission layer sits among them: [Sandbox Permission Mode](concepts/sandbox-permission-mode.md).
 - Shared Jev/TypeSafe vocabulary and confidence-floor conventions: [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md).
 - Go-side guards referenced above: [permission evaluation and unknown-tool guard](gotchas/permission-evaluation-and-unknown-tool-guard.md), [auto-permission judge withholds credentials](gotchas/auto-permission-judge-withholds-credentials.md).
+
+## Amendment (2026-09-29): environment enumeration carve-out in the Jev rubric
+
+A single new bullet was added to the `typesafeJudgeInstructions` raw-string gatekeeper rubric in `internal/agent/permission_typesafe.go`, inserted immediately after the existing "reading a credential-bearing file (.env, ~/.ssh, …) is NOT by itself a reason to deny or to hesitate" carve-out and immediately before the `allow_destructive=false` bullet. It extends the same exposure-based rule from credential **files** to the **environment**:
+
+> Enumerating the environment is subject to the same rule, not a stricter one: what makes it a concern is a secret's VALUE reaching the output, a file, or another process, never the existence of a variable. Listing variable NAMES, or redacting values per line, is ordinary debugging and must be ALLOWED even when a later filter would match a credential-bearing key: `env | cut -d= -f1`, `compgen -v`, `env | sed 's/=.*/=<set>/'`, and `env | grep -i TOKEN | sed 's/=.*/=/'` are all allowed, because `sed` rewrites every line before anything is displayed and `grep` only narrows which keys are shown. Judge the pipeline in order and do not deny a command merely because it contains the word `env`. A bare `env`, `printenv` or `set` with no filter that prints every value at once IS the concern.
+
+**Motivating incident.** A live call was auto-deferred: `cd <repo> && grep -ri "typesafe\|jev" --include=… -l . | head -20; env | grep -i typesafe | sed 's/=.*/=<set>/'`. The judge (typesafe/jev-latest) leaned ALLOW at confidence **0.72**, below the **0.85** `permissions.auto.min_confidence` floor, so the human saw "Auto-denied by LLM permission model: TypeSafe judge leaned allow but confidence 0.72 is below the 0.85 floor". Two gaps combined:
+
+1. The secrets carve-out covered reading credential **files** and consuming a value as an argument to a local program, but said nothing about enumerating the environment — so the judge had no rule pointing at the trailing `sed` redaction and had to re-derive pipeline ordering itself before it could call the shape safe. (That the `env` keyword triggered the hesitation is a hypothesis, not confirmed: the repo-wide `grep -ri` was an equally plausible source. Untested either way.)
+2. The concern answer came back `none`, so the banner carried no explanation, and the `truncated_or_unknown` → 0.75 opaque confidence relief never engaged.
+
+**What did NOT change:**
+
+- **No code path changed.** The concern vocabulary, the floor resolvers, the `secrets` concern **label**, and the deny backstop are all untouched — this was rubric prose only.
+- `permissions.auto.min_confidence` still defaults to **0.85** and an explicitly configured value still governs; the opaque **0.75** relief remains gated on the judge naming `truncated_or_unknown`, which it did not here. See *Opaque floor* above — unchanged.
+- The **`none`-but-hesitant** case (a below-floor `allow` with no named concern, hence no explanation in the banner) is a **KNOWN REMAINING GAP**, deliberately NOT addressed in this change: the fix belongs in the fallback reasoning, not in the rubric. Recorded here as open.
+- The bullet contains the words `sed` and quoted fragments but is plain text inside a **Go raw string literal** — a backtick anywhere in it would terminate the literal. That is now pinned by a test.
+
+**Tests** (`internal/agent/permission_typesafe_rubric_test.go`, both mutation-verified — deleting the bullet fails both):
+
+- `TestTypesafeJudgeInstructionsCarveOutEnvironmentNameListing` — pins five distinctive fragments, including the two literal command shapes and the "sed rewrites every line before anything is displayed" justification, so trimming the allowed-forms list back out still fails.
+- `TestTypesafeEnvironmentCarveOutIsInVerdictRubric` — asserts the clause is in the **verdict** rubric (not only the concern rubric, since the verdict answer is the one gated by the floor) and that the raw string contains no backtick.
+
+**Prose mirror.** The rubric's prose copy gained a parallel bullet right after the `.env`/psql carve-out: `skills/ocode-permissions/SKILL.md` (the source; the `Makefile` copies `skills/` into `cmd/ocode-desktop/embedded-assets/skills/` at build time, and that mirrored copy carries the same bullet).

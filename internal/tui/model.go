@@ -1494,6 +1494,8 @@ type model struct {
 	transcriptWindowStart    int                         // first message index rendered in the transcript window; always >= 0 once initialized (0 = show all). Never -1: -1 is reserved for transcriptMsgStartLine entries meaning "hidden".
 	transcriptWindowInit     bool                        // true once the window has been computed; false until the first render. New models and zero-value test models start uninitialized and compute the window on first render.
 	transcriptRenderedLen    int                         // len(m.messages) at the last render; eviction only trims when the tail grew since then, so explicitly expanded history is never discarded by a mere re-render.
+	userJumpCursor           int                         // position within the countable user messages for the alt+up/alt+down walk; -1 = no walk in progress. See user_jump.go.
+	userJumpTotal            int                         // len(userMessageIndices(m.messages)) captured at the last jump, so the status readout stays stable while walking.
 	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
 	themeGen                 int                         // bumped on every applyTheme so the render cache invalidates when colors change
 	pipboyArtLines           []string                    // current pipboy art lines, randomized per session when pipboy theme is active
@@ -2635,6 +2637,7 @@ func newModel(opts ...RunOptions) model {
 		}(),
 		scrollSpeed:       3,
 		inputHistoryIndex: -1,
+		userJumpCursor:    -1,
 		workDir: func() string {
 			d, _ := os.Getwd()
 			return d
@@ -5339,8 +5342,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.Err != nil {
 			m.lastCompactErr = msg.result.Err
 			m.pendingCompactUIIdx = nil
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⚠ Compaction failed: %v (conversation continues uncompacted)", msg.result.Err)})
+			// A failed pass left the transcript untouched, so re-dispatching the
+			// deferred turn would re-send the identical oversized prompt and the
+			// next step boundary would re-arm the compaction that just failed —
+			// one "Compaction failed" warning per turn, forever, until the user
+			// switched sessions. The agent has already latched auto-compaction
+			// off for the same reason; this is the matching half on the TUI
+			// side. The user keeps a usable session and retypes (or runs
+			// /compact) when ready.
+			restored := m.restoreQueuedMessagesToComposer()
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⚠ Compaction failed: %v (conversation continues uncompacted; auto-compaction is off until /compact succeeds)", msg.result.Err)})
+			if restored {
+				m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("↩ your queued message was returned to the input box"), transient: true})
+			}
 			m.renderTranscript()
+			m.layout()
+			// Return here rather than falling through to the shared drain/resume
+			// tail: that tail is what re-dispatched the deferred turn, and it
+			// also drains the queue — a drained command resets the composer,
+			// wiping the text just restored above (and a queued /compact would
+			// immediately re-run the pass that just failed). This early return
+			// is the ONLY thing that stops the loop; the queue and any deferred
+			// background jobs stay parked for the user to trigger, and the next
+			// turn drains them.
+			return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 		} else if msg.result.OK {
 			if ok, bannerIdx := m.applyCompactionResult(msg.result, m.pendingCompactUIIdx); ok {
 				m.pendingCompactUIIdx = nil
@@ -6187,6 +6212,13 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	if keyStr != "up" {
 		m.inputAtFirstLineUpNotice = false
 	}
+	// Any key other than the jump keys themselves ends the user-message walk
+	// and drops its status readout. Without this the label would keep claiming
+	// a position long after the user started typing over it, and the cursor
+	// would seed the next alt+up from a stale position.
+	if keyStr != "alt+up" && keyStr != "alt+down" && keyStr != "ctrl+shift+up" && keyStr != "ctrl+shift+down" {
+		m.clearUserJump()
+	}
 
 	if m.showPermDialog {
 		switch keyStr {
@@ -6454,6 +6486,14 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	case "ctrl+t":
 		m.cycleTheme()
 		return m, nil
+	case "alt+up", "ctrl+shift+up":
+		// Jump the viewport to the previous (older) user message. Distinct
+		// from plain "up", which walks the composer's input history.
+		m.userJumpPrev()
+		return m, chatSearchFlashTick()
+	case "alt+down", "ctrl+shift+down":
+		m.userJumpNext()
+		return m, chatSearchFlashTick()
 	case "pgup":
 		m.scrollTranscriptUp(m.viewport.Height())
 		return m, nil
@@ -8957,6 +8997,104 @@ func (m *model) removeQueuedInputByText(text string) {
 	}
 }
 
+// mergeQueuedIntoDraft places queued message text ahead of whatever the user
+// has already typed, joined with a newline, and reports the rune index where
+// the user's own draft begins.
+//
+// Order matters: the queued messages were submitted earlier, so restoring them
+// in submission order keeps the block chronological. The draft stays the suffix
+// so the text the user is looking at (and about to keep typing) is not buried
+// under restored history.
+//
+// Blank queued entries are dropped rather than turned into blank lines, so a
+// whitespace-only item cannot leave a leading or doubled separator behind.
+func mergeQueuedIntoDraft(queued []string, draft string) (string, int) {
+	parts := make([]string, 0, len(queued)+1)
+	for _, q := range queued {
+		if trimmed := strings.TrimSpace(q); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	if len(parts) == 0 {
+		return draft, 0
+	}
+	block := strings.Join(parts, "\n")
+	if draft == "" {
+		return block, len([]rune(block))
+	}
+	merged := block + "\n" + draft
+	return merged, len([]rune(block)) + 1
+}
+
+// restoreQueuedMessagesToComposer returns queued plain-text submissions to the
+// input box after a failed compaction. Those messages exist ONLY in the queue
+// at that point — nothing was sent — so dropping them on the floor would lose
+// user input with no trace. Commands stay queued: a "/compact" or "!ls" is
+// not composer prose, inlining it would corrupt the joined block, and it
+// remains dispatchable.
+//
+// Reports whether anything was restored.
+func (m *model) restoreQueuedMessagesToComposer() bool {
+	var texts []string
+	keep := make([]queuedItem, 0, len(m.queuedItems))
+	for _, item := range m.queuedItems {
+		if item.kind == queueItemCommand {
+			keep = append(keep, item)
+			continue
+		}
+		texts = append(texts, item.text)
+	}
+	if len(texts) == 0 {
+		return false
+	}
+	m.queuedItems = keep
+
+	// A message typed while a turn was streaming was ALSO handed to the live
+	// agent loop (EnqueueInjection) and kept in the queue only so it could be
+	// recalled. Restoring it here without dropping the injection would send it
+	// twice: spliced into the next turn, and again as the retyped message.
+	m.discardPickedUpInjections(texts)
+
+	merged, _ := mergeQueuedIntoDraft(texts, m.input.Value())
+	m.input.SetValue(merged)
+	// The textarea API cannot address an arbitrary caret (Cursor() reports a
+	// screen position, and only Cursor{Column,Start,End} are settable), so the
+	// caret goes to the end of the merged value. That is exactly where it was
+	// in the normal case — the user typing at the end of their draft — and it
+	// keeps them positioned to carry on typing.
+	m.input.MoveToEnd()
+	m.layout()
+	m.maybeScrollTranscriptToBottom()
+	return true
+}
+
+// discardPickedUpInjections drops pending agent-loop injections whose text
+// matches one of the given parts. Shared with drainQueuedItems: both pop queue
+// items the agent may have already been handed, and both must not leave the
+// injection behind or the message is delivered twice.
+func (m *model) discardPickedUpInjections(parts []string) {
+	if m.agent == nil || !m.agent.HasPendingInjections() {
+		return
+	}
+	pending := m.agent.DrainPendingInjections()
+	popped := make(map[string]int, len(parts))
+	for _, pr := range parts {
+		popped[strings.TrimSpace(pr)]++
+	}
+	var keep []agent.Message
+	for _, msg := range pending {
+		key := strings.TrimSpace(msg.Content)
+		if cnt, ok := popped[key]; ok && cnt > 0 {
+			popped[key]--
+			continue
+		}
+		keep = append(keep, msg)
+	}
+	for _, k := range keep {
+		m.agent.EnqueueInjection(k)
+	}
+}
+
 func (m *model) drainQueuedItems() (tea.Cmd, bool) {
 	drained := false
 	for len(m.queuedItems) > 0 {
@@ -9018,24 +9156,8 @@ func (m *model) drainQueuedItems() (tea.Cmd, bool) {
 			// while streaming but missed the Step drain window would be both
 			// resent here as a coalesced follow-up turn and re-injected at the
 			// start of the next turn, appearing twice in the transcript.
-			if firstKind == queueItemInput && m.agent != nil && m.agent.HasPendingInjections() {
-				pending := m.agent.DrainPendingInjections()
-				popped := make(map[string]int, len(parts))
-				for _, pr := range parts {
-					popped[pr]++
-				}
-				var keep []agent.Message
-				for _, msg := range pending {
-					key := strings.TrimSpace(msg.Content)
-					if cnt, ok := popped[key]; ok && cnt > 0 {
-						popped[key]--
-						continue
-					}
-					keep = append(keep, msg)
-				}
-				for _, k := range keep {
-					m.agent.EnqueueInjection(k)
-				}
+			if firstKind == queueItemInput {
+				m.discardPickedUpInjections(parts)
 			}
 			return m.processFileReferences(text), true
 		}
@@ -12141,6 +12263,10 @@ func (m *model) handleAdvisorCmd(args []string) tea.Cmd {
 		} else {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Advisor model reset to default (%s/%s).", config.DefaultAdvisorProvider(), config.DefaultAdvisorModelName())})
 		}
+		// The running agent holds its OWN advisor config (it is no longer read
+		// live from cfg), so apply the new default here too — otherwise
+		// /advisor would silently stop affecting this session.
+		m.applyAdvisorConfigToAgent()
 		m.rerenderTranscriptAndMaybeScroll()
 		return nil
 	}
@@ -12163,8 +12289,21 @@ func (m *model) handleAdvisorCmd(args []string) tea.Cmd {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Advisor model set to %s%s.", modelID, mode)})
 	}
+	m.applyAdvisorConfigToAgent()
 	m.rerenderTranscriptAndMaybeScroll()
 	return nil
+}
+
+// applyAdvisorConfigToAgent re-installs the advisor config on the running
+// agent from the TUI's current config. The agent snapshots its own advisor
+// config (the model is per session, not read live from cfg), so every TUI-side
+// advisor change must push it through here or the running session would keep
+// the previous model.
+func (m *model) applyAdvisorConfigToAgent() {
+	if m.agent == nil {
+		return
+	}
+	m.agent.SetAdvisorConfig(agent.AdvisorConfigFromConfig(m.config))
 }
 
 func (m *model) handleDetailsCmd(args []string) {
@@ -20016,6 +20155,14 @@ func (m *model) renderStatus() string {
 		}
 	}
 	leftStatus := statusPrefix + tokUsage + permissionMode + compactState + jobState
+	// alt+up/alt+down position readout. Appended AFTER permissionMode on
+	// purpose: the INVARIANT above scopes statusPermColStart/End to the
+	// permissionMode segment, and leftStatus is truncated from the right, so
+	// a segment added here survives on narrow terminals where the hint
+	// suffix (rightContent) would be cut.
+	if indicator := m.userJumpIndicator(); indicator != "" {
+		leftStatus += " · " + indicator
+	}
 	if m.mcpLoading {
 		leftStatus += " · ~MCP"
 	}

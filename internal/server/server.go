@@ -33,6 +33,7 @@ import (
 	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/reminders"
 	"github.com/u007/ocode/internal/remote"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/secretfile"
@@ -98,6 +99,7 @@ type Server struct {
 	schedulerOutbox  *scheduler.Outbox // optional; set via SetScheduler
 	schedulerRuns    *scheduler.RunHistory
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
+	reminders        *reminders.Service // optional; set via SetReminders
 	frontendStats    *frontendStatsRing
 	startedAt        time.Time
 
@@ -221,6 +223,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/state", s.authMiddleware(s.handleSessionState))
 	s.mux.HandleFunc("GET /api/sessions/{id}/status", s.authMiddleware(s.handleSessionStatus))
 	s.mux.HandleFunc("GET /api/sessions/{id}/search", s.authMiddleware(s.handleSearchSession))
+	// Backs the web/desktop alt+up/alt+down jump between the user's own
+	// messages; see handler_session_user_messages.go.
+	s.mux.HandleFunc("GET /api/sessions/{id}/user-messages", s.authMiddleware(s.handleListSessionUserMessages))
 	// Pulse: the cross-project live-sessions dashboard. Lives next to the
 	// session routes because every row is a session; it is a global view
 	// (no project_path filter) by design, which is the whole point.
@@ -323,6 +328,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/modified", s.authMiddleware(s.handleGetModifiedFiles))
 	s.mux.HandleFunc("POST /api/debug/frontend-stats", s.authMiddleware(s.handlePostFrontendStats))
 	s.mux.HandleFunc("GET /api/debug/frontend-stats", s.authMiddleware(s.handleGetFrontendStats))
+	s.mux.HandleFunc("POST /api/debug/frontend-stall", s.authMiddleware(s.handlePostFrontendStall))
 
 	// Session operations
 	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.authMiddleware(s.handleCompactSession))
@@ -575,6 +581,13 @@ func (s *Server) registerRoutes() {
 	// Open-session tab state (server-side persistence; survives desktop restarts)
 	s.mux.HandleFunc("GET /api/tabs", s.authMiddleware(s.handleGetTabs))
 	s.mux.HandleFunc("PUT /api/tabs", s.authMiddleware(s.handleSetTabs))
+
+	// Open-terminal tab state. Same server-side rationale as /api/tabs: the
+	// list must not live in per-origin localStorage, or a terminal started in
+	// the desktop app is invisible to a second browser even though the shell
+	// itself is shared.
+	s.mux.HandleFunc("GET /api/terminal-tabs", s.authMiddleware(s.handler.HandleGetTerminalTabs))
+	s.mux.HandleFunc("PUT /api/terminal-tabs", s.authMiddleware(s.handler.HandleSetTerminalTabs))
 
 	// Directory browser for the project sidebar folder picker.
 	s.mux.HandleFunc("GET /api/browse", s.authMiddleware(s.handleBrowseDirectory))
@@ -1243,6 +1256,14 @@ func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSearchSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSearchSession(w, r, id)
+}
+
+// handleListSessionUserMessages backs GET /api/sessions/{id}/user-messages —
+// the authoritative list of the user's own message indices, used by the
+// web/desktop alt+up/alt+down transcript jump.
+func (s *Server) handleListSessionUserMessages(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleListSessionUserMessages(w, r, id)
 }
 
 func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {

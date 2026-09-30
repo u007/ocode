@@ -119,7 +119,7 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 	// Skip when the ORIGINAL request had no path — session-scoped
 	// endpoints do not carry a project to register.
 	if originalPath != "" {
-		if err := ensureRemoteProject(r.Context(), ws, h.remoteHosts, host, originalPath); err != nil {
+		if err := ensureRemoteProject(r.Context(), ws, h.remoteHosts, host, remotePort, originalPath); err != nil {
 			log.Printf("remote proxy: register project %s on host %s failed: %v", originalPath, host, err)
 			// The cached workspace/proxy just proved unusable (e.g. the remote
 			// server died or the tunnel dropped). Drop the host so the next
@@ -127,7 +127,7 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 			// the same self-heal the proxy ErrorHandler performs on a
 			// round-trip failure, extended to the pre-proxy registration call
 			// that runs first.
-			h.remoteHosts.drop(host)
+			h.remoteHosts.drop(host, remotePort)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -139,7 +139,7 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get the cached proxy.
-	proxy, ok := h.remoteHosts.proxyFor(host)
+	proxy, ok := h.remoteHosts.proxyFor(host, remotePort)
 	if !ok || proxy == nil {
 		log.Printf("remote proxy: no cached proxy for host %q (rest=%s)", host, rest)
 		writeError(w, http.StatusBadGateway, "no cached proxy for host")
@@ -278,9 +278,13 @@ var remoteRegisterClient = &http.Client{Timeout: 10 * time.Second}
 // endpoint when isRegistered reports the pair is not yet registered. On
 // success (200 or 409) the pair is marked registered. An already-registered
 // response (409) is treated as success.
-func ensureRemoteProject(ctx context.Context, ws remoteHostWorkspace, reg *remoteHostRegistry, host, path string) error {
+//
+// Registration is scoped to the CONNECTION (host + port): the path is POSTed to
+// one specific remote server, so the same path on a second port has not been
+// registered there and must be POSTed again.
+func ensureRemoteProject(ctx context.Context, ws remoteHostWorkspace, reg *remoteHostRegistry, host string, port int, path string) error {
 	// Read-only check first — do NOT mark before the POST succeeds.
-	if reg.isRegistered(host, path) {
+	if reg.isRegistered(host, port, path) {
 		return nil
 	}
 
@@ -314,7 +318,7 @@ func ensureRemoteProject(ctx context.Context, ws remoteHostWorkspace, reg *remot
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict {
 		// 200 = registered, 409 = already registered — both are success.
 		// Mark the pair so subsequent requests skip the POST.
-		reg.markRegistered(host, path)
+		reg.markRegistered(host, port, path)
 		return nil
 	}
 

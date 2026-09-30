@@ -1,13 +1,16 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -392,5 +395,70 @@ func TestForwardManagerStartFailureDoesNotFireOnExit(t *testing.T) {
 	case <-fired:
 		t.Fatal("onExit fired for Start's own readiness failure; the failure is double-counted")
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// lockedBuf is a log sink safe to read while the goroutine under test writes it.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// An unrecovered panic on ANY goroutine terminates the whole process, so a
+// background forward open that panicked would take down the app and every
+// session in it. RunAsync must absorb its own and say so in the log.
+func TestRunAsyncRecoversAndLogsPanic(t *testing.T) {
+	buf := &lockedBuf{}
+	orig := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	RunAsync("test", func() { panic("boom") })
+
+	// RunAsync's recover runs AFTER fn's own defers unwind, so poll rather than
+	// synchronize on anything inside fn.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "panicked") {
+		if time.Now().After(deadline) {
+			t.Fatalf("panic was neither recovered nor logged, got %q", buf.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := buf.String(); !strings.Contains(got, "boom") || !strings.Contains(got, "goroutine") {
+		t.Fatalf("panic log lacks the value or a stack: %q", got)
+	}
+}
+
+// RunAsync exists so a slow forward open never delays its caller. This pins
+// that half too: fn has not finished when RunAsync returns.
+func TestRunAsyncReturnsBeforeFnFinishes(t *testing.T) {
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	RunAsync("test", func() {
+		<-release
+		close(finished)
+	})
+	select {
+	case <-finished:
+		t.Fatal("RunAsync ran fn to completion before returning; it is not asynchronous")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fn never finished after release")
 	}
 }

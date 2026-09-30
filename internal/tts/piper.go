@@ -198,6 +198,14 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 	var done int64
 	for _, a := range p.manifest.VoiceFiles {
 		dst := filepath.Join(dir, a.Name)
+		// Artifact names may carry a subdirectory (MeloTTS stages bert/ and
+		// nltk_data/), so the parent must exist before the temp file is
+		// created next to the destination.
+		if parent := filepath.Dir(dst); parent != dir {
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				return fmt.Errorf("create %s: %w", parent, err)
+			}
+		}
 		if verifyArtifact(dst, a) == nil {
 			done += a.Size
 			continue
@@ -211,6 +219,14 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 		done += a.Size
 	}
 
+	// MeloTTS ships no pip-installable package, so unpack the checksum-verified
+	// source archive here rather than resolving it from an index.
+	if p.manifest.Engine == EngineMelo {
+		if err := extractMeloSource(dir); err != nil {
+			return err
+		}
+	}
+
 	venv := filepath.Join(dir, "venv")
 	p.progress(50, "creating python environment")
 	if err := os.RemoveAll(venv); err != nil {
@@ -219,21 +235,13 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 	if out, err := runCmd(ctx, py.Command, "-m", "venv", venv); err != nil {
 		return fmt.Errorf("create venv: %w: %s", err, out)
 	}
-	stepName := "installing piper-tts"
-	if p.manifest.Engine == EngineKokoro {
-		stepName = "installing kokoro-onnx"
-	}
-	p.progress(60, stepName)
+	p.progress(60, "installing "+p.installLabel())
 	pipArgs := append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--quiet"}, rt.Requirements...)
 	if out, err := runCmd(ctx, []string{venvPython(venv)}, pipArgs...); err != nil {
 		return fmt.Errorf("pip install: %w: %s", err, pipResolutionHint(out, py, rt))
 	}
 	p.progress(92, "verifying runtime")
-	importCheck := "import kokoro_onnx, onnxruntime"
-	if p.manifest.Engine == EnginePiper {
-		importCheck = "import piper, onnxruntime"
-	}
-	if out, err := runCmd(ctx, []string{venvPython(venv)}, "-c", importCheck); err != nil {
+	if out, err := p.verifyRuntime(ctx, venv, dir); err != nil {
 		return fmt.Errorf("verify runtime import: %w: %s", err, out)
 	}
 	rec, err := json.Marshal(installedRecord{Version: p.manifest.Version, Python: strings.Join(py.Command, " ")})
@@ -245,6 +253,53 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 	}
 	p.progress(100, "installed")
 	return nil
+}
+
+// installLabel names the distribution being installed so the progress step
+// reads as a product rather than as an engine id.
+func (p *piperInstaller) installLabel() string {
+	switch p.manifest.Engine {
+	case EnginePiper:
+		return "piper-tts"
+	case EngineKokoro:
+		return "kokoro-onnx"
+	case EngineMelo:
+		return "MeloTTS runtime"
+	default:
+		return string(p.manifest.Engine)
+	}
+}
+
+// verifyRuntime imports the engine's entrypoint in the freshly built venv so a
+// broken requirement set is reported as a failed install rather than as a
+// synthesis error on the user's first playback.
+//
+// MeloTTS is the odd one out: its package is unpacked into the cache and
+// imported via PYTHONPATH, and g2p_en resolves its corpora from NLTK_DATA. The
+// import therefore only means anything with that environment applied, which is
+// what meloEnv builds. It also has to run through the same offline preamble
+// synthesis will: a bare `python -c "import melo.api"` reaches the Hugging Face
+// Hub, because melo/text/cleaner.py imports every language backend and each loads
+// a tokenizer at module scope. With HF_HUB_OFFLINE=1 that turned into a failed
+// install; the preamble is shared with meloSynth so the check and the runtime
+// cannot drift apart.
+func (p *piperInstaller) verifyRuntime(ctx context.Context, venv, dir string) (string, error) {
+	if p.manifest.Engine == EngineMelo {
+		scriptPath := filepath.Join(dir, "melo_import_check.py")
+		if err := os.WriteFile(scriptPath, []byte(meloImportCheckScript), 0o644); err != nil {
+			return "", fmt.Errorf("write melo import check: %w", err)
+		}
+		return runCmdEnv(ctx, meloEnv(venv, dir), dir,
+			[]string{venvPython(venv), scriptPath, filepath.Join(dir, bertDirName)})
+	}
+	var importCheck string
+	switch p.manifest.Engine {
+	case EngineKokoro:
+		importCheck = "import kokoro_onnx, onnxruntime"
+	default:
+		importCheck = "import " + string(p.manifest.Engine)
+	}
+	return runCmd(ctx, []string{venvPython(venv), "-c", importCheck})
 }
 
 // Verify reports whether the cache directory holds a complete, size-valid
@@ -273,6 +328,13 @@ func (p *piperInstaller) Verify() error {
 	}
 	if _, err := os.Stat(venvPython(filepath.Join(dir, "venv"))); err != nil {
 		return fmt.Errorf("venv python missing: %w", err)
+	}
+	// MeloTTS' package lives outside the venv, so the artifact set alone does
+	// not prove the engine is runnable.
+	if p.manifest.Engine == EngineMelo {
+		if _, err := os.Stat(filepath.Join(meloSourceDir(dir), "melo", "api.py")); err != nil {
+			return fmt.Errorf("melo source missing: %w", err)
+		}
 	}
 	return nil
 }
@@ -370,6 +432,19 @@ func (p *piperInstaller) download(ctx context.Context, a Artifact, dst string, o
 
 func runCmd(ctx context.Context, argv []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, argv[0], append(append([]string{}, argv[1:]...), args...)...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// runCmdEnv is runCmd with an explicit environment and working directory.
+// Engines whose runtime needs more than the interpreter path (MeloTTS:
+// PYTHONPATH, NLTK_DATA, offline hub flags) use it so the import check and the
+// real synthesis see the same world. dir is the engine cache directory, used as
+// the child's cwd so nothing is written relative to the app's own directory.
+func runCmdEnv(ctx context.Context, env []string, dir string, argv []string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, argv[0], append(append([]string{}, argv[1:]...), args...)...)
+	cmd.Env = env
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }

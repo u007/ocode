@@ -3,10 +3,14 @@ package desktop
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
@@ -134,4 +138,84 @@ func TestPortMapsRemoveUnknownPortNotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("DELETE unknown port = %d, want 404", rec.Code)
 	}
+}
+
+// freeLocalPort returns a currently-unused 127.0.0.1 TCP port.
+func freeLocalPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// installSleepingSSH puts a fake ssh on PATH that ignores its arguments and
+// sleeps, so a forward's child stays alive (and therefore "live") without
+// contacting anything.
+func installSleepingSSH(t *testing.T, d time.Duration) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nsleep %d\n", int(d.Seconds()))
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return dir
+}
+
+// autoStartEnabled is the loop startRemoteServer runs off the critical path.
+// Extraction must not change what it opens: every persisted ENABLED forward, and
+// nothing else.
+//
+// Start's readiness probe only dials 127.0.0.1:<localPort>, so a listener bound
+// here satisfies it immediately and the fake ssh keeps the child alive — which
+// is what makes "live" observable.
+func TestAutoStartEnabledOpensOnlyEnabledForwards(t *testing.T) {
+	installSleepingSSH(t, 30*time.Second)
+	h, _ := newTestPortMapsHandler(t)
+
+	live := freeLocalPort(t)
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", live))
+	if err != nil {
+		t.Fatalf("bind local forward port: %v", err)
+	}
+	defer ln.Close()
+	// The disabled forward's local port is bound too, on purpose. If the
+	// enabled-check were dropped, its open would SUCCEED and IsLive(4000) would
+	// catch it; with an unbound port the open would fail on the readiness probe
+	// and the assertion would pass either way.
+	offline := freeLocalPort(t)
+	offlineLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", offline))
+	if err != nil {
+		t.Fatalf("bind disabled forward port: %v", err)
+	}
+	defer offlineLn.Close()
+
+	if err := h.store.AddPortMap(h.ref, 3000, live); err != nil {
+		t.Fatalf("AddPortMap(enabled): %v", err)
+	}
+	if err := h.store.AddPortMap(h.ref, 4000, offline); err != nil {
+		t.Fatalf("AddPortMap(to disable): %v", err)
+	}
+	if err := h.store.SetPortMapEnabled(h.ref, 4000, false); err != nil {
+		t.Fatalf("SetPortMapEnabled: %v", err)
+	}
+
+	h.autoStartEnabled()
+
+	if !h.fm.IsLive(3000) {
+		t.Fatal("enabled forward 3000 is not live after autoStartEnabled")
+	}
+	if h.fm.IsLive(4000) {
+		t.Fatal("disabled forward 4000 was opened by autoStartEnabled")
+	}
+}
+
+// A nil store is a best-effort boot (the store failed to open), not a crash.
+func TestAutoStartEnabledToleratesNilStore(t *testing.T) {
+	h, _ := newTestPortMapsHandler(t)
+	h.store = nil
+	h.autoStartEnabled() // must not panic
 }

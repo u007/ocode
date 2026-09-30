@@ -280,11 +280,16 @@ describe("ModelDialog favorites/recents sections", () => {
       fireEvent.click(await screen.findByText("claude-code/claude-sonnet-5"));
 
       await waitFor(() =>
-        expect(hoisted.api.setAdvisorFull).toHaveBeenCalledWith({
-          model: "claude-sonnet-5",
-          provider: "claude-code",
-          claude_code: true,
-        }),
+        // No session in scope: this is the default NEW chats start with.
+        // The explicit undefined pins that the per-session branch was NOT taken.
+        expect(hoisted.api.setAdvisorFull).toHaveBeenCalledWith(
+          {
+            model: "claude-sonnet-5",
+            provider: "claude-code",
+            claude_code: true,
+          },
+          undefined,
+        ),
       );
       // The store keeps the bare alias (the value the sidebar renders).
       expect(hoisted.dispatchSpy).toHaveBeenCalledWith({
@@ -300,11 +305,14 @@ describe("ModelDialog favorites/recents sections", () => {
       fireEvent.click(await screen.findByText("gpt-c"));
 
       await waitFor(() =>
-        expect(hoisted.api.setAdvisorFull).toHaveBeenCalledWith({
-          model: "gpt-c",
-          provider: "openai",
-          claude_code: false,
-        }),
+        expect(hoisted.api.setAdvisorFull).toHaveBeenCalledWith(
+          {
+            model: "gpt-c",
+            provider: "openai",
+            claude_code: false,
+          },
+          undefined,
+        ),
       );
     });
 
@@ -483,7 +491,9 @@ describe("ModelDialog remote session host", () => {
     // The dialog must seed its config reads from the host too.
     await waitFor(() => expect(hoisted.api.getSmallModel).toHaveBeenCalledWith("devbox"));
     expect(hoisted.api.getConfigModel).toHaveBeenCalledWith("devbox");
-    expect(hoisted.api.getAdvisor).toHaveBeenCalledWith("devbox");
+    // Host AND session: the advisor model is per chat, so the read must carry
+    // the session id or the dialog would show the new-chat default.
+    expect(hoisted.api.getAdvisor).toHaveBeenCalledWith("devbox", "sess-remote");
 
     fireEvent.click(await screen.findByText("gpt-c"));
     await waitFor(() =>

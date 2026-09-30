@@ -45,6 +45,14 @@ function useRunningSessions(): Set<string> {
  * only for the selected project — the inventory is browsable from any row, but
  * killing a shell on another machine requires the project to be active first.
  *
+ * The chat inventory is a LIVE view, not a session browser: it lists only chats
+ * the user is actually working with — open as a tab in this window, or running
+ * an agent turn on the host. The host's full history belongs in the Sessions
+ * dialog; once remote session listing actually loaded, rendering every session
+ * here flooded the row (dozens of past chats) and buried the live ones. The
+ * collapsed `N chats` count tracks this same filtered set, so the count always
+ * matches the rows the expansion shows.
+ *
  * The status hook is owned by the parent row (so its context menu can trigger
  * the same Restart); this component owns expansion and the terminal inventory.
  */
@@ -76,6 +84,12 @@ export function RemoteProjectStatus({
 
   const sessions = projectState.sessionsByProject?.[projectSessionKey(project.path, host)]?.sessions ?? [];
   const openSessionIds = new Set((projectState.tabsByProject?.[project.path] ?? []).map((t) => t.id));
+  // Only the chats the user is actually working with: open as a tab here, or
+  // running a turn on the host. `running` is fed by the per-host `runs` bus
+  // (App opens a stream per host and routes frames by session_id), so a remote
+  // session running with no local tab is still listed. Everything else — the
+  // host's full history — is reachable through the Sessions dialog.
+  const visibleSessions = sessions.filter((s) => openSessionIds.has(s.id) || running.has(s.id));
   const localTerminals = useMemo(
     () => getProjectTerminals(terminalState, project.path, host).terminals,
     [terminalState, project.path, host],
@@ -102,13 +116,22 @@ export function RemoteProjectStatus({
     if (expanded && connected) prefetchProjectSessions(project);
   }, [expanded, connected, prefetchProjectSessions, project]);
 
-  const runningCount = sessions.filter((s) => running.has(s.id)).length;
+  // Re-read the host's terminal list when the row is expanded. The list is
+  // fetched on mount and on terminal_tabs_changed, but a host that was already
+  // connected can gain terminals while this row sits collapsed (a shell started
+  // elsewhere, or a session restored on the host), and expanding used to reveal
+  // that stale count rather than the live one.
+  useEffect(() => {
+    if (expanded && connected) refresh();
+  }, [expanded, connected, refresh]);
+
+  const runningCount = visibleSessions.filter((s) => running.has(s.id)).length;
 
   let line: string;
   if (busy === "connecting") line = "connecting…";
   else if (busy === "restarting") line = "restarting…";
   else if (!connected) line = loading && !status ? "checking…" : "not connected";
-  else line = `${status?.version ?? ""} · ${sessions.length} chats${runningCount > 0 ? ` (${runningCount} running)` : ""} · ${terminals.length} terminals`;
+  else line = `${status?.version ?? ""} · ${visibleSessions.length} chats${runningCount > 0 ? ` (${runningCount} running)` : ""} · ${terminals.length} terminals`;
 
   const busyNow = busy !== "idle";
 
@@ -199,10 +222,10 @@ export function RemoteProjectStatus({
         <div className="mt-1 space-y-1 pl-3">
           <div>
             <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Chats</div>
-            {sessions.length === 0 ? (
-              <div className="text-xs text-muted-foreground">No chats</div>
+            {visibleSessions.length === 0 ? (
+              <div className="text-xs text-muted-foreground">No open chats</div>
             ) : (
-              sessions.map((s) => (
+              visibleSessions.map((s) => (
                 <button
                   key={s.id}
                   type="button"

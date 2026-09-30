@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/process"
@@ -114,10 +115,39 @@ func (h *Handler) startWatchEmitters() {
 	go h.watchEmittersLoop()
 }
 
-// gitStatusFn computes one project's git status for the emitter. It is a var
-// so tests can substitute a blocking implementation and prove that a slow
-// project never delays another project's git_status envelope.
-var gitStatusFn = gitStatusForDir
+// gitStatusFn computes one project's git status for the emitter. Tests
+// substitute a blocking implementation to prove that a slow project never
+// delays another project's git_status envelope.
+//
+// The swap is guarded because a test restores the original from a defer while
+// the emitter goroutine it started may still be running: watchEmittersLoop
+// keeps ticking for up to emitterIdleExit after its last subscriber leaves, and
+// a test that returns early (as the isolation tests do, on first success)
+// leaves that loop alive. Writing this var directly from a test while the loop
+// reads it is a genuine data race, so writes go through setGitStatusFn and
+// reads through currentGitStatusFn.
+var (
+	gitStatusMu sync.RWMutex
+	gitStatusFn = gitStatusForDir
+)
+
+// setGitStatusFn replaces the git-status seam under the guard. It never blocks
+// on a running status computation: see currentGitStatusFn.
+func setGitStatusFn(fn func(string) (GitStatus, error)) {
+	gitStatusMu.Lock()
+	defer gitStatusMu.Unlock()
+	gitStatusFn = fn
+}
+
+// currentGitStatusFn returns the git-status seam under the guard. Callers must
+// invoke the returned function AFTER releasing the read lock: a substituted
+// implementation may block for as long as its test holds it blocked, and
+// holding the write lock across that call would deadlock the restoring test.
+func currentGitStatusFn() func(string) (GitStatus, error) {
+	gitStatusMu.RLock()
+	defer gitStatusMu.RUnlock()
+	return gitStatusFn
+}
 
 // forEachGitStatusConcurrently computes a status for every project in
 // projects in its own goroutine, invoking yield(project, status, err) on the
@@ -143,7 +173,10 @@ func forEachGitStatusConcurrently(projects []string, yield func(project string, 
 	results := make(chan gitResult, len(projects))
 	for _, p := range projects {
 		go func(p string) {
-			status, err := gitStatusFn(p)
+			// Read the seam once, then call it unlocked — a test's blocking
+			// stub must not be able to wedge a concurrent setGitStatusFn.
+			gitStatus := currentGitStatusFn()
+			status, err := gitStatus(p)
 			results <- gitResult{project: p, status: status, err: err}
 		}(p)
 	}

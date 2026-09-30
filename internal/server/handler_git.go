@@ -214,18 +214,69 @@ var gitBinary = "git"
 // repository); the next poll retries.
 var gitStatusTimeout = 10 * time.Second
 
+// gitNotARepoMarkers are the git stderr fragments that mean "this directory is
+// simply not a repository" and nothing else. A bare "not a git repository" match
+// is NOT enough: git also says "fatal: not a git repository: '<path>'" when
+// GIT_DIR points somewhere broken, which is a real fault. Requiring the
+// "(or any of the parent directories)" qualifier keeps the benign case and
+// rejects the broken-GIT_DIR one. git 2.x spells it with a trailing "ies";
+// the truncated form covers older builds that dropped the plural.
+var gitNotARepoMarkers = []string{
+	"not a git repository (or any of the parent directories)",
+	"not a git repository (or any of the parent director",
+	"not a git repository or any parent directory",
+}
+
+// gitProbeNotARepo reports whether a FAILED PROBE means "not a repository" (a
+// normal answer) rather than "git could not do its job" (a fault worth
+// surfacing). Both cases exit 128, so the decision rests on stderr text — hence
+// the C-locale pin in the probe env, which makes that text stable regardless of
+// the user's locale.
+//
+// It must be handed the raw error from cmd.Output(), BEFORE runRaw folds
+// stderr into a plain fmt.Errorf: that fold uses %s for the stderr branch, so
+// the *exec.ExitError (and with it Stderr) is no longer reachable via errors.As
+// afterwards. A non-exec error (git missing from PATH) is never a non-repo
+// answer, so it is classified as a fault without consulting stderr.
+func gitProbeNotARepo(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		// git did not run at all (exec.ErrNotFound and friends).
+		return false
+	}
+	stderr := strings.ToLower(string(exitErr.Stderr))
+	if stderr == "" {
+		return false
+	}
+	for _, marker := range gitNotARepoMarkers {
+		if strings.Contains(stderr, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
 // gitStatusForDir computes the working-tree status of the repo at dir. It is
 // shared by the legacy GET endpoint (with the server's workdir) and the
 // subscriber-aware server-push git watcher (per project root). A non-repo dir
 // yields an empty status with IsRepo=false and no error. A probe that fails
-// inside a repository, or the shared deadline (gitStatusTimeout) expiring, is
-// an error — an empty status would read as a clean repository.
+// inside a repository — git missing from PATH, safe.directory refusing a repo
+// git considers unsafe, an unreadable .git — is an error carrying git's own
+// message, as is the shared deadline (gitStatusTimeout) expiring. Returning an
+// empty status for those would read as a clean, non-repository directory and
+// hide the fault from both the caller and the git_status emitter.
 func gitStatusForDir(dir string) (GitStatus, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitStatusTimeout)
 	defer cancel()
 	// runRaw returns stdout verbatim; run trims it for the line-oriented
 	// probes. The `-z` probe must not be trimmed, because its records are
 	// NUL-separated and a path is allowed to end in whitespace.
+	// notARepo is set by the most recent runRaw call whose failure git
+	// classified as a genuine non-repo. It has to be computed from the RAW
+	// exec error: runRaw's own wrapping (below) discards the *exec.ExitError,
+	// so by the time a caller inspects the returned error the Stderr text that
+	// distinguishes "not a repository" from every other refusal is gone.
+	notARepo := false
 	runRaw := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, gitBinary, args...)
 		if dir != "" {
@@ -236,7 +287,10 @@ func gitStatusForDir(dir string) (GitStatus, error) {
 		// every viewed project every 10s (emitters.go), so without it ocode is
 		// a permanent lock contender against the user's own git commands — and
 		// a probe SIGKILLed by gitStatusTimeout mid-write could strand the lock.
-		cmd.Env = gitexec.Env()
+		// LC_ALL=C: the repo-ness probe below classifies git's stderr text, so
+		// the language must not vary with the user's locale. Same reasoning (and
+		// the same withoutLCAll helper) as the conflict operation-state probe.
+		cmd.Env = append(withoutLCAll(gitexec.Env()), probeCLocale)
 		out, err := cmd.Output()
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("git status for %s timed out after %s", dir, gitStatusTimeout)
@@ -244,6 +298,7 @@ func gitStatusForDir(dir string) (GitStatus, error) {
 		// stdout is returned even alongside an exit error: on an unborn branch
 		// `rev-parse --abbrev-ref HEAD` prints "HEAD" and still exits 128.
 		if err != nil {
+			notARepo = gitProbeNotARepo(err)
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
 				return string(out), fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(exitErr.Stderr)))
@@ -266,9 +321,14 @@ func gitStatusForDir(dir string) (GitStatus, error) {
 	}
 
 	// Repo-ness first: a non-repo is a normal answer (IsRepo=false), not an
-	// error, and needs none of the probes below. Only a timeout is an error.
+	// error, and needs none of the probes below. Everything else that makes
+	// rev-parse fail is a fault and is returned with git's own message — the
+	// timeout, a missing git binary, or git refusing this repository. Treating
+	// those as "not a repo" published a clean-looking empty status and logged
+	// nothing, so a server with no git on PATH reported every project as a
+	// plain directory and a safe.directory refusal looked identical.
 	if _, err := run("rev-parse", "--git-dir"); err != nil {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || !notARepo {
 			return GitStatus{}, err
 		}
 		return status, nil

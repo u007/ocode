@@ -467,6 +467,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// Wire the sub-agent's advisor gate to the parent's atomic flag so
 	// mid-run toggles propagate immediately (reactive, not a snapshot).
 	subAgent.SetParentAdvisorEnabled(&t.mainAgent.advisorEnabled)
+	// Same reasoning for the advisor CONFIG (model + trigger set): the child's
+	// own seed comes from the process-wide config, so without this a sub-agent's
+	// advisor call would use the global model instead of the chat's pinned one.
+	subAgent.SetParentAdvisorConfig(&t.mainAgent.advisorConfig)
 	// Share the parent's advisor recursion guard (resolved through the
 	// chain so grandchild sub-agents land on the same root flag) so a
 	// nested advisor call anywhere in this session's tree is caught,

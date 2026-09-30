@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -72,6 +73,7 @@ func ExecCommand(t Target, command string) (*exec.Cmd, error) {
 				"-o", "ControlPersist=600",
 			)
 		}
+		// SSHArgs supplies the "--" separator immediately before the destination.
 		args = append(args, t.SSHArgs()...)
 		return exec.Command("ssh", append(args, command)...), nil
 	default:
@@ -88,9 +90,35 @@ func ExecCommand(t Target, command string) (*exec.Cmd, error) {
 func sshControlSocket(t Target) string {
 	dir := filepath.Join(homeDir(), ".ocode", "ssh-mux")
 	_ = os.MkdirAll(dir, 0o700)
-	sum := sha256.Sum256([]byte(t.String()))
+	// Hash the CONNECTION identity, not Target.String(): the mux socket must be
+	// per host AND port AND user. ssh reuses an existing master without
+	// verifying it matches the requested destination, so two ports sharing one
+	// ControlPath means a command aimed at port 2222 is executed on whichever
+	// port opened the master first. Keep this in step with
+	// server.remoteConnectionKey, which keys the registry and exec pool by the
+	// same three components; a test pins that they agree.
+	sum := sha256.Sum256([]byte(sshConnectionIdentity(t)))
 	return filepath.Join(dir, hex.EncodeToString(sum[:8]))
 }
+
+// sshConnectionIdentity is the mux-socket identity for t: the same
+// user+host+port string the server package's registry and exec pool key on.
+// It lives here (not in internal/server) because this package must not import
+// server. SSHControlSocketIdentity exposes it for the cross-package test that
+// proves the two agree.
+func sshConnectionIdentity(t Target) string {
+	if t.Port <= 0 {
+		return t.String()
+	}
+	return t.String() + ":" + strconv.Itoa(t.Port)
+}
+
+// SSHControlSocketIdentity returns the connection identity used for the mux
+// socket, so internal/server can assert its own remoteConnectionKey agrees.
+func SSHControlSocketIdentity(t Target) string { return sshConnectionIdentity(t) }
+
+// SSHControlSocketPath returns the ControlPath ssh will use for t.
+func SSHControlSocketPath(t Target) string { return sshControlSocket(t) }
 
 func homeDir() string {
 	home, err := os.UserHomeDir()

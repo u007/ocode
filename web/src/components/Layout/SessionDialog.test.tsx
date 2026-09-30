@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   openSessionTab: vi.fn(),
   toggleSessionPicker: vi.fn(),
   projectSessions: [] as Array<{ id: string; title: string; created_at: string; updated_at: string }>,
+  sessionsError: null as string | null,
+  activeProject: { path: "/project", name: "Project" } as { path: string; name: string; host?: string },
 }));
 
 const session = {
@@ -31,8 +33,9 @@ vi.mock("../../stores/projectStore", () => ({
     state: {
       projectSessions: mocks.projectSessions,
       sessionsLoading: false,
+      sessionsError: mocks.sessionsError,
       sessionPickerOpen: true,
-      activeProject: { path: "/project", name: "Project" },
+      activeProject: mocks.activeProject,
     },
     tabs: [{ id: "session-1" }],
     activeTabId: "session-1",
@@ -53,6 +56,7 @@ describe("SessionDialog tab closing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.projectSessions = [session];
+    mocks.activeProject = { path: "/project", name: "Project" };
   });
 
   it("asks for confirmation when the X is clicked", () => {
@@ -187,5 +191,65 @@ describe("SessionDialog keyboard navigation", () => {
         screen.getByText(`Session ${SESSION_DIALOG_PAGE_SIZE}`).closest("button"),
       );
     });
+  });
+});
+
+describe("SessionDialog load failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.projectSessions = [];
+    mocks.sessionsError = null;
+    mocks.activeProject = { path: "/project", name: "Project" };
+  });
+
+  it("reports why the list could not load instead of claiming there are none", () => {
+    // A remote listing that 404s/502s used to be indistinguishable from an
+    // empty project, so the user saw "No sessions yet" (or an endless spinner)
+    // with no reason at all.
+    mocks.sessionsError = "remote connect failed: exit 127 (stage remote-connect)";
+    render(<SessionDialog />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("Couldn't load sessions");
+    expect(alert.textContent).toContain("stage remote-connect");
+    expect(screen.queryByText("No sessions yet")).toBeNull();
+  });
+
+  it('still says "No sessions yet" for a project that genuinely has none', () => {
+    mocks.sessionsError = null;
+    render(<SessionDialog />);
+
+    expect(screen.getByText("No sessions yet")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("prefers the error over an empty list even when sessions are cached", () => {
+    // A stale cached list plus a failed revalidation must not read as healthy.
+    mocks.projectSessions = [session];
+    mocks.sessionsError = "network error";
+    render(<SessionDialog />);
+
+    expect(screen.getByRole("alert").textContent).toContain("network error");
+    expect(screen.queryByText("Alpha session")).toBeNull();
+  });
+});
+
+// With the sidebar's remote chat inventory now a live view (open ∪ running
+// only), this dialog is the path to a CLOSED remote chat — so its host binding
+// is load-bearing: opening from here must carry the project's host or the
+// session would be routed through the local server.
+describe("SessionDialog remote open", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.projectSessions = [session];
+    mocks.sessionsError = null;
+    mocks.activeProject = { path: "/srv", name: "srv", host: "dev@box" };
+  });
+
+  it("opens a closed remote session with its host bound", () => {
+    render(<SessionDialog />);
+    fireEvent.click(screen.getByText("Alpha session"));
+
+    expect(mocks.openSessionTab).toHaveBeenCalledWith("session-1", "Alpha session", "/srv", "dev@box");
   });
 });

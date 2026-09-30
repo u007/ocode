@@ -79,8 +79,8 @@ func TestExpandBashForJudgeNeverRunsUnlistedSubstitutions(t *testing.T) {
 func TestExpandBashForJudgeAllowlist(t *testing.T) {
 	outputs := map[string]string{
 		"npm root -g": "/usr/lib/node_modules",
-		`python3 -c "import sysconfig;print(sysconfig.get_paths()['purelib'])"`: "/py/site-packages",
-		"git rev-parse --show-toplevel":                                         "/work/proj",
+		`python3 -I -c "import sysconfig;print(sysconfig.get_paths()['purelib'])"`: "/py/site-packages",
+		"git rev-parse --show-toplevel":                                            "/work/proj",
 	}
 	stubJudgeExpansion(t, nil, outputs)
 	cases := map[string]string{
@@ -254,5 +254,54 @@ func TestChatJudgeMasksSecretsWhenMaskOn(t *testing.T) {
 	}
 	if strings.Contains(capture.Prompts[0], fakeGitHubToken) {
 		t.Fatalf("chat judge prompt leaks the token:\n%s", capture.Prompts[0])
+	}
+}
+
+// A variable rebound through a form the expander does not model (export,
+// +=, for/read/unset, a buried assignment) must go opaque: otherwise the judge
+// is shown /tmp/build while the shell runs a destructive reset — e.g.
+// D=/tmp/build; export D=/; rm -rf "$D".
+func TestExpandBashForJudgeRebindingsAreOpaque(t *testing.T) {
+	stubJudgeExpansion(t, nil, nil)
+	for _, cmd := range []string{
+		`D=/tmp/build; export D=/; rm -rf "$D"`,
+		`D=/tmp/build; D+=/x; rm -rf "$D"`,
+		`D=/tmp/build; for D in / /etc; do rm -rf "$D"; done`,
+		`D=/tmp/build; read D; rm -rf "$D"`,
+		`D=/tmp/build; unset D; rm -rf "$D"`,
+		`D=/tmp/build; { D=/; }; rm -rf "$D"`,
+	} {
+		exp, _ := newExpansionAgent().expandBashForJudge(cmd)
+		if !strings.Contains(exp.Command, `rm -rf "$D"`) {
+			t.Errorf("%s: expected $D to stay unresolved, got %q", cmd, exp.Command)
+		}
+		if strings.Contains(exp.Command, `rm -rf "/tmp/build"`) {
+			t.Errorf("%s: stale value expanded to the judge: %q", cmd, exp.Command)
+		}
+	}
+}
+
+// A resolved substitution must be withheld when it names a secret
+// (go env GITHUB_TOKEN) or returns credentials in a URL userinfo
+// (GOPROXY=https://user:pass@…), which QuickScan alone does not match.
+func TestExpandBashForJudgeWithholdsSecretSubstitution(t *testing.T) {
+	stubJudgeExpansion(t, nil, map[string]string{
+		"go env GITHUB_TOKEN": "ghp_" + strings.Repeat("a", 36) + "\n",
+		"go env GOPROXY":      "https://user:s3cr3t@proxy.example\n",
+	})
+	for _, cmd := range []string{`echo "$(go env GITHUB_TOKEN)"`, `curl "$(go env GOPROXY)"`} {
+		exp, ok := newExpansionAgent().expandBashForJudge(cmd)
+		if !ok {
+			t.Fatalf("%s: expected a withholder record", cmd)
+		}
+		got, _ := json.Marshal(exp)
+		for _, leak := range []string{"ghp_", "s3cr3t"} {
+			if strings.Contains(string(got), leak) {
+				t.Fatalf("%s: leaked %q to the judge: %s", cmd, leak, got)
+			}
+		}
+		if !strings.Contains(exp.Command, "$(") {
+			t.Errorf("%s: expected the substitution to stay unresolved, got %q", cmd, exp.Command)
+		}
 	}
 }

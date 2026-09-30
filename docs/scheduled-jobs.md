@@ -1,12 +1,12 @@
 ---
 type: concept
 title: Scheduled Jobs / Cron Dispatch
-description: Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics.
+description: Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics. Also covers the reminders/tasks engine behind the Cron tab's Reminders and Tasks sub-views.
 tags: [scheduler, cron, dispatch, agent, automation]
 status: active
 created: 2026-07-17
+timestamp: 2026-09-29T17:41:41Z
 ---
-
 # Scheduled Jobs / Cron Dispatch
 
 ## What it is
@@ -200,6 +200,241 @@ resolve)` for hosts that want to forward cron results to a Telegram chat
   so the web UI and RC clients can fetch results without going through
   Telegram. The targets registry is exposed at
   `GET/POST /api/cron/targets` so operators can list/clear mappings.
+
+## Reminders & Tasks engine (Cron tab → `Jobs | Reminders | Tasks`)
+
+The web/desktop **Cron tab** has three sub-views — `Jobs | Reminders | Tasks`.
+Jobs is the cron UI described above. Reminders and Tasks are served by a
+second, purpose-built engine in `internal/reminders/` that deliberately
+mirrors `internal/scheduler`'s persist pattern: its own JSON store
+(`<GlobalDataDir>/scheduler/<project-slug>/reminders.json`, a sibling of
+`jobs.json` — `DefaultStorePath` at `internal/reminders/types.go:166`), its
+own run loop, and its own mutex.
+
+### Why a separate store and engine, not a `kind` field on `scheduler.Job`
+Because `executeJob` hardcodes *delete on `KindAt` fire*: when a one-shot `at`
+job runs, the engine removes it from the store
+(`internal/scheduler/scheduler.go:291-292`, `case KindAt:` →
+`s.removeJobLocked(j.ID)`). A reminder is one-shot by definition, so modelling
+it as an `at` job would erase the record on the very first fire — exactly the
+record the user opened the Cron tab to see (fired time, status, outcome).
+`scheduler.Payload` also has no home for `Status`/`Action`/`AutoComplete`.
+Everything reusable — outbox, run history, targets, the agent runner and its
+per-firing cleanup — is shared rather than forked (below).
+
+### Model: `Kind`, `Status`, `Action`
+`Item` (in `internal/reminders/types.go`):
+
+- **`Kind`** — `reminder` (a one-shot nudge; a due time is REQUIRED:
+  `types.go:272-273` rejects `KindReminder` with `DueAtMs <= 0`) or `task`
+  (checklist item; due date OPTIONAL — `DueAtMs == 0` means "no due date",
+  never "due now").
+- **`Status`** — `pending | in_progress | completed | cancelled`.
+  `ValidStatus` (`types.go:179`) is the ONLY definition of the set: an
+  unrecognised value is rejected, never coerced to a default.
+- **`Action`** — `notify` (desktop/in-app notification, no LLM: the agent
+  runner is invoked only when `Action == agent`, `internal/reminders/fire.go:85`)
+  or `agent` (a real agent turn through the injected `AgentRunner` seam,
+  `fire.go:26-28`).
+- **`AutoComplete`** (task + `agent` only) — on validate it is normalised to
+  `false` for every other shape (`types.go:278-280`), so a stored flag always
+  means something. When set, a task whose agent turn returns **without error**
+  settles on `completed` (`fire.go:125`); there is deliberately **no** parsing
+  of the model's output for a magic completion marker — completion is derived
+  from the flag plus the error result only (`autoCompleteTarget` comment at
+  `fire.go:71-78`; applied through `CanTransition` in `commitFire`,
+  `fire.go:176`).
+- Remaining fields: `Title`, `Message`, `Notes`, `Owner`, `DueAtMs`,
+  `PermMode`, `CreatedAtMs`, `UpdatedAtMs`, `FiredAtMs`, `Runs`,
+  `LastStatus`, `LastError`.
+- **There is no `deliver_to` on an `Item`** — no per-item delivery target
+  exists; Telegram routing is by `Owner`/workdir only (see below).
+
+### Status transition table (`internal/reminders/transition.go:40`)
+The whole state machine lives in `allowedTransitions`
+(`transition.go:40`); every legality question — the PATCH handler, the
+auto-complete path, `NextStatuses` (`transition.go:98`) which drives the web
+buttons, and the tests — resolves through it (`Transition`,
+`transition.go:79`; errors wrap `ErrTransition`, `transition.go:11`).
+
+```
+pending ─────► in_progress ─────► completed
+   ▲  │             │  │              │
+   │  └─────────────┼──┘              │
+   │                ▼                 │
+   └──────────── cancelled ◄──────────┘
+```
+
+- `pending → in_progress | completed | cancelled`
+- `in_progress → completed | cancelled | pending`
+- `completed → pending` and `cancelled → pending` (only).
+- `completed` and `cancelled` are terminal **with respect to each other**:
+  there is no `completed → cancelled` nor `cancelled → completed` in one
+  step — route through `pending`, keeping "reopen" a single auditable move.
+- Every non-terminal state can return to `pending` — the deliberate unmark
+  escape hatch, available from any state.
+- A same-status PATCH is an idempotent no-op → 200 (the handler skips the
+  check and `Service.SetStatus` returns early, `service.go:371-374`);
+  re-sending `pending` re-arms instead (see below).
+
+HTTP behaviour:
+
+- **Illegal transition → 409.** The PATCH handler pre-validates the requested
+  status against the CURRENT status and answers `http.StatusConflict`
+  (`internal/server/reminders.go:170-175`); `statusForErr`
+  (`reminders.go:343-351`) maps `ErrNotFound → 404`, `ErrTransition → 409`,
+  everything else → 400.
+- **Unknown status values → rejected, never coerced to a default:**
+  - create (`POST`) with any status other than `pending` → **400**
+    (`reminders.go:117-119`, "a new item is always created pending; set
+    status with PATCH");
+  - list filter `?status=archived` → **400** (`reminders.go:69-72`);
+  - ⚠ **known discrepancy (red test):** on `PATCH`, an unknown status passes
+    through `Transition`, which wraps "unknown status" in `ErrTransition`
+    (`transition.go:83-85`), and the handler maps that to **409** — so
+    `TestUnknownStatusIsRejected` (`internal/server/reminders_test.go:165`,
+    which asserts 400) currently FAILS deterministically (verified 3/3 on
+    2026-09-30). The "never coerced" half of the contract holds everywhere;
+    only the PATCH status code for an unknown value disagrees with the test.
+- **PATCH validates the transition BEFORE applying field edits**
+  (`reminders.go:149-193`): the body's status is checked first, then field
+  edits via `Service.Update`, then `SetStatus` — so a rejected status change
+  cannot half-apply the rest of the PATCH (pinned by
+  `TestRejectedStatusChangeLeavesFieldsUnapplied`, `reminders_test.go:179`).
+
+### One-shot firing and the `FiredAtMs` re-arm rule
+The firing gate is one predicate, `Item.Due(now)` (`types.go:225-226`):
+active (pending/in_progress) AND `DueAtMs > 0 && <= now` AND **`FiredAtMs == 0`**.
+
+- **Claim before run:** `fireOnce` stamps `FiredAtMs = now` while still
+  holding the mutex (`fire.go:58`), so a concurrent tick cannot double-fire;
+  a crash between claim and write-back leaves the item re-armed rather than
+  lost — a duplicate notification beats a dropped one.
+- **Re-arm = move back to `pending`:** `SetStatus(→ pending)` clears
+  `FiredAtMs` along with `LastStatus`/`LastError`
+  (`internal/reminders/service.go:378-382`). That is the only way a fired
+  one-shot rings again. `commitFire` deliberately refuses to resurrect a
+  claim the user cleared mid-flight (`fire.go:158-166`), and it only settles
+  status when the live status still equals the one at claim time
+  (`fire.go:176`) — a cancel during the agent turn is never overwritten.
+- **Settle:** a fired **reminder** settles on `completed` (a nudge that rang
+  is done; the record is the point). A fired **task** settles on `completed`
+  only per the `AutoComplete` rule above; otherwise it stays put so an
+  overdue task remains visible and the user decides.
+
+### Shared outbox, run history, targets — and the id prefixes
+Firing appends to the SAME files the cron engine uses, so a reminder appears
+in the Cron tab's **Outbox** panel and gets the same **history** panel with
+no new plumbing:
+
+- `scheduler.Outbox` (`deliveries.jsonl`) — `appendDelivery`,
+  `internal/reminders/fire.go:191-207`.
+- `scheduler.RunHistory` (`runs.jsonl`) — `appendRunRecord`,
+  `fire.go:215-240`; the `GET .../{id}/runs` route is literally wired to
+  cron's `handleCronRuns` handler (`reminders.go:321`).
+- Both records key their `JobID` with the prefix **`<kind>:<id>`**
+  (`fire.go:198` and `fire.go:221`, e.g. `reminder:3f2a9c01`). That prefix
+  is what lets the shared drainer tell a routable reminder delivery from a
+  genuinely orphaned cron delivery.
+- **Agent turns reuse the existing cron runner:**
+  `reminderItemAsCronJob` (`internal/server/scheduler_reminders_runner.go:56`)
+  projects an `Item` onto a `*scheduler.Job` with id **`rt-<id>`**
+  (`:51`; session id `cron:rt-<id>`, `:26`) and `Schedule{Kind: KindAt}`,
+  then calls `server.RunScheduledJob` (`:46`) — so a reminder turn inherits
+  the cron runner's per-firing `lspMgr.Close()` / `ag.Shutdown()` cleanup.
+
+**Reminders and tasks ARE Telegram-routable**, through the same per-project
+`(workdir → chatID)` registry (`cron-targets.json`,
+`internal/scheduler/targets.go`) as jobs. The `SetTelegramCronSink` drainer
+sink previously DROPPED any delivery whose `JobID` was not in the cron store —
+which would have silently lost every reminder push (visible locally in the
+Outbox panel, lost remotely). It now recognises a `"reminder:"`/`"task:"` id
+via `isReminderDeliveryID` (`internal/server/scheduler.go:482`; gate at
+`scheduler.go:462`) and resolves it with a **synthetic Job** carrying the
+delivery's `Owner` as `Payload.Owner` (`scheduler.go:466`) — the same
+workdir hint `NewCronChatResolver` already reads. So a reminder is routed by
+exactly the same rule as a job, with no resolver contract change. Note:
+**`deliver_to` does NOT exist on an `Item`** — there is no per-item delivery
+target; routing is by `Owner`/workdir only.
+
+### REST surface (`internal/server/reminders.go`, registered by `attachReminders` at `:296`)
+One handler is parameterised by kind, so the identical set is mounted under
+both collections:
+
+- `GET    /api/reminders` (and `/api/tasks`) — list, sorted due-time
+  ascending with **UNDATED LAST**, then `created_at_ms`, then id
+  (`internal/reminders/service.go:165-174`, sort call at `:191`), and
+  paginated: `limit` (default **50**, max **200** — `DefaultPageSize` /
+  `MaxPageSize`, `service.go:147,149`; the effective value is echoed back
+  via `effectiveLimit`, `reminders.go:384`), `offset`, optional `status`
+  filter. Response shape `{items,total,limit,offset}`
+  (`reminderListResponse`, `reminders.go:53`). A malformed `limit`/`offset`
+  is a **400**, never a silent `0` (`reminders.go:76-84`).
+- `POST   /api/reminders` — create (title required; the kind comes from the
+  route, not the body).
+- `GET    /api/reminders/{id}` — read one.
+- `PATCH  /api/reminders/{id}` — edit fields and/or change status (transition
+  rules above).
+- `DELETE /api/reminders/{id}` — delete.
+- `POST   /api/reminders/{id}/run` — "run now", bypassing the due gate;
+  terminal items are refused → **400** (`FireNow`, `service.go:558-578`),
+  missing id → 404.
+- `GET    /api/reminders/{id}/runs?limit&offset` — run history (same file and
+  same handler cron uses, keyed by the prefixed id).
+
+**Cross-kind ids are 404s, not edits:** a task id presented under
+`/api/reminders` (or vice versa) is reported as 404 — `lookup` enforces the
+kind (`reminders.go:233-253`) so one collection cannot be read or mutated
+through the other's route.
+
+### Host wiring
+`Server.AttachReminders(workDir, cfg, notifier)`
+(`internal/server/reminders_host.go:72`) starts the engine and mounts the
+routes. When the cron service is attached it reuses that service's
+`Outbox`/`RunHistory` instances, so the drainer fan-out (Telegram, TUI bridge,
+web Outbox panel) applies to reminder deliveries too. A `busNotifier`
+(`reminders_host.go:32`) publishes a project-level **`reminder_fired`** SSE
+event (`ReminderFiredEvent`, `reminders_host.go:21`). Call sites:
+`internal/desktop/scheduler.go:69` and `main.go`'s `schedulerSetup()`
+(`main.go:116`).
+
+### Frontend (web/desktop Cron tab)
+- `web/src/components/Cron/CronSubTabs.tsx` — the `Jobs | Reminders | Tasks`
+  switcher (`CronSubView`, `:10`).
+- `web/src/components/Cron/ReminderTaskView.tsx` — ONE component serves both
+  kinds; a `kind` prop selects the `/api/reminders` vs `/api/tasks`
+  collection.
+- `web/src/components/Cron/ReminderTaskDialog.tsx` — create/edit dialog.
+- `web/src/components/Cron/reminderFormat.ts` — due-date/status formatting
+  helpers.
+- `web/src/components/Cron/CronHistoryPanel.tsx` — gains an optional
+  `fetchRuns` prop (`:47`) so a reminder reuses the cron history panel
+  against the shared `runs.jsonl`.
+- `web/src/components/Cron/CronPanel.tsx` — holds `SUB_VIEW_FOR_KIND`, the
+  singular→plural kind→collection map (`:232`). All three panes stay
+  mounted but load **lazily** (a pane fetches the first time it is shown)
+  and only the front pane polls.
+
+### File map (reminders/tasks additions)
+| File | Purpose |
+|------|---------|
+| `internal/reminders/types.go`        | `Item`, `Kind`/`Status`/`Action`, `DefaultStorePath` → `reminders.json`, firing gate `Due()`, validate + normalisation |
+| `internal/reminders/transition.go`   | `allowedTransitions` table, `Transition`/`CanTransition`/`NextStatuses`, `ErrTransition` |
+| `internal/reminders/service.go`      | Store + mutex + run loop: `Add`, `Update`, `SetStatus` (re-arm), `List` (sort/paging), `FireNow` |
+| `internal/reminders/fire.go`         | Claim (`FiredAtMs`), notify/agent delivery, shared outbox + run-history appends, `commitFire` write-back |
+| `internal/reminders/host.go`         | Host seams (`AgentRunner`, `Notifier`, `OutboxAppender`, `RunRecorder`) keeping the package free of agent imports |
+| `internal/reminders/reminders_test.go` | State machine, one-shot/re-arm, auto-complete, cross-kind tests |
+| `internal/server/reminders.go`       | One kind-parameterised REST handler set for `/api/reminders` + `/api/tasks` |
+| `internal/server/reminders_host.go`  | `AttachReminders`, `busNotifier` → `reminder_fired` SSE |
+| `internal/server/scheduler_reminders_runner.go` | `reminderItemAsCronJob` → `RunScheduledJob` (`rt-` id prefix) |
+| `internal/server/scheduler.go` *(changed)* | Drainer `isReminderDeliveryID` + synthetic-Job resolution so reminder/task deliveries keep their Telegram target |
+| `internal/server/reminders_test.go`  | HTTP tests: 409/400/404, pagination, sorting, cross-kind isolation, Telegram id gate |
+| `web/src/components/Cron/CronSubTabs.tsx` | Sub-view switcher |
+| `web/src/components/Cron/ReminderTaskView.tsx` | Shared reminders/tasks list view |
+| `web/src/components/Cron/ReminderTaskDialog.tsx` | Create/edit dialog |
+| `web/src/components/Cron/reminderFormat.ts` | Formatting helpers |
+| `web/src/components/Cron/CronHistoryPanel.tsx` | History panel (+ optional `fetchRuns`) |
+| `web/src/components/Cron/CronPanel.tsx` | Sub-view state, `SUB_VIEW_FOR_KIND`, lazy mount + front-pane polling |
 
 ## Design decisions (advisor-verified)
 - **Tool ordering for prompt cache**: registering a `cron` tool later will change

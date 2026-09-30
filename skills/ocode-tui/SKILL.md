@@ -15,7 +15,7 @@ A short, dense map of the ocode TUI so you don't re-discover it from scratch.
 - `View() tea.View` in `internal/tui/model.go` — builds `tea.NewView(m.renderContent())`, sets `AltScreen = true`, conditionally sets `MouseMode = MouseModeAllMotion` when `m.mouseEnabled()` returns true (required for hover-underline on the sidebar; gated by config `tui.mouse`).
 - `Update(msg tea.Msg) (tea.Model, tea.Cmd)` in `internal/tui/model.go` — value receiver. Big `switch msg := msg.(type)` for window size, key, mouse, agent, debug, etc.
 
-> **Line anchors drift fast** — `model.go` is ~23.4k lines and grows constantly. Trust the symbol name, not the line number.
+> **Line anchors drift fast** — `model.go` is ~23.7k lines and grows constantly. Trust the symbol name, not the line number.
 
 ## 2. Screen layout (chat tab, top → bottom)
 
@@ -91,7 +91,7 @@ See `internal/tui/selection.go`, `handleMouseAction` / `handleMouseMotion` in `m
 
 ## 6. TUI output safety (alt-screen)
 
-Any `fmt.Print*` / `fmt.Fprint*(os.Stdout|os.Stderr,…)` / `println` / raw `os.Stderr.Write` from a code path the running TUI invokes paints over the alt-screen frame and corrupts it (text overlap, "hairwire" at the bottom, status line off-screen). The rules are repeated in `AGENTS.md` and `CLAUDE.md`:
+Any `fmt.Print*` / `fmt.Fprint*(os.Stdout|os.Stderr,…)` / `println` / raw `os.Stderr.Write` from a code path the running TUI invokes paints over the alt-screen frame and corrupts it (text overlap, "hairwire" at the bottom, status line off-screen). The rules live in `AGENTS.md` (§ TUI Output Safety); `CLAUDE.md` is a pointer file that deliberately does not duplicate them:
 
 - Use `agent.emitDebug` / `agent.DebugAppendf` inside the `agent` package, or `log.Printf` elsewhere — `tui.Run()` calls `log.SetOutput(debugLogWriter{})` so `log` lands in the debug panel.
 - For subprocesses, capture output (`cmd.Stdout = &buf`); never inherit the terminal with `cmd.Stdout = os.Stdout`.
@@ -128,7 +128,7 @@ In `internal/tui`:
 ## 9. Files to know
 
 ### Core layout & chrome
-- `internal/tui/model.go` (~23.4k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math. Tab routing in `renderTabContent`; the agents tab (`tabAgents`) renders via `m.renderAgentsTab()`.
+- `internal/tui/model.go` (~23.7k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math. Tab routing in `renderTabContent`; the agents tab (`tabAgents`) renders via `m.renderAgentsTab()`.
 - `internal/tui/theme.go` — themes + style singletons.
 - `internal/tui/tabs.go` — tab constants (6: chat, agents, files, changes, git, log) + `renderTabBar`.
 - `internal/tui/selection.go` — shared `selectionState`, `applySelectionHighlight`, `extractSelectionText`, `normaliseSelection`.
@@ -143,7 +143,8 @@ In `internal/tui`:
 - `internal/tui/detail_view.go` — recursive agent/tool drill-in stack (`detailView`, `detailStack`, own `sel`).
 
 ### Chat-specific
-- `internal/tui/chat_search.go` — in-chat find bar (ctrl+f on chat tab).
+- `internal/tui/chat_search.go` — in-chat find bar (ctrl+f on chat tab). `flashAndScrollToMessage` is the shared "flash + scroll a message into view" primitive; `jumpToChatMatch` and the alt+up/down user-jump both delegate to it, so a second caller must NOT re-implement the ensure-visible → re-render → `SetYOffset` sequence.
+- `internal/tui/user_jump.go` — alt+up/alt+down walk between the user messages of the current session (`userMessageIndices` / `userJumpStep` / `userJumpIndicator`), counted with the existing `isVisibleUserMessage` predicate so the count matches the session title and the web/desktop readout. Deliberately NOT the composer's plain up/down input history. Clamps at both ends (no wrap) and seeds at the newest message on the first press in either direction.
 
 ### Commands & knowledge
 - `internal/tui/commands.go` — slash-command registry/dispatch.

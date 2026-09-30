@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/reminders"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/server"
 )
@@ -57,5 +58,19 @@ func AttachScheduler(srv *server.Server, workDir string) {
 	srv.SetScheduler(svc)
 	if store, derr := scheduler.DefaultStorePath(wd); derr == nil {
 		log.Printf("ocode-desktop: scheduler attached (store: %s)", store)
+	}
+
+	// Reminders and the task list. Attached after the cron scheduler so the
+	// reminders engine reuses the outbox and run-history instances the cron
+	// service just created — one delivery log, one drainer, one Telegram
+	// fan-out for both kinds of result. A failure here is logged and
+	// non-fatal, exactly like the cron scheduler above: the webview must still
+	// open, and the Cron tab simply reports the engine as unavailable.
+	if err := srv.AttachReminders(wd, cfg, nil); err != nil {
+		log.Printf("ocode-desktop: reminders disabled (start: %v)", err)
+		return
+	}
+	if store, derr := reminders.DefaultStorePath(wd); derr == nil {
+		log.Printf("ocode-desktop: reminders attached (store: %s)", store)
 	}
 }

@@ -786,6 +786,20 @@ func (m *SessionManager) PendingFront(sessionID string) (string, bool) {
 	return e.pending[0], true
 }
 
+// PendingContents returns a copy of the persisted-but-un-turned queue, oldest
+// first. Bootstrap matches these against the tail of the stored transcript to
+// decide which trailing rows to withhold from a fresh agent's context — see
+// pendingStripLen.
+func (m *SessionManager) PendingContents(sessionID string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil {
+		return nil
+	}
+	return append([]string(nil), e.pending...)
+}
+
 // ShiftPending drops the oldest pending message after its turn has started
 // (the message has been appended to the in-memory transcript by runTurn).
 func (m *SessionManager) ShiftPending(sessionID string) {

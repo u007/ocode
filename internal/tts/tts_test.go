@@ -264,6 +264,10 @@ func TestStripMarkdown(t *testing.T) {
 		{"legitimate math preserved", "5 * 3 = 15", "5 * 3 = 15"},
 		{"snake_case preserved", "Use snake_case_name here", "Use snake_case_name here"},
 		{"nested bold italic", "***bold italic***", "bold italic"},
+		{"unspaced multiplication preserved", "2*3*4", "2*3*4"},
+		{"unspaced algebra preserved", "a*b*c", "a*b*c"},
+		{"italic beside punctuation", "(*real*)", "(real)"},
+		{"adjacent italic spans", "*a* *b* *c*", "a b c"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

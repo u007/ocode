@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Remote Persistent Sessions and Terminals
-description: Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, sidebar UI and tab reveal, and wake reconnect.
+description: Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, the live (open∪running) sidebar chat inventory and tab reveal, and wake reconnect.
 tags:
   - remote
   - terminal
@@ -10,9 +10,18 @@ tags:
   - sessions
   - sidebar
   - architecture
-timestamp: 2026-09-21T04:31:54Z
-resource: web/src/components/Layout/RemoteProjectStatus.tsx, web/src/lib/tabFocus.ts, web/src/App.tsx, CHANGES.md (2026-09-21)
+timestamp: 2026-09-30T04:20:10Z
+resource: ""
 ---
+# Remote Persistent Sessions and Terminals
+
+**Type:** Concept  
+**Description:** Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, the live sidebar chat/terminal inventory and tab reveal, and wake reconnect.  
+**Resource:** web/src/components/Layout/RemoteProjectStatus.tsx, web/src/lib/tabFocus.ts, web/src/App.tsx, CHANGES.md (2026-09-21)  
+**Tags:** remote, terminal, websocket, proxy, sessions, sidebar, architecture  
+
+---
+
 ## Overview
 
 A sidebar remote (SSH/WSL) project's terminal now runs on the host inside `ocode serve --remote`, reached through the local server's reverse proxy at `/api/remote/{host}/api/...`. Previously terminal, Files, git, `!` commands, and port forwards all used per-request SSH. Now only the terminal moved to the host. Files tab, git, `!` commands, and port forwards still use per-request SSH/Wsl.exe.
@@ -65,9 +74,15 @@ Any server, proxied for remote. `GET /api/terminal?project_path=…` → `{ "ter
 
 `web/src/components/Layout/RemoteProjectStatus.tsx`, mounted under the project row in `ProjectSidebar.tsx`.
 
-Below the existing `host:path` line, a status line reads `v1.2.3 · 2 chats (1 running) · 3 terminals`. `outdated=true` → amber dot before the version, an inline Restart action, and a "Restart remote server" context-menu item. `connected=false` → line reads `not connected` with a Connect action and no counts. Restart in progress → `restarting…`, action disabled. Clicking the status line expands the row: Chats (title, running badge, click opens the session as a tab) and Terminals (title, click attaches by ID, small kill icon calls the proxied DELETE).
+Below the existing `host:path` line, a status line reads `v1.2.3 · 2 chats (1 running) · 3 terminals`. `outdated=true` → amber dot before the version, an inline Restart action, and a "Restart remote server" context-menu item. `connected=false` → line reads `not connected` with a Connect action and no counts. Restart in progress → `restarting…`, action disabled. Clicking the status line expands the row: **Chats** (title, running badge, an `open` marker for tabs already open in this window, click opens the session as a tab) and **Terminals** (title, click attaches by ID, small kill icon calls the proxied DELETE).
+
+**The Chats list is a LIVE view — open ∪ running only, not all of the host's persisted sessions** (deliberate product change, 2026-09-30). A session row appears only if it is **open as a tab in this window** (`openSessionIds` = ids of `tabsByProject[project.path]`) **or running an agent turn on the host** (`running`, fed by the per-host `runs` bus — App opens one stream per host, routed by `session_id`, so a remote session running with no local tab is still listed). The filter is `RemoteProjectStatus.tsx:92`: `sessions.filter((s) => openSessionIds.has(s.id) || running.has(s.id))`. Both the collapsed count (`visibleSessions.length` and the `(R running)` badge, `:128`/`:134`) and the expanded list (`:225-228`) derive from that same `visibleSessions`, and the empty state reads **"No open chats"** (was "No chats").
+
+Rationale: once remote session listing actually loaded, rendering every host session flooded the sidebar row with past chats and buried the ones in progress. **Closed, non-running remote chats are reached through the Sessions dialog** (`web/src/components/Layout/SessionDialog.tsx`, the full browser) — the sidebar inventory deliberately does not list or open them.
 
 Hooks: `useRemoteHostStatus(host)` (fetch on mount, every 30 s while visible, and on every event-bus `onReconnect`) and `useRemoteTerminals(host, path)` (fetch when expanded and on event-bus reconnect).
+
+Tests pinning the live view: `RemoteProjectStatus.test.tsx` covers all four membership cases (open-only, running-only, both, neither) plus the empty state; `App.tabFocusRemote.test.tsx` seeds the remote chat as an open tab (the inventory no longer opens closed chats); `SessionDialog.test.tsx` gained "opens a closed remote session with its host bound" — the dialog is the path to a closed remote chat.
 
 ### Revealing an inventory tab (focus queue)
 
@@ -88,7 +103,7 @@ Failure mode this prevents: without selecting the project AND binding the tab to
 
 Testability hook: `<main>` in `App.tsx` carries `data-active-view` and `data-focused-kind` so tests can assert the revealed view/kind.
 
-Tests: `web/src/App.tabFocus.test.tsx` (a chat request overrides a restored Files view; a terminal request reveals the terminal half and activates the requested id; a request naming a non-active project is not applied and stays queued; and "does not apply a request whose host differs even when the path matches" — a `host: "dev@box"` request for `/proj` stays queued against the local `/proj`), `web/src/lib/tabFocus.test.ts` (queue/replace/clear), additions in `RemoteProjectStatus.test.tsx` (binds to the clicked project, selects a non-active project, queues the right focus) and `projectStore.test.tsx` (tab bound to the non-active project, host resolves). `web/src/App.tabFocusRemote.test.tsx` is the end-to-end one: it renders the real `App` + real `ProjectSidebar` + real `RemoteProjectStatus` (only `useRemoteHostStatus`, `useRemoteTerminals`, and heavy visual children stubbed) and asserts that ONE click on a chat in a NON-active remote project's inventory selects that project, binds the tab to it (the rendered chat panel carries `data-session-id`), and overrides that project's **persisted "Files" view** with Sessions — pinning the passive-effect-beats-layout-restore ordering. Two test-relevant details it encodes: the chat inventory row's handler is `onPointerUp` while the terminal row's is `onClick`; and the sidebar rows rebuild while boot auto-select lands, so the test settles boot before clicking. The load-bearing behaviors were mutation-verified by temporary revert. Cross-reference `CHANGES.md` 2026-09-21.
+Tests: `web/src/App.tabFocus.test.tsx` (a chat request overrides a restored Files view; a terminal request reveals the terminal half and activates the requested id; a request naming a non-active project is not applied and stays queued; and "does not apply a request whose host differs even when the path matches" — a `host: "dev@box"` request for `/proj` stays queued against the local `/proj`), `web/src/lib/tabFocus.test.ts` (queue/replace/clear), additions in `RemoteProjectStatus.test.tsx` (binds to the clicked project, selects a non-active project, queues the right focus) and `projectStore.test.tsx` (tab bound to the non-active project, host resolves). `web/src/App.tabFocusRemote.test.tsx` is the end-to-end one: it renders the real `App` + real `ProjectSidebar` + real `RemoteProjectStatus` (only `useRemoteHostStatus`, `useRemoteTerminals`, and heavy visual children stubbed) and asserts that ONE click on a chat in a NON-active remote project's inventory selects that project, binds the tab to it (the rendered chat panel carries `data-session-id`), and overrides that project's **persisted "Files" view** with Sessions — pinning the passive-effect-beats-layout-restore ordering. Because the inventory is now a live (open ∪ running) view, the test seeds "Remote one" as an open tab in server-persisted state. Two test-relevant details it encodes: the chat inventory row's handler is `onPointerUp` while the terminal row's is `onClick`; and the sidebar rows rebuild while boot auto-select lands, so the test settles boot before clicking. The load-bearing behaviors were mutation-verified by temporary revert. Cross-reference `CHANGES.md` 2026-09-21.
 
 ### Wake reconnect
 

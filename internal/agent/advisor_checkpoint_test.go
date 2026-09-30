@@ -83,11 +83,13 @@ func TestAdvisorCheckpointEnabled_Gating(t *testing.T) {
 	// has a built-in default fallback (AdvisorTool.resolveModel). The old
 	// model gate was removed: absence of an explicit model does not disable
 	// checkpoints; the advisor call itself handles resolution gracefully.
-	a.config.Ocode.Advisor.Model = ""
+	// The triggers are the SESSION's, so drop the model from the session's
+	// config rather than from the process-wide one.
+	a.SetAdvisorConfig(AdvisorConfig{Checkpoints: []string{"plan", "done"}})
 	if !a.advisorCheckpointEnabled(checkpointPlan) {
 		t.Fatal("expected checkpoint enabled even without explicit advisor model (default fallback)")
 	}
-	a.config.Ocode.Advisor.Model = "deepseek-v4-pro"
+	a.SetAdvisorConfig(AdvisorConfig{Model: "deepseek/deepseek-v4-pro", Checkpoints: []string{"plan", "done"}})
 
 	// Sub-agent (spec set) → off.
 	a.spec = &AgentSpec{Name: "sub"}
@@ -96,19 +98,31 @@ func TestAdvisorCheckpointEnabled_Gating(t *testing.T) {
 	}
 	a.spec = nil
 
-	// Checkpoint not listed → off.
-	a.config.Ocode.Advisor.Checkpoints = []string{"done"}
+	// Checkpoint not in the session's trigger set → off. Changing the
+	// PROCESS-WIDE config must not move a session's triggers.
+	a.config.Ocode.Advisor.Checkpoints = []string{"plan", "done"}
+	a.SetAdvisorConfig(AdvisorConfig{Model: "deepseek/deepseek-v4-pro", Checkpoints: []string{"done"}})
 	if a.advisorCheckpointEnabled(checkpointPlan) {
-		t.Fatal("expected plan checkpoint disabled when not listed")
+		t.Fatal("expected plan checkpoint disabled when not in the session's triggers")
 	}
 	if !a.advisorCheckpointEnabled(checkpointDone) {
 		t.Fatal("expected done checkpoint still enabled")
 	}
+	a.config.Ocode.Advisor.Checkpoints = nil
 
-	// Nil config → off.
+	// No triggers on the session → off, even with a nil process-wide config:
+	// the session's own trigger set is the only source of truth.
+	a.SetAdvisorConfig(AdvisorConfig{Model: "deepseek/deepseek-v4-pro"})
 	a.config = nil
 	if a.advisorCheckpointEnabled(checkpointDone) {
-		t.Fatal("expected checkpoint disabled with nil config")
+		t.Fatal("expected checkpoint disabled when the session has no triggers")
+	}
+
+	// A nil process-wide config does NOT disable a session that has its own
+	// triggers — the session's pinned set governs, not cfg.
+	a.SetAdvisorConfig(AdvisorConfig{Checkpoints: []string{"done"}})
+	if !a.advisorCheckpointEnabled(checkpointDone) {
+		t.Fatal("expected session triggers to still fire with a nil process config")
 	}
 }
 

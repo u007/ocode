@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -162,13 +163,24 @@ func (h *Handler) autoStartPortMaps(ref projects.ProjectRef, fm *remote.ForwardM
 // HandleListPortMaps serves GET /api/portmaps?host=&project=. The first list
 // for a project is also the auto-start trigger, so persisted forwards come
 // back when the panel mounts after a server restart.
+//
+// The auto-start runs in the background: a forward that cannot come up spends
+// ~5s in ForwardManager.Start's readiness probe, and the list can answer that
+// from persisted state immediately (the row reports live=false until the open
+// lands, which is exactly how a disabled or not-yet-opened forward already
+// renders). autoStartOnce still guards duplicates — Do returns as soon as the
+// goroutine is spawned, so only one auto-start ever runs per project.
 func (h *Handler) HandleListPortMaps(w http.ResponseWriter, r *http.Request) {
 	rw, entry, ok := h.portMapTarget(w, r)
 	if !ok {
 		return
 	}
 	ref := portMapRef(rw)
-	entry.autoStartOnce.Do(func() { h.autoStartPortMaps(ref, entry.fm) })
+	entry.autoStartOnce.Do(func() {
+		remote.RunAsync(fmt.Sprintf("auto-start for %s:%s", ref.Host, ref.Path), func() {
+			h.autoStartPortMaps(ref, entry.fm)
+		})
+	})
 	writeJSON(w, http.StatusOK, h.portMapViews(ref, entry.fm))
 }
 

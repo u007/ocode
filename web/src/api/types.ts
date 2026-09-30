@@ -119,7 +119,7 @@ export interface ModelInfo {
   has_kaizen?: boolean;
 }
 
-export type TTSEngineId = "browser-native" | "piper" | "kokoro";
+export type TTSEngineId = "browser-native" | "piper" | "melo" | "kokoro";
 export type TTSPlaybackMode = "manual" | "at-bottom" | "auto";
 
 export interface TTSEngine {
@@ -320,6 +320,139 @@ export interface CronJobPatchRequest {
   perm_mode?: CronPermissionMode;
   schedule?: CronSchedule;
 }
+
+/**
+ * Reminders and tasks live in their own store (`internal/reminders`) and their
+ * own REST surface (`/api/reminders`, `/api/tasks`), but share the cron
+ * delivery log and run history — so a fired reminder shows up in the Cron
+ * tab's Outbox panel and gets the same history panel a job does.
+ */
+
+/** The kind is fixed by the collection the item lives in, not by a field. */
+export type ReminderItemKind = "reminder" | "task";
+
+/**
+ * The accepted statuses. The transition table lives server-side
+ * (`allowedTransitions` in internal/reminders/transition.go) and an illegal
+ * move is a 409; `nextStatuses` below is the same table, served to the UI so
+ * the buttons offered can never drift from what the server accepts.
+ */
+export type ReminderItemStatus = "pending" | "in_progress" | "completed" | "cancelled";
+
+/** What a firing does: a plain notification, or a real agent turn. */
+export type ReminderItemAction = "notify" | "agent";
+
+export interface ReminderItem {
+  id: string;
+  kind: ReminderItemKind;
+  title: string;
+  message?: string;
+  notes?: string;
+  owner?: string;
+  status: ReminderItemStatus;
+  action: ReminderItemAction;
+  /**
+   * Task + agent only. A successful turn marks the task completed. Off by
+   * default because a turn that returns cleanly is not proof the work was
+   * finished.
+   */
+  auto_complete: boolean;
+  /** 0 means "no due date" — legal for a task, never for a reminder. */
+  due_at_ms?: number;
+  perm_mode?: CronPermissionMode;
+  created_at_ms: number;
+  updated_at_ms: number;
+  /**
+   * The one-shot CLAIM, and the gate on re-firing. It is written at the START
+   * of a firing, not the end, so a concurrent tick cannot double-fire the item
+   * — which means a reader can legitimately see this set while `status` has not
+   * settled yet. It means "claimed", not "finished".
+   *
+   * A reset to `pending` clears it, which re-arms the item.
+   */
+  fired_at_ms?: number;
+  runs: number;
+  last_status?: string;
+  last_error?: string;
+}
+
+export interface ReminderItemListResponse {
+  items: ReminderItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ReminderItemWriteRequest {
+  title: string;
+  message?: string;
+  notes?: string;
+  owner?: string;
+  action?: ReminderItemAction;
+  auto_complete?: boolean;
+  due_at_ms?: number;
+  perm_mode?: CronPermissionMode;
+}
+
+/** A PATCH: every field is optional and only the present ones are applied. */
+export interface ReminderItemPatchRequest {
+  title?: string;
+  message?: string;
+  notes?: string;
+  owner?: string;
+  action?: ReminderItemAction;
+  auto_complete?: boolean;
+  due_at_ms?: number;
+  perm_mode?: CronPermissionMode;
+  status?: ReminderItemStatus;
+}
+
+export interface ReminderItemListParams {
+  status?: ReminderItemStatus;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * The status transition table, mirroring `allowedTransitions` in
+ * internal/reminders/transition.go. It is duplicated here on purpose so the
+ * status menu can disable an illegal move BEFORE the round trip — the server
+ * still owns the decision and answers 409, so a drift between the two degrades
+ * to "the button is offered and then refused", never to "a move is silently
+ * allowed".
+ *
+ * If you change this, change the Go table in the same commit; the server test
+ * `TestTransitionMatrix` restates it independently and will fail if the two
+ * ever disagree about the shape of the machine.
+ */
+export const REMINDER_STATUS_TRANSITIONS: Record<ReminderItemStatus, ReminderItemStatus[]> = {
+  pending: ["in_progress", "completed", "cancelled"],
+  in_progress: ["completed", "cancelled", "pending"],
+  completed: ["pending"],
+  cancelled: ["pending"],
+};
+
+/** Human labels for the statuses, in lifecycle order. */
+export const REMINDER_STATUS_LABELS: Record<ReminderItemStatus, string> = {
+  pending: "Pending",
+  in_progress: "In progress",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
+
+/** Returns the statuses reachable from `from`, or [] for an unknown value. */
+export function nextReminderStatuses(from: ReminderItemStatus): ReminderItemStatus[] {
+  return REMINDER_STATUS_TRANSITIONS[from] ?? [];
+}
+
+/** True when `from -> to` is a legal change per the table above. */
+export function canTransitionReminder(
+  from: ReminderItemStatus,
+  to: ReminderItemStatus,
+): boolean {
+  return nextReminderStatuses(from).includes(to);
+}
+
 
 export interface SSETextEvent {
   delta: string;
@@ -722,7 +855,11 @@ export interface TUIStatus {
   permission_effective_behavior?: string;
   small_model?: string;
   small_model_enabled?: boolean;
+  /** Advisor model for THIS session (per chat; the global config is only the
+   *  default a new chat starts with). */
   advisor_model?: string;
+  /** Advisor completion triggers for this session. */
+  advisor_checkpoints?: string[];
   advisor_enabled?: boolean;
   recap_model?: string;
   recap_model_enabled?: boolean;
@@ -866,6 +1003,24 @@ export interface Project {
 export interface ServerProjectTabs {
   tabs: { id: string; title: string; sub_tab?: string }[];
   active: string;
+}
+
+/** One terminal tab's persisted metadata, keyed by the server's
+ *  `host::path` project key (GET/PUT /api/terminal-tabs).
+ *
+ *  The tab LIST is shared across clients; `activeId` deliberately is not (it is
+ *  per-window focus state and can be the PROCESSES sentinel, which is not a
+ *  terminal at all). */
+export interface ServerTerminalTab {
+  id: string;
+  title: string;
+  renamed?: boolean;
+  osc_title?: string;
+}
+
+/** One project's persisted open-terminal tabs. */
+export interface ServerProjectTerminals {
+  terminals: ServerTerminalTab[];
 }
 
 export interface ProjectGroup {

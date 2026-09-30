@@ -1434,3 +1434,57 @@ describe("extractAskContext", () => {
     expect(extractAskContext(messages, live)).toBeNull();
   });
 });
+
+// The advisor model is per chat: a session-tagged status snapshot updates that
+// chat's slice and leaves the global new-chat default alone. The sessionEvents
+// test covers the wire path; this pins the reducer.
+describe("SET_SESSION_ADVISOR_CONFIG", () => {
+  it("writes the model and triggers to the owning session only", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_SESSION_ADVISOR_CONFIG",
+      sessionId: "a",
+      model: "openai/gpt-5.1",
+      checkpoints: ["done"],
+    });
+    expect(getSessionSlice(state, "a").advisorModel).toBe("openai/gpt-5.1");
+    expect(getSessionSlice(state, "a").advisorCheckpoints).toEqual(["done"]);
+    expect(getSessionSlice(state, "b").advisorModel).toBeUndefined();
+    // The global is the default NEW chats start with — never written here.
+    expect(state.advisorModel).toBeNull();
+  });
+
+  it("clears the override once an authoritative snapshot agrees", () => {
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_SESSION_ADVISOR_CONFIG",
+      sessionId: "a",
+      model: "openai/gpt-5.1",
+      checkpoints: ["done"],
+    });
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_model: "openai/gpt-5.1", advisor_checkpoints: ["done"] },
+    });
+    // The truth now lives in tuiStatus, so the optimistic copy is dropped.
+    expect(getSessionSlice(state, "a").advisorModel).toBeUndefined();
+    expect(getSessionSlice(state, "a").tuiStatus?.advisor_model).toBe("openai/gpt-5.1");
+  });
+
+  it("keeps the optimistic value when the snapshot still disagrees", () => {
+    // A poll that raced the in-flight PUT must not flash the old value back.
+    let state = initial();
+    state = chatReducer(state, {
+      type: "SET_SESSION_ADVISOR_CONFIG",
+      sessionId: "a",
+      model: "openai/gpt-5.1",
+    });
+    state = chatReducer(state, {
+      type: "SET_TUI_STATUS",
+      sessionId: "a",
+      status: { advisor_model: "deepseek/deepseek-v4-pro" },
+    });
+    expect(getSessionSlice(state, "a").advisorModel).toBe("openai/gpt-5.1");
+  });
+});

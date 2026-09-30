@@ -61,7 +61,7 @@ func (h *Handler) HandleRemoteStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.requireRemoteHosts(w) {
 		return
 	}
-	writeJSON(w, http.StatusOK, h.remoteHosts.status(p.Host))
+	writeJSON(w, http.StatusOK, h.remoteHosts.status(p.Host, p.RemotePort))
 }
 
 // HandleRemoteConnect brings a remote host up (discover-or-start the server,

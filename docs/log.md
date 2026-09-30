@@ -35,8 +35,40 @@
 
 
 
+
+## 2026-09-30
+
+* **Creation**: Sidebar row stopPropagation breaks mobile drawer dismiss ([gotchas/sidebar-row-propagation-breaks-drawer-dismiss.md](/gotchas/sidebar-row-propagation-breaks-drawer-dismiss.md))
+* **Update**:  ([superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](/superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md))
+* **Update**: Remote Persistent Sessions and Terminals Design ([superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md](/superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md))
+* **Update**:  ([superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](/superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md))
+* **Update**: Remote Persistent Sessions and Terminals Design ([superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md](/superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md))
+* **Update**: Remote Persistent Sessions and Terminals ([concepts/remote-persistent-sessions-terminals.md](/concepts/remote-persistent-sessions-terminals.md))
+* **Update**: Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor ([gotchas/port-forwards-url-composition-and-supervisor-restart.md](/gotchas/port-forwards-url-composition-and-supervisor-restart.md))
+* **Update**: Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor ([gotchas/port-forwards-url-composition-and-supervisor-restart.md](/gotchas/port-forwards-url-composition-and-supervisor-restart.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Creation**: A module-scope model/corpus fetch turns a "local" Python engine into a networked one ([gotchas/python-module-scope-network-fetch.md](/gotchas/python-module-scope-network-fetch.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Update**: Web/Desktop UI Parity — Current Status ([web-desktop-parity-todo.md](/web-desktop-parity-todo.md))
+* **Update**: Web/Desktop UI Parity — Current Status ([web-desktop-parity-todo.md](/web-desktop-parity-todo.md))
+* **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
+* **Creation**: Remote session listing 404s for tilde-keyed projects ([gotchas/remote-session-list-tilde-404.md](/gotchas/remote-session-list-tilde-404.md))
+* **Update**: Outbound-Network Guardrail ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))
+* **Update**: Outbound-Network Guardrail ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))
+* **Update**: Outbound-Network Guardrail ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))
+* **Creation**: Outbound-Network Guardrail ([concepts/webfetch-websearch-guardrails.md](/concepts/webfetch-websearch-guardrails.md))
 ## 2026-09-29
 
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
+* **Creation**: User-Message Jump (Alt+↑ / Alt+↓) ([concepts/user-message-jump.md](/concepts/user-message-jump.md))
+* **Update**: Cowork Sidebar LSP Status Overflow (horizontal scrollbar from an unshrinkable cell) ([gotchas/cowork-sidebar-lsp-status-overflow.md](/gotchas/cowork-sidebar-lsp-status-overflow.md))
+* **Update**: Web UI Mobile Layout Breakage (≤767px)" ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Update**: Web UI Mobile Layout Breakage (≤767px)" ([gotchas/web-ui-mobile-layout-breakage.md](/gotchas/web-ui-mobile-layout-breakage.md))
+* **Creation**: Cowork Sidebar LSP Status Overflow (horizontal scrollbar from an unshrinkable cell) ([gotchas/cowork-sidebar-lsp-status-overflow.md](/gotchas/cowork-sidebar-lsp-status-overflow.md))
+* **Creation**: Remote connection identity is user+host+port, never Target.String() ([gotchas/remote-connection-identity-includes-port.md](/gotchas/remote-connection-identity-includes-port.md))
+* **Creation**: A failed git probe is not the same answer as "not a repository" ([gotchas/git-probe-failure-is-not-a-non-repo.md](/gotchas/git-probe-failure-is-not-a-non-repo.md))
 * **Update**: Speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
 * **Update**: opencode-go per-model protocol routing & Anthropic tool schema flatness ([gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md](/gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md))
 * **Update**: Stack Detection ([okf/_schema/stack-detection.md](/okf/_schema/stack-detection.md))

@@ -1,15 +1,16 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RemoteHostStatusState } from "@/hooks/useRemoteHostStatus";
 import type { Project } from "@/api/types";
 import { RemoteProjectStatus } from "./RemoteProjectStatus";
 
 const mockTerminals = vi.fn();
+/** The refresh handle useRemoteTerminals returns; captured so a test can assert
+ *  the row re-reads the host inventory when it expands. */
+let mockRefresh = vi.fn();
 vi.mock("@/hooks/useRemoteTerminals", () => ({
   useRemoteTerminals: (...a: unknown[]) => mockTerminals(...a),
 }));
-
-vi.mock("@/lib/eventBus", () => ({ eventBus: { on: () => () => {} } }));
 
 const authedFetchMock = vi.fn((..._args: unknown[]) => Promise.resolve({ ok: true, status: 204 }));
 vi.mock("@/api/client", () => ({
@@ -29,9 +30,14 @@ vi.mock("@/stores/terminalStore", () => ({
   useTerminalState: () => ({ state: {}, attachTerminal: mockAttach, killTerminal: mockKill }),
 }));
 
+// The host's session history has four chats; only "s1" (open tab, see
+// tabsByProject) and "s2" (running, see the runs bus below) are live, so the
+// inventory must show two and hide "s3"/"s4".
 const sessions = [
   { id: "s1", title: "Chat one" },
   { id: "s2", title: "Chat two" },
+  { id: "s3", title: "Chat three" },
+  { id: "s4", title: "Chat four" },
 ];
 // Hoisted so the assertions below can read the same spy instances the
 // lazily-evaluated factories hand to the component.
@@ -39,13 +45,14 @@ const projectStoreFake = vi.hoisted(() => ({
   openSessionTab: vi.fn(),
   selectProject: vi.fn(() => Promise.resolve()),
   activeProject: { path: "/srv", host: "dev@box" } as { path: string; host?: string } | null,
+  tabsByProject: { "/srv": [{ id: "s1", projectPath: "/srv", title: "Chat one", activeSubTab: "chat" }] },
 }));
 vi.mock("@/stores/projectStore", () => ({
   projectSessionKey: (path: string, host?: string) => (host ? `${host}::${path}` : path),
   useProjectState: () => ({
     state: {
       sessionsByProject: { "dev@box::/srv": { sessions } },
-      tabsByProject: { "/srv": [] },
+      tabsByProject: projectStoreFake.tabsByProject,
       activeProject: projectStoreFake.activeProject,
     },
     prefetchProjectSessions: vi.fn(),
@@ -53,6 +60,26 @@ vi.mock("@/stores/projectStore", () => ({
     selectProject: projectStoreFake.selectProject,
   }),
 }));
+
+// The `runs` bus carries the host's live agent runs. Only "s2" is running:
+// s1 is open as a tab, s3/s4 are neither, so exactly s1+s2 remain visible.
+const eventBusFake = vi.hoisted(() => ({ handlers: [] as ((env: unknown) => void)[] }));
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: (_name: string, fn: (env: unknown) => void) => {
+      eventBusFake.handlers.push(fn);
+      return () => {};
+    },
+  },
+}));
+function emitRunningRun(sessionId: string) {
+  for (const h of eventBusFake.handlers) {
+    h({
+      session_id: sessionId,
+      data: [{ id: "r1", session_id: sessionId, status: "running", children: [] }],
+    });
+  }
+}
 
 const mockTabFocusRequest = vi.fn();
 vi.mock("@/lib/tabFocus", () => ({
@@ -99,7 +126,12 @@ describe("RemoteProjectStatus", () => {
     projectStoreFake.selectProject.mockReset();
     projectStoreFake.selectProject.mockReturnValue(Promise.resolve());
     projectStoreFake.activeProject = { path: "/srv", host: "dev@box" };
+    projectStoreFake.tabsByProject = {
+      "/srv": [{ id: "s1", projectPath: "/srv", title: "Chat one", activeSubTab: "chat" }],
+    };
     mockTabFocusRequest.mockReset();
+    mockRefresh.mockReset();
+    eventBusFake.handlers = [];
     mockTerminals.mockReturnValue({
       terminals: [
         { id: "t1", title: "shell one", pid: 1, started_at: "", attached: false },
@@ -108,7 +140,7 @@ describe("RemoteProjectStatus", () => {
       ],
       loading: false,
       error: null,
-      refresh: vi.fn(),
+      refresh: mockRefresh,
     });
   });
 
@@ -122,9 +154,61 @@ describe("RemoteProjectStatus", () => {
 
   it("renders version, chat and terminal counts when connected", () => {
     render(<RemoteProjectStatus project={project} statusState={state()} />);
-    expect(screen.getByText(/1\.2\.3 · 2 chats · 3 terminals/)).toBeTruthy();
+    // 1 live chat: the open tab. The "Chat two" run only appears once a `runs`
+    // frame arrives (see the filter test below), and the host's other two
+    // sessions are history, not inventory.
+    expect(screen.getByText(/1\.2\.3 · 1 chats · 3 terminals/)).toBeTruthy();
     expect(screen.queryByText("Restart")).toBeNull();
     expect(screen.queryByLabelText("outdated")).toBeNull();
+  });
+
+  // The sidebar is a live view of a remote host's chats, not a browser of its
+  // whole history. Exactly two conditions admit a chat, and the fixture covers
+  // all four combinations: s1 open-only, s2 running-only (added in-test), s3
+  // both would be, s4 neither. Rendering every persisted session flooded the
+  // row with past chats and buried the ones in progress.
+  it("lists only open or running chats, and counts only those", () => {
+    eventBusFake.handlers = [];
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+
+    // Before any run event, only the open tab (s1) is live; the count and the
+    // expanded list must agree.
+    expect(screen.getByText(/· 1 chats ·/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    expect(screen.getByText("Chat one")).toBeTruthy();
+    expect(screen.queryByText("Chat two")).toBeNull();
+    expect(screen.queryByText("Chat three")).toBeNull();
+    expect(screen.queryByText("Chat four")).toBeNull();
+
+    // A run starting on s2 (no local tab) must surface it — a running remote
+    // chat with no local tab is still something the user is working with — and
+    // the count grows with it.
+    act(() => emitRunningRun("s2"));
+    expect(screen.getByText("Chat two")).toBeTruthy();
+    expect(screen.getByText(/· 2 chats \(1 running\) ·/)).toBeTruthy();
+    // A run on a session that is ALSO open must not double-count (s1 already
+    // occupies one slot in the list and one in the count).
+    act(() => emitRunningRun("s1"));
+    expect(screen.getAllByText("Chat one")).toHaveLength(1);
+    expect(screen.getByText(/· 2 chats \(2 running\) ·/)).toBeTruthy();
+    // s3/s4 stay hidden: neither open nor running.
+    expect(screen.queryByText("Chat three")).toBeNull();
+    expect(screen.queryByText("Chat four")).toBeNull();
+  });
+
+  // The empty state must say the list is a live view, not that the host has no
+  // sessions at all — otherwise a project with a rich history looks empty.
+  it("renders the empty state when nothing is open or running", () => {
+    eventBusFake.handlers = [];
+    projectStoreFake.tabsByProject = { "/srv": [] };
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+
+    expect(screen.getByText(/· 0 chats ·/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    expect(screen.getByText("No open chats")).toBeTruthy();
+    expect(screen.queryByText("Chat one")).toBeNull();
+    // Terminals are unaffected by the chat filter.
+    expect(screen.getByText("shell one")).toBeTruthy();
   });
 
   it("shows an amber outdated marker and Restart only when outdated, and restarts on click", () => {
@@ -139,8 +223,9 @@ describe("RemoteProjectStatus", () => {
     render(<RemoteProjectStatus project={project} statusState={state()} />);
     fireEvent.click(screen.getByTestId("remote-project-status"));
 
+    // Chats lists the live set (the open tab here); "Chat two" is idle+closed.
     expect(screen.getByText("Chat one")).toBeTruthy();
-    expect(screen.getByText("Chat two")).toBeTruthy();
+    expect(screen.queryByText("Chat two")).toBeNull();
     expect(screen.getByText("shell one")).toBeTruthy();
 
     fireEvent.click(screen.getByText("shell one"));
@@ -152,6 +237,32 @@ describe("RemoteProjectStatus", () => {
       projectPath: "/srv",
       host: "dev@box",
     });
+  });
+
+  // The host inventory was fetched on mount and on terminal_tabs_changed only.
+  // A host that gains a shell while this row sits COLLAPSED (a terminal opened
+  // in the desktop app, or a session restored on the host) used to leave the
+  // count stuck at its mount-time value forever, because expanding did not
+  // re-read. That is the "0 terminals" the user reported.
+  it("re-reads the host terminal inventory when the row expands", () => {
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    expect(mockRefresh).not.toHaveBeenCalled(); // collapsed: no extra fetch
+
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    expect(mockRefresh).toHaveBeenCalled();
+  });
+
+  it("does not fetch the inventory on expand while the host is disconnected", () => {
+    const disconnected: RemoteHostStatusState = {
+      ...state(),
+      status: { ...connected(), connected: false },
+    };
+    render(<RemoteProjectStatus project={project} statusState={disconnected} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    // A GET here goes through /api/remote/{host}/... and would COLD-CONNECT the
+    // host (SSH provision + server start + tunnel) — the 2026-09-18 "sidebar
+    // hover hangs the app" incident. Connect must stay an explicit action.
+    expect(mockRefresh).not.toHaveBeenCalled();
   });
 
   it("focuses the chat it opens, bound to this project", () => {

@@ -1,5 +1,5 @@
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const mockIsPortMapsAvailable = vi.hoisted(() => vi.fn());
 const mockListPortMaps = vi.hoisted(() => vi.fn());
@@ -207,5 +207,63 @@ describe("PortMapsWidget", () => {
     expect(
       await screen.findByText(/Non-JSON response from \/api\/desktop\/portmaps/),
     ).toBeInTheDocument();
+  });
+
+  // The server auto-starts a project's persisted forwards in the BACKGROUND
+  // (HandleListPortMaps answers from persisted state immediately), so the first
+  // list legitimately reports live=false while the open is still in flight —
+  // ForwardManager.Start spends up to ~5s in its readiness probe. Without a
+  // re-fetch the panel would sit on that stale row until the user closed and
+  // reopened the dialog.
+  describe("polling while a forward is still opening", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("re-fetches until an enabled forward reports live", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps
+        .mockResolvedValueOnce([{ remote_port: 3000, local_port: 3000, enabled: true, live: false }])
+        .mockResolvedValue([{ remote_port: 3000, local_port: 3000, enabled: true, live: true }]);
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      // The badge reads "enabled" for an enabled-but-not-yet-live forward.
+      expect(await screen.findByText("enabled")).toBeInTheDocument();
+
+      await waitFor(() => expect(screen.getByText("live")).toBeInTheDocument(), { timeout: 4000 });
+      expect(mockListPortMaps.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it("stops re-fetching once every enabled forward is live", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([
+        { remote_port: 3000, local_port: 3000, enabled: true, live: true },
+      ]);
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      await screen.findByText(/localhost:3000/);
+      const callsAfterOpen = mockListPortMaps.mock.calls.length;
+
+      // Nothing is pending, so no further list must be issued.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(mockListPortMaps.mock.calls.length).toBe(callsAfterOpen);
+    });
+
+    it("does not re-fetch a disabled forward that is not live", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([
+        { remote_port: 3000, local_port: 3000, enabled: false, live: false },
+      ]);
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      await screen.findByText(/localhost:3000/);
+      const callsAfterOpen = mockListPortMaps.mock.calls.length;
+
+      await new Promise((r) => setTimeout(r, 300));
+      expect(mockListPortMaps.mock.calls.length).toBe(callsAfterOpen);
+    });
   });
 });

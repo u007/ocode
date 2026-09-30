@@ -316,6 +316,13 @@ export interface SessionSlice {
   // the in-flight PUT cannot clobber the just-clicked state. Undefined = no
   // pending flip; fall back to the session's snapshot / the process default.
   advisorEnabled?: boolean;
+  // Optimistic per-session advisor MODEL + trigger set, same lifecycle as
+  // advisorEnabled: written on pick, shadowing tuiStatus.advisor_model /
+  // tuiStatus.advisor_checkpoints until a snapshot confirms it. The advisor
+  // model is per chat, so without these a pick in one chat would repaint every
+  // other chat's picker from the shared global `advisorModel`.
+  advisorModel?: string;
+  advisorCheckpoints?: string[];
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -417,6 +424,15 @@ export type ChatAction =
   // Session-scoped: never touches the global s.advisorEnabled. `enabled:
   // undefined` clears the pending flip so the authoritative snapshot wins.
   | { type: "SET_SESSION_ADVISOR_ENABLED"; sessionId: string; enabled?: boolean }
+  // Optimistic per-session advisor model + trigger set (see
+  // SessionSlice.advisorModel). Session-scoped: never touches the global
+  // s.advisorModel, which is the default NEW chats start with.
+  | {
+      type: "SET_SESSION_ADVISOR_CONFIG";
+      sessionId: string;
+      model?: string;
+      checkpoints?: string[];
+    }
   | { type: "SET_OCR_MODEL"; model: string }
   | { type: "SET_OCR_ENABLED"; enabled: boolean }
   | { type: "SET_OCR_BACKEND"; backend: string }
@@ -713,6 +729,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => ({
         ...s,
         advisorEnabled: action.enabled,
+      }));
+    case "SET_SESSION_ADVISOR_CONFIG":
+      // Session-scoped like SET_SESSION_ADVISOR_ENABLED: it must never touch
+      // the global `advisorModel`, which is the new-chat default.
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        advisorModel: action.model,
+        advisorCheckpoints: action.checkpoints,
       }));
     case "SET_OCR_MODEL":
       return { ...state, ocrModel: action.model };
@@ -1069,7 +1093,19 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           // field (older payload) leaves the pending flip alone.
           const authoritative = action.status?.advisor_enabled;
           const confirmed = s.advisorEnabled !== undefined && authoritative === s.advisorEnabled;
-          return { ...s, tuiStatus: action.status, advisorEnabled: confirmed ? undefined : s.advisorEnabled };
+          // Same reconciliation for the model + triggers: a session-tagged
+          // snapshot carries THAT chat's advisor model, so once it agrees the
+          // optimistic value has landed in tuiStatus and the override can go.
+          const snapshotModel = action.status?.advisor_model;
+          const modelConfirmed =
+            s.advisorModel !== undefined && snapshotModel === s.advisorModel;
+          return {
+            ...s,
+            tuiStatus: action.status,
+            advisorEnabled: confirmed ? undefined : s.advisorEnabled,
+            advisorModel: modelConfirmed ? undefined : s.advisorModel,
+            advisorCheckpoints: modelConfirmed ? undefined : s.advisorCheckpoints,
+          };
         }),
         tuiStatusReady: true,
       };

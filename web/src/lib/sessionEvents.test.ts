@@ -614,6 +614,36 @@ describe("routeBusEnvelope", () => {
     expect(getState().advisorEnabled).toBe(false);
   });
 
+  it("session-tagged status carries the advisor MODEL to that chat only, never to the global", () => {
+    // The advisor model is per chat, so one chat's pick must not repaint every
+    // other tab's picker. The server stamps the session's own model into a
+    // session-tagged snapshot; only an untagged snapshot may write the global
+    // (which is the default a NEW chat starts with).
+    const { router, getState } = makeRouter(["s1", "s2"]);
+    routeBusEnvelope(
+      env("status", {
+        session_id: "s1",
+        data: { advisor_model: "openai/gpt-5.1", advisor_checkpoints: ["done"] },
+      }),
+      router,
+    );
+    expect(getState().sessions["s1"]?.tuiStatus?.advisor_model).toBe("openai/gpt-5.1");
+    expect(getState().sessions["s1"]?.tuiStatus?.advisor_checkpoints).toEqual(["done"]);
+    // The other chat is untouched, and the global new-chat default is not
+    // overwritten by this chat's value.
+    expect(getState().sessions["s2"]?.tuiStatus?.advisor_model).toBeUndefined();
+    expect(getState().advisorModel).toBeNull();
+
+    // An untagged (process-global) snapshot still seeds the default.
+    routeBusEnvelope(
+      env("status", { session_id: "", data: { advisor_model: "deepseek/deepseek-v4-pro" } }),
+      router,
+    );
+    expect(getState().advisorModel).toBe("deepseek/deepseek-v4-pro");
+    // ...and still must not stamp either chat's slice.
+    expect(getState().sessions["s1"]?.tuiStatus?.advisor_model).toBe("openai/gpt-5.1");
+  });
+
   it("warns for a session-scoped event without any session id", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { router } = makeRouter(["s1"]);

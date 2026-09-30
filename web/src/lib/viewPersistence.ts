@@ -82,3 +82,65 @@ export function getPersistedViewState(): Record<string, { view: ActiveView; focu
 export function persistViewStates(projects: Record<string, { view: ActiveView; focusedKind: FocusedKind }>) {
   persistAll(projects);
 }
+
+/** The fallback for a project with no stored state. A jump and a first visit
+ *  both land on the chat surface, so this is the shared "nothing to restore"
+ *  answer rather than a value duplicated at each call site. */
+export const DEFAULT_VIEW_STATE: { view: ActiveView; focusedKind: FocusedKind } = {
+  view: "sessions",
+  focusedKind: "chat",
+};
+
+export interface PendingJumpView {
+  /** The project being landed on — NOT the one the user came from. */
+  path: string;
+  view: ActiveView;
+}
+
+/**
+ * Consume a Pulse jump's armed destination on a project switch.
+ *
+ * The slot is cleared on EVERY call, whether or not the arm applies. That is
+ * the whole point: a same-project jump never re-runs the switch effect, so its
+ * arm is still sitting there when the user later switches to some unrelated
+ * project. Clearing unconditionally is what stops a stale arm from dictating
+ * that later switch.
+ *
+ * Mutating `pending` (rather than returning a value App assigns) is deliberate —
+ * it makes "the clear" inseparable from "the read", so a future edit cannot
+ * honour an arm and forget to drop it.
+ *
+ * Takes the ref object rather than its value so App cannot accidentally do the
+ * read and the clear in two steps.
+ */
+export function consumePendingJumpView(
+  pending: { current: PendingJumpView | null },
+  path: string,
+): PendingJumpView | null {
+  const armed = pending.current;
+  pending.current = null;
+  return armed && armed.path === path ? armed : null;
+}
+
+/**
+ * Decide which view a project switch lands on.
+ *
+ * `forced` is a Pulse card jump: the user clicked a SESSION card, so the
+ * destination is the chat surface regardless of what the target project was
+ * last left showing. It is honoured only when it names THIS project — a
+ * same-project jump never reaches the switch effect at all, and a stale arm
+ * from an earlier jump must not silently dictate a later, unrelated switch.
+ *
+ * Extracted as a pure function so the precedence is testable without booting
+ * App and driving a real project switch; App only owns the ref lifecycle.
+ */
+export function resolveViewOnProjectSwitch(
+  saved: { view: ActiveView; focusedKind: FocusedKind } | null,
+  forced: PendingJumpView | null,
+  path: string,
+): { view: ActiveView; focusedKind: FocusedKind } {
+  if (forced && forced.path === path) {
+    return { view: forced.view, focusedKind: "chat" };
+  }
+  return saved ?? DEFAULT_VIEW_STATE;
+}

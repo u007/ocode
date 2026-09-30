@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { api } from "./client";
+import { api, isPortMapsAvailable } from "./client";
 import type { PortMapTarget } from "./types";
 
 /** The project-scoped port-forward family is routed by query params
@@ -93,5 +93,50 @@ describe("port-forward client routing", () => {
     const listFetch = stubFetch();
     await api.listPortMaps();
     expect(requestedUrl(listFetch)).toBe("/api/desktop/portmaps");
+  });
+});
+
+/** The Ports button is gated on this probe. It gates on "did the server give me
+ *  a list?", so anything that is not a list must read as unavailable — otherwise
+ *  the button renders and every action behind it fails. The 404/400 cases were
+ *  handled; a 500 and a transport failure were not (both returned true), which
+ *  is the inversion these pin. */
+describe("isPortMapsAvailable", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reports available for a JSON list", async () => {
+    stubFetch();
+    await expect(isPortMapsAvailable()).resolves.toBe(true);
+  });
+
+  it("reports unavailable on 404 (route absent)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not found", { status: 404 })));
+    await expect(isPortMapsAvailable()).resolves.toBe(false);
+  });
+
+  it("reports unavailable on 400 (server refuses this project)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad request", { status: 400 })));
+    await expect(isPortMapsAvailable()).resolves.toBe(false);
+  });
+
+  it("reports unavailable on 500, not available", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await expect(isPortMapsAvailable()).resolves.toBe(false);
+  });
+
+  it("reports unavailable when the transport fails outright", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    }));
+    await expect(isPortMapsAvailable()).resolves.toBe(false);
+  });
+
+  it("reports unavailable for a 200 that is not a list", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })));
+    await expect(isPortMapsAvailable()).resolves.toBe(true);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("null", { status: 200, headers: { "Content-Type": "application/json" } })));
+    await expect(isPortMapsAvailable()).resolves.toBe(false);
   });
 });

@@ -10,6 +10,19 @@ import { browserStore, browserActions } from "../../lib/browserStore";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import UnifiedTabBar from "./UnifiedTabBar";
 
+// terminalStore subscribes to the server's `terminal_tabs_changed` bus event;
+// the real eventBus auto-starts an SSE stream on the first on(), calling
+// remoteApiBase() from the partial api mock below. Mirrors the real bus surface
+// the store uses (on/off/onReconnect/offReconnect).
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: () => () => {},
+    off: () => {},
+    onReconnect: () => () => {},
+    offReconnect: () => {},
+  },
+}));
+
 vi.mock("@/hooks/useTerminalConfig", () => ({
   useTerminalConfig: () => ({ available: true }),
 }));

@@ -92,3 +92,47 @@ describe("ExcelViewer", () => {
     expect(await screen.findByText("2")).toBeDefined();
   });
 });
+
+/**
+ * A .tsv from disk took the `type: "array"` branch, which hands SheetJS raw
+ * BYTES. SheetJS decodes those as latin-1, so every non-ASCII cell rendered as
+ * mojibake ("café" → "cafÃ©"). The sibling .csv path was already correct
+ * because it runs `new TextDecoder().decode(buf)` first — the extension check
+ * that guards the decode just never listed .tsv.
+ */
+describe("ExcelViewer tab-separated files", () => {
+  function tsvBytes(text: string): ArrayBuffer {
+    return new TextEncoder().encode(text).buffer as ArrayBuffer;
+  }
+
+  it("decodes a .tsv as UTF-8 instead of mojibaking non-ASCII cells", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(
+      tsvBytes("name\tcity\ncafé\tnaïve\n"),
+    );
+    render(<ExcelViewer path="cities.tsv" />);
+
+    // Not "cafÃ©" / "naÃ¯ve" — the latin-1 reading of the same UTF-8 bytes.
+    expect(await screen.findByText("café")).toBeDefined();
+    expect(screen.getByText("naïve")).toBeDefined();
+  });
+
+  it("still splits a .tsv into columns", async () => {
+    vi.mocked(api.fetchFileRaw).mockResolvedValue(
+      tsvBytes("name\tqty\tprice\nwidget\t3\t1.5\n"),
+    );
+    render(<ExcelViewer path="stock.tsv" />);
+
+    expect(await screen.findByText("widget")).toBeDefined();
+    // A single merged cell would mean the tabs were not treated as delimiters.
+    const cells = [...document.querySelectorAll("table.select-text td, table.select-text th")].map(
+      (c) => c.textContent,
+    );
+    expect(cells).toContain("price");
+    expect(cells).toContain("1.5");
+  });
+
+  it("parses a .tsv from the live editor string too (controlled mode)", async () => {
+    render(<ExcelViewer path="cities.tsv" content={"name\tcity\ncafé\tnaïve\n"} />);
+    expect(await screen.findByText("café")).toBeDefined();
+  });
+});

@@ -65,6 +65,29 @@ type terminalAttachMsg struct {
 	Resumed bool   `json:"resumed"`
 }
 
+// terminalDetachMsg is the text control frame written to a socket that is about
+// to be superseded — a second client attached to the same terminal id and
+// took the single attachment slot (attach closes s.ws before handing it over).
+//
+// The frame exists because the close alone is ambiguous: a superseded socket is
+// closed cleanly, exactly like a shell that exited, so the client would render
+// "[terminal session ended]" for a shell that is still running on someone
+// else's screen. Worse, its auto-reconnect paths (the backoff timer and the
+// onWake handler) treat a closed socket as a network blip and immediately
+// re-attach — which supersedes the new client, whose own wake/close then
+// supersedes this one. That ping-pong is the same failure shape as the
+// two-sockets-per-terminal loop fixed on 2026-09-19, so the reason must be
+// explicit on the wire rather than inferred from a close code.
+//
+// `reason` is "superseded" today; the field exists so a future detach cause
+// (server shutdown, admin kill) can be reported without a protocol change.
+type terminalDetachMsg struct {
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
+}
+
+const terminalDetachReasonSuperseded = "superseded"
+
 var anonTerminalSeq atomic.Int64
 
 // terminalSession is one pty-backed shell and whichever websocket is
@@ -312,10 +335,13 @@ func (s *terminalSession) attach(ws *websocket.Conn, resumed bool, historyOffset
 		s.detachTimer.Stop()
 		s.detachTimer = nil
 	}
+	// Take the single attachment slot. The displaced socket is closed below —
+	// after s.ws has been repointed and s.mu released — so no delivery can
+	// interleave the detach frame with pty output, and no late delivery can
+	// pick the old socket back up (deliver revalidates s.ws under writeMu).
+	var superseded *websocket.Conn
 	if s.ws != nil && s.ws != ws {
-		if err := s.ws.Close(); err != nil {
-			log.Printf("terminal %s: failed to close superseded websocket: %v", s.id, err)
-		}
+		superseded = s.ws
 	}
 	s.ws = ws
 	s.replaying = true
@@ -339,6 +365,27 @@ func (s *terminalSession) attach(ws *websocket.Conn, resumed bool, historyOffset
 		replay = append([]byte(nil), s.replay...)
 	}
 	s.mu.Unlock()
+
+	// Retire the displaced client BEFORE the new socket's hello. The frame has
+	// to land first: once Close runs the client cannot read it, and it is the
+	// only thing that distinguishes "another client took this terminal" from
+	// "the shell exited" — both arrive as a clean 1000 close. Without it the
+	// displaced client auto-reconnects on its next wake and takes the slot
+	// back, and the two clients ping-pong.
+	if superseded != nil {
+		frame, err := json.Marshal(terminalDetachMsg{Type: "detached", Reason: terminalDetachReasonSuperseded})
+		switch {
+		case err != nil:
+			log.Printf("terminal %s: failed to encode detach frame: %v", s.id, err)
+		default:
+			if werr := superseded.WriteMessage(websocket.TextMessage, frame); werr != nil {
+				log.Printf("terminal %s: failed to send detach frame to superseded client: %v", s.id, werr)
+			}
+		}
+		if err := superseded.Close(); err != nil {
+			log.Printf("terminal %s: failed to close superseded websocket: %v", s.id, err)
+		}
+	}
 
 	// writeMu is held from the control frame through the replay and queued
 	// output, so live delivery cannot interleave with the handoff.

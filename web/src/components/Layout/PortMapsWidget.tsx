@@ -5,6 +5,10 @@ import type { PortMapTarget, PortMapView } from "../../api/types";
 import { useProjectState } from "../../stores/projectStore";
 import { remoteForwardTarget } from "../../lib/trustedProject";
 import {
+  LIVE_POLL_INTERVAL_MS,
+  shouldPollForLive,
+} from "../../lib/portMapsLivePoll";
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -46,6 +50,9 @@ export default function PortMapsWidget() {
   const [remotePort, setRemotePort] = useState("");
   const [localPort, setLocalPort] = useState("");
   const [busy, setBusy] = useState(false);
+  // Bounded re-fetch budget for the background auto-start; reset whenever the
+  // dialog opens or the project changes, so each open gets a fresh budget.
+  const livePollAttempts = useRef(0);
 
   // The live target for handlers that fire after a project switch (the dialog is
   // closed on switch, but an in-flight request can still resolve).
@@ -61,6 +68,7 @@ export default function PortMapsWidget() {
     setMaps([]);
     setError("");
     setOpen(false);
+    livePollAttempts.current = 0;
     isPortMapsAvailable(targetRef.current).then((ok) => {
       if (!cancelled) setAvailable(ok);
     });
@@ -79,6 +87,20 @@ export default function PortMapsWidget() {
   useEffect(() => {
     if (open) refresh();
   }, [open, targetKey, refresh]);
+
+  // The server opens this project's forwards in the BACKGROUND, so the first
+  // list reports live=false for anything still coming up. Re-fetch while an
+  // enabled forward is pending; see shouldPollForLive for the two rules that
+  // keep this bounded.
+  useEffect(() => {
+    if (!open) return;
+    if (!shouldPollForLive(maps, livePollAttempts.current)) return;
+    const timer = setTimeout(() => {
+      livePollAttempts.current += 1;
+      refresh();
+    }, LIVE_POLL_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [open, maps, refresh]);
 
   if (!available) return null;
 
@@ -131,7 +153,10 @@ export default function PortMapsWidget() {
   return (
     <>
       <button
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          livePollAttempts.current = 0;
+          setOpen(true);
+        }}
         className="flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
         title="Port forwards"
       >

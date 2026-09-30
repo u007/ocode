@@ -14,7 +14,8 @@ import PreviewTabPage from "./components/Preview/PreviewTabPage";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
 import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
-import { loadViewStateForProject, saveViewStateForProject, type FocusedKind, type ActiveView } from "./lib/viewPersistence";
+import { loadViewStateForProject, consumePendingJumpView, resolveViewOnProjectSwitch, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
+import { usePulseViewState } from "./lib/pulseViewState";
 import { sessionAskSurfaceVisible } from "./lib/dialogScope";
 import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
@@ -85,6 +86,7 @@ import { useSessionStatus } from "./hooks/useSessionStatus";
 import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
 import { useSessionRevisionSync } from "./hooks/useSessionRevisionSync";
 import FrontendMemoryReporter from "./lib/debug/frontendMemoryReporter";
+import FrontendStallReporter from "./lib/debug/frontendStallReporter";
 import { __setRevoker } from "./lib/browserStore";
 import { revokeBrowseSession } from "./api/client";
 import { getTrustedTerminalProject } from "./lib/trustedProject";
@@ -276,26 +278,19 @@ function HomeApp() {
   // URL. It is deliberately NOT persisted per project (see the saveViewState
   // effect below): it is global, so switching projects must not strand the
   // user in it, and leaving it must restore whatever that project was showing.
-  const [activeView, setActiveView] = useState<ActiveView | "pulse">("sessions");
   // Which half of the merged Sessions tab (chat vs terminal) is currently
   // shown. Restored from per-project persistence on project switch.
   const [focusedKind, setFocusedKind] = useState<FocusedKind>("chat");
-  // Pulse (cross-project dashboard) view transitions. `previousViewRef` is what
-  // makes Cmd+J a TOGGLE: leaving the dashboard returns to whatever the user
-  // was looking at, not to a hard-coded default.
-  const previousViewRef = useRef<ActiveView | "pulse">("sessions");
-  const openPulse = useCallback(() => {
-    previousViewRef.current = activeView === "pulse" ? previousViewRef.current : activeView;
-    setActiveView("pulse");
-  }, [activeView]);
-  const togglePulse = useCallback(() => {
-    if (activeView === "pulse") {
-      setActiveView(previousViewRef.current);
-    } else {
-      previousViewRef.current = activeView;
-      setActiveView("pulse");
-    }
-  }, [activeView]);
+  // Pulse transitions, including the Cmd+J toggle and the card-jump arm the
+  // project-switch effect below consumes. See lib/pulseViewState.
+  const {
+    activeView,
+    setActiveView,
+    openPulse,
+    togglePulse,
+    leavePulseFor,
+    pendingJumpRef: pendingJumpViewRef,
+  } = usePulseViewState();
 
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const activeProjectHost = projectState.activeProject?.host;
@@ -407,14 +402,14 @@ function HomeApp() {
   useLayoutEffect(() => {
     const path = projectState.activeProject?.path;
     if (!path) return;
-    const saved = loadViewStateForProject(path);
-    if (saved) {
-      setActiveView(saved.view);
-      setFocusedKind(saved.focusedKind);
-    } else {
-      setActiveView("sessions");
-      setFocusedKind("chat");
-    }
+    // A Pulse jump armed for exactly this project wins over the saved view —
+    // the user asked for a session, not for whatever this project was left on.
+    // The arm is always consumed here: a same-project jump never re-runs this
+    // effect, so a leftover arm must not dictate a later, unrelated switch.
+    const forced = consumePendingJumpView(pendingJumpViewRef, path);
+    const next = resolveViewOnProjectSwitch(loadViewStateForProject(path), forced, path);
+    setActiveView(next.view);
+    setFocusedKind(next.focusedKind);
   }, [projectState.activeProject?.path]);
   // Persist view state whenever it changes (debounced).
   useEffect(() => {
@@ -1041,7 +1036,7 @@ function HomeApp() {
         getCronJob: (id) => api.getCronJob(id),
         deleteCronJob: (id) => api.deleteCronJob(id),
         getSmallModelWithEnabled: (host?) => api.getSmallModelWithEnabled(host),
-        getAdvisor: (host?) => api.getAdvisor(host),
+        getAdvisor: (host?, sessionId?) => api.getAdvisor(host, sessionId),
         getLimitsConfig: () => api.getLimitsConfig(),
         setLimitsConfig: (fields) => api.setLimitsConfig(fields),
         getThinkingBudget: (host?) => api.getThinkingBudget(host),
@@ -1636,10 +1631,22 @@ function HomeApp() {
               {/* Pulse — the cross-project live-sessions dashboard. Global, not
                   per-project, so it renders no matter which project is active.
                   PulseJumpProvider supplies the "leave the dashboard" transition,
-                  because activeView lives here and the cards need to drive it. */}
+                  because activeView lives here and the cards need to drive it.
+
+                  A card click means "open this session", so exitPulse lands on
+                  the chat surface — NOT on `previousViewRef`, which is the
+                  pre-dashboard view and belongs to the Cmd+J toggle alone.
+                  Restoring it put the user on Files/Git in the target project
+                  with the chat tab invisibly opened behind it, and then saved
+                  that foreign view against the target project. */}
               {activeView === "pulse" && (
                 <div className="relative flex-1 min-h-0 overflow-hidden flex">
-                  <PulseJumpProvider exitPulse={() => setActiveView(previousViewRef.current)}>
+                  <PulseJumpProvider
+                    exitPulse={(targetPath) => {
+                      leavePulseFor(targetPath);
+                      setFocusedKind("chat");
+                    }}
+                  >
                     <PulseView />
                   </PulseJumpProvider>
                 </div>
@@ -2099,6 +2106,7 @@ export default function App() {
 	                  Resolved by the bridge, which is inside <ProjectProvider>. */}
 	              <SpeechProviderInsideProject>
 	              <FrontendMemoryReporter />
+	              <FrontendStallReporter />
               <StatusMetricsHydrator />
               <Routes>
                 <Route path="/session/:id" element={<SessionPage />} />

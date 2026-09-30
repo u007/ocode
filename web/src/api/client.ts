@@ -24,6 +24,7 @@ import type {
   Project,
   ProjectGroup,
   ServerProjectTabs,
+  ServerProjectTerminals,
   BrowseResponse,
   PermissionsResponse,
   PermissionModeConfigResponse,
@@ -40,6 +41,12 @@ import type {
   CronRunsResponse,
   CronRun,
   CronTargetsResponse,
+  ReminderItem,
+  ReminderItemKind,
+  ReminderItemListParams,
+  ReminderItemListResponse,
+  ReminderItemPatchRequest,
+  ReminderItemWriteRequest,
   FileChange,
   ChangeDiff,
   SyncStatusResponse,
@@ -650,7 +657,7 @@ export const api = {
   },
   getSession: (
     id: string,
-    opts?: { limit?: number; offset?: number },
+    opts?: { limit?: number; offset?: number; noteRevision?: boolean },
     host?: string,
   ) => {
     const params = new URLSearchParams();
@@ -666,7 +673,16 @@ export const api = {
       // so the cross-process revalidation poll can detect an out-of-process
       // write (see lib/sessionRevision). Centralized here because every
       // transcript load path must leave the same baseline.
-      noteSessionRevision(id, host, detail.revision);
+      //
+      // `noteRevision: false` opts a read out of it. A baseline is only
+      // meaningful for a session an OPEN TAB is showing: it answers "has this
+      // tab's transcript changed since it loaded?". A speculative read — the
+      // Pulse dashboard hovering a card, say — would otherwise stamp a FRESH
+      // revision over an open tab that is still showing older content, and the
+      // poll would then see "no change" and never repair it.
+      if (opts?.noteRevision !== false) {
+        noteSessionRevision(id, host, detail.revision);
+      }
       return detail;
     });
   },
@@ -726,6 +742,34 @@ export const api = {
       truncated: boolean;
       scanned: number;
     }>(`/api/sessions/${id}/search?${params.toString()}`, undefined, host);
+  },
+  /**
+   * Authoritative indices of the user's own messages, for the alt+up/alt+down
+   * transcript jump. Server-side so the web "msg 3/17" readout agrees with the
+   * TUI's on the same session — the client only holds a tail window of the
+   * transcript, so a client-side count would under-report on long sessions.
+   *
+   * Indices are positions in the same post-load array that the paged
+   * /api/sessions/{id} response slices, so they double as pagination targets.
+   */
+  userMessages: (
+    id: string,
+    opts?: { limit?: number },
+    host?: string,
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const query = params.toString();
+    return fetchJSON<{
+      total: number;
+      indices: number[];
+      truncated: boolean;
+      scanned: number;
+    }>(
+      `/api/sessions/${id}/user-messages${query ? `?${query}` : ""}`,
+      undefined,
+      host,
+    );
   },
   listModels: (
     opts?: { provider?: string; refresh?: boolean; configured?: boolean },
@@ -1017,20 +1061,33 @@ export const api = {
   // server's. A summariser failure resolves with an EMPTY summary rather than
   // an error, so callers fall back to the full text: speech must never be
   // blocked because a side task could not run.
-  summarizeSpeech: (sessionId: string, text: string, host?: string) =>
+  summarizeSpeech: (sessionId: string, text: string, host?: string, signal?: AbortSignal) =>
     fetchJSON<{ summary: string }>(
       `/api/sessions/${sessionId}/speech-summary`,
-      { method: "POST", body: JSON.stringify({ text }) },
+      { method: "POST", body: JSON.stringify({ text }), signal },
       host,
     ),
 
-  getAdvisorFull: (host?: string) =>
+  // Advisor model + backend + trigger set. With a sessionId these read/write
+  // THAT chat's own pinned values (persisted to its transcript metadata by the
+  // server, never to global config); without one they are the process-wide
+  // default that seeds NEW chats — never a value pushed onto existing ones.
+  // `host` routes a session-scoped call to a remote project's server
+  // (/api/remote/<host>/…), otherwise the local server cannot resolve that
+  // session and 404s.
+  getAdvisorFull: (host?: string, sessionId?: string) =>
     fetchJSON<{
       model: string;
       provider: string;
       claude_code: boolean;
       checkpoints: string[];
-    }>("/api/config/advisor", undefined, host),
+    }>(
+      sessionId
+        ? `/api/config/advisor?session_id=${encodeURIComponent(sessionId)}`
+        : "/api/config/advisor",
+      undefined,
+      host,
+    ),
   setAdvisorFull: (
     fields: Partial<{
       model: string;
@@ -1039,6 +1096,7 @@ export const api = {
       checkpoints: string[];
     }>,
     host?: string,
+    sessionId?: string,
   ) =>
     fetchJSON<{
       model: string;
@@ -1047,7 +1105,12 @@ export const api = {
       checkpoints: string[];
     }>(
       "/api/config/advisor",
-      { method: "PUT", body: JSON.stringify(fields) },
+      {
+        method: "PUT",
+        body: JSON.stringify(
+          sessionId ? { ...fields, session_id: sessionId } : fields,
+        ),
+      },
       host,
     ),
 
@@ -1591,6 +1654,59 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ workdir, chat_id: chatId }),
     }),
+
+  // --- Reminders and tasks -------------------------------------------------
+  //
+  // One implementation, two base paths: the server derives the kind from the
+  // collection, so `kind` never travels on the wire. The paging params are
+  // always explicit (offset is never omitted) so paging cannot silently
+  // restart at 0 when a caller forgets one of them.
+  listReminderItems: (
+    kind: ReminderItemKind,
+    params: ReminderItemListParams = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set("status", params.status);
+    q.set("limit", String(params.limit ?? 0));
+    q.set("offset", String(params.offset ?? 0));
+    return fetchJSON<ReminderItemListResponse>(`/api/${kind}s?${q.toString()}`);
+  },
+  getReminderItem: (kind: ReminderItemKind, id: string) =>
+    fetchJSON<ReminderItem>(`/api/${kind}s/${encodeURIComponent(id)}`),
+  addReminderItem: (kind: ReminderItemKind, item: ReminderItemWriteRequest) =>
+    fetchJSON<ReminderItem>(`/api/${kind}s`, {
+      method: "POST",
+      body: JSON.stringify(item),
+    }),
+  updateReminderItem: (
+    kind: ReminderItemKind,
+    id: string,
+    patch: ReminderItemPatchRequest,
+  ) =>
+    fetchJSON<ReminderItem>(`/api/${kind}s/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteReminderItem: (kind: ReminderItemKind, id: string) =>
+    fetchEmpty(`/api/${kind}s/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** Fire an item now, bypassing the due-time gate. */
+  runReminderItem: (kind: ReminderItemKind, id: string) =>
+    fetchJSON<ReminderItem>(`/api/${kind}s/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+    }),
+  /**
+   * Run history for a reminder/task. It is the SAME runs.jsonl cron writes, so
+   * the caller passes the BARE item id and this prefixes it — the server keys
+   * those rows by "<kind>:<id>", and making every caller remember that
+   * invariant is how a history panel ends up silently empty.
+   */
+  getReminderItemRuns: (kind: ReminderItemKind, id: string, limit = 20, offset = 0) =>
+    fetchJSON<CronRunsResponse>(
+      `/api/${kind}s/${encodeURIComponent(`${kind}:${id}`)}/runs?limit=${limit}&offset=${offset}`,
+    ),
+  /** The delivery-log id the server writes for an item: "<kind>:<id>". */
+  reminderDeliveryId: (kind: ReminderItemKind, id: string) => `${kind}:${id}`,
+
   getTheme: (name?: string) =>
     fetchJSON<ThemeResponse>(
       name ? `/api/theme?name=${encodeURIComponent(name)}` : "/api/theme",
@@ -1615,14 +1731,22 @@ export const api = {
       undefined,
       host,
     ),
-  getAdvisor: (host?: string) =>
-    fetchJSON<{ model: string }>("/api/config/advisor", undefined, host),
-  setAdvisor: (model: string, host?: string) =>
-    fetchJSON<{ model: string }>(
+  // Short form of getAdvisorFull for the per-chat picker. Session-scoped for
+  // the same reason as getAdvisorFull: a chat reads its OWN model.
+  getAdvisor: (host?: string, sessionId?: string) =>
+    fetchJSON<{ model: string; checkpoints: string[] }>(
+      sessionId
+        ? `/api/config/advisor?session_id=${encodeURIComponent(sessionId)}`
+        : "/api/config/advisor",
+      undefined,
+      host,
+    ),
+  setAdvisor: (model: string, host?: string, sessionId?: string) =>
+    fetchJSON<{ model: string; checkpoints: string[] }>(
       "/api/config/advisor",
       {
         method: "PUT",
-        body: JSON.stringify({ model }),
+        body: JSON.stringify(sessionId ? { model, session_id: sessionId } : { model }),
       },
       host,
     ),
@@ -2084,6 +2208,22 @@ export const api = {
   /** Full replacement of every project's open-session tabs. */
   setTabs: (projects: Record<string, ServerProjectTabs>) =>
     fetchJSON<{ status: string }>("/api/tabs", {
+      method: "PUT",
+      body: JSON.stringify({ projects }),
+    }),
+  /** Every project's open-terminal tabs, server-side so a terminal started in
+   *  one client (the desktop app) is visible in another (a second browser).
+   *  The shell was always shared — a remote project's pty lives on the host's
+   *  `serve --remote` — but the tab LIST used to be per-origin localStorage,
+   *  which is the only reason a second browser saw an empty strip. */
+  getTerminalTabs: () =>
+    fetchJSON<{ projects: Record<string, ServerProjectTerminals> }>("/api/terminal-tabs"),
+  /** Merge of the projects the caller knows about. A key with an empty
+   *  `terminals` list DELETES it (how a client persists "I closed this
+   *  project's last tab"); keys absent from the body are preserved, so a client
+   *  that has never seen another client's projects cannot wipe them. */
+  setTerminalTabs: (projects: Record<string, ServerProjectTerminals>) =>
+    fetchJSON<{ status: string }>("/api/terminal-tabs", {
       method: "PUT",
       body: JSON.stringify({ projects }),
     }),
@@ -3003,18 +3143,26 @@ function portMapsPath(target?: PortMapTarget, suffix = ""): string {
  *  portmaps JSON array means the route is actually missing (SPA fallback or
  *  proxy) and every panel action would fail anyway. 400 is unavailable as well —
  *  the server answered but does not accept this project (unregistered host, or
- *  a WSL target, which never needs forwards). Any other error is assumed
- *  transient and keeps the panel offered, matching the historical behavior. */
+ *  a WSL target, which never needs forwards).
+ *
+ *  Every other failure is unavailable too. The button gates on "did the server
+ *  hand me a list?", so a 5xx or a transport error is not evidence the feature
+ *  exists — it only proves the probe could not confirm it, and offering the
+ *  button on a guess makes every action behind it fail. The old code returned
+ *  true for those, which is how a 500 rendered a button whose every click
+ *  errored. */
 export async function isPortMapsAvailable(
   target?: PortMapTarget,
 ): Promise<boolean> {
   try {
     const maps = await api.listPortMaps(target);
     return Array.isArray(maps);
-  } catch (e) {
-    if (e instanceof ApiError && (e.status === 404 || e.status === 400))
-      return false;
-    return !(e instanceof ApiError && e.status === 404);
+  } catch {
+    // intentionally not logged: this is a capability probe whose whole result is
+    // the boolean below, and it runs on every project switch — logging each
+    // failure would bury real errors. A failure the user acts on is surfaced by
+    // the panel's own list call, which reports the same error readably.
+    return false;
   }
 }
 

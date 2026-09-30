@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,6 +49,33 @@ type portMapView struct {
 func writePortMapsJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// autoStartEnabled opens every persisted, enabled forward for this workspace.
+// Best-effort per forward: a failure is logged, not fatal, so one unreachable
+// tunnel cannot hide the rest.
+//
+// It is deliberately NOT fast — a forward that cannot come up spends ~5s in
+// ForwardManager.Start's readiness probe — so callers that are on a latency
+// path (server boot) must run it through remote.RunAsync. Tests drive it
+// directly.
+func (h *portMapsHandler) autoStartEnabled() {
+	if h.store == nil {
+		return
+	}
+	maps, err := h.store.PortMaps(h.ref)
+	if err != nil {
+		log.Printf("desktop: port maps: load: %v", err)
+		return
+	}
+	for _, pm := range maps {
+		if !pm.Enabled {
+			continue
+		}
+		if err := h.fm.Start(remote.ProjectPortMap{RemotePort: pm.RemotePort, LocalPort: pm.LocalPort, Enabled: true}); err != nil {
+			log.Printf("desktop: port maps: auto-start remote:%d: %v", pm.RemotePort, err)
+		}
+	}
 }
 
 // register wires every /api/desktop/portmaps* route onto mux.
