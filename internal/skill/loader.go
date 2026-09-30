@@ -42,6 +42,40 @@ type Skill struct {
 	// "<Plugin>:<skill>", Claude Code's namespacing, so it never collides
 	// with (or shadows) a same-named user or project skill.
 	Plugin string
+	// PluginDir is the shipping plugin's root directory; empty for ordinary
+	// skills.
+	PluginDir string
+}
+
+// Dir is the directory holding the skill's SKILL.md — the base its relative
+// references (scripts/, references/, sibling .md files) resolve against.
+func (s Skill) Dir() string {
+	if s.Source == "" {
+		return ""
+	}
+	return filepath.Dir(s.Source)
+}
+
+// ForModel renders a skill for the model the way Claude Code does: a header
+// naming the skill's base directory (and its plugin's root for a plugin
+// skill), then the body with ${CLAUDE_PLUGIN_ROOT} expanded. Skills refer to
+// their own files by relative path; without the base directory the model
+// looks for them in the project and cannot find them.
+func (s Skill) ForModel() string {
+	var b strings.Builder
+	if dir := s.Dir(); dir != "" {
+		b.WriteString("Base directory for this skill: " + dir + "\n")
+		if s.PluginDir != "" {
+			b.WriteString("Plugin root: " + s.PluginDir + " (plugin \"" + s.Plugin + "\")\n")
+		}
+		b.WriteString("Relative paths in this skill resolve against the base directory; paths starting with skills/ resolve against the plugin root.\n\n")
+	}
+	body := s.Content
+	if s.PluginDir != "" {
+		body = strings.ReplaceAll(body, "${CLAUDE_PLUGIN_ROOT}", s.PluginDir)
+	}
+	b.WriteString(body)
+	return b.String()
 }
 
 // skillCache caches LoadSkillsForRoot results keyed by the search-path set, so
@@ -168,6 +202,7 @@ func loadPluginSkills(roots []plugins.SkillRoot) []Skill {
 			}
 			seen[s.Name] = true
 			s.Plugin = r.Plugin
+			s.PluginDir = r.PluginDir
 			skills = append(skills, s)
 		}
 	}
@@ -583,20 +618,29 @@ func renderCatalog(skills []Skill) string {
 	return b.String()
 }
 
-// LoadSkill resolves a skill by exact name (or containing directory name). It
-// scans the UNFILTERED set (LoadSkillsForRoot), so an explicit load-by-name can
-// still resolve a Kaizen skill — that is an explicit request, distinct from
-// advertising it in an ungated catalog.
+// LoadSkill resolves a skill by name against the current working directory;
+// see LoadSkillForRoot.
 func LoadSkill(name string) (*Skill, error) {
 	root := ""
 	if cwd, err := os.Getwd(); err == nil {
 		root = cwd
 	}
+	return LoadSkillForRoot(root, name)
+}
+
+// LoadSkillForRoot resolves a skill by exact name (or containing directory
+// name) among the skills discoverable from root. It scans the UNFILTERED set
+// (LoadSkillsForRoot), so an explicit load-by-name can still resolve a Kaizen
+// skill — that is an explicit request, distinct from advertising it in an
+// ungated catalog.
+//
+// Order: exact name ("superpowers:brainstorming" for a plugin skill), then the
+// directory name preferring an ordinary skill over a plugin one, then — for a
+// namespaced "<plugin>:<name>" that matched nothing — the bare "<name>". The
+// last step covers plugin skills copied into a skills dir, which lose their
+// namespace while their text still cites each other as "superpowers:<name>".
+func LoadSkillForRoot(root, name string) (*Skill, error) {
 	all := LoadSkillsForRoot(root)
-	// Exact name first ("superpowers:brainstorming" for a plugin skill), then
-	// the directory name, preferring an ordinary skill over a plugin one so a
-	// bare "brainstorming" still resolves to a plugin's skill only when no
-	// user/project skill has that name.
 	for _, s := range all {
 		if s.Name == name {
 			skill := s
@@ -610,6 +654,9 @@ func LoadSkill(name string) (*Skill, error) {
 				return &skill, nil
 			}
 		}
+	}
+	if i := strings.Index(name, ":"); i > 0 && i < len(name)-1 {
+		return LoadSkillForRoot(root, name[i+1:])
 	}
 	return nil, nil
 }
