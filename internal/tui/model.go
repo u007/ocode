@@ -4083,7 +4083,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		pluginDir := cfg.Dir
 		var pluginForMCP *plugins.Plugin
-		for _, pl := range plugins.LoadPlugins(nil) {
+		for _, pl := range plugins.LoadAllPluginsForProject(m.workDir) {
 			if pl.Name == name {
 				p := pl
 				pluginForMCP = &p
@@ -9163,27 +9163,39 @@ func (m model) renderPluginList() string {
 	builtins.WriteString("      The LSP-backed 'ast' tool is always on when a language server is installed.\n")
 	builtins.WriteString("      " + astToggle + "\n\n")
 
-	if m.config == nil || len(m.config.Plugins) == 0 {
-		return builtins.String() + "No installed plugins.\n\nUse /plugin install <github.com/user/repo> to add one."
-	}
-	names := make([]string, 0, len(m.config.Plugins))
-	for name := range m.config.Plugins {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	// Load ALL plugins (including disabled) so we get descriptions for every one.
-	allLoaded := plugins.LoadPlugins(nil)
+	// Load ALL plugins (including disabled) so we get descriptions for every
+	// one, and so discovered-but-unconfigured plugins (Claude Code installs)
+	// are listed and toggle-able too.
+	allLoaded := plugins.LoadAllPluginsForProject(m.workDir)
 	loadedMeta := map[string]plugins.Plugin{}
 	for _, p := range allLoaded {
 		loadedMeta[p.Name] = p
 	}
+	configured := map[string]config.PluginConfig{}
+	if m.config != nil {
+		for name, pc := range m.config.Plugins {
+			configured[name] = pc
+		}
+	}
+	for _, p := range allLoaded {
+		if _, ok := configured[p.Name]; !ok && p.Source == plugins.SourceClaudeCode {
+			configured[p.Name] = config.PluginConfig{Source: plugins.SourceClaudeCode, Dir: p.Dir, Enabled: p.DefaultEnabled}
+		}
+	}
+	if len(configured) == 0 {
+		return builtins.String() + "No installed plugins.\n\nUse /plugin install <github.com/user/repo> to add one."
+	}
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 
 	var enabledCount, disabledCount int
 	var b strings.Builder
 	b.WriteString("Installed Plugins:\n\n")
 	for _, name := range names {
-		cfg := m.config.Plugins[name]
+		cfg := configured[name]
 		meta := loadedMeta[name]
 
 		stateIcon := "○"
@@ -9209,7 +9221,11 @@ func (m model) renderPluginList() string {
 		b.WriteString(fmt.Sprintf("    %s\n", desc))
 
 		// Source
-		b.WriteString(fmt.Sprintf("    Source: %s\n", cfg.Source))
+		source := cfg.Source
+		if meta.Source == plugins.SourceClaudeCode {
+			source = "Claude Code (installed there; disable here, uninstall in Claude Code)"
+		}
+		b.WriteString(fmt.Sprintf("    Source: %s\n", source))
 
 		// Ref (if pinned)
 		if cfg.Ref != "" {

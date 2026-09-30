@@ -132,6 +132,7 @@ func InstallGit(rawURL, pluginsRoot, ref string) (Plugin, string, error) {
 		_ = os.RemoveAll(destDir)
 		return Plugin{}, "", fmt.Errorf("read plugin manifest: %w", err)
 	}
+	InvalidateSessionStartCache()
 	if p.Name == "" {
 		p.Name = dirName
 	}
@@ -152,6 +153,7 @@ func InstallLocal(srcDir, destDir string) (Plugin, error) {
 	if err := copyDir(srcDir, destDir); err != nil {
 		return Plugin{}, fmt.Errorf("copy plugin directory: %w", err)
 	}
+	InvalidateSessionStartCache()
 	return p, nil
 }
 
@@ -172,9 +174,17 @@ func Remove(pluginDir string) error {
 			return fmt.Errorf("cannot remove bundled plugin directory %q", pluginDir)
 		}
 	}
+	// Claude Code-installed plugins are listed alongside ocode's but belong to
+	// Claude Code's store; uninstall them from Claude Code instead.
+	if configDir := claudeConfigDir(); configDir != "" {
+		if cp, err := filepath.Abs(filepath.Join(configDir, "plugins")); err == nil && isSubpath(cp, abs) {
+			return fmt.Errorf("%q was installed by Claude Code; remove it there (/plugin uninstall in Claude Code)", pluginDir)
+		}
+	}
 	if err := os.RemoveAll(abs); err != nil {
 		return fmt.Errorf("remove plugin dir %q: %w", abs, err)
 	}
+	InvalidateSessionStartCache()
 	return nil
 }
 
@@ -460,14 +470,13 @@ func installDirName(gitURL string) string {
 	return strings.ReplaceAll(path, "/", "-")
 }
 
+// readManifest reads an install candidate's manifest: an ocode plugin.json,
+// or a Claude Code .claude-plugin/plugin.json, so a Claude Code plugin repo
+// installs with /plugin install as-is.
 func readManifest(dir string) (Plugin, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
-	if err != nil {
-		return Plugin{}, fmt.Errorf("plugin.json not found in %s: %w", dir, err)
-	}
-	var p Plugin
-	if err := json.Unmarshal(data, &p); err != nil {
-		return Plugin{}, fmt.Errorf("parse plugin.json: %w", err)
+	p, ok := readPluginManifest(dir)
+	if !ok {
+		return Plugin{}, fmt.Errorf("no valid plugin.json or %s found in %s", claudeManifestRel, dir)
 	}
 	return p, nil
 }
@@ -489,6 +498,16 @@ func copyDir(src, dest string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, 0644)
+		// Keep the source's permission bits: plugin hooks and on_install
+		// scripts are executables, and a flat 0644 made them unrunnable.
+		mode := os.FileMode(0644)
+		if info, err := os.Stat(path); err == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := os.WriteFile(target, data, mode); err != nil {
+			return err
+		}
+		// WriteFile applies mode only when creating, and through the umask.
+		return os.Chmod(target, mode)
 	})
 }

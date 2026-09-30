@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-09-30 - Claude Code plugins load in ocode; CLAUDE.md is the single repo briefing
+
+- **Claude Code plugin format** (`internal/plugins/claude.go`). A plugin dir is
+  recognised by an ocode `plugin.json` or a Claude Code
+  `.claude-plugin/plugin.json`, so `/plugin install` takes a Claude Code plugin
+  repo as-is. Plugins Claude Code installed (`installed_plugins.json`) are
+  discovered after every ocode path; an ocode plugin of the same name wins.
+- **Enable/disable stays in ocode.** ocode's plugin config overrides Claude
+  Code's `enabledPlugins`, which is only the default; toggling writes ocode's
+  config only. The TUI `/plugin list|enable|disable` and `GET /api/plugins`
+  now include discovered Claude Code plugins. `plugins.Remove` refuses Claude
+  Code's plugin store.
+- **Plugin skills** load as `<plugin>:<skill>`; a bare name falls back to a
+  plugin skill only when no user/project skill has it.
+- **SessionStart hooks** (`internal/plugins/sessionstart.go`) of Claude Code
+  plugins run once per process per project and their context joins the system
+  prompt next to plugin instructions.
+- **Repo docs:** `AGENTS.md` merged into `CLAUDE.md` (ocode loaded only the
+  thin `CLAUDE.md` pointer when both existed). `/doc-sync`, `/init` and
+  `POST /api/init` no longer recreate `AGENTS.md` in a `CLAUDE.md`-only repo.
+
 ## 2026-09-29 - A long Speak summary now opens with a one-line recap
 
 Asking for a summary of a long reply gave two-to-five detail sentences with no

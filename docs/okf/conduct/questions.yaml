@@ -1,5 +1,5 @@
 # Engineering-conduct benchmark — SOURCE OF TRUTH.
-# Anchored to this project's house rules (CLAUDE.md + AGENTS.md). Answers flag
+# Anchored to this project's house rules (CLAUDE.md). Answers flag
 # "(house rule)" where stricter than general consensus. Format:
 # docs/okf/_schema/question-format.md. corpus_rev must match meta.yaml (1).
 

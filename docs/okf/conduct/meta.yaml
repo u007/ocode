@@ -3,7 +3,7 @@ title: Engineering Conduct (how a model should behave while coding)
 corpus_rev: 1
 # NOT a tech stack — this corpus tests coding *behavior/discipline*, which
 # applies to every repo regardless of language. Answers are anchored to this
-# project's house rules (CLAUDE.md + AGENTS.md). Where a rule is stricter than
+# project's house rules (CLAUDE.md). Where a rule is stricter than
 # general senior-engineer consensus it is flagged "(house rule)" in the answer,
 # so a grader can tell "diverges from consensus" from "diverges from OUR rules".
 version_scope: "n/a"

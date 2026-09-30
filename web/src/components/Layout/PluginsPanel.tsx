@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
-import type { PluginInfo } from "../../api/types";
+import { isClaudeCodePlugin, type PluginInfo } from "../../api/types";
 import {
   Dialog,
   DialogContent,
@@ -204,7 +204,14 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
                 className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-accent/50"
               >
                 <div className="min-w-0">
-                  <div className="text-sm text-foreground truncate">{p.name}</div>
+                  <div className="text-sm text-foreground truncate">
+                    {p.name}
+                  {isClaudeCodePlugin(p) && (
+                    <span className="ml-1.5 rounded border border-border px-1 text-[10px] text-muted-foreground" title="Installed by Claude Code. Toggling here only affects ocode; uninstall it in Claude Code.">
+                      Claude Code
+                    </span>
+                  )}
+                  </div>
                   <div className="text-xs text-muted-foreground truncate" title={p.description || p.source}>
                     {p.description || p.source}
                   </div>
@@ -225,16 +232,18 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
                       "Off"
                     )}
                   </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
-                    onClick={() => remove(p)}
-                    disabled={busy === p.name}
-                    title="Remove plugin"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
+                  {!isClaudeCodePlugin(p) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
+                      onClick={() => remove(p)}
+                      disabled={busy === p.name}
+                      title="Remove plugin"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
                 </div>
               </div>
             ))

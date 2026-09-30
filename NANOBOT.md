@@ -3,7 +3,7 @@
 > Purpose: a reference notes file answering *"what can `~/www/nanobot` do that
 > our agent (ocode) cannot?"*. Source of truth for the comparison: nanobot
 > source at `/Users/james/www/nanobot` (`CLAUDE.md`, `README.md`, `docs/`,
-> `nanobot/`) and ocode source at this repo (`AGENTS.md`, `internal/`).
+> `nanobot/`) and ocode source at this repo (`CLAUDE.md`, `internal/`).
 > Last reviewed: 2026-07-17.
 
 ## TL;DR
@@ -13,7 +13,7 @@
   platform** (chat platforms, remote-machine management, ticketing, network
   ops). See `nanobot/CLAUDE.md:5-7`, `nanobot/README.md:65-85`.
 - **ocode** = a Go-based **AI coding agent** — TUI/CLI/web/desktop, built
-  around filesystem/shell/LSP/git tooling for software work. See `AGENTS.md`.
+  around filesystem/shell/LSP/git tooling for software work. See `CLAUDE.md`.
 
 They target different jobs. The gap below is essentially "everything outside
 *write/run code in a terminal*": conversational presence on 10+ chat/email
@@ -83,7 +83,7 @@ sandboxing.
 - Evidence: `nanobot/ROLES.md:1-50`, `nanobot/docs/CONFIGURATION.md`,
   `nanobot/README.md:1233-1272`.
 - ocode: single local developer; permission modes are about *tool safety*,
-  not multi-tenant user isolation (`AGENTS.md` permissions section).
+  not multi-tenant user isolation (`CLAUDE.md` permissions section).
 
 ### 9. Deterministic document requirement evaluation
 `evaluate_requirements`: 6-stage pipeline judging whether an output doc satisfies

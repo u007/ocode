@@ -37,7 +37,7 @@ timestamp: 2026-09-16T17:00:39Z
   `exec.go:222` and background `process.go:294` inherit `os.Environ()`), so if the PARENT lacks `SSH_AUTH_SOCK` the sandboxed ssh sees no agent. Diagnose by checking `SSH_AUTH_SOCK` inside the failing ocode process, not just the interactive terminal.
 
 **5. User-facing fixes**: `ssh-add --apple-use-keychain ~/.ssh/<key>` in the user's own terminal before the session (agent socket IS reachable from the sandbox — verified); use a passphrase-free default key; or run the push via the unsandboxed `!` shell path (interactive PTY terminal and web `!shell` run unsandboxed per
-`AGENTS.md`).
+`CLAUDE.md`).
 
 **6. Safety verdict + hard NOs**: allowing git push in sandbox mode adds no new local read exposure (integrity-only design) and does not weaken local write confinement — the remote mutation is the explicitly requested action and is outside any local sandbox's reach. **HARD NOs**: never grant `~/.ssh` as a writable root / allow writes there (authorized_keys planting → persistence escape); never add `/dev/tty` to the seatbelt profile (alt-screen TUI corruption class + hanging interactive prompts).
 

@@ -1,7 +1,6 @@
 package plugins
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,59 +23,79 @@ type Plugin struct {
 	Instructions string           `json:"instructions"`
 	OnInstall    []string         `json:"on_install"`
 	MCP          *PluginMCPConfig `json:"mcp"`
-	// Dir is the absolute filesystem directory containing plugin.json. Not
+	// Dir is the absolute filesystem directory containing the manifest. Not
 	// persisted in plugin.json; populated by LoadPlugins from the scan.
 	Dir string `json:"-"`
+	// Format is FormatOcode (has plugin.json) or FormatClaude (has only a
+	// Claude Code .claude-plugin/plugin.json).
+	Format string `json:"-"`
+	// HasClaudeManifest is true when the plugin ships a Claude Code manifest,
+	// which opts it into Claude Code conventions (hooks/hooks.json).
+	HasClaudeManifest bool `json:"-"`
+	// Source is SourceOcode for plugins in ocode's plugin dirs and
+	// SourceClaudeCode for plugins installed by Claude Code.
+	Source string `json:"-"`
+	// SkillDirs are the plugin's skill roots (skills/ plus manifest extras).
+	SkillDirs []string `json:"-"`
+	// DefaultEnabled is the plugin's state when ocode's config has no entry
+	// for it: true for ocode plugins; for a Claude Code install, whatever
+	// Claude Code's own enabledPlugins says (enabled when unset). An ocode
+	// config entry always overrides it, and ocode never writes Claude Code's
+	// settings, so toggling in ocode leaves Claude Code untouched.
+	DefaultEnabled bool `json:"-"`
 }
 
 func LoadPlugins(enabled map[string]bool) []Plugin {
 	return LoadPluginsForProject(enabled, "")
 }
 
-// LoadPluginsForProject loads plugins from the standard search paths, using
-// projectRoot for project-scoped discovery instead of os.Getwd(). When
-// projectRoot is empty, falls back to the legacy findProjectRoot() path.
+// LoadPluginsForProject loads the enabled plugins from the standard search
+// paths, using projectRoot for project-scoped discovery instead of
+// os.Getwd(). When projectRoot is empty, falls back to the legacy
+// findProjectRoot() path.
+//
+// enabled is ocode's per-plugin config (name → on). A plugin with an entry
+// follows it; one without falls back to its DefaultEnabled.
 func LoadPluginsForProject(enabled map[string]bool, projectRoot string) []Plugin {
-	var plugins []Plugin
-	// seen dedupes by plugin name so a disk copy (listed first in
-	// pluginSearchPaths) wins over the bundled/embedded copy.
-	seen := make(map[string]bool)
-
-	for _, dir := range pluginSearchPathsForProject(projectRoot) {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
+	var out []Plugin
+	for _, p := range LoadAllPluginsForProject(projectRoot) {
+		on := p.DefaultEnabled
+		if v, ok := enabled[p.Name]; ok {
+			on = v
 		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			pluginPath := filepath.Join(dir, e.Name(), "plugin.json")
-			data, err := os.ReadFile(pluginPath)
-			if err != nil {
-				continue
-			}
-			var p Plugin
-			if err := json.Unmarshal(data, &p); err != nil {
-				continue
-			}
-			if p.Name == "" {
-				p.Name = e.Name()
-			}
-			if seen[p.Name] {
-				continue
-			}
-			if enabled != nil {
-				if on, ok := enabled[p.Name]; ok && !on {
-					continue
-				}
-			}
-			seen[p.Name] = true
-			p.Dir = filepath.Join(dir, e.Name())
-			plugins = append(plugins, p)
+		if on {
+			out = append(out, p)
 		}
 	}
+	return out
+}
 
+// LoadAllPluginsForProject returns every discoverable plugin, enabled or
+// not, one per name. Candidates arrive in precedence order (ocode's global,
+// project and bundled dirs, then Claude Code's installed plugins), so
+// first-wins dedupe makes a disk copy win over the bundled one and any ocode
+// plugin shadow a Claude Code install of the same name — even when the ocode
+// copy is disabled, so disabling it never lets the other copy through.
+func LoadAllPluginsForProject(projectRoot string) []Plugin {
+	var plugins []Plugin
+	seen := make(map[string]bool)
+	for _, c := range pluginCandidatesForProject(projectRoot) {
+		p, ok := readPluginManifest(c.dir)
+		if !ok {
+			continue
+		}
+		if p.Name == "" {
+			p.Name = filepath.Base(c.dir)
+		}
+		if seen[p.Name] {
+			continue
+		}
+		seen[p.Name] = true
+		p.Dir = c.dir
+		p.Source = c.source
+		p.DefaultEnabled = c.defaultEnabled
+		plugins = append(plugins, p)
+	}
 	return plugins
 }
 
@@ -114,11 +133,11 @@ func FindPluginDir(name string) string {
 // projectRoot is empty, falls back to the legacy os.Getwd() path.
 func FindPluginDirForProject(name, projectRoot string) string {
 	for _, dir := range pluginSearchPathsForProject(projectRoot) {
-		candidate := filepath.Join(dir, name, "plugin.json")
-		if _, err := os.Stat(candidate); err == nil {
-			return filepath.Join(dir, name)
+		candidate := filepath.Join(dir, name)
+		if _, ok := readPluginManifest(candidate); ok {
+			return candidate
 		}
-		// Also handle case where plugin.json's name field differs from dir
+		// Also handle case where the manifest's name field differs from dir
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -127,13 +146,8 @@ func FindPluginDirForProject(name, projectRoot string) string {
 			if !e.IsDir() {
 				continue
 			}
-			pluginPath := filepath.Join(dir, e.Name(), "plugin.json")
-			data, err := os.ReadFile(pluginPath)
-			if err != nil {
-				continue
-			}
-			var p Plugin
-			if err := json.Unmarshal(data, &p); err != nil {
+			p, ok := readPluginManifest(filepath.Join(dir, e.Name()))
+			if !ok {
 				continue
 			}
 			if p.Name == "" {
@@ -228,7 +242,19 @@ func LoadPluginToolsDirPaths(enabled map[string]bool) []string {
 }
 
 func LoadPluginCommandDirPaths(enabled map[string]bool) []string {
-	return loadPluginSubdirPaths(pluginSearchPaths(), "commands", enabled)
+	paths := loadPluginSubdirPaths(pluginSearchPaths(), "commands", enabled)
+	// Claude Code-installed plugins contribute commands too, unless an ocode
+	// plugin of the same name shadows them (LoadPlugins drops those).
+	for _, p := range LoadPlugins(enabled) {
+		if p.Source != SourceClaudeCode {
+			continue
+		}
+		cmdDir := filepath.Join(p.Dir, "commands")
+		if info, err := os.Stat(cmdDir); err == nil && info.IsDir() {
+			paths = append(paths, cmdDir)
+		}
+	}
+	return paths
 }
 
 // LoadGlobalPluginAgentsDirPaths returns the agents/ subdirectories for global
@@ -265,12 +291,8 @@ func loadPluginSubdirPaths(roots []string, subdir string, enabled map[string]boo
 			}
 			if enabled != nil {
 				name := e.Name()
-				pluginPath := filepath.Join(dir, e.Name(), "plugin.json")
-				if data, err := os.ReadFile(pluginPath); err == nil {
-					var p Plugin
-					if err := json.Unmarshal(data, &p); err == nil && p.Name != "" {
-						name = p.Name
-					}
+				if p, ok := readPluginManifest(filepath.Join(dir, e.Name())); ok && p.Name != "" {
+					name = p.Name
 				}
 				if on, ok := enabled[name]; ok && !on {
 					continue

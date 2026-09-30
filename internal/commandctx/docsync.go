@@ -24,6 +24,7 @@ func DocSync(workDir string, mode string) (string, error) {
 	}
 
 	docFiles := collectDocSyncTargets(workDir)
+	briefing := rootBriefingDoc(workDir)
 
 	var b strings.Builder
 	b.WriteString("You are running /doc-sync for this repository.\n\n")
@@ -47,7 +48,10 @@ func DocSync(workDir string, mode string) (string, error) {
 	b.WriteString("- Only fix what is PROVABLY wrong or missing given the diff below — no speculative improvements.\n")
 	b.WriteString("- Do not increase file length unless filling a genuine gap the diff introduced.\n")
 	b.WriteString("- Noop is the correct answer most of the time.\n")
-	b.WriteString("- Never touch CLAUDE.md.\n")
+	if briefing == "AGENTS.md" {
+		b.WriteString("- Never touch CLAUDE.md.\n")
+	}
+	b.WriteString("- Never create new files — only edit the files listed above.\n")
 	b.WriteString("- Edit in-place with the Edit tool — do not rewrite whole files unless the file is tiny (<20 lines).\n")
 	b.WriteString("- After all edits, summarise what changed and why in one short paragraph.\n\n")
 
@@ -89,14 +93,30 @@ func collectDocSyncDiff(workDir, mode string) (string, error) {
 	return result, nil
 }
 
+// rootBriefingDoc returns the root instruction file /doc-sync maintains:
+// AGENTS.md when present (a CLAUDE.md beside it is then conventionally a thin
+// pointer that must not be edited), else CLAUDE.md when it is the repo's only
+// briefing. Without the CLAUDE.md fallback a CLAUDE.md-only repo got no
+// briefing target, and the model recreated a duplicate AGENTS.md. Empty when
+// neither exists.
+func rootBriefingDoc(workDir string) string {
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if _, err := os.Stat(filepath.Join(workDir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
 // collectDocSyncTargets returns the doc files that may be updated, relative paths.
 func collectDocSyncTargets(workDir string) []string {
 	var files []string
 
-	for _, name := range []string{"AGENTS.md", "OCODE.md"} {
-		if _, err := os.Stat(filepath.Join(workDir, name)); err == nil {
-			files = append(files, name)
-		}
+	if briefing := rootBriefingDoc(workDir); briefing != "" {
+		files = append(files, briefing)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "OCODE.md")); err == nil {
+		files = append(files, "OCODE.md")
 	}
 
 	rulesDir := filepath.Join(workDir, ".opencode", "rules")

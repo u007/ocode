@@ -38,5 +38,5 @@ Every modifying tool backs up *before* mutating:
 - Backups accumulate under `<GlobalDataDir>/project/{slug}/snapshots/`; there is no documented automatic GC beyond agent unregister (`UnregisterAgent`). Because the store lives outside the project working directory, it never enters the project's git tree.
 
 ## See also
-- `AGENTS.md` — forbids `git stash`/`git reset --hard`/`git checkout -- <file>`/`git clean -fd` as a default coping strategy (the snapshot store is the supported alternative).
+- `CLAUDE.md` — forbids `git stash`/`git reset --hard`/`git checkout -- <file>`/`git clean -fd` as a default coping strategy (the snapshot store is the supported alternative).
 - `internal/tool/undo.go`, `internal/snapshot/snapshot.go`, `internal/tool/file.go`, `internal/tool/patch.go`

@@ -1,5 +1,7 @@
 Create or update `AGENTS.md` for this repository.
 
+If the repository has a root `CLAUDE.md` but no `AGENTS.md`, apply everything below to `CLAUDE.md` instead and do not create `AGENTS.md` — one briefing file, never two copies.
+
 The goal is a compact instruction file that helps future ocode sessions avoid mistakes and ramp up quickly. Every line should answer: "Would an agent likely miss this without help?" If not, leave it out.
 
 User-provided focus or constraints (honor these):

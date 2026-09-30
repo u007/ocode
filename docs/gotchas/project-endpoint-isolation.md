@@ -2,7 +2,7 @@
 type: Gotcha
 title: Project/Endpoint Isolation — one project must never halt another
 description: 'Gotcha: one project endpoint must never halt another — Handler.mu map-only invariant, per-item deadlines in shared loops, and the git-status emitter isolation fix.'
-resource: internal/server/handler_git.go; internal/server/emitters.go; internal/server/agent_session.go; AGENTS.md
+resource: internal/server/handler_git.go; internal/server/emitters.go; internal/server/agent_session.go; CLAUDE.md
 tags:
   - gotcha
   - server
@@ -101,7 +101,7 @@ When adding per-project work driven from a shared loop:
 
 ## Related
 
-- `AGENTS.md` § "Handler.mu is a map lock, never a work lock" and "one project must never block
+- `CLAUDE.md` § "Handler.mu is a map lock, never a work lock" and "one project must never block
   another" bullets.
 - `docs/gotchas/remote-ssh-connect-hangs-whole-app.md` — same class of bug (SSH `BatchMode`
   missing → invisible prompt → hold `remoteHostRegistry` entry → every proxied request for that

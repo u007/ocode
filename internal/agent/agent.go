@@ -1390,7 +1390,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// Re-anchor the todo plan into the user-role volatile tail so a long run
 	// (or post-compaction turn) keeps the model's own plan in scope. The block
 	// is user-role, not system-role, because every system-role message rides
-	// the cached system block — see AGENTS.md "## Persistent todo plan".
+	// the cached system block — see CLAUDE.md "## Persistent todo plan".
 	messages = injectTodoTail(messages)
 	// LSP diagnostics that changed since the agent last reported them
 	// (user edits between turns, package-level fallout). User-role, tail,

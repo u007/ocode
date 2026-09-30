@@ -45,6 +45,6 @@ If corruption occurs:
 
 ## Related
 
-- AGENTS.md "Git Worktrees" section for isolated parallel development
+- CLAUDE.md "Git Worktrees" section for isolated parallel development
 - `internal/snapshot/` for the file-edit snapshot and undo mechanism
 - OKF docs/file-edit-snapshot.md for the snapshot system architecture

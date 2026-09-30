@@ -179,8 +179,7 @@ Providers are configured via env vars:
 ### Context files
 
 These are loaded at session start:
-- `AGENTS.md` — Agent instructions and coding standards
-- `CLAUDE.md` — Project-specific instructions
+- `CLAUDE.md` — Agent instructions and coding standards
 - `.cursorrules` — Cursor compatibility rules
 
 ---
