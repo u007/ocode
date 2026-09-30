@@ -232,6 +232,24 @@ dropping the 148-entry prefix list are worthwhile secondary wins (0.14 → 0.37)
 recovers 0.85 on its own.
 
 
+## Test lesson: a "symlink escape" fixture pointed at a temp dir proves nothing (2026-09-30)
+
+- **`isWithinAllowedScope` always admits a well-known temp dir** (`isTempDir` →
+  `pathscope.IsTempDir`), so a test that builds BOTH the allowed root and the "outside" target with
+  `t.TempDir()` constructs a scenario that is legitimately in scope. The test compiles, runs, and
+  asserts a refusal — and the code is *correct*, because there is no escape to catch. It fails for the
+  wrong reason, or worse, would be deleted as "flaky" by whoever hits it next.
+- **Symptom:** `TestFoldTopLevelCds_SymlinkEscapeRefused` failed with "fold accepted a symlink escape"
+  while pointing at two sibling `t.TempDir()` paths. The fix was the *fixture*, not the fold: point the
+  symlink at a genuinely out-of-scope location (`/etc`) and set the root with `t.TempDir()`.
+- **Rule:** for any scope/containment test, the out-of-scope side must be verified out of scope
+  *first* — assert the predicate returns false for it before asserting the code under test refuses it.
+  Otherwise a "passing" test may be asserting nothing, or asserting the wrong invariant. This is the
+  same class as the opaque-substitution rule (a missing fixture must fail loudly, never silently pass)
+  and as the mutation lesson (a build-only failure is a false positive, not a catch).
+- Related: the `cd` fold itself, its refusal matrix, and the measured 0.06 → 0.96 live-API result are in
+  `CHANGES.md` under the 2026-09-30 `permission_cdfold` entry.
+
 ## Git follow-up status probe errors a mutation that succeeded (2026-09-29)
 
 - **A completed git mutation can report HTTP 500/502.** The action handlers
@@ -3278,10 +3296,22 @@ rescope a server HTTP/SSE skill, fold the `AgentRegistry` lock contract into
 `ocode-agent-architecture`, add the worktree embed copies to AGENTS.md). Nothing
 was written to `skills/`. Partial work left open, deliberately:
 
-- [ ] **7 of the 9 `docs/gotchas/remote-*.md` pages are unread.** The proposed
-  `ocode-remote-ssh` skill was justified from first-hand source work on
-  `internal/remote` + `internal/server/remote_*.go`, NOT from those pages. They
-  are step 0 of the skill draft, not optional. Pages:
+- [x] **`skills/ocode-remote-ssh/SKILL.md` ALREADY EXISTS — do not create it.**
+  A concurrent session created it (255 lines, 11 sections: file map, connection
+  identity, ssh argv, exec-slot pool, trust boundary, git, provisioning,
+  profile routing, bundle-page index, known-bad page, quick greps) and it is
+  tracked at HEAD `28dc67bd`. My `/learn` pass proposed creating it and, on the
+  next step, OVERWROTE it with a weaker 221-line draft before reading the file.
+  The overwrite was undone and the index re-staged to the 255-line content, so
+  the net change is zero and the tree matches HEAD for this path. LESSON: a
+  `skills/*` inventory listing is not proof a skill is absent — the directory can
+  be created between the listing and the write. **Always read the target path
+  before writing a new skill file.**
+- [ ] **Review (not write) `ocode-remote-ssh`.** Open items: whether its §5
+  trust-boundary / §6 git sections should absorb the tilde-vs-expanded
+  `403/400/404` failure-mode table and the "remote chat runs on the host, ignore
+  stale projectHostFor comments" note from the draft I discarded. Pages still
+  worth reading against it:
   `remote-git-shell-quoting`, `remote-session-config-host-routing`,
   `remote-session-list-tilde-404`, `remote-ssh-chat-profile-not-applied`,
   `remote-terminal-502-provisioning`, `remote-terminal-custom-port-omitted`,

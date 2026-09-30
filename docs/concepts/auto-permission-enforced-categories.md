@@ -125,6 +125,26 @@ The judges are separate model calls, so the main conversation's masking never re
 
 Jev gets `expanded_command` and `resolved_variables` in its state plus a rubric line telling it to judge paths from the expanded form. The chat judge gets the same as an "Expanded command" section under `Arguments`. The expansion is judge context only: the command that runs is unchanged, and `verifyAutoGrant` still checks the original.
 
+## `cd` is resolved in Go, not by the judge (2026-09-30 amendment)
+
+Shell-variable expansion above resolves *names*. It never resolved a `cd`, and that turned out to be the dominant cause of low-confidence false prompts on the Jev path.
+
+**The finding.** Jev cannot resolve a `cd` target against `allowed_roots` — it does no path-containment reasoning. Replaying one ordinary read-only `cd X && … && for …` command against the live API with the real 37-root / 148-prefix state, 5 repeats per case:
+
+| what the judge saw | choice | confidence | concern |
+|---|---|---|---|
+| the `cd` | deny | 0.06 [0.04-0.10] | `outside_allowed_roots` (wrong — the target was in a listed root) |
+| the `cd` folded away | allow | 0.96 [0.95-0.97] | none |
+| `working_directory` moved instead, `cd` kept | allow | 0.89 [0.85-0.92] | none |
+
+5/5 runs fell below the 0.85 floor in every variant containing a `cd`, so **every `cd`-bearing command was a systematic false prompt**. The root count and prefix-list size are not causes: with the `cd` gone the full state still scores 0.96.
+
+**The fix.** `foldTopLevelCds` (`internal/agent/permission_cdfold.go`) strips top-level `cd <literal>` statements before the state is built. `buildTypesafePermissionState` then sends `working_directory` set to the resolved target, `expanded_command` carrying the folded command, and `resolved_cd`. `arguments.command` stays verbatim so the audit trail still shows what runs.
+
+**It fails closed, and that is the load-bearing property.** Folding converts an ask into an allow, so it happens only for a literal, in-scope, unconditional top-level target. Everything else returns the command byte-identical, so the judge still sees the `cd` and a human decides. Refused: `cd -`, bare `cd`, `cd $VAR`, `cd ~/x`, globs, `$(…)`/backtick and quoted targets, out-of-scope targets, `..` escapes, multi-line commands, and any `cd` following a pipeline, `||`, or control flow. Control flow is a *freeze*, not a blanket refusal: `cd`s before a `for`/`if` still fold (the reported command's own `for` loop must not defeat it), a `cd` after one does not.
+
+**Not fixed here.** `OutOfScopePath` is still never populated for compound commands, because `shellCompound` (`internal/agent/permissions.go`) makes `firstOutOfScopePath` bail, so `verifyAutoGrant`'s scope guard remains unreachable for them. Folding improves what the judge sees; it does not add a deterministic scope check. Tracked in `TODO.md`.
+
 ## UI
 
 `PermissionsForm.tsx` loads the catalog and the auto-permission config in parallel. Each category is a checkbox with `aria-label="Enforce <key>"`; **ticked = enforced**, and saving writes `relaxed_concerns` = the **unticked** keys. `All` / `None` buttons set the array to `[]` / every key. The block renders a server-unavailable fallback when the catalog is empty.

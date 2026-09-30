@@ -470,7 +470,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
    *  then so a mint-then-fetch race cannot replace the server's list with a
    *  locally-derived one (which would spawn a phantom shell). */
   const restoredRef = useRef(false);
-  const syncRef = useRef({ dirty: false, writing: false, refetchQueued: false });
+  const syncRef = useRef({ dirty: false, writing: false, refetchQueued: false, pushFailed: false });
 
   /** Applies a server list to one already-live project. Ids only: a rename or an
    *  OSC title is owned by whichever client has the panel open and lands in the
@@ -479,8 +479,24 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     (key: string, incoming: TerminalInstance[]) => {
       const cur = store.state.byProject[key];
       if (!cur?.live) return;
+      // Compare METADATA, not just ids. An ids-only check meant a rename or an
+      // OSC title set in another client never reached this window's live tab —
+      // it stayed stale until a full page reload. Titles are lost to a
+      // last-writer-wins race anyway (only the attached client sees OSC output),
+      // and the caller's dirty/writing guard keeps a mid-flight PUT from being
+      // mistaken for a newer server state.
       const same =
-        cur.terminals.length === incoming.length && cur.terminals.every((t, i) => t.id === incoming[i]?.id);
+        cur.terminals.length === incoming.length &&
+        cur.terminals.every((t, i) => {
+          const next = incoming[i];
+          return (
+            !!next &&
+            t.id === next.id &&
+            t.title === next.title &&
+            !!t.renamed === !!next.renamed &&
+            (t.oscTitle ?? "") === (next.oscTitle ?? "")
+          );
+        });
       if (same) return;
       // Two independent skips. The mirror write is redundant (refetchTerminalTabs
       // already wrote it), and the server PUT is an ECHO: this state came FROM
@@ -537,6 +553,25 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
         saveProjectTerminals(key, terminals, current?.activeId ?? "");
         adoptServerList(key, terminals);
       }
+      // A project whose LAST terminal was closed is DELETED server-side, so it
+      // is absent from the response entirely rather than present with an empty
+      // list. Walking only the returned keys therefore left this window showing
+      // a tab for a shell that no longer exists — forever, since nothing else
+      // would ever mention the key again.
+      //
+      // Only live projects are cleared, and only on a REFETCH: during the initial
+      // restore a live project absent from the server is one minted locally
+      // before hydration landed, which the restore flushes TO the server rather
+      // than deleting. A failed PUT likewise leaves live projects the server never
+      // heard of, so clearing waits for a push that succeeds.
+      const clearAbsent = restoredRef.current && !sync.pushFailed;
+      for (const [key, entry] of Object.entries(store.state.byProject)) {
+        if (!clearAbsent || !entry.live || key in (res.projects ?? {}) || entry.terminals.length === 0) continue;
+        skipNextPutRef.current.add(key);
+        skipNextSaveRef.current.add(key);
+        saveProjectTerminals(entry.path, [], "", entry.host);
+        dispatch({ type: "SET_PROJECT_TERMINALS", projectPath: entry.path, host: entry.host, terminals: [], activeId: "" });
+      }
       // Peeked projects read the mirror out of localStorage, which is not
       // reactive; bump so the provider re-renders and they pick the list up.
       dispatch({ type: "BUMP_REVISION" });
@@ -574,7 +609,9 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       // (which the server would read as "delete every project").
       if (Object.keys(projects).length === 0) return;
       await api.setTerminalTabs(projects);
+      sync.pushFailed = false;
     } catch (err) {
+      sync.pushFailed = true;
       console.error("Failed to persist terminal tabs to server:", err);
     } finally {
       sync.writing = false;

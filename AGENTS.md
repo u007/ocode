@@ -351,6 +351,25 @@ reads as authoritative while pointing at the wrong statement.
 - **`/doc-sync`** (rules/skills sync) is unrelated — its scope is `AGENTS.md`, rules, skills, never `docs/`.
 - **Memory scopes** (`/mem`) are orthogonal — knowledge bundle is project docs, memory is agent state.
 
+## Authoring knowledge and skill files: read the target first
+
+`docs/**` bundle pages and `skills/*/SKILL.md` are shared, concurrently-edited
+knowledge artifacts — unlike source files, they are often untracked while being
+written, so an accidental overwrite has **no git history to recover from**.
+
+- **Read the exact target path before writing it.** A directory listing
+  (`ls skills/*/`) is not proof a skill is absent: another session can create
+  the file between your listing and your write. This has already happened — a
+  `skills/ocode-remote-ssh/SKILL.md` was replaced mid-authoring by a weaker
+  draft and survived only because the write tool's undo existed.
+- **Prefer the `edit` tool over a whole-file `write` for any path that may
+  already exist.** An anchored replace fails loudly when the anchor is missing;
+  `write` silently clobbers.
+- When you do overwrite by mistake, `undo_file_change` restores the file — but
+  the **staged index is separate**: re-stage the restored file, or a later commit
+  will land the bad version. Prefer a **path-limited** commit
+  (`git commit <path>`) to correct one file without sweeping a shared tree.
+
 ## TUI Output Safety (alt-screen)
 The TUI runs in Bubble Tea's alt-screen. Any raw write to `os.Stdout` /
 `os.Stderr` from a path the running TUI invokes paints directly over the
@@ -905,6 +924,31 @@ Rules for anything in `internal/server`:
   per-project work driven from a shared loop must follow that shape: a
   per-item deadline plus per-item fan-out, never a bare `exec.Command`.
 
+- **Registering a session-scoped SSE event is a two-part change.**
+  `sessionScopedEvents` (`event_bus.go`) is the allowlist of event types that
+  must carry a session id — publishing one of those without an id is an error
+  (`event_bus.go`), and a scoped event whose NAME is absent from the map routes
+  wrongly. Separately, momentary events (`agent_activity`, `todo_updated`) are
+  deliberately NOT in `liveFrameEvents` (`session_manager.go`): replaying them on
+  a reconnect shows stale mid-turn state. A new event name must be placed in both
+  maps deliberately, not by pattern-matching an existing one.
+- **Every path that holds `turnActive=true` must publish `turn_heartbeat`.**
+  `runTurn` starts the ticker, but the permission-answer and question-answer
+  *continuations* hold turn state too. A continuation without a heartbeat makes
+  the client watchdog flag a false "stalled" after 30s while the turn is running
+  fine. Use the shared `startTurnHeartbeat` helper (`agent_session.go`) rather
+  than setting turn state by hand.
+- **Push emitters only cover VIEWED projects.** `EventBus.ViewedProjects()`
+  gates the git/spending emitters, so a project with no open tab receives no
+  `git_status` push at all and must poll instead — a sidebar badge that needs
+  live data has to fetch for itself rather than wait for an event.
+- **Routes all live in `Server.registerRoutes()` (`server.go`), behind one of
+  four middleware wrappers** (`authMiddleware`, `mediaAuthMiddleware`,
+  `healthMiddleware`, `pluginAuthMiddleware` — health is the unauthenticated
+  one). A new endpoint must pick its wrapper deliberately, and a
+  session/project-scoped route must accept and thread `?host=` (see
+  `concepts/web-session-host-scoping.md`).
+
 ## Git subprocesses: `gitexec`, never a bare `exec.Command("git", …)`
 
 Every git child ocode spawns is a potential `.git/index.lock` contender, because
@@ -1090,6 +1134,15 @@ Rules:
   mirror out of localStorage, which is not reactive; without the counter a
   hydrating server read would write the mirror and change nothing the store
   exposes, and the second client would keep showing an empty strip.
+- **Closing a tab is a PERMANENT discard, not a detach.** `DELETE
+  /api/terminal/{id}` kills the shell AND removes its append-only disk history
+  (`sess.history.remove()`, `handler_terminal.go`), because the transcript
+  belonged to a tab that no longer exists; unmounting the panel alone only
+  detaches and keeps both (30 min local / 24 h remote TTL). With the list shared,
+  a close therefore ends the session for EVERY client — including one currently
+  attached to that shell. `TestTerminalKillDropsDiskHistory` pins the history
+  removal (the other `history.remove()` call sites are test cleanup, not
+  assertions).
 - **One attachment slot per terminal; the loser is told why.** `attach()` sends
   `{"type":"detached","reason":"superseded"}` on the displaced socket before
   closing it. The close is clean (1000), byte-identical to a shell exiting, so

@@ -225,8 +225,8 @@ per-firing cleanup — is shared rather than forked (below).
 ### Model: `Kind`, `Status`, `Action`
 `Item` (in `internal/reminders/types.go`):
 
-- **`Kind`** — `reminder` (a one-shot nudge; a due time is REQUIRED:
-  `types.go:272-273` rejects `KindReminder` with `DueAtMs <= 0`) or `task`
+- **`Kind`** — `reminder` (a one-shot nudge; a due time is REQUIRED, and
+  `types.go:277-278` rejects `KindReminder` with `DueAtMs <= 0`) or `task`
   (checklist item; due date OPTIONAL — `DueAtMs == 0` means "no due date",
   never "due now").
 - **`Status`** — `pending | in_progress | completed | cancelled`.
@@ -289,13 +289,16 @@ HTTP behaviour:
     (`reminders.go:117-119`, "a new item is always created pending; set
     status with PATCH");
   - list filter `?status=archived` → **400** (`reminders.go:69-72`);
-  - ⚠ **known discrepancy (red test):** on `PATCH`, an unknown status passes
-    through `Transition`, which wraps "unknown status" in `ErrTransition`
-    (`transition.go:83-85`), and the handler maps that to **409** — so
-    `TestUnknownStatusIsRejected` (`internal/server/reminders_test.go:165`,
-    which asserts 400) currently FAILS deterministically (verified 3/3 on
-    2026-09-30). The "never coerced" half of the contract holds everywhere;
-    only the PATCH status code for an unknown value disagrees with the test.
+  - `PATCH` with an unknown status → **400** (`reminders.go:170-175`). The
+    handler checks `ValidStatus` BEFORE consulting `Transition`, because both
+    an unknown value and an illegal move come back from `Transition` wrapped in
+    the same `ErrTransition` sentinel: an unknown value is a malformed request
+    (400, a field error the form can show) while a known value the machine
+    forbids is a state CONFLICT (409, meaning re-read and re-render). Collapsing
+    them made an unknown status answer 409, which is what
+    `TestUnknownStatusIsRejected` (`internal/server/reminders_test.go:165`)
+    caught — the two are now checked separately and the whole
+    `internal/server` package is green.
 - **PATCH validates the transition BEFORE applying field edits**
   (`reminders.go:149-193`): the body's status is checked first, then field
   edits via `Service.Update`, then `SetStatus` — so a rejected status change
@@ -366,7 +369,7 @@ both collections:
   (`internal/reminders/service.go:165-174`, sort call at `:191`), and
   paginated: `limit` (default **50**, max **200** — `DefaultPageSize` /
   `MaxPageSize`, `service.go:147,149`; the effective value is echoed back
-  via `effectiveLimit`, `reminders.go:384`), `offset`, optional `status`
+  via `effectiveLimit`, `reminders.go:403`), `offset`, optional `status`
   filter. Response shape `{items,total,limit,offset}`
   (`reminderListResponse`, `reminders.go:53`). A malformed `limit`/`offset`
   is a **400**, never a silent `0` (`reminders.go:76-84`).
@@ -384,7 +387,7 @@ both collections:
 
 **Cross-kind ids are 404s, not edits:** a task id presented under
 `/api/reminders` (or vice versa) is reported as 404 — `lookup` enforces the
-kind (`reminders.go:233-253`) so one collection cannot be read or mutated
+kind (`reminders.go:249`) so one collection cannot be read or mutated
 through the other's route.
 
 ### Host wiring
@@ -394,7 +397,7 @@ routes. When the cron service is attached it reuses that service's
 `Outbox`/`RunHistory` instances, so the drainer fan-out (Telegram, TUI bridge,
 web Outbox panel) applies to reminder deliveries too. A `busNotifier`
 (`reminders_host.go:32`) publishes a project-level **`reminder_fired`** SSE
-event (`ReminderFiredEvent`, `reminders_host.go:21`). Call sites:
+event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
 `internal/desktop/scheduler.go:69` and `main.go`'s `schedulerSetup()`
 (`main.go:116`).
 

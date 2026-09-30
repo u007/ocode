@@ -1,5 +1,77 @@
 # Changelog
 
+## 2026-09-30 — The auto-permission judge is no longer asked to resolve `cd`, which was the whole cause of its low-confidence false prompts
+
+- **Traceability.** The implementation is `internal/agent/permission_cdfold.go` (`foldTopLevelCds`),
+  its tests `internal/agent/permission_cdfold_test.go`, and the wiring in
+  `internal/agent/permission_typesafe.go` (`buildTypesafePermissionState`). **These landed in commit
+  `28dc67bd` ("feat: shared terminals, cron reminders, MeloTTS")** — a concurrent session's sweep
+  commit absorbed them, so the fix is filed under an unrelated message. Search `permission_cdfold`
+  to find it. Also `internal/debuglog/debuglog.go` gains `KindPermissionJudge` in the same commit.
+- **Symlinks and `..` are covered, and pinned.** The fold's scope predicate is the existing
+  `isWithinAllowedScope` → `IsPathWithinAllowedRoots` → `resolveForScopeCheck`, which runs
+  `filepath.Abs` (lexically cleaning `..`) and `EvalSymlinks` (resolving links, walking up to the
+  nearest existing ancestor so a not-yet-created target still resolves). Because a fold turns an ask
+  into an allow, that is the load-bearing property, so it is tested against a **real** `PermissionManager`
+  and a **real** symlink rather than asserted: a link whose literal path sits inside the root but whose
+  target is outside it, a lexical `../` escape, and an absolute path with `../` inside it are all
+  refused with the command returned byte-identical. The first draft of that test was itself wrong —
+  it used `t.TempDir()` as the escape target, which `isWithinAllowedScope` always admits, so it
+  proved nothing; `TODO.md` records the lesson. A second test proves the fold removes **only** the cd,
+  so `rm -rf`, `curl -d @/etc/passwd` and `git push --force` tails all survive verbatim into the
+  command the judge reads — the fold cannot be used to smuggle a payload past the judge.
+
+- **Symptom.** An ordinary read-only compound command (`cd <dir> && total=$(ls …); …; for f in …; do …; done`)
+  was auto-denied with `TypeSafe judge leaned allow but confidence 0.21 is below the 0.85 floor`.
+  The command was harmless and every path in it was inside an allowed root.
+- **Cause, measured not guessed.** Replaying the exact command against the live TypeSafe API with the
+  real effective state (workDir + 17 global `extra_allowed_paths` + 24 from `.ocode/settings.json`
+  = **37 roots**, plus **148** `allowed_command_prefixes`), 5 repeats per case, varying one variable:
+
+  | state | choice | confidence | concern |
+  |---|---|---|---|
+  | real state, `cd` visible | deny | 0.06 [0.04-0.10] | `outside_allowed_roots` |
+  | real state, `cd` folded away | allow | 0.96 [0.95-0.97] | none |
+  | workDir moved to the target, `cd` kept | allow | 0.89 [0.85-0.92] | none |
+  | real state, `cd` removed, single root | allow | 1.00 [1.00-1.00] | none |
+
+  **The judge does not resolve a `cd` target against `allowed_roots`.** It does no path-containment
+  reasoning, so it either invents an `outside_allowed_roots` concern — wrongly, since
+  `/Users/james/www` is in the roots and contains the target — or simply loses confidence. The root
+  count and the prefix list are *not* the cause: with the `cd` gone, the full 37-root/148-prefix state
+  scores 0.96. **5/5 runs fell below the floor in every variant containing a `cd`**, so every
+  `cd`-bearing command was a systematic false prompt.
+- **Fix.** New `internal/agent/permission_cdfold.go`: `foldTopLevelCds` removes top-level
+  `cd <literal>` statements and reports the working directory they establish, before the state is
+  built. Wired into `buildTypesafePermissionState`, which now sends `working_directory` set to the
+  resolved target, `expanded_command` carrying the folded command, and a new `resolved_cd` field.
+  `arguments.command` stays verbatim so the audit trail still shows what will run — measured at
+  0.96, so rewriting it was not necessary.
+- **Fail-closed, and the tests earned their keep.** Folding turns an ask into an allow, so it folds
+  only when certain: a literal, in-scope, unconditional top-level target. Refused (input returned
+  unchanged, so the judge still sees the `cd` and a human decides) for `cd -`, bare `cd`, `cd $VAR`,
+  `cd ~/x`, globs, `$(…)`/backtick targets, quoted targets, out-of-scope targets, `..` escapes, and
+  anything after a pipeline, `||`, or control flow. The first draft refused the real reported command
+  because a global control-flow guard saw its `for` loop; narrowing the guard to a *freeze* (cd's
+  before control flow fold, a cd after one is refused) is what made the real case work. The refusal
+  tests then caught a genuine bug — a `cd` after a `|`/`||` join was folding — which is the
+  ask→allow direction.
+- **Negative controls unchanged.** Literal secret in a URL → `deny@1.00` (`secrets`); `rm -rf`
+  behind a `cd` → `deny@0.98` (`destructive`). Folding does not weaken the deny direction.
+- **Tests.** `internal/agent/permission_cdfold_test.go`: folds a simple and a chained cd; 19 refusal
+  sub-cases each asserting the command is returned byte-identical; a `NeverWidens` set pairing every
+  ambiguous shape with a destructive payload; and the exact production command pinned as must-fold.
+- **Deliberately not done.** `permissions.auto.min_confidence` is unchanged — it would not have
+  auto-granted the original call and it weakens gates that matter. The gate still reads the
+  `confidence` field, not `probabilities[choice]`: the gap between them is 0.00 in the confident band
+  and only opens under uncertainty, and switching would be *more* permissive for allows, so it needs
+  a labeled corpus first. The `OutOfScopePath` gap is unchanged: `shellCompound` still makes
+  `firstOutOfScopePath` bail for compound commands, so `verifyAutoGrant`'s scope guard is still
+  unreachable there — tracked separately in `TODO.md`.
+- Also adds `KindPermissionJudge` (`PERMJUDGE`) to `internal/debuglog`, currently unused, for the
+  durable judge-decision log that would make the next occurrence diagnosable — the 0.21 event itself
+  was unrecoverable because no verdict, confidence, concern, or `allowed_roots` was ever persisted.
+
 ## 2026-09-30 — Skill-doc audit: a new `ocode-remote-ssh` field guide, and corrections across the `ocode-*` skills
 
 A read-only audit of `skills/` found 17 stale line anchors and ~10 false claims
@@ -260,6 +332,49 @@ copies if the search-path precedence ever flips).
   closes, and host-qualified key isolation). Each mutation-verified: removing the detach
   frame, the merge semantics, the alert pruning, or the `onWake` takeover guard each fails a
   named test. Full web suite 310 files / 2735 tests green.
+
+## 2026-09-30 — Closing a terminal, and renaming one, now reach the other client
+
+Two follow-up defects in the shared terminal tab list, both found by asking "what
+actually happens when a client closes or renames a terminal?" rather than by a
+failing test — they were shipped in the previous entry with no coverage.
+
+- **Closing a project's LAST terminal did not propagate.** An empty terminal list
+  is how a client says "close this project's last tab", and the server treats it
+  as a DELETE — so the project is absent from `GET /api/terminal-tabs` entirely
+  rather than present with an empty list. The refetch walked only the keys the
+  server RETURNED, so the other client never learned the key was gone and kept
+  showing a tab for a shell that no longer existed, forever. Fixed: a refetch now
+  also clears every LIVE project whose key is absent from the response. That
+  clearing is deliberately refetch-only — during the initial restore a live
+  project absent from the server is one minted before hydration landed, which the
+  restore flushes TO the server instead of deleting.
+- **A rename (or OSC title) never reached another client's open project.**
+  `adoptServerList` compared terminal IDS only and returned early when they
+  matched, so metadata changes were dropped on the floor: a rename lived in the
+  renaming window and nowhere else until a full page reload. Fixed: the
+  comparison now includes title, `renamed` and `oscTitle`. The caller's
+  dirty/writing guard still prevents a mid-flight PUT from being mistaken for
+  newer server state, and adopting sets the echo skips so the change is not
+  written straight back.
+- **Tests.** "clears the tab when another client closes the project's last
+  terminal" and "adopts a rename made by another client" in
+  `terminalStore.shared.test.tsx`, both mutation-verified (reverting to an
+  ids-only comparison fails the rename case; removing the absent-key sweep fails
+  the close case). The rename test had to be made realistic first — as written it
+  rendered a non-activated project, which reads the local mirror and passed even
+  with the live store never updating.
+- **Closing a tab was already permanent, and is now pinned by a test.** `DELETE
+  /api/terminal/{id}` kills the shell and REMOVES its append-only disk history
+  (`sess.history.remove()`), unlike a detach which keeps both. That was only a
+  code comment with no coverage; `TestTerminalKillDropsDiskHistory` now asserts it
+  (mutation-verified: dropping the `remove()` call fails it). The first version of
+  the test called the handler directly and 404'd, because `HandleTerminalKill`
+  reads `r.PathValue("id")` which `httptest.NewRequest` does not populate — it now
+  routes through a real mux, which also proves the route pattern matches.
+- **Still true, and worth stating plainly:** the shell itself does NOT mirror.
+  Keystrokes and output belong to whichever client holds the single attachment
+  slot; the other client sees the tab, not the session.
 
 ## 2026-09-30 — Desktop logs renderer main-thread stalls
 

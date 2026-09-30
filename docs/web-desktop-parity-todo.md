@@ -37,6 +37,14 @@ below apply to both.
     map); all three panes stay mounted, load lazily on first show, and only
     the front pane polls.
 - TUI: `/cron` command (`internal/tui/command_cron.go`).
+- ⚠ **Reminders and Tasks are WEB/DESKTOP ONLY.** The TUI `/cron` command and
+  the LLM-facing `cron` tool (`internal/tool/cron.go`) still know only
+  `scheduler.Job`, so neither can add a reminder or tick off a task, and the
+  two stores have no TUI surface at all. Deferred deliberately to keep the
+  first change contained; tracked in `TODO.md` ("Reminders and the task list
+  are web/desktop-only"). Note the engine is already reachable from the TUI
+  process — same `reminders.json` path, and `Service.syncFromDisk` reconciles
+  a second process's writes — so this is UI work, not plumbing.
 - Docs: `docs/scheduled-jobs.md` (reminders/tasks section added 2026-09-30).
 
 ### 2. Per-session Changes tab ✅

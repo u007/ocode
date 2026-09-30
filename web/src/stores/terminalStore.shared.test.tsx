@@ -71,6 +71,7 @@ function Client({ id, projectPath, host }: { id: string; projectPath: string; ho
     <div>
       <div data-testid={`${id}-count`}>{terminals.length}</div>
       <div data-testid={`${id}-ids`}>{terminals.map((t) => t.id).join(",")}</div>
+      <div data-testid={`${id}-titles`}>{terminals.map((t) => t.title).join(",")}</div>
       <button onClick={() => activate(projectPath, host)}>{`${id}-activate`}</button>
       <button onClick={() => openTerminal(projectPath, host)}>{`${id}-open`}</button>
     </div>
@@ -194,6 +195,63 @@ it("sends a terminal opened before hydration finished once the restore settles",
   await waitFor(() => {
     expect(serverProjects.get("/srv/app")?.terminals.length).toBe(1);
   });
+});
+
+// Closing a project's LAST terminal deletes the project's entry server-side
+// (an empty list means delete). A refetch that only walks keys PRESENT in the
+// response therefore never learns the project is gone, and the other client
+// keeps a tab for a shell that no longer exists.
+it("clears the tab when another client closes the project's last terminal", async () => {
+  serverProjects.set("/srv/app", { terminals: [{ id: "only-one", title: "Solo" }] });
+
+  render(
+    <TerminalProvider>
+      <Client id="b" projectPath="/srv/app" />
+    </TerminalProvider>,
+  );
+  // Activate so the project is live, then let B's own debounced write land —
+  // otherwise that pending PUT overwrites the simulated server change and the
+  // test measures a race instead of the behaviour.
+  await act(async () => {
+    screen.getByText("b-activate").click();
+  });
+  await waitFor(() => expect(screen.getByTestId("b-ids").textContent).toBe("only-one"));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  });
+
+  // The other client closes it; the server deletes the whole project entry.
+  serverProjects.delete("/srv/app");
+  publishChanged();
+
+  await waitFor(() => expect(screen.getByTestId("b-count").textContent).toBe("0"));
+  expect(screen.getByTestId("b-ids").textContent).toBe("");
+});
+
+// A rename is user intent and must reach the other client, not just live in the
+// renaming window until that window reloads.
+it("adopts a rename made by another client", async () => {
+  serverProjects.set("/srv/app", { terminals: [{ id: "t1", title: "Terminal 1" }] });
+
+  render(
+    <TerminalProvider>
+      <Client id="b" projectPath="/srv/app" />
+    </TerminalProvider>,
+  );
+  // Activate: the realistic case is an OPEN project. A peeked project reads the
+  // mirror and would pass this even if the live store never updated.
+  await act(async () => {
+    screen.getByText("b-activate").click();
+  });
+  await waitFor(() => expect(screen.getByTestId("b-titles").textContent).toBe("Terminal 1"));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  });
+
+  serverProjects.set("/srv/app", { terminals: [{ id: "t1", title: "build", renamed: true }] });
+  publishChanged();
+
+  await waitFor(() => expect(screen.getByTestId("b-titles").textContent).toBe("build"));
 });
 
 // Adopting another client's list must not PUT that same list straight back: the
