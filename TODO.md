@@ -31,7 +31,7 @@ here rather than left implicit.
 - **The 45 `gws-*` skills (all 85 days old) have never been reviewed** and dominate the catalog
   (59% of 75). They are Google Workspace CLI docs, unrelated to this repo's domain. They may be
   legitimately reachable from here (the repo does AIMS billing work), so removal is the user's
-  call, not a cleanup to perform unattended. If they stay, a routing line in `AGENTS.md` would stop
+  call, not a cleanup to perform unattended. If they stay, a routing line in `CLAUDE.md` would stop
   them crowding the trigger surface.
 
 ## docs/ bundle: 2 of 3 writes still missing (2026-09-30)
@@ -930,7 +930,7 @@ Found while fixing the local-model-hijacks-the-tty startup crash
 ## Desktop anchors sessions at home dir when Finder-launched (2026-08-25)
 
 - [x] **Fixed (2026-08-25)**: `glob`/`grep`/`list` now anchor on `WithWorkDir` (`internal/tool/search.go:resolveSearchRoot`) and `MERGE_SNAPSHOT`/`ChatPanel` guard now keys only on `messages.length>0` (see `web/src/stores/chatStore.tsx` and `web/src/components/Chat/ChatPanel.tsx`).
-- [ ] **Deferred**: `cmd/ocode-desktop/main.go:60-68` falls back to `workDir=$HOME` when cwd is `/` — a default `~` project still triggers unbounded `WalkDir` at `internal/agent/md_discovery.go:453`. Fix: don't treat `~` as implicit project; restore last-used or require explicit pick, and/or cap md-discovery when no `.git`/`AGENTS.md` marker.
+- [ ] **Deferred**: `cmd/ocode-desktop/main.go:60-68` falls back to `workDir=$HOME` when cwd is `/` — a default `~` project still triggers unbounded `WalkDir` at `internal/agent/md_discovery.go:453`. Fix: don't treat `~` as implicit project; restore last-used or require explicit pick, and/or cap md-discovery when no `.git`/`CLAUDE.md` marker.
 
 ## Tool calls with duplicate argument keys executed silently (2026-08-23)
 
@@ -3293,7 +3293,7 @@ Two independent latent races, both in code untouched by the remote work:
 
 A `/learn` pass over `skills/` produced a plan (create `ocode-remote-ssh`,
 rescope a server HTTP/SSE skill, fold the `AgentRegistry` lock contract into
-`ocode-agent-architecture`, add the worktree embed copies to AGENTS.md). Nothing
+`ocode-agent-architecture`, add the worktree embed copies to CLAUDE.md). Nothing
 was written to `skills/`. Partial work left open, deliberately:
 
 - [x] **`skills/ocode-remote-ssh/SKILL.md` ALREADY EXISTS — do not create it.**
@@ -3319,14 +3319,14 @@ was written to `skills/`. Partial work left open, deliberately:
 - [ ] **6 of the 8 `ocode-*` skills are unaudited** (only `ocode-permissions`
   was read, for house style). They may contain drifted anchors or claims; the
   audit is what decides whether the proposed new skills duplicate them.
-- [ ] **`AGENTS.md` gaps found but not filled.** (a) §Git Worktrees does not
+- [ ] **`CLAUDE.md` gaps found but not filled.** (a) §Git Worktrees does not
   mention that a fresh worktree needs `cp internal/agent/models-snapshot.json`
   and `cp internal/browse/cdp/htr-assets.zip` (gitignored embeds) or the build
   fails; (b) the `AgentRegistry` concurrency contract is documented nowhere
-  (`AgentRegistry` 0 hits in AGENTS.md) even though it shipped with no lock and
+  (`AgentRegistry` 0 hits in CLAUDE.md) even though it shipped with no lock and
   produced 13 race reports at HEAD; (c) the `turn_heartbeat` contract and
-  `ViewedProjects` push-gating are likewise 0-hit in AGENTS.md. Decide per item:
-  AGENTS.md or skill, then write it once.
+  `ViewedProjects` push-gating are likewise 0-hit in CLAUDE.md. Decide per item:
+  CLAUDE.md or skill, then write it once.
 - [ ] **Unresolved question for the repo owner: 45 `gws-*` skills (~59% of the
   76 project-local skill dirs) are Google Workspace skills in a Go agent
   repo.** If they are intentional (shipped to ocode users) they should arguably

@@ -91,7 +91,7 @@ See `internal/tui/selection.go`, `handleMouseAction` / `handleMouseMotion` in `m
 
 ## 6. TUI output safety (alt-screen)
 
-Any `fmt.Print*` / `fmt.Fprint*(os.Stdout|os.Stderr,…)` / `println` / raw `os.Stderr.Write` from a code path the running TUI invokes paints over the alt-screen frame and corrupts it (text overlap, "hairwire" at the bottom, status line off-screen). The rules live in `AGENTS.md` (§ TUI Output Safety); `CLAUDE.md` is a pointer file that deliberately does not duplicate them:
+Any `fmt.Print*` / `fmt.Fprint*(os.Stdout|os.Stderr,…)` / `println` / raw `os.Stderr.Write` from a code path the running TUI invokes paints over the alt-screen frame and corrupts it (text overlap, "hairwire" at the bottom, status line off-screen). The rules live in `CLAUDE.md` (§ TUI Output Safety).
 
 - Use `agent.emitDebug` / `agent.DebugAppendf` inside the `agent` package, or `log.Printf` elsewhere — `tui.Run()` calls `log.SetOutput(debugLogWriter{})` so `log` lands in the debug panel.
 - For subprocesses, capture output (`cmd.Stdout = &buf`); never inherit the terminal with `cmd.Stdout = os.Stdout`.

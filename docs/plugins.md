@@ -162,6 +162,40 @@ The `on_install` array specifies commands to run after a plugin is installed. Th
 
 The `{plugin_dir}` token is replaced with the absolute path of the installed plugin directory.
 
+## Claude Code Plugins
+
+ocode also loads plugins in the **Claude Code format**, so one plugin repo
+installs in both tools.
+
+**Recognised layout.** A directory counts as a plugin when it holds an ocode
+`plugin.json` **or** a Claude Code `.claude-plugin/plugin.json`. With both, the
+ocode manifest wins and the Claude Code one only fills blank fields
+(description, version). `/plugin install <git-url>` accepts either, so a Claude
+Code plugin repo (e.g. `github.com/obra/superpowers`) installs as-is.
+
+**Plugins Claude Code installed.** Plugins listed in
+`~/.claude/plugins/installed_plugins.json` (or `$CLAUDE_CONFIG_DIR/plugins`)
+are discovered too, **after** every ocode search path. A plugin is keyed by
+name, so an ocode plugin always shadows a Claude Code install of the same name;
+the Claude Code copy is used only when ocode has none. Project/local-scoped
+Claude Code installs count only in the project they were installed for.
+
+**Enable/disable.** ocode's own `/plugin enable|disable` (and the web toggle)
+decides for every plugin, Claude Code ones included, and is stored only in
+ocode's config — Claude Code's settings are never written, so toggling in ocode
+never changes Claude Code. Without an ocode entry, a Claude Code plugin follows
+Claude Code's `enabledPlugins` (enabled when unset). ocode never deletes a
+Claude Code install; uninstall those from Claude Code.
+
+**What a Claude Code plugin contributes.**
+
+| Component | In ocode |
+|---|---|
+| `skills/<name>/SKILL.md` (+ manifest `skills` paths) | Skills named `<plugin>:<name>`, like Claude Code. A bare `<name>` resolves to the plugin skill only when no user/project skill has that name. |
+| `commands/*.md` | Slash commands |
+| `hooks/hooks.json` → `SessionStart` | Command hooks whose matcher accepts `startup` run once per process per project; their `hookSpecificOutput.additionalContext` (or plain stdout) is added to the system prompt next to plugin `instructions`. `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PROJECT_DIR}` are expanded and exported; cwd is the project root; 30 s default timeout, 60 s cap. Only plugins with a Claude Code manifest run hooks. |
+| `agents/`, other hook events, `.mcp.json` | Not loaded yet |
+
 ## Managing Plugins
 
 All plugin management happens through the `/plugin` TUI command.

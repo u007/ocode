@@ -205,6 +205,7 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 - **LLM instructions** — plugins inject context into the system prompt
 - **MCP auto-registration** — plugins can register and unregister MCP servers on install/remove
 - **Bundled plugins** under `.opencode/plugins` (embedded in the binary via `go:embed`)
+- **Claude Code plugins** — `.claude-plugin/plugin.json` plugins install and load as-is, and plugins Claude Code installed are picked up too (an ocode plugin of the same name wins; ocode's enable/disable never touches Claude Code). See [docs/plugins.md](docs/plugins.md#claude-code-plugins)
 
 ### 🎯 Skills
 
@@ -443,7 +444,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/help` | | Show help for all commands |
 | `/exit` | `/quit`, `/q` | Quit the app (always instant, even while streaming) |
 
-> **Queuing note:** `/exit`/`/quit`/`/q` and ~30 local commands (`/model`, `/themes`, `/help`, `/thinking`, `/details`, `/sidebar`, `/context`, `/commands`, `/permissions`, `/yolo`, `/small-model`, `/editor`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`, `/rc`, `/search`, `/find`, `/docs`, `/goal`, `/agents status`, `/add-dir`, `/add-dirs`, …) run instantly. Everything else — and any command that mutates persistent state mid-stream (`/doc-sync`, `/agents limit`) — queues behind the current turn and drains via `agentStreamDoneMsg` / `compactFinishedMsg`. `handleCommand` is the single chokepoint; keep it in sync with `AGENTS.md`.
+> **Queuing note:** `/exit`/`/quit`/`/q` and ~30 local commands (`/model`, `/themes`, `/help`, `/thinking`, `/details`, `/sidebar`, `/context`, `/commands`, `/permissions`, `/yolo`, `/small-model`, `/editor`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`, `/rc`, `/search`, `/find`, `/docs`, `/goal`, `/agents status`, `/add-dir`, `/add-dirs`, …) run instantly. Everything else — and any command that mutates persistent state mid-stream (`/doc-sync`, `/agents limit`) — queues behind the current turn and drains via `agentStreamDoneMsg` / `compactFinishedMsg`. `handleCommand` is the single chokepoint; keep it in sync with `CLAUDE.md`.
 
 ### 📊 Debug & Observability
 

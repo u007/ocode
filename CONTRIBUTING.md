@@ -114,8 +114,7 @@ See [TESTING.md](TESTING.md) for tested features, known issues, and platform sup
 │   ├── tui/                   # Bubble Tea TUI (views, models, rendering)
 │   └── version/               # Version info
 ├── web/                       # Web UI (WIP)
-├── AGENTS.md                  # Agent instructions (loaded into context)
-├── CLAUDE.md                  # Project instructions for Claude
+├── CLAUDE.md                  # Agent instructions (loaded into context by ocode and Claude Code)
 ├── SETUP.md                   # Setup and configuration guide
 └── TESTING.md                 # Test status and known issues
 ```

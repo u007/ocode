@@ -133,7 +133,7 @@ Two complementary layers of the same function — don't merge them:
 
 | Layer | Owner | Rule |
 |---|---|---|
-| Lock/env | **`AGENTS.md` §"Git subprocesses: `gitexec`"** | leading `GIT_OPTIONAL_LOCKS=0` in `remoteGitCommand`; mutations via `remoteGitMutation` |
+| Lock/env | **`CLAUDE.md` §"Git subprocesses: `gitexec`"** | leading `GIT_OPTIONAL_LOCKS=0` in `remoteGitCommand`; mutations via `remoteGitMutation` |
 | Quoting | `docs/gotchas/remote-git-shell-quoting.md` | see below |
 
 - `remoteGitCommand` (`handler_remote_work.go:527`) builds a **shell string**,
@@ -188,7 +188,7 @@ A terminal has ONE attachment slot even across clients: attaching the same
 `terminal_id` from a second client sends `{"type":"detached","reason":"superseded"}`
 on the first socket and closes it, and that client's panel parks with a **Take
 over** button rather than reconnecting. See `skills/ocode-web` (terminalStore) and
-`AGENTS.md`.
+`CLAUDE.md`.
 
 ## 8. Profile and credential routing
 
@@ -222,7 +222,7 @@ Remote chat runs **on the host** (`ocode serve --remote`) — never locally.
 | `docs/gotchas/remote-terminal-502-provisioning.md` | the three 502 causes above |
 | `docs/gotchas/tui-clipboard-remote-ssh-osc52.md` | `copyToClipboard` / OSC 52 |
 | `docs/concepts/remote-mcp-oauth-compat.md` | MCP credential bound to exact server URL |
-| `AGENTS.md` §885 | `gitexec`, `GIT_OPTIONAL_LOCKS=0`, `WithLockRetry` |
+| `CLAUDE.md` §885 | `gitexec`, `GIT_OPTIONAL_LOCKS=0`, `WithLockRetry` |
 
 **TUI clipboard (page above):** never call `clipboard.WriteAll` from a TUI view —
 route every copy through `copyToClipboard` (`internal/tui/clipboard.go:26`), which

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
-import type { PluginInfo } from "../../api/types";
+import { isClaudeCodePlugin, type PluginInfo } from "../../api/types";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2, Trash2, Download } from "lucide-react";
@@ -155,7 +155,14 @@ export default function OcodePluginsForm() {
           <div className="space-y-1">
             {plugins.map((p) => (
               <div key={p.name} className="flex items-center justify-between gap-2 py-2 px-3 rounded-md hover:bg-muted">
-                <div className="min-w-0 text-sm text-foreground truncate">{p.name}</div>
+                <div className="min-w-0 text-sm text-foreground truncate">
+                  {p.name}
+                  {isClaudeCodePlugin(p) && (
+                  <span className="ml-1.5 rounded border border-border px-1 text-[10px] text-muted-foreground" title="Installed by Claude Code. Toggling here only affects ocode; uninstall it in Claude Code.">
+                    Claude Code
+                  </span>
+                )}
+                </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <Button
                     variant={p.enabled ? "default" : "outline"}
@@ -166,15 +173,17 @@ export default function OcodePluginsForm() {
                   >
                     {busy === p.name ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : p.enabled ? "On" : "Off"}
                   </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
-                    onClick={() => removeExternal(p)}
-                    disabled={busy === p.name}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
+                  {!isClaudeCodePlugin(p) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0 text-muted-foreground hover:text-red-400"
+                      onClick={() => removeExternal(p)}
+                      disabled={busy === p.name}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
                 </div>
               </div>
             ))}

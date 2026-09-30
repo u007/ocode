@@ -3,7 +3,7 @@
 > **Generated from `questions.yaml` (corpus_rev 1). Do not grade from this file
 > — `questions.yaml` is the source of truth.** Hand-synced.
 
-Anchored to this project's house rules (`CLAUDE.md` + `AGENTS.md`). Answers flag
+Anchored to this project's house rules (`CLAUDE.md`). Answers flag
 **(house rule)** where stricter than general consensus. This corpus is
 **universal** — it tests coding behavior that applies to any repo, so its derived
 skill activates for the tuned model everywhere (no stack marker).

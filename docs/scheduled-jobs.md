@@ -441,7 +441,7 @@ event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
 
 ## Design decisions (advisor-verified)
 - **Tool ordering for prompt cache**: registering a `cron` tool later will change
-  the tools array and bust the Anthropic prompt cache (AGENTS.md: tools come
+  the tools array and bust the Anthropic prompt cache (CLAUDE.md: tools come
   first in the prefix). Keep `InitBuiltinTools` deterministic; treat the tool
   set as grow-only/sticky within a session.
 - **No exported `Agent.SetPermissions`**: `SetMode` is workflow mode, not

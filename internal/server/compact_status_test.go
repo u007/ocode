@@ -342,7 +342,7 @@ func (failingCompactClient) Chat([]agent.Message, []map[string]interface{}) (*ag
 func (failingCompactClient) GetProvider() string { return "mock" }
 func (failingCompactClient) GetModel() string    { return "mock-compact" }
 
-// TestSessionContextUsesPostCompactionEstimate pins the AGENTS.md "one
+// TestSessionContextUsesPostCompactionEstimate pins the CLAUDE.md "one
 // resolution, two entry points" invariant: HandleSessionContext must fall back
 // to the agent's post-compaction estimate (like applySessionContext) instead of
 // reporting 0 after a /compact cleared LastInputTokens. Reverting the

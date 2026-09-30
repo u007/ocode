@@ -2153,7 +2153,7 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 	// is cleared by a /compact). Only when no live agent exists in this process
 	// (restored/idle-evicted session) does it fall back to a chars/4 estimate
 	// over the persisted transcript. This is the SAME chain applySessionContext
-	// uses — the two entry points must agree (see the AGENTS.md rule).
+	// uses — the two entry points must agree (see the CLAUDE.md rule).
 	model := ""
 	maxTokens := 0
 	var current int64

@@ -1102,6 +1102,10 @@ export interface PluginInfo {
   description?: string;
 }
 
+/** A plugin installed by Claude Code (source "claude-code"). ocode can
+ * enable/disable it (in ocode's config only) but never removes it. */
+export const isClaudeCodePlugin = (p: PluginInfo): boolean => p.source === "claude-code";
+
 // ── Dynamic commands / skills (GET /api/commands, /api/skills) ──
 export interface CommandEntry {
   name: string;

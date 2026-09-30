@@ -522,7 +522,7 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		text := fmt.Sprintf("Plugin: %s\nSource: %s\nDir: %s\nEnabled: %v", name, p.Source, p.Dir, p.Enabled)
-		for _, pl := range plugins.LoadPlugins(nil) {
+		for _, pl := range plugins.LoadAllPluginsForProject(m.workDir) {
 			if pl.Name == name {
 				if pl.Description != "" {
 					text += "\nDescription: " + pl.Description
@@ -561,10 +561,30 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 			return m.rebuildAgentWithExternalTools()
 		}
 		if _, ok := m.config.Plugins[name]; !ok {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
-			return nil
-		}
-		if err := config.SavePluginEnabled(name, enabled); err != nil {
+			// Discovered but never configured (e.g. a Claude Code install):
+			// record the choice in ocode's config only — Claude Code's own
+			// settings are never written.
+			dir := ""
+			for _, pl := range plugins.LoadAllPluginsForProject(m.workDir) {
+				if pl.Name == name {
+					dir = pl.Dir
+					break
+				}
+			}
+			if dir == "" {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+				return nil
+			}
+			pc := config.PluginConfig{Dir: dir, Enabled: enabled}
+			if err := config.SavePlugin(name, pc); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to update plugin config: %v", err)})
+				return nil
+			}
+			if m.config.Plugins == nil {
+				m.config.Plugins = map[string]config.PluginConfig{}
+			}
+			m.config.Plugins[name] = pc
+		} else if err := config.SavePluginEnabled(name, enabled); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to update plugin config: %v", err)})
 			return nil
 		}
