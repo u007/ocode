@@ -336,3 +336,31 @@ func TestRemoveRefusesClaudeCodeInstall(t *testing.T) {
 		t.Fatalf("plugin dir gone: %v", err)
 	}
 }
+
+// TestInstallLocalKeepsExecutableBit pins that a local install preserves file
+// modes: a Claude Code plugin's SessionStart hook (and an ocode on_install
+// script) is an executable the copy must not strip.
+func TestInstallLocalKeepsExecutableBit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no executable bit on Windows")
+	}
+	src := t.TempDir()
+	writeClaudePlugin(t, src, "exe")
+	script := filepath.Join(src, "hooks", "run.sh")
+	writeFile(t, script, "#!/bin/sh\necho hi\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "exe")
+	if _, err := InstallLocal(src, dest); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dest, "hooks", "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("executable bit lost: %v", info.Mode())
+	}
+}

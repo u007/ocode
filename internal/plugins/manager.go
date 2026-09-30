@@ -498,6 +498,16 @@ func copyDir(src, dest string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, 0644)
+		// Keep the source's permission bits: plugin hooks and on_install
+		// scripts are executables, and a flat 0644 made them unrunnable.
+		mode := os.FileMode(0644)
+		if info, err := os.Stat(path); err == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := os.WriteFile(target, data, mode); err != nil {
+			return err
+		}
+		// WriteFile applies mode only when creating, and through the umask.
+		return os.Chmod(target, mode)
 	})
 }
