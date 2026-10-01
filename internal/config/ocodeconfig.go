@@ -798,6 +798,10 @@ type OcodeConfig struct {
 	Browser       BrowserConfig
 	TTS           TTSConfig
 	ChatVerbosity ChatVerbosityConfig
+	// QuickActions is the composer strip. It is seeded in memory by
+	// defaultOcodeConfig when the key is absent, so an untouched install
+	// renders the three starters without anything on disk.
+	QuickActions QuickActionsConfig
 	// Wallpaper holds the chat background wallpaper selection
 	// (enabled, light/dark image IDs, auto/manual mode).
 	Wallpaper wallpaper.WallpaperConfig
@@ -1155,6 +1159,7 @@ type ocodeConfigFile struct {
 	Browser                 browserConfigFile           `json:"browser"`
 	TTS                     TTSConfig                   `json:"tts,omitempty"`
 	ChatVerbosity           *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
+	QuickActions            *QuickActionsConfig         `json:"quick_actions,omitempty"`
 	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
 	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
 	Security                securityConfigFile          `json:"security"`
@@ -1249,6 +1254,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Browser:              BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", NoSandbox: true},
 		TTS:                  TTSConfig{Engine: "browser-native", Mode: "manual"},
 		ChatVerbosity:        defaultChatVerbosityConfig(),
+		QuickActions:         SeedQuickActions(),
 		MemoryEnabled:        true,
 		SmallModelEnabled:    true,
 		RecapModelEnabled:    false,
@@ -1583,6 +1589,29 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			return fmt.Errorf("chat_verbosity: %w", err)
 		}
 		delete(raw, "chat_verbosity")
+	}
+
+	if _, ok := raw["quick_actions"]; ok {
+		if file.QuickActions != nil {
+			cfg.QuickActions = NormalizeQuickActions(*file.QuickActions)
+			// Branch on Chips == nil, never on len(Chips) == 0. The type's doc
+			// makes nil the "absent" marker for both a missing key and a JSON
+			// null, while a non-nil empty slice is the user having deleted
+			// every chip. A length check would resurrect the starters for them.
+			if cfg.QuickActions.Chips == nil {
+				cfg.QuickActions = SeedQuickActions()
+			}
+		} else {
+			cfg.QuickActions = SeedQuickActions()
+		}
+		delete(raw, "quick_actions")
+	} else {
+		// An absent key seeds the starters WITHOUT the loader writing a default
+		// to disk, so a fresh install still renders today's three pills.
+		// defaultOcodeConfig already seeded; restating it here binds the
+		// contract to the loader and covers a caller that passes a zero-value
+		// OcodeConfig.
+		cfg.QuickActions = SeedQuickActions()
 	}
 
 	if _, ok := raw["extra_allowed_paths"]; ok {
@@ -2363,6 +2392,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"browser":        cfg.Browser,
 		"tts":            cfg.TTS,
 		"chat_verbosity": chatVerbosity,
+		"quick_actions":  NormalizeQuickActions(cfg.QuickActions),
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
@@ -2468,7 +2498,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" {
 			continue
 		}
 		payload[k] = v

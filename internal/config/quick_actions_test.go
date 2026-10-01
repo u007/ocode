@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -312,5 +314,178 @@ func TestQuickActionsConfigToleratesNullChipsField(t *testing.T) {
 	}
 	if got := NormalizeQuickActions(emptied); got.Chips == nil || len(got.Chips) != 0 {
 		t.Fatalf("NormalizeQuickActions on an emptied strip = %#v, want a non-nil empty slice", got.Chips)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Persist and load wiring.
+//
+// The house pattern for save-then-reload is speech_summary_test.go:81 —
+// LoadOcodeConfig takes a *Config and returns only error, so values are read
+// back through cfg.Ocode. HOME is redirected in every test below; omitting it
+// writes into the developer's real ~/.config/opencode and clobbers it.
+// ---------------------------------------------------------------------------
+
+func TestSaveAndLoadOcodeQuickActionsRoundTrips(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	saved := QuickActionsConfig{Chips: []QuickActionChip{
+		{ID: "tests", Label: "Run tests", Icon: "flask-conical", Message: "run the test suite", Mode: QuickActionModeFill},
+		{ID: "recap", Label: "Recap", Icon: "file-text", Message: "/recap", Mode: QuickActionModeSend, Seed: QuickActionSeedRecap},
+	}}
+	if err := SaveOcodeQuickActions(saved); err != nil {
+		t.Fatalf("SaveOcodeQuickActions: %v", err)
+	}
+	cfg := Config{}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if len(cfg.Ocode.QuickActions.Chips) != 2 {
+		t.Fatalf("loaded %d chips, want 2: %+v", len(cfg.Ocode.QuickActions.Chips), cfg.Ocode.QuickActions.Chips)
+	}
+	if cfg.Ocode.QuickActions.Chips[0] != saved.Chips[0] {
+		t.Errorf("chip 0 = %+v, want %+v", cfg.Ocode.QuickActions.Chips[0], saved.Chips[0])
+	}
+	// Order IS the sort order; losing it silently scrambles the user's arrangement.
+	if cfg.Ocode.QuickActions.Chips[1].ID != "recap" {
+		t.Errorf("chip 1 = %q, want recap — order must survive the round trip", cfg.Ocode.QuickActions.Chips[1].ID)
+	}
+}
+
+func TestSaveOcodeQuickActionsDoesNotDisturbSiblingKeys(t *testing.T) {
+	// A one-key save must not read-modify-write its way through unrelated
+	// config, or saving a chip list would clobber chat_verbosity.
+	t.Setenv("HOME", t.TempDir())
+
+	if err := SaveOcodeChatVerbosity(ChatVerbosityConfig{Preset: ChatVerbosityBalanced}); err != nil {
+		t.Fatalf("SaveOcodeChatVerbosity: %v", err)
+	}
+	if err := SaveOcodeQuickActions(SeedQuickActions()); err != nil {
+		t.Fatalf("SaveOcodeQuickActions: %v", err)
+	}
+	cfg := Config{}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.ChatVerbosity.Preset != ChatVerbosityBalanced {
+		t.Errorf("chat_verbosity.preset = %q, want %q — the quick-actions save clobbered a sibling key",
+			cfg.Ocode.ChatVerbosity.Preset, ChatVerbosityBalanced)
+	}
+}
+
+func TestSaveOcodeQuickActionsRejectsInvalidWithoutWriting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	bad := QuickActionsConfig{Chips: []QuickActionChip{{ID: "a", Label: "A", Icon: "zap", Message: "m", Mode: "sideways"}}}
+	if err := SaveOcodeQuickActions(bad); err == nil {
+		t.Fatal("SaveOcodeQuickActions accepted an invalid mode")
+	}
+	// A rejected save must not leave a half-written file behind: nothing was
+	// valid to persist, so a reload has to still report the untouched default.
+	cfg := Config{}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if len(cfg.Ocode.QuickActions.Chips) != len(SeedQuickActions().Chips) {
+		t.Errorf("rejected save changed the strip: %+v", cfg.Ocode.QuickActions.Chips)
+	}
+}
+
+func TestLoadOcodeConfigSeedsQuickActionsWhenAbsent(t *testing.T) {
+	// The out-of-the-box guarantee: an install that never touched settings
+	// still renders the three starter pills. HOME is a fresh temp dir, so there
+	// is no ocodeconfig.json at all — the no-file path, not just "file without
+	// the key".
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := Config{}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	want := SeedQuickActions()
+	if len(cfg.Ocode.QuickActions.Chips) != len(want.Chips) {
+		t.Fatalf("absent key seeded %d chips, want %d", len(cfg.Ocode.QuickActions.Chips), len(want.Chips))
+	}
+	for i := range want.Chips {
+		if cfg.Ocode.QuickActions.Chips[i] != want.Chips[i] {
+			t.Errorf("seeded chip %d = %+v, want %+v", i, cfg.Ocode.QuickActions.Chips[i], want.Chips[i])
+		}
+	}
+}
+
+func TestSaveAndLoadOcodeQuickActionsPreservesEmptyStrip(t *testing.T) {
+	// The resurrection bug. A user who deletes every chip must get no strip,
+	// forever — a loader that branches on len(Chips) == 0 instead of Chips ==
+	// nil silently restores all three starters on the next config load, which
+	// looks like the app ignoring them. This is the one test that separates
+	// "absent" from "deliberately emptied", so it must assert on the non-nil
+	// marker, not just the length.
+	t.Setenv("HOME", t.TempDir())
+
+	emptied := QuickActionsConfig{Chips: []QuickActionChip{}}
+	if err := SaveOcodeQuickActions(emptied); err != nil {
+		t.Fatalf("SaveOcodeQuickActions(empty): %v", err)
+	}
+	cfg := Config{}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.QuickActions.Chips == nil {
+		t.Fatal("an emptied strip loaded as nil, so the loader will treat it as absent and resurrect the seeds")
+	}
+	if len(cfg.Ocode.QuickActions.Chips) != 0 {
+		t.Fatalf("an emptied strip loaded %d chips: %+v", len(cfg.Ocode.QuickActions.Chips), cfg.Ocode.QuickActions.Chips)
+	}
+}
+
+func TestLoadOcodeConfigSeedsWhenFileExistsWithoutQuickActionsKey(t *testing.T) {
+	// The other absent-key shape: a real config file that predates the feature
+	// and has every other key. It must seed too, and — the spec's Migration
+	// guarantee — loading must not require the key to be present.
+	t.Setenv("HOME", t.TempDir())
+
+	if err := SaveOcodeChatVerbosity(ChatVerbosityConfig{Preset: ChatVerbosityQuiet}); err != nil {
+		t.Fatalf("SaveOcodeChatVerbosity: %v", err)
+	}
+	cfg := Config{}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	want := SeedQuickActions()
+	if len(cfg.Ocode.QuickActions.Chips) != len(want.Chips) {
+		t.Fatalf("file without quick_actions seeded %d chips, want %d", len(cfg.Ocode.QuickActions.Chips), len(want.Chips))
+	}
+	if cfg.Ocode.ChatVerbosity.Preset != ChatVerbosityQuiet {
+		t.Errorf("chat_verbosity.preset = %q, want %q", cfg.Ocode.ChatVerbosity.Preset, ChatVerbosityQuiet)
+	}
+}
+
+func TestLoadOcodeConfigSeedsQuickActionsWhenChipsIsJSONNull(t *testing.T) {
+	// "absent chips" has two spellings on disk — the key missing, and an
+	// explicit null. QuickActionsConfig's doc makes nil chips mean "absent",
+	// and the spec lists it beside a missing key, so both must seed. Reading
+	// null as "the user emptied the strip" would silently give a fresh-looking
+	// config three pills the user never asked for.
+	t.Setenv("HOME", t.TempDir())
+	cfgDir := filepath.Join(os.Getenv("HOME"), ".config", "opencode")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "ocodeconfig.json"), []byte(`{"quick_actions":{"chips":null}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	want := SeedQuickActions()
+	if len(cfg.Ocode.QuickActions.Chips) != len(want.Chips) {
+		t.Fatalf(`"chips":null loaded %d chips, want the %d seeds`, len(cfg.Ocode.QuickActions.Chips), len(want.Chips))
+	}
+	for i := range want.Chips {
+		if cfg.Ocode.QuickActions.Chips[i] != want.Chips[i] {
+			t.Errorf("seeded chip %d = %+v, want %+v", i, cfg.Ocode.QuickActions.Chips[i], want.Chips[i])
+		}
 	}
 }

@@ -193,3 +193,25 @@ func (c QuickActionsConfig) Validate() error {
 	}
 	return nil
 }
+
+// SaveOcodeQuickActions persists the composer's quick-action strip, replacing
+// only that key.
+//
+// It follows SaveOcodeChatVerbosity: normalize first, validate BEFORE taking the
+// lock so an invalid request cannot rewrite an existing config file, then assign
+// exactly one field under withOcodeConfigLock (which re-reads the whole file and
+// writes it back, so sibling keys survive).
+//
+// NormalizeQuickActions does not mutate its argument, and the value handed to
+// withOcodeConfigLock becomes the one that is written, so the caller's slice is
+// never aliased into the persisted file.
+func SaveOcodeQuickActions(cfg QuickActionsConfig) error {
+	cfg = NormalizeQuickActions(cfg)
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.QuickActions = cfg
+		return nil
+	})
+}
