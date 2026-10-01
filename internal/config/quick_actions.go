@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -102,6 +103,17 @@ func (c *QuickActionChip) UnmarshalJSON(data []byte) error {
 
 // QuickActionsConfig is the persisted strip. An empty Chips list is legal and
 // means "no strip".
+//
+// Chips carries a load-bearing nil-vs-empty distinction:
+//
+//   - nil          the key is absent or JSON null -> seed the three starters.
+//   - non-nil, 0   the user deliberately deleted every chip -> show no strip.
+//
+// Validate accepts both identically, so nothing downstream records which one
+// arrived. Do NOT branch on len(Chips) == 0: it collapses the two states and
+// silently resurrects all three starters for a user who removed them.
+// NormalizeQuickActions preserves the distinction, because slices.Clone(nil)
+// is nil.
 type QuickActionsConfig struct {
 	Chips []QuickActionChip `json:"chips"`
 }
@@ -119,18 +131,25 @@ func SeedQuickActions() QuickActionsConfig {
 
 // NormalizeQuickActions fills omitted fields. It deliberately preserves
 // unknown values so Validate can report them instead of silently repairing
-// them. The chip slice is normalized in place and returned; callers must use
-// the return value rather than assume their own copy was updated.
+// them.
+//
+// It does not mutate its argument. The struct is copied by value, but Chips is
+// a slice header, so writing through cfg.Chips[i] would reach the caller's
+// backing array; the chips are therefore cloned first and the returned config
+// owns them outright. That makes it safe to call on a config handed out from a
+// cache outside the mutex that guards it. A nil Chips clones to nil, so the
+// nil-vs-empty distinction documented on QuickActionsConfig survives.
 func NormalizeQuickActions(cfg QuickActionsConfig) QuickActionsConfig {
-	for i := range cfg.Chips {
-		if cfg.Chips[i].Icon == "" {
-			cfg.Chips[i].Icon = QuickActionDefaultIcon
+	out := slices.Clone(cfg.Chips)
+	for i := range out {
+		if out[i].Icon == "" {
+			out[i].Icon = QuickActionDefaultIcon
 		}
-		if cfg.Chips[i].Mode == "" {
-			cfg.Chips[i].Mode = QuickActionModeSend
+		if out[i].Mode == "" {
+			out[i].Mode = QuickActionModeSend
 		}
 	}
-	return cfg
+	return QuickActionsConfig{Chips: out}
 }
 
 // Validate rejects a config that could not be rendered faithfully. Callers

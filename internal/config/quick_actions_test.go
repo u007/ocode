@@ -13,10 +13,16 @@ func TestSeedQuickActionsIsTodayThreePills(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("seed chip count = %d, want 3", len(got))
 	}
+	// Mode and Seed are spelled as literals on purpose. Pinning them with the
+	// Go constants would move expectation and implementation together, so
+	// renaming QuickActionSeedCompact to any other string would leave this
+	// green -- while the TypeScript store matches the literal "compact", making
+	// that a silent cross-boundary break. An expectation must be an
+	// independent transcription of the spec, never a restatement of the code.
 	want := []QuickActionChip{
-		{ID: "compact", Label: "Compact", Icon: "archive", Message: "/compact", Mode: QuickActionModeSend, Seed: QuickActionSeedCompact},
-		{ID: "continue", Label: "Continue", Icon: "play", Message: "continue", Mode: QuickActionModeSend, Seed: QuickActionSeedContinue},
-		{ID: "recap", Label: "Recap", Icon: "file-text", Message: "/recap", Mode: QuickActionModeSend, Seed: QuickActionSeedRecap},
+		{ID: "compact", Label: "Compact", Icon: "archive", Message: "/compact", Mode: "send", Seed: "compact"},
+		{ID: "continue", Label: "Continue", Icon: "play", Message: "continue", Mode: "send", Seed: "continue"},
+		{ID: "recap", Label: "Recap", Icon: "file-text", Message: "/recap", Mode: "send", Seed: "recap"},
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -64,6 +70,33 @@ func TestNormalizeQuickActionsPreservesExplicitIcon(t *testing.T) {
 	}
 }
 
+func TestNormalizeQuickActionsDoesNotMutateItsArgument(t *testing.T) {
+	// QuickActionsConfig copies by value but Chips is a slice header, so filling
+	// through cfg.Chips[i] reaches the caller's backing array even though the
+	// struct itself was copied. A handler that snapshots a cached config out
+	// from under its mutex and then normalizes outside the lock would be racing
+	// its own readers. The returned config must own its chips outright.
+	in := []QuickActionChip{{ID: "a", Label: "A", Message: "m"}}
+	cfg := QuickActionsConfig{Chips: in}
+	got := NormalizeQuickActions(cfg)
+
+	if cfg.Chips[0].Icon != "" || cfg.Chips[0].Mode != "" {
+		t.Fatalf("NormalizeQuickActions mutated its argument: %+v", cfg.Chips[0])
+	}
+	if in[0].Icon != "" || in[0].Mode != "" {
+		t.Fatalf("NormalizeQuickActions wrote through the caller's backing array: %+v", in[0])
+	}
+	if got.Chips[0].Icon != QuickActionDefaultIcon || got.Chips[0].Mode != QuickActionModeSend {
+		t.Fatalf("normalized chip = %+v, want icon %q and mode %q",
+			got.Chips[0], QuickActionDefaultIcon, QuickActionModeSend)
+	}
+	// And the other direction: writing to the result must not reach back in.
+	got.Chips[0].Label = "mutated"
+	if in[0].Label != "A" {
+		t.Fatalf("the returned config still aliases the caller's array: %+v", in[0])
+	}
+}
+
 func makeChips(n int, base QuickActionChip) []QuickActionChip {
 	out := make([]QuickActionChip, 0, n)
 	for i := 0; i < n; i++ {
@@ -95,6 +128,11 @@ func TestQuickActionsValidate(t *testing.T) {
 		wantIs string // substring the error must contain; "" means expect nil
 	}{
 		{"valid single chip", QuickActionsConfig{Chips: []QuickActionChip{base}}, ""},
+		// Without a positive row here, deleting `&& chip.Mode !=
+		// QuickActionModeSend` from the accept check -- turning every fill chip
+		// into a hard error and breaking half the feature -- fails no test,
+		// because every other positive row is built on base, whose mode is send.
+		{"fill mode chip", QuickActionsConfig{Chips: []QuickActionChip{mutate(func(c *QuickActionChip) { c.Mode = QuickActionModeFill })}}, ""},
 		{"empty list is legal", QuickActionsConfig{Chips: []QuickActionChip{}}, ""},
 		{"20 chips ok", QuickActionsConfig{Chips: makeChips(20, base)}, ""},
 		{"21 chips rejected", QuickActionsConfig{Chips: makeChips(21, base)}, "at most 20"},
@@ -191,7 +229,7 @@ func TestQuickActionChipRejectsUnknownJSONField(t *testing.T) {
 	}
 }
 
-func TestQuickActionsConfigMarshalMatchesTheSpecDataModel(t *testing.T) {
+func TestQuickActionsConfigJSONShapeRoundTripAndSeedMarker(t *testing.T) {
 	// This exact shape is both the persisted `quick_actions` block and the GET
 	// body, so the tag names, the tag order, and `seed` being the ONLY optional
 	// field are all part of the contract. A custom chip must not persist
@@ -238,12 +276,39 @@ func TestQuickActionsConfigRejectsNullChip(t *testing.T) {
 	}
 }
 
-func TestQuickActionsConfigRejectsNullChips(t *testing.T) {
+func TestQuickActionsConfigToleratesNullChipsField(t *testing.T) {
+	// `{"chips":null}` must NOT error -- an absent/null field is a legal "no
+	// config yet", distinct from `{"chips":[null]}` in the sibling test, which
+	// is a malformed chip and must be rejected.
 	var cfg QuickActionsConfig
 	if err := json.Unmarshal([]byte(`{"chips":null}`), &cfg); err != nil {
 		t.Fatalf("null chips rejected: %v", err)
 	}
-	if len(cfg.Chips) != 0 {
-		t.Fatalf("null chips decoded to %d entries", len(cfg.Chips))
+	// Assert nil specifically, not len() == 0: nil is the load-bearing signal
+	// that means "key absent -> seed the starters", so a loader that seeds on
+	// a zero-length slice cannot be defended by this test. An empty-but-non-nil
+	// slice means the user deleted every chip and must show no strip.
+	if cfg.Chips != nil {
+		t.Fatalf("null chips decoded to a non-nil slice of %d entries; nil is what preserves the seed-vs-deleted-all distinction", len(cfg.Chips))
+	}
+
+	// Normalize must not disturb that distinction: slices.Clone(nil) is nil.
+	// Without the clone, or if it ever normalizes nil into an empty slice, the
+	// loader contract documented on QuickActionsConfig silently breaks.
+	if got := NormalizeQuickActions(cfg); got.Chips != nil {
+		t.Fatalf("NormalizeQuickActions turned nil chips into a %d-entry slice; the nil marker was lost", len(got.Chips))
+	}
+
+	// The opposite state stays distinguishable: `[]` is a legal, deliberate
+	// "the user removed all chips", and it must remain non-nil through normalize.
+	var emptied QuickActionsConfig
+	if err := json.Unmarshal([]byte(`{"chips":[]}`), &emptied); err != nil {
+		t.Fatalf("empty chips rejected: %v", err)
+	}
+	if emptied.Chips == nil {
+		t.Fatal(`"chips":[] decoded to nil; it must stay non-nil so an emptied strip is distinguishable from an absent one`)
+	}
+	if got := NormalizeQuickActions(emptied); got.Chips == nil || len(got.Chips) != 0 {
+		t.Fatalf("NormalizeQuickActions on an emptied strip = %#v, want a non-nil empty slice", got.Chips)
 	}
 }
