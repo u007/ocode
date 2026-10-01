@@ -66,6 +66,12 @@ const (
 	leaseTTL                 = 20 * time.Second
 )
 
+// htrWindowsEndpoint is the loopback endpoint used on Windows, where the
+// supported htrcli transport has no Unix-domain socket. Shared by the managed
+// daemon's socket resolution and shared-daemon resolution so the two cannot
+// drift apart.
+const htrWindowsEndpoint = "127.0.0.1:3847"
+
 // htrServeID is the supervisor registration ID for the daemon.
 const htrServeID = "htr-serve"
 
@@ -184,7 +190,7 @@ func ResolveHTRSocketPath(configured string) (string, error) {
 	if runtime.GOOS == "windows" {
 		// Windows has no Unix-domain socket in the supported htrcli transport;
 		// use a private loopback endpoint in the same namespace instead.
-		return "127.0.0.1:3847", nil
+		return htrWindowsEndpoint, nil
 	}
 	root, err := paths.OcodeGlobalDataDir()
 	if err != nil {

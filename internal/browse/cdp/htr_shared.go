@@ -8,6 +8,7 @@ package cdp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -22,6 +23,11 @@ import (
 // carries no usable loopback port.
 const DefaultHTRCLIPort = 3845
 
+// errHTRCLiConfigMissing distinguishes "there is no config file" from "the
+// config file is there but unreadable or unparseable". Without it both land in
+// the same branch and the notice points the user at a file that does not exist.
+var errHTRCLiConfigMissing = errors.New("no htrcli config")
+
 // htrcliConfig is the subset of htrcli's config ocode needs. Unknown keys are
 // ignored, which keeps this stable across htrcli releases.
 type htrcliConfig struct {
@@ -33,28 +39,29 @@ type htrcliConfig struct {
 // SharedDaemon is the resolved description of the single htrcli daemon ocode
 // will ensure. Zero Mode means private (legacy) mode.
 type SharedDaemon struct {
-	Mode       string
-	AdoptOnly  bool
-	Port       int
-	Socket     string
-	Token      string
-	Binary     string
-	ConfigPath string
+	Mode       string `json:"mode"`
+	AdoptOnly  bool   `json:"adopt_only"`
+	Port       int    `json:"port"`
+	Socket     string `json:"socket"`
+	Token      string `json:"-"` // live bearer credential: never serialised
+	Binary     string `json:"binary"`
+	ConfigPath string `json:"config_path"`
 	// TokenSource is "ocode-config" (browser.htr_token), "htrcli-config"
 	// (htrcli's own token), "none" (no token available — AdoptOnly), or
 	// "generated" (private mode, where ocode mints a per-launch identity).
-	TokenSource string
-	Notice      string
+	TokenSource string `json:"token_source"`
+	Notice      string `json:"notice"`
 }
 
-// LoadHTRcliConfig reads htrcli's config as JSON. A missing file is not an
-// error: it yields the zero value so the caller can fall back to AdoptOnly.
-func LoadHTRcliConfig(path string) (htrcliConfig, error) {
+// loadHTRcliConfig reads htrcli's config as JSON. A missing file is not a
+// failure: it yields the zero value plus errHTRCLiConfigMissing, so the caller
+// can name the real reason it fell back to AdoptOnly.
+func loadHTRcliConfig(path string) (htrcliConfig, error) {
 	var cfg htrcliConfig
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cfg, nil
+			return cfg, fmt.Errorf("%w at %s", errHTRCLiConfigMissing, path)
 		}
 		return cfg, err
 	}
@@ -90,12 +97,36 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 	}
 
 	if !in.Shared {
-		// Private (legacy) mode: today's managed daemon, unchanged.
+		// Private (legacy) mode: today's managed daemon, unchanged. htrcli's
+		// config is deliberately never consulted — a leftover config must not
+		// move the private port or supply a token.
 		return SharedDaemon{
 			Mode:        "private",
 			Port:        in.LegacyPort,
 			Socket:      in.LegacySocket,
 			TokenSource: "generated",
+		}
+	}
+
+	if home == "" {
+		// os.UserHomeDir failed. Never fall through: filepath.Join("", ".htrcli",
+		// "config.json") is the RELATIVE path ".htrcli/config.json", which a
+		// Finder/Dock-launched desktop app (cwd "/") would read as
+		// "/.htrcli/config.json". An explicit ConfigPath does not bypass this:
+		// shared mode also derives its unix socket path from home.
+		//
+		// This notice deliberately names "~/.htrcli/config.json" instead of
+		// cfgPath — there is no config path here, and printing the relative one
+		// is the bug this guard exists to prevent. Do not fold it into a later
+		// "every notice names cfgPath" sweep.
+		return SharedDaemon{
+			Mode:        "shared",
+			AdoptOnly:   true,
+			Port:        DefaultHTRCLIPort,
+			TokenSource: "none",
+			Notice: "Could not determine the home directory, so htrcli's config " +
+				"(~/.htrcli/config.json) cannot be read. Start `htrcli serve` yourself, " +
+				"or set browser.htr_token.",
 		}
 	}
 
@@ -110,14 +141,21 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 	d := SharedDaemon{Mode: "shared", ConfigPath: cfgPath, Port: DefaultHTRCLIPort, TokenSource: "none"}
 	d.Socket = sharedSocketPath(home, goos)
 
-	cfg, err := LoadHTRcliConfig(cfgPath)
+	cfg, err := loadHTRcliConfig(cfgPath)
+	missing := errors.Is(err, errHTRCLiConfigMissing)
 	switch {
-	case err != nil:
+	case err != nil && !missing:
+		// Unreadable or unparseable config: AdoptOnly even when
+		// browser.htr_token is set, because this branch runs first. The notice
+		// therefore must NOT suggest setting that token would help.
 		d.AdoptOnly = true
-		d.Notice = fmt.Sprintf("Could not read %s (%v). Start `htrcli serve` yourself, or set browser.htr_token.", cfgPath, err)
+		d.Notice = fmt.Sprintf("Could not read %s (%v). Start `htrcli serve` yourself; ocode stays adopt-only until that file is readable JSON.", cfgPath, err)
 	case in.Token != "":
 		d.Token = in.Token
 		d.TokenSource = "ocode-config"
+	case missing:
+		d.AdoptOnly = true
+		d.Notice = fmt.Sprintf("No htrcli config at %s. Start `htrcli serve` yourself, or set browser.htr_token.", cfgPath)
 	case strings.TrimSpace(cfg.Token) == "":
 		d.AdoptOnly = true
 		d.Notice = fmt.Sprintf("No token in %s. Start `htrcli serve` yourself, or set browser.htr_token.", cfgPath)
@@ -126,12 +164,23 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 		d.TokenSource = "htrcli-config"
 	}
 
-	if p, ok := loopbackPort(cfg.Server); ok {
-		d.Port = p
+	if p, isLoopback := loopbackEndpoint(cfg.Server); isLoopback {
+		if p > 0 {
+			d.Port = p
+		}
+		// A loopback URL with no explicit port keeps DefaultHTRCLIPort.
 	} else if strings.TrimSpace(cfg.Server) != "" {
+		// loopbackEndpoint also answers false for a URL ocode cannot parse into
+		// a host+port ("127.0.0.1:3845" has no scheme, "localhost:3845" parses as
+		// a scheme, an out-of-range port is rejected), so the notice speaks about
+		// reachability rather than claiming the address is not loopback.
+		//
+		// It is only set when no config-read notice already fired: a missing or
+		// tokenless config is the first thing to fix, and notices are never
+		// accumulated into one string.
 		d.AdoptOnly = true
 		if d.Notice == "" {
-			d.Notice = fmt.Sprintf("htrcli server %q is not a loopback address; ocode will not start a daemon it cannot reach locally.", cfg.Server)
+			d.Notice = fmt.Sprintf("htrcli server %q in %s is not a loopback URL ocode can reach locally (expected something like http://127.0.0.1:3845).", cfg.Server, cfgPath)
 		}
 	}
 
@@ -141,14 +190,19 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 
 func sharedSocketPath(home, goos string) string {
 	if goos == "windows" {
-		return "127.0.0.1:3847"
+		return htrWindowsEndpoint
 	}
 	return filepath.Join(home, ".htrcli", "daemon.sock")
 }
 
-// loopbackPort extracts the port from a loopback server URL. A non-loopback or
-// unparseable URL yields ok=false so the caller keeps the default port.
-func loopbackPort(server string) (int, bool) {
+// loopbackEndpoint reports whether server is a loopback URL and, when it is,
+// the port it names explicitly. A loopback URL with no explicit port returns
+// port 0: htrcli has no 80/443 default, so inventing one would point ocode at
+// a port nothing listens on — the caller keeps DefaultHTRCLIPort instead.
+//
+// Host matching is on the parsed hostname, never a prefix: "127.0.0.1.evil.com"
+// parses to that registrable name and is NOT loopback.
+func loopbackEndpoint(server string) (port int, isLoopback bool) {
 	server = strings.TrimSpace(server)
 	if server == "" {
 		return 0, false
@@ -165,14 +219,13 @@ func loopbackPort(server string) (int, bool) {
 	if ip == nil || !ip.IsLoopback() {
 		return 0, false
 	}
-	if p := u.Port(); p != "" {
-		if n, err := strconv.Atoi(p); err == nil && n > 0 && n <= 65535 {
-			return n, true
-		}
+	p := u.Port()
+	if p == "" {
+		return 0, true
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n <= 0 || n > 65535 {
 		return 0, false
 	}
-	if u.Scheme == "https" {
-		return 443, true
-	}
-	return 80, true
+	return n, true
 }
