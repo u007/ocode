@@ -15,8 +15,10 @@ package cdp
 // Lifetime: the daemon is retained across individual ocode shutdowns while
 // any cross-process lease is alive. Heartbeats expire after leaseTTL; the last
 // explicit release terminates only the daemon recorded in ocode's own marker.
-// A standalone htrcli daemon is on port 3845 and has no ocode marker, so it is
-// never adopted or stopped.
+// A daemon on the shared port (3845) that ocode did not start is ADOPTED — it
+// answers on the port and is reused — but it gets no ocode marker, and both
+// terminateManagedHTR and StopHTRServe read that marker, so ocode never stops
+// a daemon it did not start.
 //
 // Limits (documented, not silently degraded):
 //   - The Chrome profile stays ephemeral (fresh tmpDir per launch), so
@@ -30,6 +32,7 @@ package cdp
 //     its existing browser support policy.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -97,13 +100,19 @@ type HTROptions struct {
 
 // HTRStatus describes the daemon state after EnsureHTRServe.
 type HTRStatus struct {
-	Running bool   // health probe passed
-	Owned   bool   // this process spawned it (retained across supervisor shutdown while leases exist)
-	Addr    string // 127.0.0.1:port
-	Binary  string // resolved htrcli binary ("" when reused and unknown)
-	Socket  string
-	Notice  string
-	Release func()
+	Running bool // health probe passed
+	Owned   bool // this process spawned it (retained across supervisor shutdown while leases exist)
+	// StartedByOcode is true only when THIS call spawned the daemon. It stays
+	// false whenever an already-running daemon is reused, whether ocode started
+	// that one or the user did — which is what makes it the field to consult
+	// before stopping anything: a daemon ocode did not start has no ocode owner
+	// marker and must never be killed on ocode's initiative.
+	StartedByOcode bool
+	Addr           string // 127.0.0.1:port
+	Binary         string // resolved htrcli binary ("" when reused and unknown)
+	Socket         string
+	Notice         string
+	Release        func()
 }
 
 // NormalizeHTRPort maps 0 to the default and validates the range.
@@ -277,6 +286,47 @@ func htrHealthyForInstance(port int, socket, identity string) bool {
 	h := health.Data
 	return health.OK && h.Service == "htrcli" && h.Managed && h.Identity == identity && h.Port == p && h.Socket == socket
 }
+
+// htrHealthyForeign probes a daemon ocode did not start. It is deliberately
+// laxer than htrHealthyForInstance: a daemon the user started reports
+// managed:false, because HTR_MANAGED_ID is only set by ocode's own spawn.
+// Requiring service+port+socket+authentication is enough to adopt it safely —
+// those four cannot all coincide by accident on a loopback port, and the token
+// proves the caller is entitled to drive this daemon at all.
+func htrHealthyForeign(port int, socket, token string) bool {
+	p, err := NormalizeHTRPort(port)
+	if err != nil || strings.TrimSpace(token) == "" {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://"+htrAddr(p)+"/api/health", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	var health htrHealthResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&health); err != nil {
+		return false
+	}
+	h := health.Data
+	return health.OK && h.Service == "htrcli" && h.Port == p && h.Socket == socket
+}
+
+// Probes are indirected through package vars so EnsureHTRServe's four-state
+// resolution can be exercised against a branch matrix without a live daemon on
+// a real port. Production code never reassigns them.
+var (
+	htrHealthyForInstanceFn = htrHealthyForInstance
+	htrHealthyForeignFn     = htrHealthyForeign
+)
 
 // HTRHealthy probes the daemon HTTP API and accepts only the managed daemon
 // described by the ocode owner marker. A random service on the configured
@@ -786,6 +836,152 @@ func terminateManagedHTR(port int, socket, identity string, lg *log.Logger) {
 	_ = os.Remove(path)
 }
 
+// htrOutputLimit caps what htrDaemonOutput keeps. The daemon is long-lived and
+// its sink outlives the EnsureHTRServe call that built it, so an uncapped
+// buffer would grow for the life of the ocode process.
+const htrOutputLimit = 64 * 1024
+
+// htrDaemonOutput collects the `htrcli serve` child's stdout and stderr.
+//
+// The TUI runs in Bubble Tea's alt-screen, so the child must never be handed the
+// terminal's own file descriptors: a single log line would paint over the
+// rendered frame. Leaving Cmd.Stdout nil is not the alternative — os/exec sends
+// a nil stream to os.DevNull, which silently discards the one diagnostic that
+// explains a daemon that never became healthy. Capturing costs one bounded
+// buffer and lets EnsureHTRServe quote the daemon's own words back in the
+// readiness failure.
+//
+// It is mutex-protected because os/exec copies stdout and stderr from two
+// independent goroutines. Both streams share one sink so their interleaving is
+// preserved, which is what makes the captured text readable.
+type htrDaemonOutput struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	dropped int
+}
+
+func (o *htrDaemonOutput) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if room := htrOutputLimit - o.buf.Len(); room > 0 {
+		if len(p) > room {
+			o.buf.Write(p[:room])
+			o.dropped += len(p) - room
+		} else {
+			o.buf.Write(p)
+		}
+	} else {
+		o.dropped += len(p)
+	}
+	// Always report a full write: returning short would make os/exec surface a
+	// spurious copy error for output we chose to drop.
+	return len(p), nil
+}
+
+// String renders the captured output for a diagnostic, saying so when anything
+// was dropped so a truncated log is never mistaken for a complete one.
+func (o *htrDaemonOutput) String() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := strings.TrimSpace(o.buf.String())
+	if o.dropped > 0 {
+		out += fmt.Sprintf("\n[%d further byte(s) of daemon output dropped]", o.dropped)
+	}
+	return out
+}
+
+// sharedServeEnv builds the child environment for the SHARED daemon. It
+// deliberately omits HTR_BEARER_TOKEN: htrcli resolves its own token from its
+// own config, so passing one here would create a second source of truth that can
+// silently disagree with the credential the daemon actually validates against —
+// and with a disagreeing token every authenticated probe 401s and ocode would
+// believe it may spawn a daemon that then never looks healthy.
+func sharedServeEnv(token string, port int, socket, nativeHost string) []string {
+	return append(os.Environ(),
+		"HTR_PORT="+strconv.Itoa(port),
+		"HTRCLI_NO_TRAY=1",
+		"HTR_SOCKET_PATH="+socket,
+		"HTR_NATIVE_HOST_NAME="+nativeHost,
+		"HTR_MANAGED_ID="+token,
+	)
+}
+
+// privateServeEnv is sharedServeEnv plus the bearer token, which only the
+// ocode-managed (private) daemon gets: it was created by ocode precisely because
+// there was no htrcli config for it to read a token from, so HTR_BEARER_TOKEN is
+// its only credential.
+func privateServeEnv(identity string, port int, socket, nativeHost string) []string {
+	return append(sharedServeEnv(identity, port, socket, nativeHost),
+		"HTR_BEARER_TOKEN="+identity)
+}
+
+// newServeCmd builds the `htrcli serve` child with its output captured rather
+// than inherited; see htrDaemonOutput for why. Use htrDaemonOutput.String() via
+// a type assertion on cmd.Stdout to recover what the daemon printed.
+func newServeCmd(bin string, env []string) *exec.Cmd {
+	cmd := exec.Command(bin, "serve", "--no-tray")
+	cmd.Env = env
+	out := &htrDaemonOutput{}
+	cmd.Stdout, cmd.Stderr = out, out
+	return cmd
+}
+
+// newSharedServeCmd is newServeCmd for the shared daemon: HTR_MANAGED_ID is the
+// shared token, never a fresh random identity, so the strict probe stays valid
+// for a daemon ocode started itself.
+func newSharedServeCmd(bin, token string, port int, socket, nativeHost string) *exec.Cmd {
+	return newServeCmd(bin, sharedServeEnv(token, port, socket, nativeHost))
+}
+
+// adoptHTRServe builds the status for a daemon that was already running when
+// EnsureHTRServe was called. StartedByOcode stays false because this call did
+// not spawn it — that is the field a later stop consults before touching a
+// daemon, and Owned reports only whether this process's supervisor registered
+// one it launched earlier (an ocode daemon another process started is
+// deliberately neither owned nor started-by-us).
+func adoptHTRServe(sup *tool.ProcessSupervisor, addr, socket string, lease *htrLeaseHandle, lg *log.Logger) HTRStatus {
+	owned := false
+	if sup != nil {
+		if rec, ok := sup.Lookup(htrServeID); ok && rec.PID > 0 {
+			owned = true
+		}
+		_ = sup.RegisterShutdownCallback(lease.release)
+	}
+	if lg != nil {
+		lg.Printf("htr: reusing the daemon already running on %s", addr)
+	}
+	return HTRStatus{
+		Running:        true,
+		Owned:          owned,
+		StartedByOcode: false,
+		Addr:           addr,
+		Socket:         socket,
+		Release:        lease.release,
+	}
+}
+
+// sharedMode reports whether opts describes the single htrcli daemon shared with
+// the user's browser extension. An empty Mode is private too: callers that
+// predate shared mode leave the whole struct zero, and treating "" as shared
+// would silently reroute every one of them onto the shared resolution.
+func (o HTROptions) sharedMode() bool {
+	return o.Shared.Mode != "" && o.Shared.Mode != "private"
+}
+
+// configuredSocket returns the socket path EnsureHTRServe should probe. A caller
+// in shared mode that already copied Shared.Socket into SocketPath (see
+// resolveManagedHTROptions in internal/server/htr.go) is unaffected; the
+// fallback matters for a caller that set Shared alone, because SocketPath's
+// empty default resolves into ocode's own private namespace — a directory a
+// shared daemon never listens in, so probing there would always answer "dead"
+// and ocode would spawn a second daemon onto a served port.
+func (o HTROptions) configuredSocket() string {
+	if o.SocketPath != "" || !o.sharedMode() {
+		return o.SocketPath
+	}
+	return o.Shared.Socket
+}
+
 // EnsureHTRServe guarantees the `htrcli serve` daemon: reuse the healthy
 // instance when present, else spawn a supervisor-owned child that dies with
 // Server.Shutdown (last ocode process). sup may be nil — then an already
@@ -803,20 +999,29 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 	if err := validateHTRNativeHostName(effectiveHTRNativeHostName(opts.NativeHostName)); err != nil {
 		return HTRStatus{}, err
 	}
-	socketPath, err := ResolveHTRSocketPath(opts.SocketPath)
+	socketPath, err := ResolveHTRSocketPath(opts.configuredSocket())
 	if err != nil {
 		return HTRStatus{}, err
 	}
 	identity := ""
 	if owner, ownerErr := readHTROwner(); ownerErr == nil && owner.Port == port && owner.Socket == socketPath {
-		if owner.Identity != "" && htrHealthyForInstance(port, socketPath, owner.Identity) {
+		if owner.Identity != "" && htrHealthyForInstanceFn(port, socketPath, owner.Identity) {
 			identity = owner.Identity
 		}
 	}
 	if identity == "" {
-		identity, err = newHTRIdentity()
-		if err != nil {
-			return HTRStatus{}, err
+		if opts.sharedMode() && strings.TrimSpace(opts.Shared.Token) != "" {
+			// Shared mode pins the identity to the token from htrcli's config.
+			// A fresh random value would be wrong twice over: the daemon is
+			// spawned with HTR_MANAGED_ID=<shared token>, so a random identity
+			// could never satisfy the strict probe, and the lease would record an
+			// identity no daemon has.
+			identity = opts.Shared.Token
+		} else {
+			identity, err = newHTRIdentity()
+			if err != nil {
+				return HTRStatus{}, err
+			}
 		}
 	}
 	lease, err := acquireHTRLease(port, socketPath, identity, lg)
@@ -828,7 +1033,47 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 		return HTRStatus{}, err
 	}
 
-	if htrHealthyForInstance(port, socketPath, identity) {
+	// foreignAlive reports a daemon on this port that answers with the shared
+	// token but carries no ocode-managed identity. It is the only thing that
+	// distinguishes "the user already runs htrcli serve" from "the port is
+	// empty", and it is deliberately checked BEFORE the supervisor guard: a
+	// foreign daemon is reusable with no supervisor, because ocode does not own
+	// its lifetime.
+	foreignAlive := func() bool {
+		return opts.sharedMode() && !opts.Shared.AdoptOnly &&
+			htrHealthyForeignFn(port, socketPath, opts.Shared.Token)
+	}
+
+	// The four states, in resolution order: own-alive, foreign-alive, adopt-only
+	// refusal, spawn. Adoption MUST precede the `sup == nil` guard below — a
+	// caller without a supervisor (the TUI bridge, the settings API) must still
+	// attach to a daemon the user is already running.
+	if opts.sharedMode() {
+		if identity != "" && htrHealthyForInstanceFn(port, socketPath, identity) {
+			return adoptHTRServe(sup, addr, socketPath, lease, lg), nil
+		}
+		if foreignAlive() {
+			// No owner marker: that file is what authorises terminateManagedHTR
+			// to kill a daemon, and this one is the user's. StopHTRServe reads
+			// the same marker, so leaving it absent is what keeps a foreign
+			// daemon out of ocode's stop path.
+			lg.Printf("htr: adopting the running htrcli daemon on %s (not started by ocode)", addr)
+			return adoptHTRServe(sup, addr, socketPath, lease, lg), nil
+		}
+		if opts.Shared.AdoptOnly {
+			where := opts.Shared.ConfigPath
+			if where == "" {
+				where = "htrcli's config"
+			}
+			notice := opts.Shared.Notice
+			if notice == "" {
+				notice = "ocode is configured to adopt the shared htrcli daemon and never start one."
+			}
+			return fail(fmt.Errorf("no htrcli daemon on %s: %s Start `htrcli serve` yourself, or fix %s and retry", addr, notice, where))
+		}
+	}
+
+	if htrHealthyForInstanceFn(port, socketPath, identity) {
 		owned := false
 		if sup != nil {
 			if rec, ok := sup.Lookup(htrServeID); ok && rec.PID > 0 {
@@ -857,26 +1102,38 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 	if err := ensureNativeHostManifest(effectiveHTRNativeHostName(opts.NativeHostName), bin, assets.ExtensionDir, opts.BrowserPath); err != nil {
 		return fail(err)
 	}
-	cmd := exec.Command(bin, "serve", "--no-tray")
-	cmd.Env = append(os.Environ(),
-		"HTR_PORT="+strconv.Itoa(port),
-		"HTRCLI_NO_TRAY=1",
-		"HTR_SOCKET_PATH="+socketPath,
-		"HTR_NATIVE_HOST_NAME="+effectiveHTRNativeHostName(opts.NativeHostName),
-		"HTR_MANAGED_ID="+identity,
-		"HTR_BEARER_TOKEN="+identity,
-	)
+	nativeHost := effectiveHTRNativeHostName(opts.NativeHostName)
+	var cmd *exec.Cmd
+	if opts.sharedMode() {
+		cmd = newSharedServeCmd(bin, opts.Shared.Token, port, socketPath, nativeHost)
+	} else {
+		cmd = newServeCmd(bin, privateServeEnv(identity, port, socketPath, nativeHost))
+	}
 	var rec tool.ProcessRecord
 	started := false
+	// adoptedRace records that a daemon appeared between the resolution above
+	// and this lock — another ocode process, or the user — so the spawn was
+	// skipped. It must not be reported as started by ocode and must not write an
+	// owner marker.
+	adoptedRace := false
 	err = withHTRStartLock(func() error {
-		if htrHealthyForInstance(port, socketPath, identity) {
+		// Both probes are re-checked INSIDE the lock: two ocode processes can
+		// pass the resolution above concurrently and then contend for this lock,
+		// and the loser would spawn a second daemon onto a port already served.
+		if htrHealthyForInstanceFn(port, socketPath, identity) {
+			adoptedRace = true
 			return nil
 		}
-		if owner, ownerErr := readHTROwner(); ownerErr == nil && owner.Port == port && owner.Socket == socketPath && owner.Identity != "" && htrHealthyForInstance(port, socketPath, owner.Identity) {
+		if foreignAlive() {
+			adoptedRace = true
+			return nil
+		}
+		if owner, ownerErr := readHTROwner(); ownerErr == nil && owner.Port == port && owner.Socket == socketPath && owner.Identity != "" && htrHealthyForInstanceFn(port, socketPath, owner.Identity) {
 			if err := lease.updateIdentity(owner.Identity); err != nil {
 				return err
 			}
 			identity = owner.Identity
+			adoptedRace = true
 			return nil
 		}
 		var startErr error
@@ -891,23 +1148,32 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 	})
 	if err != nil {
 		// Port likely taken by a daemon we don't own — reuse if it answers.
-		if owner, ownerErr := readHTROwner(); ownerErr == nil && owner.Port == port && owner.Socket == socketPath && owner.Identity != "" && htrHealthyForInstance(port, socketPath, owner.Identity) {
+		if owner, ownerErr := readHTROwner(); ownerErr == nil && owner.Port == port && owner.Socket == socketPath && owner.Identity != "" && htrHealthyForInstanceFn(port, socketPath, owner.Identity) {
 			_ = lease.updateIdentity(owner.Identity)
 			lg.Printf("htr: port %d busy, reusing existing daemon", port)
 			_ = sup.RegisterShutdownCallback(lease.release)
 			return HTRStatus{Running: true, Owned: false, Addr: addr, Socket: socketPath, Binary: bin, Release: lease.release}, nil
 		}
-		return fail(fmt.Errorf("start htrcli serve: %w", err))
+		if foreignAlive() {
+			lg.Printf("htr: port %d busy, adopting the daemon already running there", port)
+			return adoptHTRServe(sup, addr, socketPath, lease, lg), nil
+		}
+		return fail(fmt.Errorf("start htrcli serve: %w%s", err, htrDaemonOutputTail(cmd)))
 	}
 	if !started {
+		if adoptedRace {
+			return adoptHTRServe(sup, addr, socketPath, lease, lg), nil
+		}
 		_ = sup.RegisterShutdownCallback(lease.release)
 		return HTRStatus{Running: true, Owned: false, Addr: addr, Socket: socketPath, Binary: bin, Release: lease.release}, nil
 	}
 	go watchHTRExit(cmd, sup, rec, identity, lg)
-	// Wait for readiness (bounded): the HTTP API must answer /api/health.
+	// Wait for readiness (bounded): the HTTP API must answer /api/health. A
+	// foreign daemon that won a race also counts — it is answering on this port
+	// with this socket, which is all the caller needs.
 	ready := false
 	for i := 0; i < 50; i++ {
-		if htrHealthyForInstance(port, socketPath, identity) {
+		if htrHealthyForInstanceFn(port, socketPath, identity) || foreignAlive() {
 			ready = true
 			break
 		}
@@ -920,7 +1186,7 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 				_ = process.Kill()
 			}
 		}
-		return fail(fmt.Errorf("htr daemon started (pid %d) but /api/health unreachable on %s", rec.PID, addr))
+		return fail(fmt.Errorf("htr daemon started (pid %d) but /api/health unreachable on %s%s", rec.PID, addr, htrDaemonOutputTail(cmd)))
 	}
 	if err := htrWriteOwner(identity, port, rec.PID, socketPath, bin, rec.StartedAt); err != nil {
 		return fail(fmt.Errorf("record managed HTR owner: %w", err))
@@ -930,7 +1196,23 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 	// lease; the final release terminates only the managed daemon.
 	_ = sup.RegisterShutdownCallback(lease.release)
 	lg.Printf("htr: daemon running pid %d on %s (owned, dies with ocode exit)", rec.PID, addr)
-	return HTRStatus{Running: true, Owned: true, Addr: addr, Socket: socketPath, Binary: bin, Release: lease.release}, nil
+	return HTRStatus{Running: true, Owned: true, StartedByOcode: true, Addr: addr, Socket: socketPath, Binary: bin, Release: lease.release}, nil
+}
+
+// htrDaemonOutputTail renders whatever the daemon printed, for a failure message.
+// It is the only place the child's own diagnostics survive: without the capture
+// os/exec would have sent them to the null device and left the operator with a
+// bare "did not answer /api/health".
+func htrDaemonOutputTail(cmd *exec.Cmd) string {
+	out, ok := cmd.Stdout.(*htrDaemonOutput)
+	if !ok {
+		return ""
+	}
+	text := out.String()
+	if text == "" {
+		return " (the daemon printed nothing)"
+	}
+	return " (daemon output: " + text + ")"
 }
 
 func watchHTRExit(cmd *exec.Cmd, sup *tool.ProcessSupervisor, rec tool.ProcessRecord, identity string, lg *log.Logger) {
