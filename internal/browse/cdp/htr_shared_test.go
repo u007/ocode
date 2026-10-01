@@ -359,6 +359,17 @@ func TestResolveSharedDaemonUnknownHome(t *testing.T) {
 	if !strings.Contains(got.Notice, "home directory") {
 		t.Errorf("notice=%q, want it to mention the home directory", got.Notice)
 	}
+	// This branch is the one place browser.htr_token cannot rescue the user:
+	// with no home directory there is no config to read, and a daemon ocode
+	// spawned would come up with no token at all. The notice must therefore
+	// tell the user htr_token will NOT help, rather than offering it as a fix.
+	// Asserted as a phrase so the word may still appear in the explanation.
+	if !strings.Contains(got.Notice, "does not help") {
+		t.Errorf("notice=%q, want it to say that browser.htr_token does not help here", got.Notice)
+	}
+	if !strings.Contains(got.Notice, "htrcli serve") {
+		t.Errorf("notice=%q, want it to tell the user to start `htrcli serve` themselves", got.Notice)
+	}
 }
 
 // TestSharedDaemonTokenIsNeverSerialised pins the wire shape: the live bearer

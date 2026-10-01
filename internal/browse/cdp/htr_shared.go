@@ -125,8 +125,9 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 			Port:        DefaultHTRCLIPort,
 			TokenSource: "none",
 			Notice: "Could not determine the home directory, so htrcli's config " +
-				"(~/.htrcli/config.json) cannot be read. Start `htrcli serve` yourself, " +
-				"or set browser.htr_token.",
+				"(~/.htrcli/config.json) cannot be read. Start `htrcli serve` yourself. " +
+				"Setting browser.htr_token does not help here: a daemon ocode spawned " +
+				"would resolve no token at all, because ocode never passes one.",
 		}
 	}
 
