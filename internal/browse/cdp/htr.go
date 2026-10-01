@@ -49,10 +49,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gopsprocess "github.com/shirou/gopsutil/v4/process"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/filelock"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/tool"
@@ -78,6 +80,30 @@ const htrWindowsEndpoint = "127.0.0.1:3847"
 
 // htrServeID is the supervisor registration ID for the daemon.
 const htrServeID = "htr-serve"
+
+const (
+	// sharedSpawnConfirmBudget bounds the BLOCKING half of readiness: how long
+	// EnsureHTRServe waits for a freshly spawned daemon to die before accepting
+	// it. Desktop boot calls StartBrowse synchronously, so this is paid directly
+	// as startup time; it must stay well under a second.
+	//
+	// It is sized against measured reap latency, not guessed. A child that exits
+	// immediately is not observed by the supervisor the instant it exits: on
+	// macOS, exec of a freshly written binary plus cmd.Wait's teardown measured
+	// 135-350ms here (6ms for an already-warm binary, which is what production
+	// runs). 500ms clears that with margin and still costs half a second of
+	// boot, once.
+	sharedSpawnConfirmBudget = 500 * time.Millisecond
+
+	// sharedVerifyBudget bounds BACKGROUND readiness verification: how long the
+	// daemon is given to answer /api/health once it is known to be alive. It is
+	// a ceiling, not a wait — verification runs off the boot path, so it may be
+	// generous, but it must terminate so a daemon that never comes up is
+	// reported once instead of polling forever.
+	sharedVerifyBudget = 15 * time.Second
+	// sharedVerifyPoll is the gap between probes inside that budget.
+	sharedVerifyPoll = 250 * time.Millisecond
+)
 
 // htrOwnerFileName is the ownership record for multi-process takeover.
 const htrOwnerFileName = "ocode-owner.json"
@@ -1043,6 +1069,162 @@ func (o *htrDaemonOutput) String() string {
 	return out
 }
 
+// htrStatusFunc is the host UI's status sink, installed by SetStatusFunc.
+//
+// It has to be a package slot rather than a parameter because the two things
+// that publish through it both run AFTER EnsureHTRServe has returned — the
+// background verifier outlives the call that launched it, and the death watcher
+// outlives the daemon — so neither has the caller's server to hand. The pointer
+// is atomic: publishHTRStatus runs on a background goroutine while SetStatusFunc
+// may be called from a later StartBrowse.
+var htrStatusFunc atomic.Pointer[func(string)]
+
+// SetStatusFunc installs the sink that receives shared-daemon status changes
+// ("", or a reason the daemon is unusable) once EnsureHTRServe has already
+// returned. Pass nil to remove it.
+//
+// internal/server installs one so a daemon that never becomes healthy — the
+// failure this function used to report synchronously from the boot path — is
+// still surfaced to the browser UI instead of being lost to a log line.
+//
+// One slot, last writer wins: a process that stands up a second server simply
+// hands the sink over. Nothing is lost by the handover, and a sink left
+// pointing at a server that has since shut down is inert, because publishing
+// only writes a mutex-guarded string nobody reads.
+func SetStatusFunc(fn func(string)) {
+	if fn == nil {
+		htrStatusFunc.Store(nil)
+		return
+	}
+	htrStatusFunc.Store(&fn)
+}
+
+// publishHTRStatus hands a status change to the installed sink. An empty
+// notice means "no longer claiming anything", which is what a dead daemon
+// publishes: the UI must fall back to its own liveness read rather than keep
+// showing a boot-time claim. A nil sink (the TUI bridge, or tests) is a no-op.
+func publishHTRStatus(notice string) {
+	if fn := htrStatusFunc.Load(); fn != nil {
+		(*fn)(notice)
+	}
+}
+
+// htrVerifyOutcome is the last background-verification result recorded for this
+// process's daemon. It exists so a failure is reported once: without it every
+// ensure would re-log and re-publish the same complaint, and the first one —
+// the one that explains what happened — would be buried under the repeats.
+// Immutable once published, so readers need no lock.
+type htrVerifyOutcome struct {
+	port  int
+	ready bool
+}
+
+var lastHTRVerifyOutcome atomic.Pointer[htrVerifyOutcome]
+
+// noteHTRVerifyOutcome records out and reports whether it CHANGED the answer
+// for that port. A false return means the operator has already been told, so the
+// caller must stay silent.
+//
+// What counts as the same answer is (port, ready) and nothing else — not the
+// wording. Keying on the text instead would let a rewording, or a different
+// budget in a test, turn one complaint into a stream of them, which is the very
+// thing this exists to prevent.
+func noteHTRVerifyOutcome(out htrVerifyOutcome) bool {
+	for {
+		prev := lastHTRVerifyOutcome.Load()
+		if prev != nil && prev.port == out.port && prev.ready == out.ready {
+			return false
+		}
+		if lastHTRVerifyOutcome.CompareAndSwap(prev, &out) {
+			return true
+		}
+	}
+}
+
+// launchSharedVerifyFn starts background verification. Production goes through
+// crashguard.Go: a panic in a raw goroutine kills the process before the TUI can
+// restore the terminal, and the verifier probes the network from a goroutine
+// that outlives the boot path, so it needs the same guard every other
+// ocode-owned goroutine has. It is a var only so a test can join the goroutine
+// instead of leaving it to race the next test's probe stubs.
+var launchSharedVerifyFn = func(fn func()) { crashguard.Go(fn) }
+
+// verifySharedDaemonAsync confirms in the background that a daemon which was
+// just spawned and confirmed alive does actually answer /api/health.
+//
+// token is the identity the strict probe must present, which in shared mode IS
+// htrcli's configured token (the daemon is spawned with HTR_MANAGED_ID set to
+// it) and in private mode is the managed identity. Passing the same value to
+// both probes is therefore correct in both modes: the laxer foreign probe can
+// only be satisfied by a daemon holding that same bearer, which is precisely
+// the daemon we are waiting for.
+//
+// On failure it logs once and publishes the reason to the host UI. It never
+// touches a supervisor lock or a host lock, and it never kills the daemon: a
+// slow start is not a failed start, and the stop rule (shouldStopSharedDaemon)
+// owns termination.
+func verifySharedDaemonAsync(port int, socket, token string, lg *log.Logger) {
+	verifySharedDaemon(port, socket, token, lg, sharedVerifyBudget, sharedVerifyPoll)
+}
+
+// verifySharedDaemon is verifySharedDaemonAsync with the budget and poll
+// interval as arguments. The production wrapper above passes the constants;
+// keeping the parameters here is what lets the exhaustion path — the one that
+// has to actually run to its deadline to be observed — be tested without a
+// 15-second test.
+func verifySharedDaemon(port int, socket, token string, lg *log.Logger, budget, poll time.Duration) bool {
+	if lg == nil {
+		lg = log.Default()
+	}
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if htrHealthyForInstanceFn(port, socket, token) || htrHealthyForeignFn(port, socket, token) {
+			// Record the success: it is also what re-arms reporting, so a daemon
+			// that dies later and is ensured again is complained about once more.
+			noteHTRVerifyOutcome(htrVerifyOutcome{port: port, ready: true})
+			return true
+		}
+		time.Sleep(poll)
+	}
+	notice := fmt.Sprintf("HTR automation is unavailable: the daemon on %s did not answer /api/health within %s. Browsing continues without the HTR extension — check the ocode log, or start `htrcli serve` yourself.", htrAddr(port), budget)
+	if !noteHTRVerifyOutcome(htrVerifyOutcome{port: port, ready: false}) {
+		return false
+	}
+	publishHTRStatus(notice)
+	lg.Printf("htr: shared daemon on port %d did not become healthy within %s; run `htrcli serve` manually or check %s", port, budget, htrAddr(port))
+	return false
+}
+
+// confirmSharedSpawnAlive is the BLOCKING half of readiness: it waits up to
+// budget for the freshly spawned child to die, and reports whether it survived.
+//
+// It waits on died — the signal watchHTRExit raises after it has marked the
+// supervisor record terminal, retracted the owner marker and logged — rather
+// than polling the record. Polling cannot be made both cheap and reliable here:
+// the child is not observable as gone until cmd.Wait reaps it, and reaping a
+// process that exited immediately is not fast (see sharedSpawnConfirmBudget).
+// Selecting on the event also means the FAILURE path costs one reap, not the
+// whole window.
+//
+// The check buys exactly one thing: an exec that succeeded but produced a
+// process that dies on the spot is reported here, loudly, with the daemon's own
+// output, while the caller is still on the boot path. A daemon that dies later
+// is not this function's business — that is watchHTRExit's, and it fails just
+// as loudly without stalling anything.
+func confirmSharedSpawnAlive(died <-chan struct{}, budget time.Duration) bool {
+	if died == nil {
+		return true
+	}
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-died:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 // sharedServeEnv builds the child environment for the SHARED daemon. It
 // deliberately omits HTR_BEARER_TOKEN: htrcli resolves its own token from its
 // own config, so passing one here would create a second source of truth that can
@@ -1320,26 +1502,16 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 		_ = sup.RegisterShutdownCallback(lease.release)
 		return HTRStatus{Running: true, Owned: false, Addr: addr, Socket: socketPath, Binary: bin, Release: lease.release}, nil
 	}
-	go watchHTRExit(cmd, sup, rec, identity, lg)
-	// Wait for readiness (bounded): the HTTP API must answer /api/health. A
-	// foreign daemon that won a race also counts — it is answering on this port
-	// with this socket, which is all the caller needs.
-	ready := false
-	for i := 0; i < 50; i++ {
-		if htrHealthyForInstanceFn(port, socketPath, identity) || foreignAlive() {
-			ready = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !ready {
-		lg.Printf("htr: daemon pid %d did not answer /api/health on %s within 5s", rec.PID, addr)
-		if rec.PID > 0 {
-			if process, findErr := os.FindProcess(rec.PID); findErr == nil {
-				_ = process.Kill()
-			}
-		}
-		return fail(fmt.Errorf("htr daemon started (pid %d) but /api/health unreachable on %s%s", rec.PID, addr, htrDaemonOutputTail(cmd)))
+	died := make(chan struct{})
+	go watchHTRExitNotify(cmd, sup, rec, identity, lg, died)
+	// Readiness is split in two. The BLOCKING half asks one question only: did
+	// the process we just spawned die during exec? That is the failure that must
+	// surface while the caller is still on the boot path — desktop boot calls
+	// StartBrowse synchronously, so anything longer is startup latency the user
+	// waits through — and the watcher above reports it on an event, so the
+	// failure costs one reap rather than the whole window.
+	if !confirmSharedSpawnAlive(died, sharedSpawnConfirmBudget) {
+		return fail(fmt.Errorf("htr daemon pid %d exited immediately after start on %s%s", rec.PID, addr, htrDaemonOutputTail(cmd)))
 	}
 	// This is the spawn site, so this process is unambiguously the spawner.
 	if err := htrWriteOwner(identity, port, rec.PID, socketPath, bin, rec.StartedAt, os.Getpid()); err != nil {
@@ -1349,7 +1521,14 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 	// child is retained by the supervisor while another ocode process owns a
 	// lease; the final release terminates only the managed daemon.
 	_ = sup.RegisterShutdownCallback(lease.release)
-	lg.Printf("htr: daemon running pid %d on %s (owned, dies with ocode exit)", rec.PID, addr)
+	// The BACKGROUND half asks the question the boot path must not wait for: does
+	// the daemon actually answer /api/health? It runs behind crashguard.Go,
+	// touches no supervisor or host lock, and gives up at sharedVerifyBudget
+	// after logging one warning — it never kills the daemon and never starts a
+	// replacement. A slow-starting htrcli is not a dead one, and terminating a
+	// healthy-but-slow daemon would destroy work the stop rule owns.
+	launchSharedVerifyFn(func() { verifySharedDaemonAsync(port, socketPath, identity, lg) })
+	lg.Printf("htr: daemon running pid %d on %s (owned, dies with ocode exit); verifying readiness in the background", rec.PID, addr)
 	return HTRStatus{Running: true, Owned: true, StartedByOcode: true, Addr: addr, Socket: socketPath, Binary: bin, Release: lease.release}, nil
 }
 
@@ -1369,7 +1548,27 @@ func htrDaemonOutputTail(cmd *exec.Cmd) string {
 	return " (daemon output: " + text + ")"
 }
 
+// watchHTRExit is the SINGLE death detector for the daemon ocode spawned. It
+// runs on its own goroutine for the daemon's whole lifetime, so every "the
+// daemon is gone" transition in this file is accounted for here.
+//
+// Death is terminal and loud, on purpose. There is deliberately NO restart and
+// NO fallback to a private per-session daemon: a silent fallback would recreate
+// the two-daemon split the shared daemon exists to end, and would hide the
+// disconnect the user has to notice. Recovery is the next EXPLICIT ensure — the
+// next ocode start, or the Settings start button — so a daemon that died
+// mid-session is restarted by a decision someone made, never as a side effect of
+// one being noticed.
 func watchHTRExit(cmd *exec.Cmd, sup *tool.ProcessSupervisor, rec tool.ProcessRecord, identity string, lg *log.Logger) {
+	watchHTRExitNotify(cmd, sup, rec, identity, lg, nil)
+}
+
+// watchHTRExitNotify is watchHTRExit plus a death signal. died, when non-nil,
+// is closed once the death has been fully accounted for — record marked,
+// marker retracted, report logged — so the caller that is still on the boot path
+// can return on the event instead of sleeping out a window. It is closed, not
+// sent, so no caller can be left blocking on an unbuffered channel.
+func watchHTRExitNotify(cmd *exec.Cmd, sup *tool.ProcessSupervisor, rec tool.ProcessRecord, identity string, lg *log.Logger, died chan<- struct{}) {
 	err := cmd.Wait()
 	code := 0
 	if err != nil {
@@ -1382,12 +1581,32 @@ func watchHTRExit(cmd *exec.Cmd, sup *tool.ProcessSupervisor, rec tool.ProcessRe
 	if sup != nil {
 		sup.MarkExitedPID(htrServeID, rec.PID, code)
 	}
-	if owner, ownerErr := readHTROwner(); ownerErr == nil && owner.PID == rec.PID && owner.Identity == identity {
+	// The marker is both what StopHTRServe consults and the only in-process
+	// record of WHICH daemon this was, so it is also where the port comes from.
+	// A death report naming a pid and no port leaves the operator guessing which
+	// of possibly two daemons just went away.
+	owner, ownerErr := readHTROwner()
+	port := 0
+	if ownerErr == nil && owner.PID == rec.PID && owner.Identity == identity {
+		port = owner.Port
 		if path, pathErr := htrOwnerPath(); pathErr == nil {
 			_ = os.Remove(path)
 		}
 	}
 	if lg != nil {
-		lg.Printf("htr: managed daemon pid %d exited with code %d", rec.PID, code)
+		if port > 0 {
+			lg.Printf("htr: daemon pid %d on port %d exited with code %d; not restarting it (the next ocode start, or the Settings start button, will ensure it again)", rec.PID, port, code)
+		} else {
+			lg.Printf("htr: daemon pid %d exited with code %d; not restarting it (the next ocode start, or the Settings start button, will ensure it again)", rec.PID, code)
+		}
+	}
+	// Clear whatever the boot-time ensure cached for the UI. After a death the
+	// daemon is stopped, so any claim the UI is still holding is stale — and a
+	// healthy-looking one would be worse than none. Nothing is written in its
+	// place: the Settings row derives Running from its own liveness probe, and
+	// that is what must show Stopped here.
+	publishHTRStatus("")
+	if died != nil {
+		close(died)
 	}
 }

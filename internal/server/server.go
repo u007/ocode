@@ -124,7 +124,11 @@ type Server struct {
 	// EnableBrowse, before the server starts serving.
 	browse     *browse.Server
 	browseBase string
-	htrNotice  string
+	// htrNotice is written at boot and then, from background goroutines owned by
+	// the shared HTR daemon, for the lifetime of the server. Guarded by
+	// htrNoticeMu — see SetHTRNotice.
+	htrNoticeMu sync.RWMutex
+	htrNotice   string
 
 	// procSup supervises long-lived child processes owned by the server (e.g.
 	// the headless Chrome backing the browser panel). Created in New, shut
@@ -195,7 +199,26 @@ func (s *Server) ProcessSupervisor() *tool.ProcessSupervisor {
 // SetHTRNotice stores a startup failure for the browser UI. The notice is
 // intentionally persistent for the lifetime of this server so a later browser
 // panel mount cannot hide a best-effort HTR failure.
-func (s *Server) SetHTRNotice(notice string) { s.htrNotice = notice }
+//
+// It is now also written from a background goroutine — the shared daemon's
+// readiness verifier, and its death watcher, both outlive the StartBrowse call
+// that installed them (see cdp.SetStatusFunc) — so the field needs a lock. An
+// empty notice CLEARS it: a dead daemon must leave the Settings row reading
+// Stopped rather than a stale claim from boot, and nothing healthy-looking is
+// written in its place.
+func (s *Server) SetHTRNotice(notice string) {
+	s.htrNoticeMu.Lock()
+	s.htrNotice = notice
+	s.htrNoticeMu.Unlock()
+}
+
+// HTRNotice reads the cached daemon notice. Callers are HTTP handlers, so this
+// must not block on anything but this lock.
+func (s *Server) HTRNotice() string {
+	s.htrNoticeMu.RLock()
+	defer s.htrNoticeMu.RUnlock()
+	return s.htrNotice
+}
 
 func isLoopbackBind(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
@@ -999,7 +1022,15 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	// HTR companion (non-fatal): supervised `htrcli serve` daemon. Enabled by
 	// default for managed Chrome; shared leases keep it alive while another
 	// ocode process is using it. A healthy existing daemon is reused.
+	//
+	// EnsureHTRServe confirms only that a daemon it spawned is alive and returns
+	// immediately; health is verified on a background goroutine. That means a
+	// daemon which never becomes healthy is reported AFTER this function has
+	// returned, so the notice is wired through cdp.SetStatusFunc rather than
+	// being decided here. The sink writes into srv.htrNotice under its own lock
+	// and never takes srv's map lock or the handler's.
 	if opts != nil && bOpts.HTR.Enabled {
+		cdp.SetStatusFunc(srv.SetHTRNotice)
 		if st, err := cdp.EnsureHTRServe(srv.ProcessSupervisor(), bOpts.HTR, log.Default()); err != nil {
 			notice := "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
 			srv.SetHTRNotice(notice)
@@ -1029,7 +1060,7 @@ func (s *Server) browsePort() int {
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"base_url":    sameSiteBrowseBase(s.browseBase, r.Host),
-		"htr_notice":  s.htrNotice,
+		"htr_notice":  s.HTRNotice(),
 		"remote_mode": s.remoteMode,
 	})
 }
