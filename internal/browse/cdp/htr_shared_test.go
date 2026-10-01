@@ -20,6 +20,18 @@ func litSock(s string) func(string) string {
 	return func(string) string { return s }
 }
 
+// TestHTRWindowsEndpointIsPinned pins the constant's VALUE. The Windows case in
+// TestResolveSharedDaemon compares against litSock(htrWindowsEndpoint), so
+// retargeting the constant to any other value kept that case green — the two
+// sites agree no matter what they agree on. Changing the endpoint breaks users
+// already running a daemon there, so the value itself is the contract.
+func TestHTRWindowsEndpointIsPinned(t *testing.T) {
+	const want = "127.0.0.1:3847"
+	if htrWindowsEndpoint != want {
+		t.Fatalf("htrWindowsEndpoint=%q, want %q", htrWindowsEndpoint, want)
+	}
+}
+
 func TestResolveSharedDaemon(t *testing.T) {
 	cases := []struct {
 		name string
@@ -59,7 +71,27 @@ func TestResolveSharedDaemon(t *testing.T) {
 			wantNotice: []string{"No htrcli config at"},
 		},
 		{
-			name:     "missing config still honours the ocode token override",
+			// browser.htr_token overrides the token VALUE, not the presence of
+			// htrcli's config. ocode never passes HTR_BEARER_TOKEN to a daemon it
+			// spawns, so against a missing config a spawned daemon comes up with
+			// no token at all and every authenticated probe 401s: ocode would
+			// believe it may spawn, spawn, and then never see it become healthy.
+			name:     "missing config plus an explicit token is still adopt-only",
+			in:       HTRSharedInput{Shared: true, Token: "from_ocode", Goos: "darwin"},
+			wantMode: "shared", wantAdopt: true, wantPort: 3845,
+			wantSock: unixSock,
+			wantTok:  "", wantSrc: "none",
+			// Setting browser.htr_token does not make htrcli come up at all, so
+			// the notice must name the missing file rather than offer the token.
+			wantNotice:    []string{"No htrcli config at"},
+			wantNotNotice: []string{"htr_token"},
+		},
+		{
+			// The override's real purpose, and the case it still serves: the
+			// config IS readable, so it is read and consulted for everything else,
+			// and only the token comes from ocode.
+			name:     "ocode token override fills in a readable config with no token",
+			write:    `{"server":"http://127.0.0.1:3845"}`,
 			in:       HTRSharedInput{Shared: true, Token: "from_ocode", Goos: "darwin"},
 			wantMode: "shared", wantPort: 3845,
 			wantSock: unixSock,
@@ -86,6 +118,23 @@ func TestResolveSharedDaemon(t *testing.T) {
 			// This branch runs before the token branch, so setting
 			// browser.htr_token cannot help and the notice must not say so.
 			wantNotNotice: []string{"htr_token"},
+		},
+		{
+			// The one reachable way two reasons to adopt fire in the same call: the
+			// config parses (so cfg.Server is populated and non-loopback) but
+			// carries no token. Notices are neither accumulated nor overwritten,
+			// so the token reason must survive intact and the loopback reason must
+			// not be appended to it.
+			name:     "a tokenless config keeps its own notice when the server is also non-loopback",
+			write:    `{"server":"http://10.0.0.5:9999"}`,
+			in:       HTRSharedInput{Shared: true, Goos: "darwin"},
+			wantMode: "shared", wantAdopt: true, wantPort: 3845,
+			wantSock: unixSock,
+			wantTok:  "", wantSrc: "none",
+			wantNotice: []string{"No token in"},
+			// The second reason must not grow onto the first, and the
+			// non-loopback port must still not be adopted.
+			wantNotNotice: []string{"not a loopback URL ocode can reach"},
 		},
 		{
 			name:     "tokenless config is adopt-only",
@@ -257,8 +306,13 @@ func TestResolveSharedDaemon(t *testing.T) {
 						t.Errorf("notice %q contains %q, advice that cannot work here", got.Notice, unwanted)
 					}
 				}
-			} else if tc.wantNotice != nil {
-				t.Errorf("notice=%q, want it to contain %q", got.Notice, tc.wantNotice)
+			} else if got.Notice != "" {
+				// Every notice ResolveSharedDaemon emits is paired with
+				// AdoptOnly, so a resolution ocode may act on must not carry one.
+				// This replaces an arm that only fired when a case set wantNotice
+				// while wantAdopt was false — no such case exists, and its %q on a
+				// []string printed ["x"], so it asserted nothing.
+				t.Errorf("notice=%q on a resolution ocode may act on, want empty", got.Notice)
 			}
 			notices[tc.name] = got.Notice
 		})

@@ -144,18 +144,30 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 	cfg, err := loadHTRcliConfig(cfgPath)
 	missing := errors.Is(err, errHTRCLiConfigMissing)
 	switch {
-	case err != nil && !missing:
-		// Unreadable or unparseable config: AdoptOnly even when
-		// browser.htr_token is set, because this branch runs first. The notice
-		// therefore must NOT suggest setting that token would help.
+	case err != nil:
+		// A config that cannot be read — missing, unreadable, or not JSON —
+		// forces AdoptOnly even when browser.htr_token is set, so this branch
+		// is consulted FIRST. ocode deliberately never passes HTR_BEARER_TOKEN
+		// to a daemon it spawns: htrcli resolves its own token from its own
+		// config, so with no readable config a spawned daemon comes up with no
+		// token at all and every authenticated probe 401s. ocode would believe
+		// it may spawn, spawn, and then never see the daemon become healthy.
+		//
+		// browser.htr_token overrides the token VALUE, not the presence of the
+		// config, so neither notice here may offer it as the fix — the file is
+		// what htrcli itself needs.
 		d.AdoptOnly = true
-		d.Notice = fmt.Sprintf("Could not read %s (%v). Start `htrcli serve` yourself; ocode stays adopt-only until that file is readable JSON.", cfgPath, err)
+		if missing {
+			d.Notice = fmt.Sprintf("No htrcli config at %s. Start `htrcli serve` yourself; ocode stays adopt-only until that file exists.", cfgPath)
+		} else {
+			d.Notice = fmt.Sprintf("Could not read %s (%v). Start `htrcli serve` yourself; ocode stays adopt-only until that file is readable JSON.", cfgPath, err)
+		}
 	case in.Token != "":
+		// The config IS readable but carries no usable token of its own. This
+		// is the override's real purpose: ocode knows where the daemon's token
+		// should come from and substitutes its own.
 		d.Token = in.Token
 		d.TokenSource = "ocode-config"
-	case missing:
-		d.AdoptOnly = true
-		d.Notice = fmt.Sprintf("No htrcli config at %s. Start `htrcli serve` yourself, or set browser.htr_token.", cfgPath)
 	case strings.TrimSpace(cfg.Token) == "":
 		d.AdoptOnly = true
 		d.Notice = fmt.Sprintf("No token in %s. Start `htrcli serve` yourself, or set browser.htr_token.", cfgPath)
@@ -175,9 +187,12 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 		// a scheme, an out-of-range port is rejected), so the notice speaks about
 		// reachability rather than claiming the address is not loopback.
 		//
-		// It is only set when no config-read notice already fired: a missing or
-		// tokenless config is the first thing to fix, and notices are never
-		// accumulated into one string.
+		// It is only set when no notice already fired. The only reachable co-fire
+		// is a readable but tokenless config whose server is also non-loopback:
+		// a config that could not be read at all leaves cfg.Server empty, so it
+		// never reaches here. Notices are never accumulated into one string and
+		// never overwritten — the first reason wins, and the token is the first
+		// thing to fix.
 		d.AdoptOnly = true
 		if d.Notice == "" {
 			d.Notice = fmt.Sprintf("htrcli server %q in %s is not a loopback URL ocode can reach locally (expected something like http://127.0.0.1:3845).", cfg.Server, cfgPath)
