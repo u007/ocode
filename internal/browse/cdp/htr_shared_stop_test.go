@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -554,5 +556,129 @@ func TestStopHTRServeStopsOwnDaemon(t *testing.T) {
 	}
 	if _, err := readHTROwner(); err == nil {
 		t.Error("owner marker must be removed after a granted stop")
+	}
+}
+
+// finalReleaseOwner is stopRuleOwner with an Executable that actually names
+// the child startIdleHelperProcess started, so the DIRECT
+// processMatchesOwner also answers true for it. That matters because the two
+// final-lease-release tests must be able to distinguish "the provenance gate
+// said no" from "the daemon was left alone for some unrelated reason": with a
+// placeholder executable, a stop path that skips the predicate entirely would
+// leave the daemon running anyway and the test would pass without ever
+// reaching the kill. Do not "simplify" this back to stopRuleExe.
+func finalReleaseOwner(daemonPID, startedBy int) htrOwner {
+	o := stopRuleOwner(daemonPID, startedBy)
+	o.Executable = os.Args[0]
+	return o
+}
+
+// TestFinalLeaseReleaseStopsOwnDaemon is the non-regression half of the stop
+// rule on the path that actually runs: htrLeaseHandle.release, which is what
+// terminates the daemon when the last lease goes away. One process spawns it,
+// holds a lease, releases the last one, and the marker then names this process
+// as the spawner — so the provenance gate must permit the kill. Driving release
+// rather than terminateManagedHTR directly is deliberate: release is the
+// production path, and it removes this process's own lease before asking,
+// which is the only ordering under which the "is anybody else left" question
+// means anything.
+func TestFinalLeaseReleaseStopsOwnDaemon(t *testing.T) {
+	isolateHTROwnerState(t)
+	stubStopRuleLiveness(t)
+	withStubbedProbes(t, true, true)
+
+	daemon := startIdleHelperProcess(t)
+	defer func() { _ = daemon.Process.Kill() }()
+
+	owner := writeOwnerForTest(t, finalReleaseOwner(daemon.Process.Pid, os.Getpid()))
+	if owner.StartedByPID != os.Getpid() {
+		t.Fatalf("StartedByPID = %d, want this process — the fixture no longer models a self-spawned daemon", owner.StartedByPID)
+	}
+
+	lease, err := acquireHTRLease(owner.Port, owner.Socket, owner.Identity, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.release()
+
+	exited := make(chan error, 1)
+	go func() { exited <- daemon.Wait() }()
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Error("the daemon exited cleanly, expected it to be killed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("daemon pid %d survived the final lease release; the provenance gate must not block a daemon this process spawned", daemon.Process.Pid)
+	}
+	if _, err := readHTROwner(); err == nil {
+		t.Error("owner marker must be removed after a granted stop")
+	}
+}
+
+// TestFinalLeaseReleaseDoesNotKillAnAdoptedDaemon is the adopter half of the
+// same path, and the case the rule exists for. The sequence modelled is: A
+// spawns the daemon, B adopts it, A exits, B releases the final lease. What B
+// finds in the marker is itself as the writer (OwnerPID) and A as the spawner
+// (StartedByPID) — so B releasing the last lease must NOT kill A's daemon, and
+// must not erase the marker that records who did spawn it.
+func TestFinalLeaseReleaseDoesNotKillAnAdoptedDaemon(t *testing.T) {
+	isolateHTROwnerState(t)
+	stubStopRuleLiveness(t)
+	// Everything downstream of provenance answers "yes": with the gate missing,
+	// the predicate would return true and the daemon below would be killed,
+	// which is exactly what this test forbids.
+	withStubbedProbes(t, true, true)
+
+	daemon := startIdleHelperProcess(t)
+	defer func() { _ = daemon.Process.Kill() }()
+
+	// A: the process that spawned the daemon and has since exited. One above
+	// this one is the established "somebody else" stand-in in these fixtures.
+	spawner := os.Getpid() + 1
+	owner := writeOwnerForTest(t, finalReleaseOwner(daemon.Process.Pid, spawner))
+	if owner.OwnerPID != os.Getpid() {
+		t.Fatalf("OwnerPID = %d, want this process — the fixture no longer models an adopting writer", owner.OwnerPID)
+	}
+	if owner.StartedByPID != spawner {
+		t.Fatalf("StartedByPID = %d, want the original spawner %d", owner.StartedByPID, spawner)
+	}
+
+	var logged bytes.Buffer
+	lease, err := acquireHTRLease(owner.Port, owner.Socket, owner.Identity, log.New(&logged, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.release()
+
+	// The proof that nothing was killed: a killed child is reaped at once, so
+	// Wait returning at all means the release reached for it.
+	exited := make(chan error, 1)
+	go func() { exited <- daemon.Wait() }()
+	select {
+	case err := <-exited:
+		t.Fatalf("the final-lease release killed a daemon this process did not spawn (child exited: %v)", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	kept, err := readHTROwner()
+	if err != nil {
+		t.Fatalf("a refused kill must keep the owner marker: %v", err)
+	}
+	if kept.StartedByPID != spawner {
+		t.Errorf("StartedByPID = %d, want %d — a refusal must not rewrite provenance", kept.StartedByPID, spawner)
+	}
+
+	// A refusal is otherwise silent, so the single line carrying the pid and
+	// the reason is the only evidence this was a decision rather than a miss.
+	got := strings.TrimSpace(logged.String())
+	if lines := strings.Count(got, "\n"); lines != 0 {
+		t.Errorf("refusal must be one line, got %d: %q", lines+1, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("pid %d", daemon.Process.Pid)) {
+		t.Errorf("refusal line must name the daemon pid, got %q", got)
+	}
+	if !strings.Contains(got, "did not spawn it") {
+		t.Errorf("refusal line must give the reason, got %q", got)
 	}
 }

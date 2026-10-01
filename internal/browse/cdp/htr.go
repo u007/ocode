@@ -946,7 +946,16 @@ func terminateManagedHTR(port int, socket, identity string, lg *log.Logger) {
 	if json.Unmarshal(data, &owner) != nil || owner.Port != port || owner.Socket != socket || owner.Identity != identity || owner.PID <= 0 || !pidAlive(owner.PID) {
 		return
 	}
-	if !htrHealthyForInstance(owner.Port, owner.Socket, owner.Identity) || !processMatchesOwner(owner) {
+	// Stop rights are decided before anything is signalled to the process, and
+	// the marker is deliberately left in place on a refusal: it is the only
+	// record of who spawned the daemon, so deleting it would make the next run
+	// see "no daemon" rather than "not mine". This is the real kill path — it is
+	// what runs when the final lease is released — so the provenance clause is
+	// what keeps an ADOPTER from killing the daemon that the process which
+	// adopted it spawned. See shouldStopSharedDaemon.
+	stopped, err := shouldStopSharedDaemon(owner)
+	if err != nil || !stopped {
+		logHTRStopRefusal(lg, owner, err)
 		return
 	}
 	proc, err := os.FindProcess(owner.PID)
@@ -960,6 +969,24 @@ func terminateManagedHTR(port int, socket, identity string, lg *log.Logger) {
 	_ = os.Remove(path)
 }
 
+// logHTRStopRefusal emits the single line explaining why a last-lease-release
+// kill did not happen. A refusal is a normal outcome, not a failure, but it is
+// silent in every other sense, so without this line a daemon that outlives its
+// last lease looks exactly like one that was never noticed.
+func logHTRStopRefusal(lg *log.Logger, owner htrOwner, err error) {
+	if lg == nil {
+		return
+	}
+	switch {
+	case err != nil:
+		lg.Printf("htr: final lease expired; leaving daemon pid %d on %s alone: %v", owner.PID, htrAddr(owner.Port), err)
+	case owner.StartedByPID != os.Getpid():
+		lg.Printf("htr: final lease expired; leaving daemon pid %d on %s alone: this process did not spawn it", owner.PID, htrAddr(owner.Port))
+	default:
+		lg.Printf("htr: final lease expired; leaving daemon pid %d on %s alone: another ocode instance still holds a lease on it", owner.PID, htrAddr(owner.Port))
+	}
+}
+
 // htrOutputLimit caps what htrDaemonOutput keeps. The daemon is long-lived and
 // its sink outlives the EnsureHTRServe call that built it, so an uncapped
 // buffer would grow for the life of the ocode process.
@@ -967,17 +994,19 @@ const htrOutputLimit = 64 * 1024
 
 // htrDaemonOutput collects the `htrcli serve` child's stdout and stderr.
 //
-// The TUI runs in Bubble Tea's alt-screen, so the child must never be handed the
-// terminal's own file descriptors: a single log line would paint over the
-// rendered frame. Leaving Cmd.Stdout nil is not the alternative — os/exec sends
-// a nil stream to os.DevNull, which silently discards the one diagnostic that
-// explains a daemon that never became healthy. Capturing costs one bounded
-// buffer and lets EnsureHTRServe quote the daemon's own words back in the
-// readiness failure.
+// Capturing, rather than leaving Cmd.Stdout/Cmd.Stderr nil, is what keeps a
+// daemon that never became healthy diagnosable: os/exec connects a nil stream
+// to os.DevNull, so the child's own error text — the one line that says why it
+// died — would be discarded and there would be nothing left to quote. The sink
+// costs one bounded buffer and lets EnsureHTRServe put the daemon's own words
+// into the readiness failure. Both streams share this single sink so their
+// interleaving is preserved, which is what makes the captured text readable.
 //
-// It is mutex-protected because os/exec copies stdout and stderr from two
-// independent goroutines. Both streams share one sink so their interleaving is
-// preserved, which is what makes the captured text readable.
+// The load-bearing part of this struct is the htrOutputLimit cap, not the
+// mutex. The mutex is cheap insurance, not a fix: os/exec already serialises
+// writes when Stdout and Stderr are the same writer and its type is comparable
+// with ==, which bytes.Buffer is, so there is no race here to prevent. The lock
+// only keeps that guarantee from resting on a subtlety of the standard library.
 type htrDaemonOutput struct {
 	mu      sync.Mutex
 	buf     bytes.Buffer
