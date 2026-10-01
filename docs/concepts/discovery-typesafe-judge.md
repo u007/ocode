@@ -3,7 +3,7 @@ type: Concept
 title: "Discovery TypeSafe Relevance Judge"
 description: TypeSafe relevance judge that vets discovery candidates per-turn (fail-open attach, shared with doc_search) plus the fail-closed auto-injection of the top-scoring skill body with its own 0.8 floor; score plumbing, selection, dedupe, bounding, user-role injection.
 tags: [discovery, typesafe, skills, architecture, observability, auto-inject]
-timestamp: 2026-10-01T03:39:51Z
+timestamp: 2026-10-01T17:14:06Z
 resource: internal/agent/discovery_glue.go
 ---
 # Discovery TypeSafe Relevance Judge
@@ -59,7 +59,7 @@ Why the auto-inject floor is neither of the other two is argued in the 2026-10-0
 - Keep/veto semantics of ALL THREE judges sharing the helper are UNCHANGED — the boolean keep map remains the authority, and the signature change is additive. The other two callers discard the scores with `_`: doc_search (`internal/agent/doc_search_typesafe.go:107`) and tool/code-search (`internal/agent/search_typesafe.go:121`).
 - A VETOED candidate still reports its real score (the score is written at `:80` before the floor comparison at `:81`) — that is what lets a caller see how close a turn came to firing.
 - A MISSING or non-noul answer is ABSENT from the scores map, never defaulted to 0.0 (that path `continue`s at `internal/agent/relevance_typesafe.go:73-76` before the write). Absent means "unknown"; callers must treat it that way, never as a zero score.
-- `judgeDiscoveryCandidates` correspondingly returns `([]discovery.Doc, map[string]float64, error)` (`internal/agent/discovery_typesafe.go:77`, returning at `:102`); `runDiscovery` captures the map as `judgeScores` (`internal/agent/discovery_glue.go:429`, assigned at `:437`).
+- `judgeDiscoveryCandidates` correspondingly returns `([]discovery.Doc, map[string]float64, error)` (`internal/agent/discovery_typesafe.go:77`, returning at `:102`); `runDiscovery` captures the map as `judgeScores` (`internal/agent/discovery_glue.go:435`, assigned at `:443`).
 
 ## Split Select/Seed
 
@@ -69,7 +69,7 @@ Why the auto-inject floor is neither of the other two is argued in the 2026-10-0
 
 `Discover` (`internal/discovery/engine.go:134`) is exactly `Select` + `Seed` — the plain attach-everything wrapper used when no judge is active.
 
-The judge path in `runDiscovery` (`internal/agent/discovery_glue.go:350`) calls `Select`, feeds the candidates to `judgeDiscoveryCandidates`, and only calls `Seed` with the kept IDs. That same seam is where auto-injection is decided: `maybeAutoInjectSkill(keep, judgeScores, tail)` runs after judging and before `Seed` (`internal/agent/discovery_glue.go:448`), and only on this automatic per-turn path — never from `discover_more`.
+The judge path in `runDiscovery` (`internal/agent/discovery_glue.go:356`) calls `Select`, feeds the candidates to `judgeDiscoveryCandidates`, and only calls `Seed` with the kept IDs. That same seam is where auto-injection is decided: `maybeAutoInjectSkill(keep, judgeScores, tail)` runs after judging and before `Seed` (`internal/agent/discovery_glue.go:454`), and only on this automatic per-turn path — never from `discover_more`.
 
 ## Fail-open matrix
 
@@ -80,19 +80,19 @@ The judge path in `runDiscovery` (`internal/agent/discovery_glue.go:350`) calls 
 | Candidate answer missing or not `type:"noul"` | That candidate is kept (fail-open per candidate) |
 | Real below-threshold noul (Noul < 0.5) | Vetoes only that candidate |
 
-The judge can only ever **veto** — a failure never attaches fewer docs than the pre-judge behavior. A vetoed doc stays unattached and is re-judged on a later turn when the query or transcript changes. The judge never changes `renderDiscoveryContext` (`internal/agent/discovery_glue.go:809`); the names-index is a function of the doc set, not of which ids are attached.
+The judge can only ever **veto** — a failure never attaches fewer docs than the pre-judge behavior. A vetoed doc stays unattached and is re-judged on a later turn when the query or transcript changes. The judge never changes `renderDiscoveryContext` (`internal/agent/discovery_glue.go:815`); the names-index is a function of the doc set, not of which ids are attached.
 
 **The one deliberate exception: auto-injection fails CLOSED.** The matrix above governs *attach*; the auto-inject consumer of the same scores inverts every row — no judge, a transport error, or a missing/non-noul answer all mean no score, and no score means no injection. Rationale in the 2026-10-01 amendment.
 
 ## Amendment (2026-09-26): `discover_more` is a second judged attach path — and the warm gate is NOT the judge
 
-The sections above describe the judge as a per-turn `runDiscovery` mechanism. That was accurate when written; the on-demand attach path has since been brought under the same gate. (Line references in this amendment were re-derived against the tree on 2026-10-01: `runDiscovery` now lives at `internal/agent/discovery_glue.go:350`, `renderDiscoveryContext` at `:809`, `DiscoveryStatusInfo.Judge`/`JudgeVetoed` at `:505-523`.)
+The sections above describe the judge as a per-turn `runDiscovery` mechanism. That was accurate when written; the on-demand attach path has since been brought under the same gate. (Line references in this amendment were re-derived against the tree on 2026-10-02: `runDiscovery` now lives at `internal/agent/discovery_glue.go:356`, `renderDiscoveryContext` at `:815`, `DiscoveryStatusInfo.Judge`/`JudgeVetoed` at `:511-529`.)
 
-**Every retrieval attach path is now judged.** `discover_more` (`discoverMoreTool.Execute`, `internal/agent/discovery_glue.go:947`) used to call `Session.Discover` (Select+Seed, no judge), so a model that named a need bypassed Jev entirely — the exact guard-bypass class where a fallback path skips the gate the primary path runs. It now calls `Session.Select` (`:966`), then `judgeDiscoveryCandidates` when `discoveryJudgeClient()` resolves (`:971`), then `Seed`s only the survivors (`:988`).
+**Every retrieval attach path is now judged.** `discover_more` (`discoverMoreTool.Execute`, `internal/agent/discovery_glue.go:953`) used to call `Session.Discover` (Select+Seed, no judge), so a model that named a need bypassed Jev entirely — the exact guard-bypass class where a fallback path skips the gate the primary path runs. It now calls `Session.Select` (`:972`), then `judgeDiscoveryCandidates` when `discoveryJudgeClient()` resolves (`:977`), then `Seed`s only the survivors (`:994`).
 
-**Its fail-open matrix is identical to the table above.** Same four rows: TypeSafe not connected → seed all candidates; `Decide` transport/decode failure → seed all (logged as `discover_more judge failed (fail-open, all attached): ...`, `:976`); missing or non-`noul` answer → keep that candidate; below-threshold noul → veto that candidate. Real vetoes increment the **same** `discoveryState.judgeVetoed` counter the per-turn path uses (`:980` vs. `:439`), so `/discovery status`'s `vetoed N` totals both paths. The path's own debug line is `discover_more("<need>") → +N tools (judge kept N/M)` (`:989`).
+**Its fail-open matrix is identical to the table above.** Same four rows: TypeSafe not connected → seed all candidates; `Decide` transport/decode failure → seed all (logged as `discover_more judge failed (fail-open, all attached): ...`, `:982`); missing or non-`noul` answer → keep that candidate; below-threshold noul → veto that candidate. Real vetoes increment the **same** `discoveryState.judgeVetoed` counter the per-turn path uses (`:986` vs. `:445`), so `/discovery status`'s `vetoed N` totals both paths. The path's own debug line is `discover_more("<need>") → +N tools (judge kept N/M)` (`:995`).
 
-**The on-demand judge sees the conversation too.** `noteDiscoveryTail` / `discoveryTail` (`:920` / `:938`) record a bounded copy of the turn's last `discoveryJudgeTailN` (6) messages on `discoveryState.tail`, guarded by `tailMu`. `runDiscovery` records it right after `ensureDiscovery()` and **before** its early returns (`:358-363`) — the cold-cache deferral is precisely the turn where nothing is attached and the model must fall back to `discover_more`.
+**The on-demand judge sees the conversation too.** `noteDiscoveryTail` / `discoveryTail` (`:926` / `:944`) record a bounded copy of the turn's last `discoveryJudgeTailN` (6) messages on `discoveryState.tail`, guarded by `tailMu`. `runDiscovery` records it right after `ensureDiscovery()` and **before** its early returns (`:364-369`) — the cold-cache deferral is precisely the turn where nothing is attached and the model must fall back to `discover_more`.
 
 **The reply distinguishes veto-all from no-match.** When candidates matched but the judge vetoed all of them, `discover_more` now returns `N tool(s) matched that need but were judged out of scope for this request. Try a different need, or continue without them.` instead of the old `No additional tools matched that need.` — so the model can distinguish "nothing matched" from "matched but out of scope" and retry rather than conclude the capability is missing.
 
@@ -100,18 +100,18 @@ The sections above describe the judge as a per-turn `runDiscovery` mechanism. Th
 
 | Mechanism | Location | Failure it handles | Effect |
 |---|---|---|---|
-| Judge fail-open (matrix above) | `runDiscovery` `:427-443`, `discover_more` `:971-983` | TypeSafe transport/decode failure, or TypeSafe not connected | **Attaches everything the embedder proposed** — the judge only ever filters retrieval results; it never gates the tool list |
-| Corpus-warm / rank gate (`discoveryAllows`) | `internal/agent/discovery_glue.go:624-635` | Cold embedder cache or failed rank — deliberately **no fail-open** for these (the only surviving fail-open is discovery-off) | **Attaches nothing** — hides unattached MCP tool *schemas* from the model's callable tool list; the names-only index still advertises every name |
+| Judge fail-open (matrix above) | `runDiscovery` `:433-449`, `discover_more` `:977-989` | TypeSafe transport/decode failure, or TypeSafe not connected | **Attaches everything the embedder proposed** — the judge only ever filters retrieval results; it never gates the tool list |
+| Corpus-warm / rank gate (`discoveryAllows`) | `internal/agent/discovery_glue.go:630-641` | Cold embedder cache or failed rank — deliberately **no fail-open** for these (the only surviving fail-open is discovery-off) | **Attaches nothing** — hides unattached MCP tool *schemas* from the model's callable tool list; the names-only index still advertises every name |
 
 A warm failure and a judge failure therefore have **opposite** effects on attach volume: warm-fail → zero MCP tool definitions this turn (recover via `discover_more`, which warms with no timeout); judge-fail → every candidate attached. The warm gate's history and rules are documented in [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md).
 
 ## Amendment (2026-10-01): auto-injected skill body — the judge's one fail-closed consumer
 
-Discovery used to advertise skills by NAME ONLY (a cached, system-role name index) and rely on the model choosing to call the `skill` tool for the body — a round trip that depends on the model taking it. Now, when Jev is confident that ONE skill is the right one, the full body is inlined into the prompt automatically. Implementation: `internal/agent/discovery_autoinject.go` (tests in `internal/agent/discovery_autoinject_test.go`). All line references in this section were verified against the tree on 2026-10-01.
+Discovery used to advertise skills by NAME ONLY (a cached, system-role name index) and rely on the model choosing to call the `skill` tool for the body — a round trip that depends on the model taking it. Now, when Jev is confident that ONE skill is the right one, the full body is inlined into the prompt automatically. Implementation: `internal/agent/discovery_autoinject.go` (tests in `internal/agent/discovery_autoinject_test.go`). All line references in this section were verified against the tree on 2026-10-02.
 
 ### Score plumbing
 
-Described under [State and question shape](#state-and-question-shape) above: `judgeRelevanceQuestions` gained the third `scores` return, `judgeDiscoveryCandidates` forwards it (`internal/agent/discovery_typesafe.go:77`), and `runDiscovery` hands the map to `maybeAutoInjectSkill(keep, judgeScores, tail)` (`internal/agent/discovery_glue.go:448`). The keep/veto contract of the discovery, doc_search and tool-search judges is untouched; the staging state lives on `discoveryState` (`autoInject`, `autoInjected`, `autoInjectMu` — `internal/agent/discovery_glue.go:57-69`).
+Described under [State and question shape](#state-and-question-shape) above: `judgeRelevanceQuestions` gained the third `scores` return, `judgeDiscoveryCandidates` forwards it (`internal/agent/discovery_typesafe.go:77`), and `runDiscovery` hands the map to `maybeAutoInjectSkill(keep, judgeScores, tail)` (`internal/agent/discovery_glue.go:454`). The keep/veto contract of the discovery, doc_search and tool-search judges is untouched; the staging state lives on `discoveryState` (`autoInject`, `autoInjected`, `autoInjectMu` — `internal/agent/discovery_glue.go:57-75`).
 
 ### Its own confidence floor: `discoveryAutoInjectFloor = 0.8`
 
@@ -130,15 +130,15 @@ No judge connected, a judge transport error, or a missing/non-noul answer all me
 
 `pickAutoInjectSkill(keep, scores)` (`internal/agent/discovery_autoinject.go:98`) takes the **highest-scoring** candidate whose `Kind == "skill"` and whose noul ≥ 0.8. Ties break by embedder rank — candidates arrive in rank order from `Session.Select` (`internal/discovery/engine.go:114`), so first-wins is deterministic rather than map-iteration order. MCP tools and project markdown docs are never inlined (an MCP tool's gate is a separate mechanism; md docs already emit as summaries).
 
-A skill is a candidate only on the turn it **FIRST** attaches, because `Session.Select` skips already-attached docs — so selection happens at most once per skill per session, with no re-judging loop to get wrong. Auto-inject runs only on the automatic per-turn path (`runDiscovery`), **NOT** from the `discover_more` tool, which discards the scores (`judged, _, jerr` at `internal/agent/discovery_glue.go:972`): there the model asked for more and will load the body itself.
+A skill is a candidate only on the turn it **FIRST** attaches, because `Session.Select` skips already-attached docs — so selection happens at most once per skill per session, with no re-judging loop to get wrong. Auto-inject runs only on the automatic per-turn path (`runDiscovery`), **NOT** from the `discover_more` tool, which discards the scores (`judged, _, jerr` at `internal/agent/discovery_glue.go:978`): there the model asked for more and will load the body itself.
 
 ### Dedupe, three layers
 
-1. **Sticky set** — `recordAutoInject` (`internal/agent/discovery_autoinject.go:291`) refuses a replay: a skill name already in `discoveryState.autoInjected` is never staged again.
+1. **Sticky set** — `recordAutoInject` (`internal/agent/discovery_autoinject.go:299`) refuses a replay: a skill name already in `discoveryState.autoInjected` is never staged again. A name that passes is **appended** to `discoveryState.autoInject`, which is now a `[]*autoInjectSkill` list rather than a single slot, so a second confident pick never evicts the first skill's body. (The former single slot DID evict — and because the blocks are never persisted while the sticky set still refused to re-select the evicted name, only a compaction could bring that body back.)
 2. **`chatAlreadyHasSkill`** (`internal/agent/discovery_autoinject.go:166`) scans the **whole transcript** for three signals: a prior `skill`/`load_skill` tool call naming it (the JSON `name` field is compared after a cheap `strings.Contains` pre-filter, so `pdf` does not match a `load_skill("pdf-forms")` call); the skill's `Source` path appearing in any message (the model read the SKILL.md directly); or a previous auto-inject block (marker `auto-loaded skill`, `internal/agent/discovery_autoinject.go:71`).
-3. **Compaction resets** — `resetAutoInjected()` (`internal/agent/discovery_autoinject.go:315`) clears the sticky set AND the staged block, called beside `resetDirMDSeen()` at the compaction splice (`internal/agent/agent.go:2803`, and `resetAutoInjected()` on the next line at `:2807`). These blocks are request-time injections that are **never persisted**, so after a splice the model genuinely no longer has them and the next judged turn must be free to re-select.
+3. **Compaction resets** — `resetAutoInjected()` (`internal/agent/discovery_autoinject.go:326`) clears the sticky set AND **every staged block**, called beside `resetDirMDSeen()` at the compaction splice (`internal/agent/agent.go:2803`, and `resetAutoInjected()` on the next line at `:2807`). Lifetime is the **session**, not the turn, and that is deliberate, not an oversight: these blocks are request-time injections that are **never persisted**, so dropping them between turns would lose the bodies with no way to get them back — clearing them only at the compaction splice is what keeps them available while keeping the re-select honest (after a splice the model genuinely no longer has them and the next judged turn must be free to re-select).
 
-Once staged, the block is re-rendered on every subsequent request of the session until compaction (`autoInjectBlock` is read by `injectDiscoveryContext` on each Step) — that is intentional: the body stays available across turns without re-judging.
+Once staged, the blocks are re-rendered on every subsequent request of the session until compaction (`autoInjectBlock` is read by `injectDiscoveryContext` on each Step) — that is intentional: the bodies stay available across turns without re-judging. Nothing clears them between turns and nothing persists them either; the session lifetime named in the previous list is the deliberate consequence of both.
 
 ### Bounded at 8KB
 
@@ -146,15 +146,15 @@ Once staged, the block is re-rendered on every subsequent request of the session
 
 ### User-role, and this is load-bearing for the prompt cache
 
-The block is appended by `injectDiscoveryContext` (`internal/agent/discovery_glue.go:748`) as a **`user`-role message LAST in the tail** (`:791-793`). `collectAndRemoveSystemMessages` hoists EVERY system-role message into the cached `system` field, so a per-turn-varying injection there would invalidate the entire cached prefix. `TestInjectDiscoveryContextAutoInjectKeepsSystemBlockByteIdentical` (`internal/agent/discovery_autoinject_test.go:246`) pins that the system block is byte-identical whether or not the injection fires. In the stable/volatile split of `injectDiscoveryContext`, the auto-inject block is on the **volatile** side — uncached user tail, alongside attached-skill descriptions.
+`autoInjectBlock()` renders **every** staged block, oldest first, and `injectDiscoveryContext` (`internal/agent/discovery_glue.go:754`) appends them as ONE **`user`-role message LAST in the tail** (`:797-799`) — a single message carrying the whole list, so the volatile append stays one message and the cached block above it is untouched either way. `collectAndRemoveSystemMessages` hoists EVERY system-role message into the cached `system` field, so a per-turn-varying injection there would invalidate the entire cached prefix. `TestInjectDiscoveryContextAutoInjectKeepsSystemBlockByteIdentical` (`internal/agent/discovery_autoinject_test.go:246`) pins that the system block is byte-identical whether or not any injection fires. In the stable/volatile split of `injectDiscoveryContext`, the auto-inject blocks are on the **volatile** side — uncached user tail, alongside attached-skill descriptions.
 
 ### The latent root bug fixed on the way
 
-`skill.LoadSkill` resolved the project root from `os.Getwd()` — the SERVER process's cwd, the wrong root for any session not rooted at the process cwd. Added `skill.LoadSkillForRoot(name, root)` (`internal/skill/loader.go:605`); `LoadSkill` (`internal/skill/loader.go:595`) delegates with the cwd exactly as before, so its existing callers — `internal/tool/misc.go:59` and `internal/memory/memory.go:241` — are unaffected. Auto-inject uses the root-aware form with `a.workDir` (`loadAutoInjectBody`, `internal/agent/discovery_autoinject.go:141`; test `TestLoadAutoInjectBodyUsesWorkDirNotProcessCwd` at `internal/agent/discovery_autoinject_test.go:349`).
+`skill.LoadSkill` resolved the project root from `os.Getwd()` — the SERVER process's cwd, the wrong root for any session not rooted at the process cwd. Added `skill.LoadSkillForRoot(name, root)` (`internal/skill/loader.go:605`); `LoadSkill` (`internal/skill/loader.go:595`) delegates with the cwd exactly as before, so its existing callers — `internal/tool/misc.go:59` and `internal/memory/memory.go:241` — are unaffected. Auto-inject uses the root-aware form with `a.workDir` (`loadAutoInjectBody`, `internal/agent/discovery_autoinject.go:141`; test `TestLoadAutoInjectBodyUsesWorkDirNotProcessCwd` at `internal/agent/discovery_autoinject_test.go:434`).
 
 ## How to observe
 
-`/discovery` status shows `judge: typesafe/jev-latest (vetoed N this session)` only when TypeSafe is connected (`DiscoveryStatusInfo.Judge` / `JudgeVetoed` in `internal/agent/discovery_glue.go:505-523`).
+`/discovery` status shows `judge: typesafe/jev-latest (vetoed N this session)` only when TypeSafe is connected (`DiscoveryStatusInfo.Judge` / `JudgeVetoed` in `internal/agent/discovery_glue.go:511-529`).
 
 **Turn-rank line (primary entry point).** Every turn that selects new candidates emits one line to the debug log (kind `DISCOVERY`):
 
@@ -190,7 +190,7 @@ No `auto-inject:` line at all on a turn with candidates means there was no judge
 
 At most one `Decide` per turn that has new candidates, with at most `SelectCap` (30) noul questions. Recorded as side usage via `RecordSideUsage`. No call at all when nothing new is selected (empty candidates from `Select`).
 
-Auto-injection adds **no extra `Decide`** — it reuses the same turn's score map. Its marginal cost is one local skill-file read plus at most `discoveryAutoInjectMaxBytes` (8KB) appended to the **uncached** user tail, on the staging turn and on later turns of the session until compaction (the staged block is re-rendered per request because it is never persisted).
+Auto-injection adds **no extra `Decide`** — it reuses the same turn's score map. Its marginal cost is one local skill-file read plus at most `discoveryAutoInjectMaxBytes` (8KB) **per staged skill** appended to the **uncached** user tail, on the staging turn and, for every block then staged, on later turns of the session until compaction (the staged blocks are re-rendered per request because they are never persisted).
 
 ## See also
 
