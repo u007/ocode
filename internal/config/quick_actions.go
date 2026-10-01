@@ -149,7 +149,11 @@ func NormalizeQuickActions(cfg QuickActionsConfig) QuickActionsConfig {
 			out[i].Mode = QuickActionModeSend
 		}
 	}
-	return QuickActionsConfig{Chips: out}
+	// Reassign the field on the (already copied) struct rather than building a
+	// fresh QuickActionsConfig: a composite literal would silently zero any
+	// scalar field added to this type later.
+	cfg.Chips = out
+	return cfg
 }
 
 // Validate rejects a config that could not be rendered faithfully. Callers

@@ -128,10 +128,12 @@ func TestQuickActionsValidate(t *testing.T) {
 		wantIs string // substring the error must contain; "" means expect nil
 	}{
 		{"valid single chip", QuickActionsConfig{Chips: []QuickActionChip{base}}, ""},
-		// Without a positive row here, deleting `&& chip.Mode !=
-		// QuickActionModeSend` from the accept check -- turning every fill chip
-		// into a hard error and breaking half the feature -- fails no test,
-		// because every other positive row is built on base, whose mode is send.
+		// Without a positive row here, dropping the `QuickActionModeFill &&`
+		// clause from the accept check -- which turns every fill chip into a
+		// hard error and breaks half the feature -- fails no test, because
+		// every other positive row is built on base, whose mode is send.
+		// (Dropping the *Send* clause instead is a different mutant: it breaks
+		// send chips, which the other positive rows already cover.)
 		{"fill mode chip", QuickActionsConfig{Chips: []QuickActionChip{mutate(func(c *QuickActionChip) { c.Mode = QuickActionModeFill })}}, ""},
 		{"empty list is legal", QuickActionsConfig{Chips: []QuickActionChip{}}, ""},
 		{"20 chips ok", QuickActionsConfig{Chips: makeChips(20, base)}, ""},
