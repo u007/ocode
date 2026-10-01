@@ -2,12 +2,16 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockIsRemoteSession = vi.hoisted(() => vi.fn(() => false));
+const mockIsDesktopShell = vi.hoisted(() => vi.fn(() => false));
 const mockAuthedFetch = vi.hoisted(() => vi.fn());
 vi.mock("../../api/client", () => ({
   authToken: () => "test-token",
   isRemoteSession: mockIsRemoteSession,
   authedFetch: mockAuthedFetch,
   apiPath: (p: string) => p,
+}));
+vi.mock("../../lib/desktopShell", () => ({
+  isDesktopShell: () => mockIsDesktopShell(),
 }));
 
 import ShareDialog from "./ShareDialog";
@@ -18,7 +22,17 @@ function openShareDialog() {
   });
 }
 
-function mockShareResponses(opts: { tailscale?: string; lan?: string } = {}) {
+function mockShareResponses(
+  opts: {
+    tailscale?: string;
+    lan?: string;
+    // undefined/null = the route is absent (a plain `ocode serve`), which is
+    // what makes the dialog fall back to the launch token.
+    shareToken?: string | null;
+    resetToken?: string;
+    resetStatus?: number;
+  } = {},
+) {
   mockAuthedFetch.mockImplementation(async (path: string) => {
     if (path === "/api/tailscale-url") {
       return {
@@ -29,13 +43,32 @@ function mockShareResponses(opts: { tailscale?: string; lan?: string } = {}) {
     if (path === "/api/network-ip") {
       return { ok: true, json: async () => ({ ip: opts.lan ?? "" }) };
     }
-    return { ok: false, json: async () => null };
+    if (path === "/api/desktop/share-token") {
+      if (opts.shareToken == null) {
+        return { ok: false, status: 404, json: async () => null };
+      }
+      return { ok: true, status: 200, json: async () => ({ token: opts.shareToken }) };
+    }
+    if (path === "/api/desktop/share-token/reset") {
+      const status = opts.resetStatus ?? 200;
+      return {
+        ok: status < 400,
+        status,
+        json: async () => (status < 400 ? { token: opts.resetToken ?? "rotated-token" } : null),
+      };
+    }
+    return { ok: false, status: 404, json: async () => null };
   });
 }
 
 describe("ShareDialog", () => {
   beforeEach(() => {
     mockIsRemoteSession.mockReturnValue(false);
+    mockIsDesktopShell.mockReturnValue(false);
+    // Clear call history between tests: the "never POST a reset" assertions
+    // below would otherwise see the POST from an earlier test, which really
+    // does reset the token.
+    mockAuthedFetch.mockReset();
     mockShareResponses({ lan: "192.168.1.5" });
   });
 
@@ -141,5 +174,115 @@ describe("ShareDialog", () => {
     ]);
     // A false "Copied" must not be reported when nothing was written.
     expect(screen.queryByTestId("share-dialog-copy-failed")).toBeNull();
+  });
+
+  // ---- durable share token (desktop shell) ----
+
+  it("uses the durable share token in place of the launch token in the desktop shell", async () => {
+    mockIsDesktopShell.mockReturnValue(true);
+    mockShareResponses({ lan: "192.168.1.5", shareToken: "durable-token" });
+    render(<ShareDialog />);
+    openShareDialog();
+    await waitFor(() => expect(screen.getByTestId("share-dialog-copy")).toBeInTheDocument());
+    const value = (screen.getByRole("textbox") as HTMLInputElement).value;
+    // The launch token dies with the process, so handing it out would make
+    // every shared link expire on the next restart.
+    expect(value).toContain("token=durable-token");
+    expect(value).not.toContain("test-token");
+    expect(screen.getByTestId("share-dialog-persistent-note")).toBeInTheDocument();
+  });
+
+  it("falls back to the launch token and offers no reset when the desktop has no durable token", async () => {
+    mockIsDesktopShell.mockReturnValue(true);
+    mockShareResponses({ lan: "192.168.1.5", shareToken: null });
+    render(<ShareDialog />);
+    openShareDialog();
+    await waitFor(() => expect(screen.getByTestId("share-dialog-copy")).toBeInTheDocument());
+    expect((screen.getByRole("textbox") as HTMLInputElement).value).toContain("token=test-token");
+    expect(screen.queryByTestId("share-dialog-reset")).toBeNull();
+  });
+
+  it("offers no reset outside the desktop shell", async () => {
+    render(<ShareDialog />);
+    openShareDialog();
+    await waitFor(() => expect(screen.getByTestId("share-dialog-lan")).toBeInTheDocument());
+    expect(screen.queryByTestId("share-dialog-reset")).toBeNull();
+    expect(screen.queryByTestId("share-dialog-persistent-note")).toBeNull();
+  });
+
+  it("resets the share token and rewrites the displayed URL", async () => {
+    mockIsDesktopShell.mockReturnValue(true);
+    mockShareResponses({ lan: "192.168.1.5", shareToken: "old-token", resetToken: "rotated-token" });
+    render(<ShareDialog />);
+    openShareDialog();
+    await waitFor(() => expect(screen.getByTestId("share-dialog-reset-start")).toBeInTheDocument());
+    expect((screen.getByRole("textbox") as HTMLInputElement).value).toContain("token=old-token");
+
+    fireEvent.click(screen.getByTestId("share-dialog-reset-start"));
+    fireEvent.click(screen.getByTestId("share-dialog-reset-confirm-yes"));
+
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLInputElement).value).toContain("token=rotated-token"),
+    );
+    expect(screen.queryByTestId("share-dialog-reset-confirm")).toBeNull();
+    expect(screen.queryByTestId("share-dialog-reset-error")).toBeNull();
+  });
+
+  it("cancelling the confirmation leaves the token alone", async () => {
+    mockIsDesktopShell.mockReturnValue(true);
+    mockShareResponses({ lan: "192.168.1.5", shareToken: "old-token", resetToken: "rotated-token" });
+    render(<ShareDialog />);
+    openShareDialog();
+    await waitFor(() => expect(screen.getByTestId("share-dialog-reset-start")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("share-dialog-reset-start"));
+    fireEvent.click(screen.getByTestId("share-dialog-reset-cancel"));
+
+    await waitFor(() => expect(screen.getByTestId("share-dialog-reset-start")).toBeInTheDocument());
+    expect(mockAuthedFetch).not.toHaveBeenCalledWith(
+      "/api/desktop/share-token/reset",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("keeps the previous link and explains the failure when the reset does not land", async () => {
+    mockIsDesktopShell.mockReturnValue(true);
+    mockShareResponses({ lan: "192.168.1.5", shareToken: "old-token", resetStatus: 500 });
+    render(<ShareDialog />);
+    openShareDialog();
+    await waitFor(() => expect(screen.getByTestId("share-dialog-reset-start")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("share-dialog-reset-start"));
+    fireEvent.click(screen.getByTestId("share-dialog-reset-confirm-yes"));
+
+    await waitFor(() => expect(screen.getByTestId("share-dialog-reset-error")).toBeInTheDocument());
+    // The old token is still the live one, so the dialog must not advertise a
+    // URL it knows is revoked.
+    expect((screen.getByRole("textbox") as HTMLInputElement).value).toContain("token=old-token");
+  });
+
+  it("arms the confirmation from the Share menu event without revoking anything", async () => {
+    mockIsDesktopShell.mockReturnValue(true);
+    mockShareResponses({ lan: "192.168.1.5", shareToken: "old-token" });
+    render(<ShareDialog />);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("ocode:reset-share-token"));
+    });
+    await waitFor(() => expect(screen.getByTestId("share-dialog-reset-confirm")).toBeInTheDocument());
+    expect(mockAuthedFetch).not.toHaveBeenCalledWith(
+      "/api/desktop/share-token/reset",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("keeps refusing to share in a remote session even with a durable token", async () => {
+    mockIsDesktopShell.mockReturnValue(true);
+    mockIsRemoteSession.mockReturnValue(true);
+    mockShareResponses({ lan: "192.168.1.5", shareToken: "durable-token" });
+    render(<ShareDialog />);
+    openShareDialog();
+    expect(screen.getByTestId("share-dialog-remote-unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByTestId("share-dialog-reset")).toBeNull();
   });
 });

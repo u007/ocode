@@ -23,6 +23,7 @@ import { describeActionError, reportActionErrorMessage } from "../../lib/actionE
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
 import { getCompactionState, isCompactCommand, useCompactionState } from "../../lib/compactionState";
 import CompactionStatus from "./CompactionStatus";
+import CommandActivityBar from "./CommandActivityBar";
 import RecentInputsStrip from "./RecentInputsStrip";
 
 interface ChatInputProps {
@@ -63,6 +64,17 @@ export interface SlashCommandResult {
   startedTurn?: boolean;
   accepted?: boolean;
 }
+
+/**
+ * The composer's keyboard/slash shortcuts. Deliberately NOT the placeholder:
+ * Chrome counts placeholder text in a textarea's `scrollHeight`, so a long one
+ * wraps and inflates the EMPTY composer on narrow viewports (and Chrome paints
+ * a scrollbar once the wrapped placeholder no longer fits the one-line box).
+ * It is surfaced as the textarea's `title` (hover) instead, so the hints are
+ * still discoverable without owning the box's layout.
+ */
+const CHAT_INPUT_PLACEHOLDER_HINT =
+  "Enter to send · Shift+Enter for newline · ↑/↓ history · / for commands · ! for shell";
 
 const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   onSlashCommand,
@@ -166,10 +178,29 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const fitTextarea = useCallback(() => {
     const el = textareaRef.current;
     if (!el || el.scrollHeight <= 0) return;
+    // An EMPTY composer is exactly one line tall. Drop the inline height and
+    // let `.composer-control` (index.css) supply it — that value is already
+    // derived from the textarea's own box model and scales with the root font
+    // size. Measuring instead would be wrong here: Chrome counts the PLACEHOLDER
+    // in `scrollHeight`, so on a narrow viewport this composer's 110-character
+    // placeholder wrapped and inflated the empty box to 3-5 lines (measured 110px
+    // at a 320px viewport vs 47px at 1400px). Clearing the draft from a tall
+    // multi-line box lands here too, so this is also the shrink-to-one-line path.
+    if (!el.value) {
+      el.style.height = "";
+      return;
+    }
+    // `scrollHeight` covers content + padding but NOT the border, and `height`
+    // is border-box, so applying it raw left the box 2px short of its content —
+    // which pinned a scrollbar track on an EMPTY composer. `offsetHeight -
+    // clientHeight` is exactly the chrome we omitted (borders + any horizontal
+    // scrollbar). Both are 0 under jsdom, so the modelled tests still see the
+    // bare scrollHeight.
+    const chrome = el.offsetHeight - el.clientHeight;
     // Must clear the explicit height *before* reading, otherwise a shrink keeps
     // reporting the old (taller) box as its minimum scrollHeight.
     el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
+    el.style.height = `${el.scrollHeight + chrome}px`;
   }, []);
 
   useLayoutEffect(() => {
@@ -1156,7 +1187,8 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             </span>
           ))}
       </div>
-      <CompactionStatus sessionId={sessionTabId} queued={getQueue(sessionTabId).some((item) => !item.dispatched && item.kind === "command" && isCompactCommand(item.text))} />
+      <CommandActivityBar sessionId={sessionTabId} host={projectHost} />
+      <CompactionStatus sessionId={sessionTabId} host={projectHost} queued={getQueue(sessionTabId).some((item) => !item.dispatched && item.kind === "command" && isCompactCommand(item.text))} />
       {queueCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1">
           <div>{queueCount} queued — press ↑ in an empty box to edit the last one</div>
@@ -1214,20 +1246,34 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         className="hidden"
         onChange={handleAttach}
       />
+      {/* Every child carries `composer-control` (index.css) so the row reads
+        as one aligned unit: the textarea box, the attach button's hit area and
+        the action button all share a height and a `rounded-lg` radius, and
+        their top edges line up with the top of the input. `items-end` (not
+        `items-center`) is deliberate — the textarea auto-grows up to
+        `max-h-40` and the controls must stay pinned to its bottom edge. */}
       <div className="flex items-end gap-2">
         <button
           type="button"
           onClick={() => attachRef.current?.click()}
-          className="shrink-0 p-1.5 rounded text-muted-foreground hover:text-accent-foreground hover:bg-accent"
+          className="composer-control flex w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           title="Attach files"
+          aria-label="Attach files"
         >
-          <Paperclip className="w-4 h-4" />
+          <Paperclip className="h-4 w-4" />
         </button>
         <textarea
           ref={textareaRef}
-          className="flex-1 resize-none overflow-y-auto max-h-40 rounded-lg border border-border bg-muted p-3 text-sm leading-[1.5em] text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="composer-control flex-1 resize-none overflow-y-auto max-h-40 rounded-lg border border-border bg-muted p-3 text-sm leading-[1.5em] text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           rows={1}
-          placeholder="Type a message... (Enter to send, Shift+Enter for newline, ↑/↓ history, / for commands, ! for shell)"
+          placeholder="Type a message…"
+          // The full shortcut list used to live in the placeholder, where 110
+          // characters dominated the box and — because Chrome counts the
+          // PLACEHOLDER in `scrollHeight` — wrapped to 3-5 lines and forced the
+          // empty composer to overflow on any narrow viewport. It stays
+          // reachable on hover instead; `CHAT_INPUT_PLACEHOLDER_HINT` keeps one
+          // copy of the text.
+          title={CHAT_INPUT_PLACEHOLDER_HINT}
           value={input}
           onChange={(e) => updateDraft(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -1241,7 +1287,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             type="button"
             variant="outline"
             size="icon"
-            className="h-9 w-9 shrink-0"
+            className="composer-control w-11 shrink-0 rounded-lg"
             onClick={() => {
               void retryLastTurn();
             }}
@@ -1256,7 +1302,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             type="button"
             variant="destructive"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             onClick={stop}
           >
             Stop
@@ -1269,7 +1315,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             disabled
           >
             Running…
@@ -1282,7 +1328,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             disabled
           >
             Waiting for permission…
@@ -1291,7 +1337,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             onClick={handleResume}
             title={queueCount > 0 ? `Resume — ${queueCount} queued` : "Resume"}
           >
@@ -1301,7 +1347,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             onClick={handleSend}
             disabled={!input.trim()}
           >

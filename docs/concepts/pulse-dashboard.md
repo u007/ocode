@@ -11,7 +11,7 @@ tags:
   - web
   - desktop
   - api
-timestamp: 2026-09-29T04:38:57Z
+timestamp: 2026-10-01T03:44:34Z
 ---
 # Pulse — cross-project live-sessions dashboard
 
@@ -382,3 +382,55 @@ user was.
 - Desktop shell: `cmd/ocode-desktop/main.go`, `web/src/components/Pulse/PulseShellSignal.tsx`, `web/src/lib/wails.ts`
 - Design spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 - Plan: `docs/superpowers/plans/2026-09-24-pulse-dashboard/`
+
+## The live card carries its own stream
+
+A `running`, `needs_permission` or `needs_question` row renders its streaming
+preview on the card face, not only in the hover overlay, and enables
+`usePulseTail` unconditionally (`expanded || streamOnCard`, gated by the
+`STREAM_ON_CARD` set). Every other status — `idle` and `error` — keeps the
+existing hover/focus gate and still renders its preview in the overlay.
+
+Why: watching a turn is the entire reason to open this dashboard, and
+hover-gating the preview inverted that. It also made the preview unreachable on
+a touch device, which has no hover at all.
+
+The fetch-cost rationale that kept the gate is unchanged and still load-bearing.
+A settled row is seeded from a 200-message transcript fetch (`IDLE_FETCH_LIMIT`)
+and the dashboard pages up to 50 rows (`pulseDefaultLimit`), so seeding every
+settled card up front would cost a request per card on open. Live rows number in
+single digits, so their seed fetch and SSE `text` subscription follow work that
+is actually happening rather than history.
+
+The stream renders in exactly ONE place per card — the card face for a live row,
+the overlay otherwise — so the same lines are never on screen twice and
+`pulse-tail` stays a unique test hook.
+
+### Card height is a floor, not a hint
+
+Non-compact cards reserve `CARD_MIN_H = "min-h-[16rem]"` and are `h-full`, so
+every card in a grid row is one height. Both are needed: `min-h` alone still lets
+a taller card stretch its row, and `h-full` alone gives nowhere to stream into.
+
+The floor must stay ABOVE the content. Measured in headless Chromium against the
+built CSS, a full card (status row, title, task line, todo bar) plus the full
+preview is 240.5px, so 16rem/256px leaves ~15px of slack. When `min-h` sat below
+the content the content governed instead: a card grew from 224px to 240px as tail
+lines arrived, reflowing the whole grid row on every streaming delta.
+
+`PULSE_TAIL_LINES` is 7, sized to that reserved region. The region itself is
+`flex-1 justify-end overflow-hidden` with `truncate` per line, so the newest line
+is pinned to the bottom edge (the way a terminal tail reads) and a long streamed
+line is truncated rather than wrapped. `justify-end` only has an effect because
+`PulseStream`'s base carries `flex-col` — the vertical main axis.
+
+### Grid is capped at 3 columns
+
+`grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3`. The earlier `xl:grid-cols-4`
+is gone: a live card reserves a full block for its stream, and a fourth column
+squeezed those lines to unreadable width. This reverses the earlier "responsive
+columns, up to 4" intent from the design spec, deliberately, at the user's
+request for more height and more visible streaming context.
+
+Compact (Recent-section) cards are unchanged: one line, no reserved height,
+hover-gated.

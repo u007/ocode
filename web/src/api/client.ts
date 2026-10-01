@@ -668,6 +668,63 @@ async function remoteLifecycleRequest<T>(
   }
 }
 
+// ── Connectors (web/desktop parity with the TUI /connect dialog) ──
+// One method per route the Connectors settings section drives, all taking a
+// trailing `host`. Credentials live in a per-machine auth store, so a connect
+// call that silently dropped `host` would save the key on the wrong machine
+// when the user is looking at a remote (SSH/WSL) project.
+export type ConnectMethodKind = "apikey" | "oauth" | "plugin" | "remove";
+
+export interface ConnectMethod {
+  id: string;
+  label: string;
+  kind: ConnectMethodKind;
+}
+
+export interface ConnectProvider {
+  id: string;
+  label: string;
+  /** Symbol from auth.Status: a check/tick/cross plus an optional detail. */
+  status: string;
+  statusDetail: string;
+  methods: ConnectMethod[];
+  hasCredential: boolean;
+  /** Credential kind (e.g. "api_key", "oauth"); absent when nothing is stored. */
+  kind?: string;
+  /** Masked credential, e.g. "sk-a••••b123". Never the real secret. */
+  masked?: string;
+}
+
+export interface ConnectFlow {
+  flowId: string;
+  provider?: string;
+  method?: string;
+  /** "paste-code" | "local-callback" | "device-code" | "cookies" | "plugin" */
+  kind: string;
+  /** "waiting_input" | "waiting_browser" | "running" | "complete" | "failed" | "cancelled" */
+  state: string;
+  url?: string;
+  userCode?: string;
+  verificationUri?: string;
+  instructions?: string;
+  error?: string;
+  account?: string;
+}
+
+export interface ConnectSetPayload {
+  apiKey?: string;
+  key?: string;
+  accountId?: string;
+  baseUrl?: string;
+}
+
+export interface ConnectFlowInput {
+  code?: string;
+  authToken?: string;
+  ct0?: string;
+}
+
+
 export const api = {
   listSessions: (opts?: { limit?: number; offset?: number }, host?: string) => {
     const params = new URLSearchParams();
@@ -2391,9 +2448,17 @@ export const api = {
     ),
   // Session operations
   compactSession: (id: string, host?: string, focus?: string) =>
-    fetchJSON<{ original_len: number; compacted_len: number }>(
+    fetchJSON<{ original_len: number; compacted_len: number; cancelled?: boolean }>(
       `/api/sessions/${encodeURIComponent(id)}/compact`,
       { method: "POST", body: JSON.stringify(focus ? { focus } : {}) },
+      host,
+    ),
+  /** Interrupt an in-flight compaction (manual or automatic) for the session.
+   *  Idempotent: cancelled:false when nothing is compacting. */
+  cancelCompaction: (id: string, host?: string) =>
+    fetchJSON<{ cancelled: boolean }>(
+      `/api/sessions/${encodeURIComponent(id)}/compact/cancel`,
+      { method: "POST" },
       host,
     ),
   recapSession: (id: string, host?: string) =>
@@ -2680,6 +2745,7 @@ export const api = {
       },
     ),
 
+
   // ── Agent selection ──
   setAgent: (name: string, sessionId?: string, host?: string) =>
     fetchJSON<{ name: string; description: string }>(
@@ -2821,6 +2887,57 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ provider, api_key }),
     }),
+  // ── Connectors: the /connect routes behind Settings → Connectors ──
+  // NOTE `connectProvider` above is a DIFFERENT, older server route
+  // (POST /api/auth/connect, `s.handleConnectProvider`). The list endpoint
+  // below is GET on the same path. They must not be merged.
+  listConnectProviders: (host?: string) =>
+    fetchJSON<{ providers: ConnectProvider[] }>("/api/auth/connect", undefined, host),
+  setConnectCredential: (provider: string, payload: ConnectSetPayload, host?: string) =>
+    fetchJSON<{ ok: boolean; provider: ConnectProvider }>(
+      `/api/auth/connect/${encodeURIComponent(provider)}`,
+      { method: "PUT", body: JSON.stringify(payload) },
+      host,
+    ),
+  removeConnectCredential: (provider: string, host?: string) =>
+    fetchJSON<{ ok: boolean; provider: ConnectProvider }>(
+      `/api/auth/connect/${encodeURIComponent(provider)}`,
+      { method: "DELETE" },
+      host,
+    ),
+  testConnectCredential: (provider: string, host?: string) =>
+    fetchJSON<{ ok: boolean; error?: string }>(
+      `/api/auth/connect/${encodeURIComponent(provider)}/test`,
+      { method: "POST" },
+      host,
+    ),
+  // `mode` picks how a loopback OAuth flow completes. "auto" (the default when
+  // omitted) binds the callback port on the SERVER and finishes when the
+  // provider redirects the browser back there — only correct when the browser
+  // and ocode share a machine. Pass "manual" when they do not (a
+  // `serve --remote` host, or a second device): nothing is bound and the user
+  // pastes the redirect back, which surfaces as a paste box because the flow
+  // comes back in state "waiting_input".
+  startConnectFlow: (provider: string, method: string, host?: string, mode?: "auto" | "manual") =>
+    fetchJSON<ConnectFlow & { note?: string }>(
+      `/api/auth/connect/${encodeURIComponent(provider)}/oauth/start`,
+      { method: "POST", body: JSON.stringify({ method, ...(mode ? { mode } : {}) }) },
+      host,
+    ),
+  getConnectFlow: (flowId: string, host?: string) =>
+    fetchJSON<ConnectFlow>(`/api/auth/connect/flows/${encodeURIComponent(flowId)}`, undefined, host),
+  submitConnectFlowInput: (flowId: string, input: ConnectFlowInput, host?: string) =>
+    fetchJSON<ConnectFlow>(
+      `/api/auth/connect/flows/${encodeURIComponent(flowId)}/input`,
+      { method: "POST", body: JSON.stringify(input) },
+      host,
+    ),
+  cancelConnectFlow: (flowId: string, host?: string) =>
+    fetchJSON<ConnectFlow>(
+      `/api/auth/connect/flows/${encodeURIComponent(flowId)}`,
+      { method: "DELETE" },
+      host,
+    ),
   getDocsStatus: (project?: string, host?: string) => {
     const query = project ? `?project=${encodeURIComponent(project)}` : "";
     return fetchJSON<{ enabled: boolean; text: string }>(

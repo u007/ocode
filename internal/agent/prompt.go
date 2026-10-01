@@ -21,6 +21,7 @@ const (
 	promptSelectionMarker = "[ocode:selection]"
 	promptNotesMarker     = "[ocode:notes]"
 	promptDocPromptMarker = "[ocode:doc_prompt]"
+	promptRecapMarker     = "[ocode:recap]"
 )
 
 // docPromptContent is the documentation-first development prompt injected
@@ -49,6 +50,33 @@ When the knowledge bundle is active, OKF documentation (docs/) is ONLY accessibl
 **Do NOT read docs/ files directly with the read tool** to answer knowledge questions. The docs/ directory is owned by the knowledge system: retrieval is intentionally routed through the context agent so answers stay curated, verified, and citation-tracked. Only fall back to read on docs/ if the context agent explicitly reports the bundle has no relevant information.
 
 **Context subsumes explore when the bundle is active:** the context sub-agent also handles codebase exploration (where/how/what) and has the full explore toolkit plus doc tools. When the bundle is active, dispatch task with agent=context for code-level or mixed (why+where) questions — explore is hidden from the schema. Pure exploration (no doc involvement) may use grep/glob/read/lsp directly. On grep/rgrep/glob you must pass the required intent so the relevance judge can filter out-of-scope files. Priority: doc_search first (get_top: 3), then doc_get as needed, then code tools; for mixed questions you MAY call doc_search and code tools (grep/glob/lsp/read) in parallel in the same batch — if docs answer, ignore the parallel code results.`
+
+// recapPromptContent teaches the agent to close a response that did work
+// with a recap block. It is a static const on purpose: it sits in the cached
+// system-role prefix, so it must be a function of construction-time state
+// only and never vary per turn (see append_stable.go). Adding it re-caches the
+// prefix once for existing sessions, which is the accepted cost of a new
+// system fragment.
+//
+// It applies to PRIMARY agents only. Sub-agents, ask helpers and the advisor
+// turn it off (see SetRecapPromptEnabled): their output is a tool result the
+// model consumes, not a response shown to the user, and they see only a slice
+// of the conversation, so a recap they write would be noise and wrong.
+const recapPromptContent = `## Recap
+
+Close every response that DID work with a recap block. Caveman style: short, punchy, no filler. Never restate the request back to the user.
+
+Sections, in this order:
+
+1. ASKED — what was requested.
+2. WORKED — what you produced, under ONE label chosen for the job: BUILT (new feature or capability), FIXED (a bug), or CHANGED (refactor, config, docs). Pick the one that fits; never list all three.
+3. FOUND — what was discovered, and what it implies.
+4. DECIDED — the decisions made, then a final line "BOTTOM LINE: …" carrying the conclusion.
+5. NEXT — pending tasks or suggested actions. Every item states its reason: what to do, then why it matters. Write "None — <reason>" when nothing is pending.
+
+Rules: the point that matters most goes first. Say what it MEANS, not what happened. Report status honestly — a blocked or unvalidated item is stated as such, never smoothed over.
+
+Skip the block entirely for conversational turns, one-line answers, and turns that only ran tools. No recap about nothing.`
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.
@@ -149,6 +177,12 @@ func (a *Agent) BasePromptMessages() []Message {
 	}
 	if agentPrompt != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptModeMarker + "\n" + agentPrompt})
+	}
+	// Recap contract sits directly after the mode fragment: the mode says what
+	// the agent may do, the recap says how it closes a turn that did work. Both
+	// are static, so the ordering is stable for the cached prefix.
+	if a.RecapPromptEnabled() {
+		msgs = append(msgs, Message{Role: "system", Content: promptRecapMarker + "\n" + recapPromptContent})
 	}
 	ctx := a.getPreloadedContext()
 	if ctx == "" {

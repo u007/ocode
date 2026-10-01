@@ -36,6 +36,31 @@
 
 
 
+
+## 2026-10-01
+
+* **Update**: Loopback curl with a shell-variable port asked as exfiltration — and the 127. prefix host-match hole ([gotchas/loopback-curl-shell-port-variable.md](/gotchas/loopback-curl-shell-port-variable.md))
+* **Creation**: Loopback curl with a shell-variable port asked as exfiltration — and the 127. prefix host-match hole ([gotchas/loopback-curl-shell-port-variable.md](/gotchas/loopback-curl-shell-port-variable.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Update**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Cross-Client Compaction Indicator — Design Spec ([superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md](/superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md))
+* **Update**: Compaction Cancellation: User-Initiated Cancel of an In-Flight Pass ([concepts/compaction-cancellation.md](/concepts/compaction-cancellation.md))
+* **Creation**: Desktop durable share token (two-credential model) ([concepts/desktop-share-token.md](/concepts/desktop-share-token.md))
+* **Update**: Cross-Client Compaction Indicator — Design Spec ([superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md](/superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Creation**: Compaction Cancellation: User-Initiated Cancel of an In-Flight Pass ([concepts/compaction-cancellation.md](/concepts/compaction-cancellation.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Web Chat Composer Input History (↑/↓ Navigation) ([concepts/web-chat-input-history.md](/concepts/web-chat-input-history.md))
+* **Update**: Web ask dialogs: 202 + background continuation (broadcast *_resolved before Step) ([gotchas/web-ask-dialog-resolved-before-continuation.md](/gotchas/web-ask-dialog-resolved-before-continuation.md))
+* **Update**: Web Chat Composer Input History (↑/↓ Navigation) ([concepts/web-chat-input-history.md](/concepts/web-chat-input-history.md))
+* **Update**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Update**: Pulse — cross-project live-sessions dashboard ([concepts/pulse-dashboard.md](/concepts/pulse-dashboard.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
 ## 2026-09-30
 
 * **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))

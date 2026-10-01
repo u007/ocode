@@ -26,6 +26,27 @@ function formatTok(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
+// Percentage of the context window in use, or null when the provider
+// hasn't reported occupancy yet (cur unknown) or the window is unknown
+// (max 0) — no percentage is shown rather than a fabricated 0% or NaN.
+// Values over 100% (e.g. a provider that rounds past the window) clamp
+// to 100 so the gauge stays honest.
+function contextPercent(cur: number, max: number): number | null {
+  return cur > 0 && max > 0
+    ? Math.min(100, Math.round((cur / max) * 100))
+    : null;
+}
+
+// Context-window pressure color, matching the CoworkSidebar gauge and
+// the Chat tab memory badge: green under 65%, yellow from 65%, red
+// from 85%. The percent text is the non-color signal, so color alone
+// never carries the meaning.
+function contextPressureClass(pct: number): string {
+  if (pct >= 85) return "text-red-500";
+  if (pct >= 65) return "text-yellow-500";
+  return "text-emerald-500";
+}
+
 // Format a USD amount for the spend gauge.
 function formatUSD(n: number): string {
   if (!isFinite(n) || n < 0) return "$0";
@@ -179,6 +200,9 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const cwd = snap?.cwd || "";
   const ctxCur = snap?.context_current_tokens ?? 0;
   const ctxMax = snap?.context_max_tokens ?? 0;
+  // Percentage of the context window in use (null = unknown), so the
+  // ctx segment can show pressure like the CoworkSidebar gauge.
+  const ctxPct = contextPercent(ctxCur, ctxMax);
   // Prefer the per-session snapshot value (populated for headless sessions by
   // the server's per-session accumulator); the global store value is the
   // process-wide daily total, used only as a fallback before a snapshot lands.
@@ -250,6 +274,16 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
       <div className="flex items-center border-t border-border px-4 py-1 text-xs text-muted-foreground">
         <div className="flex items-center gap-3 min-w-0 flex-1 flex-wrap">
           {runningIndicator}
+          {/* Compact context gauge — the slim row keeps the
+              pressure signal visible, not just the expanded rows. */}
+          {ctxPct !== null && (
+            <span
+              className={contextPressureClass(ctxPct)}
+              title={`Context: ${ctxCur} / ${ctxMax} tokens (${ctxPct}% of window)`}
+            >
+              ctx {ctxPct}%
+            </span>
+          )}
           {error && (
             <span className="text-red-400 truncate max-w-[28rem]" title={error}>
               {error}
@@ -372,14 +406,17 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
         <div className="flex items-center gap-3">
           {(ctxCur > 0 || ctxMax > 0) && (
             <span
-              className="text-muted-foreground"
+              className={
+                ctxPct !== null ? contextPressureClass(ctxPct) : "text-muted-foreground"
+              }
               title={
                 ctxCur > 0
-                  ? `Context: ${ctxCur} / ${ctxMax} tokens`
+                  ? `Context: ${ctxCur} / ${ctxMax} tokens (${ctxPct}% of window)`
                   : `Context: unknown / ${ctxMax} tokens (no provider reading yet)`
               }
             >
               ctx: {ctxCur > 0 ? formatTok(ctxCur) : "?"}/{formatTok(ctxMax)}
+              {ctxPct !== null ? ` (${ctxPct}%)` : ""}
             </span>
           )}
           {(inTok > 0 || cachedTok > 0 || outTok > 0) && (

@@ -315,6 +315,42 @@ func (a *Agent) emitDebug(kind, msg string) {
 	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg, SessionID: a.sessionID})
 }
 
+// noteBashChangeSkip surfaces one dropped bash change-detection event in the
+// debug panel. The recorder deliberately discards an event it cannot attribute
+// (a truncated fingerprint walk, a diff too large to be one command's work),
+// and discarding silently is what made a 4,214-row false positive impossible
+// to diagnose after the fact. A WARN line is the whole point: the changes tab
+// staying quiet is only acceptable if something says why.
+func (a *Agent) noteBashChangeSkip(n changes.SkipNotice) {
+	detail := n.Detail
+	if detail == "" {
+		detail = "no further detail"
+	}
+	a.emitDebug(string(debuglog.KindWarn), fmt.Sprintf(
+		"changes: bash detection skipped this command's diff (%s, %d path(s)): %s — %s",
+		n.Reason, n.Paths, truncateForDebug(n.Command), detail))
+}
+
+// truncateForDebug keeps a skipped-command echo short enough for the debug
+// panel: these are heredocs and build commands, not one-liners.
+func truncateForDebug(s string) string {
+	const max = 120
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// BashChangeSkips returns the retained skip history for this agent's change
+// registry, so a caller can explain a sparse changes tab without reading the
+// debug log. Returns nil when no registry is attached.
+func (a *Agent) BashChangeSkips() []changes.SkipNotice {
+	if a == nil || a.changes == nil {
+		return nil
+	}
+	return a.changes.BashSkips()
+}
+
 // getClientAPIKey extracts the API key from an LLMClient via type assertion.
 // Returns "(unknown)" if the client type doesn't expose the key.
 func getClientAPIKey(c LLMClient) string {
@@ -686,6 +722,18 @@ type Agent struct {
 	// compactMu serialises async compaction passes so a slow summary call
 	// can't fire OnCompact twice for overlapping snapshots.
 	compactMu sync.Mutex
+	// compactPassMu guards compactPassCancels. It is deliberately a separate
+	// mutex from compactMu: the compaction goroutine holds compactMu for the
+	// whole pass, so CancelCompaction (called from an HTTP handler) must be
+	// able to read the registry without waiting on the pass it is cancelling.
+	compactPassMu sync.Mutex
+	// compactPassCancels holds the cause-cancel for every in-flight compaction
+	// pass, keyed by a monotonically increasing id. A pass that is cancelled by
+	// the user gets cause ErrCompactionCanceled, which the server distinguishes
+	// from a provider's bare context.Canceled. Lazily initialised because many
+	// tests construct &Agent{} directly.
+	compactPassCancels map[uint64]context.CancelCauseFunc
+	compactPassSeq     uint64
 	// compactFailed latches auto-compaction off after a pass exhausts its
 	// retries and fails. A failed pass never touches the transcript, so the
 	// context stays over threshold and the next step boundary re-arms the very
@@ -717,6 +765,7 @@ type Agent struct {
 	orphanRecoveryWG           sync.WaitGroup
 	memoryEnabled              bool   // whether memory prompt injection is active
 	docPromptEnabled           bool   // whether doc-first development prompt is injected
+	recapPromptEnabled         bool   // whether the recap system-prompt fragment is injected
 	preloadedModelContext      string // cached result of LoadModelContext, set once lazily
 	preloadedModelContextKind  string // "file" | "embedded" | "" — source of preloadedModelContext
 	preloadedModelContextPath  string // absolute file path (Kind=="file") or embedded filename (Kind=="embedded")
@@ -832,7 +881,8 @@ func (a *Agent) shareChangeTrackingFrom(parent *Agent) {
 		workDir, _ = os.Getwd()
 	}
 	if bt, ok := a.tools["bash"].(*tool.BashTool); ok {
-		bt.Recorder = changes.NewStatBashRecorder(workDir, parent.changes)
+		bt.Recorder = changes.NewStatBashRecorder(workDir, parent.changes,
+			changes.WithSkipNotice(a.noteBashChangeSkip))
 		a.tools["bash"] = bt
 	}
 }
@@ -1112,6 +1162,22 @@ func (a *Agent) DocPromptEnabled() bool {
 	return a.docPromptEnabled
 }
 
+// SetRecapPromptEnabled toggles injection of the recap system-prompt fragment.
+// Default is true for a primary agent (see NewAgent); the helper agents that
+// NewAgent also constructs — dispatched sub-agents (subagent.go), ask
+// helpers (ask.go) and the advisor (advisor_tool.go) — turn it off, because
+// their output is a tool result consumed by the model rather than a response
+// shown to the user, and a helper only sees a slice of the conversation, so a
+// recap it writes would be both noise and wrong.
+func (a *Agent) SetRecapPromptEnabled(enabled bool) {
+	a.recapPromptEnabled = enabled
+}
+
+// RecapPromptEnabled reports whether the recap fragment is injected.
+func (a *Agent) RecapPromptEnabled() bool {
+	return a.recapPromptEnabled
+}
+
 // getPreloadedContext returns the cached context under read lock.
 func (a *Agent) getPreloadedContext() string {
 	a.preloadedContextMu.RLock()
@@ -1197,8 +1263,9 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		workDir, _ = os.Getwd()
 	}
 	a.tools["bash"] = &tool.BashTool{
-		Procs:    a.procs,
-		Recorder: changes.NewStatBashRecorder(workDir, a.changes),
+		Procs: a.procs,
+		Recorder: changes.NewStatBashRecorder(workDir, a.changes,
+			changes.WithSkipNotice(a.noteBashChangeSkip)),
 		// Sandbox backend + live per-command state. The provider reads the
 		// agent's PermissionManager fresh on every invocation so mode changes
 		// (normal→sandbox) and extra_allowed_paths edits take effect
@@ -1272,6 +1339,11 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	}
 	a.memoryEnabled = cfg == nil || cfg.Ocode.MemoryEnabled
 	a.docPromptEnabled = cfg != nil && cfg.Ocode.DocPromptEnabled
+	// The recap fragment is on by default and is NOT config-derived: it is a
+	// static const, so it is fixed at construction time and never varies per
+	// turn (prompt-cache stability, see append_stable.go). Helper agents
+	// constructed from the same NewAgent opt out explicitly.
+	a.recapPromptEnabled = true
 	a.attachComputerDriver()
 	return a
 }
@@ -2173,7 +2245,9 @@ func (a *Agent) CompactAsync(messages []Message, focus string) bool {
 // pass would succeed, and server sessions have no /compact to re-arm.
 func (a *Agent) recordCompactOutcome(res CompactResult) {
 	switch {
-	case errors.Is(res.Err, context.Canceled):
+	case errors.Is(res.Err, context.Canceled), errors.Is(res.Err, ErrCompactionCanceled):
+		// A bare provider cancellation and an explicit user cancel both say
+		// nothing about whether the next pass would succeed, so neither latches.
 	case res.Err != nil:
 		a.compactFailed.Store(true)
 	case res.OK:
@@ -2212,11 +2286,16 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, 
 		a.compactFailed.Store(false)
 	}
 	a.emitDebug("COMPACT", note)
+	// Register the pass BEFORE OnCompactStart: the start callback is what makes
+	// the operation visible to clients (the web/desktop compaction bar), and a
+	// client that reacts by cancelling must find a registered pass.
+	ctx, release := a.beginCompactPass()
 	if a.OnCompactStart != nil {
 		a.OnCompactStart()
 	}
 	crashguard.Go(func() {
 		defer a.compactMu.Unlock()
+		defer release()
 		completed := false
 		// Clear the server-side lifecycle even if runCompact panics before it
 		// returns a result. crashguard re-panics afterwards, so this only
@@ -2231,7 +2310,7 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, 
 				a.OnCompact(aborted)
 			}
 		}()
-		result := a.runCompact(snapshot, rt, focus, force)
+		result := a.runCompactWithCtx(ctx, snapshot, rt, focus, force)
 		completed = true
 		a.recordCompactOutcome(result)
 		if a.OnCompact != nil {
@@ -2619,13 +2698,24 @@ func (a *Agent) runAutoContinueJudge(client LLMClient, messages []Message) (bool
 	return strings.HasPrefix(verdict, "YES"), nil
 }
 
-// runCompact performs the synchronous compaction. When force is true (manual /
-// compact API), it summarises the whole conversation after the prompt prefix
-// even if the recent tail already fits the token budget, so the user always
-// gets a result when there is anything to summarise. When force is false
-// (auto-compaction) it returns a no-op result when the recent tail is already
-// within budget — there is genuinely nothing old to summarise.
+// runCompact starts a compaction pass and owns its operation context. Callers
+// that must register the pass before an observable side effect (startCompactAsync's
+// OnCompactStart, which clients react to by offering Cancel) create the context
+// via beginCompactPass themselves and call runCompactWithCtx.
 func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, force bool) CompactResult {
+	ctx, release := a.beginCompactPass()
+	defer release()
+	return a.runCompactWithCtx(ctx, messages, rt, focus, force)
+}
+
+// runCompactWithCtx performs the synchronous compaction on a caller-supplied
+// operation context. When force is true (manual /compact API), it summarises
+// the whole conversation after the prompt prefix even if the recent tail
+// already fits the token budget, so the user always gets a result when there is
+// anything to summarise. When force is false (auto-compaction) it returns a
+// no-op result when the recent tail is already within budget — there is
+// genuinely nothing old to summarise.
+func (a *Agent) runCompactWithCtx(ctx context.Context, messages []Message, rt compactRuntime, focus string, force bool) CompactResult {
 	res := CompactResult{OriginalLen: len(messages)}
 
 	prefixEnd := findPrefixEnd(messages)
@@ -2705,8 +2795,6 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	pruned := pruneToolResults(middle, compactPruneToolMaxChars)
 
 	client := a.compactSummaryClient()
-	operationCtx, operationCancel := newCompactOperationContext()
-	defer operationCancel()
 
 	// Chunked anchored summarisation: when the middle exceeds the per-call
 	// input budget, split it into consecutive batches and summarise each in
@@ -2726,9 +2814,9 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 		var batchCancel context.CancelFunc
 		var reset func()
 		if rt.SummaryTimeoutSeconds > 0 {
-			batchCtx, batchCancel, reset = inactivityContextWithParent(operationCtx, idle, firstToken)
+			batchCtx, batchCancel, reset = inactivityContextWithParent(ctx, idle, firstToken)
 		} else {
-			batchCtx, batchCancel = context.WithCancel(operationCtx)
+			batchCtx, batchCancel = context.WithCancel(ctx)
 			reset = func() {}
 		}
 		if _, ok := client.(*GenericClient); ok {
@@ -2779,6 +2867,10 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	// Subdirectory docs surfaced during the compacted span were volatile
 	// (never persisted) and are gone with the splice; let them re-surface.
 	a.resetDirMDSeen()
+	// Same reasoning for an auto-injected skill body: it lived only in the
+	// request-time prompt, so after the splice the model no longer has it and the
+	// next judged turn must be free to re-select and re-inline it.
+	a.resetAutoInjected()
 	// The context occupancy is now unknown until the next provider call: the
 	// last reading describes a transcript shape that no longer exists. Clear it
 	// so the web/desktop Context gauge reports "unknown" instead of a stale
@@ -3056,10 +3148,12 @@ func (a *Agent) SetWorkDir(dir string) {
 	// second hang the user experiences as "bash hangs").
 	if a.changes != nil {
 		if bt, ok := a.tools["bash"].(*tool.BashTool); ok {
-			bt.Recorder = changes.NewStatBashRecorder(dir, a.changes)
+			bt.Recorder = changes.NewStatBashRecorder(dir, a.changes,
+				changes.WithSkipNotice(a.noteBashChangeSkip))
 			a.tools["bash"] = bt
 		} else if btv, ok := a.tools["bash"].(tool.BashTool); ok {
-			btv.Recorder = changes.NewStatBashRecorder(dir, a.changes)
+			btv.Recorder = changes.NewStatBashRecorder(dir, a.changes,
+				changes.WithSkipNotice(a.noteBashChangeSkip))
 			a.tools["bash"] = &btv
 		}
 	}

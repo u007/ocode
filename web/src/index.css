@@ -110,6 +110,40 @@ html.light {
       max-height: calc(100dvh - 2rem);
     }
   }
+
+  /*
+   * Shared height for every control in the chat composer's input row — the
+   * textarea box, the attach button's hit area, and the Send/Stop/Resume action
+   * button — so their top AND bottom edges line up instead of the action button
+   * rendering as a shorter bottom-aligned stub next to the input.
+   *
+   * This must equal the composer's border-box height for ONE line. It is
+   * written as the textarea's own box model rather than a baked `47px`,
+   * because every term scales with the user's root font size except the border:
+   *
+   *   line box  `text-sm` (0.875rem) × `leading-[1.5em]` (1.5) = 1.3125rem
+   *   padding   `p-3` (0.75rem) × 2                            = 1.5rem
+   *   border    `border` (1px) × 2 — Tailwind's border width is px,
+   *            NOT rem, so it must stay a px term
+   *                                                    total = 2.8125rem + 2px
+   *
+   * At the default 16px root that is exactly 47px, and at a 20px root both the
+   * textarea and the buttons grow together (58.25px) — a hardcoded px would have
+   * drifted and re-broken the alignment for anyone who changed their text size.
+   * If the textarea's padding or line-height changes, update the `rem` terms.
+   *
+   * A class (rather than a `h-[${SOME_CONST}px]` template literal in the TSX) is
+   * required because Tailwind's scanner reads the raw source text and cannot
+   * evaluate an interpolation — an interpolated arbitrary value is simply never
+   * emitted. The textarea carries this class too, so the two cannot drift.
+   *
+   * It lives in `@layer utilities` so `max-h-40`'s growth ceiling on the
+   * textarea still wins at equal specificity by source order. The textarea's
+   * JS auto-grow sets an INLINE height, which outranks this class entirely.
+   */
+  .composer-control {
+    height: calc(2.8125rem + 2px);
+  }
 }
 
 /* ── Inline diff decorations (FileEditor.tsx) ── */

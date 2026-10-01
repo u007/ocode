@@ -6,6 +6,7 @@ export interface ChatDisplayScrollAnchor {
 
 export type ChatDisplayOffsetResolver = (
   index: number,
+  align: "start",
 ) => readonly [number, "auto" | "start" | "end" | "center"] | undefined;
 
 export type ChatDisplayIndexScroller = {
@@ -19,7 +20,7 @@ export function captureChatDisplayAnchor(
   getOffsetForIndex: ChatDisplayOffsetResolver,
 ): ChatDisplayScrollAnchor | null {
   if (firstVisibleIndex === undefined) return null;
-  const resolved = getOffsetForIndex(firstVisibleIndex);
+  const resolved = getOffsetForIndex(firstVisibleIndex, "start");
   if (!resolved) return null;
   return { index: firstVisibleIndex, distance: scrollTop - resolved[0] };
 }
@@ -34,7 +35,7 @@ export function restoreChatDisplayAnchor(
 ): void {
   if (!anchor) return;
   virtualizer.scrollToIndex(anchor.index, { align: "start" });
-  const resolved = virtualizer.getOffsetForIndex(anchor.index);
+  const resolved = virtualizer.getOffsetForIndex(anchor.index, "start");
   if (!resolved) return;
   scrollElement.scrollTop = resolved[0] + anchor.distance;
 }

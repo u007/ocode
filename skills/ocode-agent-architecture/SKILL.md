@@ -14,7 +14,7 @@ This skill maps the ocode agent subsystem (`internal/agent/`). It is the neural 
 |-------|-------|---------------|
 | **Agent loop** | `agent.go` | Central `Agent` struct, `Step()` loop, message prep, tool dispatch, cancellation, tail injectors |
 | **LLM client** | `client.go`, `llm_contract.go`, `websocket.go` | `LLMClient`/`StreamingLLMClient` interfaces, `GenericClient`, per-provider chat impls (`chatAnthropic`, `chatCopilot`, `chatGoogle`, `chatOpenAI`, `chatOpenAIResponses`, `chatOpenAIWebSocket`, `chatOpenAIHTTP`), WebSocket transport, stream idle watchdog |
-| **Context loading** | `context.go`, `prompt.go`, `provider_prompts.go` | Assemble system prompt chunks: env, provider, mode, AGENTS.md/CLAUDE.md, model context, skills |
+| **Context loading** | `context.go`, `prompt.go`, `provider_prompts.go` | Assemble system prompt chunks: env, provider, mode, recap, AGENTS.md/CLAUDE.md, model context, skills |
 | **Provider/model** | `models_registry.go`, `small_model.go`, `images.go` | Model metadata (windows, pricing), small-model resolution for cheap tasks, vision detection |
 | **Sub-agents** | `subagent.go`, `agent_registry.go`, `agent_loader.go`, `child_session.go`, `agent_runs.go`, `task_cancel.go`, `task_contract.go`, `task_dag.go` | Task tool, agent definitions (built-in + markdown), run tracking, cancellation, output contracts, in-batch DAG scheduling |
 | **Compaction** | `compact.go`, `truncate.go` | Conversation compaction via small-model summarisation; large tool-result truncation |
@@ -40,6 +40,7 @@ a.PrepareMessages(messages, selection)    → prompt.go
   │   ├─ a.environmentPrompt()           → [ocode:environment]  (cwd, git branch, platform, date)
   │   ├─ modelFamilyPrompt()             → [ocode:provider]     (model-family-specific guidance)
   │   ├─ a.Mode().SystemPrompt()         → [ocode:mode]         (build/plan/review/debug/docs)
+  │   ├─ recapPromptContent              → [ocode:recap]         (recap contract; PRIMARY agents only)
   │   ├─ LoadContext()                   → [ocode:context]      (AGENTS.md, CLAUDE.md, .cursorrules,
   │   │                                                            .opencode/rules/*.md, plugins, skills)
   │   └─ preloadedModelContext            → [ocode:model_context] (model-specific OCODE.md files)
@@ -82,6 +83,46 @@ LOOP (unbounded; maxSteps configurable via config):
   ↓
 a.MaybeCompactAsync()                     → compact.go (async context compaction)
 ```
+
+### Recap contract (`[ocode:recap]`, `prompt.go`)
+
+`recapPromptContent` is a **static const** appended to the base system prompt
+immediately after the mode fragment, teaching the agent to close a response that
+did work with a caveman-style recap: `ASKED` → `WORKED` → `FOUND` → `DECIDED`
+(with a `BOTTOM LINE:` conclusion) → `NEXT`. Two rules carry the weight:
+
+- **`WORKED` is adaptive.** The model picks ONE label for the job — `BUILT`
+  (new feature), `FIXED` (bug), or `CHANGED` (refactor/config/docs) — so a
+  feature recap reads "what was built" rather than a fixed "what was fixed".
+- **`NEXT` items each state a reason**, with `None — <reason>` for an empty list.
+
+**Primary agents only.** `NewAgent` enables it; the three helper agents built
+from the same constructor opt out via `SetRecapPromptEnabled(false)` — dispatched
+sub-agents (`subagent.go`), `/btw` side queries (`ask.go`), and the advisor
+(`advisor_tool.go`). Their output is a *tool result* the model consumes, not a
+response shown to the user, and they see only a slice of the conversation, so a
+recap they write is both noise and factually wrong. A child created without that
+opt-out inherits the parent's config, so the explicit call is load-bearing — it
+is not covered by any constructor flag.
+
+It is a const, not a per-turn value, so it stays inside the cached system-role
+prefix (see `append_stable.go`). Adding it re-caches the prefix once for
+existing sessions. The TUI rebuild path (`model.go`) carries the flag across so a
+model/profile switch cannot silently drop it.
+
+**Three separate recap mechanisms — do not merge or confuse them.** This fragment
+is only the third, and it is the odd one out:
+
+| Mechanism | Site | Producer | Consumer |
+|---|---|---|---|
+| Auto-recap | `RecapAsyncShort` (`agent.go`), fired by the TUI after each turn | small-model side query | one-line TUI row; toggled by `/recap enable\|disable` |
+| `/recap` command | `runRecap` (`agent.go`), user-invoked | side-query LLM call | on-demand summary in the transcript |
+| **`[ocode:recap]`** (this) | `recapPromptContent` (`prompt.go`) | **the main LLM itself** | the agent's own response body |
+
+The first two *generate* text with a separate call; this one *shapes what the
+main model writes*, so it belongs in the main loop's system prompt only. Do not
+fold them onto a shared format constant, and do not wire this fragment to
+`/recap enable|disable` — that switch controls the auto-recap feature.
 
 ## 3. LLM client (`client.go`)
 

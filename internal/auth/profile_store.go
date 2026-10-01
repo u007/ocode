@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/paths"
@@ -17,25 +16,25 @@ var (
 	profileStoreMu sync.Mutex
 	profileCache   map[string]map[string]Credential // profile -> provider -> cred
 	profileLoaded  bool
-	profileVersion atomic.Int64
 )
 
-// ProfileCredentialVersion returns a counter bumped on every profile
-// credential mutation (set/remove/delete/rename). Callers that cache
-// something built from profile credentials (e.g. an LLM client keyed by
-// profile name) can snapshot this value at build time and compare it later
-// to detect an in-place credential edit that a same-name profile comparison
-// would otherwise miss.
+// ProfileCredentialVersion is the LEGACY name for CredentialVersion, kept so
+// the profile-flavoured call sites still read. Both stores now share one
+// counter (see CredentialVersion in store.go): a base-store edit — TUI
+// /connect, or the web/desktop Connectors settings — must invalidate a cached
+// LLM client exactly as a profile edit does, and one counter cannot be missed
+// by a caller that reads only one of the two names.
+//
+// New code should call CredentialVersion; the version is no longer
+// profile-specific.
 func ProfileCredentialVersion() int64 {
-	return profileVersion.Load()
+	return CredentialVersion()
 }
 
-// SetProfileCredentialVersionForTest pins the credential version. Exists only
-// so a test that must mutate the process-global profile store (which bumps the
-// version on every write) can restore it afterwards; a leaked bump makes every
-// agent cached with an older snapshot look stale and rebuild unexpectedly.
+// SetProfileCredentialVersionForTest is the legacy name for
+// SetCredentialVersionForTest. See ProfileCredentialVersion.
 func SetProfileCredentialVersionForTest(v int64) {
-	profileVersion.Store(v)
+	SetCredentialVersionForTest(v)
 }
 
 // ProfileAuthPath returns the ocode-only sidecar path for per-profile credentials:
@@ -147,7 +146,7 @@ func SetProfileCredential(profile, provider string, cred Credential) error {
 		profileCache[profile] = m
 	}
 	m[provider] = cred
-	profileVersion.Add(1)
+	credentialVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 
@@ -166,7 +165,7 @@ func RemoveProfileCredential(profile, provider string) error {
 	if len(m) == 0 {
 		delete(profileCache, profile)
 	}
-	profileVersion.Add(1)
+	credentialVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 
@@ -207,7 +206,7 @@ func DeleteProfileCredentials(profile string) error {
 		return err
 	}
 	delete(profileCache, profile)
-	profileVersion.Add(1)
+	credentialVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 
@@ -227,7 +226,7 @@ func RenameProfileCredentials(oldName, newName string) error {
 	}
 	profileCache[newName] = m
 	delete(profileCache, oldName)
-	profileVersion.Add(1)
+	credentialVersion.Add(1)
 	return writeProfileStoreLocked()
 }
 

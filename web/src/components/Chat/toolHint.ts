@@ -12,6 +12,16 @@ function parseToolArgs(argsJson?: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * The skill name from a `skill` / `load_skill` call's raw arguments, or "" when
+ * absent/malformed. Shared with sessionEvents so the composer bar and the
+ * transcript header agree on the name without a second JSON parser.
+ */
+export function skillNameFromArgs(argsJson?: string): string {
+  const name = parseToolArgs(argsJson)?.name;
+  return typeof name === "string" ? name : "";
+}
+
 // bashCommandFromArgs returns the raw shell command for a bash tool call, or ""
 // when there is none. Unlike formatToolArgsHint this does NOT add the `$ `
 // prefix: callers that render the command in its own code block add it
@@ -69,6 +79,17 @@ export function formatToolArgsHint(tool: string, argsJson?: string): string {
     }
     case "write":
       return `write ${first("path", "file_path")}`;
+    case "skill":
+    // load_skill is the registered alias (internal/tool/misc.go SkillAliasTool)
+    // that some models guess instead of "skill"; without this case it rendered
+    // as a bare tool name with the skill buried in collapsed JSON.
+    //
+    // Uses skillNameFromArgs rather than first(): `first` stringifies numbers,
+    // so {"name":42} would render a hallucinated `Skill "42"` in the transcript.
+    case "load_skill": {
+      const name = skillNameFromArgs(argsJson);
+      return name ? `Skill "${name}"` : "";
+    }
     default:
       return "";
   }

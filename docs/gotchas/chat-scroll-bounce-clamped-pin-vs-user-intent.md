@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: 'Chat transcript scroll-bounce: clamped pin vs. user intent'
-description: 'Chat transcript scroll-bounce: four stacked root causes (object-identity virtual keys, live→committed height hole, clamped pin mistaken for user intent, competing scrollTop writers) and the durable fix rules.'
+description: 'Chat transcript scroll-bounce: six stacked root causes (object-identity virtual keys, live→committed height hole, clamped pin mistaken for user intent, competing scrollTop writers, un-anchored window slides for a scrolled-up reader, duplicate pane keys from a session open under two projects) and the durable fix rules.'
 tags:
   - chat
   - scroll
@@ -10,18 +10,18 @@ tags:
   - ui-glitch
   - autoscroll
   - state
-timestamp: 2026-09-29T04:48:47Z
+timestamp: 2026-10-01T01:10:00Z
 ---
 **Type:** Gotcha
 **Files:** `web/src/components/Chat/ChatPanel.tsx`, `web/src/lib/chatItemKeys.ts`, `web/src/stores/chatStore.tsx`
-**Status:** Active (all four causes fixed)
+**Status:** Active (all six causes fixed)
 **Related:** `gotchas/autoscroll-bounce.md` (an earlier, distinct ChatPanel scroll bug: competing smooth-scroll animations + turn-end growth follow-up)
 
 ## Symptom
 
 The web/desktop chat transcript viewport jumped **upward** repeatedly — on initial render of a long transcript and at the end of every agent turn ("bouncing the scroll position up after it render finish or agent loop finish"). The view would follow the tail during streaming, then leap up mid-stream and stop following.
 
-Four independent causes stacked on top of each other. Fixing only one is not enough: each either *created* the height change, *amplified* it, or *misread* it as user intent.
+Six independent causes stacked on top of each other (5 and 6 were found on 2026-10-01, after the first four were fixed and the report came back as "still bounces"). Fixing only one is not enough: each either *created* the height change, *amplified* it, or *misread* it as user intent.
 
 ## Root cause 1 — virtual items keyed by message-object identity
 
@@ -97,3 +97,62 @@ Note: `getScrollOffset()` is private — the public field `scrollOffset` is the 
 ## Known coverage gap (honest)
 
 The virtual-core fold arithmetic in the `shouldAdjustScrollPositionOnItemSizeChange` override is **NOT regression-covered**: a compiling mutant that drops the fold check survives the whole suite, because jsdom has no layout engine — every row measures 96px via a stubbed `offsetHeight` and there is no real scroll geometry. It needs a real-browser check before it can be considered pinned by tests.
+## Root cause 5 — window slides move rows above a scrolled-up reader (2026-10-01)
+
+Stable keys keep *measured heights*; they do not keep the reader's *place*. The
+loaded window is not fixed:
+
+- the turn-end `messages` broadcast carries the whole transcript, so on a
+  session longer than the 100-row initial page it replaces that page with the
+  `MAX_SLICE_MESSAGES` (400) window — ~300 rows land ABOVE the reader at the
+  96px estimate (`SET_MESSAGES`, `windowStartServerIndex` 428 → 136 in the trace);
+- a few seconds later the reconcile `MERGE_SNAPSHOT` replaces it with a tail page
+  again (400 → 100 rows removed from the top);
+- once the window sits at the cap, every appended message trims one head row.
+
+None of those touch `scrollTop`, so a reader who scrolled up (the "auto bounce
+back up on completion" report) saw their content jump by the height of the rows
+that came or went above them. Worse, the shrink tripped the `[messages, live]`
+effect's "list got shorter ⇒ transcript reset" rule and **pinned them to the
+bottom**. Traced live with a 528-message session: `first row 52 → 182` and
+`distance-from-bottom 1.6k → 15.8k` at turn end, then `dist 0` seven seconds later.
+
+**Fix (`ChatPanel.tsx`):** `handleScroll`'s deferred pass records a reader anchor
+while unpinned — the virtual item under the top edge (`key` = global transcript
+position, `index`, and the pixel `distance` into it). A `useLayoutEffect` keyed on
+`[renderEntries, windowStartServerIndex]` finds that key's new index after any
+change that is not a pure append and calls `restoreChatDisplayAnchor` before
+paint. A pinned reader is untouched (the tail pin owns the offset); the scroll-up
+pagination path keeps its own `scrollHeight`-delta restore and flags the prepend
+(`prependRestoreRef`) so the effect stays out of it. If the anchored row is gone
+(truncate/rewind) the effect does nothing and the old reset rule still re-arms
+the follow; if it survived, `anchorSurvivedShrinkRef` tells the `[messages, live]`
+effect NOT to treat the shrink as a reset.
+
+`chatDisplayScroll.ts` now asks `getOffsetForIndex(index, "start")` explicitly:
+the default `"auto"` alignment answers with the END-aligned offset for a row
+below the viewport, which landed the restore 504px short in the test.
+
+## Root cause 6 — one session open under two projects = duplicate React keys (2026-10-01)
+
+`App.tsx` renders a pane per tab across ALL projects keyed `${tab.id}:chat`. A
+deep link (`/session/:id`, the desktop `-session` flag) or the session picker
+binds the session to the *active* project, so a session that already had a tab
+under its own project got a second tab under another path — two panes with the
+same key. React then recreated a pane on renders and, with the panes being
+`absolute inset-0` stacks, the DOM accumulated orphaned copies (44 after a few
+minutes in Safari, 663 in one Chrome run after switching projects); every copy
+was a live `ChatPanel` reloading the transcript and pinning to the bottom.
+
+**Fix (`projectStore.tsx`, `App.tsx`):** `ADD_TAB` refuses a second copy and
+activates the existing one (`findProjectPathForTab`); `openSessionTab` also
+brings the owning project forward so a deep link never lands on an empty bar;
+`dropCrossProjectDuplicateTabs` runs on `RESTORE_TABS` and on every server merge
+(`mergeExternalTabs`), and `REKEY_TABS` no longer concatenates duplicates. As a
+belt-and-braces guard the pane keys (and `visitedTabsRef`) now include
+`tab.projectPath`, so a duplicate that still slips in from a shared `tabs.json`
+can only waste a pane, never corrupt the DOM.
+
+Tests: `ChatPanel.test.tsx` "keeps an un-pinned reader's row across window
+slides" (grow + shrink), `projectStore.test.tsx` "keeps one tab per session
+across projects".

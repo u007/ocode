@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { usePulseTail } from "./usePulseTail";
+import { PULSE_TAIL_LINES, usePulseTail } from "./usePulseTail";
 import type { BusEnvelope } from "../../lib/eventBus";
 
 const mockGetSessionState = vi.fn();
@@ -164,15 +164,19 @@ describe("usePulseTail", () => {
       expect(result.current.lines).toEqual(["alpha", "beta"]);
     });
 
-    it("keeps only the last 6 lines, newest last", async () => {
+    // The cap is asserted against PULSE_TAIL_LINES rather than a hardcoded 6:
+    // PulseCard reserves a fixed-height region for these lines, so the two must
+    // move together, and a hand-typed count goes stale the moment either does.
+    it("keeps only the last PULSE_TAIL_LINES lines, newest last", async () => {
+      const all = Array.from({ length: PULSE_TAIL_LINES + 2 }, (_, i) => String(i + 1));
       mockGetSessionState.mockResolvedValue({
-        live_frames: [{ event: "text", data: { delta: "1\n2\n3\n4\n5\n6\n7\n8" }, seq: 1 }],
+        live_frames: [{ event: "text", data: { delta: all.join("\n") }, seq: 1 }],
       });
 
       const { result } = renderHook(() => usePulseTail("s1", true, "running"));
 
-      await waitFor(() => expect(result.current.lines).toHaveLength(6));
-      expect(result.current.lines).toEqual(["3", "4", "5", "6", "7", "8"]);
+      await waitFor(() => expect(result.current.lines).toHaveLength(PULSE_TAIL_LINES));
+      expect(result.current.lines).toEqual(all.slice(-PULSE_TAIL_LINES));
     });
 
     it("reports a seed-fetch failure naming the session instead of an empty tail", async () => {
@@ -211,15 +215,16 @@ describe("usePulseTail", () => {
       expect(textHandlerCount()).toBe(0);
     });
 
-    it("caps a long last message at the last 6 lines", async () => {
+    it("caps a long last message at the last PULSE_TAIL_LINES lines", async () => {
+      const all = Array.from({ length: PULSE_TAIL_LINES + 2 }, (_, i) => String(i + 1));
       mockGetSession.mockResolvedValue({
-        messages: [{ role: "assistant", content: "1\n2\n3\n4\n5\n6\n7" }],
+        messages: [{ role: "assistant", content: all.join("\n") }],
       });
 
       const { result } = renderHook(() => usePulseTail("s1", true, status));
 
-      await waitFor(() => expect(result.current.lines).toHaveLength(6));
-      expect(result.current.lines).toEqual(["2", "3", "4", "5", "6", "7"]);
+      await waitFor(() => expect(result.current.lines).toHaveLength(PULSE_TAIL_LINES));
+      expect(result.current.lines).toEqual(all.slice(-PULSE_TAIL_LINES));
     });
 
     it("reports a transcript-fetch failure naming the session", async () => {

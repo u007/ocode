@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDrainBufferedSummary pins the drain runSummary uses when its wait select
@@ -249,5 +250,60 @@ func TestRunSummaryLabelsRetryBackoffCancellation(t *testing.T) {
 	}
 	if !errors.Is(err, ErrCompactionTimeout) {
 		t.Fatalf("error = %v, want it to wrap ErrCompactionTimeout", err)
+	}
+}
+
+// blockingSummaryClient blocks every summary call until release is closed, so
+// a compaction pass is observably in flight while the test drives cancel.
+type blockingSummaryClient struct{ release <-chan struct{} }
+
+func (b blockingSummaryClient) Chat([]Message, []map[string]interface{}) (*Message, error) {
+	<-b.release
+	return nil, errors.New("released")
+}
+func (blockingSummaryClient) GetProvider() string { return "mock" }
+func (blockingSummaryClient) GetModel() string    { return "mock-compact" }
+
+// A user-initiated cancel interrupts an in-flight pass and must be reported as
+// ErrCompactionCanceled (not a bare context.Canceled), so the server can tell
+// it apart from a genuine provider cancellation and clear the shared indicator
+// without an error banner.
+func TestCancelCompactionCancelsInFlightPass(t *testing.T) {
+	release := make(chan struct{})
+	a := &Agent{client: blockingSummaryClient{release: release}, config: stopTestConfig()}
+	t.Cleanup(func() { close(release) })
+
+	done := make(chan CompactResult, 1)
+	a.OnCompact = func(r CompactResult) { done <- r }
+
+	if !a.MaybeCompactAsync(stopTestMessages()) {
+		t.Fatal("expected auto-compaction to start a pass")
+	}
+	if !a.CancelCompaction() {
+		t.Fatal("CancelCompaction should find the in-flight pass")
+	}
+
+	select {
+	case r := <-done:
+		if !errors.Is(r.Err, ErrCompactionCanceled) {
+			t.Fatalf("pass error = %v, want ErrCompactionCanceled", r.Err)
+		}
+		if errors.Is(r.Err, context.Canceled) {
+			t.Fatalf("user cancel must not surface as a bare context.Canceled: %v", r.Err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pass never completed after cancel")
+	}
+
+	if a.CompactFailed() {
+		t.Fatal("a user cancel must not latch auto-compaction off")
+	}
+}
+
+// Cancelling when nothing is compacting is a harmless no-op.
+func TestCancelCompactionWithoutPassReturnsFalse(t *testing.T) {
+	a := &Agent{}
+	if a.CancelCompaction() {
+		t.Fatal("CancelCompaction = true with no pass in flight")
 	}
 }

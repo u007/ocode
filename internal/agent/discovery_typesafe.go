@@ -58,20 +58,25 @@ func (a *Agent) resolveDiscoveryJudgeClient() *TypesafeClient {
 }
 
 // judgeDiscoveryCandidates asks one noul (yes-probability) question per
-// candidate in a single Decide call and returns the subset judged relevant. It
-// is pure with respect to the sticky session: the caller seeds exactly what is
-// returned.
+// candidate in a single Decide call and returns the subset judged relevant plus
+// the raw per-candidate noul scores. It is pure with respect to the sticky
+// session: the caller seeds exactly what is returned.
 //
 // The floor is the lenient shared relevance floor
 // (relevanceJudgeMinConfidenceDefault = 0.5), not the high-stakes permission
 // floor: this judge only decides whether a candidate is in scope, and the
 // product rule is "even slight relevancy should be presented; only a different
 // scope is skipped". Fail-open is handled by judgeRelevanceQuestions — a
-// transport/decode error returns (nil, err) and the caller seeds every
+// transport/decode error returns (nil, nil, err) and the caller seeds every
 // candidate; a missing or non-noul answer keeps that candidate.
-func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message, query string, candidates []discovery.Doc) ([]discovery.Doc, error) {
+//
+// The scores are the ONLY channel by which the auto-inject gate learns how
+// relevant Jev thought a skill was (see discovery_autoinject.go). They are
+// returned, never consulted here: a vetoed candidate still carries its real
+// score, and this judge's keep contract is unchanged.
+func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message, query string, candidates []discovery.Doc) ([]discovery.Doc, map[string]float64, error) {
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	state := buildDiscoveryJudgeState(tail, query, candidates)
 	ids := make([]string, len(candidates))
@@ -84,9 +89,9 @@ func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message,
 		}
 	}
 
-	keepSet, err := a.judgeRelevanceQuestions(context.Background(), client, "DISCOVERY", "discovery_typesafe", ids, state, questions)
+	keepSet, scores, err := a.judgeRelevanceQuestions(context.Background(), client, "DISCOVERY", "discovery_typesafe", ids, state, questions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keep := make([]discovery.Doc, 0, len(candidates))
 	for _, d := range candidates {
@@ -94,7 +99,7 @@ func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message,
 			keep = append(keep, d)
 		}
 	}
-	return keep, nil
+	return keep, scores, nil
 }
 
 // buildDiscoveryJudgeState assembles the structured judge request: the current

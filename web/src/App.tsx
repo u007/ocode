@@ -36,6 +36,7 @@ import GitPanel from "./components/Git/GitPanel";
 import ChangesPanel from "./components/Changes/ChangesPanel";
 import FileTree from "./components/Files/FileTree";
 import FileTabContent from "./components/Files/FileTabContent";
+import type { TreeRevealRequest } from "./components/Files/FileTree";
 import LogPanel from "./components/Logs/LogPanel";
 import TerminalTabs, { type TerminalTabsHandle } from "./components/Terminal/TerminalTabs";
 import AssetsPanel from "./components/Assets/AssetsPanel";
@@ -78,6 +79,11 @@ import { rekeyQueue, clearQueue } from "./lib/tabQueue";
 import { rekeyInputHistory, clearInputHistory } from "./lib/tabInputHistory";
 import { rekeySidePaneState, sideChatKey, sideTermKey } from "./lib/sidePaneState";
 import { cancelLiveDeltas, closeSessionBackend } from "./lib/sessionEvents";
+import {
+  clearCommandActivity,
+  rekeySessionActivity,
+  setCommandActivity,
+} from "./lib/commandActivity";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
 import { eventBus } from "./lib/eventBus";
@@ -292,6 +298,26 @@ function HomeApp() {
     leavePulseFor,
     pendingJumpRef: pendingJumpViewRef,
   } = usePulseViewState();
+  // "Show in file tree" from an editor/preview tab's context menu: switch to the
+  // Files view, un-collapse the tree pane (a reveal into a collapsed tree would
+  // be invisible), and hand the tree a request carrying the tab's path and root.
+  // The nonce makes revealing the SAME file twice a distinct request — the tree
+  // treats an already-seen nonce as done. `setCollapsed` (a state setter) is the
+  // dependency rather than `fileTreePane`, which is a fresh object per render.
+  const [treeRevealRequest, setTreeRevealRequest] = useState<TreeRevealRequest | null>(null);
+  const treeRevealSeqRef = useRef(0);
+  const revealEditorTabInTree = useCallback(
+    (tab: { path: string; projectRoot?: string }) => {
+      setActiveView("files");
+      fileTreePane.setCollapsed(false);
+      setTreeRevealRequest({
+        path: tab.path,
+        root: tab.projectRoot,
+        nonce: ++treeRevealSeqRef.current,
+      });
+    },
+    [fileTreePane.setCollapsed],
+  );
 
   const activeProjectPath = projectState.activeProject?.path ?? "";
   const activeProjectHost = projectState.activeProject?.host;
@@ -915,6 +941,10 @@ function HomeApp() {
     // must move with the tab or the pane would detach and close on the first
     // message of a brand-new chat (and on /reset-id).
     rekeySidePaneState(tempTabId, sessionId);
+    // CLAUDE.md: every session-keyed map must move with the rekey or it is
+    // stranded under the deleted id. This one holds the in-flight
+    // command/skill bar.
+    rekeySessionActivity(tempTabId, sessionId);
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
@@ -1005,8 +1035,16 @@ function HomeApp() {
       return { handled: true, accepted: true };
     }
 
-    // Delegate to the shared command dispatch
-    const result = await dispatchCommand(cmd, {
+    // Every client-side command funnels through this one await, so recording
+    // activity here covers /recap, /share, /mask, /btw and anything added
+    // later without per-command bookkeeping. Instant handlers simply never
+    // paint (CommandActivityBar holds the bar back 400ms), so this costs fast
+    // commands nothing visible.
+    const activityEntry = targetSessionId ? setCommandActivity(targetSessionId, baseCmd) : null;
+    let result: Awaited<ReturnType<typeof dispatchCommand>>;
+    try {
+      // Delegate to the shared command dispatch
+      result = await dispatchCommand(cmd, {
       commandName: baseCmd,
       args: cmd.slice(baseCmd.length).trim(),
       api: {
@@ -1119,6 +1157,14 @@ function HomeApp() {
       // read the tab's own project, not the server's default workdir.
       projectPath: targetProjectPath,
     });
+    } finally {
+      // Identity-checked: if this slow command resolved after the user already
+      // sent a new message and the model loaded a skill, that newer live
+      // indicator must survive. Clearing before the result effects below also
+      // means a `{prompt}` command hands off to the turn's own indicator with
+      // no uncovered gap — sendCommandToSession sets streaming synchronously.
+      if (targetSessionId && activityEntry) clearCommandActivity(targetSessionId, activityEntry);
+    }
 
     if (!result.handled) return { handled: false, accepted: true };
 
@@ -1239,6 +1285,7 @@ function HomeApp() {
         path: t.path,
         isDirty: t.isDirty,
         includeInContext: t.includeInContext,
+        projectRoot: t.projectRoot,
       })),
     [visibleEditorTabs],
   );
@@ -1279,7 +1326,7 @@ function HomeApp() {
   // kept in the DOM — the rest return null until first activated.
   const visitedTabsRef = useRef<Set<string>>(new Set());
   if (activeSessionTab) {
-    visitedTabsRef.current.add(`${activeSessionTab.id}:${activeSessionTab.activeSubTab}`);
+    visitedTabsRef.current.add(`${activeSessionTab.projectPath ?? ""}:${activeSessionTab.id}:${activeSessionTab.activeSubTab}`);
   }
   // Same lazy display:none policy for editor panes: a tab mounts once it has
   // been the visible active tab for its project, then stays mounted (hidden)
@@ -1484,6 +1531,7 @@ function HomeApp() {
                       includedPaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (projectState.activeProject?.path ?? "")).map((e) => e.path)}
                       loadingKey={filesLoadingKey}
                       onLoadingEvent={handleTabLoadingEvent}
+                      revealRequest={treeRevealRequest}
                     />
                   </div>
                   <TabLoadingOverlay
@@ -1515,6 +1563,7 @@ function HomeApp() {
                     onSelectTab={setActiveEditorTabId}
                     onCloseTab={requestCloseTab}
                     onToggleInclude={toggleIncludeInContext}
+                    onRevealInTree={revealEditorTabInTree}
                   />
                   <div className="relative flex-1 overflow-hidden">
                     {visibleEditorTabs.length === 0 && (
@@ -1680,7 +1729,7 @@ function HomeApp() {
                    )}
                     {allChatTabs.map((tab) => {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "chat";
-                      const key = `${tab.id}:chat`;
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:chat`;
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
                         <div
@@ -1721,7 +1770,7 @@ function HomeApp() {
                     })}
                     {allChatTabs.map((tab) => {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "agents";
-                      const key = `${tab.id}:agents`;
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:agents`;
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
@@ -1731,7 +1780,7 @@ function HomeApp() {
                     })}
                     {allChatTabs.map((tab) => {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "changes";
-                      const key = `${tab.id}:changes`;
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:changes`;
                       const changesLoadingKey = tabLoadKey(
                         resolveSessionHost(projectState, tab.id),
                         tab.projectPath,
@@ -1766,7 +1815,7 @@ function HomeApp() {
                     })}
                     {allChatTabs.map((tab) => {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "logs";
-                      const key = `${tab.id}:logs`;
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:logs`;
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
@@ -1776,7 +1825,7 @@ function HomeApp() {
                     })}
                     {allChatTabs.map((tab) => {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "status";
-                      const key = `${tab.id}:status`;
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:status`;
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       return (
                         <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
@@ -1786,7 +1835,7 @@ function HomeApp() {
                     })}
                     {allChatTabs.map((tab) => {
                       const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "preview";
-                      const key = `${tab.id}:preview`;
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:preview`;
                       if (!visitedTabsRef.current.has(key) && !isActive) return null;
                       // On mobile there is no side pane, so the preview
                       // activation (AI `preview_open` tool / "Preview in

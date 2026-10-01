@@ -29,11 +29,21 @@ func (a *Agent) resolveRelevanceJudgeMinConfidence() float64 {
 }
 
 // judgeRelevanceQuestions sends one noul (yes-probability) question per
-// candidate in a single Decide call and returns the set of candidate ids whose
-// answer meets the lenient relevance floor. The caller builds the state and
+// candidate in a single Decide call and returns (a) the set of candidate ids
+// whose answer meets the lenient relevance floor and (b) the raw noul score for
+// every candidate that got a real noul answer. The caller builds the state and
 // per-candidate instructions; this function owns the shared mechanics: the
 // Decide call, side-usage recording, the confidence floor, per-candidate
 // fail-open handling, and the debug lines.
+//
+// The score map is a SECOND output rather than a change to the keep contract, so
+// the three judges keep identical veto semantics. It exists because a boolean
+// cannot express "how relevant": the discovery auto-inject gate
+// (discovery_autoinject.go) needs a much higher bar than relevance and must not
+// re-derive the number from the bool. A vetoed candidate still carries its real
+// score, which is what lets the caller log how close a turn came to firing. An
+// id is ABSENT from the map when the answer was missing or not a noul (fail-open,
+// kept) — callers must treat "absent" as "unknown", never as 0.
 //
 // ctx bounds the round trip. A caller that supplies its own deadline gets that
 // budget (the code-search judge passes searchJudgeTimeout); a caller that passes
@@ -44,19 +54,20 @@ func (a *Agent) resolveRelevanceJudgeMinConfidence() float64 {
 // transport/decode error returns (nil, err) so the caller keeps every
 // candidate; a missing or non-noul answer keeps that candidate; only a real
 // below-floor noul vetoes. The judge can therefore only ever veto.
-func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client *TypesafeClient, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, error) {
+func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client *TypesafeClient, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, map[string]float64, error) {
 	if len(candidateIDs) == 0 {
-		return map[string]bool{}, nil
+		return map[string]bool{}, map[string]float64{}, nil
 	}
 	resp, err := client.DecideCtx(ctx, state, questions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)
 
 	min := a.resolveRelevanceJudgeMinConfidence()
 	model := "typesafe/" + client.Model
 	keep := make(map[string]bool, len(candidateIDs))
+	scores := make(map[string]float64, len(candidateIDs))
 	for _, id := range candidateIDs {
 		ans, ok := resp.Answers[id]
 		if !ok || ans.Type != "noul" {
@@ -64,6 +75,9 @@ func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client *TypesafeCli
 			keep[id] = true
 			continue
 		}
+		// Recorded for BOTH verdicts: a vetoed candidate's real score is what a
+		// caller needs to see how far below the floor it landed.
+		scores[id] = ans.Noul
 		if ans.Noul >= min {
 			a.emitDebug(debugKind, fmt.Sprintf("%s id=%s noul=%.3f verdict=keep", logTag, id, ans.Noul))
 			keep[id] = true
@@ -72,5 +86,5 @@ func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client *TypesafeCli
 		}
 	}
 	a.emitDebug(debugKind, fmt.Sprintf("%s kept=%d vetoed=%d min=%.2f model=%s", logTag, len(keep), len(candidateIDs)-len(keep), min, model))
-	return keep, nil
+	return keep, scores, nil
 }

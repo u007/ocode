@@ -317,6 +317,7 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 
 	advisorAgent := NewAgent(client, advisorTools, t.cfg, t.mainAgent.lspMgr)
 	advisorAgent.toolBatchDelay = 0
+	advisorAgent.SetRecapPromptEnabled(false)
 	advisorAgent.SetParentAdvisorInFlight(t.mainAgent.advisorGuard())
 	// This agent is used for one synchronous advisor call and must not retain
 	// its maintenance workers or background shell processes after Step returns.

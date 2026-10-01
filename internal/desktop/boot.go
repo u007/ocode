@@ -136,6 +136,27 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 		srv.HandleDesktopRoute(StorageMigrationPath, migration)
 	}
 
+	// Durable share token (added AFTER the saved-port fallback above, so it
+	// lands on the srv that actually gets served — the fallback replaces srv
+	// wholesale and would drop anything registered earlier).
+	//
+	// The Share dialog embeds this credential in the URL it hands to other
+	// devices. It is persisted so an already-shared link keeps working across
+	// restarts (the sticky port above already guarantees the other half of the
+	// URL), and it is a SECOND credential so the user can revoke every
+	// outstanding link without losing their own session. Best-effort: a machine
+	// with no writable config dir still boots, it just falls back to the
+	// per-launch token in shared URLs.
+	if store, err := NewShareTokenStore(srv); err != nil {
+		log.Printf("desktop: durable share token disabled: %v", err)
+	} else if _, err := store.LoadOrCreate(); err != nil {
+		log.Printf("desktop: durable share token disabled: %v", err)
+	} else {
+		srv.HandleAuthedDesktopRoute(ShareTokenPath, store.TokenHandler())
+		srv.HandleAuthedDesktopRoute(ShareTokenResetPath, store.ResetHandler())
+		log.Printf("desktop: durable share token enabled (%s)", store.Path())
+	}
+
 	// Browse origin: a second loopback listener, isolated from the SPA
 	// origin, backing the embedded browser panel. Failing to bind it means
 	// the panel cannot work at all, so boot fails loudly rather than

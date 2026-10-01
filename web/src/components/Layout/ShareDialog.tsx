@@ -2,9 +2,16 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Copy, Check, Monitor } from "lucide-react";
+import { Copy, Check, Monitor, RotateCcw } from "lucide-react";
 import { authToken, isRemoteSession, authedFetch, apiPath } from "../../api/client";
 import { copyTextToClipboard } from "../../lib/clipboard";
+import { isDesktopShell } from "../../lib/desktopShell";
+
+// Routes owned by internal/desktop.ShareTokenStore. They exist only in the
+// desktop shell; a plain `ocode serve` answers 404, which is how the dialog
+// falls back to the launch token.
+const SHARE_TOKEN_PATH = "/api/desktop/share-token";
+const SHARE_TOKEN_RESET_PATH = "/api/desktop/share-token/reset";
 
 function isUsableIP(ip: unknown): ip is string {
   return (
@@ -22,6 +29,13 @@ function isLoopbackHost(h: string): boolean {
 
 function joinWithToken(base: string, tokenSuffix: string): string {
   return `${base}/${tokenSuffix}`.replace(/\/\//g, "/").replace(":/", "://");
+}
+
+// The credential travels in the query string (the only form EventSource and
+// the WS handshake can carry), so the token is what makes a share URL a
+// credential rather than a dead link.
+function tokenQuery(token: string): string {
+  return token ? `?token=${encodeURIComponent(token)}` : "";
 }
 
 function buildPrimaryUrl(
@@ -71,25 +85,40 @@ export default function ShareDialog() {
   const [tailscaleUrl, setTailscaleUrl] = useState<string | null>(null);
   const [tailscaleHint, setTailscaleHint] = useState<string | null>(null);
   const [shareLoaded, setShareLoaded] = useState(false);
+  // The durable desktop share token. Null means "not resolved yet" (or not the
+  // desktop shell); "" means "resolved, but there is none" — which is the
+  // server-mode case where the launch token is the only credential. The two
+  // are deliberately distinct: only a non-empty token may offer a reset.
+  const [shareToken, setShareToken] = useState<string | null>(null);
+  const [resetArmed, setResetArmed] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
   const primaryInputRef = useRef<HTMLInputElement | null>(null);
   // Refs mirror state so the headless "Copy Desktop URL" menu handler (which
   // may fire before the dialog ever opens) always sees fresh values without
   // re-subscribing listeners.
   const tailscaleRef = useRef<string | null>(null);
   const networkIPRef = useRef<string | null>(null);
+  const shareTokenRef = useRef<string | null>(null);
   const shareLoadedRef = useRef(false);
   tailscaleRef.current = tailscaleUrl;
   networkIPRef.current = networkIP;
+  shareTokenRef.current = shareToken;
   shareLoadedRef.current = shareLoaded;
 
   const resolveShareInfo = useCallback(async (): Promise<{
     tailscale: string | null;
     lan: string | null;
+    token: string | null;
   }> => {
     // Cached: the server caches one tailscale exposure per process, and the
     // LAN IP is stable for the lifetime of the dialog.
     if (shareLoadedRef.current) {
-      return { tailscale: tailscaleRef.current, lan: networkIPRef.current };
+      return {
+        tailscale: tailscaleRef.current,
+        lan: networkIPRef.current,
+        token: shareTokenRef.current,
+      };
     }
     let tailscale: string | null = tailscaleRef.current;
     let lan: string | null = networkIPRef.current;
@@ -121,9 +150,29 @@ export default function ShareDialog() {
         }
       }
     } catch {}
+    // Durable share token (desktop shell only). Preferred over authToken()
+    // because it survives a restart, so a link already in someone's hands keeps
+    // working; authToken() is this launch's credential and would make every
+    // shared URL expire on the next quit. A plain server has no such route and
+    // answers 404, which leaves the launch token in place.
+    let token: string | null = shareTokenRef.current;
+    if (isDesktopShell()) {
+      token = "";
+      try {
+        const r = await authedFetch(apiPath(SHARE_TOKEN_PATH));
+        if (r.ok) {
+          const data: any = await r.json().catch(() => null);
+          if (data && typeof data.token === "string") token = data.token;
+        }
+      } catch {
+        // Leave token as "" — the launch-token fallback below still works.
+      }
+      setShareToken(token);
+      shareTokenRef.current = token;
+    }
     setShareLoaded(true);
     shareLoadedRef.current = true;
-    return { tailscale, lan };
+    return { tailscale, lan, token };
   }, []);
 
   useEffect(() => {
@@ -138,10 +187,9 @@ export default function ShareDialog() {
     void resolveShareInfo();
   }, [open, resolveShareInfo]);
 
-  const tokenSuffix = (() => {
-    const token = authToken();
-    return token ? `?token=${encodeURIComponent(token)}` : "";
-  })();
+  // Prefer the durable desktop share token; fall back to this launch's token
+  // (server mode, or a desktop whose share-token file could not be created).
+  const tokenSuffix = tokenQuery(shareToken || authToken());
 
   // Primary share URL: tailscale first, LAN fallback. Never localhost — a
   // loopback URL shared to another device is dead on arrival.
@@ -176,6 +224,35 @@ export default function ShareDialog() {
     }
   }, [primaryUrl, selectPrimaryInput]);
 
+  // Rotate the durable share token. Every link already handed out stops
+  // working the moment the server answers; this window's own session is
+  // unaffected because it authenticates with the launch token, not this one.
+  const handleResetToken = useCallback(async () => {
+    setResetting(true);
+    setResetError(null);
+    try {
+      const r = await authedFetch(apiPath(SHARE_TOKEN_RESET_PATH), { method: "POST" });
+      const data: any = r.ok ? await r.json().catch(() => null) : null;
+      const token = data && typeof data.token === "string" ? data.token : "";
+      if (!r.ok || !token) {
+        setResetError(
+          `Reset failed (HTTP ${r.status}). The previous link still works — try again, or reset from the Share menu.`,
+        );
+        return;
+      }
+      setShareToken(token);
+      shareTokenRef.current = token;
+      setResetArmed(false);
+      // The on-screen URL now embeds the new token; a stale "Copied" would
+      // invite re-sharing the revoked one.
+      setCopied(false);
+    } catch (e) {
+      setResetError(`Reset failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setResetting(false);
+    }
+  }, []);
+
   useEffect(() => {
     const openDialog = () => {
       setOpen(true);
@@ -184,6 +261,14 @@ export default function ShareDialog() {
     };
     const onShareSession = () => openDialog();
     const onShareDesktop = () => openDialog();
+    // The native Share ▸ "Reset Share Token…" item. It opens the dialog and
+    // arms the inline confirmation in one step, so the menu item is never a
+    // silent revocation — but it also never requires hunting for the button.
+    const onResetShareToken = () => {
+      setOpen(true);
+      setResetError(null);
+      setResetArmed(true);
+    };
     const onCopyDesktop = async () => {
       // Same leak this dialog itself guards against: desktopUrl carries the
       // bearer token in a query string, which a remote server rejects
@@ -194,9 +279,7 @@ export default function ShareDialog() {
       // so the loopback fallback yields ""). Resolve on demand instead of
       // copying the stale (empty) closure value.
       const info = await resolveShareInfo();
-      const token = authToken();
-      const suffix = token ? `?token=${encodeURIComponent(token)}` : "";
-      const url = buildPrimaryUrl(info.tailscale, info.lan, suffix);
+      const url = buildPrimaryUrl(info.tailscale, info.lan, tokenQuery(info.token || authToken()));
       if (!url) {
         // Nothing shareable — open the dialog so the user sees why instead
         // of the menu item silently doing nothing.
@@ -216,10 +299,12 @@ export default function ShareDialog() {
     window.addEventListener("ocode:share-session", onShareSession);
     window.addEventListener("ocode:share-desktop", onShareDesktop);
     window.addEventListener("ocode:copy-desktop-url", onCopyDesktop);
+    window.addEventListener("ocode:reset-share-token", onResetShareToken);
     return () => {
       window.removeEventListener("ocode:share-session", onShareSession);
       window.removeEventListener("ocode:share-desktop", onShareDesktop);
       window.removeEventListener("ocode:copy-desktop-url", onCopyDesktop);
+      window.removeEventListener("ocode:reset-share-token", onResetShareToken);
     };
   }, [resolveShareInfo, selectPrimaryInput]);
 
@@ -290,9 +375,66 @@ export default function ShareDialog() {
               <p className="text-[11px] text-muted-foreground">Tailscale setup: {tailscaleHint}</p>
             ) : null}
 
+            {shareToken ? (
+              <div className="border-t pt-3" data-testid="share-dialog-reset">
+                {resetArmed ? (
+                  <div className="flex flex-col gap-2" data-testid="share-dialog-reset-confirm">
+                    <p className="text-[11px] text-amber-500">
+                      Reset the share token? Every link already shared with this token stops working
+                      immediately — anyone holding one will have to open a fresh one. This window
+                      stays connected.
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        onClick={handleResetToken}
+                        disabled={resetting}
+                        data-testid="share-dialog-reset-confirm-yes"
+                      >
+                        {resetting ? "Resetting…" : "Yes, reset token"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setResetArmed(false)}
+                        disabled={resetting}
+                        data-testid="share-dialog-reset-cancel"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setResetArmed(true)}
+                    className="gap-1"
+                    data-testid="share-dialog-reset-start"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Reset share token
+                  </Button>
+                )}
+                {resetError ? (
+                  <p className="text-[11px] text-red-500 mt-2" data-testid="share-dialog-reset-error">
+                    {resetError}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="text-[11px] text-muted-foreground border-t pt-3">
               <p>Desktop shell: <code className="bg-muted px-1 py-0.5 rounded">Share</code> menu → <code className="bg-muted px-1 py-0.5 rounded">⌘⇧S</code> for session.</p>
               <p className="mt-1">TUI equivalent: <code className="bg-muted px-1 py-0.5 rounded">/rc [port]</code> / <code className="bg-muted px-1 py-0.5 rounded">/rc off</code> in the chat input.</p>
+              {shareToken ? (
+                <p className="mt-1" data-testid="share-dialog-persistent-note">
+                  This link survives restarts of ocode. Revoke it with{" "}
+                  <code className="bg-muted px-1 py-0.5 rounded">Reset share token</code> above, or{" "}
+                  <code className="bg-muted px-1 py-0.5 rounded">Share</code> →{" "}
+                  <code className="bg-muted px-1 py-0.5 rounded">Reset Share Token…</code>.
+                </p>
+              ) : null}
             </div>
           </div>
         )}

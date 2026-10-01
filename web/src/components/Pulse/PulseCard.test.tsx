@@ -276,6 +276,107 @@ describe("PulseCard compact mode", () => {
   });
 });
 
+describe("PulseCard streams a live row on the card itself", () => {
+  // The dashboard's job is watching turns. Requiring a hover to see what a
+  // running session is saying inverted that — and made the preview unreachable
+  // on touch, which has no hover at all. These pin the new contract, including
+  // that the stream is rendered ONCE (never in both the card and the overlay).
+
+  const lines = ["streaming line a", "streaming line b"];
+
+  beforeEach(() => {
+    mockTail.mockReturnValue({ lines, error: null, loading: false });
+  });
+
+  it("shows the running turn's text with no hover at all", () => {
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    const stream = screen.getByTestId("pulse-tail");
+    expect(within(stream).getByText("streaming line a")).toBeInTheDocument();
+    expect(overlay()).not.toBeInTheDocument();
+  });
+
+  it("keeps the tail hook enabled while collapsed, which is what makes it visible", () => {
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    expect(mockTail).toHaveBeenLastCalledWith("ses_1", true, "running");
+  });
+
+  it.each(["needs_permission", "needs_question"] as const)(
+    "streams a %s row too, since a paused turn is still live output",
+    (status) => {
+      render(
+        <PulseCard
+          row={makeRow({ status, pending_ask: { kind: "permission", summary: "run rm -rf build" } })}
+          compact={false}
+        />,
+      );
+
+      expect(screen.getByTestId("pulse-tail")).toBeInTheDocument();
+      expect(mockTail).toHaveBeenLastCalledWith("ses_1", true, status);
+    },
+  );
+
+  it("does not repeat the stream in the hover overlay", async () => {
+    render(
+      <PulseCard
+        row={makeRow({
+          todo: { done: 1, total: 2, current: "x", items: [{ text: "x", state: "in_progress" }] },
+        })}
+        compact={false}
+      />,
+    );
+
+    await expand();
+
+    // Exactly one, not two: the card keeps the stream and the overlay keeps the
+    // plan, which is the content the card body cannot show.
+    expect(screen.getAllByTestId("pulse-tail")).toHaveLength(1);
+    expect(within(overlay()!).getByTestId("pulse-todo-items")).toBeInTheDocument();
+  });
+
+  it("surfaces a fetch failure on the card rather than swallowing it", () => {
+    mockTail.mockReturnValue({ lines: [], error: "session state failed: boom", loading: false });
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    expect(screen.getByText(/session state failed: boom/)).toBeInTheDocument();
+  });
+
+  it("reserves the stream height so the grid does not jump as text arrives", () => {
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    expect(cardButton().className).toContain("min-h-[16rem]");
+    // flex-1 + justify-end pins the newest line to the bottom of the reserved
+    // region; overflow-hidden plus the per-line truncate is what stops a long
+    // streamed line from growing the card past that height.
+    const stream = screen.getByTestId("pulse-tail");
+    expect(stream.className).toContain("flex-1");
+    expect(stream.className).toContain("justify-end");
+    expect(stream.className).toContain("overflow-hidden");
+    expect(within(stream).getByText("streaming line a").className).toContain("truncate");
+  });
+
+  it("leaves an idle row hover-gated: nothing renders and nothing is fetched until hover", async () => {
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+
+    expect(screen.queryByTestId("pulse-tail")).not.toBeInTheDocument();
+    expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "idle");
+
+    await expand();
+
+    expect(screen.getByTestId("pulse-tail")).toBeInTheDocument();
+  });
+
+  it("never streams a compact card, even a running one", () => {
+    render(<PulseCard row={makeRow()} compact />);
+
+    expect(screen.queryByTestId("pulse-tail")).not.toBeInTheDocument();
+    expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "running");
+    // No reserved height either: the one-line Recent row keeps its own box.
+    expect(cardButton().className).not.toContain("min-h-[16rem]");
+  });
+});
+
 describe("PulseCard overlay", () => {
   it("does not expand on hover before the 150ms delay elapses", async () => {
     render(<PulseCard row={makeRow()} compact={false} />);
@@ -290,16 +391,20 @@ describe("PulseCard overlay", () => {
   });
 
   it("expands after the hover delay and enables the tail hook", async () => {
-    render(<PulseCard row={makeRow()} compact={false} />);
+    // An IDLE row, deliberately: a running row is always subscribed because it
+    // streams on the card face (see the streaming describe below), so hover is
+    // only still the gate here. This keeps pinning that `expanded` reaches the
+    // hook, which is what it did before live cards became always-on.
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
     // The hook runs on every render; `expanded` is what tells it whether to
-    // subscribe. Collapsed, it is always passed false.
-    expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "running");
+    // subscribe. Collapsed, it is passed false.
+    expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "idle");
 
     await expand();
 
     expect(overlay()).toBeInTheDocument();
     expect(cardButton()).toHaveAttribute("aria-expanded", "true");
-    expect(mockTail).toHaveBeenLastCalledWith("ses_1", true, "running");
+    expect(mockTail).toHaveBeenLastCalledWith("ses_1", true, "idle");
   });
 
   it("collapses on mouse leave", async () => {
@@ -410,7 +515,9 @@ describe("PulseCard overlay", () => {
 
   it("surfaces a tail fetch failure in the overlay instead of showing nothing", async () => {
     mockTail.mockReturnValue({ lines: [], error: "session state failed: boom", loading: false });
-    render(<PulseCard row={makeRow()} compact={false} />);
+    // Idle, so the preview genuinely lives in the overlay. A live row puts it
+    // on the card instead — pinned in the streaming describe.
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
 
     await expand();
 
@@ -418,13 +525,13 @@ describe("PulseCard overlay", () => {
   });
 
   it("stops requesting the tail once collapsed", async () => {
-    render(<PulseCard row={makeRow()} compact={false} />);
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
     await expand();
     mockTail.mockClear();
 
     fireEvent.pointerLeave(cardButton());
 
-    expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "running");
+    expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "idle");
   });
 });
 

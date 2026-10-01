@@ -29,12 +29,14 @@ import BrowserForm from "./BrowserForm";
 import VaultForm from "./VaultForm";
 import TTSForm from "./TTSForm";
 import ChatDisplayForm from "./ChatDisplayForm";
+import ConnectorsForm from "./ConnectorsForm";
 
 export type SettingsGroupId =
   | "backend"
   | "browser"
   | "vault"
   | "tts"
+  | "connectors"
   | "profiles"
   | "profile-debug"
   | "model-defaults"
@@ -73,6 +75,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "browser", label: "Browser" },
   { id: "vault", label: "Passwords" },
   { id: "tts", label: "Speech playback" },
+  { id: "connectors", label: "Connectors" },
   { id: "profiles", label: "Profiles" },
   { id: "profile-debug", label: "Profile Debug" },
   { id: "model-defaults", label: "Model Defaults & Recap" },
@@ -118,6 +121,12 @@ function renderGroup(id: SettingsGroupId) {
       return <VaultForm />;
     case "tts":
       return <TTSForm />;
+    case "connectors":
+      // No `host`: the Settings panel is a GLOBAL surface by convention (see
+      // the same choice in PermissionsForm), so this manages THIS machine's
+      // base credentials. ConnectorsForm still accepts a host for a future
+      // project-scoped surface — do not delete the prop as "unused".
+      return <ConnectorsForm />;
     case "profiles":
       return <ProfilesManager />;
     case "profile-debug":

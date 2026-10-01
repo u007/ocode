@@ -61,7 +61,7 @@
 
 **Files:**
 - Create: `internal/tool/bash_build.go`
-- Modify: foreground construction `internal/tool/exec.go:174-189`; background construction `internal/tool/process.go:257-287` (`StartBackgroundDisplay`) — both call the builder. Set `cmd.Dir` to the session project root (carried in agent context, `internal/agent/agent.go:4092-4098`) for both; make the background process hooks use the session workdir instead of `os.Getwd()` (`process.go:275-287`).
+- Modify: foreground construction `internal/tool/exec.go:174-189`; background construction `internal/tool/process.go:257-287` (`StartBackgroundDisplay`) — both call the builder. Set `cmd.Dir` to the session project root (carried in agent context, `internal/agent/agent.go:4114-4120`) for both; make the background process hooks use the session workdir instead of `os.Getwd()` (`process.go:275-287`).
 - Test: `internal/tool/bash_build_test.go`, plus re-run existing `internal/tool` suites unchanged
 
 **Interfaces:**

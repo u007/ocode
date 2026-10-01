@@ -118,7 +118,7 @@ func (a *Agent) judgeSearchResults(ctx context.Context, client *TypesafeClient, 
 		return req.Results, 0, nil
 	}
 
-	keepSet, err := a.judgeRelevanceQuestions(ctx, client, "TOOL", "search_typesafe", ids, state, questions)
+	keepSet, _, err := a.judgeRelevanceQuestions(ctx, client, "TOOL", "search_typesafe", ids, state, questions)
 	if err != nil {
 		return nil, 0, err
 	}

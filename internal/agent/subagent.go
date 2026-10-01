@@ -426,6 +426,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
 	subAgent.toolBatchDelay = 0
+	// A child's final result is returned to the parent as a tool result, not
+	// rendered as a user-facing response, and the child only sees the dispatch
+	// prompt — never the whole conversation. A recap block here would be noise
+	// in the parent's transcript and factually wrong, so opt out explicitly.
+	subAgent.SetRecapPromptEnabled(false)
 	// Draw concurrency slots from the same pool as the dispatcher instead of
 	// NewAgent's fresh per-agent default. Without this, max_concurrent_agents
 	// only caps direct dispatches at each nesting level independently, and

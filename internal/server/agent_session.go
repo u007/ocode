@@ -598,7 +598,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// leak into another chat, and a resume/restart re-seeds from metadata.
 	ag.SetAdvisorEnabled(h.advisorSeed(sessionID, h.advisorFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.ProfileCredentialVersion()}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion()}
 	// Restore this session's spend and token history before anything reads the
 	// gauge. The totals live in transcript metadata (the same keys the TUI
 	// writes) and a freshly built agent starts at zero, so without this seed the
@@ -678,7 +678,7 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// The credential version is global, not per-profile: an in-place edit must
 	// invalidate the cached client for window-unbound sessions too, so it is
 	// read unconditionally rather than only on the window-bound path.
-	curCredVersion := auth.ProfileCredentialVersion()
+	curCredVersion := auth.CredentialVersion()
 	cur := as.profile
 	if entry.WindowID != "" {
 		cur = h.resolveSessionProfile(entry)
@@ -2070,8 +2070,13 @@ func (h *Handler) wireCompactCallbacks(sessionID string, ag *agent.Agent) {
 // transcript has not shrunk since (a racing manual /compact can shrink it —
 // in that case the stale result is dropped).
 func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
+	// A user cancel is not a summarization failure: retire the lifecycle slot
+	// with a clean completion (compaction_done{ok:true}) so the shared
+	// indicator clears on every client without an error banner, and leave the
+	// transcript untouched.
+	cancelled := errors.Is(r.Err, agent.ErrCompactionCanceled)
 	compactionErr := ""
-	if r.Err != nil {
+	if r.Err != nil && !cancelled {
 		compactionErr = r.Err.Error()
 	}
 	// Always retire the lifecycle slot, including malformed/stale results and
@@ -2081,7 +2086,7 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 		h.finishCompaction(sessionID, compactionErr)
 	}()
 	if !r.OK {
-		if r.Err != nil {
+		if r.Err != nil && !cancelled {
 			log.Printf("serve: auto-compaction failed for session %s: %v", sessionID, r.Err)
 		}
 		return

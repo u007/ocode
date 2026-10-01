@@ -1140,6 +1140,13 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 		next.SetMemoryEnabled(m.config.Ocode.MemoryEnabled)
 		next.SetDocPromptEnabled(m.config.Ocode.DocPromptEnabled)
 	}
+	// Carry the recap flag across the rebuild. NewAgent defaults it on, so this
+	// only matters once a runtime toggle exists — copied here so that adding one
+	// later cannot be silently dropped by an unrelated rebuild (model switch,
+	// profile change, config reload).
+	if next != nil && m.agent != nil {
+		next.SetRecapPromptEnabled(m.agent.RecapPromptEnabled())
+	}
 	m.agent = next
 	if m.agent != nil {
 		if m.sessionID != "" {

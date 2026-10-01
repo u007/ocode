@@ -110,6 +110,16 @@ type Server struct {
 	frontendStats    *frontendStatsRing
 	startedAt        time.Time
 
+	// shareTokenMu guards shareToken, an OPTIONAL second credential accepted
+	// alongside password. The desktop shell installs one so the link it hands
+	// to another device stays valid across restarts (see
+	// internal/desktop.ShareTokenStore). It is never the webview's own
+	// per-launch token, so rotating it revokes outstanding share links without
+	// logging the local window out. Empty means "no share token configured",
+	// which is every non-desktop server.
+	shareTokenMu sync.RWMutex
+	shareToken   string
+
 	// remoteMode is true when the process was launched as `ocode serve
 	// --remote` (see Run). It forces loopback-only binding, requires a
 	// generated API token (never the OPENCODE_SERVER_* env vars), and
@@ -339,6 +349,7 @@ func (s *Server) registerRoutes() {
 
 	// Session operations
 	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.authMiddleware(s.handleCompactSession))
+	s.mux.HandleFunc("POST /api/sessions/{id}/compact/cancel", s.authMiddleware(s.handleCancelCompaction))
 	s.mux.HandleFunc("GET /api/sessions/{id}/recap", s.authMiddleware(s.handleRecapSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/export", s.authMiddleware(s.handleExportSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/export-claude", s.authMiddleware(s.handleExportClaudeSession))
@@ -585,6 +596,18 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/window/{id}/activeProfile", s.authMiddleware(s.handler.handleGetWindowActiveProfile))
 	s.mux.HandleFunc("PUT /api/window/{id}/activeProfile", s.authMiddleware(s.handler.handleSetWindowActiveProfile))
 
+	// Connector settings (TUI /connect parity): base-store credential
+	// management for the web/desktop settings. Per-profile credentials
+	// stay under /api/profiles above.
+	s.mux.HandleFunc("GET /api/auth/connect", s.authMiddleware(s.handler.handleConnectList))
+	s.mux.HandleFunc("PUT /api/auth/connect/{provider}", s.authMiddleware(s.handler.handleConnectSet))
+	s.mux.HandleFunc("DELETE /api/auth/connect/{provider}", s.authMiddleware(s.handler.handleConnectRemove))
+	s.mux.HandleFunc("POST /api/auth/connect/{provider}/oauth/start", s.authMiddleware(s.handler.handleConnectOAuthStart))
+	s.mux.HandleFunc("POST /api/auth/connect/{provider}/test", s.authMiddleware(s.handler.handleConnectTest))
+	s.mux.HandleFunc("GET /api/auth/connect/flows/{flowId}", s.authMiddleware(s.handler.handleConnectFlowStatus))
+	s.mux.HandleFunc("POST /api/auth/connect/flows/{flowId}/input", s.authMiddleware(s.handler.handleConnectFlowInput))
+	s.mux.HandleFunc("DELETE /api/auth/connect/flows/{flowId}", s.authMiddleware(s.handler.handleConnectFlowCancel))
+
 	// Open-session tab state (server-side persistence; survives desktop restarts)
 	s.mux.HandleFunc("GET /api/tabs", s.authMiddleware(s.handleGetTabs))
 	s.mux.HandleFunc("PUT /api/tabs", s.authMiddleware(s.handleSetTabs))
@@ -660,19 +683,25 @@ func remoteWSToken(header string) string {
 func (s *Server) checkAuth(r *http.Request) bool {
 	// Bearer token header (used by frontend fetch calls)
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		return auth[7:] == s.password
+		return s.tokenMatches(auth[7:])
 	}
 	// ?token= query param (used by EventSource, which can't set headers).
 	// Forbidden in --remote mode: query strings reach access logs and
 	// intermediary proxies, which the remote token model treats as a leak.
 	if !s.remoteMode {
 		if tok := r.URL.Query().Get("token"); tok != "" {
-			return tok == s.password
+			return s.tokenMatches(tok)
 		}
 	}
 	// WebSocket subprotocol token (remote mode only — the browser WebSocket
 	// API can't set Authorization or use ?token= safely under the remote
 	// token model, but it can offer a Sec-WebSocket-Protocol list).
+	//
+	// Compared against the launch token ONLY: the remote token model is a
+	// single per-launch credential, and a remote session never carries a
+	// durable share token (sharing is refused there — see the SPA's
+	// ShareDialog remote branch). Accepting the share token here would let a
+	// share link outlive the launch model it was minted for.
 	if s.remoteMode {
 		if tok := remoteWSToken(r.Header.Get("Sec-WebSocket-Protocol")); tok != "" {
 			return tok == s.password
@@ -1998,6 +2027,10 @@ func (s *Server) handleSessionDiscovery(w http.ResponseWriter, r *http.Request) 
 }
 func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleCancelSession(w, r, r.PathValue("id"))
+}
+
+func (s *Server) handleCancelCompaction(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleCancelCompaction(w, r, r.PathValue("id"))
 }
 
 func (s *Server) handleRetrySession(w http.ResponseWriter, r *http.Request) {

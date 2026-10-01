@@ -139,7 +139,7 @@ func TestDiscoveryJudgeKeepsAboveThreshold(t *testing.T) {
 	if client == nil {
 		t.Fatal("judge client should resolve with a keyed typesafe factory")
 	}
-	keep, err := a.judgeDiscoveryCandidates(client, []Message{{Role: "user", Content: "do a"}}, "do a", discoveryJudgeCandidates())
+	keep, _, err := a.judgeDiscoveryCandidates(client, []Message{{Role: "user", Content: "do a"}}, "do a", discoveryJudgeCandidates())
 	if err != nil {
 		t.Fatalf("judge error: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestDiscoveryJudgeMissingAnswerKept(t *testing.T) {
 		// md:c omitted
 	}), 0)
 	client := a.discoveryJudgeClient()
-	keep, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
+	keep, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
 	if err != nil {
 		t.Fatalf("judge error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestDiscoveryJudgeMissingAnswerKept(t *testing.T) {
 func TestDiscoveryJudgeTransportError(t *testing.T) {
 	a, _ := newDiscoveryJudgeAgent(t, "", http.StatusInternalServerError)
 	client := a.discoveryJudgeClient()
-	keep, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
+	keep, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
 	if err == nil {
 		t.Fatal("expected an error from a 500 response")
 	}
@@ -208,7 +208,7 @@ func TestDiscoveryJudgeRecordsSideUsage(t *testing.T) {
 	var in, out int64
 	a.OnSideUsage = func(p, c, _, _ int64, _ *float64) { in, out = p, c }
 	client := a.discoveryJudgeClient()
-	if _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:1]); err != nil {
+	if _, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:1]); err != nil {
 		t.Fatal(err)
 	}
 	if in != 11 || out != 3 {
@@ -283,7 +283,7 @@ func TestDiscoveryJudgeKeepsSlightlyRelevantCandidate(t *testing.T) {
 	if client == nil {
 		t.Fatal("judge client should resolve with a keyed typesafe factory")
 	}
-	keep, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:2])
+	keep, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:2])
 	if err != nil {
 		t.Fatalf("judge error: %v", err)
 	}
@@ -291,5 +291,33 @@ func TestDiscoveryJudgeKeepsSlightlyRelevantCandidate(t *testing.T) {
 	want := []string{"skill:a"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("keep = %v want %v (0.60 must survive the lenient relevance floor)", got, want)
+	}
+}
+
+// The auto-inject gate needs "how relevant", not just "is it in scope", so the
+// judge must hand back the raw noul. The two easy mistakes this pins down:
+// dropping a VETOED candidate's score (the caller then cannot tell "scored 0.10"
+// from "never scored", and loses the tuning signal for the floor), and
+// defaulting a MISSING answer to 0.0 (which reads as a confident zero instead
+// of the unknown it is).
+func TestDiscoveryJudgeReturnsNoulScores(t *testing.T) {
+	a, _ := newDiscoveryJudgeAgent(t, typesafeNoulReply(map[string]float64{
+		"skill:a": 0.93,
+		"skill:b": 0.10, // below the relevance floor -> vetoed
+		// md:c omitted entirely -> no answer
+	}), 0)
+	client := a.discoveryJudgeClient()
+	_, scores, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
+	if err != nil {
+		t.Fatalf("judge error: %v", err)
+	}
+	if got, ok := scores["skill:a"]; !ok || got != 0.93 {
+		t.Fatalf("skill:a score = %v (ok=%v), want 0.93", got, ok)
+	}
+	if got, ok := scores["skill:b"]; !ok || got != 0.10 {
+		t.Fatalf("a vetoed candidate must still report its real score: got %v (ok=%v)", got, ok)
+	}
+	if _, ok := scores["md:c"]; ok {
+		t.Fatal("a missing answer must be ABSENT from scores, never defaulted to 0")
 	}
 }

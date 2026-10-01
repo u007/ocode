@@ -1,5 +1,54 @@
 # TODO
 
+## Concurrency hazard: another ocode session owns part of this feature's files (2026-10-01)
+
+While building the Connectors settings, a **second session was writing the same feature at
+the same time**. The split, as of 2026-10-01:
+
+- Written by the other session, untracked (`??`), **not yet committed**:
+  `internal/server/handler_connect.go` (782 lines, 16 tests), the connector methods +
+  `Connect*` types in `web/src/api/client.ts`, `web/src/components/Settings/ConnectorsForm.tsx`
+  and its two test files. Also `internal/auth/google.go` / `openai_oauth.go` (an
+  unrelated OAuth refactor).
+- Written by this session: `internal/auth/methods.go` + the shared catalog it replaced,
+  `auth.CredentialVersion()`, `internal/auth/openai_oauth_manual.go`, the manual-mode
+  server wiring, and the parity / leak / invalidation tests.
+
+Two things this cost, both worth not repeating:
+
+- [ ] **`git add -A` is unsafe in this repo right now.** It would sweep another agent's
+      in-flight, uncommitted work into a commit under this session's name, and untracked
+      files have no git history to recover from. Commit by explicit path list, or not at
+      all, until the other session lands.
+- [ ] **Two writers in one Go file means one silently loses the work.** `handler_connect.go`
+      was being edited at 19:40 when I first went to wire the manual flow, so that step
+      waited. When it was finally safe (stable ~3.75h), the fix was a **new file**
+      (`openai_oauth_manual.go`) rather than extending the file the other session had
+      just refactored — zero collision surface. Prefer a new file over an edit when
+      someone else may be mid-change in the same package.
+- [ ] **Check ownership before touching a file another session may own:**
+      `stat -f "%Sm" <file>` plus `find ~/.local/share/opencode/project/<slug>/sessions
+      -maxdepth 1 -newermt "-6 minutes" -name "*.sqlite" | wc -l`. mtime vs your own
+      session's start time is the fastest tell.
+
+## Discovery skill auto-injection: two open decisions (2026-10-01)
+
+Ships the top-1 Jev-scored skill body into the prompt (`internal/agent/discovery_autoinject.go`).
+Two things were deliberately left out of the change rather than decided unilaterally:
+
+- [ ] **Auto-injected skills are invisible in `/discovery` status.** `DiscoveryStatusInfo`
+      (`internal/agent/discovery_glue.go`) reports `AttachedSkills` and `judgeVetoed` but
+      nothing about the auto-inject, so the feature is observable only via the `DISCOVERY`
+      debug line. Adding it means touching the TUI status snapshot and the web
+      `/api/discovery` consumer, so it was scoped out of the original change.
+- [ ] **The 0.8 floor has never been observed firing.** It is a reasoned guess, and a high
+      one. `maybeAutoInjectSkill` now logs the best skill's real noul on every judged turn
+      (`auto-inject: no skill qualified (best %q noul=%.3f < floor %.2f)`) precisely so it
+      can be tuned against real numbers. If real scores cluster well below 0.8 the feature
+      will look dead; check the debug log before concluding it is broken, then adjust
+      `discoveryAutoInjectFloor` and the value pinned in
+      `TestAutoInjectFloorIsDeliberatelyDecoupled`.
+
 ## Skill-doc audit follow-ups: four deferred items (2026-09-30)
 
 A read-only audit of `skills/` found 17 stale line anchors and ~10 false claims across the
@@ -3563,3 +3612,125 @@ The `melo` engine is registered, pinned, installable and verified end to end on
   cause is this file's setup, not the component. Left alone rather than
   restructuring the composer's mount effects; worth a cleanup pass on the harness if
   the noise starts masking a real warning.
+
+## Recap contract ([ocode:recap]) — follow-ups (2026-10-01)
+
+Shipped the recap format as a static system-prompt fragment
+(`internal/agent/prompt.go::recapPromptContent`), on for primary agents and
+explicitly off for sub-agents / `/btw` side queries / the advisor.
+
+- [ ] **No config toggle — deliberate, and NOT to be tied to `/recap`.** The
+      `SetRecapPromptEnabled`/`RecapPromptEnabled` pair exists and the TUI rebuild
+      path (`model.go`) carries the flag across, but there is no user-facing
+      switch, because the fragment is meant to be unconditional for the main loop.
+      **`/recap enable|disable` (-> `handleRecapCmd` -> `handleRecapEnable`) already
+      exists and toggles a DIFFERENT feature — the automatic one-line auto-recap
+      (`RecapAsyncShort`). Do not repurpose it for this fragment.** If a switch is
+      ever wanted, add a separate `recap_prompt_enabled` key (mirroring
+      `doc_prompt_enabled`) plus its own subcommand; the flag plumbing is already
+      in place.
+- [ ] **THREE SEPARATE RECAP MECHANISMS — keep them separate (do NOT "unify").**
+      An earlier note in this file proposed folding these onto one shared format
+      constant. That was WRONG and is retracted; the user corrected it explicitly
+      (2026-10-01). They are distinct features with distinct consumers:
+      1. **Auto-recap** — `RecapAsyncShort` (`agent.go`), fired automatically from
+         the TUI after every turn; one line; toggled by `/recap enable|disable`.
+      2. **`/recap` command** — user-invoked; `runRecap` (`agent.go`) fires a
+         side-query LLM call and formats its own sections (`WHAT USER WANT / WHAT
+         FIND / DECISION / DO / TASKS`).
+      3. **This fragment (`[ocode:recap]`)** — the odd one out: NOT a side query and
+         NOT a trigger. It is a static system-prompt instruction telling the
+         **main LLM loop** to close its OWN response with the recap, in
+         `ASKED/WORKED/FOUND/DECIDED/NEXT` shape.
+      (1) and (2) both GENERATE text via a separate small-model call; (3) SHAPES
+      what the main model writes. Different producers, different consumers — so
+      (3) is main-loop-only and must not be described as, or merged with, (1)/(2).
+- [ ] **No runtime observation yet.** The contract is enforced only by prompt
+      text. Nothing verifies the model actually emits the five sections, that
+      `WORKED` picks the right label, or that the skip rule suppresses the block
+      on conversational turns. A transcript check (or an eval against a handful of
+      recorded sessions) would confirm the prompt is actually load-bearing rather
+      than merely present.
+- [ ] **Bundle anchors describe the COMMITTED tree (HEAD + the recap change), not the
+      live working tree — deliberately.** My insertions to `internal/agent/agent.go`
+      (+22) and `prompt.go` (+34) shifted every `file.go:NNN` anchor in the bundle.
+      All 121 anchor endpoints and all 26 `file.go:A-B` spans are now verified
+      against HEAD + the recap change, width-preserving, 0 stale. Another session
+      has +4 further UNCOMMITTED lines in `runCompact` (old line 2781), so those
+      anchors are 4 short of the live tree; they are NOT shifted to chase it,
+      because CLAUDE.md's own rule is that a tracked file with unstaged
+      modifications is read from HEAD — docs must not describe uncommitted code.
+      **If that runCompact work is committed, re-derive every `agent.go:NNNN` at or
+      above old line 2782 with +4** (scripts kept at
+      `/tmp/recapbk/rewrite_spans_from_head.py` and `verify_anchors.py`; the
+      `--mine` shift table is at the top of `verify_anchors.py`). A span must
+      shift BOTH endpoints by the same amount — an earlier pass moved only the
+      start, which turned 18 spans backwards and lost width on 5 more; both classes
+      are now fixed and guarded.
+
+- [ ] **`TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent` fails at PRISTINE HEAD —
+      pre-existing and unrelated to the recap fragment.** Proven, not inferred:
+      a clean `git worktree add .worktrees/pristine-recap HEAD` (embeds copied)
+      fails the test 3/3 in isolation, and the full `go test -race ./internal/agent/`
+      at pristine HEAD (238s) reports it as the ONLY failure. An earlier note here
+      blamed the concurrent discovery/TypeSafe work — that guess was WRONG, the
+      failure is committed at HEAD. It polls for `RunningCount()==1 &&
+      QueuedCount()==1` on a 2s deadline, so it is timing-sensitive; needs its own
+      triage. (Worktree can be removed with `git worktree remove`.)
+
+## Changes tab: bash change-detection guards (2026-10-01)
+
+Shipped three guards for the pre/post stat-walk detector
+(`internal/changes/bash.go`), all mutation-verified, all with the skip visible
+in the debug panel:
+
+- [ ] **Adaptive walk budget.** `defaultWalkBudget` is a flat 2s. Measured on
+      this machine with a read-only probe: the ocode repo root walks in
+      **90–150ms** (4,357 files, `walkComplete` on all runs), but
+      `/Users/james/www` holds **91,410 files** and **truncated on a cold run**,
+      taking the full 2s. A session opened on a directory that large now skips
+      bash detection on *every* command (loud, not wrong — but the tab goes
+      quiet). Fix by tracking the last observed full-walk duration on the
+      recorder and scaling the budget off it, or by refusing a workDir whose
+      file count is absurd. Do NOT just raise the 2s: that is a workaround for
+      an unpruned walk.
+- [ ] **Report the trustworthy half of a truncated PRE walk.** Today a truncated
+      pre-walk drops the whole event, but only the "added" class is actually
+      unsound there — paths the pre-walk DID cover give reliable
+      modified/deleted. A truncated POST walk must still drop entirely (the
+      abort point invents deletions). Would recover coverage for large repos.
+- [ ] **`pathTokenRegex` still requires a slash, so bare filenames are never
+      tokens.** `cat >> TODO.md` yields nothing, which is why the fail-open is
+      bounded rather than absent. Widening the regex to accept single-segment
+      filenames in redirect position (`>`, `>>`) would let the common heredoc /
+      in-place-`sed` case be attributed by name and retire most of the
+      fail-open.
+- [ ] **Known residual: bounded misattribution.** A diff of ≤
+      `maxTouchesPerEvent` (200) paths with no nameable target is still
+      attributed to the command. Probed on `/Users/james/www`: a no-op reported
+      1 row for `nanobot/.parakeet.log`, written by another process during the
+      command's window. Small, and inherent to any mtime-diff detector without
+      per-writer attribution — but it is not zero.
+
+## HTR shared daemon (2026-10-01)
+
+- [ ] **Orphaned `com.ocode.htrcontrol.json` in browser families ocode no longer
+      manages.** Found while designing the shared HTR daemon: ocode writes its
+      native-host manifest only for the browser it selects (`FindChrome` prefers
+      Chromium), so `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.ocode.htrcontrol.json`
+      is a stale Sep-29 copy pointing at the 0.8.113 binary, with an
+      `allowed_origins` value matching none of the 0.8.91→0.8.120 bundled
+      extension keys. Harmless today (Chrome has no ocode extension installed),
+      but it is leftover state. Deferred add-on: prune `com.ocode.*` manifests
+      from the other known browser families when writing — never
+      `com.htrcontrol.host`. Design: `.opencode/plans/2026-10-01-htr-shared-daemon-spec.md`.
+- [ ] **The shared-daemon spec is not in the OKF bundle yet.** Design lives at
+      `.opencode/plans/2026-10-01-htr-shared-daemon-spec.md` (338 lines, section 3
+      marked PENDING USER CONFIRMATION). The bundle copy at
+      `docs/superpowers/specs/2026-10-01-htr-shared-daemon-design.md` was NOT
+      written: the context agent was cancelled after 21 min having drifted into an
+      unrelated spec (`2026-10-01-web-connector-settings-design.md`) and started
+      editing `docs/index.md` for that one instead. Retry via the context agent
+      once the other session's agent is done — it is the sole writer for `docs/`.
+      That write must also land the `docs/index.md` and `docs/log.md` entries,
+      which are auto-managed by the agent and must not be hand-edited.

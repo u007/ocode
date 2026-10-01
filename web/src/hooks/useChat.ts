@@ -12,6 +12,7 @@ import { api, ApiError } from "../api/client";
 import { resolveSessionHost } from "./useSessionHost";
 import { clearPendingRewind, loadPendingRewind } from "../lib/pendingRewindStore";
 import { reportActionError, reportActionErrorMessage } from "../lib/actionErrors";
+import { clearSessionActivity } from "../lib/commandActivity";
 import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
 import type { PermissionDecideResult } from "../components/Chat/PermissionDialog";
 
@@ -287,6 +288,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const stop = useCallback(() => {
     if (!sessionId) return;
     dispatch({ type: "INTERRUPT", sessionId });
+    // A cancelled turn never emits turn_done/turn_error, so the skill/command
+    // bar has to be dropped here or it would hang for the rest of the session.
+    clearSessionActivity(sessionId);
     // Don't block UI on the cancel RPC; fire and forget. If the session is
     // a temp `new-*` id with no server session yet, skip the call.
     if (!sessionId.startsWith("new-")) {

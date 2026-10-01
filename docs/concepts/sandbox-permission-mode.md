@@ -81,7 +81,7 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Carve-out rules
 
-`sandboxSensitivePath` (`permissions.go:3074`) classifies a resolved path against the sandbox sensitive set:
+`sandboxSensitivePath` (`permissions.go:3227`) classifies a resolved path against the sandbox sensitive set:
 
 - **auth.json / auth.profiles.json** (read or write) → Ask
 - **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
@@ -113,14 +113,14 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3164`
 - `runSandboxCmd`: `internal/tui/commands.go:1056`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`
-- `isHarmfulForceCommand`: `internal/agent/permissions.go:721`
-- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1175`
+- `isHarmfulForceCommand`: `internal/agent/permissions.go:723`
+- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1414`
 - `isReadOnlyGitStashForm`: `internal/agent/permissions.go:577`
 - `isSensitivePath`: `internal/agent/permissions.go:2790`
 - `isSecretMaterialPath`: `internal/agent/permissions.go:2799`
 - `isRepoMetadataPath`: `internal/agent/permissions.go:2852`
 - `sandboxSensitiveTargets`: `internal/agent/permissions.go:2919`
-- `sandboxSensitivePath`: `internal/agent/permissions.go:3074`
+- `sandboxSensitivePath`: `internal/agent/permissions.go:3227`
 
 ## Enforcement details (moved from CLAUDE.md)
 

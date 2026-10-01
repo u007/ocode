@@ -465,9 +465,12 @@ type agentSession struct {
 	// Compared against the window's current active profile on each turn so a
 	// profile switch takes effect on the next turn without an app restart.
 	profile string
-	// credVersion snapshots auth.ProfileCredentialVersion() at build time, so
-	// an in-place credential edit on the same profile (not just a switch to a
-	// different profile) also triggers a rebuild — see reconcileProfileAgent.
+	// credVersion snapshots auth.CredentialVersion() at build time, so an
+	// in-place credential edit triggers a rebuild even when nothing else
+	// changed — not just a switch to a different profile, and not just a
+	// profile-overlay edit. It covers the BASE store too (TUI /connect, the
+	// web/desktop Connectors settings write auth.json). See
+	// reconcileProfileAgent.
 	credVersion int64
 	// liveAppend mirrors a mid-turn transcript row into the in-flight
 	// live-persist view (set by wireLivePersist for headless turns). Without it,
@@ -1938,6 +1941,22 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 			if r.Context().Err() != nil {
 				log.Printf("serve: compaction request cancelled for session %s: %v", id, result.Err)
 				finish("")
+				return
+			}
+			if errors.Is(result.Err, agent.ErrCompactionCanceled) {
+				// The user (the compaction bar's Cancel button, or Stop)
+				// interrupted the pass. That is not a summarization failure:
+				// clear the shared indicator with no error banner and report a
+				// clean cancellation to the client. A bare provider
+				// context.Canceled deliberately does NOT land here and stays a
+				// 500 (see TestCompactSessionBareCancellationRemains500).
+				log.Printf("serve: compaction cancelled for session %s", id)
+				finish("")
+				writeJSON(w, http.StatusOK, map[string]any{
+					"cancelled":     true,
+					"original_len":  result.OriginalLen,
+					"compacted_len": len(as.messages),
+				})
 				return
 			}
 			log.Printf("serve: compaction failed for session %s: %v", id, result.Err)

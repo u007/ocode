@@ -158,6 +158,59 @@ type CompactResult struct {
 // classified as a provider timeout by callers.
 var ErrCompactionTimeout = errors.New("compaction timed out")
 
+// ErrCompactionCanceled identifies a pass the user (or the session Stop)
+// explicitly cancelled via CancelCompaction. It is deliberately distinct from
+// a bare provider context.Canceled: the latter, observed while the HTTP
+// request is still alive, remains a real failure (see HandleCompactSession).
+var ErrCompactionCanceled = errors.New("compaction cancelled by user")
+
+// beginCompactPass creates the operation context for one compaction pass and
+// registers its cancel func so CancelCompaction can interrupt it. The returned
+// release func unregisters the pass and releases the context; callers must
+// defer it around the whole pass.
+func (a *Agent) beginCompactPass() (context.Context, func()) {
+	ctx, cancel := newCompactOperationContext()
+	id := a.registerCompactPass(cancel)
+	return ctx, func() {
+		a.unregisterCompactPass(id)
+		cancel(ErrCompactionCanceled)
+	}
+}
+
+func (a *Agent) registerCompactPass(cancel context.CancelCauseFunc) uint64 {
+	a.compactPassMu.Lock()
+	defer a.compactPassMu.Unlock()
+	if a.compactPassCancels == nil {
+		a.compactPassCancels = make(map[uint64]context.CancelCauseFunc)
+	}
+	a.compactPassSeq++
+	id := a.compactPassSeq
+	a.compactPassCancels[id] = cancel
+	return id
+}
+
+func (a *Agent) unregisterCompactPass(id uint64) {
+	a.compactPassMu.Lock()
+	defer a.compactPassMu.Unlock()
+	delete(a.compactPassCancels, id)
+}
+
+// CancelCompaction interrupts every in-flight compaction pass for this agent
+// (manual or automatic) with cause ErrCompactionCanceled. Returns true when at
+// least one pass was cancelled. Safe to call when nothing is compacting.
+func (a *Agent) CancelCompaction() bool {
+	a.compactPassMu.Lock()
+	cancels := make([]context.CancelCauseFunc, 0, len(a.compactPassCancels))
+	for _, c := range a.compactPassCancels {
+		cancels = append(cancels, c)
+	}
+	a.compactPassMu.Unlock()
+	for _, c := range cancels {
+		c(ErrCompactionCanceled)
+	}
+	return len(cancels) > 0
+}
+
 // compactOverallCap bounds one complete manual or automatic compaction pass.
 // It is a variable so tests can exercise the cap without waiting 30 minutes;
 // production callers never override it.
@@ -178,9 +231,20 @@ func contextCause(ctx context.Context) error {
 // newCompactOperationContext creates the hard upper bound for one complete
 // compaction pass. Per-batch inactivity contexts are children of this context,
 // so the cap also interrupts a batch that is still receiving tokens.
-func newCompactOperationContext() (context.Context, context.CancelFunc) {
+func newCompactOperationContext() (context.Context, context.CancelCauseFunc) {
 	limit := compactOverallCap
-	return context.WithTimeoutCause(context.Background(), limit, ErrCompactionTimeout)
+	// The parent carries the caller's cancel cause (ErrCompactionCanceled for a
+	// user cancel); the child owns the overall deadline so it still fires
+	// ErrCompactionTimeout. Cancelling the parent propagates its cause to the
+	// child, so context.Cause(child) reports which one ended the pass. The
+	// parent is cancelled BEFORE the child's timeout cancel: doing it the other
+	// way would set the child's cause to context.Canceled and lose the reason.
+	parent, cancelParent := context.WithCancelCause(context.Background())
+	ctx, cancelTimeout := context.WithTimeoutCause(parent, limit, ErrCompactionTimeout)
+	return ctx, func(cause error) {
+		cancelParent(cause)
+		cancelTimeout()
+	}
 }
 
 // tokenEstimate is a coarse heuristic used when real Usage data is unavailable.

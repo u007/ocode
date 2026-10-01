@@ -587,11 +587,22 @@ func renderCatalog(skills []Skill) string {
 // scans the UNFILTERED set (LoadSkillsForRoot), so an explicit load-by-name can
 // still resolve a Kaizen skill — that is an explicit request, distinct from
 // advertising it in an ungated catalog.
+// LoadSkill resolves a skill by name for the process's current working
+// directory. Callers that know the session's project root MUST use
+// LoadSkillForRoot instead: os.Getwd() is the SERVER process's cwd, which for a
+// web/desktop server (or any session rooted at a different project) is not the
+// session's project, so a project-local skill would not be found.
 func LoadSkill(name string) (*Skill, error) {
 	root := ""
 	if cwd, err := os.Getwd(); err == nil {
 		root = cwd
 	}
+	return LoadSkillForRoot(name, root)
+}
+
+// LoadSkillForRoot is LoadSkill with an explicit project root (may be empty,
+// which falls back to the process cwd exactly like LoadSkill).
+func LoadSkillForRoot(name, root string) (*Skill, error) {
 	all := LoadSkillsForRoot(root)
 	// Exact name first ("superpowers:brainstorming" for a plugin skill), then
 	// the directory name, preferring an ordinary skill over a plugin one so a

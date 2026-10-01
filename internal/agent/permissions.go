@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"unicode"
@@ -1168,19 +1170,107 @@ func netcatHostIsLoopback(fields []string) bool {
 	return false
 }
 
-// isLoopbackHost reports whether host is a loopback address.
+// isLoopbackHost reports whether host is a loopback address, matching
+// 127.0.0.0/8 and ::1 as parsed IP literals. It never uses a string prefix:
+// "127." also begins attacker-registrable domains such as "127.0.0.1.evil.com",
+// and this predicate gates auto-ALLOWs, so a false positive would exempt
+// off-host traffic from every gate.
 func isLoopbackHost(host string) bool {
 	h := strings.TrimPrefix(host, "[")
 	h = strings.TrimSuffix(h, "]")
-	switch h {
-	case "localhost", "::1":
+	if h == "localhost" {
 		return true
 	}
-	// 127.0.0.0/8 — all loopback per RFC 3330/6598-era conventions
-	if strings.HasPrefix(h, "127.") {
+	addr, err := netip.ParseAddr(h)
+	return err == nil && addr.IsLoopback()
+}
+
+// isLoopbackHostForPermissionGuard is the deliberately PERMISSIVE loopback test
+// used only by the self-escalation guard (isLocalhostURL -> permissionApiLoopback).
+// That guard must over-ask and never under-ask: the inet_aton-style shorthands
+// netip cannot parse still resolve to loopback, so failing to recognise one would
+// let the agent rewrite its own permission rules un-gated.
+func isLoopbackHostForPermissionGuard(host string) bool {
+	h := strings.Trim(host, "[]")
+	if isLoopbackHost(h) {
 		return true
 	}
+	// Strip userinfo and port before the address test.
+	if at := strings.LastIndex(h, "@"); at >= 0 {
+		h = h[at+1:]
+	}
+	if colon := strings.LastIndexByte(h, ':'); colon > 0 && !strings.Contains(h[:colon], "]") {
+		h = h[:colon]
+	}
+	if addr, ok := parseLooseInetAton(h); ok {
+		return addr.IsLoopback()
+	}
+	// No prefix fallback: parseLooseInetAton covers every loopback form a
+	// resolver honours, and a prefix test would also match registrable names
+	// like "127.0.0.1.evil.com".
 	return false
+}
+
+// parseLooseInetAton parses the inet_aton shorthands that netip rejects: a 1-4
+// part dotted form where each part is decimal, octal (leading 0) or hex (leading
+// 0x), or a bare 32-bit integer. It reports ok=false for anything else,
+// including hostnames — so "127.0.0.1.evil.com" is never read as an address.
+func parseLooseInetAton(host string) (netip.Addr, bool) {
+	if host == "" {
+		return netip.Addr{}, false
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) > 4 {
+		return netip.Addr{}, false
+	}
+	var vals []uint64
+	for _, p := range parts {
+		v, ok := parseInetAtonPart(p)
+		if !ok {
+			return netip.Addr{}, false
+		}
+		vals = append(vals, v)
+	}
+	// The last part absorbs the remaining bytes; earlier parts are single bytes.
+	var addr [4]byte
+	shift := len(vals) - 1
+	for i, v := range vals {
+		if i == len(vals)-1 {
+			limit := uint64(1) << (8 * (4 - shift))
+			if v >= limit {
+				return netip.Addr{}, false
+			}
+			for b := 0; b < 4-shift; b++ {
+				addr[3-b] = byte(v >> (8 * b))
+			}
+			break
+		}
+		if v >= 256 {
+			return netip.Addr{}, false
+		}
+		addr[i] = byte(v)
+	}
+	return netip.AddrFrom4(addr), true
+}
+
+// parseInetAtonPart parses one inet_aton component: decimal, octal (0-prefixed)
+// or hexadecimal (0x-prefixed).
+func parseInetAtonPart(p string) (uint64, bool) {
+	if p == "" {
+		return 0, false
+	}
+	base := 10
+	switch {
+	case strings.HasPrefix(p, "0x"), strings.HasPrefix(p, "0X"):
+		p, base = p[2:], 16
+	case len(p) > 1 && p[0] == '0':
+		p, base = p[1:], 8
+	}
+	v, err := strconv.ParseUint(p, base, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // isAllDigits reports whether s consists only of ASCII digits.
@@ -1216,20 +1306,40 @@ func isLoopbackNetcat(command string) bool {
 // localhost). Loopback connections stay on-host and cannot exfiltrate data
 // off-machine, so they are auto-allowed — same rationale as loopback nc.
 func isLoopbackNetworkCommand(command string) bool {
+	return isLoopbackNetworkCommandWithVars(command, nil)
+}
+
+// isLoopbackNetworkCommandWithVars is isLoopbackNetworkCommand with the whole
+// line's integer assignments supplied — see numericAssignedVarsFrom for why the
+// fragment alone is not enough.
+func isLoopbackNetworkCommandWithVars(command string, numericVars map[string]bool) bool {
 	fields := splitShellFields(command)
 	if len(fields) < 2 {
 		return false
 	}
 	switch fields[0] {
 	case "curl", "wget", "http", "https":
-		return subprocessTargetsLocalhost(command)
+		return subprocessTargetsLocalhostWithVars(command, numericVars)
 	}
 	return false
 }
 
-// isExfiltrationRiskCommand checks if a bash command has data exfiltration
-// risk patterns. This covers curl, wget, httpie, and netcat.
+// isExfiltrationRiskCommand judges a single command with no cross-fragment
+// context, so it derives numericVars from that command alone. Compound callers
+// that evaluate fragments one at a time must call the WithVars form with the
+// whole line's set, or a same-line "p=8080" stays invisible to the curl
+// fragment that uses "$p".
 func isExfiltrationRiskCommand(command string) bool {
+	return isExfiltrationRiskCommandWithVars(command, numericAssignedVars(command))
+}
+
+// isExfiltrationRiskCommandWithVars checks if a bash command has data
+// exfiltration risk patterns. This covers curl, wget, httpie, and netcat.
+//
+// numericVars holds the variables the WHOLE command line assigns a plain
+// integer to. It is passed in rather than recomputed because this function is
+// reached once per fragment, and a same-line "p=8080" is its own fragment.
+func isExfiltrationRiskCommandWithVars(command string, numericVars map[string]bool) bool {
 	fields := splitShellFields(command)
 	if len(fields) == 0 {
 		return false
@@ -1240,7 +1350,7 @@ func isExfiltrationRiskCommand(command string) bool {
 		// Loopback connections (127.0.0.0/8, ::1, localhost) stay on-host and
 		// cannot exfiltrate data off-machine, so secrets in headers/data sent
 		// to localhost are never harmful — same rationale as loopback nc below.
-		if subprocessTargetsLocalhost(command) {
+		if subprocessTargetsLocalhostWithVars(command, numericVars) {
 			return false
 		}
 		switch fields[0] {
@@ -1264,8 +1374,19 @@ func isExfiltrationRiskCommand(command string) bool {
 // gate checks it first only so the Ask carries an accurate rule label
 // (sandbox.exfiltration_risk) instead of sandbox.harmful_git.
 func isExfiltrationRiskBash(command string) bool {
+	return isExfiltrationRiskBashWithVars(command, nil)
+}
+
+// isExfiltrationRiskBashWithVars judges the fragments of a compound command with
+// the whole line's integer assignments supplied. Callers that iterate fragments
+// must pass them: "p=8080" is its own fragment, so without this a loopback URL
+// whose port is "$p" is misread as an unproven port and gated as exfiltration.
+func isExfiltrationRiskBashWithVars(command string, numericVars map[string]bool) bool {
+	if numericVars == nil {
+		numericVars = numericAssignedVars(command)
+	}
 	for _, words := range effectiveCommandWords(splitShellFields(strings.TrimSpace(command))) {
-		if isExfiltrationRiskCommand(rebuildCommandLine(words)) {
+		if isExfiltrationRiskCommandWithVars(rebuildCommandLine(words), numericVars) {
 			return true
 		}
 	}
@@ -1291,6 +1412,13 @@ func isExfiltrationRiskBash(command string) bool {
 // it, making the matching always-ALLOW lines in the bundled gatekeeper
 // prompt dead text.
 func IsHarmfulBashCommand(command string) bool {
+	return isHarmfulBashCommandWithVars(command, nil)
+}
+
+// isHarmfulBashCommandWithVars is IsHarmfulBashCommand with the whole line's
+// integer assignments supplied — see isExfiltrationRiskBashWithVars for why a
+// per-fragment caller must thread them.
+func isHarmfulBashCommandWithVars(command string, numericVars map[string]bool) bool {
 	fields := splitShellFields(strings.TrimSpace(command))
 	if len(fields) == 0 {
 		return false
@@ -1300,8 +1428,11 @@ func IsHarmfulBashCommand(command string) bool {
 	// shell re-exec/eval bodies are peeled by effectiveCommandWords so
 	// "bash -c 'git stash'" or "/usr/bin/git stash" is as harmful as the bare
 	// form (permissions_wrappers.go).
+	if numericVars == nil {
+		numericVars = numericAssignedVars(command)
+	}
 	for _, words := range effectiveCommandWords(fields) {
-		if isHarmfulBashFields(words) {
+		if isHarmfulBashFields(words, numericVars) {
 			return true
 		}
 	}
@@ -1310,7 +1441,7 @@ func IsHarmfulBashCommand(command string) bool {
 
 // isHarmfulBashFields is the per-command core of IsHarmfulBashCommand; it
 // expects an already-unwrapped command whose first word is the binary.
-func isHarmfulBashFields(fields []string) bool {
+func isHarmfulBashFields(fields []string, numericVars map[string]bool) bool {
 	cmd := rebuildCommandLine(fields)
 	if len(fields) < 2 {
 		return false
@@ -1358,7 +1489,7 @@ func isHarmfulBashFields(fields []string) bool {
 	}
 
 	// --- Data exfiltration risk (curl, wget, httpie, nc) ---
-	if isExfiltrationRiskCommand(cmd) {
+	if isExfiltrationRiskCommandWithVars(cmd, numericVars) {
 		return true
 	}
 
@@ -1666,6 +1797,16 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			// nor an explicit user ban can ride the sandbox auto-allow.
 			parsed, perr := parseShellCommandLine(command)
 			if perr == nil {
+				// Integer assignments from every fragment, PLUS a scan of the raw
+				// line: parseShellCommandLine discards the `for p in 8080 4096`
+				// header that proves a loop variable numeric, so the fragments
+				// alone cannot see it.
+				var lineTokens []string
+				for _, c := range parsed {
+					lineTokens = append(lineTokens, c.cmdWords...)
+					lineTokens = append(lineTokens, c.envVars...)
+				}
+				sandboxLineVars := numericAssignedVarsFrom(lineTokens, splitShellFields(command))
 				for _, c := range parsed {
 					sub := rebuildCommandLine(c.cmdWords)
 					if sub == "" {
@@ -1692,11 +1833,11 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					// the write-wall is blind to them. Read-only stash
 					// inspection forms ("git stash list"/"show") are excluded
 					// from IsHarmfulBashCommand and still auto-allow below.
-					if isExfiltrationRiskBash(sub) {
+					if isExfiltrationRiskBashWithVars(sub, sandboxLineVars) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox exfiltration risk): tool=bash command=%q", sub))
 						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk")}
 					}
-					if IsHarmfulBashCommand(sub) {
+					if isHarmfulBashCommandWithVars(sub, sandboxLineVars) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", sub))
 						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
 					}
@@ -1768,10 +1909,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: level}
 		}
 
+		// Integer assignments from every fragment of this line, PLUS a scan of
+		// the raw line. parseShellCommandLine lifts "p=8080" into its own
+		// fragment's envVars and drops a `for p in 8080 4096` header entirely,
+		// so a loopback URL in a later fragment cannot see the assignment (or
+		// the numeric list) its "$p" depends on without this.
+		var lineTokens []string
+		for _, c := range parsedCmds {
+			lineTokens = append(lineTokens, c.cmdWords...)
+			lineTokens = append(lineTokens, c.envVars...)
+		}
+		lineNumericVars := numericAssignedVarsFrom(lineTokens, splitShellFields(command))
+
 		// Evaluate each constituent command, environment variable, and redirection
 		var finalDecision *PermissionDecision
 		for _, cmd := range parsedCmds {
-			dec := pm.decideSingleCommand(args, cmd)
+			dec := pm.decideSingleCommand(args, cmd, lineNumericVars)
 			if dec.Level == PermissionDeny {
 				return dec
 			}
@@ -3448,7 +3601,12 @@ func isLocalhostURL(raw string) bool {
 	if colon := strings.LastIndexByte(host, ':'); colon >= 0 && !strings.Contains(host[:colon], "]") {
 		host = host[:colon]
 	}
-	return isLocalhostDomain(host)
+	// Userinfo: "http://user@127.0.0.1/" still reaches loopback, so strip it
+	// before testing (this guard asks, so over-matching is the safe direction).
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	return isLoopbackHostForPermissionGuard(host)
 }
 
 func extractPathFromArgs(toolName string, args json.RawMessage) string {
@@ -4067,19 +4225,13 @@ func extractDomainFromURL(rawURL string) string {
 }
 
 // isLocalhostDomain reports whether a hostname refers to the local machine
-// (localhost, 127.x.x.x, ::1, or any [::1]-style bracket form).
+// (localhost, 127.x.x.x, ::1, or any [::1]-style bracket form). Like
+// isLoopbackHost it parses the address instead of prefix-matching, because it
+// gates auto-ALLOWs.
 func isLocalhostDomain(host string) bool {
 	// Strip brackets from IPv6 literals.
 	h := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-	switch h {
-	case "localhost", "::1":
-		return true
-	}
-	// 127.0.0.0/8 loopback range.
-	if strings.HasPrefix(h, "127.") {
-		return true
-	}
-	return false
+	return isLoopbackHost(h)
 }
 
 // matchPathPattern matches a path against a glob pattern that may contain
@@ -6130,7 +6282,11 @@ func resolvePath(path string, workDir string) string {
 	return path
 }
 
-func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parsedShellCommand) PermissionDecision {
+// lineNumericVars holds the integer assignments from every fragment of the
+// command line being judged (see the caller). It is threaded in because a
+// loopback URL's "$p" port depends on an assignment the parser put in a
+// different fragment — or in a `for` header it discarded.
+func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parsedShellCommand, lineNumericVars map[string]bool) PermissionDecision {
 	// Check env variables for path values
 	for _, env := range cmd.envVars {
 		parts := strings.SplitN(env, "=", 2)
@@ -6229,7 +6385,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// approval and must never auto-allow — even when a broader prefix rule or a
 	// tool-level "bash" allow would otherwise permit them (e.g. a persisted
 	// "git push" rule must not auto-approve "git push --force").
-	if IsHarmfulBashCommand(command) {
+	if isHarmfulBashCommandWithVars(command, lineNumericVars) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 	}
@@ -6257,7 +6413,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// Loopback curl, wget, and httpie (targeting 127.0.0.0/8, ::1, localhost)
 	// stay on-host and cannot exfiltrate data off-machine, so they are
 	// auto-allowed without prompting — same rationale as loopback nc.
-	if isLoopbackNetworkCommand(command) {
+	if isLoopbackNetworkCommandWithVars(command, lineNumericVars) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback network): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}

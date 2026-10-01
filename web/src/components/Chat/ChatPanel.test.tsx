@@ -1909,3 +1909,73 @@ describe("ChatPanel", () => {
     });
   });
 });
+
+describe("ChatPanel keeps an un-pinned reader's row across window slides", () => {
+  /** A 4-row tail page of a 104-message transcript (window start 100), with
+   *  the reader locked at the top of the page. */
+  async function renderSlidingWindow(sessionId: string) {
+    let captured: ((a: unknown) => void) | null = null;
+    const tail = [mk("user", "u1"), mk("assistant", "a1"), mk("user", "u2"), mk("assistant", "a2")];
+    const utils = render(
+      <ChatProvider>
+        <DispatchCapture onCapture={(d) => (captured = d)} />
+        <LiveSeed sessionId={sessionId} messages={tail} hasMore total={104} />
+        <ChatPanel sessionId={sessionId} />
+      </ChatProvider>,
+    );
+    await tick();
+    act(() => {
+      hoisted.resolve.current({ messages: [], total: 0, title: "" });
+    });
+    await tick();
+    await advanceFrame();
+    const el = scrollElOf(utils.container);
+    // Pinned first (same shape as the wheel-up test above), then a real
+    // gesture drags the reader to the top of the page.
+    // (A tall fake scrollHeight: virtual-core clamps scrollToIndex against the
+    // element's scrollHeight, and the restore must land at 100 * 96.)
+    const f = fakeScroll(el, 49400, 50000);
+    fireEvent.scroll(el);
+    await advanceFrame();
+    // 300px down: past the scroll-up pagination trigger (< 100px), so only
+    // the slide moves the offset. Row 3 (global key 103) is under the top edge,
+    // 12px into it.
+    f.set(300);
+    userScrollsUp(el);
+    await advanceFrame();
+    expect(f.get()).toBe(300);
+    return { ...utils, el, f, tail, dispatch: (a: unknown) => captured!(a) };
+  }
+
+  it("moves the offset by the height of the rows the turn-end snapshot inserts above the reader", async () => {
+    const sessionId = "sess-slide-grow";
+    const { f, tail, dispatch } = await renderSlidingWindow(sessionId);
+    // The turn-end `messages` broadcast carries the WHOLE transcript: 100 older
+    // rows land above the reader's row (global key 100, local index 0 → 100).
+    const older = Array.from({ length: 100 }, (_, i) => mk(i % 2 ? "assistant" : "user", `older${i}`));
+    act(() => {
+      dispatch({ type: "SET_MESSAGES", sessionId, messages: [...older, ...tail] });
+    });
+    // 100 rows at the 96px estimate now sit above the same row (index 103).
+    expect(f.get()).toBe(103 * 96 + 12);
+  });
+
+  it("does not treat the reconcile snapshot shrinking the window back to a tail page as a reset", async () => {
+    const sessionId = "sess-slide-shrink";
+    const { f, tail, dispatch } = await renderSlidingWindow(sessionId);
+    const older = Array.from({ length: 100 }, (_, i) => mk(i % 2 ? "assistant" : "user", `older${i}`));
+    act(() => {
+      dispatch({ type: "SET_MESSAGES", sessionId, messages: [...older, ...tail] });
+    });
+    expect(f.get()).toBe(103 * 96 + 12);
+    // The watchdog's MERGE_SNAPSHOT replaces the 104-row window with the same
+    // 4-row tail page: the reader's row is back at local index 3 and the list
+    // shrank — which used to read as "transcript reset" and pinned the reader
+    // to the bottom (50000).
+    act(() => {
+      dispatch({ type: "MERGE_SNAPSHOT", sessionId, messages: tail, total: 104 });
+    });
+    await advanceFrame();
+    expect(f.get()).toBe(300);
+  });
+});

@@ -16,18 +16,18 @@ timestamp: 2026-09-28T17:57:35Z
 
 ## Overview
 
-When discovery is on, `discoveryAllows` (`internal/agent/discovery_glue.go:604`) decides which MCP tool definitions reach the model. Built-ins are never gated; MCP tools are gated to the sticky attached set (`session.IsAttached("mcp:" + name)`). The filter runs in `GetToolDefinitions` (`internal/agent/agent.go:5017`), so every turn's tool list is shaped before the provider sees it.
+When discovery is on, `discoveryAllows` (`internal/agent/discovery_glue.go:624`) decides which MCP tool definitions reach the model. Built-ins are never gated; MCP tools are gated to the sticky attached set (`session.IsAttached("mcp:" + name)`). The filter runs in `GetToolDefinitions` (`internal/agent/agent.go:5039`), so every turn's tool list is shaped before the provider sees it.
 
-The gate exists to **shrink the tool list, and fail-open defeats it.** One real session logged `exposing 322 tools` (`internal/agent/agent.go:5047`), 274 of them `zoho-books_*`. The judge that decides *what* attaches is documented in [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md); this page is about the gate itself — when it holds, the one escape that survives, and the attach paths that must stay behind the judge.
+The gate exists to **shrink the tool list, and fail-open defeats it.** One real session logged `exposing 322 tools` (`internal/agent/agent.go:5069`), 274 of them `zoho-books_*`. The judge that decides *what* attaches is documented in [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md); this page is about the gate itself — when it holds, the one escape that survives, and the attach paths that must stay behind the judge.
 
 ## Names-only index vs. callable definitions
 
 Every connected MCP tool exists in the prompt in one of two representations:
 
-1. **Names-only index** — one short line per tool in the system-role block headed `Available MCP tools (names only — not all loaded)` (`discovery_glue.go:787`), introduced by the `discoveryPromptContract` (`discovery_glue.go:695`) which tells the model to call `discover_more` with a natural-language need BEFORE claiming it cannot do something. Rendered by `renderDiscoveryContext` (`discovery_glue.go:782`) as a function of the doc **set** only — never of which ids are attached — so attaching mid-session leaves the hoisted, cached system prompt byte-identical. Injection is split by volatility in `injectDiscoveryContext` (`discovery_glue.go:728`, called from `internal/agent/agent.go:1348`): index = system-role (cached), attached-skill descriptions = user-role tail (uncached).
-2. **Full callable tool definitions** — complete JSON schemas, only for tools that pass the gate, assembled in `GetToolDefinitions` (`internal/agent/agent.go:5014`) and recomputed **every Step loop iteration** (`internal/agent/agent.go:1406-1408`), so a mid-turn `discover_more` attach becomes visible to the LLM on the next iteration.
+1. **Names-only index** — one short line per tool in the system-role block headed `Available MCP tools (names only — not all loaded)` (`discovery_glue.go:814`), introduced by the `discoveryPromptContract` (`discovery_glue.go:715`) which tells the model to call `discover_more` with a natural-language need BEFORE claiming it cannot do something. Rendered by `renderDiscoveryContext` (`discovery_glue.go:782`) as a function of the doc **set** only — never of which ids are attached — so attaching mid-session leaves the hoisted, cached system prompt byte-identical. Injection is split by volatility in `injectDiscoveryContext` (`discovery_glue.go:728`, called from `internal/agent/agent.go:1370`): index = system-role (cached), attached-skill descriptions = user-role tail (uncached).
+2. **Full callable tool definitions** — complete JSON schemas, only for tools that pass the gate, assembled in `GetToolDefinitions` (`internal/agent/agent.go:5036`) and recomputed **every Step loop iteration** (`internal/agent/agent.go:1428-1430`), so a mid-turn `discover_more` attach becomes visible to the LLM on the next iteration.
 
-**Why the split: schema cost vs. index cost.** Full MCP schemas run hundreds of tokens each (the 322-tool session above); an index line costs a few. The token-accounting helper `DiscoveryGatedTokens` (`discovery_glue.go:544`) reports `attached, total, gatedToks, indexToks`: gated tokens ≈ `len(json.Marshal(Definition()))/4` per unattached tool (`:557-559`), index tokens ≈ `len(name)+1` chars / 4 over all tools (`:547-552`, `:561`) — bytes/4 is a deliberate approximation for `/context`, not exact tokenization.
+**Why the split: schema cost vs. index cost.** Full MCP schemas run hundreds of tokens each (the 322-tool session above); an index line costs a few. The token-accounting helper `DiscoveryGatedTokens` (`discovery_glue.go:564`) reports `attached, total, gatedToks, indexToks`: gated tokens ≈ `len(json.Marshal(Definition()))/4` per unattached tool (`:557-559`), index tokens ≈ `len(name)+1` chars / 4 over all tools (`:547-552`, `:561`) — bytes/4 is a deliberate approximation for `/context`, not exact tokenization.
 
 ## The gating chain
 
@@ -35,20 +35,20 @@ Every connected MCP tool exists in the prompt in one of two representations:
 runDiscovery → Session.Select → judge → Seed → discoveryAllows → GetToolDefinitions
 ```
 
-1. **`runDiscovery(query, tail)`** (`discovery_glue.go:337`) — no-op when discovery is off, the query is empty, or a background warm is in flight.
-2. **`Session.Select`** (`internal/discovery/engine.go:114`, invoked at `discovery_glue.go:389` under a 500ms budget) — ranks and returns not-yet-attached candidates **without mutating the sticky set**.
-3. **Judge** (`discovery_glue.go:414-428`, call at `:417`) — `judgeDiscoveryCandidates` when TypeSafe resolves; otherwise (or on judge error) every candidate is kept (fail-open). Vetoes increment `discoveryState.judgeVetoed` (`:424`).
-4. **`Session.Seed`** (`discovery_glue.go:433`; `internal/discovery/engine.go:149`) — marks survivors attached; sticky for the session.
-5. **`discoveryAllows(name)`** (`discovery_glue.go:604`) — per-tool gate, consulted at render time (next section).
-6. **`GetToolDefinitions`** (`internal/agent/agent.go:5014`) — filters `discoveryAllows` AND `isToolAllowed`, sorts names for a stable provider tool-cache prefix (`:5046`), emits the `TOOLS` debug line (`:5047`).
+1. **`runDiscovery(query, tail)`** (`discovery_glue.go:350`) — no-op when discovery is off, the query is empty, or a background warm is in flight.
+2. **`Session.Select`** (`internal/discovery/engine.go:114`, invoked at `discovery_glue.go:402` under a 500ms budget) — ranks and returns not-yet-attached candidates **without mutating the sticky set**.
+3. **Judge** (`discovery_glue.go:427-442`, call at `:431`) — `judgeDiscoveryCandidates` when TypeSafe resolves; otherwise (or on judge error) every candidate is kept (fail-open). Vetoes increment `discoveryState.judgeVetoed` (`:424`).
+4. **`Session.Seed`** (`discovery_glue.go:453`; `internal/discovery/engine.go:149`) — marks survivors attached; sticky for the session.
+5. **`discoveryAllows(name)`** (`discovery_glue.go:624`) — per-tool gate, consulted at render time (next section).
+6. **`GetToolDefinitions`** (`internal/agent/agent.go:5036`) — filters `discoveryAllows` AND `isToolAllowed`, sorts names for a stable provider tool-cache prefix (`:5046`), emits the `TOOLS` debug line (`:5047`).
 
 ## The gate consults no warm/corpus state
 
-`discoveryAllows` deliberately consults NO warm/corpus state. A cold embedder cache is the *normal* first turn: `runDiscovery` (`internal/agent/discovery_glue.go:337`) gives `engine.Warm` a 500ms synchronous budget (`discovery_glue.go:375`) and defers to `startBackgroundWarm` (`discovery_glue.go:450` — single-flight via the `warming atomic.Bool` field, generous `discoveryWarmTimeout`) when that budget is not enough. The old "warm failed → don't gate" escape therefore fired on exactly the turns discovery exists to shrink, exposing the entire MCP corpus right when the tool list was supposed to be smallest — the 322-tool session above.
+`discoveryAllows` deliberately consults NO warm/corpus state. A cold embedder cache is the *normal* first turn: `runDiscovery` (`internal/agent/discovery_glue.go:350`) gives `engine.Warm` a 500ms synchronous budget (`discovery_glue.go:375`) and defers to `startBackgroundWarm` (`discovery_glue.go:450` — single-flight via the `warming atomic.Bool` field, generous `discoveryWarmTimeout`) when that budget is not enough. The old "warm failed → don't gate" escape therefore fired on exactly the turns discovery exists to shrink, exposing the entire MCP corpus right when the tool list was supposed to be smallest — the 322-tool session above.
 
 See [Discovery Corpus Cache](concepts/discovery-corpus-cache.md) for what sits *behind* `engine.Warm` — the machine-global corpus file, its cross-instance flock, and the `ErrCorpusLocked` skip on contention. None of it feeds back into the gate: a contended or cold warm is just another warm error that defers to the background path described above, and `discoveryAllows` still consults only `disco.enabled` and the sticky set. The gate's contract is unchanged.
 
-Failing open was never necessary: the names-only index (`discoveryPromptContract`, `discovery_glue.go:695`) still advertises every MCP tool by name even when its definition is gated.
+Failing open was never necessary: the names-only index (`discoveryPromptContract`, `discovery_glue.go:715`) still advertises every MCP tool by name even when its definition is gated.
 
 ## The only surviving fail-open
 
@@ -62,7 +62,7 @@ This is a contract, not a bug. While the background warm is in flight — or the
 
 ## Failed Session.Select: cost the turn, not the gate (newest fix)
 
-`runDiscovery` bounds ranking with a 500ms budget (`discovery_glue.go:388-390`). On error it attaches **nothing for that turn** and returns — it must **never** set `disco.enabled = false`. Setting the gate off re-opens the whole corpus for the rest of the session: the same leak as the cold-corpus path, reachable whenever the embedder blows the 500ms rank budget. Staying active is safe because the names-only index still advertises every tool, `discover_more` retries the rank with no timeout, and the next turn ranks again.
+`runDiscovery` bounds ranking with a 500ms budget (`discovery_glue.go:401-403`). On error it attaches **nothing for that turn** and returns — it must **never** set `disco.enabled = false`. Setting the gate off re-opens the whole corpus for the rest of the session: the same leak as the cold-corpus path, reachable whenever the embedder blows the 500ms rank budget. Staying active is safe because the names-only index still advertises every tool, `discover_more` retries the rank with no timeout, and the next turn ranks again.
 
 `TestRankFailureKeepsTheGateClosed` pins both halves: after a query-embed failure, `disco.enabled` stays `true` and `GetToolDefinitions` still returns only built-ins.
 
@@ -79,33 +79,33 @@ Registered by `ensureDiscovery` into `a.tools` (`discovery_glue.go:139-141`) but
 
 ## Every attach path is judged
 
-- **Per-turn `runDiscovery`** runs `judgeDiscoveryCandidates` (`discovery_glue.go:417`) before `Seed` (`discovery_glue.go:433`).
-- **On-demand `discover_more`** runs `judgeDiscoveryCandidates` (`discovery_glue.go:945`) before `Seed` (`discovery_glue.go:961`). The inline comment is explicit: `Discover` (plain Select+Seed) stays a deliberately no-judge wrapper, because the on-demand path is the one the model reaches for when per-turn ranking attached nothing — a convenience wrapper there would let a named need bypass the judge entirely.
+- **Per-turn `runDiscovery`** runs `judgeDiscoveryCandidates` (`discovery_glue.go:431`) before `Seed` (`discovery_glue.go:453`).
+- **On-demand `discover_more`** runs `judgeDiscoveryCandidates` (`discovery_glue.go:972`) before `Seed` (`discovery_glue.go:988`). The inline comment is explicit: `Discover` (plain Select+Seed) stays a deliberately no-judge wrapper, because the on-demand path is the one the model reaches for when per-turn ranking attached nothing — a convenience wrapper there would let a named need bypass the judge entirely.
 
-Both funnel through `judgeDiscoveryCandidates` (`internal/agent/discovery_typesafe.go:72`) with the once-cached `discoveryJudgeClient` (`discovery_typesafe.go:41`). **A second, unjudged attach path is a bypass.**
+Both funnel through `judgeDiscoveryCandidates` (`internal/agent/discovery_typesafe.go:77`) with the once-cached `discoveryJudgeClient` (`discovery_typesafe.go:41`). **A second, unjudged attach path is a bypass.**
 
 Note the direction: this gate's fail-open is forbidden, while the judge's is required — a judge transport/decode failure seeds every candidate (the judge may only veto, never attach fewer than pre-judge behavior).
 
 ## Turn-tail capture
 
-`runDiscovery` records the bounded transcript tail via `noteDiscoveryTail` (`discovery_glue.go:350`) after `ensureDiscovery` but **before its warm/rank early returns**, so the on-demand `discover_more` judge has conversation context precisely on the cold turn where nothing was attached. The snapshot is bounded (`discoveryJudgeTailN` = 6, `internal/agent/discovery_typesafe.go:28`) and copied under `tailMu` because callers reuse the message backing array while the judge reads the snapshot later. `TestDiscoverMoreJudgeSeesTurnTailOnColdTurn` asserts the judge state carries the tail.
+`runDiscovery` records the bounded transcript tail via `noteDiscoveryTail` (`discovery_glue.go:920`) after `ensureDiscovery` but **before its warm/rank early returns**, so the on-demand `discover_more` judge has conversation context precisely on the cold turn where nothing was attached. The snapshot is bounded (`discoveryJudgeTailN` = 6, `internal/agent/discovery_typesafe.go:28`) and copied under `tailMu` because callers reuse the message backing array while the judge reads the snapshot later. `TestDiscoverMoreJudgeSeesTurnTailOnColdTurn` asserts the judge state carries the tail.
 
 ## Debug lines readers can check
 
 `TOOLS` (kind `TOOLS`, emitted from `GetToolDefinitions`):
 
-- `exposing <N> tools: <sorted names>` — `internal/agent/agent.go:5047`. The definitive answer to "how many full tool definitions did this turn send"; the leak symptom was `exposing 322 tools: advisor, ...`.
+- `exposing <N> tools: <sorted names>` — `internal/agent/agent.go:5069`. The definitive answer to "how many full tool definitions did this turn send"; the leak symptom was `exposing 322 tools: advisor, ...`.
 
 `DISCOVERY` (kind `DISCOVERY`):
 
-- `turn rank: <N> newly attached, <M> total [judge=...] (q="...")` — `discovery_glue.go:441`.
+- `turn rank: <N> newly attached, <M> total [judge=...] (q="...")` — `discovery_glue.go:461`.
 - `corpus warm: <D> docs (<K> embedded) model=<m> dim=<d>` — `internal/discovery/engine.go:65`, on a successful warm.
-- `corpus warm deferred to background: <err>` — `discovery_glue.go:380`; this turn attaches nothing (gate holds).
-- `background corpus warm complete (cache hot; ranking resumes next turn)` — `discovery_glue.go:463`.
-- `rank failed (attaching nothing this turn): <err>` — `discovery_glue.go:398`; gate stays closed (no `enabled = false`).
-- `discover_more("<need>") → +N tools (judge kept N/M)` — `discovery_glue.go:962`.
-- `discover_more judge failed (fail-open, all attached): <err>` — `discovery_glue.go:949`.
-- `disabled (fail-open): <err>` — `discovery_glue.go:118`; discovery never initialized → the ONE surviving fail-open is in effect.
+- `corpus warm deferred to background: <err>` — `discovery_glue.go:393`; this turn attaches nothing (gate holds).
+- `background corpus warm complete (cache hot; ranking resumes next turn)` — `discovery_glue.go:483`.
+- ``rank failed (attaching nothing this turn): <err>` — `discovery_glue.go:411`; gate stays closed (no `enabled = false`).
+- `discover_more("<need>") → +N tools (judge kept N/M)` — `discovery_glue.go:989`.
+- ``discover_more judge failed (fail-open, all attached): <err>` — `discovery_glue.go:976`.
+- `disabled (fail-open): <err>` — `discovery_glue.go:131`; discovery never initialized → the ONE surviving fail-open is in effect.
 
 ## Regression tests
 

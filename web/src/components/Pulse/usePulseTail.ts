@@ -20,18 +20,22 @@ import type { Message, PulseStatus } from "../../api/types";
  *    events that belong to the NEXT turn. The tail of the last assistant
  *    message on disk is the only honest preview there.
  *
- * The hook is enabled by the card's hover/focus state, so it is subscribed and
- * unsubscribed constantly. Two consequences are handled explicitly rather than
- * left to chance: the subscription is torn down in the effect cleanup (a leak
- * here keeps appending to a card that is no longer on screen), and every
- * response is checked against a generation counter so a fetch that resolves
- * after the session changed — or after the hook was disabled — cannot write
- * into the new card's state.
+ * The hook is enabled by the card's own gating: a LIVE card (running, or
+ * paused on an ask) enables it unconditionally because it streams on the card
+ * face, while every other status enables it only on hover/focus. It is
+ * therefore both subscribed and unsubscribed constantly. Two consequences are
+ * handled explicitly rather than left to chance: the subscription is torn down
+ * in the effect cleanup (a leak here keeps appending to a card that is no
+ * longer on screen), and every response is checked against a generation counter
+ * so a fetch that resolves after the session changed — or after the hook was
+ * disabled — cannot write into the new card's state.
  */
 
 /** Lines kept. Enough to see the shape of the answer, few enough to stay a
- *  preview rather than a transcript. */
-export const PULSE_TAIL_LINES = 6;
+ *  preview rather than a transcript. Sized to the height PulseCard reserves for
+ *  its on-card stream (CARD_MIN_H) — going higher would just be clipped there,
+ *  going lower would leave the reserved region empty. */
+export const PULSE_TAIL_LINES = 7;
 
 /**
  * Messages requested from the END of the transcript for a finished turn. The
@@ -202,8 +206,8 @@ export function usePulseTail(
       api
         .getSession(sessionId, {
           limit: IDLE_FETCH_LIMIT,
-          // Opt out of the revision baseline: this is a speculative read of a
-          // card the user is only hovering, not an open tab's transcript load.
+          // Opt out of the revision baseline: this is a speculative read for a
+          // card's preview, not an open tab's transcript load.
           // Recording one would stamp a FRESH revision over an open tab that is
           // still showing older content, and the revalidation poll would then
           // see "no change" and never repair it.

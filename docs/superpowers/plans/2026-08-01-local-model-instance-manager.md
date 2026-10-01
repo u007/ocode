@@ -851,7 +851,7 @@ git commit -m "feat(config): add LocalModels map + SaveLocalModelConfig/DeleteLo
 - Test: `internal/tui/command_test.go`
 
 **Interfaces:**
-- Consumes: `discovery.ChatManifestsForHost()`, `discovery.ManifestForModel()`, `discovery.AssignChatPort()`, `discovery.StartModelInstance()`, `discovery.StopModelInstance()`, `discovery.GetModelInstance()`, `discovery.SetModelInstanceProcessID()` (Task 3); `config.SaveLocalModelConfig()`, `config.DeleteLocalModelConfig()` (Task 4); `m.config.Ocode.LocalModels` (Task 4); `m.agent.Procs()` (`internal/agent/agent.go:3569`).
+- Consumes: `discovery.ChatManifestsForHost()`, `discovery.ManifestForModel()`, `discovery.AssignChatPort()`, `discovery.StartModelInstance()`, `discovery.StopModelInstance()`, `discovery.GetModelInstance()`, `discovery.SetModelInstanceProcessID()` (Task 3); `config.SaveLocalModelConfig()`, `config.DeleteLocalModelConfig()` (Task 4); `m.config.Ocode.LocalModels` (Task 4); `m.agent.Procs()` (`internal/agent/agent.go:3591`).
 - Produces: `/localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]`.
 
 - [ ] **Step 1: Register the command**

@@ -8,7 +8,7 @@ tags:
   - anthropic
   - tools
   - discovery
-timestamp: 2026-09-30T07:37:10Z
+timestamp: 2026-10-01T04:50:48Z
 ---
 # Prompt Cache Stability
 
@@ -19,6 +19,10 @@ Anthropic prompt caching reads one linear prefix in a **fixed order: `tools` →
 first, **any change to the tools array invalidates the `system` block and the
 message prefix too** — they sit downstream of tools in the prefix. This is the
 dominant cost when adding features that vary what gets sent.
+
+The agent's base system prompt now also includes a static `[ocode:recap]`
+contract fragment (`recapPromptContent` in `internal/agent/prompt.go`), a const
+so it is cache-safe and re-cached the prefix once when it shipped.
 
 Rules for any change that touches tools or the base prompt:
 - **Never put per-turn-varying content in `tools` or `system`.** `LoadContext`

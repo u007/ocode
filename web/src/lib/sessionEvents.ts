@@ -21,6 +21,8 @@ import {
   noteCompactionGeneration,
   setCompactionState,
 } from "./compactionState";
+import { clearSessionActivity, setSkillActivity } from "./commandActivity";
+import { skillNameFromArgs } from "../components/Chat/toolHint";
 
 /**
  * sessionEvents — pure routing of bus envelopes into chatStore/projectStore.
@@ -515,6 +517,8 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       }
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: true });
       r.dispatch({ type: "SET_ERROR", sessionId, error: null });
+      // A new turn invalidates any skill/command bar left by the previous one.
+      clearSessionActivity(sessionId);
     });
   }
   if (event === "turn_heartbeat") {
@@ -527,12 +531,14 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       flushLiveDeltas(sessionId, r.dispatch);
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
       r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+      clearSessionActivity(sessionId);
     });
   }
   if (event === "turn_error") {
     return routeSessionScoped(r, env, eventSessionId, (sessionId) => {
       flushLiveDeltas(sessionId, r.dispatch);
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
+      clearSessionActivity(sessionId);
       const error = (data as { error?: string }).error || "turn failed";
       r.dispatch({ type: "SET_ERROR", sessionId, error });
       // Mark this as a retryable LLM-loop failure so the composer offers Retry.
@@ -676,20 +682,32 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           text: `Indexing: ${(data as { delta: string }).delta}`,
         });
         return;
-      case "tool_start":
+      case "tool_start": {
         // Flush first: LIVE_TOOL_START appends a part, and a buffered text
         // tail (the end of the sentence that introduced the call) must land
         // in the text bubble above it, not in a new one below.
         flushLiveDeltas(sessionId, r.dispatch);
+        const tool = (data as { tool: string }).tool;
+        const args = (data as { command?: string }).command;
+        // `skill` returns instantly (it only reads SKILL.md), so a bar tied to
+        // the tool's own pending state would vanish before any work happened.
+        // Record it for the rest of the turn instead — cleared on turn_started
+        // / turn_done / turn_error. `load_skill` is the registered alias some
+        // models emit instead (internal/tool/misc.go SkillAliasTool).
+        if (tool === "skill" || tool === "load_skill") {
+          const name = skillNameFromArgs(args);
+          if (name) setSkillActivity(sessionId, name);
+        }
         r.dispatch({
           type: "LIVE_TOOL_START",
           sessionId,
-          tool: (data as { tool: string }).tool,
+          tool,
           callId: (data as { call_id?: string }).call_id,
-          command: (data as { command?: string }).command,
+          command: args,
         });
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         return;
+      }
       case "tool_output":
         r.dispatch({
           type: "LIVE_TOOL_OUTPUT",

@@ -125,7 +125,11 @@ export function PulseView() {
                 </h2>
                 <div
                   role="list"
-                  className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2"
+                  // Capped at 3 across (no xl override): a live card reserves a
+                  // full block for its stream, so a 4th column would squeeze
+                  // those lines to unreadable width. Wider cards also mean fewer
+                  // lines wrap off, which is the point of the extra height.
+                  className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
                 >
                   {inSection.map((r) => (
                     <PulseCard key={r.session_id} row={r} compact={key === "recent"} />

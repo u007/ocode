@@ -21,21 +21,39 @@ import (
 // for the user to complete login, then shuts down the server.
 // The returned token is the real access token from Google, not a placeholder.
 func LoginWithGoogle() (string, error) {
+	authURL, finish, err := StartGoogleOAuth()
+	if err != nil {
+		return "", err
+	}
+	log.Printf("Opening browser for Google login…")
+	openBrowser(authURL)
+	return finish()
+}
+
+// StartGoogleOAuth prepares the Google OAuth flow without opening a
+// browser: it starts the localhost callback server and returns the
+// authorize URL plus a finish func that blocks until the user completes
+// login (or the flow's 2-minute window elapses), then exchanges the
+// code for a token. Callers that render their own sign-in UI (the
+// web/desktop connector settings) open the returned URL themselves.
+// The callback still lands on the machine running ocode, so the
+// browser and ocode must be on the same host.
+func StartGoogleOAuth() (string, func() (string, error), error) {
 	clientID := os.Getenv("GOOGLE_CLIENT_ID")
 	if clientID == "" {
-		return "", fmt.Errorf("GOOGLE_CLIENT_ID environment variable not set")
+		return "", nil, fmt.Errorf("GOOGLE_CLIENT_ID environment variable not set")
 	}
 
 	// Generate PKCE verifier and challenge.
 	verifier, err := generateCodeVerifier()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate PKCE verifier: %w", err)
+		return "", nil, fmt.Errorf("failed to generate PKCE verifier: %w", err)
 	}
 	challenge := codeChallenge(verifier)
 
 	state, err := generateState()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate state: %w", err)
+		return "", nil, fmt.Errorf("failed to generate state: %w", err)
 	}
 
 	redirectURL := "http://localhost:8080/callback"
@@ -86,36 +104,37 @@ func LoginWithGoogle() (string, error) {
 		}
 	}()
 
-	log.Printf("Opening browser for Google login…")
-	openBrowser(authURL)
+	finish := func() (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+		var code string
+		var flowErr error
+		select {
+		case code = <-tokenChan:
+		case flowErr = <-errChan:
+			server.Shutdown(context.Background()) //nolint:errcheck
+			return "", flowErr
+		case <-ctx.Done():
+			server.Shutdown(context.Background()) //nolint:errcheck
+			return "", fmt.Errorf("login timed out after 2 minutes")
+		}
 
-	var code string
-	select {
-	case code = <-tokenChan:
-	case err = <-errChan:
-		server.Shutdown(context.Background()) //nolint:errcheck
-		return "", err
-	case <-ctx.Done():
-		server.Shutdown(context.Background()) //nolint:errcheck
-		return "", fmt.Errorf("login timed out after 2 minutes")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		server.Shutdown(shutdownCtx) //nolint:errcheck
+
+		// Exchange the authorization code for a token.
+		// The caller must provide GOOGLE_CLIENT_SECRET for a confidential client,
+		// or use a public client that accepts PKCE without a secret.
+		clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
+		token, err := exchangeCodeForToken(clientID, clientSecret, code, verifier, redirectURL)
+		if err != nil {
+			return "", fmt.Errorf("token exchange failed: %w", err)
+		}
+		return token, nil
 	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	server.Shutdown(shutdownCtx) //nolint:errcheck
-
-	// Exchange the authorization code for a token.
-	// The caller must provide GOOGLE_CLIENT_SECRET for a confidential client,
-	// or use a public client that accepts PKCE without a secret.
-	clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
-	token, err := exchangeCodeForToken(clientID, clientSecret, code, verifier, redirectURL)
-	if err != nil {
-		return "", fmt.Errorf("token exchange failed: %w", err)
-	}
-	return token, nil
+	return authURL, finish, nil
 }
 
 func exchangeCodeForToken(clientID, clientSecret, code, verifier, redirectURL string) (string, error) {

@@ -48,13 +48,22 @@ func (h *Handler) interruptSessionWork(id string) {
 	// from the session manager; read it before taking cancelMu to avoid lock
 	// inversion (sessions uses its own mutex).
 	active := h.sessions.IsTurnActive(id)
+	compacting := h.sessions.IsCompacting(id)
 	h.cancelMu.Lock()
 	inFlight := h.turnInFlight[id] > 0
 	if !active && !inFlight {
-		// Idle session: nothing to cancel. Clear any stale flag so it cannot
-		// poison the next turn.
+		// No turn to cancel. Always clear any stale pendingCancel flag so it
+		// cannot poison the next turn. A compaction pass is NOT a turn: it has
+		// no executeTurnJob waiting to consume pendingCancel, so recording the
+		// flag for compaction-only work would swallow the next user message
+		// with a cancelled turn_error.
 		delete(h.pendingCancel, id)
 		h.cancelMu.Unlock()
+		if compacting {
+			if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+				as.agent.CancelCompaction()
+			}
+		}
 		return
 	}
 	h.pendingCancel[id] = true
@@ -68,9 +77,30 @@ func (h *Handler) interruptSessionWork(id string) {
 		return
 	}
 	as.agent.Cancel()
+	// Stop must also interrupt an in-flight compaction: Agent.Cancel only
+	// closes the Step loop's stop channel, which runCompact does not observe.
+	as.agent.CancelCompaction()
 	if as.agent.Runs() != nil {
 		as.agent.Runs().CancelAll()
 	}
+}
+
+// HandleCancelCompaction handles POST /api/sessions/{id}/compact/cancel:
+// interrupts every in-flight compaction pass (manual or automatic) for the
+// session. Idempotent — cancelling with nothing in flight returns
+// cancelled:false rather than an error, so a stale or double-clicked Cancel
+// button cannot surface as a failure. The running pass publishes the terminal
+// compaction_done frame itself, so this handler does no lifecycle bookkeeping.
+func (h *Handler) HandleCancelCompaction(w http.ResponseWriter, r *http.Request, id string) {
+	if _, err := h.sessions.Resolve(id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	cancelled := false
+	if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+		cancelled = as.agent.CancelCompaction()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled})
 }
 
 func (h *Handler) consumePendingCancel(id string) bool {

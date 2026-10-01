@@ -60,6 +60,14 @@ import { loadFileTreeView, saveFileTreeView, type FileTreeViewMode } from "./fil
 import { loadFileSearchFilters, saveFileSearchFilters } from "./fileSearchFiltersPersistence";
 import { fileTreeRootKey, loadExpandedDirs, saveExpandedDirs } from "./fileTreeExpansionPersistence";
 import { loadShowHiddenFiles, saveShowHiddenFiles, subscribeShowHiddenFiles, showHiddenFilesProjectKey } from "./showHiddenFilesPersistence";
+import {
+  ancestorDirs,
+  hiddenTreeSegment,
+  normalizeTreePath,
+  sameTreeRoot,
+  treeDirOf,
+  treeRelativePath,
+} from "./fileTreeReveal";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
 import { eventBus } from "@/lib/eventBus";
 import { isMutatingTool, mutatedPathsFromToolCall } from "@/lib/previewLiveMutations";
@@ -139,7 +147,36 @@ interface FileTreeProps {
   /** Stable host/project/tab key used by the shared tab loading store. */
   loadingKey?: string;
   onLoadingEvent?: LoadingEventHandler;
+  /** "Show in file tree" from the editor/preview tab bar. A NEW object with a
+   *  fresh `nonce` is what re-triggers a reveal of the same file. */
+  revealRequest?: TreeRevealRequest | null;
 }
+
+/**
+ * One "reveal this file in the tree" request. `path` is the editor tab's path
+ * (absolute or root-relative), `root` its project root — the tree switches to
+ * that root when it is one of the browsable roots, and says so when it is not.
+ * `nonce` makes a repeat request for the SAME file a distinct event.
+ */
+export interface TreeRevealRequest {
+  path: string;
+  root?: string;
+  nonce: number;
+}
+
+/** Transient highlight state for a row the reveal just brought into view. */
+export interface RevealFlash {
+  path: string;
+  seq: number;
+}
+
+// How long the just-revealed row keeps its transient highlight.
+const REVEAL_FLASH_MS = 1600;
+// Backstop for a reveal whose target row never materializes (its parent node
+// itself never appears). Generous, because a remote project's ancestors are
+// fetched one SSH round trip at a time; it only fires where the tree could
+// not resolve the request at all.
+const REVEAL_TIMEOUT_MS = 15000;
 
 const langIcons: Record<string, string> = {
   ts: "🔷",
@@ -351,6 +388,18 @@ interface TreeNodeProps {
   expandedPaths?: Set<string>;
   /** Reports a user (or auto-prune) expansion change so it can be persisted. */
   onToggleExpanded?: (path: string, expanded: boolean) => void;
+  /** Root-relative path the tree is currently revealing, or null. The node whose
+   *  path matches scrolls itself into view and reports back through onRevealed. */
+  revealTarget?: string | null;
+  /** The just-revealed row: its path (for the highlight) plus a sequence number,
+   *  so revealing the SAME file again is a distinct state and re-runs the
+   *  scroll/highlight instead of being a no-op on an unchanged value. */
+  revealFlash?: RevealFlash | null;
+  onRevealed?: (path: string) => void;
+  /** The reveal target's parent directory loaded without it — the row can never
+   *  render, so the tree reports the miss (naming the path) instead of waiting
+   *  on a timeout. */
+  onRevealMiss?: (path: string) => void;
 }
 
 function TreeNode({
@@ -369,9 +418,20 @@ function TreeNode({
   showHiddenFiles,
   expandedPaths,
   onToggleExpanded,
+  revealTarget,
+  revealFlash,
+  onRevealed,
+  onRevealMiss,
 }: TreeNodeProps) {
+  // Expansion keys, node paths and reveal paths all go through
+  // normalizeTreePath so a Windows `src\app` node still matches a computed
+  // `src/app` (the tree walk reports filepath.Rel, which uses `\` there).
+  const nodePath = normalizeTreePath(node.path);
+  const isRevealTarget = !!revealTarget && nodePath === revealTarget;
+  const isRevealed = !!revealFlash && nodePath === revealFlash.path;
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState(
-    () => !!forceExpanded || (expandedPaths?.has(node.path) ?? false),
+    () => !!forceExpanded || (expandedPaths?.has(nodePath) ?? false),
   );
   const [children, setChildren] = useState<FileNode[] | null>(node.children ?? null);
   const [loadingChildren, setLoadingChildren] = useState(false);
@@ -383,7 +443,7 @@ function TreeNode({
   // node in sync both ways (the parent set is updated on every toggle).
   useEffect(() => {
     if (forceExpanded || !expandedPaths) return;
-    const next = expandedPaths.has(node.path);
+    const next = expandedPaths.has(nodePath);
     if (!next) {
       // Mirror toggle(): a collapse must cancel an in-flight children fetch
       // so it cannot complete into a collapsed node with a stale spinner.
@@ -391,7 +451,7 @@ function TreeNode({
       setLoadingChildren(false);
     }
     setExpanded(next);
-  }, [expandedPaths, forceExpanded, node.path]);
+  }, [expandedPaths, forceExpanded, nodePath]);
 
   useEffect(() => {
     if (forceExpanded) {
@@ -461,6 +521,41 @@ function TreeNode({
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, node.is_dir, node.path, children, showHiddenFiles, projectRoot, projectHost]);
+
+  // Reveal (see FileTree's revealRequest effect): this node IS the row the
+  // caller asked for, so report back — the tree turns that into the transient
+  // highlight, and that highlight is what drives the scroll below.
+  useEffect(() => {
+    if (!isRevealTarget) return;
+    onRevealed?.(nodePath);
+  }, [isRevealTarget, onRevealed, nodePath]);
+
+  // Bring the revealed row into view. Keyed on the flash rather than on
+  // revealTarget, because the report above clears that immediately — and the
+  // flash is what the user actually sees. The tree pane animating its width open
+  // (`transition-[width]`) when the reveal un-collapses it is NOT a hazard here:
+  // the pane's inner content keeps a fixed width, so the Radix viewport already
+  // has real scrollable geometry in that same commit (verified in a real browser:
+  // scrollTop advances to the centered row with no retry). jsdom has no layout
+  // engine and no scrollIntoView at all, hence the optional call.
+  useEffect(() => {
+    if (!isRevealed) return;
+    rowRef.current?.scrollIntoView?.({ block: "center", inline: "nearest" });
+  }, [isRevealed, revealFlash?.seq]);
+
+  // Miss: this node holds the target's directory but its children do not
+  // contain it (deleted, renamed, or filtered out server-side). Reported from
+  // the authoritative listing instead of waiting on a timeout, and only once
+  // per target so a later reload cannot re-report a settled miss.
+  const missReportedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!revealTarget || children === null) return;
+    if (nodePath !== treeDirOf(revealTarget)) return;
+    if (missReportedRef.current === revealTarget) return;
+    if (children.some((c) => normalizeTreePath(c.path) === revealTarget)) return;
+    missReportedRef.current = revealTarget;
+    onRevealMiss?.(revealTarget);
+  }, [revealTarget, children, nodePath, onRevealMiss]);
 
   const toggle = () => {
     if (forceExpanded) return;
@@ -611,7 +706,13 @@ function TreeNode({
       <div>
         <ContextMenu onOpenChange={(open) => open && openMenu()}>
           <ContextMenuTrigger asChild>
-            <div className="flex items-center gap-0.5" style={{ paddingLeft: `${depth * 12 + 4}px` }}>
+            <div
+              ref={rowRef}
+              data-tree-path={nodePath}
+              data-revealed={isRevealed ? "" : undefined}
+              className={`flex items-center gap-0.5 ${isRevealed ? "bg-amber-400/10 ring-1 ring-inset ring-amber-400/70" : ""}`}
+              style={{ paddingLeft: `${depth * 12 + 4}px` }}
+            >
               {CheckBox}
               <button
                 className={`${rowBase} ${rowState} flex-1 min-w-0`}
@@ -654,6 +755,10 @@ function TreeNode({
               generation={generation}
               expandedPaths={expandedPaths}
               onToggleExpanded={onToggleExpanded}
+              revealTarget={revealTarget}
+              revealFlash={revealFlash}
+              onRevealed={onRevealed}
+              onRevealMiss={onRevealMiss}
             />
           ))}
       </div>
@@ -664,7 +769,13 @@ function TreeNode({
   return (
     <ContextMenu onOpenChange={(open) => open && openMenu()}>
       <ContextMenuTrigger asChild>
-        <div className="flex items-center gap-0.5" style={{ paddingLeft: `${depth * 12 + 16}px` }}>
+        <div
+          ref={rowRef}
+          data-tree-path={nodePath}
+          data-revealed={isRevealed ? "" : undefined}
+          className={`flex items-center gap-0.5 ${isRevealed ? "bg-amber-400/10 ring-1 ring-inset ring-amber-400/70" : ""}`}
+          style={{ paddingLeft: `${depth * 12 + 16}px` }}
+        >
           {CheckBox}
           <button className={`${rowBase} ${rowState} flex-1 min-w-0`} onClick={handleRowClick}>
             <FileIcon name={node.name} isDir={false} expanded={false} />
@@ -808,6 +919,7 @@ export default function FileTree({
   includedPaths,
   loadingKey,
   onLoadingEvent,
+  revealRequest = null,
 }: FileTreeProps) {
   const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const includedSet = new Set(includedPaths ?? []);
@@ -821,6 +933,10 @@ export default function FileTree({
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [extraPaths, setExtraPaths] = useState<string[]>([]);
+  // Extra allowed roots load asynchronously; until they arrive the tree cannot
+  // tell "this file is in another browsable root" from "this file is outside the
+  // tree", and a reveal that guesses wrong is cancelled for good (see below).
+  const [rootsConfigLoaded, setRootsConfigLoaded] = useState(false);
   // Server OS (GOOS) for the "reveal in file manager" menu label; loaded from
   // GET /api/config/ocode/paths alongside the extra roots. Undefined until the
   // fetch resolves, which the label helper maps to a neutral "File Manager".
@@ -863,6 +979,17 @@ export default function FileTree({
   const [pendingDelete, setPendingDelete] = useState<string[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Reveal ("show in file tree"): the root-relative path being brought into
+  // view, and the flash on the row that was revealed. `revealTarget` is cleared
+  // by the row itself once it has scrolled, or by failReveal() when the row
+  // cannot exist. The flash carries a sequence number so a repeat reveal of the
+  // same file is a new state rather than a same-value no-op.
+  const [revealTarget, setRevealTarget] = useState<string | null>(null);
+  const [revealFlash, setRevealFlash] = useState<RevealFlash | null>(null);
+  const revealFlashSeqRef = useRef(0);
+  const revealNonceRef = useRef(-1);
+  const revealTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revealFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Miller-columns view (macOS Finder-style) — persisted view mode
   const [viewMode, setViewMode] = useState<FileTreeViewMode>(() => loadFileTreeView());
@@ -903,10 +1030,11 @@ export default function FileTree({
 
   const handleToggleExpanded = useCallback(
     (path: string, isExpanded: boolean) => {
+      const key = normalizeTreePath(path);
       setExpandedDirs((prev) => {
         const next = new Set(prev);
-        if (isExpanded) next.add(path);
-        else next.delete(path);
+        if (isExpanded) next.add(key);
+        else next.delete(key);
         saveExpandedDirs(treeRootKey, next);
         return next;
       });
@@ -964,8 +1092,13 @@ export default function FileTree({
       .then((cfg) => {
         setExtraPaths(cfg.extra_allowed_paths || []);
         setServerPlatform(cfg.platform);
+        setRootsConfigLoaded(true);
       })
-      .catch((err) => console.error("Failed to load extra allowed paths:", err));
+      .catch((err) => {
+        console.error("Failed to load extra allowed paths:", err);
+        // An empty list is now definitive — the request failed, not pending.
+        setRootsConfigLoaded(true);
+      });
   }, []);
 
   useEffect(() => {
@@ -1388,6 +1521,148 @@ export default function FileTree({
     return opts;
   }, [projectPath, extraPaths]);
 
+  // ── Reveal: bring an editor/preview tab's file into view in this tree.
+  //
+  // The request carries the tab's path and root; everything the tree needs is
+  // derived locally (fileTreeReveal.ts). Four things can stand between a request
+  // and a visible row, and each is resolved up front rather than left to fail:
+  //
+  //   1. the browsed root is a different folder  → switch to the tab's root
+  //      when it is one of the roots the tree can browse, otherwise say so;
+  //   2. a filter / content-search view is showing → clear the path filter and
+  //      return to the plain tree (the filtered branch force-expands every node
+  //      and renders a different surface, so the row is not the same element);
+  //   3. Miller-column view has no ancestor rows at all → list view;
+  //   4. the path lives under a directory the server walk omits while hidden
+  //      files are off → notice now, instead of expanding folders that can
+  //      never render it.
+  //
+  // Expansion then cascades on its own: every ancestor joins the persisted
+  // expanded set, and each TreeNode that mounts with it expanded lazily fetches
+  // its children, which materialises the next level. The row itself scrolls
+  // into view and reports back (onRevealed), or its parent reports the miss
+  // (onRevealMiss). The timeout below is only a backstop for the case where the
+  // parent's node never appears at all.
+  const failReveal = useCallback(
+    (message: string) => {
+      if (revealTimeoutRef.current) {
+        clearTimeout(revealTimeoutRef.current);
+        revealTimeoutRef.current = null;
+      }
+      setRevealTarget(null);
+      showNotice(message);
+    },
+    [showNotice],
+  );
+
+  const completeReveal = useCallback((path: string) => {
+    if (revealTimeoutRef.current) {
+      clearTimeout(revealTimeoutRef.current);
+      revealTimeoutRef.current = null;
+    }
+    setRevealFlash({ path, seq: ++revealFlashSeqRef.current });
+    if (revealFlashTimer.current) clearTimeout(revealFlashTimer.current);
+    revealFlashTimer.current = setTimeout(() => setRevealFlash(null), REVEAL_FLASH_MS);
+    setRevealTarget(null);
+  }, []);
+
+  // NOTE: there is deliberately NO root-level counterpart of the per-node miss
+  // check below. A root-level target would be judged against `tree` + `loading`,
+  // and both are one commit stale exactly when it matters: the commit that
+  // switches `activeRoot` for a reveal still holds the PREVIOUS root's listing
+  // and `loading === false` (loadRoot's effect runs after this one), so the
+  // check would call a healthy reveal a miss and cancel it. Nested targets do
+  // not have that problem — a TreeNode judges the children it fetched itself.
+  // A root-level file that cannot exist is reported by the timeout below.
+
+  // Clean up the reveal's timers when the tree unmounts mid-reveal.
+  useEffect(
+    () => () => {
+      if (revealTimeoutRef.current) clearTimeout(revealTimeoutRef.current);
+      if (revealFlashTimer.current) clearTimeout(revealFlashTimer.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const req = revealRequest;
+    if (!req) return;
+    const root = activeRoot ?? projectPath;
+    if (!root) return;
+
+    // 1. Root switch. Returning WITHOUT marking the request handled is what
+    //    lets the effect re-run (activeRoot is a dependency) and finish the job
+    //    once the tree has reloaded against the new root.
+    if (req.root && !sameTreeRoot(req.root, root)) {
+      // Judging this against an empty rootOptions fails a reveal that is merely
+      // early (the roots config has not resolved yet), and that failure records
+      // the nonce — so the reveal is cancelled and never retried.
+      if (!rootsConfigLoaded) return;
+      const target = rootOptions.find((o) => sameTreeRoot(o.path, req.root));
+      if (!target) {
+        revealNonceRef.current = req.nonce;
+        failReveal(`${req.path} is outside the folder this tree is browsing`);
+        return;
+      }
+      setActiveRoot(target.path);
+      return;
+    }
+
+    // One-shot per nonce: a repeat request for the same file carries a new one.
+    if (revealNonceRef.current === req.nonce) return;
+    revealNonceRef.current = req.nonce;
+
+    const rel = treeRelativePath(req.path, root);
+    if (!rel) {
+      failReveal(`${req.path} is outside the folder this tree is browsing`);
+      return;
+    }
+
+    // 4. A directory the walk omits can never produce the row.
+    if (!showHiddenFiles) {
+      const hidden = hiddenTreeSegment(rel);
+      if (hidden) {
+        failReveal(`${rel} is hidden — turn on hidden files to show it in the tree`);
+        return;
+      }
+    }
+
+    // 2. A filtered / content-search surface hides the row entirely.
+    setKeyword("");
+    if (searchMode === "content") setSearchMode("path");
+    // 3. Miller columns have no ancestor rows to expand.
+    if (viewMode === "columns") setViewMode("tree");
+
+    setSelectedPath(rel);
+    setRevealTarget(rel);
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      for (const dir of ancestorDirs(rel)) next.add(dir);
+      saveExpandedDirs(treeRootKey, next);
+      return next;
+    });
+    if (revealTimeoutRef.current) clearTimeout(revealTimeoutRef.current);
+    revealTimeoutRef.current = setTimeout(() => {
+      revealTimeoutRef.current = null;
+      failReveal(`Could not show ${rel} in the file tree`);
+    }, REVEAL_TIMEOUT_MS);
+    // `failReveal`/`completeReveal` are stable; the mutable state setters are
+    // intentionally not dependencies (the nonce guard makes this one-shot).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    revealRequest,
+    activeRoot,
+    projectPath,
+    rootOptions,
+    showHiddenFiles,
+    searchMode,
+    viewMode,
+    treeRootKey,
+    rootsConfigLoaded,
+    failReveal,
+    completeReveal,
+  ]);
+
   const isFiltering = keywords.length > 0;
   const filteredTree = useMemo(() => {
     if (!isFiltering) return null;
@@ -1397,6 +1672,13 @@ export default function FileTree({
   const filteredCount = useMemo(
     () => (filteredTree ? countTreeNodes(filteredTree) : 0),
     [filteredTree],
+  );
+
+  const onRevealMiss = useCallback(
+    (path: string) => {
+      failReveal(`Could not show ${path} in the file tree`);
+    },
+    [failReveal],
   );
 
   const handleSelect = (path: string) => {
@@ -1938,6 +2220,10 @@ export default function FileTree({
                   menu={menu}
                   includedPaths={includedSet}
                   generation={refreshKey}
+                  revealTarget={revealTarget}
+                  revealFlash={revealFlash}
+                  onRevealed={completeReveal}
+                  onRevealMiss={onRevealMiss}
                 />
               ))}
             </div>
@@ -2132,6 +2418,10 @@ export default function FileTree({
                 generation={refreshKey}
                 expandedPaths={expandedDirs}
                 onToggleExpanded={handleToggleExpanded}
+                revealTarget={revealTarget}
+                revealFlash={revealFlash}
+                onRevealed={completeReveal}
+                onRevealMiss={onRevealMiss}
               />
             ))}
           </div>

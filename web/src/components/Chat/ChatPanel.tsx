@@ -616,6 +616,58 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     return item.start < offset;
   };
 
+  // --- Reader anchor across window slides -------------------------------------
+  // The loaded window is not fixed: the turn-end `messages` broadcast can
+  // replace a 100-row tail page with the capped 400-row window (300 rows land
+  // ABOVE the reader), the reconcile MERGE_SNAPSHOT later shrinks it back to a
+  // tail page, and once the window sits at MAX_SLICE_MESSAGES every appended
+  // message trims one row off the head. None of those moves scrollTop, so a
+  // reader who scrolled up sees their content jump by the height of the rows
+  // that came or went above them — and the shrink then read as a "transcript
+  // reset" and yanked them to the bottom. Keys are global transcript positions,
+  // so the row the reader was on can be found again after any slide: remember
+  // it (with the pixel offset inside it) on every scroll while unpinned, and
+  // put it back at the same place in a LAYOUT effect, before paint.
+  const readerAnchorRef = useRef<{ key: number; index: number; distance: number } | null>(null);
+  const prevWindowRef = useRef<{ start: number; count: number } | null>(null);
+  // Set by the layout effect below when the anchored row survived a shrink, so
+  // the [messages, live] effect does not mistake the slide for a reset.
+  const anchorSurvivedShrinkRef = useRef(false);
+  // The scroll-up pagination path restores its own offset (scrollHeight delta
+  // in a rAF, see handleScroll); it flags the prepend so this effect stays out.
+  const prependRestoreRef = useRef(false);
+  useLayoutEffect(() => {
+    const prev = prevWindowRef.current;
+    prevWindowRef.current = { start: windowStartServerIndex, count: renderEntries.length };
+    if (!prev || !initialized) return;
+    if (prependRestoreRef.current) {
+      prependRestoreRef.current = false;
+      return;
+    }
+    // Pinned: the tail pin is the only writer of the offset.
+    if (atBottomRef.current) return;
+    const anchor = readerAnchorRef.current;
+    if (!anchor) return;
+    // Nothing above the reader moved: same window start and rows only appended.
+    if (prev.start === windowStartServerIndex && renderEntries.length >= prev.count) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const index = renderEntries.findIndex(
+      (entry) => transcriptItemKey(windowStartServerIndex, entry.originalIndex) === anchor.key,
+    );
+    if (index < 0) {
+      // The row the reader was on is gone (truncate/rewind): the old position
+      // no longer refers to this content, so let the follow re-arm.
+      readerAnchorRef.current = null;
+      return;
+    }
+    anchorSurvivedShrinkRef.current = true;
+    if (index === anchor.index) return;
+    restoreChatDisplayAnchor(el, { index, distance: anchor.distance }, virtualizer);
+    lastScrollTopRef.current = el.scrollTop;
+    readerAnchorRef.current = { ...anchor, index };
+  }, [renderEntries, windowStartServerIndex, initialized, virtualizer]);
+
   const lastPolicyRevisionRef = useRef(chatPolicyRevision);
   useEffect(() => {
     if (lastPolicyRevisionRef.current === chatPolicyRevision) return;
@@ -631,7 +683,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       ? captureChatDisplayAnchor(
           el.scrollTop,
           firstVisible?.index,
-          (index) => virtualizer.getOffsetForIndex(index),
+          (index, align) => virtualizer.getOffsetForIndex(index, align),
         )
       : null;
     const pinned = atBottomRef.current;
@@ -946,7 +998,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     // the transcript was reset/replaced under the reader.
     const prev = prevMessagesRef.current;
     prevMessagesRef.current = { count: messages.length };
-    if (prev && messages.length < prev.count) {
+    // A window SLIDE also shrinks the list (the reconcile snapshot replacing the
+    // 400-row window with a tail page); the layout effect above has already put
+    // the reader's row back in that case and says so — only a genuine reset
+    // (their row is gone) re-arms the follow.
+    const anchorSurvived = anchorSurvivedShrinkRef.current;
+    anchorSurvivedShrinkRef.current = false;
+    if (prev && messages.length < prev.count && !anchorSurvived) {
       atBottomRef.current = true;
     }
     // Only meaningful while the panel has a layout box: a hidden (display:none)
@@ -1477,6 +1535,17 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       if (atBottom || isRecentUserScrollIntent(userScrollIntentAtRef.current)) {
         atBottomRef.current = atBottom;
       }
+      // Remember the row under the top edge (and the offset inside it) while
+      // the reader is away from the tail, so a window slide can put it back.
+      if (atBottomRef.current) {
+        readerAnchorRef.current = null;
+      } else {
+        const top = el.scrollTop;
+        const first = virtualizer.getVirtualItems().find((item) => item.end > top);
+        readerAnchorRef.current = first
+          ? { key: first.key as number, index: first.index, distance: top - first.start }
+          : null;
+      }
       setShowJumpToBottom(!atBottom);
       setShowJumpToTop(el.scrollTop > 200);
       // Publish "the reader is away from the tail" to the composer, which is a
@@ -1512,6 +1581,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
         .then((detail) => {
           if (detail.messages.length > 0) {
             const scrollHeightBefore = el.scrollHeight;
+            prependRestoreRef.current = true;
             dispatch({
               type: "PREPEND_MESSAGES",
               sessionId,
@@ -1530,7 +1600,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           dispatch({ type: "SET_LOADING_MORE", sessionId, loading: false });
         });
     }
-  }, [hasMore, loadingMore, messages.length, windowStartServerIndex, totalMessages, sessionId, host, dispatch]);
+  }, [hasMore, loadingMore, messages.length, windowStartServerIndex, totalMessages, sessionId, host, dispatch, virtualizer]);
 
   // Role "tool" messages carry only tool_call_id, not the tool's name — resolve
   // it here from the assistant message that issued the call, so replayed

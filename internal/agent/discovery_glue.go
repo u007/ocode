@@ -54,6 +54,19 @@ type discoveryState struct {
 	// writes it while /api status reads run on another goroutine.
 	tailMu sync.Mutex
 	tail   []Message
+	// autoInject is the skill whose body is inlined into the prompt this turn
+	// (nil when nothing is selected). It is a request-time injection, never
+	// persisted, and is re-rendered on each Step of the turn by
+	// injectDiscoveryContext.
+	autoInject *autoInjectSkill
+	// autoInjected is the set of skills already auto-injected this session. It
+	// is what makes a selection happen at most once per skill, and it is cleared
+	// at the compaction splice (resetAutoInjected) because the blocks were never
+	// persisted — after a splice the model no longer has them.
+	// Guarded by autoInjectMu because injectDiscoveryContext (the agent
+	// goroutine) reads autoInject while a status read can run concurrently.
+	autoInjectMu sync.Mutex
+	autoInjected map[string]bool
 }
 
 // discoveryWarmTimeout bounds a background corpus warm. Generous because a local
@@ -413,19 +426,26 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	// "Jev was never consulted" looked identical in the log.
 	keep := candidates
 	judgeNote := "judge=none (typesafe not connected)"
+	var judgeScores map[string]float64
 	if client := a.discoveryJudgeClient(); client != nil {
-		judged, jerr := a.judgeDiscoveryCandidates(client, tail, query, candidates)
+		judged, scores, jerr := a.judgeDiscoveryCandidates(client, tail, query, candidates)
 		if jerr != nil {
 			judgeNote = fmt.Sprintf("judge=%s error (fail-open)", client.Model)
 			a.emitDebug("DISCOVERY", fmt.Sprintf("typesafe judge failed (fail-open, all attached): %v", jerr))
 		} else {
 			keep = judged
+			judgeScores = scores
 			if vetoed := len(candidates) - len(keep); vetoed > 0 {
 				a.disco.judgeVetoed.Add(int64(vetoed))
 			}
 			judgeNote = fmt.Sprintf("judge=%s kept %d/%d", client.Model, len(keep), len(candidates))
 		}
 	}
+	// Auto-inject the single top-scoring SKILL body (see discovery_autoinject.go).
+	// Runs only on the automatic per-turn path — NOT from discover_more, where
+	// the model asked for more and will load the body itself. Fail-closed: with no
+	// judge (or a judge error) there are no scores, so nothing is injected.
+	a.maybeAutoInjectSkill(keep, judgeScores, tail)
 	ids := make([]string, 0, len(keep))
 	for _, d := range keep {
 		ids = append(ids, d.ID)
@@ -764,6 +784,13 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	if a.redactionEnabled && a.redactionRegistry != nil {
 		messages = append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + redactionAwarenessPrompt})
 	}
+	// Auto-injected skill body, LAST so it sits closest to the user message in
+	// the uncached tail (same attention rationale as every other volatile
+	// injector). User-role, and deliberately the final append: nothing above it
+	// may change when this fires, because sysContent rides the cached prompt.
+	if block := a.autoInjectBlock(); block != "" {
+		messages = append(messages, Message{Role: "user", Content: block})
+	}
 	return messages
 }
 
@@ -942,7 +969,7 @@ func (t discoverMoreTool) Execute(args json.RawMessage) (string, error) {
 	}
 	keep := candidates
 	if client := a.discoveryJudgeClient(); client != nil && len(candidates) > 0 {
-		judged, jerr := a.judgeDiscoveryCandidates(client, a.discoveryTail(), p.Need, candidates)
+		judged, _, jerr := a.judgeDiscoveryCandidates(client, a.discoveryTail(), p.Need, candidates)
 		if jerr != nil {
 			// Fail-open, and say so: a judge failure must never attach fewer
 			// tools than the pre-judge behavior.

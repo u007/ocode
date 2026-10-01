@@ -3,7 +3,7 @@ import { GitFork } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "../../lib/utils";
 import { useJumpToSession, useJumpToPendingAsk, type JumpTarget } from "../../lib/jumpToSession";
-import { usePulseTail } from "./usePulseTail";
+import { usePulseTail, type PulseTail } from "./usePulseTail";
 import { pulseProjectBasename } from "./pulseFilter";
 import type { PulseRow, PulseStatus, PulseTodoState } from "../../api/types";
 
@@ -26,6 +26,18 @@ import type { PulseRow, PulseStatus, PulseTodoState } from "../../api/types";
  * and rendered as a SIBLING of the button, so showing it cannot resize the
  * card or push its neighbours — and so the overlay's own content is not part
  * of the button's click target or accessible name.
+ *
+ * A LIVE card (running, or paused on an ask) streams its output on the card
+ * itself instead of waiting for the hover overlay: watching a turn is the
+ * entire reason to open this dashboard, and making the user hover every card
+ * to learn what it is doing inverts that. The stream renders in exactly ONE
+ * place per card — the overlay for every other status — so the same lines are
+ * never on screen twice and `pulse-tail` stays unique.
+ *
+ * Settled rows keep the hover-only preview deliberately: seeding one costs a
+ * 200-message transcript fetch, on a dashboard that pages up to 50 rows. Live
+ * rows number in single digits, so the seed fetch and the SSE `text`
+ * subscription follow work that is actually happening instead of history.
  */
 
 /** Hover must settle before an overlay appears, or a mouse crossing the grid
@@ -43,6 +55,32 @@ const TICK_MS = 1_000;
  * duration.
  */
 const MAX_TURN_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * Statuses whose card carries its own always-visible streaming block.
+ *
+ * Needs-you rows are in here for the same reason as `running`: a paused turn is
+ * live output the user is waiting on, and its `pending_ask` summary is already
+ * on the card body, so the tail beside it is the context for that ask rather
+ * than a historical fetch.
+ */
+const STREAM_ON_CARD: ReadonlySet<PulseStatus> = new Set<PulseStatus>([
+  "running",
+  "needs_permission",
+  "needs_question",
+]);
+
+/**
+ * Reserved height for the on-card stream.
+ *
+ * This has to be the FLOOR, not a hint: with `min-h` smaller than the content,
+ * the content governs and a card grows from 224px to 240px as tail lines arrive
+ * — which reflows the whole grid row on every streaming delta. Measured in
+ * headless Chromium against the built CSS, a full card (status row, title,
+ * task, todo bar) plus the full PULSE_TAIL_LINES-line preview is 240.5px, so
+ * 16rem leaves ~15px of slack and the height is genuinely constant.
+ */
+const CARD_MIN_H = "min-h-[16rem]";
 
 const STATUS_META: Record<PulseStatus, { glyph: string; label: string; className: string }> = {
   needs_permission: { glyph: "◆", label: "needs permission", className: "text-amber-400" },
@@ -86,6 +124,28 @@ function formatAgo(iso: string, now: number): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
+/**
+ * The streaming / last-assistant preview, in one place so the SAME block can be
+ * laid out on the card for a live row and in the overlay for every other
+ * status. Rendering both at once would duplicate the lines on screen and make
+ * `pulse-tail` ambiguous to the tests.
+ */
+function PulseStream({ tail, className }: { tail: PulseTail; className?: string }) {
+  return (
+    <div data-testid="pulse-tail" className={cn("flex flex-col gap-0.5", className)}>
+      {tail.error ? (
+        <span className="text-[11px] text-destructive">{tail.error}</span>
+      ) : (
+        tail.lines.map((line, i) => (
+          <div key={`${i}-${line}`} className="truncate font-mono text-[11px] text-muted-foreground">
+            {line}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean }) {
   const jump = useJumpToSession();
   const jumpAsk = useJumpToPendingAsk();
@@ -127,9 +187,12 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
     setExpanded(false);
   }, [clearExpandTimer]);
 
-  // The tail hook is gated on `expanded`: a collapsed card subscribes to
-  // nothing and fetches nothing.
-  const tail = usePulseTail(row.session_id, expanded, row.status);
+  // A live card reads its tail whether or not it is hovered — which is also the
+  // only way it is reachable at all on a touch device, where there is no hover.
+  // Every other status stays gated on `expanded`, so a collapsed card
+  // subscribes to nothing and fetches nothing.
+  const streamOnCard = !compact && STREAM_ON_CARD.has(row.status);
+  const tail = usePulseTail(row.session_id, expanded || streamOnCard, row.status);
 
   const target: JumpTarget = useMemo(
     () => ({
@@ -172,10 +235,13 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
     row.current_task?.kind === "tool" || row.current_task?.kind === "text"
       ? row.current_task.text
       : "";
+  // The tail only counts toward the overlay's content when it is NOT already on
+  // the card body: a live row shows its stream there, so repeating the same
+  // lines in the overlay would be redundant as well as a second `pulse-tail`.
+  const tailOnOverlay = !streamOnCard && (tail.lines.length > 0 || tail.error !== null);
   const overlayHasContent =
     overlayTask !== "" ||
-    tail.lines.length > 0 ||
-    tail.error !== null ||
+    tailOnOverlay ||
     !!row.pending_ask ||
     (row.todo?.items.length ?? 0) > 0;
 
@@ -202,7 +268,14 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
           // pointer bookkeeping we can rely on for the overlay.
           if (e.key === "Enter") jump(target);
         }}
-        className="flex w-full min-w-0 flex-col gap-1.5 rounded-md border border-border bg-card p-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        // h-full fills the grid row the card is stretched into, so every card in
+        // a row shares one height; the min-height is the floor that reserves the
+        // live region. Both are needed: `min-h` alone still lets a taller card
+        // stretch its row, and `h-full` alone gives no room to stream into.
+        className={cn(
+          "flex h-full w-full min-w-0 flex-col gap-1.5 rounded-md border border-border bg-card p-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          !compact && CARD_MIN_H,
+        )}
       >
         {compact ? (
           <div data-pulse-line="" className="flex min-w-0 items-center gap-2">
@@ -282,6 +355,17 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
                 </span>
               </div>
             )}
+            {/* The reserved live region. flex-1 + justify-end pins the newest
+                line to the bottom edge, nearest the eye, the way a terminal
+                tail reads. min-h-0 lets it shrink rather than push the card
+                taller if the budget is ever exceeded; truncate per line stops
+                a long streamed line from wrapping. */}
+            {streamOnCard && (
+              <PulseStream
+                tail={tail}
+                className="mt-0.5 min-h-0 flex-1 justify-end overflow-hidden"
+              />
+            )}
           </>
         )}
       </button>
@@ -295,17 +379,10 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
           data-testid="pulse-overlay"
           className="absolute bottom-full left-0 right-0 z-20 mb-1 flex flex-col gap-1.5 rounded-md border border-border bg-popover p-2 text-left shadow-lg"
         >
-          <div data-testid="pulse-tail" className="flex flex-col gap-0.5">
-            {tail.error ? (
-              <span className="text-[11px] text-destructive">{tail.error}</span>
-            ) : (
-              tail.lines.map((line, i) => (
-                <div key={`${i}-${line}`} className="truncate font-mono text-[11px] text-muted-foreground">
-                  {line}
-                </div>
-              ))
-            )}
-          </div>
+          {/* Hover still owns the preview for every non-live status; a live row
+              already carries its stream on the card, so the overlay shows only
+              what the card body cannot — the plan and the ask. */}
+          {!streamOnCard && <PulseStream tail={tail} />}
           {row.todo && row.todo.items.length > 0 && (
             <div data-testid="pulse-todo-items" className="flex flex-col gap-0.5">
               {row.todo.items.map((item, i) => (

@@ -40,6 +40,7 @@ type connectDialog struct {
 	methodIdx          int
 	provider           *auth.Provider
 	methods            []connectMethod
+	filterInput        textinput.Model
 	keyInput           textinput.Model
 	codeInput          textinput.Model
 	accountIDInput     textinput.Model
@@ -51,6 +52,15 @@ type connectDialog struct {
 	grokCookieField    int // 0 = auth_token, 1 = ct0
 	message            string
 	messageOK          bool
+
+	// providerRows caches each provider's label and connection status for the
+	// lifetime of this dialog. It is populated by openConnectDialog and never
+	// mutated afterwards, which is safe because every credential write in the
+	// connect flow ends at connectStageMessage — whose enter/esc closes the
+	// dialog — so a cached status cannot go stale. Beyond correctness this keeps
+	// the filter off auth.Status, which re-reads the opencode config files once
+	// per unconfigured provider, and that would otherwise run on every keystroke.
+	providerRows []connectProviderRow
 
 	// OAuth-flow scratch state.
 	anthropicFlow auth.AnthropicFlow
@@ -64,8 +74,28 @@ type connectMethod struct {
 	label string
 }
 
+// connectProviderRow is one rendered row of the provider stage: a provider
+// snapshot (idx indexes auth.Providers) plus the connection status rendered
+// beside its label.
+type connectProviderRow struct {
+	idx    int
+	label  string
+	sym    string
+	detail string
+}
+
 func (m *model) openConnectDialog() {
 	m.input.Blur()
+
+	// filter narrows the provider list by label, id or connection status. It
+	// occupies the row that used to be blank between the header and the list,
+	// so every provider row keeps the screen-Y offset connectRowForY assumes.
+	filter := textinput.New()
+	filter.Prompt = "filter: "
+	filter.Placeholder = "name, id or status…"
+	filter.CharLimit = 120
+	filter.SetWidth(connectFilterInputWidth)
+	filter.Focus()
 
 	ti := textinput.New()
 	ti.Placeholder = "paste API key and press Enter"
@@ -100,6 +130,8 @@ func (m *model) openConnectDialog() {
 	m.connect = &connectDialog{
 		stage:              connectStageProvider,
 		providerIdx:        0,
+		providerRows:       snapshotProviderRows(),
+		filterInput:        filter,
 		keyInput:           ti,
 		codeInput:          codeIn,
 		accountIDInput:     acctIn,
@@ -119,44 +151,116 @@ func (m *model) closeConnectDialog() {
 	m.input.Focus()
 }
 
+// connectFilterInputWidth bounds the filter input so its rendered row stays a
+// single line inside the dialog's minimum width (see renderConnect).
+const connectFilterInputWidth = 40
+
+// snapshotProviderRows reads every provider's label and current connection
+// status once, so the provider stage can filter and render without re-reading
+// the auth store and opencode config on each keystroke.
+func snapshotProviderRows() []connectProviderRow {
+	rows := make([]connectProviderRow, 0, len(auth.Providers))
+	for i := range auth.Providers {
+		p := &auth.Providers[i]
+		sym, detail := auth.Status(p.ID)
+		rows = append(rows, connectProviderRow{idx: i, label: p.Label, sym: sym, detail: detail})
+	}
+	return rows
+}
+
+// providerRowsFor returns the cached provider rows in catalog order. A dialog
+// built directly rather than by openConnectDialog (tests) has no cache, so it
+// snapshots on demand — deliberately without assigning, so that no render path
+// mutates dialog state.
+func (d *connectDialog) providerRowsFor() []connectProviderRow {
+	if d == nil {
+		return nil
+	}
+	if d.providerRows != nil {
+		return d.providerRows
+	}
+	return snapshotProviderRows()
+}
+
+// filteredProviderRows returns the provider rows matching `query`. Matching
+// reuses the model picker's keyword-AND-fuzzy matcher so /connect and the
+// picker feel identical; the candidate is "label id status" so a query can
+// target any of the three (e.g. "open", "grok", or "api key" for the
+// configured ones). An empty query matches everything.
+func (d *connectDialog) filteredProviderRows(query string) []connectProviderRow {
+	rows := d.providerRowsFor()
+	if strings.TrimSpace(query) == "" {
+		return rows
+	}
+	out := make([]connectProviderRow, 0, len(rows))
+	for _, r := range rows {
+		candidate := strings.ToLower(r.label + " " + auth.Providers[r.idx].ID + " " + r.detail)
+		if modelPickerMatches(candidate, query) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// visibleProviderRows is filteredProviderRows driven by the live filter input.
+// Every provider-stage interaction — navigation, Enter, mouse hit-testing and
+// rendering — resolves through it, so all of them agree on which provider a
+// given row stands for.
+func (d *connectDialog) visibleProviderRows() []connectProviderRow {
+	return d.filteredProviderRows(d.filterInput.Value())
+}
+
+// ensureProviderSelected keeps providerIdx on a row the filter still shows, so
+// the highlighted provider is always one the user can act on. It is called
+// after every edit to the filter, because narrowing the list can drop the
+// previously selected provider out of the results.
+func (d *connectDialog) ensureProviderSelected() {
+	rows := d.visibleProviderRows()
+	for _, r := range rows {
+		if r.idx == d.providerIdx {
+			return
+		}
+	}
+	if len(rows) > 0 {
+		d.providerIdx = rows[0].idx
+	}
+}
+
+// moveProviderSelection moves the selection by one visible row, pinned at both
+// ends of the filtered list.
+func (d *connectDialog) moveProviderSelection(delta int) {
+	rows := d.visibleProviderRows()
+	if len(rows) == 0 {
+		return
+	}
+	pos := 0
+	for i, r := range rows {
+		if r.idx == d.providerIdx {
+			pos = i
+			break
+		}
+	}
+	next := pos + delta
+	if next < 0 || next >= len(rows) {
+		return
+	}
+	d.providerIdx = rows[next].idx
+}
+
 // buildMethods returns the available methods for the current provider.
+// buildMethods renders the method list for the selected provider. The
+// decision logic is auth.MethodsFor (internal/auth/methods.go), shared
+// with the web/desktop Connectors endpoints so the two surfaces cannot
+// drift; this only adapts the shape and appends the dialog's "cancel"
+// affordance, which is chrome rather than a way to connect.
 func (m *model) buildMethods() []connectMethod {
 	if m.connect == nil || m.connect.provider == nil {
 		return nil
 	}
-	p := m.connect.provider
-	out := []connectMethod{{id: "apikey", label: "API Key"}}
-	if plugin, ok := providerplugin.Get(p.ID); ok {
-		for _, am := range plugin.AuthMethods() {
-			if am.Run == nil {
-				continue
-			}
-			id := "plugin_" + am.Label
-			// Grok's x.com subscription needs cookies collected by the TUI,
-			// so it gets a dedicated method id handled outside the generic
-			// plugin dispatch.
-			if p.ID == "grok" && strings.Contains(am.Label, "Subscription") {
-				id = "grok_subscription"
-			}
-			out = append(out, connectMethod{id: id, label: am.Label})
-		}
-	} else {
-		switch p.OAuthFlow {
-		case "anthropic":
-			out = append(out,
-				connectMethod{id: "oauth_max", label: "Claude Pro/Max (OAuth)"},
-				connectMethod{id: "oauth_console", label: "Anthropic Console (OAuth → API key)"},
-			)
-		case "openai":
-			out = append(out, connectMethod{id: "oauth", label: "ChatGPT login (OAuth)"})
-		case "google":
-			out = append(out, connectMethod{id: "oauth", label: "Google (OAuth)"})
-		case "copilot":
-			out = append(out, connectMethod{id: "oauth", label: "GitHub device flow"})
-		}
-	}
-	if _, ok := auth.Get(p.ID); ok {
-		out = append(out, connectMethod{id: "remove", label: "Remove stored credential"})
+	shared := auth.MethodsFor(m.connect.provider)
+	out := make([]connectMethod, 0, len(shared)+1)
+	for _, method := range shared {
+		out = append(out, connectMethod{id: method.ID, label: method.Label})
 	}
 	out = append(out, connectMethod{id: "cancel", label: "Cancel"})
 	return out
@@ -169,15 +273,28 @@ func (m model) renderConnect() string {
 	}
 
 	var header, body, hint string
+	// topRows holds the chrome between the header and the stage body. It is
+	// blank for every stage except the provider stage, which shows the filter
+	// input there so the provider rows keep their existing screen-Y offsets.
+	var topRows string
 
 	switch m.connect.stage {
 	case connectStageProvider:
 		header = m.styles.Header.Render("Connect provider")
+		// The filter row's height is load-bearing for connectRowForY, so clamp it
+		// to one line: a wrapped input would push every provider row down by one.
+		topRows = lipgloss.NewStyle().MaxHeight(1).Render(
+			strings.ReplaceAll(m.connect.filterInput.View(), "\n", " "))
+		rows := m.connect.visibleProviderRows()
 		var b strings.Builder
-		for i, p := range auth.Providers {
-			sym, detail := auth.Status(p.ID)
-			line := fmt.Sprintf("%s  %-20s %s", sym, p.Label, hintStyle.Render(detail))
-			if i == m.connect.providerIdx {
+		if len(rows) == 0 {
+			// No trailing newline inside Render: the newline is appended below so
+			// TrimRight collapses this to a single row instead of leaving a blank.
+			b.WriteString("  " + dimStyle.Render(fmt.Sprintf("No providers match %q", strings.TrimSpace(m.connect.filterInput.Value()))) + "\n")
+		}
+		for _, r := range rows {
+			line := fmt.Sprintf("%s  %-20s %s", r.sym, r.label, hintStyle.Render(r.detail))
+			if r.idx == m.connect.providerIdx {
 				line = m.styles.Selected.Render(" " + line + " ")
 			} else {
 				line = "  " + line
@@ -185,17 +302,19 @@ func (m model) renderConnect() string {
 			b.WriteString(line + "\n")
 		}
 		rawLines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
-		sb := renderListScrollbar(len(rawLines), len(auth.Providers), 0, len(rawLines))
-		sbLines := strings.Split(sb, "\n")
-		for i, line := range rawLines {
-			sbCol := scrollbarTrackStyle.Render(scrollbarTrack)
-			if i < len(sbLines) {
-				sbCol = sbLines[i]
+		if len(rows) > 0 {
+			sb := renderListScrollbar(len(rawLines), len(rows), 0, len(rawLines))
+			sbLines := strings.Split(sb, "\n")
+			for i, line := range rawLines {
+				sbCol := scrollbarTrackStyle.Render(scrollbarTrack)
+				if i < len(sbLines) {
+					sbCol = sbLines[i]
+				}
+				rawLines[i] = line + sbCol
 			}
-			rawLines[i] = line + sbCol
 		}
 		body = strings.Join(rawLines, "\n") + "\n"
-		hint = hintStyle.Render("↑/↓ select · Enter continue · Esc cancel")
+		hint = hintStyle.Render("type to filter · ↑/↓ select · Enter continue · Esc clear/close")
 
 	case connectStageMethod:
 		header = m.styles.Header.Render("Method: " + m.connect.provider.Label)
@@ -283,7 +402,10 @@ func (m model) renderConnect() string {
 	if width < 60 {
 		width = 60
 	}
-	return borderStyle.Width(width).Render(header + "\n\n" + body + "\n" + hint)
+	if topRows == "" {
+		return borderStyle.Width(width).Render(header + "\n\n" + body + "\n" + hint)
+	}
+	return borderStyle.Width(width).Render(header + "\n" + topRows + "\n" + body + "\n" + hint)
 }
 
 func (m model) connectRowForY(y int) (int, bool) {
@@ -294,14 +416,17 @@ func (m model) connectRowForY(y int) (int, bool) {
 	var count int
 	switch m.connect.stage {
 	case connectStageProvider:
-		count = len(auth.Providers)
+		count = len(m.connect.visibleProviderRows())
 	case connectStageMethod:
 		count = len(m.connect.methods)
 	default:
 		return 0, false
 	}
 
-	idx := y - 3 // border top + header + blank line
+	// Row 0 is the top border, row 1 the header, row 2 the filter row (provider
+	// stage) or the blank spacer (every other stage) — so the first selectable
+	// row is y=3 for both stages.
+	idx := y - 3
 	if idx < 0 || idx >= count {
 		return 0, false
 	}
@@ -317,13 +442,22 @@ func (m model) selectConnectRow(index int) (tea.Model, tea.Cmd) {
 
 	switch d.stage {
 	case connectStageProvider:
-		if index < 0 || index >= len(auth.Providers) {
+		// `index` is a display row, so map it through the filter back to the
+		// provider it stands for.
+		rows := d.visibleProviderRows()
+		if index < 0 || index >= len(rows) {
 			return m, nil
 		}
-		d.providerIdx = index
+		d.providerIdx = rows[index].idx
 		d.provider = &auth.Providers[d.providerIdx]
 		d.methods = m.buildMethods()
 		d.methodIdx = 0
+		// Clear the filter so esc-from-the-method-stage returns to a full list
+		// with the chosen provider still highlighted. Keeping it would mean the
+		// next character typed appends to "open" instead of starting a new
+		// query, which reads as a broken filter.
+		d.filterInput.SetValue("")
+		d.ensureProviderSelected()
 		d.stage = connectStageMethod
 		return m, nil
 	case connectStageMethod:
@@ -351,22 +485,35 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case connectStageProvider:
 		switch keyStr {
 		case "esc":
+			// Esc peels one layer at a time: clear the filter first, close second.
+			if d.filterInput.Value() != "" {
+				d.filterInput.SetValue("")
+				d.ensureProviderSelected()
+				return m, nil
+			}
 			m.closeConnectDialog()
 			return m, nil
 		case "up":
-			if d.providerIdx > 0 {
-				d.providerIdx--
-			}
+			d.moveProviderSelection(-1)
 			return m, nil
 		case "down":
-			if d.providerIdx < len(auth.Providers)-1 {
-				d.providerIdx++
-			}
+			d.moveProviderSelection(1)
 			return m, nil
 		case "enter":
-			return m.selectConnectRow(d.providerIdx)
+			// Enter acts on the highlighted row, which is a filtered row: find
+			// its position rather than passing providerIdx through as if the
+			// list were unfiltered.
+			for i, r := range d.visibleProviderRows() {
+				if r.idx == d.providerIdx {
+					return m.selectConnectRow(i)
+				}
+			}
+			return m, nil
 		}
-		return m, nil
+		var cmd tea.Cmd
+		d.filterInput, cmd = d.filterInput.Update(msg)
+		d.ensureProviderSelected()
+		return m, cmd
 
 	case connectStageMethod:
 		switch keyStr {

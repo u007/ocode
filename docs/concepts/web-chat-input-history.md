@@ -10,7 +10,7 @@ tags:
   - history
   - keyboard
   - TUI-parity
-timestamp: 2026-09-22T02:38:46Z
+timestamp: 2026-10-01T05:24:40Z
 ---
 # Web Chat Composer Input History (↑/↓ Navigation)
 
@@ -43,7 +43,7 @@ The composer reads it imperatively on a key press and never renders from it, so 
 | Event | Action | Where |
 |---|---|---|
 | `new-*` → real session (first send) | `rekeyInputHistory(tempId, realId)` — old entries (chronologically older) are **prepended** | `sessionEvents.ts:226` (off `session_started`); `App.tsx:790` (`rekeySession`, first-send path) |
-| `/reset-id` | `rekeyInputHistory(oldId, newId)` — same prepend rule; re-key happens **before** return so the tab already points at the new id | `sessionEvents.ts:266` (off `session_rekeyed`); `App.tsx:1019` (reset-id caller of `rekeySession`) |
+| `/reset-id` | `rekeyInputHistory(oldId, newId)` — same prepend rule; re-key happens **before** return so the tab already points at the new id | `sessionEvents.ts:266` (off `session_rekeyed`); `App.tsx:1182` (reset-id caller of `rekeySession`) |
 | Tab close | `clearInputHistory(activeTabId)` | `App.tsx:770` (`closeActiveChat` / Cmd+W teardown) |
 
 ## Tests

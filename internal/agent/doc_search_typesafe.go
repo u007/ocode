@@ -104,7 +104,7 @@ func (a *Agent) judgeDocSearchResults(client *TypesafeClient, query string, docs
 		return docs, nil
 	}
 
-	keepSet, err := a.judgeRelevanceQuestions(context.Background(), client, "KNOWLEDGE", "doc_search_typesafe", ids, state, questions)
+	keepSet, _, err := a.judgeRelevanceQuestions(context.Background(), client, "KNOWLEDGE", "doc_search_typesafe", ids, state, questions)
 	if err != nil {
 		return nil, err
 	}

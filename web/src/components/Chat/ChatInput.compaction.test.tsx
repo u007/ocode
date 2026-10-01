@@ -4,6 +4,7 @@ import ChatInput from "./ChatInput";
 import { dispatchCommand, type CommandContext } from "./commands";
 import { clearQueue, dispatchQueueChanged, getQueue } from "../../lib/tabQueue";
 import { clearCompaction, getCompactionState, setCompactionState } from "../../lib/compactionState";
+import { __resetSessionActivityForTests, setCommandActivity, setSkillActivity } from "../../lib/commandActivity";
 import { clearDraft } from "../../lib/tabDrafts";
 import { ChatProvider, useChatDispatch, type ChatAction } from "../../stores/chatStore";
 import type { Dispatch } from "react";
@@ -61,6 +62,7 @@ describe("composer compaction lifecycle", () => {
       clearDraft(id);
       clearCompaction(id);
     }
+    __resetSessionActivityForTests();
   });
   afterEach(() => { vi.useRealTimers(); });
 
@@ -163,6 +165,67 @@ describe("composer compaction lifecycle", () => {
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith("other session message");
     expect(getCompactionState(A)?.status).toBe("active");
     await act(async () => { request.resolve({ original_len: 20, compacted_len: 4 }); });
+  });
+
+  it("does not stack a second elapsed bar while this client is the one running /compact", async () => {
+    const request = deferred();
+    compactSession.mockReturnValueOnce(request.promise);
+    render(composer());
+    await submit("/compact ");
+    // App.handleCommand wraps its single await dispatchCommand in
+    // setCommandActivity, which is the entry CommandActivityBar paints from
+    // (that pairing is pinned in App.commandActivity.test.tsx). This file's
+    // onSlashCommand stub bypasses App, so record the entry the wrapper sets.
+    act(() => { setCommandActivity(A, "/compact"); });
+    act(() => { vi.advanceTimersByTime(12000); });
+
+    // One bar only, and it is the command bar's — the composer must not stack
+    // "Running /compact" on top of "Compacting conversation…".
+    const bars = screen.getAllByRole("status");
+    expect(bars).toHaveLength(1);
+    expect(bars[0]).toHaveTextContent("Running /compact · 12s elapsed");
+    expect(screen.queryByText(/Compacting conversation/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Dismiss compaction status")).not.toBeInTheDocument();
+    await act(async () => { request.resolve({ original_len: 42, compacted_len: 7 }); });
+  });
+
+  it("still paints the compaction bar for a compaction this client did not start", async () => {
+    // A server-side automatic pass — or another tab's /compact — sets compaction
+    // state with no local command activity behind it. That cross-client case is
+    // what this bar is for, and CommandActivityBar cannot cover it.
+    render(composer());
+    act(() => { setSkillActivity(A, "git-commit-push"); });
+    act(() => { setCompactionState(A, { status: "active", startedAt: Date.now() }); });
+    act(() => { vi.advanceTimersByTime(12000); });
+
+    // The suppression is scoped to /compact, so an unrelated skill bar and the
+    // compaction bar coexist rather than one hiding the other.
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    expect(screen.getByText(/Compacting conversation/)).toBeInTheDocument();
+    expect(screen.getByText(/Skill "git-commit-push"/)).toBeInTheDocument();
+  });
+
+  it("keeps the bar for an auto-compaction, which sets no command activity at all", async () => {
+    // Auto-compaction is server-driven: it reaches the client through the
+    // compaction_started event / /state reconcile and never through the command
+    // wrapper, so the activity store is empty and this bar is the only signal.
+    render(composer());
+    act(() => { setCompactionState(A, { status: "active", startedAt: Date.now() }); });
+    act(() => { vi.advanceTimersByTime(12000); });
+    expect(screen.getByRole("status")).toHaveTextContent(/Compacting conversation/);
+  });
+
+  it("keeps the bar when an unrelated command, not /compact, is the reported activity", async () => {
+    // Pins the LABEL check, not just the `command` kind check: /recap running
+    // alongside a compaction must not suppress it.
+    render(composer());
+    act(() => { setCommandActivity(A, "/recap"); });
+    act(() => { setCompactionState(A, { status: "active", startedAt: Date.now() }); });
+    act(() => { vi.advanceTimersByTime(12000); });
+    // Both bars, because they name different work.
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    expect(screen.getByText(/Compacting conversation/)).toBeInTheDocument();
+    expect(screen.getByText(/Running/)).toBeInTheDocument();
   });
 
   it("runs queued work after a failed compaction without dismissing the error", async () => {

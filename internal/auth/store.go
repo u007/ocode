@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/u007/ocode/internal/hook"
 	"github.com/u007/ocode/internal/paths"
@@ -377,7 +378,15 @@ func Set(provider string, cred Credential) error {
 	}
 	cache[provider] = cred
 	cacheLoaded = true
-	return persistLocked()
+	if err := persistLocked(); err != nil {
+		return err
+	}
+	// Bump only on a real mutation, and only after the new credential is
+	// durably readable. NOT in persistLocked: that also runs on the seed-on-
+	// load path, which materialises an empty auth.json without changing any
+	// credential, so bumping there would invalidate every agent for nothing.
+	credentialVersion.Add(1)
+	return nil
 }
 
 // Remove deletes a credential.
@@ -389,7 +398,14 @@ func Remove(provider string) error {
 	}
 	delete(cache, provider)
 	cacheLoaded = true
-	return persistLocked()
+	if err := persistLocked(); err != nil {
+		return err
+	}
+	// Removing a key must invalidate a cached client too, or the session keeps
+	// authenticating with a credential the user deleted. See Set for why this
+	// is not bumped inside persistLocked.
+	credentialVersion.Add(1)
+	return nil
 }
 
 // OnCredentialsSaved is invoked after every successful auth.json
@@ -423,4 +439,28 @@ func persistLocked() error {
 	}
 	OnCredentialsSaved.Fire()
 	return nil
+}
+
+// credentialVersion counts every credential mutation across BOTH stores (the
+// base auth.json here and the per-profile overlays in profile_store.go). It is
+// a single counter, deliberately not two summed: summing two monotonic
+// counters can collide, and a collision is a missed invalidation.
+//
+// Callers that cache something built from credentials — an LLM client resolves
+// its key at construction (agent.NewClientWithProfile) — snapshot this at build
+// time and compare it later to notice an in-place edit that a name comparison
+// would miss. internal/server.reconcileProfileAgent is that caller.
+var credentialVersion atomic.Int64
+
+// CredentialVersion returns the counter bumped on every credential mutation.
+func CredentialVersion() int64 {
+	return credentialVersion.Load()
+}
+
+// SetCredentialVersionForTest pins the credential version. It exists only so a
+// test that must mutate the process-global store (which bumps the version on
+// every write) can restore it afterwards; a leaked bump makes every agent
+// cached with an older snapshot look stale and rebuild unexpectedly.
+func SetCredentialVersionForTest(v int64) {
+	credentialVersion.Store(v)
 }

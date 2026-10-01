@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -898,6 +899,10 @@ func TestDismissQuestionAllowsNextTurnAndHidesSentinel(t *testing.T) {
 		agent:    agent.NewAgent(questionFakeClient{}, nil, nil, nil),
 		model:    "fake-model",
 		messages: append([]agent.Message(nil), ask...),
+		// buildAgentSession always snapshots this; a bare literal leaves 0,
+		// which reconcileProfileAgent reads as "credentials changed" and tries
+		// to rebuild — impossible for a fake-model session. See newTestSession.
+		credVersion: auth.CredentialVersion(),
 	}
 	h.agents[id] = as
 
