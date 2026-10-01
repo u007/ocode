@@ -200,6 +200,15 @@ export default function ConnectorsForm({ host }: { host?: string }) {
                   <Input
                     aria-label="API key"
                     placeholder="API key"
+                    // Masked, like the TUI /connect dialog (textinput
+                    // EchoPassword in internal/tui/connect.go) and like every
+                    // other key field in Settings. A plain-text field leaves the
+                    // secret on screen, in screenshots and in screen-shares;
+                    // autoComplete is off so a password manager does not offer to
+                    // fill or persist it either.
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                   />

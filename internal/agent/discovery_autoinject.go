@@ -269,9 +269,11 @@ func (a *Agent) logAutoInjectMiss(keep []discovery.Doc, scores map[string]float6
 	a.emitDebug("DISCOVERY", fmt.Sprintf("auto-inject: no skill qualified (best %q noul=%.3f < floor %.2f)", bestName, best, discoveryAutoInjectFloor))
 }
 
-// autoInjectBlock renders the staged auto-inject block, or "" when there is
-// none. Read under the mutex because a status read can run on another
-// goroutine.
+// autoInjectBlock renders every staged auto-inject block, oldest first, or ""
+// when there is none. One message carries all of them so the tail stays a single
+// volatile append (the cached prefix above it is untouched either way).
+//
+// Read under the mutex because a status read can run on another goroutine.
 func (a *Agent) autoInjectBlock() string {
 	if a.disco == nil {
 		return ""
@@ -279,7 +281,13 @@ func (a *Agent) autoInjectBlock() string {
 	a.disco.autoInjectMu.Lock()
 	sel := a.disco.autoInject
 	a.disco.autoInjectMu.Unlock()
-	return renderAutoInjectBlock(sel)
+	var b strings.Builder
+	for _, s := range sel {
+		if block := renderAutoInjectBlock(s); block != "" {
+			b.WriteString(block)
+		}
+	}
+	return b.String()
 }
 
 // recordAutoInject stages sel for emission unless the chat already has it or this
@@ -304,7 +312,10 @@ func (a *Agent) recordAutoInject(sel *autoInjectSkill, messages []Message) bool 
 		return false
 	}
 	a.disco.autoInjected[sel.Name] = true
-	a.disco.autoInject = sel
+	// Appended, never assigned: an earlier staged skill keeps its block (see the
+	// autoInject field comment). The sticky check above is what keeps a name out
+	// of this slice twice, so no name-based dedupe is needed here.
+	a.disco.autoInject = append(a.disco.autoInject, sel)
 	return true
 }
 

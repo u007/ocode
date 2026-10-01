@@ -174,6 +174,27 @@ export function dropCrossProjectDuplicateTabs(
   return changed ? out : tabsByProject;
 }
 
+/** Reconciles active ids against a FINAL tab map: a project left with no tabs
+ *  loses its entry, and an id naming a tab that is not in its list (dropped as a
+ *  cross-project duplicate) moves to the last surviving tab.
+ *
+ *  Both tab-assembly paths MUST run this after `dropCrossProjectDuplicateTabs`,
+ *  because every id they resolved earlier was resolved against the pre-dedupe
+ *  lists. Without it the two paths disagree about which tab is active: the
+ *  restore leaves a dangling id while the refetch re-points it. */
+function reconcileActiveTabs(
+  tabsByProject: Record<string, Tab[]>,
+  activeTabByProject: Record<string, string | null>,
+): Record<string, string | null> {
+  const out = { ...activeTabByProject };
+  for (const path of Object.keys(out)) {
+    const list = tabsByProject[path];
+    if (!list) delete out[path];
+    else if (!list.some((t) => t.id === out[path])) out[path] = list[list.length - 1].id;
+  }
+  return out;
+}
+
 /** The Tab bound to a session id, across every project. Lets host resolution
  *  read the tab's own host instead of re-deriving it from the (possibly
  *  ambiguous) project path. */
@@ -381,10 +402,13 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         if (localActive && merged.some((m) => m.id === localActive)) activeTabByProject[path] = localActive;
         else if (!activeTabByProject[path]) activeTabByProject[path] = merged[merged.length - 1].id;
       }
+      const deduped = dropCrossProjectDuplicateTabs(tabsByProject);
       return {
         ...state,
-        tabsByProject: dropCrossProjectDuplicateTabs(tabsByProject),
-        activeTabByProject,
+        tabsByProject: deduped,
+        // Reconciled AFTER the dedupe: the ids above were resolved against the
+        // pre-dedupe lists, so one can name a tab this pass just dropped.
+        activeTabByProject: reconcileActiveTabs(deduped, activeTabByProject),
         tabsRestored: true,
       };
     }
@@ -581,15 +605,11 @@ function mergeExternalTabs(prev: ProjectState, external: RestoredTabs): Restored
   const dedupedByProject = dropCrossProjectDuplicateTabs(mergedByProject);
   // Remove projects that were deleted externally (no real nor new tabs), and
   // re-point an active id whose tab was dropped as a cross-project duplicate.
-  for (const path of Object.keys(mergedActive)) {
-    const list = dedupedByProject[path];
-    if (!list) delete mergedActive[path];
-    else if (!list.some((t) => t.id === mergedActive[path])) mergedActive[path] = list[list.length - 1].id;
-  }
+  const dedupedActive = reconcileActiveTabs(dedupedByProject, mergedActive);
   const prevStr = JSON.stringify({ tbp: prev.tabsByProject, atb: prev.activeTabByProject });
-  const nextStr = JSON.stringify({ tbp: dedupedByProject, atb: mergedActive });
+  const nextStr = JSON.stringify({ tbp: dedupedByProject, atb: dedupedActive });
   if (prevStr === nextStr) return null;
-  return { tabsByProject: dedupedByProject, activeTabByProject: mergedActive };
+  return { tabsByProject: dedupedByProject, activeTabByProject: dedupedActive };
 }
 
 interface ProjectContextType {

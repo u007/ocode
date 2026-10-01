@@ -220,9 +220,9 @@ func TestChatAlreadyHasSkillFalseOnUnrelatedChat(t *testing.T) {
 func TestInjectDiscoveryContextEmitsAutoInjectBlock(t *testing.T) {
 	a := newAutoInjectAgent(t)
 	base := []Message{{Role: "user", Content: "hi"}}
-	a.disco.autoInject = &autoInjectSkill{
+	a.disco.autoInject = []*autoInjectSkill{{
 		Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF WORKFLOW BODY", Noul: 0.93,
-	}
+	}}
 
 	got := a.injectDiscoveryContext(base)
 	last := got[len(got)-1]
@@ -248,9 +248,9 @@ func TestInjectDiscoveryContextAutoInjectKeepsSystemBlockByteIdentical(t *testin
 	base := []Message{{Role: "user", Content: "hi"}}
 
 	without := a.injectDiscoveryContext(base)
-	a.disco.autoInject = &autoInjectSkill{
+	a.disco.autoInject = []*autoInjectSkill{{
 		Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF WORKFLOW BODY", Noul: 0.93,
-	}
+	}}
 	with := a.injectDiscoveryContext(base)
 
 	sysBefore := systemBlockOf(t, without)
@@ -296,7 +296,7 @@ func TestRecordAutoInjectMarksStickyAndDedupeReplays(t *testing.T) {
 
 	// First selection is recorded and emitted.
 	if a.recordAutoInject(sel, []Message{{Role: "user", Content: "hi"}}) {
-		if a.disco.autoInject == nil || a.disco.autoInject.Name != "best" {
+		if len(a.disco.autoInject) != 1 || a.disco.autoInject[0].Name != "best" {
 			t.Fatalf("selected skill not staged for emission: %+v", a.disco.autoInject)
 		}
 	} else {
@@ -319,7 +319,7 @@ func TestRecordAutoInjectRefusedWhenChatAlreadyHasSkill(t *testing.T) {
 	if a.recordAutoInject(sel, msgs) {
 		t.Fatal("a skill the chat already loaded must not be injected again")
 	}
-	if a.disco.autoInject != nil {
+	if len(a.disco.autoInject) != 0 {
 		t.Fatal("nothing may be staged for emission")
 	}
 }
@@ -336,13 +336,98 @@ func TestResetAutoInjectedClearsStickyAndStaged(t *testing.T) {
 	if len(a.disco.autoInjected) != 0 {
 		t.Fatalf("sticky set must be cleared by compaction, got %v", a.disco.autoInjected)
 	}
-	if a.disco.autoInject != nil {
+	if len(a.disco.autoInject) != 0 {
 		t.Fatal("a compacted-away skill must not keep being emitted")
 	}
 	// And it can be selected again, because after the splice the model no
 	// longer has the body.
 	if !a.recordAutoInject(sel, []Message{{Role: "user", Content: "summary only"}}) {
 		t.Fatal("after a reset the skill must be selectable again")
+	}
+}
+
+// A second confident pick must NOT evict the first. The blocks are request-time
+// only and never persisted, so an evicted body is not "one turn stale" — it is
+// gone from the prompt for the rest of the session, because the sticky set
+// already refuses to select that skill again.
+func TestRecordAutoInjectKeepsEarlierSkillWhenASecondIsPicked(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	first := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF BODY", Noul: 0.91}
+	second := &autoInjectSkill{Name: "docx", Source: "/x/docx/SKILL.md", Content: "DOCX BODY", Noul: 0.93}
+
+	if !a.recordAutoInject(first, msgs) {
+		t.Fatal("setup: the first selection should be staged")
+	}
+	if !a.recordAutoInject(second, msgs) {
+		t.Fatal("a DIFFERENT skill must still be stageable; only a replay of the same name is refused")
+	}
+
+	for _, want := range []string{"PDF BODY", "DOCX BODY"} {
+		if !strings.Contains(a.autoInjectBlock(), want) {
+			t.Fatalf("picking a second skill silently dropped %q from the prompt.\nblock: %q", want, a.autoInjectBlock())
+		}
+	}
+	// The same through the real injection path, not just the helper.
+	injected := a.injectDiscoveryContext(msgs)
+	var joined strings.Builder
+	for _, m := range injected {
+		joined.WriteString(m.Content)
+	}
+	for _, want := range []string{"PDF BODY", "DOCX BODY"} {
+		if !strings.Contains(joined.String(), want) {
+			t.Fatalf("injected prompt is missing %q", want)
+		}
+	}
+}
+
+// The staged block is deliberately session-lived, not turn-lived: nothing
+// persists it, so clearing it between turns would drop the body from the prompt
+// while the sticky set still refused to re-select it.
+func TestAutoInjectBlockIsStillEmittedOnALaterTurn(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	pdf := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF BODY", Noul: 0.91}
+	if !a.recordAutoInject(pdf, []Message{{Role: "user", Content: "hi"}}) {
+		t.Fatal("setup: the first selection should be staged")
+	}
+
+	// A later turn: the transcript has grown and a second skill is picked.
+	later := []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "done"},
+		{Role: "user", Content: "now edit a docx"},
+	}
+	if !a.recordAutoInject(&autoInjectSkill{Name: "docx", Source: "/x/docx/SKILL.md", Content: "DOCX BODY", Noul: 0.9}, later) {
+		t.Fatal("the later turn's skill should be staged")
+	}
+	if !strings.Contains(a.autoInjectBlock(), "PDF BODY") {
+		t.Fatalf("the earlier skill's body must stay in the prompt across turns.\nblock: %q", a.autoInjectBlock())
+	}
+}
+
+// After the compaction splice the model genuinely has neither body, so every
+// staged block goes and every name becomes selectable again.
+func TestResetAutoInjectedClearsEveryStagedSkill(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	pdf := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF BODY", Noul: 0.91}
+	docx := &autoInjectSkill{Name: "docx", Source: "/x/docx/SKILL.md", Content: "DOCX BODY", Noul: 0.93}
+	for _, sel := range []*autoInjectSkill{pdf, docx} {
+		if !a.recordAutoInject(sel, msgs) {
+			t.Fatalf("setup: %q should be staged", sel.Name)
+		}
+	}
+
+	a.resetAutoInjected()
+
+	if block := a.autoInjectBlock(); block != "" {
+		t.Fatalf("compaction must drop every staged body, got %q", block)
+	}
+	summaryOnly := []Message{{Role: "user", Content: "summary only"}}
+	for _, sel := range []*autoInjectSkill{pdf, docx} {
+		if !a.recordAutoInject(sel, summaryOnly) {
+			t.Fatalf("after a reset %q must be selectable again", sel.Name)
+		}
 	}
 }
 

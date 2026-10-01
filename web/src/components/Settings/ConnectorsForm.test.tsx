@@ -135,6 +135,26 @@ describe("ConnectorsForm — saving an API key", () => {
     // Still expanded: a closed form reads as "saved".
     expect(screen.getByLabelText(/api key/i)).toBeTruthy();
   });
+
+  // A pasted or typed key is a live secret: a plain-text field puts it on
+  // screen, in a screenshot, and in a screen-share. The TUI /connect dialog
+  // already uses password echo for the same field (internal/tui/connect.go),
+  // and every other key field in Settings does too (ProfilesManager,
+  // SecurityForm, VaultForm) — this one was the outlier.
+  it("masks the API key field and opts it out of autofill", async () => {
+    render(<ConnectorsForm host="host-a" />);
+    await waitFor(() => expect(listProviders).toHaveBeenCalled());
+
+    fireEvent.click(within(rowFor("openai")).getByRole("button", { name: /connect/i }));
+
+    const field = screen.getByLabelText(/api key/i) as HTMLInputElement;
+    expect(field.type).toBe("password");
+    expect(field.getAttribute("autocomplete")).toBe("off");
+    // Masking must not break typing or saving.
+    fireEvent.change(field, { target: { value: "sk-live-123" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(setCredential).toHaveBeenCalledWith("openai", { apiKey: "sk-live-123" }, "host-a"));
+  });
 });
 
 describe("ConnectorsForm — remove is gated behind a rendered confirm", () => {

@@ -54,17 +54,23 @@ type discoveryState struct {
 	// writes it while /api status reads run on another goroutine.
 	tailMu sync.Mutex
 	tail   []Message
-	// autoInject is the skill whose body is inlined into the prompt this turn
-	// (nil when nothing is selected). It is a request-time injection, never
-	// persisted, and is re-rendered on each Step of the turn by
-	// injectDiscoveryContext.
-	autoInject *autoInjectSkill
+	// autoInject holds the skills whose bodies are inlined into the prompt, in
+	// the order they were selected. It is a slice, not a single slot: the blocks
+	// are request-time injections that are never persisted, so a selection that
+	// OVERWROTE an earlier one dropped that body from the prompt for the rest of
+	// the session — autoInjected still refused to re-select it, and only a
+	// compaction cleared it. Lifetime is the session (cleared together with
+	// autoInjected by resetAutoInjected at the compaction splice), NOT the turn:
+	// nothing persists the block, so dropping it between turns would lose the
+	// body with no way to get it back.
+	// Guarded by autoInjectMu because injectDiscoveryContext (the agent
+	// goroutine) reads it while a status read can run concurrently.
+	autoInject []*autoInjectSkill
 	// autoInjected is the set of skills already auto-injected this session. It
 	// is what makes a selection happen at most once per skill, and it is cleared
 	// at the compaction splice (resetAutoInjected) because the blocks were never
-	// persisted — after a splice the model no longer has them.
-	// Guarded by autoInjectMu because injectDiscoveryContext (the agent
-	// goroutine) reads autoInject while a status read can run concurrently.
+	// persisted — after a splice the model no longer has them. It is also what
+	// guarantees autoInject never holds the same name twice.
 	autoInjectMu sync.Mutex
 	autoInjected map[string]bool
 }

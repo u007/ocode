@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-10-02 — Three review findings: a silently dropped skill, a dangling active tab, an unmasked key
+
+- **Picking a second auto-injected skill no longer drops the first.**
+  `discoveryState.autoInject` was a single slot, so `recordAutoInject` overwrote
+  the previous selection while the sticky `autoInjected` set kept the evicted name
+  marked as done. Because these blocks are request-time injections that are never
+  persisted, the first body did not merely go stale — it left the prompt for the
+  rest of the session, with only a compaction able to bring it back. It is a
+  slice now, appended to and rendered oldest-first into the one volatile tail
+  message, so the cached system block above it is still untouched. The field
+  comment no longer claims a "this turn" lifetime it never had: the staged blocks
+  are session-lived and cleared at the compaction splice, which is deliberate —
+  nothing persists them, so a per-turn clear would lose the body outright.
+- **`RESTORE_TABS` reconciles active tab ids after deduping, as `mergeExternalTabs`
+  already did.** The active ids were resolved against the pre-dedupe tab lists
+  and `dropCrossProjectDuplicateTabs` ran afterwards, so a project whose active
+  tab was the cross-project duplicate kept an id naming a tab it could no longer
+  reach — the tab strip showed nothing active while the pane still rendered that
+  session's chat. Both paths now call one `reconcileActiveTabs` helper, so they
+  cannot drift apart again.
+- **The Connectors API key is masked.** `type="password"` with
+  `autoComplete="off"`, matching the TUI `/connect` dialog's password echo and
+  every other key field in Settings (ProfilesManager, SecurityForm, VaultForm).
+  It was the one credential field rendered as plain text, leaving a live secret on
+  screen, in screenshots and in screen-shares.
+
 ## 2026-10-01 — Pulse: a live card now streams its turn on the card itself
 
 The Pulse dashboard exists to watch work happen, but a card's output was
