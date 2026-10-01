@@ -136,7 +136,7 @@ func TestEnsureHTRServe_ReusesHealthy(t *testing.T) {
 	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
 	// nil supervisor: reuse-only mode must succeed without spawning.
 	t.Setenv("HOME", t.TempDir())
-	if err := htrWriteOwner(identity, port, os.Getpid(), socket, os.Args[0], time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, os.Args[0], time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	st, err := EnsureHTRServe(nil, HTROptions{Enabled: true, Port: port, SocketPath: socket}, log.Default())
@@ -331,7 +331,7 @@ func TestHTRDaemonStatus(t *testing.T) {
 	}
 
 	// Owner marker + healthy daemon: running, managed, binary from the marker.
-	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	info = HTRDaemonStatus(port, socket)
@@ -358,7 +358,7 @@ func TestStopHTRServe_RemovesStaleMarker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	port := freePort(t)
 	// PID 999999 is not alive; the marker is stale and must be cleaned up.
-	if err := htrWriteOwner("stale", port, 999999, "stale-socket", os.Args[0], time.Now()); err != nil {
+	if err := htrWriteOwner("stale", port, 999999, "stale-socket", os.Args[0], time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	st, err := StopHTRServe(nil, port, log.Default())
@@ -378,7 +378,7 @@ func TestStopHTRServe_RefusesUnverified(t *testing.T) {
 	port := freePort(t)
 	// Our own PID is alive, but neither the executable match nor a managed
 	// health probe can attribute it to ocode, so the stop must refuse.
-	if err := htrWriteOwner("unverified", port, os.Getpid(), "unverified-socket", filepath.Join(t.TempDir(), "not-a-real-binary"), time.Now()); err != nil {
+	if err := htrWriteOwner("unverified", port, os.Getpid(), "unverified-socket", filepath.Join(t.TempDir(), "not-a-real-binary"), time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := StopHTRServe(nil, port, log.Default()); err == nil {
@@ -415,7 +415,7 @@ func TestStopHTRServe_KillsVerifiedDaemon(t *testing.T) {
 
 	// The executable does not match the helper's comm, so verification comes
 	// from the managed health probe.
-	if err := htrWriteOwner(identity, port, helper.Process.Pid, socket, os.Args[0], time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, helper.Process.Pid, socket, os.Args[0], time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	sup := newTestSupervisor(t)
@@ -466,7 +466,7 @@ func TestListHTRTabs(t *testing.T) {
 	if _, err := ListHTRTabs(port); err == nil {
 		t.Fatal("listing without an owner marker must error")
 	}
-	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	tabs, err := ListHTRTabs(port)

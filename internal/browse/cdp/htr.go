@@ -16,9 +16,10 @@ package cdp
 // any cross-process lease is alive. Heartbeats expire after leaseTTL; the last
 // explicit release terminates only the daemon recorded in ocode's own marker.
 // A daemon on the shared port (3845) that ocode did not start is ADOPTED — it
-// answers on the port and is reused — but it gets no ocode marker, and both
-// terminateManagedHTR and StopHTRServe read that marker, so ocode never stops
-// a daemon it did not start.
+// answers on the port and is reused. Adopting never grants ocode the right to
+// stop it: the marker carries both OwnerPID (whoever last wrote it) and
+// StartedByPID (whoever actually spawned the daemon), and only the latter can
+// authorise a stop. See shouldStopSharedDaemon.
 //
 // Limits (documented, not silently degraded):
 //   - The Chrome profile stays ephemeral (fresh tmpDir per launch), so
@@ -395,10 +396,14 @@ func HTRDaemonStatus(port int, socketPath string) HTRDaemonInfo {
 }
 
 // StopHTRServe terminates the ocode-managed `htrcli serve` daemon recorded in
-// ocode's owner marker for the configured port. sup may be nil; when non-nil
-// the supervisor record is marked killed so an immediate restart can replace
-// it. A standalone htrcli daemon is never touched. Stopping an already-stopped
-// daemon is a no-op that reports Running:false.
+// ocode's owner marker for the configured port, but only when this process is
+// entitled to: see shouldStopSharedDaemon. A daemon this process did not spawn
+// — another ocode instance's, an external run's, an adopted one, or one another
+// live instance still holds a lease on — is left running and reported as such
+// with a nil error; that refusal is the contract, not a failure. sup may be
+// nil; when non-nil the supervisor record is marked killed so an immediate
+// restart can replace it. A standalone htrcli daemon is never touched. Stopping
+// an already-stopped daemon is a no-op that reports Running:false.
 func StopHTRServe(sup *tool.ProcessSupervisor, port int, lg *log.Logger) (HTRStatus, error) {
 	p := htrPortEnv(port)
 	addr := htrAddr(p)
@@ -416,16 +421,30 @@ func StopHTRServe(sup *tool.ProcessSupervisor, port int, lg *log.Logger) (HTRSta
 		}
 		return HTRStatus{Running: false, Addr: addr, Socket: owner.Socket}, nil
 	}
-	// Only ever kill a process positively attributable to ocode: either the
-	// owner marker's executable/start-token match, or the managed identity's
-	// bearer-protected health probe answers.
-	if !processMatchesOwner(owner) && !htrHealthyForInstance(owner.Port, owner.Socket, owner.Identity) {
-		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket},
-			fmt.Errorf("managed htr daemon pid %d could not be verified; refusing to stop it", owner.PID)
-	}
-	proc, err := os.FindProcess(owner.PID)
+	// Stop rights are decided before anything is signalled to the process. A
+	// refusal is a normal outcome, not a failure: the daemon was started by
+	// another ocode instance, adopted, or externally, or another instance is
+	// still using it — and in every one of those cases it must survive this one
+	// exiting. The marker is deliberately left in place; it is the only record
+	// of who spawned the daemon, and deleting it would make the next run see "no
+	// daemon" rather than "not mine". Both refusals are unreachable by then
+	// (owner.PID > 0 above, and the process is alive), so a refusal here is
+	// either provenance or a live foreign lease.
+	stopped, err := shouldStopSharedDaemon(owner)
 	if err != nil {
-		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket}, fmt.Errorf("find htr daemon pid %d: %w", owner.PID, err)
+		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket}, err
+	}
+	if !stopped {
+		reason := "this process did not spawn it"
+		if owner.StartedByPID == os.Getpid() {
+			reason = "another ocode instance still holds a lease on it"
+		}
+		lg.Printf("htr: leaving daemon pid %d on %s alone: %s", owner.PID, addr, reason)
+		return HTRStatus{Running: pidAlive(owner.PID), Addr: addr, Socket: owner.Socket}, nil
+	}
+	proc, findErr := os.FindProcess(owner.PID)
+	if findErr != nil {
+		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket}, fmt.Errorf("find htr daemon pid %d: %w", owner.PID, findErr)
 	}
 	if err := proc.Kill(); err != nil {
 		return HTRStatus{Running: true, Addr: addr, Socket: owner.Socket}, fmt.Errorf("stop htr daemon pid %d: %w", owner.PID, err)
@@ -474,15 +493,47 @@ func ListHTRTabs(port int) ([]HTRTab, error) {
 }
 
 // htrOwner is the multi-process ownership record.
+//
+// OwnerPID and StartedByPID answer different questions and must not be collapsed
+// into one:
+//
+//   - OwnerPID is "which ocode process wrote this file". It describes the write.
+//   - StartedByPID is "which process spawned the daemon". It describes the
+//     daemon, and it is the only field that can authorise stopping it.
+//
+// Today the spawn site is also the only writer, so the two hold the same value
+// for every marker this build produces. They are kept separate anyway because
+// the stop rule must survive the day they stop agreeing: a marker left on disk
+// by one instance is read by whichever instance asks to stop next, and that
+// instance is frequently an adopter rather than the spawner. Adopting writes no
+// marker (adoptHTRServe deliberately leaves the file alone), so the marker keeps
+// naming the spawner while a different process is the one asking — which is
+// exactly the case that must be refused. A marker written before StartedByPID
+// existed decodes to 0: "unknown", not "ours", and is therefore also never
+// stopped. See shouldStopSharedDaemon.
+//
+// Known limit: StartedByPID is a bare pid with no start token, so a stale
+// marker whose daemon died can name a pid that the OS later hands to some
+// unrelated process, and that process would inherit stop rights. Closing that
+// would need a spawner start token, which is a new field and out of scope here.
+//
+// Orphan note: if ocode is SIGKILLed the daemon outlives it. The next ocode run
+// adopts that orphan without stop rights (StartedByPID names a dead process), so
+// an orphan can outlive every ocode process. That is intended, not an oversight:
+// a survivor is indistinguishable from a daemon the user started themselves, and
+// the stop rule forbids killing those. The pid is surfaced in the Settings
+// status so the user can end a survivor deliberately; there is no auto-reaping.
 type htrOwner struct {
-	Identity   string    `json:"identity"`
-	PID        int       `json:"daemon_pid"`
-	OwnerPID   int       `json:"owner_pid"`
-	Port       int       `json:"port"`
-	Socket     string    `json:"socket"`
-	StartedAt  time.Time `json:"started_at"`
-	Executable string    `json:"executable"`
-	StartToken string    `json:"process_start_token"`
+	Identity string `json:"identity"`
+	PID      int    `json:"daemon_pid"`
+	OwnerPID int    `json:"owner_pid"`
+	// StartedByPID is 0 for a marker written before this field existed.
+	StartedByPID int       `json:"started_by_pid,omitempty"`
+	Port         int       `json:"port"`
+	Socket       string    `json:"socket"`
+	StartedAt    time.Time `json:"started_at"`
+	Executable   string    `json:"executable"`
+	StartToken   string    `json:"process_start_token"`
 }
 
 type htrLease struct {
@@ -563,7 +614,14 @@ func cleanupStaleHTRLeases() error {
 	})
 }
 
-func activeHTRLeases(port int, socket, identity string) (bool, error) {
+// activeHTRLeases reports whether a lease matching the daemon's coordinates is
+// on disk. excludePID skips one process's own lease; 0 excludes nothing at all,
+// which keeps the "is anyone else left" question byte-identical to before this
+// parameter existed. The stop rule needs the exclusion because it asks whether
+// ANOTHER ocode instance is still using this daemon, and counting our own lease
+// would make the explicit Stop action a permanent no-op for a single-instance
+// user, who is still holding the lease EnsureHTRServe took out for them.
+func activeHTRLeases(port int, socket, identity string, excludePID int) (bool, error) {
 	dir, err := htrLeaseDir()
 	if err != nil {
 		return false, err
@@ -581,7 +639,16 @@ func activeHTRLeases(port int, socket, identity string) (bool, error) {
 			continue
 		}
 		var lease htrLease
-		if json.Unmarshal(data, &lease) == nil && lease.Port == port && lease.Socket == socket && lease.Identity == identity {
+		if json.Unmarshal(data, &lease) != nil {
+			continue
+		}
+		// excludePID == 0 must skip nothing, including a lease whose pid field
+		// is missing or zero — that was counted as active before this parameter
+		// existed and must keep counting.
+		if excludePID != 0 && lease.PID == excludePID {
+			continue
+		}
+		if lease.Port == port && lease.Socket == socket && lease.Identity == identity {
 			return true, nil
 		}
 	}
@@ -700,7 +767,9 @@ func (h *htrLeaseHandle) release() {
 		if lockPath, err := htrLeaseLockPath(); err == nil {
 			_ = filelock.WithFileLock(lockPath, func() error {
 				_ = os.Remove(leasePath)
-				active, err := activeHTRLeases(port, socket, identity)
+				// 0 excludes nothing: this is the "is anyone left" question, and
+				// our own lease file was just removed above.
+				active, err := activeHTRLeases(port, socket, identity, 0)
 				if err == nil && !active {
 					terminateManagedHTR(port, socket, identity, h.logger)
 				}
@@ -771,6 +840,53 @@ func processMatchesOwner(owner htrOwner) bool {
 	return true
 }
 
+// Liveness probes behind the stop rule are indirected so the rule can be tested
+// against a recorded pid that is not a running process. Production code never
+// reassigns them; only tests do, and only for the duration of one test.
+var (
+	pidAliveFn       = pidAlive
+	processMatchesFn = processMatchesOwner
+)
+
+// shouldStopSharedDaemon reports whether THIS process may terminate the daemon
+// recorded in owner. Every condition must hold:
+//
+//  1. The marker names a daemon at all.
+//  2. This process is the one that spawned it (StartedByPID, never OwnerPID —
+//     adopting rewrites OwnerPID and must not buy stop rights).
+//  3. That process is still alive, so a dead marker is a cleanup problem rather
+//     than a stop decision.
+//  4. The daemon is still attributable to ocode — either the marker's executable
+//     and start token match, or the bearer-protected managed health probe
+//     answers. Two signals, either sufficient, exactly as before this rule
+//     existed: a daemon verified only by the probe is still ocode's, so
+//     demanding processMatchesOwner outright would refuse a stop the probe has
+//     already positively attributed.
+//  5. No OTHER ocode instance still holds a live lease on it.
+//
+// (false, nil) is a refusal, not a failure: the caller reports the daemon as
+// still running and touches nothing. An error means the answer is unknown and
+// the marker names a process ocode cannot account for.
+func shouldStopSharedDaemon(owner htrOwner) (bool, error) {
+	if owner.PID <= 0 {
+		return false, nil
+	}
+	if owner.StartedByPID != os.Getpid() {
+		return false, nil
+	}
+	if !pidAliveFn(owner.PID) {
+		return false, nil // marker cleanup is the caller's job
+	}
+	if !processMatchesFn(owner) && !htrHealthyForInstanceFn(owner.Port, owner.Socket, owner.Identity) {
+		return false, fmt.Errorf("managed htr daemon pid %d could not be verified; refusing to stop it", owner.PID)
+	}
+	active, err := activeHTRLeases(owner.Port, owner.Socket, owner.Identity, os.Getpid())
+	if err != nil {
+		return false, err
+	}
+	return !active, nil
+}
+
 func readHTROwner() (htrOwner, error) {
 	path, err := htrOwnerPath()
 	if err != nil {
@@ -787,20 +903,28 @@ func readHTROwner() (htrOwner, error) {
 	return owner, nil
 }
 
-func htrWriteOwner(identity string, port, daemonPID int, socket, executable string, startedAt time.Time) error {
+// htrWriteOwner records the daemon in ocode's ownership marker. The spawn site is
+// the only caller today, and it passes its own pid, but startedByPID is a
+// parameter rather than an implicit os.Getpid() so the provenance being recorded
+// is visible at the call site and so a future writer describing a daemon it
+// merely attached to cannot accidentally grant itself stop rights — it would
+// have to pass the original spawner, or 0 when it is unknown. OwnerPID is
+// unconditionally this process, because writing the marker is what it means.
+func htrWriteOwner(identity string, port, daemonPID int, socket, executable string, startedAt time.Time, startedByPID int) error {
 	path, err := htrOwnerPath()
 	if err != nil {
 		return err
 	}
 	o := htrOwner{
-		Identity:   identity,
-		PID:        daemonPID,
-		OwnerPID:   os.Getpid(),
-		Port:       port,
-		Socket:     socket,
-		StartedAt:  startedAt,
-		Executable: executable,
-		StartToken: processStartToken(daemonPID),
+		Identity:     identity,
+		PID:          daemonPID,
+		OwnerPID:     os.Getpid(),
+		StartedByPID: startedByPID,
+		Port:         port,
+		Socket:       socket,
+		StartedAt:    startedAt,
+		Executable:   executable,
+		StartToken:   processStartToken(daemonPID),
 	}
 	data, err := json.Marshal(o)
 	if err != nil {
@@ -1188,7 +1312,8 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 		}
 		return fail(fmt.Errorf("htr daemon started (pid %d) but /api/health unreachable on %s%s", rec.PID, addr, htrDaemonOutputTail(cmd)))
 	}
-	if err := htrWriteOwner(identity, port, rec.PID, socketPath, bin, rec.StartedAt); err != nil {
+	// This is the spawn site, so this process is unambiguously the spawner.
+	if err := htrWriteOwner(identity, port, rec.PID, socketPath, bin, rec.StartedAt, os.Getpid()); err != nil {
 		return fail(fmt.Errorf("record managed HTR owner: %w", err))
 	}
 	// Release the cross-process lease before the supervisor shuts down. The HTR
