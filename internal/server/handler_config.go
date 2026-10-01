@@ -1916,32 +1916,40 @@ func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) 
 
 // HandleGetBrowserConfig reports the embedded-browser settings (including
 // the HTR companion; HTR port 0 means the managed 3846 default).
+//
+// htr_port/htr_socket_path stay the *configured* values so the settings UI keeps
+// editing the legacy fields. The shared-daemon resolution is reported beside
+// them as effective_port/effective_socket plus its provenance, because in
+// shared mode the daemon actually used is htrcli's own and its coordinates come
+// from htrcli's config, not from what is set here. The token itself is never
+// emitted: htr_token_set says only that one is configured.
 func (h *Handler) HandleGetBrowserConfig(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	chromePath, idleTimeoutMinutes, quality := "", 10, config.DefaultScreencastQuality
-	htrEnabled, htrExt, htrCli, htrSocket, htrHost, htrPort := true, "", "", "", "com.ocode.htrcontrol", 3846
-	if h.cfg != nil {
-		chromePath = h.cfg.Ocode.Browser.ChromePath
-		idleTimeoutMinutes = h.cfg.Ocode.Browser.IdleTimeoutMinutes
-		quality = config.NormalizeScreencastQuality(h.cfg.Ocode.Browser.ScreencastQuality)
-		htrEnabled = h.cfg.Ocode.Browser.HTREnabled
-		htrExt = h.cfg.Ocode.Browser.HTRExtensionPath
-		htrCli = h.cfg.Ocode.Browser.HTRCliPath
-		htrPort = h.cfg.Ocode.Browser.HTRPort
-		htrSocket = h.cfg.Ocode.Browser.HTRSocketPath
-		htrHost = h.cfg.Ocode.Browser.HTRNativeHostName
-	}
-	h.mu.Unlock()
+	bcfg := h.htrBrowserConfig()
+	chromePath, idleTimeoutMinutes := bcfg.ChromePath, bcfg.IdleTimeoutMinutes
+	quality := config.NormalizeScreencastQuality(bcfg.ScreencastQuality)
+	shared := cdp.ResolveSharedDaemon(cdp.HTRSharedInput{
+		Token:        bcfg.HTRToken,
+		Shared:       bcfg.HTRShared,
+		LegacyPort:   bcfg.HTRPort,
+		LegacySocket: bcfg.HTRSocketPath,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"chrome_path":          chromePath,
 		"idle_timeout_minutes": idleTimeoutMinutes,
 		"screencast_quality":   quality,
-		"htr_enabled":          htrEnabled,
-		"htr_extension_path":   htrExt,
-		"htrcli_path":          htrCli,
-		"htr_port":             htrPort,
-		"htr_socket_path":      htrSocket,
-		"htr_native_host_name": htrHost,
+		"htr_enabled":          bcfg.HTREnabled,
+		"htr_extension_path":   bcfg.HTRExtensionPath,
+		"htrcli_path":          bcfg.HTRCliPath,
+		"htr_port":             bcfg.HTRPort,
+		"htr_socket_path":      bcfg.HTRSocketPath,
+		"htr_native_host_name": bcfg.HTRNativeHostName,
+		"htr_shared":           bcfg.HTRShared,
+		"htr_token_set":        bcfg.HTRToken != "",
+		"effective_port":       shared.Port,
+		"effective_socket":     shared.Socket,
+		"token_source":         shared.TokenSource,
+		"adopt_only":           shared.AdoptOnly,
+		"config_path":          shared.ConfigPath,
 	})
 }
 

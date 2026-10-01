@@ -87,6 +87,12 @@ type HTROptions struct {
 	SocketPath     string // "" = ocode-managed socket path
 	NativeHostName string // "" = DefaultHTRNativeHostName
 	BrowserPath    string // selected browser, used for native-host registration
+	// Shared is the resolved shared-daemon description behind Port/SocketPath.
+	// Mode is "shared" when the coordinates came from htrcli's own config and
+	// "private" for the legacy ocode-managed daemon, in which case Port and
+	// SocketPath are still the ocode-managed defaults. Callers that must not
+	// spawn a daemon (AdoptOnly) read this rather than re-deriving it.
+	Shared SharedDaemon
 }
 
 // HTRStatus describes the daemon state after EnsureHTRServe.

@@ -1,6 +1,12 @@
 package server
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+
 	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/config"
 )
@@ -12,6 +18,12 @@ import (
 // HTR is disabled, or a gate fails, Enabled is false and notice explains why
 // (empty when nothing is wrong). Callers treat a false Enabled as "do not
 // start" rather than an error so browsing can continue without HTR.
+//
+// browser.HTRShared selects the shared daemon: one `htrcli serve` serving both
+// ocode and the user's own extension, with its coordinates read from htrcli's
+// config rather than invented here. When it is off, Port/SocketPath keep
+// today's ocode-managed 3846/managed-socket values unchanged, so the rollback
+// really is byte-for-byte the old behaviour.
 func resolveManagedHTROptions(browser config.BrowserConfig) (cdp.HTROptions, string) {
 	htr := cdp.HTROptions{
 		Enabled:        browser.HTREnabled,
@@ -24,6 +36,24 @@ func resolveManagedHTROptions(browser config.BrowserConfig) (cdp.HTROptions, str
 	}
 	if !htr.Enabled {
 		return htr, ""
+	}
+	htr.Shared = cdp.ResolveSharedDaemon(cdp.HTRSharedInput{
+		Token:        browser.HTRToken,
+		Shared:       browser.HTRShared,
+		LegacyPort:   browser.HTRPort,
+		LegacySocket: browser.HTRSocketPath,
+	})
+	if htr.Shared.Mode == "shared" {
+		// Shared mode's coordinates are htrcli's, not ours. Assigning them here
+		// (rather than in a caller) means the later ResolveHTRSocketPath call
+		// sees an already-absolute path and passes it straight through, so the
+		// legacy socket-directory creation below never runs in shared mode.
+		htr.Port = htr.Shared.Port
+		htr.SocketPath = htr.Shared.Socket
+		if err := ensureSharedSocketDir(htr.Shared.Socket, htr.Shared.AdoptOnly); err != nil {
+			htr.Enabled = false
+			return htr, "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
+		}
 	}
 	if htr.BrowserPath == "" {
 		if browserPath, err := cdp.FindChrome(""); err == nil {
@@ -52,4 +82,31 @@ func resolveManagedHTROptions(browser config.BrowserConfig) (cdp.HTROptions, str
 	htr.ExtensionDir = assets.ExtensionDir
 	htr.CliPath = assets.CliPath
 	return htr, ""
+}
+
+// ensureSharedSocketDir creates the parent directory of the shared daemon's
+// Unix socket. cdp.ResolveHTRSocketPath does this for the ocode-managed socket,
+// but the shared path (~/.htrcli/daemon.sock) comes from the pure resolver in
+// cdp.ResolveSharedDaemon, which touches no filesystem, so nothing else would.
+//
+// It only acts when ocode may actually spawn, i.e. when AdoptOnly is false: an
+// adopt-only resolution means ocode never starts a daemon, so it has no reason
+// to create a directory in the user's home for one it will not launch. In
+// practice the directory already exists there anyway — a non-adopt-only shared
+// resolution is only possible when htrcli's config.json was readable, and that
+// file lives in this very directory — so this is a safety net for a daemon that
+// would otherwise fail to bind its socket.
+//
+// socket is not a path on Windows, where shared mode uses a loopback endpoint
+// instead of a Unix-domain socket; filepath.Dir would yield a nonsense relative
+// directory there, so skip it.
+func ensureSharedSocketDir(socket string, adoptOnly bool) error {
+	if adoptOnly || runtime.GOOS == "windows" || strings.TrimSpace(socket) == "" {
+		return nil
+	}
+	dir := filepath.Dir(socket)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create HTR shared socket dir: %w", err)
+	}
+	return nil
 }

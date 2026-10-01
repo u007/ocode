@@ -876,8 +876,18 @@ type BrowseOptions struct {
 	HTRPort            int
 	HTRSocketPath      string
 	HTRNativeHostName  string
-	NoSandbox          bool
-	Supervisor         *tool.ProcessSupervisor
+	// HTRShared selects the shared htrcli daemon (true, the default); false
+	// keeps the ocode-managed private daemon. HTRToken overrides the bearer
+	// token ocode would otherwise read from htrcli's own config.
+	//
+	// Both fields exist here because StartBrowse re-materialises a
+	// config.BrowserConfig from these options. Dropping either silently
+	// resolves every session to the private daemon on 3846, so any change to
+	// this struct must be mirrored in LoadBrowseOptions and StartBrowse.
+	HTRShared  bool
+	HTRToken   string
+	NoSandbox  bool
+	Supervisor *tool.ProcessSupervisor
 }
 
 // LoadBrowseOptions loads the complete embedded-browser configuration while
@@ -900,8 +910,32 @@ func LoadBrowseOptions(supervisor *tool.ProcessSupervisor) *BrowseOptions {
 		HTRPort:            browser.HTRPort,
 		HTRSocketPath:      browser.HTRSocketPath,
 		HTRNativeHostName:  browser.HTRNativeHostName,
+		HTRShared:          browser.HTRShared,
+		HTRToken:           browser.HTRToken,
 		NoSandbox:          browser.NoSandbox,
 		Supervisor:         supervisor,
+	}
+}
+
+// browserConfigFromBrowseOptions re-materialises the config.StartBrowse needs
+// from the flat options it is handed.
+//
+// It exists as a named function so the relay is testable and so it stays visibly
+// paired with LoadBrowseOptions: both spell out every HTR field, and a field
+// added to one and forgotten in the other silently downgrades the shared daemon
+// to the private one rather than failing. Add new fields here and there
+// together.
+func browserConfigFromBrowseOptions(opts *BrowseOptions) config.BrowserConfig {
+	return config.BrowserConfig{
+		ChromePath:        opts.ChromePath,
+		HTREnabled:        opts.HTREnabled,
+		HTRExtensionPath:  opts.HTRExtensionPath,
+		HTRCliPath:        opts.HTRCliPath,
+		HTRPort:           opts.HTRPort,
+		HTRSocketPath:     opts.HTRSocketPath,
+		HTRNativeHostName: opts.HTRNativeHostName,
+		HTRShared:         opts.HTRShared,
+		HTRToken:          opts.HTRToken,
 	}
 }
 
@@ -921,15 +955,7 @@ func LoadBrowseOptions(supervisor *tool.ProcessSupervisor) *BrowseOptions {
 func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOptions) error {
 	var bOpts browse.Options
 	if opts != nil {
-		htr, htrNotice := resolveManagedHTROptions(config.BrowserConfig{
-			ChromePath:        opts.ChromePath,
-			HTREnabled:        opts.HTREnabled,
-			HTRExtensionPath:  opts.HTRExtensionPath,
-			HTRCliPath:        opts.HTRCliPath,
-			HTRPort:           opts.HTRPort,
-			HTRSocketPath:     opts.HTRSocketPath,
-			HTRNativeHostName: opts.HTRNativeHostName,
-		})
+		htr, htrNotice := resolveManagedHTROptions(browserConfigFromBrowseOptions(opts))
 		bOpts = browse.Options{
 			ChromePath:        opts.ChromePath,
 			IdleTimeout:       time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
