@@ -20,7 +20,8 @@ import type { Message } from "../../api/types";
 vi.mock("../../lib/eventBus", () => ({
   eventBus: { on: () => () => {}, onReconnect: () => () => {} },
 }));
-vi.mock("../../api/client", () => ({
+vi.mock("../../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/client")>()),
   api: {
     getChatVerbosityConfig: vi.fn(async () => ({
       preset: "full",

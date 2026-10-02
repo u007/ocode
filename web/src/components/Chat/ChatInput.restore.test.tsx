@@ -35,7 +35,8 @@ vi.mock("../../hooks/useChat", () => ({
   }),
 }));
 
-vi.mock("../../api/client", () => ({
+vi.mock("../../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/client")>()),
   api: {
     prepareRewind: mocks.prepareRewind,
     getRewind: mocks.getRewind,

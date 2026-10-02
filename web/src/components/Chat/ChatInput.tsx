@@ -1,4 +1,4 @@
-import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
+import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useMemo, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, drainQueuedMessagesIntoDraft, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
@@ -6,8 +6,9 @@ import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
-import { Archive, FileText, Paperclip, Play, RotateCcw, X } from "lucide-react";
+import { Paperclip, RotateCcw, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
+import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
@@ -649,10 +650,10 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // touch the composer draft or the @ref/editor context — clicking "Continue"
   // must not clear what the user is already typing.
   //
-  // The whole strip is hidden until the session has conversation content
-  // (`hasConversation`, from useChat): a brand-new/empty session has nothing
-  // to compact, continue, or recap, and the mid-conversation nudges were just
-  // noise there. The slash commands themselves are unaffected.
+  // Visibility is a PER-CHIP decision made in the memo below, not a wrapper
+  // gate: a brand-new/empty session has nothing to compact, continue, or
+  // recap, but a custom chip can be useful there. The slash commands
+  // themselves are unaffected either way.
   const runQuickDispatch = (text: string, kind: "command" | "message") => {
     if (
       effectiveBusy ||
@@ -666,43 +667,33 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     void dispatchCommand(text);
   };
 
-  const runQuickAction = (id: string) => {
-    switch (id) {
-      case "compact":
-        runQuickDispatch("/compact", "command");
-        return;
-      case "recap":
-        runQuickDispatch("/recap", "command");
-        return;
-      case "continue":
-        // Context-aware: an interrupted turn is RESUMED (the pill is already
-        // labelled "Resume"); otherwise "continue" is a plain nudge message.
-        if (wasInterrupted) {
-          handleResume();
-          return;
-        }
-        runQuickDispatch("continue", "message");
-        return;
-      default:
-        return;
-    }
-  };
+  // The configured chips, read from the shared module store (one fetch for N
+  // mounted composer tabs). ONE memo produces the final, already-filtered
+  // list the strip consumes: a second memo layered on top of this one would
+  // split the ordering logic across two places.
+  const { chips: quickActionChips } = useQuickActions();
 
-  const quickActions: QuickActionItem[] = [
-    {
-      id: "compact",
-      label: "Compact",
-      icon: Archive,
-      title: compacting
-        ? "Compaction already in progress"
-        : "Compact conversation context (/compact)",
-      disabled: compacting,
-    },
-    wasInterrupted
-      ? { id: "continue", label: "Resume", icon: Play, title: "Resume the interrupted turn" }
-      : { id: "continue", label: "Continue", icon: Play, title: "Send 'continue' to keep the agent going" },
-    { id: "recap", label: "Recap", icon: FileText, title: "Generate session recap (/recap)" },
-  ];
+  const quickActions: QuickActionItem[] = useMemo(
+    () =>
+      visibleChips(quickActionChips, hasConversation).map((chip) => {
+        // The Continue seed resumes an interrupted turn, so its title says so.
+        // The LABEL stays as the user configured it — the spec makes the label
+        // user-controlled and locks only the seed's behaviour; this is a
+        // deliberate visible change from the old pill that relabelled itself to
+        // "Resume", with the hint moved into the tooltip.
+        const resumeVariant = chip.seed === "continue" && wasInterrupted;
+        return {
+          id: chip.id,
+          label: chip.label,
+          icon: quickActionIconComponent(chip.icon),
+          title: resumeVariant
+            ? `${chip.label} — resume the interrupted turn`
+            : `${chip.label} — ${chip.message.trim()}`,
+          disabled: compacting && chip.mode === "send" && chipDispatchesCompact(chip),
+        };
+      }),
+    [quickActionChips, hasConversation, wasInterrupted, compacting],
+  );
 
   const updateDraft = (value: string) => {
     setInput(value);
@@ -720,6 +711,26 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     // leaves history mode, so the next ↑ starts from the newest entry again.
     historyIndexRef.current = -1;
     historyDraftRef.current = "";
+  };
+
+  // Behaviour is resolved by SEED, then MODE. Declared below `updateDraft`
+  // because a `fill` chip calls it, and a `const` referenced from a handler
+  // that runs before its declaration is a TDZ crash on the first click.
+  const runQuickAction = (id: string) => {
+    const chip = quickActionChips.find((c) => c.id === id);
+    if (!chip) return;
+    // Resume wins over both modes: it is a turn-lifecycle action, not a text
+    // dispatch, so "fill the box with continue" would be wrong here.
+    if (chip.seed === "continue" && wasInterrupted) {
+      handleResume();
+      return;
+    }
+    if (chip.mode === "fill") {
+      updateDraft(chip.message);
+      textareaRef.current?.focus();
+      return;
+    }
+    runQuickDispatch(chip.message, chipDispatchKind(chip));
   };
 
   const cancelPendingRewind = () => {
@@ -1355,7 +1366,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
-      {hasConversation && (
+      {quickActions.length > 0 && (
         <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
       )}
     </div>
