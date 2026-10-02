@@ -33,9 +33,15 @@ const (
 )
 
 // quickActionIconAllowlist is the validation authority for chip icons. Every
-// key is a real export of the pinned lucide-react version. The TS side keeps a
-// key -> component map for rendering; a key present in one and not the other is
-// a typecheck/test failure, never a silent blank.
+// key is a real export of the pinned lucide-react version.
+//
+// The TS side keeps a key -> component map for rendering, and each side guards
+// ITSELF: this list is pinned in Go tests against a transcription of the spec's
+// list, and the TS map is typed against its own key union so a key with no
+// component is a typecheck error. Nothing reads the other language's file, so the
+// guard is per-side, not cross-language — changing a key here without changing
+// it there is still silent, and renders the default icon. If you touch this list,
+// change the TS `QUICK_ACTION_ICONS` and both transcriptions with it.
 var quickActionIconAllowlist = map[string]struct{}{
 	"zap": {}, "archive": {}, "play": {}, "file-text": {}, "search": {},
 	"refresh-cw": {}, "terminal": {}, "git-branch": {}, "hammer": {}, "bug": {},
