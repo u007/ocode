@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/mattn/go-isatty"
@@ -102,13 +101,13 @@ func Run(opts RunOptions) error {
 
 // watchProgramSignals turns termination signals into a graceful quit and
 // records every one in the crash log with the terminal's job-control state.
-// SIGHUP is included so a dropped terminal quits through bubbletea (which
-// restores the tty) instead of the default silent kill; SIGCONT is logged
-// only, as evidence of a stop/resume cycle.
+// The watched set is platform-specific (see terminationSignals): a resume
+// signal is logged only, as evidence of a stop/resume cycle, and never
+// triggers the cleanup request.
 func watchProgramSignals(p *tea.Program, logf func(string, ...interface{})) func() {
 	sigCh := make(chan os.Signal, 1)
 	done := make(chan struct{})
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGCONT)
+	signal.Notify(sigCh, terminationSignals()...)
 	crashguard.Go(func() {
 		for {
 			select {
@@ -116,7 +115,7 @@ func watchProgramSignals(p *tea.Program, logf func(string, ...interface{})) func
 				return
 			case sig := <-sigCh:
 				logf("signal %v %s", sig, ttyStateLine())
-				if sig == syscall.SIGCONT {
+				if isResumeSignal(sig) {
 					continue
 				}
 				p.Send(cleanupRequestMsg{})

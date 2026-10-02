@@ -14843,6 +14843,32 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 		lines = append(lines, req.DenyReason)
 		lines = append(lines, "")
 	}
+	if req.Scope == agent.PermissionScopeContent {
+		// Content-guardrail ask. The header deliberately does NOT say
+		// "Auto-denied by LLM permission model" — the auto-permission judge
+		// never saw this request, and telling the user their content was
+		// auto-denied would misattribute a human decision to the model.
+		lines = append(lines, "🛡 Content guardrail — this tool's result was flagged:")
+		if req.UntrustedSummary != "" {
+			lines = append(lines, req.UntrustedSummary)
+		}
+		if req.UntrustedSource != "" {
+			lines = append(lines, "Source: "+req.UntrustedSource)
+		}
+		if req.UntrustedFailure != "" {
+			// The guardrail could not clear this result. Said explicitly, because
+			// a failed guardrail and a clean pass otherwise look identical.
+			lines = append(lines, "⚠ Guardrail could not clear this result:")
+			lines = append(lines, req.UntrustedFailure)
+			lines = append(lines, "")
+		}
+		lines = append(lines, contentGuardScoreLines(req.UntrustedScores)...)
+		lines = append(lines, "The full result is below. Review it before deciding.")
+		lines = append(lines, "Secrets are already masked in this view.")
+		lines = append(lines, "")
+		lines = append(lines, req.UntrustedContent)
+		return strings.Join(lines, "\n")
+	}
 	if req.ModelUnavailable != "" {
 		lines = append(lines, "ℹ Permission model unavailable — asking you instead:")
 		lines = append(lines, req.ModelUnavailable)
@@ -14882,8 +14908,56 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	return strings.Join(lines, "\n")
 }
 
+// contentGuardScoreLines renders the per-question judge output. Each chunk is
+// listed with its own verdict confidence, its concern, and that concern's
+// confidence — the raw scores rather than one collapsed verdict, so the user can
+// see WHY the guardrail reached its answer and disagree with it.
+func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {
+	if len(scores) == 0 {
+		return nil
+	}
+	lines := []string{"Judge scores:"}
+	for _, sc := range scores {
+		verdict := sc.Verdict
+		line := fmt.Sprintf("  chunk %d/%d — %s (confidence %.2f)",
+			sc.Chunk, sc.Total, verdict, sc.VerdictConfidence)
+		// Always show the concern's own confidence, including for `none`: the
+		// user asked for each scoring, and dropping the number on the clean case
+		// would make it look like the question went unanswered.
+		if sc.Concern != "" {
+			line += fmt.Sprintf(" · %s (confidence %.2f)", sc.Concern, sc.ConcernConfidence)
+		}
+		lines = append(lines, line)
+		// Show the full verdict distribution when the provider returned one:
+		// a 0.62 confidence is opaque on its own but readable as
+		// "flagged 0.58 / clean 0.42".
+		if len(sc.Probabilities) > 0 {
+			keys := make([]string, 0, len(sc.Probabilities))
+			for k := range sc.Probabilities {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s %.2f", k, sc.Probabilities[k]))
+			}
+			lines = append(lines, "      p: "+strings.Join(parts, " / "))
+		}
+	}
+	lines = append(lines, "")
+	return lines
+}
+
 func renderPermissionPrompt(req agent.PermissionRequest) string {
 	var b strings.Builder
+	if req.Scope == agent.PermissionScopeContent {
+		// Distinct headline: this is a judgement about content, not about
+		// whether a command may run, and "allow this action?" would misread.
+		b.WriteString("Deliver this result to the model?\n\n")
+		b.WriteString(renderPermissionRequestBody(req))
+		b.WriteString("\n\n[y] deliver  [n] withhold")
+		return b.String()
+	}
 	if req.DenyReason != "" {
 		b.WriteString("Auto-denied — allow anyway?\n\n")
 	} else {
@@ -15031,6 +15105,13 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		pathRoot := outOfScopePathRoot(req)
 		log.Printf("[perm] permission ALLOWED once: tool=%s", toolName)
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName), transient: true})
+		// A content ask is about an ALREADY-EXECUTED result, so approval
+		// delivers the vetted text instead of re-running the tool. Re-executing
+		// here would issue a second webfetch/MCP call — new, unvetted bytes and a
+		// real side effect — and defeat the scan that produced this ask.
+		if agent.IsContentAsk(req) {
+			return m.contentAskResolved(req, true)
+		}
 		return m.executeApprovedTool(toolName, args, pathRoot)
 	case "a", "always", "always allow":
 		if agent.IsHarmfulRequest(req) {
@@ -15087,6 +15168,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		return m.executeApprovedTool(toolName, args, pathRoot)
 	case "n", "no", "deny":
 		log.Printf("[perm] permission DENIED: tool=%s", toolName)
+		// Content asks deny by withholding the result rather than by refusing a
+		// re-run, for the same reason they approve without one.
+		if agent.IsContentAsk(req) {
+			return m.contentAskResolved(req, false)
+		}
 		return m.permissionDeniedToolResult(toolName)
 	default:
 		m.showPermDialog = true
@@ -15319,6 +15405,21 @@ func (m model) executeApprovedTool(toolName string, args json.RawMessage, pathRo
 func (m model) permissionDeniedToolResult(toolName string) tea.Cmd {
 	return func() tea.Msg {
 		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: fmt.Sprintf("denied: tool %q denied by user", toolName)}}
+	}
+}
+
+// contentAskResolved resolves a content-guardrail ask. The tool already ran, so
+// there is nothing to execute: approval substitutes the content the guardrail
+// inspected (still truncated through the normal path, so an approved result is
+// bounded exactly like any other), and denial substitutes the refusal notice.
+//
+// The substitution is keyed on m.pendingToolCallID, the same field
+// executeApprovedTool uses, so the sentinel is replaced in place by ToolID and a
+// round holding several asks resolves each one independently.
+func (m model) contentAskResolved(req agent.PermissionRequest, approved bool) tea.Cmd {
+	return func() tea.Msg {
+		content := agent.ResolveContentAsk(req, approved)
+		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: content}}
 	}
 }
 
@@ -16919,6 +17020,15 @@ func (m *model) renderPermissionDialog(width int) string {
 	headerText := "⚠ Permission required"
 	if req.DenyReason != "" {
 		headerText = "⚠ Auto-denied by LLM — override?"
+	}
+	if req.Scope == agent.PermissionScopeContent {
+		// Last, so it wins over both headers above. A content ask is not a
+		// permission escalation: the tool already ran, and "Permission required"
+		// would misread as "the agent wanted to run something and you stopped
+		// it". A content request also never carries a DenyReason, but ordering
+		// this after the check keeps that true by construction rather than by
+		// the accident of two fields never being set together.
+		headerText = "🛡 Content guardrail — review before it reaches the model"
 	}
 	header := m.styles.Header.Render(headerText)
 	if m.permConfirm != "" {

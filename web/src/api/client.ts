@@ -679,6 +679,14 @@ export interface ConnectMethod {
   id: string;
   label: string;
   kind: ConnectMethodKind;
+  /**
+   * Completion modes the server honours for this method, when it has a choice
+   * (["auto","manual"] for the OpenAI loopback login). Absent means exactly one
+   * shape, so a client MUST NOT render a mode chooser — the server would ignore
+   * the answer. Set by the server from oauthFlowTakesMode; see
+   * handler_connect.go.
+   */
+  modes?: ("auto" | "manual")[];
 }
 
 export interface ConnectProvider {
