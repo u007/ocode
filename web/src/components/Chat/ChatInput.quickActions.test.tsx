@@ -4,8 +4,9 @@ import ChatInput from "./ChatInput";
 import { clearQueue, getQueue } from "../../lib/tabQueue";
 import { clearDraft } from "../../lib/tabDrafts";
 import { clearCompaction, setCompactionState } from "../../lib/compactionState";
-import { SEED_CHIPS } from "../../lib/quickActions";
-import type { QuickActionChip } from "@/api/types";
+import { SEED_CHIPS, __resetQuickActionsForTests } from "../../lib/quickActions";
+import { api } from "@/api/client";
+import type { QuickActionChip, QuickActionsResponse } from "@/api/types";
 
 // Controllable stand-in for useChat so the context-aware Continue action can be
 // driven between "idle" and "interrupted" without touching the real store.
@@ -31,19 +32,56 @@ vi.mock("./SlashCommandMenu", () => ({ default: () => null }));
 // BUILT HERE. Every other export stays the real one, so `visibleChips`,
 // `chipDispatchKind` and the icon map are the production helpers the composer
 // itself calls — a test that mocked those too would prove nothing.
-const quickActions = vi.hoisted(() => ({ chips: [] as QuickActionChip[] }));
+//
+// `useRealStore` swaps ONLY the hook's return value: the tests that drive the
+// real store (over the stubbed fetch below) get the ACTUAL hook, so the chain
+// Go seeds → GET → normalise → render is exercised for real. The flag is read
+// at call time and never flipped mid-render, so hook order stays stable.
+const quickActions = vi.hoisted(() => ({
+  chips: [] as QuickActionChip[],
+  loading: false,
+  useRealStore: false,
+}));
 vi.mock("../../lib/quickActions", async () => {
   const actual = await vi.importActual<typeof import("../../lib/quickActions")>("../../lib/quickActions");
   return {
     ...actual,
-    useQuickActions: () => ({
-      chips: quickActions.chips,
-      loading: false,
-      error: null,
-      revision: "r",
-    }),
+    useQuickActions: () =>
+      quickActions.useRealStore
+        ? actual.useQuickActions()
+        : {
+            chips: quickActions.chips,
+            loading: quickActions.loading,
+            error: null,
+            revision: "r",
+          },
   };
 });
+
+// Only the two quick-actions calls are stubbed. The composer's own api surface
+// (`api.uploadFile`, `apiPath`, `ApiError`, …) must stay the real module, so the
+// actual module is spread and just these two members are replaced.
+vi.mock("@/api/client", async () => {
+  const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      getQuickActionsConfig: vi.fn(),
+      setQuickActionsConfig: vi.fn(),
+    },
+  };
+});
+
+// The real store subscribes on mount and `eventBus.on` opens an SSE stream.
+// Nothing else in the composer's import graph touches the bus, so a two-method
+// stub is enough to keep jsdom offline.
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: vi.fn(() => () => {}),
+    onReconnect: vi.fn(() => () => {}),
+  },
+}));
 
 // Slash dispatch stub: the composer only needs to prove it routed the command
 // through the shared pipeline with the right session id.
@@ -69,6 +107,23 @@ const continueBtn = () => screen.getByRole("button", { name: "Continue — conti
 const quickResumeBtn = () => screen.getByRole("button", { name: "Continue — resume the interrupted turn" });
 const recapBtn = () => screen.getByRole("button", { name: "Recap — /recap" });
 const strip = () => screen.queryByRole("toolbar", { name: "Quick actions" });
+/** The strip's pill labels in DOM order — the toolbar holds the pills and nothing else. */
+const pillLabels = () =>
+  Array.from(strip()?.querySelectorAll("button") ?? []).map((b) => b.textContent ?? "");
+
+/**
+ * The body Go emits on a fresh install (`internal/config/quick_actions.go`'s
+ * starters), transcribed as the WIRE form. Deliberately not `SEED_CHIPS`: this
+ * constant is what crosses the language boundary, and comparing it against the
+ * TypeScript copy would only prove the two copies agree with each other.
+ */
+const GO_STARTER_RESPONSE: QuickActionsResponse = {
+  chips: [
+    { id: "compact", label: "Compact", icon: "archive", message: "/compact", mode: "send", seed: "compact" },
+    { id: "continue", label: "Continue", icon: "play", message: "continue", mode: "send", seed: "continue" },
+    { id: "recap", label: "Recap", icon: "file-text", message: "/recap", mode: "send", seed: "recap" },
+  ],
+};
 
 function composer(id = A) {
   // isActive changes with the simulated chat state so the rerender gets through
@@ -85,6 +140,12 @@ describe("composer quick actions", () => {
     chat.hasConversation = true;
     sendMessage.mockResolvedValue(true);
     quickActions.chips = seeds();
+    quickActions.loading = false;
+    quickActions.useRealStore = false;
+    // The store is a MODULE singleton with a cache: without this reset, chips a
+    // real-store test published would satisfy the NEXT test's hook before it
+    // ever fetched.
+    __resetQuickActionsForTests();
     clearQueue(A);
     clearDraft(A);
     clearCompaction(A);
@@ -274,5 +335,67 @@ describe("composer quick actions", () => {
     render(composer());
     expect(strip()).toBeInTheDocument();
     expect(compactBtn()).toBeInTheDocument();
+  });
+
+  // The REAL store, one stubbed GET, no mock on the hook: the fresh-install path
+  // the spec asks a regression test for, in one piece. Every other test in this
+  // file hands the composer's hook its return value, so nothing above could catch
+  // the starters failing to arrive from the server at all — and comparing the Go
+  // body against `SEED_CHIPS` would only prove the two copies agree with each
+  // other, which is the drift the review flagged.
+  describe("over the real store", () => {
+    const getConfig = vi.mocked(api.getQuickActionsConfig);
+
+    /** Resolves only when the test calls `releaseConfig`, so the first paint is observable. */
+    let releaseConfig: (value: QuickActionsResponse) => void = () => {};
+    const deferredConfig = () =>
+      new Promise<QuickActionsResponse>((resolve) => {
+        releaseConfig = resolve;
+      });
+
+    beforeEach(() => {
+      // `clearAllMocks` clears calls, not implementations, so a resolved value
+      // set here would otherwise leak into the next test.
+      vi.mocked(api.getQuickActionsConfig).mockReset();
+      vi.mocked(api.setQuickActionsConfig).mockReset();
+      quickActions.useRealStore = true;
+    });
+
+    it("renders the server's starters, in order, with the derived titles", async () => {
+      getConfig.mockResolvedValue(GO_STARTER_RESPONSE);
+
+      render(composer());
+
+      await waitFor(() => expect(compactBtn()).toBeInTheDocument());
+      expect(getConfig).toHaveBeenCalledTimes(1);
+      expect(pillLabels()).toEqual(["Compact", "Continue", "Recap"]);
+      // `aria-label` is `${label} — ${message.trim()}`, composed in ChatInput
+      // from the WIRE's fields, so these also pin that `mode`/`seed` survived
+      // normalisation — drop `seed` and the Continue title changes.
+      expect(compactBtn()).toBeInTheDocument();
+      expect(continueBtn()).toBeInTheDocument();
+      expect(recapBtn()).toBeInTheDocument();
+    });
+
+    it("renders no strip while the store is still loading, and the server's chips once they arrive", async () => {
+      getConfig.mockImplementation(deferredConfig);
+
+      render(composer());
+      await waitFor(() => expect(getConfig).toHaveBeenCalledTimes(1));
+
+      // The store's initial state is deliberately `chips: []` + `loading: true`,
+      // so nothing is on screen yet. It must NOT be seeded with SEED_CHIPS: a user
+      // who deleted every chip would watch the three starters flash back and then
+      // vanish, which reads as "the app ignored me". Pinned at the store too, in
+      // quickActions.test.ts.
+      expect(strip()).not.toBeInTheDocument();
+
+      await act(async () => {
+        releaseConfig(GO_STARTER_RESPONSE);
+      });
+
+      await waitFor(() => expect(strip()).toBeInTheDocument());
+      expect(pillLabels()).toEqual(["Compact", "Continue", "Recap"]);
+    });
   });
 });

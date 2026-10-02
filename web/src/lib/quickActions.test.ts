@@ -38,7 +38,7 @@ import {
   useQuickActions,
   visibleChips,
 } from "./quickActions";
-import type { QuickActionChip } from "@/api/types";
+import type { QuickActionChip, QuickActionsResponse } from "@/api/types";
 
 const chip = (over: Partial<QuickActionChip> = {}): QuickActionChip => ({
   id: "a",
@@ -484,6 +484,31 @@ describe("useQuickActions", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  // The DELIBERATE first-paint choice, pinned where it is made. The initial
+  // state is `chips: []` + `loading: true`, never SEED_CHIPS: a user who deleted
+  // every chip would otherwise watch the three starters flash back and vanish,
+  // which reads as "the app ignored me". The cost is a strip that appears one
+  // config round-trip late — invisible in practice, and self-correcting.
+  // The composer half of this contract ("no strip while empty") is pinned in
+  // ChatInput.quickActions.test.ts.
+  it("starts empty and loading, then publishes what the server sends", async () => {
+    let release: (value: QuickActionsResponse) => void = () => {};
+    getConfig.mockImplementation(
+      () =>
+        new Promise<QuickActionsResponse>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useQuickActions());
+    expect(result.current).toEqual({ chips: [], loading: true, error: null, revision: "" });
+
+    await act(async () => {
+      release({ chips: [chip({ id: "x" })] });
+    });
+    expect(result.current.chips.map((c) => c.id)).toEqual(["x"]);
+    expect(result.current.loading).toBe(false);
   });
 
   it("fetches once for N mounted session tabs", async () => {
