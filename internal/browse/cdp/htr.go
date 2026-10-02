@@ -959,6 +959,40 @@ func htrWriteOwner(identity string, port, daemonPID int, socket, executable stri
 	return atomicWriteFile(path, data, 0o600)
 }
 
+// HTRProvenance is what ocode's owner marker says about the daemon on one
+// HTR port. It is read-only, decision-free state for the settings API.
+type HTRProvenance struct {
+	// DaemonPID is the pid recorded in the owner marker, or 0 when no marker
+	// names a daemon for this port.
+	DaemonPID int
+	// StartedByOcode is true only when THIS process may terminate that daemon —
+	// it is shouldStopSharedDaemon's verdict, not a looser "the marker looks
+	// like mine" guess. The settings UI gates its Stop button on it, and
+	// StopHTRServe enforces exactly the same rule, so the button and the server
+	// cannot disagree about who owns the daemon.
+	StartedByOcode bool
+}
+
+// HTRProvenanceFor reports the provenance of the daemon recorded for the
+// effective HTR port (0 = managed default, honoring HTR_PORT). A missing,
+// foreign-port, or unparseable marker yields the zero value, and so does a
+// marker whose daemon this process may not stop — the answer is always
+// "ocode will not touch it", never a guess.
+func HTRProvenanceFor(port int) HTRProvenance {
+	p := htrPortEnv(port)
+	owner, err := readHTROwner()
+	if err != nil || owner.Port != p || owner.PID <= 0 {
+		return HTRProvenance{}
+	}
+	prov := HTRProvenance{DaemonPID: owner.PID}
+	// An error means the answer is unknown, which is a refusal like any other:
+	// the caller must not offer to stop a daemon ocode cannot account for.
+	if stoppable, stopErr := shouldStopSharedDaemon(owner); stopErr == nil {
+		prov.StartedByOcode = stoppable
+	}
+	return prov
+}
+
 func terminateManagedHTR(port int, socket, identity string, lg *log.Logger) {
 	path, err := htrOwnerPath()
 	if err != nil {

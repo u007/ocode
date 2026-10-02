@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type HtrStatus, type HtrTab } from "../../api/client";
+import { api, type BrowserConfig, type HtrStatus, type HtrTab } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
@@ -17,6 +17,13 @@ export default function BrowserForm() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The HTR half of the browser config. Kept as one object because the
+  // shared-daemon fields are provenance for a daemon whose coordinates live in
+  // htrcli's own config, not ocode's.
+  const [browserCfg, setBrowserCfg] = useState<BrowserConfig | null>(null);
+  const [htrPort, setHtrPort] = useState("");
+  const [htrSocketPath, setHtrSocketPath] = useState("");
+
   const [htr, setHtr] = useState<HtrStatus | null>(null);
   const [htrBusy, setHtrBusy] = useState(false);
   const [htrError, setHtrError] = useState<string | null>(null);
@@ -31,6 +38,9 @@ export default function BrowserForm() {
       setChromePath(cfg.chrome_path);
       setIdleTimeoutMinutes(cfg.idle_timeout_minutes);
       setScreencastQuality(cfg.screencast_quality);
+      setBrowserCfg(cfg);
+      setHtrPort(cfg.htr_port ? String(cfg.htr_port) : "");
+      setHtrSocketPath(cfg.htr_socket_path ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -95,6 +105,15 @@ export default function BrowserForm() {
         chrome_path: chromePath,
         idle_timeout_minutes: idleTimeoutMinutes,
         screencast_quality: screencastQuality,
+        // Shared mode ignores both of these, so sending them while shared is
+        // just noise. The fields are disabled then, so their state is whatever
+        // was loaded, not something the user just typed.
+        ...(browserCfg?.htr_shared
+          ? {}
+          : {
+              htr_port: htrPort.trim() ? Number(htrPort) : 0,
+              htr_socket_path: htrSocketPath.trim(),
+            }),
       });
       setScreencastQuality(saved.screencast_quality);
     } catch (err) {
@@ -103,6 +122,12 @@ export default function BrowserForm() {
       setSaving(false);
     }
   };
+
+  // Shared mode is read-only provenance, never an input: browser.htr_shared and
+  // browser.htr_token are config-file-only (config.SaveOcodeHTRConfig has no
+  // parameter for either), so the form shows what they produced instead of
+  // offering a control that would silently fail to persist.
+  const shared = browserCfg?.htr_shared === true;
 
   if (loading) {
     return (
@@ -181,6 +206,84 @@ export default function BrowserForm() {
             </span>
           )}
         </div>
+        {shared && (
+          <div className="space-y-1 rounded-md border border-border bg-muted/20 p-2 text-xs" data-testid="htr-effective">
+            <div className="font-medium text-foreground">Shared daemon</div>
+            <div className="text-muted-foreground">
+              ocode attaches to the one <code>htrcli serve</code> you already run. These are the
+              coordinates in use, not values set here:
+            </div>
+            <div className="text-muted-foreground">
+              Port <span className="font-mono text-foreground">{browserCfg?.effective_port ?? "—"}</span>
+              {browserCfg?.effective_socket && (
+                <>
+                  {" · socket "}
+                  <span className="font-mono break-all text-foreground">{browserCfg.effective_socket}</span>
+                </>
+              )}
+            </div>
+            <div className="text-muted-foreground">
+              Token from{" "}
+              {/* Rendered on its own node so a test can pin the source label
+                  itself: the config path below also contains "htrcli", so a
+                  substring check on the whole row would pass even if this were
+                  dropped. */}
+              <span className="font-mono text-foreground" data-testid="htr-token-source">
+                {browserCfg?.token_source || "unknown"}
+              </span>
+              {browserCfg?.config_path && (
+                <>
+                  {" in "}
+                  <span className="font-mono break-all text-foreground">{browserCfg.config_path}</span>
+                </>
+              )}
+            </div>
+            <div className="text-muted-foreground">
+              {browserCfg?.htr_token_set
+                ? "An htrcli token is configured."
+                : "No htrcli token is configured."}
+            </div>
+            <div className="text-muted-foreground">
+              <code>browser.htr_shared</code> and <code>browser.htr_token</code> are set in
+              ocodeconfig.json — this form cannot write them.
+            </div>
+          </div>
+        )}
+        <div className="space-y-1.5">
+          <label className="text-xs text-muted-foreground" htmlFor="htr-port">
+            HTR port — {shared ? "legacy private-daemon mode only; shared mode takes the port from htrcli" : "legacy private daemon (0 = managed default)"}
+          </label>
+          <Input
+            id="htr-port"
+            type="number"
+            value={htrPort}
+            onChange={(e) => setHtrPort(e.target.value)}
+            placeholder="3846"
+            disabled={shared}
+            className="h-8 text-xs"
+            data-testid="htr-port"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs text-muted-foreground" htmlFor="htr-socket">
+            HTR socket path — {shared ? "legacy private-daemon mode only" : "legacy private daemon; an empty value is left unchanged on save"}
+          </label>
+          <Input
+            id="htr-socket"
+            type="text"
+            value={htrSocketPath}
+            onChange={(e) => setHtrSocketPath(e.target.value)}
+            placeholder="(managed default)"
+            disabled={shared}
+            className="h-8 text-xs"
+            data-testid="htr-socket"
+          />
+        </div>
+        {htr?.adopt_only && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200" data-testid="htr-notice">
+            {htr.notice}
+          </div>
+        )}
         <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <input
             type="checkbox"
@@ -202,11 +305,19 @@ export default function BrowserForm() {
             {htrBusy && <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />}
             Start
           </Button>
+          {/* ocode stops only a daemon it spawned; a refused stop comes back
+              as stopped:false with a reason and nothing happens. Disabling here
+              is what keeps the button from looking like it worked. */}
           <Button
             size="sm"
             variant="outline"
             className="h-8 text-xs"
-            disabled={htrBusy || !htr?.running}
+            disabled={htrBusy || !htr?.running || htr?.started_by_ocode !== true}
+            title={
+              htr?.running && htr.started_by_ocode !== true
+                ? "ocode did not start this daemon, so it will not stop it. Start it from the terminal with `htrcli serve`, or let the ocode instance that owns it exit."
+                : undefined
+            }
             onClick={() => applyHtr(api.stopHtr)}
             data-testid="htr-stop"
           >
@@ -224,6 +335,20 @@ export default function BrowserForm() {
             List tabs
           </Button>
         </div>
+        {htr?.running && htr.started_by_ocode !== true && (
+          // A visible line, not just the button's title: a disabled control
+          // does not fire mouse events, so its native tooltip never appears.
+          // Without this the button is simply dead and the reason is invisible.
+          <div className="text-xs text-muted-foreground" data-testid="htr-stop-unavailable">
+            ocode did not start this daemon, so it will not stop it. Start it yourself with{" "}
+            <code>htrcli serve</code>, or let the ocode instance that owns it exit.
+          </div>
+        )}
+        {htr?.stopped === false && htr.reason && (
+          <div className="text-xs text-amber-200" data-testid="htr-stop-refused">
+            {htr.reason}
+          </div>
+        )}
         {htrError && (
           <div className="text-xs text-red-400" data-testid="htr-error">
             {htrError}

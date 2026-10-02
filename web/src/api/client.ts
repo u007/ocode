@@ -183,6 +183,9 @@ export interface ImageGenConfig {
 }
 
 // HtrStatus is the managed `htrcli serve` daemon snapshot (Settings > Browser).
+// Field names mirror the Go `htrStatusResponse` tags exactly — a mismatch here
+// renders as `undefined` in the UI rather than as a type error, because the
+// payload arrives as parsed JSON.
 export interface HtrStatus {
   enabled: boolean;
   running: boolean;
@@ -191,7 +194,74 @@ export interface HtrStatus {
   port: number;
   socket: string;
   binary: string;
+  /** "shared" = htrcli's own singleton, "private" = legacy ocode-managed, "" = HTR off. */
+  mode?: string;
+  /** ocode may use this daemon but must never start one. */
+  adopt_only?: boolean;
+  /** Why adopt-only is in effect, naming the file to fix or the command to run. */
+  notice?: string;
+  /** "htrcli-config" | "ocode-config" | "none" | "generated" | "". Never the token. */
+  token_source?: string;
+  /** htrcli's own config, the source of the shared coordinates. */
+  config_path?: string;
+  /** Live daemon pid from ocode's owner marker; 0 unless `running`. */
+  daemon_pid?: number;
+  /**
+   * True only when ocode itself spawned the daemon and may therefore stop it.
+   * The Stop button must be gated on this: a daemon ocode did not start (a
+   * second ocode instance's, or the user's own `htrcli serve`) is never killed
+   * on ocode's initiative.
+   */
+  started_by_ocode?: boolean;
   error?: string;
+  /** Present only on a stop response: false is a refusal, not a failure. */
+  stopped?: boolean;
+  reason?: string;
+}
+
+// BrowserConfig is the embedded-browser settings, including the HTR companion.
+// htr_shared/htr_token_set are REPORT-ONLY: config.SaveOcodeHTRConfig takes no
+// parameter for browser.htr_shared or browser.htr_token, so neither key can be
+// written through this API. They are shown as provenance for values the user
+// edits in ocodeconfig.json — never as inputs, which would look editable and
+// then silently fail to persist. htr_token_set is a boolean for the same reason
+// the value is absent: the bearer token must not cross the wire.
+export interface BrowserConfig {
+  chrome_path: string;
+  idle_timeout_minutes: number;
+  screencast_quality: number;
+  htr_enabled?: boolean;
+  htr_extension_path?: string;
+  htrcli_path?: string;
+  /** Configured legacy private-daemon port. Shared mode ignores it. */
+  htr_port?: number;
+  /** Configured legacy private-daemon socket. Shared mode ignores it. */
+  htr_socket_path?: string;
+  htr_native_host_name?: string;
+  htr_shared?: boolean;
+  htr_token_set?: boolean;
+  /** The port ocode actually uses, resolved from htrcli's config in shared mode. */
+  effective_port?: number;
+  effective_socket?: string;
+  token_source?: string;
+  adopt_only?: boolean;
+  config_path?: string;
+}
+
+// BrowserConfigSaveResult is the PUT /api/config/ocode/browser reply. It is NOT
+// a full BrowserConfig: only what the save actually wrote comes back, so every
+// derived field (effective_port, effective_socket, token_source, config_path,
+// htr_shared, htr_token_set) is absent and must be re-read with a GET.
+export interface BrowserConfigSaveResult {
+  chrome_path: string;
+  idle_timeout_minutes: number;
+  screencast_quality: number;
+  htr_enabled?: boolean;
+  htr_port?: number;
+  htr_socket_path?: string;
+  htr_native_host_name?: string;
+  /** A live start/stop triggered by htr_enabled failed; HTTP is still 200. */
+  htr_error?: string;
 }
 
 // HtrTab is one browser tab connected to the managed HTR daemon.
@@ -1303,18 +1373,22 @@ export const api = {
       body: JSON.stringify(fields),
     }),
 
-  getBrowserConfig: () =>
-    fetchJSON<{
-      chrome_path: string;
-      idle_timeout_minutes: number;
-      screencast_quality: number;
-    }>("/api/config/ocode/browser"),
+  getBrowserConfig: () => fetchJSON<BrowserConfig>("/api/config/ocode/browser"),
   setBrowserConfig: (fields: {
     chrome_path: string;
     idle_timeout_minutes: number;
     screencast_quality: number;
+    // The legacy private-daemon fields. The server writes htr_port only when it
+    // is > 0 and htr_socket_path only when non-empty, so clearing either is a
+    // no-op there; the form says so rather than pretending otherwise.
+    htr_port?: number;
+    htr_socket_path?: string;
   }) =>
-    fetchJSON<typeof fields>("/api/config/ocode/browser", {
+    // Deliberately NOT BrowserConfig: the save reply echoes only what was
+    // written, so effective_port and the shared provenance are absent from it.
+    // Typing it as the full config would let a caller read undefined and blame
+    // the resolution instead of the narrower reply.
+    fetchJSON<BrowserConfigSaveResult>("/api/config/ocode/browser", {
       method: "PUT",
       body: JSON.stringify(fields),
     }),

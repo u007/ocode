@@ -1038,8 +1038,10 @@ func TestHandleSetBackendConfigAcceptsLocalhost(t *testing.T) {
 func stubHTRSeams(t *testing.T) (*int, *int, *bool) {
 	t.Helper()
 	origEnsure, origStop, origStatus, origTabs, origOpts := ensureHTRServeFn, stopHTRServeFn, htrDaemonStatusFn, listHTRTabsFn, htrOptionsFn
+	origProv := htrProvenanceFn
 	t.Cleanup(func() {
 		ensureHTRServeFn, stopHTRServeFn, htrDaemonStatusFn, listHTRTabsFn, htrOptionsFn = origEnsure, origStop, origStatus, origTabs, origOpts
+		htrProvenanceFn = origProv
 	})
 	startCalls, stopCalls := 0, 0
 	running := false
@@ -1061,6 +1063,16 @@ func stubHTRSeams(t *testing.T) (*int, *int, *bool) {
 	}
 	htrOptionsFn = func(browser config.BrowserConfig) (cdp.HTROptions, string) {
 		return cdp.HTROptions{Enabled: browser.HTREnabled, Port: browser.HTRPort}, ""
+	}
+	// The real provenance reader consults ocode's owner marker on disk, which
+	// would reach outside the temp HOME these tests set; the running/stopped
+	// flag stands in for the entitlement, so `running` here also means "ocode
+	// may stop it".
+	htrProvenanceFn = func(port int) cdp.HTRProvenance {
+		if !running {
+			return cdp.HTRProvenance{}
+		}
+		return cdp.HTRProvenance{DaemonPID: 4242, StartedByOcode: true}
 	}
 	return &startCalls, &stopCalls, &running
 }
