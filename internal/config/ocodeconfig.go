@@ -1594,6 +1594,17 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["quick_actions"]; ok {
 		if file.QuickActions != nil {
 			cfg.QuickActions = NormalizeQuickActions(*file.QuickActions)
+			// Validate on load, exactly as chat_verbosity does above. Normalize
+			// alone would let a hand-edited strip (too many chips, duplicate ids,
+			// a retired icon) load silently, and writeOcodeConfigFile would then
+			// write that same invalid block straight back -- an invalid strip
+			// that perpetuates itself, and a cap Task 3's PUT depends on that an
+			// editor can walk straight past. Failing the whole load is the
+			// deliberate cost: it is what the chat_verbosity precedent already
+			// does, and a loud error beats a silently broken strip.
+			if err := cfg.QuickActions.Validate(); err != nil {
+				return fmt.Errorf("quick_actions: %w", err)
+			}
 			// Branch on Chips == nil, never on len(Chips) == 0. The type's doc
 			// makes nil the "absent" marker for both a missing key and a JSON
 			// null, while a non-nil empty slice is the user having deleted

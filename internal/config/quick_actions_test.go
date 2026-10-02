@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -466,18 +467,29 @@ func TestLoadOcodeConfigSeedsQuickActionsWhenChipsIsJSONNull(t *testing.T) {
 	// and the spec lists it beside a missing key, so both must seed. Reading
 	// null as "the user emptied the strip" would silently give a fresh-looking
 	// config three pills the user never asked for.
-	t.Setenv("HOME", t.TempDir())
-	cfgDir := filepath.Join(os.Getenv("HOME"), ".config", "opencode")
-	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cfgDir, "ocodeconfig.json"), []byte(`{"quick_actions":{"chips":null}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	//
+	// The fixture is written through the RESOLVED config path, never a
+	// hand-built ~/.config/opencode: GlobalConfigDir returns %APPDATA%\opencode
+	// on Windows and $XDG_CONFIG_HOME/opencode everywhere off darwin, so a
+	// hardcoded macOS path writes a file the loader never reads — the loader
+	// then takes the absent-key path, seeds three chips, and this test asserts
+	// exactly what the absent path produces. It was a false green off macOS.
+	// chat_verbosity in the same file is the guard: the loader read THIS file or
+	// that preset is not quiet.
+	home, xdg, appdata := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("APPDATA", appdata)
+
+	path := writeOcodeConfigFixture(t, `{"quick_actions":{"chips":null},"chat_verbosity":{"preset":"quiet"}}`)
 
 	cfg := Config{}
 	if err := LoadOcodeConfig(&cfg); err != nil {
 		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	if cfg.Ocode.ChatVerbosity.Preset != ChatVerbosityQuiet {
+		t.Fatalf("chat_verbosity.preset = %q, want %q — the loader never read the fixture at %s, so the seed assertions below prove nothing",
+			cfg.Ocode.ChatVerbosity.Preset, ChatVerbosityQuiet, path)
 	}
 	want := SeedQuickActions()
 	if len(cfg.Ocode.QuickActions.Chips) != len(want.Chips) {
@@ -488,4 +500,88 @@ func TestLoadOcodeConfigSeedsQuickActionsWhenChipsIsJSONNull(t *testing.T) {
 			t.Errorf("seeded chip %d = %+v, want %+v", i, cfg.Ocode.QuickActions.Chips[i], want.Chips[i])
 		}
 	}
+}
+
+func TestLoadOcodeConfigRejectsHandEditedOverCapQuickActions(t *testing.T) {
+	// The load path validates, so an over-cap strip cannot be smuggled in by
+	// editing ocodeconfig.json. SaveOcodeQuickActions already refuses this shape
+	// (it validates before taking the lock), so the editor is the only route —
+	// and writeOcodeConfigFile would otherwise write the same invalid block
+	// straight back on the next save, making it self-perpetuating. The cap is
+	// the bound Task 3's PUT depends on, so it has to hold here too.
+	//
+	// The chip count is the only thing that changes between the two writes, and
+	// the at-cap file is asserted to load cleanly first: that is what proves the
+	// later failure is the CAP and not the loader choking on hand-written JSON
+	// (the strict per-chip UnmarshalJSON is a different failure with a different
+	// message).
+	home, xdg, appdata := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("APPDATA", appdata)
+
+	writeOcodeConfigFixture(t, quickActionsFixture(QuickActionsMaxChips))
+	atCap := Config{}
+	if err := LoadOcodeConfig(&atCap); err != nil {
+		t.Fatalf("LoadOcodeConfig rejected a valid %d-chip strip: %v — the fixture is not reaching the loader the way the over-cap write will", QuickActionsMaxChips, err)
+	}
+	if len(atCap.Ocode.QuickActions.Chips) != QuickActionsMaxChips {
+		t.Fatalf("at-cap file loaded %d chips, want %d", len(atCap.Ocode.QuickActions.Chips), QuickActionsMaxChips)
+	}
+
+	writeOcodeConfigFixture(t, quickActionsFixture(QuickActionsMaxChips+1))
+	cfg := Config{}
+	err := LoadOcodeConfig(&cfg)
+	if err == nil {
+		t.Fatalf("LoadOcodeConfig accepted a %d-chip strip and loaded %d chips; the cap is bypassable by editing the file",
+			QuickActionsMaxChips+1, len(cfg.Ocode.QuickActions.Chips))
+	}
+	if !strings.Contains(err.Error(), "quick_actions") {
+		t.Errorf("error %q does not name the offending key", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(QuickActionsMaxChips)) {
+		t.Errorf("error %q does not name the cap (%d)", err, QuickActionsMaxChips)
+	}
+}
+
+// quickActionsFixture renders a raw `{"quick_actions":{...}}` block holding n
+// otherwise-valid chips. It is written as JSON text, never through
+// SaveOcodeQuickActions, because that function is what the tests below need to
+// be able to violate. Every chip is individually legal (unique id, label,
+// message, default icon and mode) so the ONLY thing that can reject the file is
+// the length check.
+func quickActionsFixture(n int) string {
+	chips := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		chips = append(chips, fmt.Sprintf(`{"id":"c%d","label":"Chip %d","message":"message %d"}`, i, i, i))
+	}
+	return fmt.Sprintf(`{"quick_actions":{"chips":[%s]}}`, strings.Join(chips, ","))
+}
+
+// writeOcodeConfigFixture writes body to the RESOLVED global ocodeconfig.json
+// and returns the path, after checking that the resolved path lands inside the
+// sandbox the test redirected HOME/XDG_CONFIG_HOME/APPDATA to. A hand-built
+// path is the trap this exists to catch: it produces a green test that never
+// touched the file the loader reads. Asserting containment here makes that
+// mistake fail loudly on every platform instead of passing for the wrong reason.
+func writeOcodeConfigFixture(t *testing.T, body string) string {
+	t.Helper()
+	path, err := ActiveOcodeConfigPath()
+	if err != nil {
+		t.Fatalf("ActiveOcodeConfigPath: %v", err)
+	}
+	for _, root := range []string{os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("APPDATA")} {
+		if root != "" && strings.HasPrefix(path, root) {
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s): %v", filepath.Dir(path), err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", path, err)
+			}
+			return path
+		}
+	}
+	t.Fatalf("resolved config path %q is outside every sandbox root (HOME=%q XDG_CONFIG_HOME=%q APPDATA=%q); the fixture would be written where the loader never reads it",
+		path, os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("APPDATA"))
+	return ""
 }
