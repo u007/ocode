@@ -66,16 +66,22 @@ describe("quick action icon allowlist", () => {
 
   it("resolves every allowlisted key to a usable React component", () => {
     for (const key of QUICK_ACTION_ICONS) {
-      // lucide exports forwardRef objects, so "is a function" would be false
-      // for every real icon. createElement throwing on an invalid type is the
-      // property that actually matters to a renderer.
+      // A smoke check only. It CANNOT be the missing-key guard: a key absent
+      // from the map resolves to the fallback, which is itself a valid
+      // component, so this passes either way. The guards are the typecheck
+      // (the map is keyed by the allowlist's own union) and the set-size
+      // assertion below.
       expect(() => createElement(quickActionIconComponent(key), {})).not.toThrow();
     }
   });
 
-  it("does not collapse the whole map onto the default icon", () => {
-    expect(quickActionIconComponent("archive")).not.toBe(quickActionIconComponent("zap"));
-    expect(quickActionIconComponent("file-text")).not.toBe(quickActionIconComponent("zap"));
+  // The load-bearing distinctness check, covering all 24 keys at once. A key
+  // missing from the map collapses onto the fallback and shrinks the set; two
+  // keys aliased to one component shrink it too. A spot check of two keys
+  // ("archive" vs "zap") caught neither — the old one asserted distinctness for
+  // 2 of 24, and 22 wrong components were green.
+  it("maps every key to a distinct component, so a missing key cannot hide", () => {
+    expect(new Set(QUICK_ACTION_ICONS.map(quickActionIconComponent)).size).toBe(24);
   });
 
   // Review Focus #5: a key that vanishes from lucide must not blank the pill.
@@ -189,6 +195,20 @@ describe("QUICK_ACTION_RESERVED_IDS", () => {
   it("names the three starter slugs the starters actually occupy", () => {
     expect(QUICK_ACTION_RESERVED_IDS).toEqual(["compact", "continue", "recap"]);
     expect(SEED_CHIPS.map((c) => c.id)).toEqual([...QUICK_ACTION_RESERVED_IDS]);
+  });
+});
+
+describe("SEED_CHIPS", () => {
+  // SEED_CHIPS is a DEGRADED FALLBACK, not a second authority: Go seeds the
+  // starters and the GET returns them. This assertion is a drift guard against
+  // that unchecked copy going stale — it does not promote the TS side to
+  // authority, and changing a value here requires changing the Go seed too.
+  it("matches the Go starters exactly", () => {
+    expect(SEED_CHIPS).toEqual([
+      { id: "compact", label: "Compact", icon: "archive", message: "/compact", mode: "send", seed: "compact" },
+      { id: "continue", label: "Continue", icon: "play", message: "continue", mode: "send", seed: "continue" },
+      { id: "recap", label: "Recap", icon: "file-text", message: "/recap", mode: "send", seed: "recap" },
+    ]);
   });
 });
 
@@ -392,6 +412,30 @@ describe("quick actions store", () => {
       const state = await refreshQuickActions();
       expect(state.chips).toEqual([]);
     })();
+  });
+
+  // The store path gets a different contract from the draft path. The draft
+  // path must PRESERVE an invalid mode so the server's rejection reaches the
+  // user, but a server response can never carry one (Go rejects a non-string
+  // mode at decode). Fed deliberately below, an invalid mode must therefore
+  // never reach QuickActionsState.chips: Task 7's `chip.mode` branch is only a
+  // total branch if this holds.
+  it("never publishes a chip whose mode is not fill or send", async () => {
+    // A response Go cannot produce, fed on purpose to prove the store does not
+    // trust the wire.
+    const impossible = { chips: [{ ...chip({ id: "bad" }), mode: 7 }, chip({ id: "ok" })] } as never;
+    getConfig.mockResolvedValue(impossible);
+    const state = await refreshQuickActions();
+    expect(state.chips.map((c) => c.id)).toEqual(["ok"]);
+    // The revision is computed from the published chips, not the pre-filter
+    // list, so a dropped chip does not linger in the rebase key.
+    expect(state.revision).toBe(quickActionsRevision(state.chips));
+  });
+
+  it("applies the same invariant to the server's answer to a save", async () => {
+    setConfig.mockResolvedValue({ chips: [{ ...chip({ id: "bad" }), mode: "sideways" }] } as never);
+    const state = await saveQuickActions([chip({ id: "ok" })]);
+    expect(state.chips).toEqual([]);
   });
 
   it("deduplicates concurrent refreshes into one request", async () => {

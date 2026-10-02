@@ -78,7 +78,14 @@ export const QUICK_ACTION_ICONS = [
   "chart-no-axes-column",
 ] as const;
 
-const ICON_COMPONENTS: Record<string, LucideIcon> = {
+/**
+ * Keyed by the allowlist's own union, so a key that is in `QUICK_ACTION_ICONS`
+ * but missing (or misspelled) here is a TYPECHECK error instead of a pill that
+ * silently renders as a zap. `web/tsconfig.json` includes `src`, so this file is
+ * inside the `npm run typecheck` gate — widening the key type back to `string`
+ * would reopen exactly that hole.
+ */
+const ICON_COMPONENTS: Record<(typeof QUICK_ACTION_ICONS)[number], LucideIcon> = {
   zap: Zap,
   archive: Archive,
   play: Play,
@@ -105,6 +112,14 @@ const ICON_COMPONENTS: Record<string, LucideIcon> = {
   "chart-no-axes-column": ChartNoAxesColumn,
 };
 
+/**
+ * Widened view of the same map, used ONLY by the runtime lookup below. The key
+ * arrives from a saved config and is usually not in the union, and the fallback
+ * must stay reachable for it. The exhaustiveness guarantee lives on
+ * `ICON_COMPONENTS`' declaration, which is why nothing is ever added here.
+ */
+const ICON_LOOKUP: Readonly<Record<string, LucideIcon>> = ICON_COMPONENTS;
+
 /** The default icon, reused both as the omitted-icon default and the fallback. */
 const DEFAULT_ICON = "zap";
 
@@ -114,7 +129,8 @@ const DEFAULT_ICON = "zap";
  * whole composer (spec Review Focus #5).
  */
 export function quickActionIconComponent(key: string): LucideIcon {
-  return ICON_COMPONENTS[key] ?? Zap;
+  const component: LucideIcon | undefined = ICON_LOOKUP[key];
+  return component ?? Zap;
 }
 
 const SEEDS: readonly QuickActionSeed[] = ["compact", "continue", "recap"];
@@ -141,6 +157,11 @@ export function isQuickActionMode(value: unknown): value is QuickActionMode {
  * ownership"). It must never be used as the source of truth, and it must never
  * be written to disk. If you change the starters in Go, change them here too
  * and say why in the commit.
+ *
+ * The test that pins every field below is a DRIFT GUARD, not a second
+ * authority: it exists because this copy is unchecked, and an unchecked copy of
+ * a Go-owned list is exactly the four-place matrix that drifted before. Change
+ * a value here only together with the Go seed it mirrors.
  */
 export const SEED_CHIPS: readonly QuickActionChip[] = [
   { id: "compact", label: "Compact", icon: "archive", message: "/compact", mode: "send", seed: "compact" },
@@ -172,6 +193,18 @@ export function normalizeQuickActionChip(input: unknown): QuickActionChip | null
     // starters). An EXPLICITLY invalid mode is preserved rather than repaired,
     // so the server rejects it and the user sees why instead of this layer
     // silently substituting a different value.
+    //
+    // The `as QuickActionMode` below is a DELIBERATE OPTIMISTIC CLAIM, and the
+    // value really can be neither "fill" nor "send": this function's declared
+    // return type is `QuickActionChip`, whose `mode` is `QuickActionMode`, and
+    // this is the one place that type is asserted rather than earned. It is
+    // safe because a server response can never carry an invalid mode (Go
+    // rejects a non-string mode at decode), so the ONLY possible source is the
+    // composer form's draft chip — and that draft is rejected by the server on
+    // save, which is where the user is told. A reader must NOT conclude that
+    // the return type proves the value is valid, and must NOT read
+    // `chipsForState`'s runtime check as dead code: the store path
+    // re-validates for real, because it cannot distinguish a claim from a fact.
     mode: isQuickActionMode(mode)
       ? mode
       : mode === undefined || mode === null || mode === ""
@@ -245,12 +278,33 @@ export function quickActionsRevision(chips: readonly QuickActionChip[]): string 
   return chips.map((c) => `${c.id}:${c.label}:${c.icon}:${c.message}:${c.mode}:${c.seed ?? ""}`).join("|");
 }
 
+/**
+ * Store-path invariant: every chip in `QuickActionsState.chips` has a REAL
+ * `QuickActionMode`, so a consumer's `chip.mode === "fill" ? … : …` is a total
+ * branch instead of a guess that reads `"sideways"` as `"send"`.
+ *
+ * This is a defence, not a repair. `normalizeQuickActionChip` preserves an
+ * invalid mode on purpose (the form's draft path needs the server's rejection
+ * to reach the user), but a server response can never carry one. So an invalid
+ * mode reaching this point means the wire already broke the invariant, and the
+ * honest response is to drop the chip: silently coercing it to a mode the user
+ * never chose, then re-saving that coercion, is the one outcome nobody can
+ * undo.
+ */
+function chipsForState(chips: readonly QuickActionChip[]): QuickActionChip[] {
+  return chips.filter((c) => isQuickActionMode(c.mode));
+}
+
 function stateFromChips(
   chips: QuickActionChip[],
   error: string | null = null,
   loading = false,
 ): QuickActionsState {
-  return { chips, error, loading, revision: quickActionsRevision(chips) };
+  // The single choke point every published state passes through — a successful
+  // refresh, the server's answer to a save, and the starter fallback — so the
+  // invariant cannot be bypassed by adding a new caller.
+  const honest = chipsForState(chips);
+  return { chips: honest, error, loading, revision: quickActionsRevision(honest) };
 }
 
 function publish(next: QuickActionsState): QuickActionsState {
