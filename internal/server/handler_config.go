@@ -1916,32 +1916,40 @@ func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) 
 
 // HandleGetBrowserConfig reports the embedded-browser settings (including
 // the HTR companion; HTR port 0 means the managed 3846 default).
+//
+// htr_port/htr_socket_path stay the *configured* values so the settings UI keeps
+// editing the legacy fields. The shared-daemon resolution is reported beside
+// them as effective_port/effective_socket plus its provenance, because in
+// shared mode the daemon actually used is htrcli's own and its coordinates come
+// from htrcli's config, not from what is set here. The token itself is never
+// emitted: htr_token_set says only that one is configured.
 func (h *Handler) HandleGetBrowserConfig(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	chromePath, idleTimeoutMinutes, quality := "", 10, config.DefaultScreencastQuality
-	htrEnabled, htrExt, htrCli, htrSocket, htrHost, htrPort := true, "", "", "", "com.ocode.htrcontrol", 3846
-	if h.cfg != nil {
-		chromePath = h.cfg.Ocode.Browser.ChromePath
-		idleTimeoutMinutes = h.cfg.Ocode.Browser.IdleTimeoutMinutes
-		quality = config.NormalizeScreencastQuality(h.cfg.Ocode.Browser.ScreencastQuality)
-		htrEnabled = h.cfg.Ocode.Browser.HTREnabled
-		htrExt = h.cfg.Ocode.Browser.HTRExtensionPath
-		htrCli = h.cfg.Ocode.Browser.HTRCliPath
-		htrPort = h.cfg.Ocode.Browser.HTRPort
-		htrSocket = h.cfg.Ocode.Browser.HTRSocketPath
-		htrHost = h.cfg.Ocode.Browser.HTRNativeHostName
-	}
-	h.mu.Unlock()
+	bcfg := h.htrBrowserConfig()
+	chromePath, idleTimeoutMinutes := bcfg.ChromePath, bcfg.IdleTimeoutMinutes
+	quality := config.NormalizeScreencastQuality(bcfg.ScreencastQuality)
+	shared := cdp.ResolveSharedDaemon(cdp.HTRSharedInput{
+		Token:        bcfg.HTRToken,
+		Shared:       bcfg.HTRShared,
+		LegacyPort:   bcfg.HTRPort,
+		LegacySocket: bcfg.HTRSocketPath,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"chrome_path":          chromePath,
 		"idle_timeout_minutes": idleTimeoutMinutes,
 		"screencast_quality":   quality,
-		"htr_enabled":          htrEnabled,
-		"htr_extension_path":   htrExt,
-		"htrcli_path":          htrCli,
-		"htr_port":             htrPort,
-		"htr_socket_path":      htrSocket,
-		"htr_native_host_name": htrHost,
+		"htr_enabled":          bcfg.HTREnabled,
+		"htr_extension_path":   bcfg.HTRExtensionPath,
+		"htrcli_path":          bcfg.HTRCliPath,
+		"htr_port":             bcfg.HTRPort,
+		"htr_socket_path":      bcfg.HTRSocketPath,
+		"htr_native_host_name": bcfg.HTRNativeHostName,
+		"htr_shared":           bcfg.HTRShared,
+		"htr_token_set":        bcfg.HTRToken != "",
+		"effective_port":       shared.Port,
+		"effective_socket":     shared.Socket,
+		"token_source":         shared.TokenSource,
+		"adopt_only":           shared.AdoptOnly,
+		"config_path":          shared.ConfigPath,
 	})
 }
 
@@ -2072,6 +2080,7 @@ var (
 	htrDaemonStatusFn = cdp.HTRDaemonStatus
 	listHTRTabsFn     = cdp.ListHTRTabs
 	htrOptionsFn      = resolveManagedHTROptions
+	htrProvenanceFn   = cdp.HTRProvenanceFor
 )
 
 // htrStatusResponse is the settings-UI snapshot of the managed daemon.
@@ -2083,7 +2092,34 @@ type htrStatusResponse struct {
 	Port    int    `json:"port"`
 	Socket  string `json:"socket"`
 	Binary  string `json:"binary"`
-	Error   string `json:"error,omitempty"`
+	// Mode is "shared" when the daemon is htrcli's own singleton, "private" for
+	// the legacy ocode-managed one, and "" when HTR is off entirely.
+	Mode string `json:"mode"`
+	// AdoptOnly reports that ocode may use this daemon but must never start
+	// one. It is the reason Start can be impossible, so the UI has to say so
+	// instead of offering a button that cannot succeed.
+	AdoptOnly bool `json:"adopt_only"`
+	// Notice explains adopt-only in the user's terms — which file to fix, or
+	// which command to run themselves. It is information, not a failure, so it
+	// is kept separate from Error.
+	Notice      string `json:"notice"`
+	TokenSource string `json:"token_source"`
+	ConfigPath  string `json:"config_path"`
+	// DaemonPID is the live daemon's pid from ocode's owner marker, or 0 when
+	// no running daemon is recorded. It is 0 whenever Running is false.
+	DaemonPID int `json:"daemon_pid"`
+	// StartedByOcode is true only when THIS process may stop the daemon: it
+	// reports cdp's stop entitlement, not merely that a marker exists. The UI
+	// must gate its Stop button on it, because ocode refuses to stop a daemon it
+	// did not spawn and a button that appears to work and silently does
+	// nothing is the failure mode worth avoiding.
+	StartedByOcode bool   `json:"started_by_ocode"`
+	Error          string `json:"error,omitempty"`
+	// Stopped is nil unless this body came from a stop attempt, so a plain
+	// status never implies a stop was tried. false is a refusal, not a failure
+	// — see Reason.
+	Stopped *bool  `json:"stopped,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // htrBrowserConfig copies the HTR-relevant browser config under the handler
@@ -2099,18 +2135,75 @@ func (h *Handler) htrBrowserConfig() config.BrowserConfig {
 
 // htrStatus builds the API snapshot from the persisted config plus a live probe.
 func (h *Handler) htrStatus(errMsg string) htrStatusResponse {
+	return h.htrStatusFor(h.resolveHTRShared(), errMsg)
+}
+
+// resolveHTRShared resolves the shared-daemon descriptor for the persisted
+// config. It is the same resolution StartBrowse performs, so the settings UI
+// reports the coordinates ocode would actually use rather than the legacy ones.
+func (h *Handler) resolveHTRShared() cdp.SharedDaemon {
+	bcfg := h.htrBrowserConfig()
+	return cdp.ResolveSharedDaemon(cdp.HTRSharedInput{
+		Token:        bcfg.HTRToken,
+		Shared:       bcfg.HTRShared,
+		LegacyPort:   bcfg.HTRPort,
+		LegacySocket: bcfg.HTRSocketPath,
+	})
+}
+
+// htrStatusFor is htrStatus with the resolved shared descriptor passed in, so a
+// caller that already holds one (startManagedHTR, via the htrOptionsFn seam)
+// does not resolve a second time and risk reporting a different answer than the
+// one it acted on. The descriptor is the sole source of the provenance fields;
+// the bearer token it may carry is never copied into the response.
+func (h *Handler) htrStatusFor(shared cdp.SharedDaemon, errMsg string) htrStatusResponse {
 	bcfg := h.htrBrowserConfig()
 	info := htrDaemonStatusFn(bcfg.HTRPort, bcfg.HTRSocketPath)
-	return htrStatusResponse{
-		Enabled: bcfg.HTREnabled,
-		Running: info.Running,
-		Managed: info.Managed,
-		Addr:    info.Addr,
-		Port:    info.Port,
-		Socket:  info.Socket,
-		Binary:  info.Binary,
-		Error:   errMsg,
+	// Provenance is only meaningful for a live daemon: a marker whose pid is
+	// gone names a process that no longer exists, and echoing its number would
+	// read as a running daemon. Gating on Running also keeps the settings poll
+	// cheap when nothing is up — the common case — since the entitlement check
+	// costs a liveness probe and a bearer-protected health probe.
+	var prov cdp.HTRProvenance
+	if info.Running {
+		prov = htrProvenanceFn(bcfg.HTRPort)
 	}
+	st := htrStatusResponse{
+		Enabled:        bcfg.HTREnabled,
+		Running:        info.Running,
+		Managed:        info.Managed,
+		Addr:           info.Addr,
+		Port:           info.Port,
+		Socket:         info.Socket,
+		Binary:         info.Binary,
+		Mode:           shared.Mode,
+		AdoptOnly:      shared.AdoptOnly,
+		TokenSource:    shared.TokenSource,
+		ConfigPath:     shared.ConfigPath,
+		DaemonPID:      prov.DaemonPID,
+		StartedByOcode: prov.StartedByOcode,
+		Error:          errMsg,
+	}
+	if shared.AdoptOnly {
+		st.Notice = adoptOnlyNotice(shared)
+	}
+	return st
+}
+
+// adoptOnlyNotice prefers the resolver's own wording, which names the specific
+// thing that is wrong, and falls back to the action only the user can take.
+// Either way it names `htrcli serve`: an adopt-only config is not a failure
+// ocode can retry its way out of.
+func adoptOnlyNotice(shared cdp.SharedDaemon) string {
+	if shared.Notice != "" {
+		return shared.Notice
+	}
+	where := shared.ConfigPath
+	if where == "" {
+		where = "htrcli's config"
+	}
+	return "ocode is configured to adopt the shared htrcli daemon and never start one. " +
+		"Start `htrcli serve` yourself, or fix " + where + " and retry."
 }
 
 func (h *Handler) setHTREnabledInMemory(enabled bool) {
@@ -2128,21 +2221,42 @@ func (h *Handler) startManagedHTR() htrStatusResponse {
 	bcfg := h.htrBrowserConfig()
 	opts, notice := htrOptionsFn(bcfg)
 	if notice != "" {
-		return h.htrStatus(notice)
+		return h.htrStatusFor(opts.Shared, notice)
 	}
+	// Adopt-only is deliberately NOT short-circuited here: EnsureHTRServe
+	// adopts an already-running shared daemon before it refuses to start one,
+	// and a settings panel that reported "stopped" for a daemon the user is
+	// happily running would be wrong. The refusal comes back as an error, and
+	// htrStatusFor's Notice says the same thing without an error.
 	if _, err := ensureHTRServeFn(h.procSup, opts, log.Default()); err != nil {
-		return h.htrStatus("HTR automation is unavailable: " + err.Error())
+		return h.htrStatusFor(opts.Shared, "HTR automation is unavailable: "+err.Error())
 	}
-	return h.htrStatus("")
+	return h.htrStatusFor(opts.Shared, "")
 }
 
-// stopManagedHTR stops the managed daemon recorded for the configured port.
+// stopManagedHTR stops the managed daemon recorded for the configured port. A
+// daemon ocode did not spawn — another instance's, an adopted one, or the
+// user's own `htrcli serve` — survives, and that is reported as stopped:false
+// with a reason rather than as an error: the request was understood and the
+// refusal is the contract (see cdp.StopHTRServe). The UI gates its Stop button
+// on started_by_ocode so a user rarely gets here, but a direct API caller must
+// still be told the truth instead of inferring success from a 200.
 func (h *Handler) stopManagedHTR() htrStatusResponse {
 	bcfg := h.htrBrowserConfig()
-	if _, err := stopHTRServeFn(h.procSup, bcfg.HTRPort, log.Default()); err != nil {
+	res, err := stopHTRServeFn(h.procSup, bcfg.HTRPort, log.Default())
+	if err != nil {
 		return h.htrStatus("failed to stop HTR daemon: " + err.Error())
 	}
-	return h.htrStatus("")
+	// The stop result, not a fresh probe, decides stopped: a refusal is exactly
+	// the case where the daemon is still up but a later probe might race.
+	stopped := !res.Running
+	st := h.htrStatus("")
+	st.Stopped = &stopped
+	if !stopped {
+		st.Reason = "left running: ocode only stops a daemon it started itself, so this one " +
+			"belongs to another ocode instance or to your own `htrcli serve`."
+	}
+	return st
 }
 
 // HandleGetHTRStatus reports the managed `htrcli serve` daemon (enabled flag +

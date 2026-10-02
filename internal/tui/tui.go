@@ -67,6 +67,17 @@ func Run(opts RunOptions) error {
 		}
 	}
 
+	// Make sure the shared HTR daemon is up for this session. A plain TUI
+	// session never reaches server.StartBrowse, so nothing else would ever start
+	// it and the user's own browser extension would have nothing to attach to.
+	// Placed here — after the startup validations, so a session that aborts
+	// above never spawns anything, and before tea.NewProgram — because this is
+	// the one place that runs for a real TUI launch and not for a test that
+	// merely builds a model. It is fire-and-forget: the first prompt must not
+	// wait on a daemon. /rc is deliberately not the trigger; that path already
+	// goes through StartBrowse and a second ensure there would be redundant.
+	m.ensureSharedHTRDaemonAsync()
+
 	crashLogf, crashLogPath := installCrashLog()
 	crashLogf("start pid=%d %s", os.Getpid(), ttyStateLine())
 

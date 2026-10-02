@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -668,6 +670,107 @@ func TestHandleSetBrowserConfigPersists(t *testing.T) {
 	}
 }
 
+func TestHandleGetBrowserConfigReportsSharedProvenance(t *testing.T) {
+	h := testConfigHandler(t)
+	// A readable htrcli config with its own token, plus an ocode-side override,
+	// so the reported provenance is the resolution's and not a default.
+	htrcliDir := filepath.Join(t.TempDir(), ".htrcli")
+	if err := os.MkdirAll(htrcliDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Dir(htrcliDir))
+	if err := os.WriteFile(filepath.Join(htrcliDir, "config.json"),
+		[]byte(`{"server":"http://127.0.0.1:3845","token":"htrcli_tok"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.cfg.Ocode.Browser.HTREnabled = true
+	h.cfg.Ocode.Browser.HTRShared = true
+	h.cfg.Ocode.Browser.HTRPort = 3846
+	h.cfg.Ocode.Browser.HTRToken = "super_secret_token"
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	h.HandleGetBrowserConfig(w, httptest.NewRequest("GET", "/api/config/ocode/browser", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "super_secret_token") || strings.Contains(body, "htrcli_tok") {
+		t.Fatalf("response leaks a bearer token: %s", body)
+	}
+	var resp struct {
+		HTRShared       bool   `json:"htr_shared"`
+		HTRTokenSet     bool   `json:"htr_token_set"`
+		EffectivePort   int    `json:"effective_port"`
+		EffectiveSocket string `json:"effective_socket"`
+		TokenSource     string `json:"token_source"`
+		AdoptOnly       bool   `json:"adopt_only"`
+		ConfigPath      string `json:"config_path"`
+		HTRPort         int    `json:"htr_port"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.HTRShared {
+		t.Error("htr_shared must report the configured mode")
+	}
+	if !resp.HTRTokenSet {
+		t.Error("htr_token_set must be true when a token is configured")
+	}
+	if resp.EffectivePort != 3845 {
+		t.Errorf("effective_port = %d, want 3845 from the htrcli config", resp.EffectivePort)
+	}
+	if resp.TokenSource != "ocode-config" {
+		t.Errorf("token_source = %q, want ocode-config", resp.TokenSource)
+	}
+	if resp.AdoptOnly {
+		t.Error("a readable config with a token must not report adopt_only")
+	}
+	if resp.ConfigPath == "" {
+		t.Error("config_path must name the htrcli config")
+	}
+	if resp.EffectiveSocket == "" {
+		t.Error("effective_socket must be reported in shared mode")
+	}
+	// The legacy fields keep reporting what is configured, so the settings UI
+	// still edits them; only the "effective_" pair describes the resolution.
+	if resp.HTRPort != 3846 {
+		t.Errorf("htr_port = %d, want the configured 3846, not the effective port", resp.HTRPort)
+	}
+}
+
+// The private rollback must report private provenance, so the UI can tell the
+// two modes apart even though both answer the same endpoint.
+func TestHandleGetBrowserConfigPrivateModeProvenance(t *testing.T) {
+	h := testConfigHandler(t)
+	h.mu.Lock()
+	h.cfg.Ocode.Browser.HTREnabled = true
+	h.cfg.Ocode.Browser.HTRShared = false
+	h.cfg.Ocode.Browser.HTRPort = 3846
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	h.HandleGetBrowserConfig(w, httptest.NewRequest("GET", "/api/config/ocode/browser", nil))
+	var resp struct {
+		TokenSource   string `json:"token_source"`
+		ConfigPath    string `json:"config_path"`
+		EffectivePort int    `json:"effective_port"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.TokenSource != "generated" {
+		t.Errorf("token_source = %q, want generated in private mode", resp.TokenSource)
+	}
+	if resp.ConfigPath != "" {
+		t.Errorf("config_path = %q, want empty in private mode: htrcli's config is never consulted", resp.ConfigPath)
+	}
+	if resp.EffectivePort != 3846 {
+		t.Errorf("effective_port = %d, want the configured 3846 in private mode", resp.EffectivePort)
+	}
+}
+
 func TestHandleSetFeaturesConfigPersists(t *testing.T) {
 	h := testConfigHandler(t)
 
@@ -935,8 +1038,10 @@ func TestHandleSetBackendConfigAcceptsLocalhost(t *testing.T) {
 func stubHTRSeams(t *testing.T) (*int, *int, *bool) {
 	t.Helper()
 	origEnsure, origStop, origStatus, origTabs, origOpts := ensureHTRServeFn, stopHTRServeFn, htrDaemonStatusFn, listHTRTabsFn, htrOptionsFn
+	origProv := htrProvenanceFn
 	t.Cleanup(func() {
 		ensureHTRServeFn, stopHTRServeFn, htrDaemonStatusFn, listHTRTabsFn, htrOptionsFn = origEnsure, origStop, origStatus, origTabs, origOpts
+		htrProvenanceFn = origProv
 	})
 	startCalls, stopCalls := 0, 0
 	running := false
@@ -958,6 +1063,16 @@ func stubHTRSeams(t *testing.T) (*int, *int, *bool) {
 	}
 	htrOptionsFn = func(browser config.BrowserConfig) (cdp.HTROptions, string) {
 		return cdp.HTROptions{Enabled: browser.HTREnabled, Port: browser.HTRPort}, ""
+	}
+	// The real provenance reader consults ocode's owner marker on disk, which
+	// would reach outside the temp HOME these tests set; the running/stopped
+	// flag stands in for the entitlement, so `running` here also means "ocode
+	// may stop it".
+	htrProvenanceFn = func(port int) cdp.HTRProvenance {
+		if !running {
+			return cdp.HTRProvenance{}
+		}
+		return cdp.HTRProvenance{DaemonPID: 4242, StartedByOcode: true}
 	}
 	return &startCalls, &stopCalls, &running
 }

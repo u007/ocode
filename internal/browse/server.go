@@ -289,11 +289,14 @@ func (s *Server) initManager(opts Options) {
 	if s.cdp != nil {
 		return
 	}
-	htrExtensionDir, htrSocketPath, htrNativeHostName := "", "", ""
+	htrExtensionDir, htrSocketPath, htrNativeHostName, htrSharedMode := "", "", "", ""
 	if opts.HTR.Enabled {
 		htrExtensionDir = opts.HTR.ExtensionDir
 		htrSocketPath = opts.HTR.SocketPath
 		htrNativeHostName = opts.HTR.NativeHostName
+		// Empty when the mode was never resolved, which the launcher reads as
+		// private/legacy behaviour.
+		htrSharedMode = opts.HTR.Shared.Mode
 	}
 	mgrOpts := cdp.ManagerOptions{
 		ChromePath:        opts.ChromePath,
@@ -302,6 +305,7 @@ func (s *Server) initManager(opts Options) {
 		HTRExtensionDir:   htrExtensionDir,
 		HTRSocketPath:     htrSocketPath,
 		HTRNativeHostName: htrNativeHostName,
+		HTRSharedMode:     htrSharedMode,
 		ProfileDir:        opts.ProfileDir,
 		NoSandbox:         opts.NoSandbox,
 		Supervisor:        opts.Supervisor,

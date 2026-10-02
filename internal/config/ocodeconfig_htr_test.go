@@ -99,4 +99,39 @@ func TestBrowserConfigHTRDefaultsAbsent(t *testing.T) {
 	if b.HTRPort != 3846 {
 		t.Fatalf("default HTRPort = %d, want 3846", b.HTRPort)
 	}
+	if !b.HTRShared {
+		t.Fatal("default HTRShared = false, want true: the shared daemon is the default and a " +
+			"zero-valued default would silently select the legacy private daemon for every user")
+	}
+	if b.HTRToken != "" {
+		t.Fatalf("default HTRToken = %q, want empty (read htrcli's config)", b.HTRToken)
+	}
+}
+
+func TestBrowserConfigHTRSharedExplicitFalseBeatsDefault(t *testing.T) {
+	chdirTempForConfigTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// htr_shared is a *bool on the wire precisely so an explicit false is
+	// distinguishable from absent. With a plain bool, a user could not roll back
+	// to the private daemon and the default true would win every time.
+	initial := `{"browser":{"htr_shared":false,"htr_token":"htr_secret"}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig: %v", err)
+	}
+	b := cfg.Ocode.Browser
+	if b.HTRShared {
+		t.Fatal("explicit htr_shared:false was ignored; the rollback path is unreachable")
+	}
+	if b.HTRToken != "htr_secret" {
+		t.Fatalf("HTRToken = %q, want htr_secret", b.HTRToken)
+	}
 }
