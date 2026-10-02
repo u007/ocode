@@ -38,12 +38,19 @@ Each was chosen explicitly in brainstorming, not inferred.
 ```json
 "quick_actions": {
   "chips": [
-    { "id": "compact",  "label": "Compact",  "icon": "archive",   "message": "/compact", "mode": "send" },
+    { "id": "compact",  "label": "Compact",  "icon": "archive",   "message": "/compact", "mode": "send", "seed": "compact" },
     { "id": "continue", "label": "Continue", "icon": "play",      "message": "continue", "mode": "send", "seed": "continue" },
-    { "id": "recap",    "label": "Recap",    "icon": "file-text", "message": "/recap",   "mode": "send" }
+    { "id": "recap",    "label": "Recap",    "icon": "file-text", "message": "/recap",   "mode": "send", "seed": "recap" }
   ]
 }
 ```
+
+All three starters carry a `seed`, not just Continue. The seed's two
+derived duties both apply to the set: any `seed` means "requires history"
+(hidden on an empty session), and `seed:"continue"` additionally means
+"resume-if-interrupted". An earlier draft of this block showed `compact`
+and `recap` without one; that was wrong and the implementation was written
+against the correct form.
 
 Every chip is uniform: `id`, `label`, `icon`, `message`, `mode`. Array order is
 the sort order. `seed` is the single optional hidden field.
