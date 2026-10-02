@@ -634,6 +634,13 @@ func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, err
 // HTTP port (0 means the managed 3846 default).
 // HTRSocketPath and HTRNativeHostName are optional development overrides. The
 // defaults are deliberately namespaced away from a user's standalone htrcli.
+//
+// HTRShared selects the shared daemon (true, the default): one `htrcli serve`
+// that serves both ocode's embedded browser and the user's own extension, whose
+// coordinates are read from htrcli's own config rather than invented here. false
+// is the rollback path — today's private, ocode-managed 3846 daemon, unchanged.
+// HTRToken is the escape hatch for a bearer token ocode cannot read from
+// htrcli's config; empty means "read htrcli's config".
 type BrowserConfig struct {
 	ChromePath         string `json:"chrome_path"`
 	IdleTimeoutMinutes int    `json:"idle_timeout_minutes"`
@@ -644,6 +651,8 @@ type BrowserConfig struct {
 	HTRPort            int    `json:"htr_port"`
 	HTRSocketPath      string `json:"htr_socket_path"`
 	HTRNativeHostName  string `json:"htr_native_host_name"`
+	HTRShared          bool   `json:"htr_shared"`
+	HTRToken           string `json:"htr_token"`
 	NoSandbox          bool   `json:"no_sandbox"`
 }
 
@@ -1148,6 +1157,8 @@ type browserConfigFile struct {
 	HTRPort            *int            `json:"htr_port,omitempty"`
 	HTRSocketPath      string          `json:"htr_socket_path,omitempty"`
 	HTRNativeHostName  string          `json:"htr_native_host_name,omitempty"`
+	HTRShared          *bool           `json:"htr_shared,omitempty"`
+	HTRToken           string          `json:"htr_token,omitempty"`
 	Extensions         json.RawMessage `json:"extensions,omitempty"`
 }
 
@@ -1251,7 +1262,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Compact:              defaultCompactConfig(),
 		Advisor:              defaultAdvisorConfig(),
 		Permissions:          defaultPermissionConfig(),
-		Browser:              BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", NoSandbox: true},
+		Browser:              BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", HTRShared: true, NoSandbox: true},
 		TTS:                  TTSConfig{Engine: "browser-native", Mode: "manual"},
 		ChatVerbosity:        defaultChatVerbosityConfig(),
 		QuickActions:         SeedQuickActions(),
@@ -2251,6 +2262,12 @@ func applyBrowserConfig(dst *BrowserConfig, src browserConfigFile) error {
 			return fmt.Errorf("browser.htr_native_host_name must use the com.ocode.* namespace")
 		}
 		dst.HTRNativeHostName = src.HTRNativeHostName
+	}
+	if src.HTRShared != nil {
+		dst.HTRShared = *src.HTRShared
+	}
+	if src.HTRToken != "" {
+		dst.HTRToken = src.HTRToken
 	}
 	return nil
 }

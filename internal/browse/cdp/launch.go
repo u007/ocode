@@ -181,12 +181,68 @@ func launchChrome(ctx context.Context, chromePath string, sup *tool.ProcessSuper
 	if len(extDir) > 0 {
 		ext = extDir[0]
 	}
-	return launchChromeWithOptions(ctx, chromePath, sup, lg, ext, "", "", "", true)
+	return launchChromeWithOptions(ctx, chromePath, sup, lg, htrLaunchConfig{ExtensionDir: ext}, "", true)
+}
+
+// htrSharedModeShared is the only SharedMode value that suppresses the launch
+// env overrides. It matches SharedDaemon.Mode as produced by
+// ResolveSharedDaemon; every other value (including the empty string a caller
+// that never threaded the mode leaves behind) means private/legacy behaviour.
+const htrSharedModeShared = "shared"
+
+// htrLaunchConfig is the HTR preload configuration for one Chrome launch. The
+// fields are grouped rather than passed as adjacent positional strings because
+// four same-typed strings in a row make a swapped socket/native-host/mode
+// invisible at every call site and to the compiler.
+type htrLaunchConfig struct {
+	// ExtensionDir is the unpacked MV3 extension to preload ("" = none).
+	ExtensionDir string
+	// SocketPath is the daemon socket ocode hands the preload's relay
+	// through HTR_SOCKET_PATH ("" = inject nothing).
+	SocketPath string
+	// NativeHostName is the namespaced native-messaging host injected as
+	// HTR_NATIVE_HOST_NAME ("" = inject nothing).
+	NativeHostName string
+	// SharedMode is SharedDaemon.Mode: "shared" or "private". See
+	// filterSharedLaunchEnv for what it changes.
+	SharedMode string
+}
+
+// filterSharedLaunchEnv decides which HTR env vars reach the embedded Chromium.
+//
+// In shared mode the preload's relay must fall back to htrcli's own default
+// socket (~/.htrcli/daemon.sock) so it reaches the SAME daemon the user's
+// browser extension attaches to. That extension cannot read a process
+// environment, so it always uses htrcli's default; injecting ocode's socket for
+// our Chromium alone is what re-creates the two-daemon split this mode exists to
+// remove — one socket is the only thing that makes "one daemon" true.
+//
+// HTR_NATIVE_HOST_NAME is dropped because nothing in htrcli reads it and an
+// extension cannot read process environment either: it is inert, so dropping it
+// is cleanup rather than a fix. ocode's own namespaced host name still applies
+// to the manifest ocode writes (ensureNativeHostManifest), which is what the
+// preload actually resolves.
+//
+// Private (legacy) mode, and the empty mode a caller that never threaded the
+// field leaves behind, keep today's behaviour exactly. The result is always a
+// freshly allocated slice, never the caller's, so a caller may append to it (or
+// mutate it) without disturbing the environment it was handed.
+func filterSharedLaunchEnv(env []string, mode string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if mode == htrSharedModeShared &&
+			(strings.HasPrefix(kv, "HTR_SOCKET_PATH=") || strings.HasPrefix(kv, "HTR_NATIVE_HOST_NAME=")) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // profileDir is the persistent --user-data-dir ("" = ephemeral temp profile);
 // see prepareProfileDir for lock handling.
-func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, ext, socketPath, nativeHostName, profileDir string, noSandbox bool) (*Conn, <-chan int, func(), error) {
+func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.ProcessSupervisor, lg *log.Logger, htrCfg htrLaunchConfig, profileDir string, noSandbox bool) (*Conn, <-chan int, func(), error) {
+	ext, socketPath, nativeHostName := htrCfg.ExtensionDir, htrCfg.SocketPath, htrCfg.NativeHostName
 	tmpDir, cleanupDir, err := prepareProfileDir(profileDir, lg)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("launch failed: %w", err)
@@ -225,10 +281,14 @@ func launchChromeWithOptions(ctx context.Context, chromePath string, sup *tool.P
 	}
 	cmd := exec.Command(chromePath, chromeArgsFor(tmpDir, ext, noSandbox)...)
 	if socketPath != "" {
-		cmd.Env = append(os.Environ(), "HTR_SOCKET_PATH="+socketPath)
+		env := append(os.Environ(), "HTR_SOCKET_PATH="+socketPath)
 		if nativeHostName != "" {
-			cmd.Env = append(cmd.Env, "HTR_NATIVE_HOST_NAME="+nativeHostName)
+			env = append(env, "HTR_NATIVE_HOST_NAME="+nativeHostName)
 		}
+		// filterSharedLaunchEnv is the whole point of this block in shared
+		// mode: the preload's relay must dial htrcli's own default socket so
+		// it lands on the same daemon the user's browser extension uses.
+		cmd.Env = filterSharedLaunchEnv(env, htrCfg.SharedMode)
 	}
 	cmd.ExtraFiles = []*os.File{r3Read, r4Write}
 	if lg != nil {

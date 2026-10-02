@@ -37,6 +37,18 @@
 
 
 
+
+## 2026-10-02
+
+* **Update**: Web/Desktop Connectors settings — implementation plan ([superpowers/plans/2026-10-01-web-connector-settings.md](/superpowers/plans/2026-10-01-web-connector-settings.md))
+* **Update**: Web/Desktop Connectors settings — implementation plan ([superpowers/plans/2026-10-01-web-connector-settings.md](/superpowers/plans/2026-10-01-web-connector-settings.md))
+* **Update**: Web/Desktop "Connectors" settings — TUI /connect parity — design ([superpowers/specs/2026-10-01-web-connector-settings-design.md](/superpowers/specs/2026-10-01-web-connector-settings-design.md))
+* **Update**: Web/Desktop "Connectors" settings — TUI /connect parity — design ([superpowers/specs/2026-10-01-web-connector-settings-design.md](/superpowers/specs/2026-10-01-web-connector-settings-design.md))
+* **Update**: Loopback curl with a shell-variable port asked as exfiltration — and the 127. host-match hole beside it ([gotchas/loopback-curl-shell-port-variable.md](/gotchas/loopback-curl-shell-port-variable.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Update**: Discovery MCP Tool Gating ([concepts/discovery-mcp-tool-gating.md](/concepts/discovery-mcp-tool-gating.md))
+* **Update**: Session-tagged snapshot: override base fields but recompute ALL derived fields ([gotchas/session-snapshot-stale-derived-fields.md](/gotchas/session-snapshot-stale-derived-fields.md))
+* **Update**: Discovery Corpus Cache ([concepts/discovery-corpus-cache.md](/concepts/discovery-corpus-cache.md))
 ## 2026-10-01
 
 * **Update**: Loopback curl with a shell-variable port asked as exfiltration — and the 127. prefix host-match hole ([gotchas/loopback-curl-shell-port-variable.md](/gotchas/loopback-curl-shell-port-variable.md))

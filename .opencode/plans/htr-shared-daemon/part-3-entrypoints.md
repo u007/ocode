@@ -304,6 +304,21 @@ In `BrowserForm.tsx`:
 - disable the stop button unless `started_by_ocode`;
 - surface `notice` verbatim when `adopt_only` is true.
 
+> **The two new keys are config-file-only — render them as read-only provenance,
+> never as inputs.** `config.SaveOcodeHTRConfig` takes
+> `(enabled, extensionPath, cliPath, port, runtimeOverrides...)` and has no
+> parameter for `HTRShared` or `HTRToken`, so neither key can be written through
+> this API. Both are read correctly by `LoadBrowseOptions` and `StartBrowse`, and
+> nothing clobbers them: `SaveOcodeHTRConfig` and `SaveOcodeBrowserConfig` mutate
+> only their named fields under `withOcodeConfigLock` rather than rewriting the
+> `browser` section, so a hand-edited `htr_shared: false` survives an unrelated
+> save in this form.
+>
+> Showing `htr_shared` and whether a `htr_token` is set is fine; offering an input
+> that silently fails to persist is not. Making them editable means adding
+> parameters to `SaveOcodeHTRConfig` — out of scope for this task, and it must
+> keep `*bool` on the wire so an explicit `false` stays expressible.
+
 Update the `HtrStatus` and browser-config types in `web/src/api/client.ts` to
 match the Go payloads exactly (field names snake_case on the wire).
 

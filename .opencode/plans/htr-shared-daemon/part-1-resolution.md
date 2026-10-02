@@ -401,8 +401,24 @@ git commit -m "feat(htr): resolve one shared daemon from htrcli's own config"
 
 **Files:**
 - Modify: `internal/server/htr.go` (`resolveManagedHTROptions`)
+- Modify: **`internal/server/server.go` (`LoadBrowseOptions`, `StartBrowse`)** — required, see the trap below
 - Modify: `internal/server/handler_config.go` (`htrBrowserConfig`, `HandleGetBrowserConfig`)
 - Test: `internal/server/handler_config_test.go`, `internal/server/htr_shared_options_test.go` (create)
+
+> **Trap — this task silently ships private mode if you skip `server.go`.**
+> `LoadBrowseOptions` and `StartBrowse` relay `BrowserConfig` **field by field**
+> rather than passing the struct. A literal built from them that omits
+> `HTRShared` yields `false`, which resolves to the legacy private daemon — with
+> a green build, a green resolver table, and no error anywhere. Carry
+> `HTRShared` and `HTRToken` through **both** functions, and add the round-trip
+> test in Step 6 that proves `browser.HTRShared` actually reaches
+> `resolveManagedHTROptions`.
+>
+> **Second trap — the shared socket directory.** `ResolveHTRSocketPath` creates the
+> parent directory for the managed socket. The shared path
+> `<home>/.htrcli/daemon.sock` is produced by the pure resolver and therefore has
+> **no** `MkdirAll` behind it. Either create `<home>/.htrcli` here or make the
+> daemon spawn tolerate its absence.
 
 **Interfaces:**
 - Consumes: `cdp.ResolveSharedDaemon`, `cdp.HTRSharedInput`, `cdp.SharedDaemon` (Task 1); `cdp.HTROptions` (existing).
@@ -517,10 +533,72 @@ Add the provenance fields to the JSON body: `htr_shared`, `htr_token_set` (bool,
 Run: `go test ./internal/server/ -run 'Browser|HTR' -v`
 Expected: PASS, including the pre-existing `TestHandleGetBrowserConfig`-style tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Prove the mode survives the relay**
+
+Add to `internal/server/htr_shared_options_test.go`:
+
+```go
+// LoadBrowseOptions and StartBrowse relay BrowserConfig field by field. If
+// either drops HTRShared, every user silently resolves to the private daemon
+// and nothing fails.
+func TestBrowseOptionsCarryHTRSharedAndToken(t *testing.T) {
+	chdirTempForConfigTest(t)
+	cases := []struct {
+		name       string
+		body       string
+		wantShared bool
+		wantToken  string
+	}{
+		// true->true is the case that catches a DROPPED field: with the relay
+		// losing HTRShared the literal's zero value is false, which the
+		// false->false case alone would happily accept.
+		{"true survives", `{"browser":{"htr_shared":true}}`, true, ""},
+		// false->false catches a relay that hardcodes the default.
+		{"false survives", `{"browser":{"htr_shared":false}}`, false, ""},
+		{"token survives", `{"browser":{"htr_token":"htr_secret"}}`, true, "htr_secret"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+			cfgDir := filepath.Join(tmp, ".config", "opencode")
+			if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cfgDir, "ocodeconfig.json"), []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			opts := LoadBrowseOptions(nil)
+			if opts.HTRShared != tc.wantShared {
+				t.Errorf("HTRShared = %v, want %v", opts.HTRShared, tc.wantShared)
+			}
+			if opts.HTRToken != tc.wantToken {
+				t.Errorf("HTRToken = %q, want %q", opts.HTRToken, tc.wantToken)
+			}
+		})
+	}
+}
+```
+
+Use whatever temp-dir helper `internal/server`'s existing tests use instead of
+`chdirTempForConfigTest` if that name is not in this package.
+
+**Why this is a table and not one case.** The original single-case version was
+VACUOUS and mutation testing proved it: asserting that `htr_shared:false` reaches
+`LoadBrowseOptions` still passes when `HTRShared` is dropped from the relay
+entirely, because the zero value of the dropped field is `false` — identical to
+the value being asserted. The `true->true` case is what catches the drop. Do not
+collapse this back to a single case.
+
+**`StartBrowse`'s hop is a second relay.** It has no test seam, so a test there
+would spawn a real daemon. Extract its literal to a named helper
+(`browserConfigFromBrowseOptions`) and test the options -> config -> resolution
+walk, so both hops are pinned.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add internal/browse/cdp/htr.go internal/server/htr.go internal/server/handler_config.go \
-        internal/server/htr_shared_options_test.go
+git add internal/browse/cdp/htr.go internal/server/htr.go internal/server/server.go \
+        internal/server/handler_config.go internal/server/htr_shared_options_test.go
 git commit -m "feat(htr): thread shared-daemon resolution into options and the settings API"
 ```

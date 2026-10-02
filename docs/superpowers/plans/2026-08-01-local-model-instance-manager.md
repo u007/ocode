@@ -1,3 +1,12 @@
+---
+type: Plan
+title: Local Model Instance Manager Implementation Plan
+description: 'Implementation plan for /localmodel local chat/completion model instances (starting with Bonsai 8B 1-bit): ServerManifest.Kind embed/chat split, chat manifest entries, instance registry with deterministic port assignment and supervised spawn, LocalModels config plumbing, the /localmodel slash command, and end-to-end verification (Tasks 1-6).'
+tags:
+  - plan
+  - local-models
+timestamp: 2026-10-01T21:28:09Z
+---
 # Local Model Instance Manager Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -629,7 +638,7 @@ func StopModelInstance(procs *tool.ProcessRegistry, modelID string) error {
 
 Add `"os"`, `"path/filepath"`, and `"time"` to the import block alongside the ones already listed in Step 3 (needed for `filepath.Join`, `time.Sleep`).
 
-Note: `spawn` in `StartModelInstance`'s callers (Task 5) is the same `func(cmdline string) error` closure shape used by `ensureDiscovery` in `internal/agent/discovery_glue.go:60-72` — it must call `procs.StartBackground(cmdline)` and store the returned `*tool.Process.ID` into `instances[modelID].processID` so `StopModelInstance` can find it later. Since `StartModelInstance` only receives the `spawn` closure (not the `*tool.Process` it creates), have the Task 5 caller's `spawn` closure capture and stash the process ID itself, e.g.:
+Note: `spawn` in `StartModelInstance`'s callers (Task 5) is the same `func(cmdline string) error` closure shape used by `ensureDiscovery` in `internal/agent/discovery_glue.go:103` — it must call `procs.StartBackground(cmdline)` and store the returned `*tool.Process.ID` into `instances[modelID].processID` so `StopModelInstance` can find it later. Since `StartModelInstance` only receives the `spawn` closure (not the `*tool.Process` it creates), have the Task 5 caller's `spawn` closure capture and stash the process ID itself, e.g.:
 
 ```go
 var lastProcID string
@@ -1055,7 +1064,7 @@ func (m *model) localModelSetEnabled(name string, enabled bool) {
 
 // startLocalModelInstance resolves this model's deterministic port and spawns
 // it through the agent's supervised process registry, mirroring the spawn
-// closure shape used by ensureDiscovery (internal/agent/discovery_glue.go:60-72).
+// closure shape used by ensureDiscovery (internal/agent/discovery_glue.go:103).
 func (m *model) startLocalModelInstance(id string, maxParallel int) error {
 	if m.agent == nil {
 		return fmt.Errorf("no active agent to spawn the local model process")

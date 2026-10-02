@@ -119,9 +119,13 @@ site that already forwards `HTRSocketPath` / `HTRNativeHostName`) down to
 These comments describe the old world and are exactly how the private daemon
 gets re-added by a later reader. Update each:
 
-- `DefaultHTRPort`'s comment in `internal/browse/cdp/htr.go` — it currently says
-  the separate port "prevents ocode from attaching to or stopping a user's
-  existing daemon". That is now only true of `htr_shared: false`.
+- `DefaultHTRPort`'s comment in `internal/browse/cdp/htr.go` — it says the
+  separate port "prevents ocode from attaching to or stopping a user's existing
+  daemon". Task 1 made shared mode the default, so that sentence is now **false
+  for the default path**, and `3845` and `3846` sit side by side in one package
+  under a comment describing neither correctly. This is the highest-value comment
+  fix in the task: until it lands, the code actively contradicts the shipped
+  behaviour. Do it first if you are short on time.
 - The file-header architecture comment in `internal/browse/cdp/htr.go` — update
   the default port and say which parts are shared-mode versus legacy.
 - The "never reads, rewrites, or removes com.htrcontrol.host" comment in

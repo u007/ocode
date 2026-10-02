@@ -11,7 +11,13 @@ then 5.
 - **Never** set `HTR_BEARER_TOKEN` on the child. htrcli resolves its own token. There is a test pinning its absence.
 - Set `HTR_MANAGED_ID` to the **shared token**, never a fresh random value, so the existing strict probe stays valid for a daemon we started.
 - Every probe keeps the existing 2s client timeout; every wait loop is bounded.
-- Daemon output must be **captured, never inherited** — the TUI runs in the alt-screen and an inherited fd paints over the frame. See Task 3 Step 4.
+- Daemon output must be **captured, not discarded**. Correcting an earlier note in this
+  plan: a nil `cmd.Stdout` makes `os/exec` connect the descriptor to `os.DevNull`, so
+  the daemon was never inheriting the TUI's terminal and was never an alt-screen
+  corruption risk. The real defect was that daemon diagnostics were silently thrown
+  away, which is exactly what CLAUDE.md says to capture instead. The invariant
+  stands — neither stream may be an `*os.File`, since an `*os.File` is connected
+  directly to that file — but the reason is now correct. See Task 3 Step 4.
 - Ownership and lease files live under `paths.GlobalDataDir()`; diagnostics go to the package logger.
 - Fail loudly: no mid-session auto-restart and no fallback to a private per-session daemon.
 
@@ -126,10 +132,10 @@ func TestSharedSpawnEnvOmitsBearerToken(t *testing.T) {
 func TestDaemonOutputIsCapturedNotInherited(t *testing.T) {
 	cmd := newSharedServeCmd("/nonexistent/htrcli", "tok", 3845, "/tmp/x.sock", "com.ocode.htrcontrol")
 	if cmd.Stdout == nil || cmd.Stderr == nil {
-		t.Fatal("daemon stdout/stderr must be captured, never inherited from the TUI")
+		t.Fatal("daemon stdout/stderr must be captured, not discarded")
 	}
 	if f, ok := cmd.Stdout.(*os.File); ok {
-		t.Fatalf("daemon stdout must not be an *os.File (would paint the alt-screen); got %v", f)
+		t.Fatalf("daemon stdout must not be an *os.File (os/exec connects those directly); got %v", f)
 	}
 }
 ```
@@ -202,8 +208,11 @@ func sharedServeEnv(token string, port int, socket, nativeHost string) []string 
 }
 
 // newSharedServeCmd builds the daemon command with its output captured. The
-// TUI runs in the alt-screen, so an inherited stdout/stderr would paint over
-// the rendered frame; an uncaptured pipe would also eventually block the child.
+// A nil stream would send diagnostics to os.DevNull and lose them; an uncaptured
+// pipe would also eventually block the child. Note os/exec already serialises
+// writes when both streams are the same comparable writer, so one shared buffer
+// is not a data race — the mutex is belt and braces, and the cap is the real
+// requirement here, because the daemon outlives the call that built the sink.
 func newSharedServeCmd(bin, token string, port int, socket, nativeHost string) *exec.Cmd {
 	cmd := exec.Command(bin, "serve", "--no-tray")
 	cmd.Env = sharedServeEnv(token, port, socket, nativeHost)
