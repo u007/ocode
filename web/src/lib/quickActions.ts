@@ -352,6 +352,26 @@ export async function saveQuickActions(chips: QuickActionChip[]): Promise<QuickA
   return publish(stateFromChips(normalizeQuickActions(response)));
 }
 
+/**
+ * A refresh whose failure must not surface as an unhandled rejection.
+ *
+ * refreshQuickActions is async, so a SYNCHRONOUS throw from inside it — an
+ * incomplete api surface, a mock missing a method — becomes a REJECTED promise
+ * rather than a thrown error. The internal catch never runs, because the throw
+ * happens before the promise chain is built, so a bare `void refreshQuickActions()`
+ * hands the rejection to the host, which reports it as an unhandled error and
+ * fails the surrounding test run. Vitest counts those against the run even when
+ * every assertion passes.
+ *
+ * refreshQuickActions already logs its own failures, so this catch is
+ * deliberately silent: the strip keeps whatever it last rendered.
+ */
+function refreshQuietly(): void {
+  void refreshQuickActions().catch(() => {
+    // intentionally not re-logged: refreshQuickActions already reported it.
+  });
+}
+
 export function useQuickActions(): QuickActionsState {
   const [state, setState] = useState<QuickActionsState>(() => cached ?? stateFromChips([], null, true));
 
@@ -360,25 +380,45 @@ export function useQuickActions(): QuickActionsState {
     listeners.add(listener);
 
     // A GLOBAL config event, published with an empty session id exactly like
-    // `chat_verbosity_changed`. It is therefore NOT a session-scoped event and
+    // chat_verbosity_changed. It is therefore NOT a session-scoped event and
     // must not be added to SESSION_SCOPED_EVENTS in sessionEvents.ts.
-    const offChanged = eventBus.on("quick_actions_changed", () => {
-      void refreshQuickActions();
-    });
-    const offReconnect = eventBus.onReconnect(() => {
-      void refreshQuickActions();
-    });
+    //
+    // Subscribing is guarded too: eventBus.on can start the bus, which reaches
+    // further into the api surface, and a throw here would leave the composer
+    // with neither a subscription nor a clean failure. Fall back to no-op
+    // unsubscribers so the hook still works, just without live updates.
+    let offChanged: (() => void) | undefined;
+    let offReconnect: (() => void) | undefined;
+    try {
+      offChanged = eventBus.on("quick_actions_changed", () => {
+        refreshQuietly();
+      });
+      offReconnect = eventBus.onReconnect(() => {
+        refreshQuietly();
+      });
+    } catch {
+      // intentionally tolerated: see above. The initial fetch below still runs.
+    }
 
-    if (cached === null) void refreshQuickActions();
+    if (cached === null) refreshQuietly();
 
     return () => {
       listeners.delete(listener);
-      offChanged();
-      offReconnect();
+      offChanged?.();
+      offReconnect?.();
     };
   }, []);
 
   return state;
+}
+
+/** Test seam: build a state object without going through the network. */
+export function __stateForTest(
+  chips: QuickActionChip[],
+  error: string | null,
+  loading: boolean,
+): QuickActionsState {
+  return stateFromChips(chips, error, loading);
 }
 
 export function __resetQuickActionsForTests(): void {
