@@ -1,5 +1,85 @@
 # Changelog
 
+## 2026-10-02 — The embedded browser and your own HTR extension now share ONE daemon
+
+**Closing ocode stops the daemon when ocode started it, so your browser extension
+drops its connection. That is intended** (see below) and will read as a
+regression the first time it happens.
+
+Previously ocode supervised a *private* `htrcli serve` on its own port with its
+own socket, its own native-messaging host name and a per-launch random bearer
+identity, while an HTR NControl extension you installed yourself talked to a
+completely separate standalone daemon via `com.htrcontrol.host`. The two could
+never meet, so the extension reported "not connected" whenever ocode was
+running and the only fix was to start `htrcli serve` by hand. A plain TUI
+session did not start any daemon at all.
+
+ocode now ensures the daemon htrcli's own config (`~/.htrcli/config.json`)
+describes, so both extension clients attach to it:
+
+- **One daemon, coordinates from htrcli.** The port comes from the config's
+  `server` (loopback only), falling back to htrcli's own 3845; the relay is
+  `~/.htrcli/daemon.sock` (Windows: `127.0.0.1:3847`). The bearer token is
+  read from the same config rather than invented, and ocode never passes
+  `HTR_BEARER_TOKEN` to a shared daemon — htrcli resolves its own, so ocode and
+  htrcli cannot disagree about it. `browser.htr_token` only substitutes the
+  *value* when the config is readable but has no token.
+- **Adopt-only when ocode cannot prove it may start a daemon** — the config is
+  missing, unreadable, not JSON, non-loopback, or tokenless. ocode probes and
+  never spawns, and the Settings notice names the actual file and the fix. A
+  config in TOML/YAML lands here too: ocode parses JSON only rather than growing
+  a second format.
+- **ocode stops only what it started.** The ownership marker gained
+  `started_by_pid` beside `owner_pid`. They diverge exactly when ocode adopts
+  somebody else's daemon — including a `htrcli serve` you started yourself —
+  and only the former authorises a stop. That is why closing ocode leaves your
+  manually started daemon running, and why it *does* take the daemon down when
+  ocode was the one that started it. **Consequence:** your extension drops when
+  ocode closes in that case. Intended; it is the price of one daemon.
+- **The embedded Chromium is no longer pointed at a private socket.**
+  ocode used to inject `HTR_SOCKET_PATH` into the headless Chrome it launches,
+  which is what kept the preload's relay off the shared socket. In shared mode
+  it injects neither that nor `HTR_NATIVE_HOST_NAME` (which nothing in htrcli
+  reads), so the relay falls back to htrcli's own default socket — the same one
+  your browser uses. ocode's namespaced `com.ocode.htrcontrol` native host is
+  unchanged and your `com.htrcontrol.host` file is still never read, rewritten
+  or removed.
+- **A plain TUI session now ensures the daemon at startup** (it previously
+  started one only via `/rc`). Eager on purpose: a lazy trigger would mean a
+  session that never opens a browser never starts it, which is the behaviour
+  being fixed.
+- **Readiness never blocks boot.** Desktop boot calls `StartBrowse`
+  synchronously, so spawning is confirmed in ~0.5s and health verification
+  continues in the background for up to 15s; a failure becomes a notice instead
+  of a stalled window. If the daemon dies mid-session there is no auto-restart
+  and no fallback to a private daemon — a silent fallback would recreate the
+  split and hide the disconnect you need to notice. The next ocode start, or the
+  Settings start button, recovers.
+- **New settings: `browser.htr_shared` (default `true`) and
+  `browser.htr_token`.** `htr_shared: false` is the documented rollback: today's
+  private ocode-managed daemon on 3846, unchanged. Both are config-file only.
+  `GET /api/config/ocode/htr` reports `mode`, `config_path`, `token_source`,
+  `adopt_only`, the effective port/socket and `started_by_ocode`, and the
+  Settings HTR section shows the effective coordinates *with provenance*
+  (`port 3845 (from ~/.htrcli/config.json)`) and greys `htr_port` /
+  `htr_socket_path`, which only apply in private mode. A leftover `htr_port:
+  3846` in your config is therefore ignored — that is intended, not a bug.
+- **Known limits, unchanged:** the Chrome profile is still ephemeral, so
+  extension storage does not survive a Chrome restart; the Settings "list tabs"
+  button now shows tabs from both browsers mixed together (ocode only ever
+  issues a read-only `GET /api/tabs`, so nothing can act on them); branded
+  Google Chrome 137+ still ignores `--load-extension`, so use Chromium, Canary,
+  Edge or Brave for HTR.
+- **Tests.** Go: `internal/browse/cdp/htr_shared_test.go` (resolution),
+  `htr_shared_lifecycle_test.go` (four states, spawn env), `htr_shared_stop_test.go`
+  (the stop rule), `htr_shared_readiness_test.go` (split blocking/background
+  readiness), `htr_provenance_test.go`, `htr_shared_launch_test.go` (the preload's
+  launch env); `internal/config/ocodeconfig_htr_test.go`,
+  `internal/server/htr_shared_options_test.go`, `htr_shared_daemon_test.go`,
+  `handler_htr_shared_test.go`; `internal/tui/htr_startup_test.go`. Web:
+  `BrowserForm.htrShared.test.tsx`, `BrowserForm.test.tsx`. The two launch-env
+  mutation guards are mutation-verified against compiling mutants.
+
 ## 2026-09-30 — Desktop boot no longer stalls on restored tabs and terminals, and a big terminal log no longer pins the renderer
 
 Three related boot/renderer fixes, all in the same place: work the desktop app did

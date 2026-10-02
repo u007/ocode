@@ -1,25 +1,61 @@
 package cdp
 
-// HTR NControl companion: supervised `htrcli serve` daemon + extension-dir
+// HTR NControl companion: one supervised `htrcli serve` daemon + extension-dir
 // resolution. Cross-platform (darwin/linux/windows), no new dependencies.
 //
-// Architecture:
+// Two modes. SHARED (browser.htr_shared, the default) is the whole point:
+// ocode's embedded browser and the user's own installed HTR extension attach to
+// the SAME daemon, whose coordinates come from htrcli's own
+// ~/.htrcli/config.json rather than from an ocode-invented identity (see
+// htr_shared.go). PRIVATE (browser.htr_shared: false) is the pre-existing
+// ocode-managed daemon on its own port, socket and random identity, kept as the
+// documented rollback path. Everything below reads differently depending on
+// the mode; read which one you are in before changing a coordinate.
 //
-//	ocode server (supervisor owner)
-//	  └─ `htrcli serve --no-tray` (ProcessKindHTR, ID "htr-serve")
-//	       ├─ HTTP API on 127.0.0.1:<port> (default 3846, /api/health)
-//	       │  bearer-protected: HTR_BEARER_TOKEN = the managed identity
-//	       └─ native-messaging relay to the preloaded extension
-//	ocode headless Chrome --load-extension=<HTRExtensionDir> (see launch.go)
+// Architecture, shared mode (the default):
+//
+//	one `htrcli serve` (ProcessKindHTR, ID "htr-serve"), coordinates read from
+//	~/.htrcli/config.json: HTTP API on 127.0.0.1:<port> (default 3845,
+//	/api/health), relay on ~/.htrcli/daemon.sock
+//	  ├─ ocode's preloaded extension (embedded headless Chrome,
+//	│  --load-extension=<ExtensionDir>) — reaches the relay by htrcli's own
+//	│  DEFAULT socket: ocode deliberately injects no HTR_SOCKET_PATH here
+//	│  (filterSharedLaunchEnv in launch.go), because an extension cannot read
+//	│  a process environment and the user's browser always uses the default.
+//	│  Injecting ocode's socket for our Chromium alone is the two-daemon split
+//	│  this mode exists to remove.
+//	  └─ the user's installed extension (their own browser) — dials the same
+//	     default socket, needs no ocode involvement at all.
+//
+//	authentication: htrcli resolves its own bearer token from its own config.
+//	ocode never passes HTR_BEARER_TOKEN to a shared daemon (sharedServeEnv);
+//	browser.htr_token only substitutes the VALUE when the config is readable but
+//	tokenless. Private mode is the mirror image: ocode mints the identity and
+//	HTR_BEARER_TOKEN is that daemon's only credential.
+//
+//	on Chrome launch (launch.go): private mode injects HTR_SOCKET_PATH and the
+//	HTR_NATIVE_HOST_NAME into Chrome's environment. In shared mode both are
+//	withheld. The namespaced host name itself is unchanged in both modes — it is
+//	what the manifest ocode writes resolves to (ensureNativeHostManifest), and
+//	the user's own com.htrcontrol.host file is never read, rewritten or removed.
+//
+// Architecture, private mode (browser.htr_shared: false):
+//
+//	`htrcli serve` on 127.0.0.1:<DefaultHTRPort> (3846), ocode-managed socket,
+//	random per-launch identity, HTR_SOCKET_PATH + HTR_NATIVE_HOST_NAME injected
+//	into Chrome. No external extension can reach this daemon; it exists so
+//	`browser.htr_shared: false` still behaves exactly as it did before shared
+//	mode shipped.
 //
 // Lifetime: the daemon is retained across individual ocode shutdowns while
 // any cross-process lease is alive. Heartbeats expire after leaseTTL; the last
 // explicit release terminates only the daemon recorded in ocode's own marker.
-// A daemon on the shared port (3845) that ocode did not start is ADOPTED — it
-// answers on the port and is reused. Adopting never grants ocode the right to
-// stop it: the marker carries both OwnerPID (whoever last wrote it) and
-// StartedByPID (whoever actually spawned the daemon), and only the latter can
-// authorise a stop. See shouldStopSharedDaemon.
+// A daemon ocode did not start — including one the user started by hand, and in
+// shared mode the common case on the shared port — is ADOPTED: it answers on the
+// port and is reused. Adopting never grants ocode the right to stop it: the
+// marker carries both OwnerPID (whoever last wrote it) and StartedByPID (whoever
+// actually spawned the daemon), and only the latter can authorise a stop. See
+// shouldStopSharedDaemon.
 //
 // Limits (documented, not silently degraded):
 //   - The Chrome profile stays ephemeral (fresh tmpDir per launch), so
@@ -60,9 +96,18 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
-// DefaultHTRPort is the ocode-managed port. Standalone htrcli keeps 3845;
-// using a separate default is what prevents ocode from attaching to or
-// stopping a user's existing daemon.
+// DefaultHTRPort is the port of the PRIVATE (legacy) ocode-managed daemon.
+// It applies only when browser.htr_shared is false; the default shared mode
+// uses DefaultHTRCLIPort (3845, htrcli's own) instead, so do not read this as
+// ocode's default any more.
+//
+// Why the private daemon still gets its own port: it must not collide with a
+// user's existing standalone `htrcli serve` on 3845, and it must stay
+// reachable by the credential ocode minted for it. That reasoning is exactly
+// why it was the only mode; shared mode exists because it also meant the user's
+// own extension could never reach ocode's daemon. Setting browser.htr_shared to
+// false restores that isolation deliberately — it is the rollback path, not the
+// recommended configuration.
 const DefaultHTRPort = 3846
 
 const (
