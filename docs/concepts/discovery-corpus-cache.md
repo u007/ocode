@@ -11,7 +11,7 @@ tags:
   - concurrency
   - embedding
   - pidlock
-timestamp: 2026-10-01T17:09:06Z
+timestamp: 2026-10-01T21:11:09Z
 ---
 # Discovery Corpus Cache
 
@@ -81,7 +81,7 @@ probe (no lock) → withCorpusLock → re-read → embed misses → Save
 
 The contract (`cache.go:107-110`): callers treat any Warm error as "retry in the background". `runDiscovery` does exactly that — a failed synchronous warm defers to `startBackgroundWarm` (`internal/agent/discovery_glue.go:397-400`, single-flight via `discoveryState.warming`, 20s `discoveryWarmTimeout`) and the turn attaches nothing while the gate holds. **A lock we cannot take is reported, not silently bypassed.**
 
-That mapping is deliberately generic: `runDiscovery` defers on **any** warm error, with no `errors.Is` special case — which is precisely why this change required **zero edits outside `internal/discovery`**: the lock work never edited `internal/agent/discovery_glue.go` (it now carries unrelated auto-inject edits — see `git status`), nor `internal/filelock` nor `internal/discovery/pidlock.go`. A contended turn already emits `corpus warm deferred to background: ...`, and `startBackgroundWarm` picks up the holder's persisted vectors once the lock frees. **Falling through to an unlocked build on lock failure is precisely the duplication the lock prevents** — skip plus background retry is the only correct recovery.
+That mapping is deliberately generic: `runDiscovery` defers on **any** warm error, with no `errors.Is` special case — which is precisely why this change required **zero edits outside `internal/discovery`**: the lock work never edited `internal/agent/discovery_glue.go`, nor `internal/filelock` nor `internal/discovery/pidlock.go`. A contended turn already emits `corpus warm deferred to background: ...`, and `startBackgroundWarm` picks up the holder's persisted vectors once the lock frees. **Falling through to an unlocked build on lock failure is precisely the duplication the lock prevents** — skip plus background retry is the only correct recovery.
 
 ## Bounded wait: the 10s filelock default is a trap
 
