@@ -67,6 +67,8 @@ import type {
   VaultGenOptions,
   ChatVerbosityConfig,
   ChatVerbosityResponse,
+  QuickActionsConfig,
+  QuickActionsResponse,
   PendingRewind,
   PreparePendingRewindRequest,
   PulsePage,
@@ -1402,6 +1404,16 @@ export const api = {
     fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity"),
   setChatVerbosityConfig: (cfg: ChatVerbosityConfig) =>
     fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  // Quick actions take NO `host`: like the other ocodeconfig endpoints, this is
+  // a GLOBAL Settings surface, not a session- or project-scoped one. Threading a
+  // host through would make the Settings panel read a remote machine's config.
+  getQuickActionsConfig: () =>
+    fetchJSON<QuickActionsResponse>("/api/config/ocode/quick-actions"),
+  setQuickActionsConfig: (cfg: QuickActionsConfig) =>
+    fetchJSON<QuickActionsResponse>("/api/config/ocode/quick-actions", {
       method: "PUT",
       body: JSON.stringify(cfg),
     }),

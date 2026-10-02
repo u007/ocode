@@ -189,6 +189,27 @@ export interface ChatDisplayPolicy {
 
 export type ChatVerbosityResponse = ChatVerbosityConfig;
 
+/** Quick actions — the pill strip above the composer. Mirrors
+ *  `internal/config.QuickActionChip`. `seed` is `omitempty` in Go, so the key
+ *  is ABSENT (not empty) for a custom chip: it must stay optional here. */
+export type QuickActionMode = "fill" | "send";
+export type QuickActionSeed = "compact" | "continue" | "recap";
+
+export interface QuickActionChip {
+  id: string;
+  label: string;
+  icon: string;
+  message: string;
+  mode: QuickActionMode;
+  seed?: QuickActionSeed;
+}
+
+export interface QuickActionsConfig {
+  chips: QuickActionChip[];
+}
+
+export type QuickActionsResponse = QuickActionsConfig;
+
 export interface TTSPlayback {
   generation: number;
   engine: TTSEngineId;
