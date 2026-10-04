@@ -956,7 +956,16 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		if strings.HasPrefix(toolName, "bash:") {
-			prefix := strings.TrimPrefix(toolName, "bash:")
+			prefix := strings.TrimSpace(strings.TrimPrefix(toolName, "bash:"))
+			// Validate before the setter, not after: SetBashPrefixRule SILENTLY
+			// discards a rule it refuses (a blanket `git` allow, an empty prefix),
+			// so reporting success here used to persist nothing — the same bug
+			// the HTTP write paths just lost. Shared with the server so both
+			// surfaces accept and reject exactly the same rules.
+			if err := agent.ValidateBashPrefixRule(prefix, level); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot set bash rule %q: %v", prefix, err)})
+				return nil
+			}
 			m.agent.Permissions().SetBashPrefixRule(prefix, level)
 			if m.permDirty.bashPrefixes == nil {
 				m.permDirty.bashPrefixes = make(map[string]string)

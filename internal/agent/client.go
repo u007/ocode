@@ -774,6 +774,17 @@ func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{})
 // HTTP requests are interrupted when the caller's context is cancelled (e.g.
 // when the user presses Escape).
 func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	// A user who submits the same input twice in a row, or a retried submit that
+	// re-appends the tail, leaves identical user messages side by side at the end
+	// of the transcript. Trim them here — the one place every transport (Anthropic,
+	// chat/completions, Responses, Google, WebSocket) funnels through — so the
+	// model sees the request once. The transcript keeps every message.
+	//
+	// This runs BEFORE redaction on purpose: redaction rewrites secrets to a
+	// placeholder, so two genuinely different messages can become textually equal
+	// after it, and collapsing those would silently drop a real user turn.
+	messages = dedupeTrailingUserMessages(messages)
+
 	// Chokepoint safety net: scan all messages for known-format secrets
 	if c.Redaction != nil && c.Redaction.Enabled && c.Redaction.Registry != nil {
 		messages = c.applyRedactionSafetyNet(messages)

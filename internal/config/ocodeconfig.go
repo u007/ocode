@@ -3700,6 +3700,24 @@ func SaveSingleBashPrefixRule(prefix, level string) error {
 	})
 }
 
+// DeleteBashPrefixRule removes one entry from permissions.bash.prefixes via
+// load-modify-write. Only the named prefix is touched; every other rule and
+// permissions field is preserved from disk. Deleting an absent prefix is a
+// no-op, not an error — the Settings UI's Remove is idempotent.
+func DeleteBashPrefixRule(prefix string) error {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Bash.Prefixes == nil {
+			return nil
+		}
+		delete(cfg.Permissions.Bash.Prefixes, prefix)
+		return nil
+	})
+}
+
 // SaveBashAutoAllowPrefixEntry adds or removes a single entry from
 // permissions.bash.auto_allow_prefixes via load-modify-write.
 func SaveBashAutoAllowPrefixEntry(prefix string, add bool) error {

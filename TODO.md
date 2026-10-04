@@ -1,5 +1,125 @@
 # TODO
 
+## Auto-permission judge — findings from the live eval (2026-10-02)
+
+Measured with `internal/agent/testdata/permission_judge_eval/` (171 mined cases,
+3 runs). None of these is fixed; each needs a decision.
+
+- [x] **"Command analysis" labelled most commands "(unknown command)".**
+      `explainBashCommand` describes only the first word of the line, so every
+      `cd … && …` or `python3 …` command was reported as unknown. Fixed
+      2026-10-02: an unlisted head gets no Command analysis block. Auto-allows of
+      commands the user went on to approve rose from 14-17% to 55-56% of 165 at
+      the unchanged 0.85 floor; all hand-written must-ask cases still defer.
+      `project_context` itself stays: the scope fixtures (`k-scope-*`,
+      `s-scope-*`) score better with it than without.
+- [ ] **Three user-denied mined cases are now allowed by the judge** (`m040`,
+      `m048`, `m116`). Review whether they are label noise or real misses.
+- [ ] **Raising the context budget does not help and can break the call.** With
+      `max_context_bytes` 60000 / sources 20 / lines 2000 the auto-allow rate is
+      unchanged (15-17%), and one 98 KB state came back
+      `400 max_tokens_exceeded`. The state needs a cap that fits the judge.
+- [ ] **The permission dialog shows a fragment, the judge scores the whole line.**
+      A deferral reported as `git log --oneline -1 main` was a five-part compound
+      command; the fragment alone scores 1.00, the whole line 0.75-0.78
+      (`s-git-log-compound` in `should_allow.yaml`). Show the whole judged line
+      next to "leaned allow but confidence … is below the floor".
+- [ ] **`allowed_command_prefixes` holds persisted command substitutions.**
+      Entries such as `$(mktemp -d)`, `$(date +%s)` and
+      `$(grep '^DATABASE_URL=' .env | cut -d= -f2-)` are stored as always-allow
+      prefixes (about 3 KB of the judge state). They name no program. Find the
+      path that persists them and stop it; decide whether to prune existing ones.
+- [ ] **Unit tests write to the real `permission-judge.log`.** 2,852 of its 3,188
+      rows came from `go test` in `internal/agent` with a fake judge. Point the
+      log at a temp dir under test.
+
+## Content guardrail — follow-ups (2026-10-02)
+
+- [ ] **The bash tool's own post-start text is still judged.** A backgrounded
+      network command returns `Started background process … Poll with
+      bash_output(…)`, which is ocode's text addressed to the agent. The live eval
+      scores it clean at 0.68 against the 0.60 floor (`host-2-background-started`
+      in `internal/agent/testdata/contentguard_eval/cases.yaml`), so it can
+      escalate. `guardExecutedToolResult` does not cover it because the tool did
+      start. Fix by keeping a `run_in_background` bash call out of
+      `contentGuardSourceFor`'s scope.
+- [ ] **`bash_output` of a backgrounded network command is never vetted.**
+      `contentGuardSourceFor` returns nil for `bash_output`, so remote text that a
+      background `curl` printed reaches the model unjudged. Decide whether the
+      background process should carry its command's in-scope flag to `bash_output`.
+- [ ] **Line anchors in `docs/concepts/inbound-content-guardrail.md` are stale.**
+      They had drifted before 2026-10-02 (the page cites `contentGuardSourceFor` at
+      `:214`) and the execution-gating change moved them again. Re-derive every
+      `file.go:NNN` on that page.
+
+## Bash prefix rules — remaining follow-ups (2026-10-02)
+
+_Done this round: the Settings rule editor, all eight tables converted to
+copy-on-write (`internal/agent/cowmap.go`), and both the HTTP and TUI write paths routed
+through `agent.ValidateBashPrefixRule` so no surface can claim a rule it did not store._
+
+
+- [ ] **A `/ban` deny rule does not apply in yolo mode.** `Decide` returns
+      `PermissionAllow` for bash when the mode is yolo, *before*
+      `decideSingleCommand` (which holds the deny-prefix check) is ever reached.
+      Sandbox re-checks deny prefixes per compound fragment; normal reaches them;
+      yolo does not. This is documented behaviour and the new Settings panel warns
+      when the startup default is yolo, but "bans silently stop applying in yolo" is
+      a security-policy decision, not a UI bug — decide whether yolo should honour
+      explicit user denies, and if so move the check above the yolo shortcut
+      (it already runs above the sandbox one at `permissions.go:1867`).
+- [ ] **`/ban remove` leaves an inert `"prefix": "ask"` entry in the config file.**
+      The Settings Remove is a true delete; the TUI/web slash command is not, for
+      parity with its own history. Every unbanned command accumulates a dead rule
+      that still shows up in `/permissions` and `/ban list` as "other bash rules".
+      Either give `/ban remove` the delete semantic (via the new
+      `agent.RemoveBashPrefixRule` / `config.DeleteBashPrefixRule`) or document the
+      difference where users will look for it.
+- [ ] **The `docs/` bundle's `internal/agent/permissions.go:NNN` anchors are broadly
+      stale and need a repair pass.** 54 anchors across 8 bundle pages; a symbol-based
+      sweep found 34 pointing at the wrong line. Most were already stale BEFORE this
+      change (concurrent sessions added `PermissionScopeContent`, the `Untrusted*`
+      fields, the loopback hardening and others without re-deriving anchors), so this
+      is not a single-session regression — but the bash-rule work adds a further
+      **+108 lines** to that file, shifting every anchor below `permissions.go:193`.
+      `docs/` is owned by the `context` sub-agent, so route the re-derivation there
+      (or do the mechanical pass by hand: print the real line for every
+      `file.go:NNN` and eyeball it — a text-matching script resolves `}`, `i++` and
+      `return false` to their FIRST occurrence and silently corrupts anchors).
+
+## Permission / connect-flow hardening — deferred follow-ups (2026-10-02)
+
+Five defects fixed this session (loopback port proof, `isLocalhostURL`, connect-flow
+cancel persistence, input double-submit, credential masking). Two things were
+deliberately NOT done and must not be forgotten:
+
+- [ ] **Thread a `context.Context` into the three OAuth exchanges that take none.**
+      `auth.AnthropicExchange` (`internal/auth/anthropic.go:109`),
+      `auth.StartGoogleOAuth` (`internal/auth/google.go:41`) and
+      `auth.ExchangeOpenAIManual` (`internal/auth/openai_oauth_manual.go:69`) are all
+      shaped without a context. `runConnectExchange` in
+      `internal/server/handler_connect.go` makes cancel *return promptly* and
+      *discard* the credential, but it cannot interrupt the in-flight HTTP request —
+      the goroutine still runs to completion. Real callers are few: one each
+      (`internal/tui/connect.go:831` for Anthropic; the others only via the server's
+      package-var seams). Adding the parameter makes cancel actually abort the call
+      instead of just ignoring its result.
+- [ ] **Cap the auto-injected skill list.** A concurrent session (2026-10-02) changed
+      `a.disco.autoInject` from a single slot to a slice appended per selection, so a
+      newer skill no longer evicts an older one. That is correct, but the slice is
+      unbounded for the life of a session: every qualifying skill's full body is
+      re-rendered into the single volatile tail message on every request
+      (`autoInjectBlock`), so a long session can accumulate a large tail. Needs a cap
+      (drop the oldest) plus a decision on eviction. Interaction to preserve: the
+      sticky `autoInjected` name set must stay, or an evicted skill could re-inject
+      forever. `docs/gotchas/loopback-curl-shell-port-variable.md` and
+      `docs/concepts/discovery-typesafe-judge.md` cover the surrounding rules.
+
+Not deferred, for the record: the loopback-port numeric proof is now an allowlist
+("every write to the variable must be `name=<digits>`") and `isLocalhostURL` keeps a
+hand-rolled authority parser OR-ed with `net/url`. Both are deliberate — narrowing
+either one fails OPEN.
+
 ## Concurrency hazard: another ocode session owns part of this feature's files (2026-10-01)
 
 While building the Connectors settings, a **second session was writing the same feature at
@@ -3734,3 +3854,340 @@ in the debug panel:
       once the other session's agent is done — it is the sole writer for `docs/`.
       That write must also land the `docs/index.md` and `docs/log.md` entries,
       which are auto-managed by the agent and must not be hand-edited.
+- [x] **Keep branch `htr-shared-daemon` — held deliberately by the user (2026-10-02),
+      not an oversight. Nothing blocks deleting it.** The user chose to keep it
+      rather than let a cleanup pass sweep it. It is safe to delete at any time:
+      the branch holds **zero** commits main lacks (`git rev-list --count
+      main..htr-shared-daemon` → 0; tip `26594965` is an ancestor of the merge
+      `f7318474`), so it preserves no content — it is a label, not a copy. There
+      is also no remote copy (`origin/htr-shared-daemon` does not exist).
+- [x] **Review Focus #1 of the htr-shared-daemon plan is NOT a live defect —
+      retired after investigation.** The plan's item 1 (*"user edits their token
+      in `~/.htrcli/config.json` while ocode is running"*, with named guard
+      `TestForeignProbeUsesConfigToken`) reads as a real staleness bug, and its
+      guard was indeed missing. But nothing caches a `SharedDaemon`:
+      `ResolveSharedDaemon` re-reads the file on **every** call
+      (`loadHTRcliConfig` → `os.ReadFile`), and every production entry point
+      resolves immediately before use — the TUI's `m.ensureSharedHTRDaemon`
+      (`internal/tui/model.go:2981`, at-most-once per session), and the settings
+      start button's `startManagedHTR` (`internal/server/handler_config.go:2221`),
+      which calls `htrBrowserConfig()` + `htrOptionsFn` per click. A `SharedDaemon`
+      is stored in exactly one place: a local `HTROptions` inside a single
+      `EnsureHTRServe` call. So no mid-session token or port edit can be missed.
+      **The plan's premise was wrong, not the code.** Note the plan also names
+      three other guards that were never written under those names
+      (`TestStopRuleUsesStartedByPID`, `TestSharedModeIgnoresLegacyPort`,
+      `TestStartSkipsWhenForeignDaemonRejectsToken`); equivalent coverage exists
+      under different names (`TestStopRuleUsesStartedByPIDNotOwnerPID`, …), so the
+      INDEX's guard table is unreliable as written.
+      **Replaced by real regression guards** in
+      `internal/browse/cdp/htr_shared_token_refresh_test.go` (token edit, port
+      edit, and `browser.htr_token` override precedence), mutation-verified
+      against a compiling cache mutant that both reread tests catch.
+- [ ] **Shared mode cannot tell "port held by a service that rejects our token"
+      from "port empty", so ocode spawns into an occupied port.** Found while
+      correcting the htr-shared-daemon plan's Review Focus table (2026-10-02).
+      Review Focus #5 asserted ocode "must not spawn over it and must say so";
+      the code cannot do that. The only two liveness probes are the strict
+      identity match (`htrHealthyForInstance`) and the laxer foreign token probe
+      (`htrHealthyForeign`), and a foreign service that rejects both is
+      indistinguishable from an open port. So `EnsureHTRServe` reaches the spawn
+      branch, the child fails to bind, and `confirmSharedSpawnAlive`
+      (`internal/browse/cdp/htr.go:1605`) surfaces the failure **with the child's
+      own output** — so the user does see a real error, but only after a wasted
+      process, and the diagnosis is indirect ("address already in use" from a
+      child, not "something else owns this port").
+      Existing coverage is partial: `TestReadinessFailsLoudlyWhenDaemonDiesDuringExec`
+      pins the dies-during-exec mechanism, but nothing pins the
+      port-already-occupied scenario.
+      A clean pre-spawn refusal needs a THIRD probe that distinguishes "bound by
+      something else" from "free" — e.g. a TCP dial (connect succeeds ⇒ someone
+      is listening) that does not require any credential. That is a real design
+      change, so it is recorded rather than done here.
+- [x] **The htr-shared-daemon plan amendments were UNCOMMITTED — now fixed
+      (commits `4996c37e`, `e5c1cae5`).** ~117 inserted lines across
+      `.opencode/plans/htr-shared-daemon/part-{1..4}-*.md` (the `LoadBrowseOptions`
+      field-relay trap, the shared-socket-dir trap, the "the single-case table test
+      was VACUOUS and mutation testing proved it" note, and the launch-env guards)
+      had existed only in the working tree — on no branch and in no stash, so a
+      lost working tree would have destroyed them. Committed by explicit path list;
+      `INDEX.md`'s phantom guard table went with them.
+      **This is the standing rule for this tree:** do NOT `git add -A`. It still
+      carries another session's in-flight work (`internal/browse/cdp/htr.go`'s
+      inherited-stop-rule change, `htr_shared_stop_test.go`), and a blanket add
+      would sweep it in under this session's name.
+
+## Advisor vs. pending asks — deferred follow-ups (2026-10-02)
+
+Fixed this session: the `plan`/`done` advisor checkpoints now stand down while a
+permission or question dialog is unanswered (`advisorCheckpointState.pendingAsk`,
+gated in `internal/agent/advisor_pending_ask.go`). Two adjacent gaps were
+identified and deliberately left out of that change.
+
+- [ ] **The server never installs `subAgentPermAsker`, so a sub-agent's or the
+      advisor's OWN permission ask gets an inert sentinel instead of a dialog.**
+      `internal/agent/advisor_tool.go:355-360` and `internal/agent/subagent.go:552`
+      both hand the child `t.mainAgent.subAgentPermAsker`, but only the TUI ever
+      sets it (`internal/tui/model.go:18356`). On the web/desktop server the field
+      is nil, so an out-of-scope tool call inside the advisor's (or a task
+      sub-agent's) own loop returns `tool.SentinelPermissionAsk` + JSON as a tool
+      result the advisor model cannot act on — it silently proceeds instead of
+      asking. Fixing it needs a decision the current code makes implicitly: a
+      sub-agent ask raised while the main turn is already showing a dialog has
+      nowhere to render. Most likely shape is a queue on `agentSession` surfaced
+      through `pending_asks` plus the existing `dispatchAskContinuation`
+      machinery. Verify against the "don't hold `h.mu` across slow work" and
+      "don't pin a connection for a turn" rules in
+      `docs/concepts/web-server-locking-and-liveness-rules.md`.
+- [ ] **The model-invoked `advisor` TOOL is not gated on a pending ask** — only
+      the two loop checkpoints are. A model that calls `advisor` from inside a
+      continuation Step can still start one with a dialog open. Left alone
+      deliberately: the tool runs mid-batch where it cannot see the message list
+      (`Agent` has no message-history getter), and a deliberate model request is
+      a weaker signal than an automatic checkpoint. If it is ever wanted, the
+      minimal shape is an `atomic.Bool` on `Agent` that `Step` sets from the same
+      `messagesHavePendingAsk` scan each Step and clears on exit, with the
+      checkpoint gate reading the same field so there is one source of truth.
+- [ ] **The knowledge bundle has no page for the advisor/ask interaction.** A
+      `knowledge_lookup` for it returned nothing (2026-10-02), and no page cites
+      `internal/agent/advisor_checkpoint.go`. The invariants worth a page: the
+      checkpoints must not run under a live dialog, a skip must not consume the
+      checkpoint, `tool.UnansweredAsk` is the single "is a dialog open" predicate
+      (and why it lives in `internal/tool`), and a continuation `Step` legitimately
+      runs with another ask outstanding. Write it via the context agent — it is the
+      sole writer for `docs/`, and `docs/index.md` / `docs/log.md` are auto-managed.
+
+## Connector settings — OAuth (web/desktop) follow-ups
+
+- [ ] **Google manual mode is not started.** `oauthFlowTakesMode`
+      (`internal/server/handler_connect.go`) deliberately keys on
+      `OAuthFlow == "openai"`, so Google advertises no modes and its flow is
+      auto-only: it binds a loopback port and cannot complete from a
+      `serve --remote` host or a second device. It is harder than OpenAI's
+      because it needs user-supplied client credentials before anything else can
+      start. When it lands, add `"manual"` to the predicate — that one line also
+      makes the client render the chooser, because the client reads `modes` off
+      the wire rather than hardcoding a provider list.
+- [ ] **Grok x.com cookies + Cloudflare prompts (Phase 3).** Not started. The
+      server side of the cookie flow exists (`connectFlowCookies`, handled by
+      `startGrokConnectFlow`) and the panel renders `userCode`/device-code
+      shapes, but the browser cookie collection UI has no host-threaded path.
+      Cloudflare interstitial detection is unimplemented entirely, so the flow
+      cannot currently tell "needs a human" from "failed".
+- [x] **Remote refusal test (Phase 4, plan item 21).** DONE 2026-10-02 —
+      `TestConnectCredentialsForARemoteHostNeverComeFromTheLocalStore` in
+      `internal/server/handler_connect_remote_refusal_test.go`. Pins both halves
+      of an invariant nothing in Go enforced: `handleConnectList` has no remote
+      awareness at all, so the ONLY thing keeping a remote project's Connectors
+      view off the local `auth.json` is the web client rewriting the path to
+      `/api/remote/{host}/api/...`. The test shows a local credential is served
+      even when `?host=` is named (documenting that coupling), and that the
+      host-scoped path refuses with 403 rather than degrading to local state.
+      Verified non-vacuous by injecting a fallback into `HandleRemoteProxy`:
+      the mutant served `masked:"••••••••••••9f3a"` through the host-scoped path
+      and the test failed.
+
+- [x] **No `docs/concepts/` page for the Connectors section.** DONE 2026-10-02 —
+      `docs/concepts/web-connector-settings.md`, written through the context
+      agent (the sole writer for the bundle) and then verified independently:
+      scope/base-vs-profile boundary, the tail-only masking rule, host threading
+      and the machine-global route contract, the `modes` contract plus both of
+      its traps, why the client picks the mode, the five flow-state invariants,
+      and the two known gaps stated as gaps. Checked the page's claims against
+      the code rather than trusting the agent's summary: zero `h.mu` references
+      in `handler_connect.go`, all eight client methods taking a trailing `host`,
+      every connect route on `authMiddleware`, `ProfilesManager.tsx` and
+      `auth.profiles.json` confirmed. It carries no `file.go:NNN` anchors, so it
+      will not silently rot as lines shift. (Two earlier agent attempts died on
+      provider TLS errors; the third succeeded in 1m28s once told to skip
+      exploration and write immediately.)
+
+- [ ] **OpenAI has NO working remote sign-in path, and manual mode cannot reach
+      it — DECIDED 2026-10-02: leave the behaviour as is, keep this entry as the
+      record.** Do not re-open without a user request. The reasoning for not
+      fixing it: both candidate fixes change every install's connector list, and
+      a remote openai user has working alternatives (an API key, or `codex`),
+      whereas the plugin that shadows the flow is what makes Pro/Plus credentials
+      work at all.
+      The underlying facts, for anyone who revisits this: the built-in `codex`
+      plugin (`internal/plugin/codex/codex.go`)
+      registers for provider id `openai`, and `auth.MethodsFor` lets a plugin
+      REPLACE a provider's built-in OAuth flow. Verified against a live server:
+      `openai` offers only `apikey` + `plugin_ChatGPT Pro/Plus (browser)` +
+      `(device code)`, no `oauth` method — so the loopback flow that gained
+      manual mode is unreachable for openai in every shipped binary (it is
+      reachable via `codex`, which shares `OAuthFlow: "openai"`). Neither plugin
+      method rescues a remote user either:
+        - browser method -> `auth.OpenAILogin` binds a localhost callback on the
+          SERVER and calls `openBrowser`, so it needs the browser on the
+          server's machine (its own doc comment says so);
+        - device-code method -> host-agnostic, but `startPluginConnectFlow`
+          creates a `running` flow and never sets `userCode`/`verificationUri`,
+          so the user is never shown the code.
+      Three ways out were considered (all rejected for now), in rough order of
+      cost:
+        (a) surface `userCode`/`verificationUri` from plugin flows (needs a
+            richer `providerplugin.AuthResult`/seam) — fixes device-code, which
+            is already host-agnostic and the smaller change of the two;
+        (b) make `MethodsFor` additive so the built-in flow is offered ALONGSIDE
+            plugin methods — one-line-ish, but shows two overlapping ChatGPT
+            logins per provider and reverses a deliberate design decision;
+        (c) leave it and document that remote openai users must use an API key
+            or `codex`.  <-- CHOSEN
+      Note `internal/server` tests CANNOT catch any of this: the package does not
+      link the plugin, so tests see a catalog no shipped binary ever has. Any
+      fix needs a test at a level that links `main.go`.
+- [ ] **The corpus side of that disagreement is still open.** `docs/okf/` is
+      context-agent-owned, so the scorecard was deliberately left alone. Whoever owns it
+      may still want a line in
+      `docs/okf/tanstack/scores/space-bunny-free.md` noting that a NON-derived skill
+      ships for this model and is hand-authored (protected via `HAND_AUTHORED`), so the
+      next reader does not read the absence of a `derived/` file as a bug.
+      **Also still latent in that tool:** an `illustrative: true` source is skipped and
+      so never enters `wanted` — harmless today only because `react-tuning-claude-opus-4-8`
+      correctly has no shipped dir either. Flipping a real derived skill to
+      `illustrative: true` while its dir exists would prune it on the next run.
+- [x] **RESOLVED (user decision: "the eval was real") — `claude-opus-4-8` now ships its React
+      corrections.** The `illustrative: true` flag is gone from
+      `docs/okf/react/derived/react.claude-opus-4-8.SKILL.md`, replaced by a comment
+      recording why (the flag predated the eval; while it stood, the sync tool refused
+      to promote the skill and the model ran with zero React tuning on a stack where it
+      has three documented blind spots). Ran `sync-derived-skills.py`, which promoted
+      `skills/kaizen/react-tuning-claude-opus-4-8/SKILL.md` (byte-identical to source).
+      **Dry-ran the destructive tool on a copy first: 1 written, 38 unchanged, 0 pruned,
+      removed/changed both `none`** — zero removals before touching the checkout.
+      Now 39 synced skills + 1 hand-authored = 40 dirs, and the audit is **green:
+      0 violations across all 105 baseline scorecards.** Delivery is pinned by
+      `internal/skill/kaizen_react_test.go` (both axes mutation-verified: a `tuned_for`
+      typo and emptying `stack:` each fail it), because `react` is a DETECTED stack —
+      a `react` dep in package.json or a .jsx/.tsx importing react — so admission needs
+      the model id AND a React repo. Note this skill has no `<!-- kaizen:digest -->`
+      block, so it reaches the model through the catalogue/Skill tool rather than the
+      cached prompt prefix, unlike the universal-stack corpora.
+- [x] **The sweep is now automated — `docs/okf/_tools/audit-derived-skills.py`.**
+      Enforces `(∃ tag < threshold) ⇔ derived skill ⇔ promoted dir` across all **105
+      baseline scorecards** and reports UNDER-DERIVED (a silent blind spot),
+      OVER-DERIVED (prompt budget spent on a model that aced the stack), and
+      NOT-PROMOTED. Exit 1 on violations, **2 when it cannot parse the corpus** — a
+      checker that silently reads zero tags would report "clean" forever, which is worse
+      than no checker. Current real-corpus result: **1 violation** (the react item
+      above), everything else consistent; 23 skills have `.with-skill` re-benchmark
+      evidence on file. Three traps it handles, each of which had already bitten it:
+      (1) `.with-skill`/`.rerun` scorecards are re-runs that have NO weak tag by
+      construction, so treating one as a baseline **inverts** the verdict and reports a
+      shipped skill as unwarranted; (2) `illustrative: true   # comment` must have its
+      comment stripped — my first version compared the raw line and produced a false
+      positive on a deliberately-unshipped skill; (3) the threshold is **per-model**
+      (docx/pdf/pptx are 0.9, everything else 0.75) and `react/scores/README.md` is not
+      a scorecard. Tests in `docs/okf/_tools/test_audit_derived_skills.py` (17 checks,
+      all mutation-verified: dropping the `.with-skill` exclusion, the comment-strip, or
+      the exit-2 guard each fails).
+- [ ] **Re-benchmark this skill the way longcat was** so there is proof it works, not
+      just proof it ships. `scores/longcat-2.5-preview-free.with-skill.md` re-ran the
+      corpus with the skill loaded and went 79.0% → 93.4%; that artifact is the only
+      evidence in the repo that a tuning skill changed a score. Do the same for
+      space-bunny-free. Expect a small delta on `suspense` (the only benchmark-warranted
+      claim) — the generated-route-tree half is NOT measurable by this corpus, which is
+      an argument for scoring it in-repo instead.
+- [ ] **Generalize the "ask about the un-linted generated code" question shape.** The
+      mechanism landed in the skill: do not ask the broad "do you know TanStack
+      Router?", pick one concrete spot in a region *no linter or formatter covers*,
+      and ask a single question carrying a recommended answer ("`/posts` is generated
+      with `loaderDeps` but no `staleTime`, so its loader data is stale on every
+      navigation — add one, yes or no?"). Generated-and-ignored code is the one region
+      where nobody has already answered, so it is the highest-information question
+      available and it can never degenerate into a formatting nit. Worth carrying into
+      the other stacks' skills and the conduct corpus, where the equivalent regions are
+      lockfiles, protobuf/OpenAPI/ORM client output, and i18n catalogs.
+- [ ] **Extend the inbound content guardrail to the four remaining untrusted-content
+      surfaces** (2026-10-02, from the content-guardrail audit). The guardrail that
+      shipped covers MCP + webfetch/websearch + bash network output. It deliberately does
+      NOT cover these, and each is a live injection path:
+      - **`md_discovery` summaries** — the sharpest of the four. Project `.md` files are
+        summarised by a *small model* (`mdSummarySystemPrompt`, `md_discovery.go:46`) and
+        the cached summaries re-enter context as the discovery TOC in
+        `.ocode/md-summaries.json`. A poisoned `README.md` is therefore laundered through
+        a second model and re-injected as a compact, quotable instruction. This is the
+        highest-value target.
+      - **Subdirectory `CLAUDE.md` / `AGENTS.md`** — `injectDirMDTail` (`dir_docs.go:169`)
+        queues a user-role `[ocode:discovery]` block per directory. Provenance-marked, not
+        trust-marked.
+      - **`doc_search` results** — `judgeDocSearchResults`
+        (`doc_search_typesafe.go:86`) is a **relevance** judge, not a trust filter. A
+        poisoned doc that is topically on-point passes it. Relevance ≠ trust.
+      - **LSP / hook / plugin `SessionStart` output and browser/CDP page text** — same
+        gap; all already carry a provenance marker or nothing.
+      Note the local-file exemption the user chose is what makes these out of scope, so
+      each needs its own decision rather than being folded into the existing scope.
+- [ ] **Calibrate `contentGuardMinSuspicionDefault` (0.6) against real traffic.** The floor
+      is chosen from TypeSafe's documented `confidence`-vs-`probabilities[choice]` gap and
+      the noise argument, not from measurement. There is no false-positive rate data. The
+      debug stream already emits `tier=contentguard_flag` with confidence and concern, so a
+      day of real use would say whether 0.6 is right — and whether the rubric's `none`
+      examples are enough to keep documentation and source code clean.
+- [ ] **Decide whether the guardrail should also fire on the tool ARGUMENTS.** It vets
+      results only. An injected instruction in a *tool result* that the model then echoes
+      into a later call's arguments is caught at egress, but a hostile MCP tool *name or
+      description* (which lands in the cached tools prefix) is not vetted at all. Widening
+      scope risks the prompt-cache stability rule (tools must stay byte-stable per session),
+      so this needs care rather than a one-line change.
+- [ ] **Fix 4 blank-line anchors in `docs/concepts/inbound-content-guardrail.md`.**
+      (2026-10-02, cosmetic, found by the mechanical sweep). 116 of the page's
+      anchors resolve in-range and correct; these four cite a BLANK line, which is
+      unverifiable and rot silently — CLAUDE.md's rule is that a wrong anchor is
+      worse than a stale one, so they need real lines:
+      - `truncate.go:14` → `truncate.go:15` (`const maxToolResultLines = 100`)
+      - `model.go:14846` → `model.go:14843` (`cacheReadTokens := int64(0)`)
+      - `model.go:16950` → `model.go:16947` (`func permAlwaysRuleAvailable(`)
+      - `handler_content_guard_test.go:76` → `handler_content_guard_test.go:77`
+        (`sub := h.subscribeHeadless()`)
+
+      Left undone deliberately: the knowledge bundle has a **sole-writer
+      invariant** (`context` sub-agent only), and that agent failed to complete a
+      doc_write three times (45 min, 12 min, 12 min) before succeeding on the
+      fourth once I handed it the verified anchors instead of asking it to derive
+      them. Spending another agent run on four cosmetic anchors is a poor trade —
+      hence recording the exact fix here rather than leaving it invisible. Sweep
+      command to re-verify the whole page: `python3` over
+      `([A-Za-z0-9_./-]+\.(?:go|ts|tsx)):(\d+)` matching each line and flagging
+      blanks/out-of-range.
+- [ ] **`internal/server` TempDir-cleanup flakes under load (pre-existing, found 2026-10-02
+      while validating the content guardrail).** Symptom is NOT an assertion failure but a
+      cleanup error:
+      `testing.go:1617: TempDir RemoveAll cleanup: unlinkat .../sessions: directory not empty`
+      plus `session: live write ses_...: disk I/O error (1802)`. Cause: the async
+      session-save goroutine outlives the test and writes into that test's `t.TempDir()`
+      AFTER `RemoveAll` starts, so cleanup races the writer. Load-sensitive — it appears
+      in full-suite runs (334s) and passes in isolation 3/3.
+      Seen in `TestChatRemoteProjectPathNotExpandedLocally` and
+      `TestHandleSendMessageAppliesProxiedActiveProfile`.
+      **Verified NOT caused by the content guardrail:** zero overlap between either test
+      and the added symbols (`IsContentAsk`, `UntrustedScores`, `UntrustedFailure`, checked
+      by grep); neither test lives in a file that change touches; neither file is under
+      concurrent edit (`handler_remote_profile_test.go` mtime Sep 21, `agent_session.go`
+      Oct 1); no `DATA RACE` reported anywhere under `-race`; and three consecutive
+      non-race full-suite runs passed (268s/257s/212s).
+      Same class as the `internal/agent` TempDir races already noted for
+      TestStreamedToolOutput*. Fix direction is test hygiene, not production code: the
+      test needs to wait for the session's async save to drain (or the save path needs a
+      per-test cancellation) before `t.TempDir()` cleanup. Do NOT "fix" this by deleting
+      or weakening either test.
+
+- [ ] **Fix 4 REMAINING stale anchors in `docs/concepts/inbound-content-guardrail.md`**
+      (2026-10-02). A second `context` doc_write landed the first 4 blank-line fixes; the
+      re-sweep then surfaced these, all caused by `HandleApprovedToolCall` gaining a doc
+      comment and a new `contextGuardBackground` helper, which shifted that region down.
+      The four `scanToolResult` call-site rows and the `agent.go:1461` `guardCtx` anchor in
+      the SAME table are already correct — leave them alone.
+      - Table row 4: `agent.go:5144` -> `agent.go:5162`; `agent.go:5147` -> `agent.go:5165`;
+        `agent.go:5139` -> `agent.go:5157` (the `HandleApprovedToolCall` decl).
+      - Prose directly under that table: `contextGuardBackground()` (`agent.go:5145`) ->
+        `agent.go:5163`.
+      Verified targets: `5157` = the `func` decl, `5162` = `a.scanToolResult(name, ...)`,
+      `5163` = `ctx, cancel := contextGuardBackground()`, `5165` = `a.guardToolResult(ctx, ...)`.
+      The old cited lines are now blank or inside an unrelated comment block, which is why
+      they must move. This is 4 number substitutions in an existing file; two `context`
+      attempts were made, the first succeeded and the second burned 10m35s composing a temp
+      file and returned WITHOUT writing (mtime unchanged). Hand-editing would desync the
+      auto-managed `docs/index.md` / `docs/log.md`, so it is left tracked rather than forced
+      — unless the sole-writer rule is relaxed for mechanical number fixes.

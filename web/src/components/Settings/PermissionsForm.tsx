@@ -1,8 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type AutoPermissionConfig, type RelaxableConcern } from "../../api/client";
+import type { PermissionLevelName } from "../../api/types";
+import {
+  dedupeRows,
+  diffBashRules,
+  isEmptyDelta,
+  normalizePrefix,
+  rowsFromResponse,
+  validateRule,
+  type BashRuleRow,
+} from "../../lib/bashRulesDiff";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Loader2 } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import ModelDialog from "../Layout/ModelDialog";
 
 const EMPTY_AUTO: AutoPermissionConfig = {
@@ -17,6 +27,19 @@ const DEFAULT_MODE_OPTIONS: { value: string; auto: boolean; label: string }[] = 
   { value: "yolo", auto: false, label: "Yolo" },
   { value: "sandbox", auto: false, label: "Sandbox" },
 ];
+
+const RULE_LEVEL_OPTIONS: { value: PermissionLevelName; label: string }[] = [
+  { value: "allow", label: "allow — run without asking" },
+  { value: "ask", label: "ask — prompt every time" },
+  { value: "deny", label: "deny — always blocked" },
+];
+
+const RULE_INPUT_CLASS =
+  "h-7 rounded-md bg-muted border border-border px-2 text-xs text-foreground font-mono";
+
+/** Shared select styling for the level column. */
+const RULE_SELECT_CLASS =
+  "h-7 rounded-md bg-muted border border-border px-1 text-xs text-foreground";
 
 export default function PermissionsForm() {
   // This form is process-wide settings. The live permission mode is now PER
@@ -38,6 +61,18 @@ export default function PermissionsForm() {
   const [error, setError] = useState<string | null>(null);
   const [permDialogOpen, setPermDialogOpen] = useState(false);
 
+  // ── Bash prefix rules (the /ban list) ──────────────────────────────────
+  // Staged, not applied on edit: the Save button at the bottom of this form
+  // writes the whole delta in one request, so a half-typed prefix never becomes
+  // a live permission rule. `loadedBashRules` is the last-known server state
+  // and the baseline the diff is computed against — without it, a rule another
+  // surface added (TUI /ban) would look deleted and be removed on save.
+  const [bashRules, setBashRules] = useState<BashRuleRow[]>([]);
+  const [loadedBashRules, setLoadedBashRules] = useState<BashRuleRow[]>([]);
+  const [newPrefix, setNewPrefix] = useState("");
+  const [newLevel, setNewLevel] = useState<PermissionLevelName>("deny");
+  const [rulesError, setRulesError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -53,6 +88,10 @@ export default function PermissionsForm() {
       setLoadedDefaultMode(defaultModeCfg.mode || "normal");
       setAuto({ ...EMPTY_AUTO, ...autoCfg });
       setConcerns(concernsCfg?.concerns ?? []);
+      const rows = rowsFromResponse(perms.bash_rules);
+      setBashRules(rows);
+      setLoadedBashRules(rows);
+      setRulesError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -78,11 +117,51 @@ export default function PermissionsForm() {
       if (model !== undefined) {
         await api.setPermissionModel(model ?? "");
       }
+      // Rule changes go last and only when there is something to change, so a
+      // plain Save never fires an empty write (and never fails on a batch with
+      // no entries). The response carries server truth, which becomes both the
+      // staged rows and the new diff baseline.
+      if (!isEmptyDelta(rulesDelta)) {
+        const res = await api.setBashRules(rulesDelta);
+        const rows = rowsFromResponse(res?.bash_rules);
+        setBashRules(rows);
+        setLoadedBashRules(rows);
+      }
+      setRulesError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
+  };
+
+  // The diff is recomputed from the staged rows on every render so the
+  // "unsaved changes" count and the payload can never disagree.
+  const rulesDelta = useMemo(
+    () => diffBashRules(loadedBashRules, bashRules),
+    [loadedBashRules, bashRules],
+  );
+  const pendingCount =
+    Object.keys(rulesDelta.set ?? {}).length + (rulesDelta.remove ?? []).length;
+
+  const updateRule = (index: number, patch: Partial<BashRuleRow>) => {
+    setBashRules((rows) => dedupeRows(rows.map((row, i) => (i === index ? { ...row, ...patch } : row))));
+    setRulesError(null);
+  };
+  const removeRule = (prefix: string) => {
+    setBashRules((rows) => rows.filter((row) => row.prefix !== prefix));
+    setRulesError(null);
+  };
+  const addRule = () => {
+    const prefix = normalizePrefix(newPrefix);
+    const problem = validateRule(prefix, newLevel);
+    if (problem) {
+      setRulesError(problem);
+      return;
+    }
+    setBashRules((rows) => dedupeRows([...rows, { prefix, level: newLevel }]));
+    setNewPrefix("");
+    setRulesError(null);
   };
 
   // Enforcement is stored inverted: a ticked box means "enforce", so it is the
@@ -146,6 +225,136 @@ export default function PermissionsForm() {
               </label>
             );
           })}
+        </div>
+      </div>
+
+      <div className="border-t border-border pt-4 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-semibold text-foreground">Bash command rules</div>
+          {pendingCount > 0 && (
+            <span className="text-[11px] text-muted-foreground" data-testid="bash-rules-pending">
+              {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          A rule matches a bash command by its leading words, so
+          <span className="font-mono text-foreground"> git push</span> covers
+          <span className="font-mono text-foreground"> git push origin main</span>.
+          A <span className="font-mono text-foreground">deny</span> rule is a hard block that
+          neither the LLM judge nor yolo mode reconsiders. Same list as
+          <span className="font-mono"> /ban</span> and
+          <span className="font-mono"> /permissions bash:</span>.
+        </p>
+        {defaultMode === "yolo" && (
+          <p
+            className="text-xs text-amber-400"
+            data-testid="bash-rules-yolo-warning"
+          >
+            New sessions default to yolo, where bash is allowed without consulting these
+            rules. Switch the default to normal or sandbox for them to apply.
+          </p>
+        )}
+        {rulesError && (
+          <p className="text-xs text-red-400" role="alert">
+            {rulesError}
+          </p>
+        )}
+
+        {bashRules.length === 0 ? (
+          <p className="text-xs text-muted-foreground/70">
+            No bash rules yet — every command falls back to the built-in safe lists.
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {bashRules.map((row, i) => {
+              const problem = validateRule(normalizePrefix(row.prefix), row.level);
+              return (
+                // Keyed by INDEX, not by prefix: the prefix is EDITABLE, so a
+                // prefix key changes on the first keystroke, which remounts the
+                // input and throws away focus mid-typing. Rows are only
+                // appended, edited in place and removed wholesale, so the index
+                // is stable for the life of a row.
+                <div key={i} className="flex items-center gap-2">
+                  <Input
+                    value={row.prefix}
+                    aria-label={`Rule prefix ${row.prefix}`}
+                    onChange={(e) => updateRule(i, { prefix: normalizePrefix(e.target.value) })}
+                    className={`${RULE_INPUT_CLASS} flex-1 min-w-0`}
+                  />
+                  <select
+                    value={row.level}
+                    aria-label={`Level for ${row.prefix}`}
+                    onChange={(e) =>
+                      updateRule(i, { level: e.target.value as PermissionLevelName })
+                    }
+                    className={RULE_SELECT_CLASS}
+                  >
+                    {RULE_LEVEL_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    aria-label={`Remove rule ${row.prefix}`}
+                    title="Remove rule"
+                    onClick={() => removeRule(row.prefix)}
+                    className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                  {problem && (
+                    <span className="text-[11px] text-red-400" role="alert">
+                      {problem}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 pt-1">
+          <Input
+            value={newPrefix}
+            placeholder="git push"
+            aria-label="New rule prefix"
+            onChange={(e) => {
+              setNewPrefix(e.target.value);
+              setRulesError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addRule();
+              }
+            }}
+            className={`${RULE_INPUT_CLASS} flex-1 min-w-0`}
+          />
+          <select
+            value={newLevel}
+            aria-label="New rule level"
+            onChange={(e) => setNewLevel(e.target.value as PermissionLevelName)}
+            className={RULE_SELECT_CLASS}
+          >
+            {RULE_LEVEL_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <Button
+            size="sm"
+            variant="outline"
+            type="button"
+            onClick={addRule}
+            disabled={newPrefix.trim() === ""}
+            className="h-7 shrink-0 text-xs"
+          >
+            Add
+          </Button>
         </div>
       </div>
 

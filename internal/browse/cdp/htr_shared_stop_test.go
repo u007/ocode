@@ -618,10 +618,12 @@ func TestFinalLeaseReleaseStopsOwnDaemon(t *testing.T) {
 
 // TestFinalLeaseReleaseDoesNotKillAnAdoptedDaemon is the adopter half of the
 // same path, and the case the rule exists for. The sequence modelled is: A
-// spawns the daemon, B adopts it, A exits, B releases the final lease. What B
-// finds in the marker is itself as the writer (OwnerPID) and A as the spawner
+// spawns the daemon, B adopts it, and B releases the final lease while A is
+// STILL RUNNING (stubStopRuleLiveness reports every pid alive). What B finds in
+// the marker is itself as the writer (OwnerPID) and A as the spawner
 // (StartedByPID) — so B releasing the last lease must NOT kill A's daemon, and
-// must not erase the marker that records who did spawn it.
+// must not erase the marker that records who did spawn it. The dead-spawner
+// counterpart is TestFinalLeaseReleaseReapsDaemonWhoseSpawnerExited.
 func TestFinalLeaseReleaseDoesNotKillAnAdoptedDaemon(t *testing.T) {
 	isolateHTROwnerState(t)
 	stubStopRuleLiveness(t)
@@ -633,7 +635,7 @@ func TestFinalLeaseReleaseDoesNotKillAnAdoptedDaemon(t *testing.T) {
 	daemon := startIdleHelperProcess(t)
 	defer func() { _ = daemon.Process.Kill() }()
 
-	// A: the process that spawned the daemon and has since exited. One above
+	// A: the process that spawned the daemon and is still running. One above
 	// this one is the established "somebody else" stand-in in these fixtures.
 	spawner := os.Getpid() + 1
 	owner := writeOwnerForTest(t, finalReleaseOwner(daemon.Process.Pid, spawner))
@@ -680,5 +682,79 @@ func TestFinalLeaseReleaseDoesNotKillAnAdoptedDaemon(t *testing.T) {
 	}
 	if !strings.Contains(got, "did not spawn it") {
 		t.Errorf("refusal line must give the reason, got %q", got)
+	}
+}
+
+// stubSpawnerExited makes exactly one pid — the recorded spawner — look dead,
+// with every other pid alive and the daemon attributable or not per matches.
+func stubSpawnerExited(t *testing.T, spawner int, matches bool) {
+	t.Helper()
+	origAlive, origMatch := pidAliveFn, processMatchesFn
+	pidAliveFn = func(pid int) bool { return pid > 0 && pid != spawner }
+	processMatchesFn = func(htrOwner) bool { return matches }
+	t.Cleanup(func() { pidAliveFn, processMatchesFn = origAlive, origMatch })
+}
+
+// TestFinalLeaseReleaseReapsDaemonWhoseSpawnerExited is the inheritance half of
+// the rule: A spawns the daemon, B adopts it, A EXITS, B releases the final
+// lease. Nobody else is entitled to stop the daemon any more, so A's stop
+// rights pass to B and the release must kill it and clear the marker rather
+// than leave an orphan no ocode process can ever stop.
+func TestFinalLeaseReleaseReapsDaemonWhoseSpawnerExited(t *testing.T) {
+	isolateHTROwnerState(t)
+	spawner := os.Getpid() + 1
+	stubSpawnerExited(t, spawner, true)
+	// The health probe answers "no": inherited rights must rest on the marker's
+	// executable and start token alone.
+	withStubbedProbes(t, false, false)
+
+	daemon := startIdleHelperProcess(t)
+	defer func() { _ = daemon.Process.Kill() }()
+
+	owner := writeOwnerForTest(t, finalReleaseOwner(daemon.Process.Pid, spawner))
+
+	lease, err := acquireHTRLease(owner.Port, owner.Socket, owner.Identity, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.release()
+
+	exited := make(chan error, 1)
+	go func() { exited <- daemon.Wait() }()
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Error("the daemon exited cleanly, expected it to be killed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("daemon pid %d survived the final lease release although its spawner pid %d is gone", daemon.Process.Pid, spawner)
+	}
+	if _, err := readHTROwner(); err == nil {
+		t.Error("owner marker must be removed after a granted stop")
+	}
+}
+
+// TestInheritedStopRightsRefusals pins what inheritance must NOT grant: a
+// daemon the marker cannot tie to the running pid (the health probe alone is
+// not enough — in shared mode it also answers for a daemon the user started),
+// and a marker with no recorded spawner at all.
+func TestInheritedStopRightsRefusals(t *testing.T) {
+	isolateHTROwnerState(t)
+	spawner := os.Getpid() + 1
+	withStubbedProbes(t, true, true)
+
+	daemon := startIdleHelperProcess(t)
+	defer func() { _ = daemon.Process.Kill() }()
+
+	stubSpawnerExited(t, spawner, false)
+	stop, err := shouldStopSharedDaemon(finalReleaseOwner(daemon.Process.Pid, spawner))
+	if stop || err == nil {
+		t.Errorf("unverifiable daemon with a dead spawner: got (%v, %v), want a refusal with an error", stop, err)
+	}
+
+	stubSpawnerExited(t, 0, true)
+	stop, err = shouldStopSharedDaemon(finalReleaseOwner(daemon.Process.Pid, 0))
+	if stop || err != nil {
+		t.Errorf("marker with no recorded spawner: got (%v, %v), want a plain refusal", stop, err)
 	}
 }

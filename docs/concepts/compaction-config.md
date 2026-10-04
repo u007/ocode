@@ -12,7 +12,7 @@ tags:
   - web
   - cancellation
   - failure-handling
-timestamp: 2026-10-01T08:49:10Z
+timestamp: 2026-10-02T02:47:23Z
 ---
 # Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification
 
@@ -74,6 +74,8 @@ web /compact  →  POST /api/sessions/{id}/compact  (server.go:351)
   → SSE compaction_started / compaction_done (compaction_events.go)
 ```
 
+**Inline summary first (2026-10-02).** Before the batch loop, `runCompactWithCtx` calls `runInlineSummary` (`internal/agent/compact.go`): one request on a clone of the **main** client (same model, same thinking budget — never `summary_provider`/`summary_model` or the small model) carrying `PrepareMessages(messages)` + `GetToolDefinitions()` + one user-role instruction (`compactionSystemPrompt` + `summaryTemplate` + `inlineSummaryInstruction`), so the provider's prompt cache serves the whole prefix. It shares the retry/validation core (`runSummaryCall`) and the per-request first-token/idle window (`summaryWindowContext`) with the batches, and the splice boundaries are unchanged (the summary covers the whole conversation; the recent tail is still kept verbatim). The batch loop below runs only when the inline request is not possible — main client is not a `*GenericClient`, the registry lacks the model's window or output cap, or `window - used < inlineSummaryReserveTokens + thinking budget` (`used` = `LastInputTokens()`, else the transcript estimate) — or when the inline request fails with a provider error. An inline timeout/cancel fails the pass (§4) without running the loop. `summary_model` therefore configures the batched loop only. Tests: `internal/agent/compact_inline_test.go`. Line anchors on this page that point into `agent.go`/`compact.go` predate this change and have shifted; trust the symbol names.
+
 Key properties (all implemented, tested):
 
 1. **Fresh inactivity context per batch** — `agent.go:2817` constructs the window *inside* the batch loop, so batch N gets a full deadline instead of the residual of batch N-1 (`TestRunCompactGivesEachBatchFreshTimeout`).
@@ -85,7 +87,7 @@ Key properties (all implemented, tested):
 
 Two deliberate, *different* lifetimes coexist:
 
-- **Compaction (per-call, context-scoped):** `runCompact` attaches the idle-reset hook with `withDeltaCallback(batchCtx, reset)` (`agent.go:2823`, `client.go:69`). `GenericClient.ChatWithContext` reads it from the request context (`client.go:783`) and routes stream deltas to it **exclusively** — the shared `OnDelta` field is neither wrapped nor invoked when a per-call callback exists. A concurrent chat calling `SetOnDelta(nil)` can no longer clear the compaction reset hook, and summary deltas no longer leak into a chat's stream (`TestChatWithContextPerCallDeltaCallbackTakesPrecedence`).
+- **Compaction (per-call, context-scoped):** `runCompact` attaches the idle-reset hook with `withDeltaCallback(batchCtx, reset)` (`agent.go:2823`, `client.go:69`). `GenericClient.ChatWithContext` reads it from the request context (`client.go:794`) and routes stream deltas to it **exclusively** — the shared `OnDelta` field is neither wrapped nor invoked when a per-call callback exists. A concurrent chat calling `SetOnDelta(nil)` can no longer clear the compaction reset hook, and summary deltas no longer leak into a chat's stream (`TestChatWithContextPerCallDeltaCallbackTakesPrecedence`).
 - **Main turn (shared, `chatWithDelta`):** `chatWithDelta` (`agent.go:1071`) still does `gc.SetOnDelta(a.OnDelta); defer gc.SetOnDelta(nil)` around one `Chat` call (`agent.go:1075-1076`). This **shared-callback lifetime is intentional and unchanged** — it is how the agent's `OnDelta` reaches the stream for the duration of a single call, and the always-clear-on-return contract is what keeps subagents from inheriting a stale callback. Do not "unify" it with the context path.
 
 ## 4. Error classification (server)

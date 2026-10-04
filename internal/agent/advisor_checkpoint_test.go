@@ -351,7 +351,7 @@ func TestNewAdvisorCheckpointState_ReceivesExplicitGoal(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, _ := checkpointTestAgent(t, []string{"plan"})
 
-	st := a.newAdvisorCheckpointState("explicit user goal")
+	st := a.newAdvisorCheckpointState("explicit user goal", false)
 	if st.userGoal != "explicit user goal" {
 		t.Fatalf("expected 'explicit user goal', got %q", st.userGoal)
 	}
@@ -364,7 +364,7 @@ func TestNewAdvisorCheckpointState_ReceivesExplicitGoal(t *testing.T) {
 		{Role: "assistant", Content: "thinking..."},
 		{Role: "user", Content: "[ocode:discovery] attached doc content"},
 	}
-	st2 := a.newAdvisorCheckpointState("real user request")
+	st2 := a.newAdvisorCheckpointState("real user request", false)
 	if st2.userGoal != "real user request" {
 		t.Fatalf("expected 'real user request', got %q (tail leaked into checkpoint)", st2.userGoal)
 	}

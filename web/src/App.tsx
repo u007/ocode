@@ -2053,6 +2053,11 @@ function HomeApp() {
           scope={pendingPermission.scope}
           prefix={pendingPermission.prefix}
           outOfScopePath={pendingPermission.out_of_scope_path}
+          untrustedContent={pendingPermission.untrusted_content}
+          untrustedSource={pendingPermission.untrusted_source}
+          untrustedSummary={pendingPermission.untrusted_summary}
+          untrustedScores={pendingPermission.untrusted_scores}
+          untrustedFailure={pendingPermission.untrusted_failure}
           context={askContext}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}

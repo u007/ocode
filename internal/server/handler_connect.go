@@ -41,6 +41,7 @@ const (
 	connectFlowWaitingInput   connectFlowState = "waiting_input"
 	connectFlowWaitingBrowser connectFlowState = "waiting_browser"
 	connectFlowRunning        connectFlowState = "running"
+	connectFlowCommitting     connectFlowState = "committing"
 	connectFlowComplete       connectFlowState = "complete"
 	connectFlowFailed         connectFlowState = "failed"
 	connectFlowCancelled      connectFlowState = "cancelled"
@@ -117,6 +118,78 @@ func (f *connectFlow) isWaitingInput() bool {
 func (f *connectFlow) isTerminal() bool {
 	switch f.getState() {
 	case connectFlowComplete, connectFlowFailed, connectFlowCancelled:
+		return true
+	}
+	return false
+}
+
+// beginInput moves a waiting_input flow to running AND installs its cancel
+// function in ONE locked step.
+//
+// These used to be two separate lock acquisitions — isWaitingInput() to check,
+// then setState(running) — so two concurrent POSTs to the flow's input endpoint
+// both passed the check and both started an exchange. The cancel func was
+// separately assigned without the lock at all, racing the cancel handler's
+// unlocked read. Doing the compare-and-set and the store together removes both:
+// the loser of the race gets false and is told the flow already started.
+func (f *connectFlow) beginInput(cancel context.CancelFunc) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state != connectFlowWaitingInput {
+		return false
+	}
+	f.cancel = cancel
+	f.state = connectFlowRunning
+	f.updatedAt = time.Now()
+	return true
+}
+
+// setCancel installs the cancel func for a flow that was never waiting for
+// input. If the flow was already cancelled the func is invoked immediately, so
+// a cancel that arrived before the func existed is not lost.
+func (f *connectFlow) setCancel(cancel context.CancelFunc) {
+	f.mu.Lock()
+	if f.state == connectFlowCancelled {
+		f.mu.Unlock()
+		cancel()
+		return
+	}
+	f.cancel = cancel
+	f.mu.Unlock()
+}
+
+// takeCancel removes and returns the flow's cancel func. Taking it (rather than
+// reading it) makes a repeated cancel a no-op instead of a double call.
+func (f *connectFlow) takeCancel() context.CancelFunc {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cancel := f.cancel
+	f.cancel = nil
+	return cancel
+}
+
+// beginCommit claims the exclusive right to persist this flow's credential.
+//
+// It succeeds only from a state a background exchange can legitimately finish
+// in — running (plugin, and every paste-code/cookie flow after beginInput) or
+// waiting_browser (OpenAI auto, Copilot and Google, whose exchanges start
+// immediately and block until the browser returns). It then moves the flow to
+// committing, so exactly one caller can reach auth.Set and a cancel arriving
+// afterwards cannot strand a half-written credential.
+//
+// A cancelled or already-finished flow loses the claim and its credential is
+// DISCARDED. Without this check a flow the user cancelled still had its
+// credential saved, because the Anthropic, Google and manual-OpenAI exchanges
+// take no context and kept running to completion regardless of the cancel.
+// waiting_input is deliberately NOT claimable: no exchange was ever started for
+// such a flow, so a completion there means a bug, not a credential to keep.
+func (f *connectFlow) beginCommit() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch f.state {
+	case connectFlowRunning, connectFlowWaitingBrowser:
+		f.state = connectFlowCommitting
+		f.updatedAt = time.Now()
 		return true
 	}
 	return false
@@ -250,12 +323,44 @@ const (
 	connectMethodRemove connectMethodKind = "remove"
 )
 
+// Completion modes for a loopback OAuth flow. "auto" makes the SERVER bind
+// the callback port and finish when the provider redirects the browser back to
+// it, which needs the browser on the server's machine. "manual" binds nothing
+// and takes a pasted redirect instead, so it works from a `serve --remote` host
+// or a second device.
+const (
+	connectModeAuto   = "auto"
+	connectModeManual = "manual"
+)
+
+// oauthFlowTakesMode reports whether a method's start handler honours a
+// caller-chosen completion mode.
+//
+// Exactly one flow qualifies: the OpenAI loopback login, shared by every
+// provider whose catalog entry declares OAuthFlow "openai" (openai AND codex —
+// keying this on the provider id would silently downgrade codex). Everything
+// else has a single shape and MUST NOT advertise a choice: an Anthropic
+// paste-code flow that offered "open the page on this machine" beside "paste the
+// redirect back" would render a control the server ignores, and a device-code or
+// plugin flow has no loopback port to choose between.
+//
+// This is the SINGLE source for both the advertised `modes` below and the start
+// handler's dispatch, so the two cannot drift: a method that advertises a mode
+// the start handler ignores would strand a client in a flow that never finishes.
+func oauthFlowTakesMode(p *auth.Provider, methodID string) bool {
+	return methodID == "oauth" && p.OAuthFlow == "openai"
+}
+
 // connectMethodInfo is one selectable way to connect a provider,
 // mirroring the TUI /connect method list.
 type connectMethodInfo struct {
 	ID    string            `json:"id"`
 	Label string            `json:"label"`
 	Kind  connectMethodKind `json:"kind"`
+	// Modes lists the completion modes this method accepts, or is omitted when
+	// the method has exactly one shape. A client MUST NOT offer a choice the
+	// server does not honour; see oauthFlowTakesMode.
+	Modes []string `json:"modes,omitempty"`
 }
 
 // connectMethodsFor adapts the shared catalog in internal/auth to the
@@ -266,7 +371,11 @@ func connectMethodsFor(p *auth.Provider) []connectMethodInfo {
 	shared := auth.MethodsFor(p)
 	out := make([]connectMethodInfo, 0, len(shared))
 	for _, m := range shared {
-		out = append(out, connectMethodInfo{ID: m.ID, Label: m.Label, Kind: connectMethodKind(m.Kind)})
+		info := connectMethodInfo{ID: m.ID, Label: m.Label, Kind: connectMethodKind(m.Kind)}
+		if oauthFlowTakesMode(p, m.ID) {
+			info.Modes = []string{connectModeAuto, connectModeManual}
+		}
+		out = append(out, info)
 	}
 	return out
 }
@@ -275,11 +384,17 @@ func connectMethodsFor(p *auth.Provider) []connectMethodInfo {
 // profile auth endpoints do: first and last characters of an API key,
 // or a bare "oauth" marker for token credentials. Keys are never
 // returned in full.
+//
+// The HEAD is never revealed. A 4+4 window on a short key discloses most of
+// it — a 9-character key rendered as "1234••••6789" handed over eight of nine
+// characters. Only the trailing 4 are shown, and only once the key is at least
+// 16 characters long, which caps the disclosure at a quarter of the key (and
+// far less on a real one). Shorter keys are masked whole.
 func maskConnectCredential(cred auth.Credential) string {
 	switch {
 	case cred.Key != "":
-		if len(cred.Key) > 8 {
-			return cred.Key[:4] + "••••" + cred.Key[len(cred.Key)-4:]
+		if len(cred.Key) >= 16 {
+			return "••••••••••••" + cred.Key[len(cred.Key)-4:]
 		}
 		return "••••"
 	case cred.AccessToken != "":
@@ -461,10 +576,10 @@ func (h *Handler) handleConnectOAuthStart(w http.ResponseWriter, r *http.Request
 	switch {
 	case method.ID == "oauth_max" || method.ID == "oauth_console":
 		h.startAnthropicConnectFlow(w, p, method.ID)
-	case method.ID == "oauth" && p.OAuthFlow == "openai":
+	case oauthFlowTakesMode(p, method.ID):
 		mode := req.Mode
-		if mode != "manual" {
-			mode = "auto"
+		if mode != connectModeManual {
+			mode = connectModeAuto
 		}
 		h.startOpenAIConnectFlow(w, p, mode)
 	case method.ID == "oauth" && p.OAuthFlow == "google":
@@ -515,7 +630,7 @@ func (h *Handler) startAnthropicConnectFlow(w http.ResponseWriter, p *auth.Provi
 // *Server, and this route is registered as s.handler.*, so the handler cannot
 // read it.
 func (h *Handler) startOpenAIConnectFlow(w http.ResponseWriter, p *auth.Provider, mode string) {
-	if mode == "manual" {
+	if mode == connectModeManual {
 		h.startOpenAIManualFlow(w, p)
 		return
 	}
@@ -528,12 +643,14 @@ func (h *Handler) startOpenAIConnectFlow(w http.ResponseWriter, p *auth.Provider
 	}
 	f := newConnectFlow(p.ID, "oauth", connectFlowLocalCallback, connectFlowWaitingBrowser)
 	f.url = authURL
-	f.cancel = cancel
 	f.instructions = "Sign in in the new tab; ocode finishes the sign-in automatically when the page returns to localhost."
 	connectFlows.add(f)
+	// setCancel, not a bare assignment: the flow is already reachable through
+	// the registry here, so a cancel can race the write.
+	f.setCancel(cancel)
 	crashguard.Go(func() {
 		cred, err := finish()
-		completeConnectFlow(f, p.ID, cred, err)
+		completeConnectFlow(ctx, f, p.ID, cred, err)
 	})
 	// `state` is reported for symmetry with the manual flow, so a client can
 	// branch on the completion mode without a second status poll.
@@ -582,13 +699,19 @@ func (h *Handler) startGoogleConnectFlow(w http.ResponseWriter, p *auth.Provider
 	f.url = authURL
 	f.instructions = "Sign in in the new tab; ocode finishes the sign-in automatically when the page returns to localhost."
 	connectFlows.add(f)
-	crashguard.Go(func() {
+	// auth.StartGoogleOAuth takes no context, so the token exchange cannot be
+	// interrupted. Run it cancellably: cancel returns promptly, and the token is
+	// discarded rather than saved behind the user's back. This is also what
+	// gives the flow a cancel func at all — the Google flow previously had none,
+	// so DELETE /flows/{id} was a complete no-op for it.
+	ctx, cancel := context.WithCancel(context.Background())
+	f.setCancel(cancel)
+	runConnectExchange(ctx, f, p.ID, func() (auth.Credential, error) {
 		token, err := finish()
-		var cred auth.Credential
-		if err == nil {
-			cred = auth.Credential{Kind: auth.KindOAuth, AccessToken: token}
+		if err != nil {
+			return auth.Credential{}, err
 		}
-		completeConnectFlow(f, p.ID, cred, err)
+		return auth.Credential{Kind: auth.KindOAuth, AccessToken: token}, nil
 	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":       f.id,
@@ -610,15 +733,15 @@ func (h *Handler) startCopilotConnectFlow(w http.ResponseWriter, p *auth.Provide
 	f.userCode = dev.UserCode
 	f.verificationURI = dev.VerificationURI
 	f.copilotDevice = dev
-	f.cancel = cancel
 	f.instructions = "Open the URL, enter the code, and authorize ocode."
 	connectFlows.add(f)
+	f.setCancel(cancel)
 	crashguard.Go(func() {
 		cred, err := copilotPollFn(ctx, dev)
 		if err == nil && cred.AccessToken != "" {
 			cred.Account = copilotFetchAccountFn(cred.AccessToken)
 		}
-		completeConnectFlow(f, p.ID, cred, err)
+		completeConnectFlow(ctx, f, p.ID, cred, err)
 	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":          f.id,
@@ -660,16 +783,16 @@ func (h *Handler) startPluginConnectFlow(w http.ResponseWriter, p *auth.Provider
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	f := newConnectFlow(p.ID, "plugin_"+label, connectFlowPlugin, connectFlowRunning)
-	f.cancel = cancel
 	f.instructions = fmt.Sprintf("Running %s…", label)
 	connectFlows.add(f)
+	f.setCancel(cancel)
 	crashguard.Go(func() {
 		result, err := am.Run(ctx)
 		var cred auth.Credential
 		if err == nil {
 			cred = pluginAuthResultCredential(result)
 		}
-		completeConnectFlow(f, p.ID, cred, err)
+		completeConnectFlow(ctx, f, p.ID, cred, err)
 	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":       f.id,
@@ -696,13 +819,27 @@ func pluginAuthResultCredential(result providerplugin.AuthResult) auth.Credentia
 	}
 }
 
-// completeConnectFlow records the outcome of a background flow: on
-// success it stores the credential through the targeted auth.Set saver
-// (the same one the TUI uses); on failure it records the error. It
-// never returns tokens to any caller.
-func completeConnectFlow(f *connectFlow, providerID string, cred auth.Credential, err error) {
+// completeConnectFlow records the outcome of a background flow: on success it
+// stores the credential through the targeted auth.Set saver (the same one the
+// TUI uses); on failure it records the error. It never returns tokens to any
+// caller.
+//
+// A flow that was cancelled does not save anything. ctx is the flow's own
+// context and is checked as well as the state, because a cancel and a finishing
+// exchange can race: ctx.Err() closes the window between the cancel signal and
+// the cancelled state being recorded.
+func completeConnectFlow(ctx context.Context, f *connectFlow, providerID string, cred auth.Credential, err error) {
 	if err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
 		f.fail(err.Error())
+		return
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	if !f.beginCommit() {
 		return
 	}
 	if setErr := auth.Set(providerID, cred); setErr != nil {
@@ -712,18 +849,72 @@ func completeConnectFlow(f *connectFlow, providerID string, cred auth.Credential
 	f.succeed(cred)
 }
 
+// connectExchangeResult is one exchange's outcome. The channel carrying it is
+// buffered so the goroutine can always exit, even when nobody is left to read.
+type connectExchangeResult struct {
+	cred auth.Credential
+	err  error
+}
+
+// runConnectExchange runs a blocking exchange that takes NO context — the
+// Anthropic code exchange, the Google token exchange and the manual OpenAI
+// exchange are all shaped that way — so that cancelling the flow still returns
+// promptly.
+//
+// It is fully ASYNCHRONOUS: it returns immediately, because every caller is an
+// HTTP handler that must reply with an auth URL (or a "running"
+// acknowledgement) without waiting on the provider. The wait therefore lives on
+// its own goroutine.
+//
+// The network call cannot be interrupted, so the inner goroutine is left to
+// finish on its own; what cancel controls is whether its credential is USED. On
+// a cancellation the result is dropped and the flow is marked cancelled, so a
+// connect the user walked away from cannot complete behind their back.
+func runConnectExchange(ctx context.Context, f *connectFlow, providerID string, exchange func() (auth.Credential, error)) {
+	done := make(chan connectExchangeResult, 1)
+	crashguard.Go(func() {
+		cred, err := exchange()
+		done <- connectExchangeResult{cred: cred, err: err}
+	})
+	crashguard.Go(func() {
+		select {
+		case res := <-done:
+			completeConnectFlow(ctx, f, providerID, res.cred, res.err)
+		case <-ctx.Done():
+			f.markCancelled()
+		}
+	})
+}
+
+// markCancelled records a cancellation raised from inside the flow rather than
+// by the cancel endpoint. It never overwrites a terminal state, so a credential
+// that already committed keeps its outcome.
+func (f *connectFlow) markCancelled() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch f.state {
+	case connectFlowComplete, connectFlowFailed, connectFlowCancelled, connectFlowCommitting:
+		return
+	}
+	f.state = connectFlowCancelled
+	f.updatedAt = time.Now()
+}
+
 // handleConnectFlowInput supplies the interactive input for a
 // waiting_input flow: a pasted Anthropic callback URL, or Grok's
 // x.com cookies.
+//
+// There is deliberately no up-front isWaitingInput() check here. It used to
+// guard the endpoint, but it was a SEPARATE lock acquisition from the
+// setState(running) that followed, so two concurrent POSTs (a double-click, or
+// a retried client) both passed it and both started an exchange. beginInput now
+// performs the waiting_input -> running compare-and-set under one lock and is
+// the authority for every branch; a caller that loses the race gets a 409.
 func (h *Handler) handleConnectFlowInput(w http.ResponseWriter, r *http.Request) {
 	flowID := r.PathValue("flowId")
 	f := connectFlows.get(flowID)
 	if f == nil {
 		writeError(w, http.StatusNotFound, "unknown flow")
-		return
-	}
-	if !f.isWaitingInput() {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("flow is %s, not waiting for input", f.getState()))
 		return
 	}
 	var req struct {
@@ -747,31 +938,42 @@ func (h *Handler) handleConnectFlowInput(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "state mismatch — possible CSRF; restart the flow.")
 			return
 		}
-		f.setState(connectFlowRunning)
 		verifier := f.anthropicVerifier
-		crashguard.Go(func() {
-			cred, err := anthropicExchangeFn(code, state, verifier)
-			completeConnectFlow(f, f.provider, cred, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		if !f.beginInput(cancel) {
+			cancel()
+			writeError(w, http.StatusConflict, fmt.Sprintf("flow is %s, it already started", f.getState()))
+			return
+		}
+		// auth.AnthropicExchange takes no context, so run it cancellably.
+		runConnectExchange(ctx, f, f.provider, func() (auth.Credential, error) {
+			return anthropicExchangeFn(code, state, verifier)
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowRunning})
 
 	case connectFlowLocalCallback:
 		// Only a MANUAL-mode flow reaches here, and the separation is enforced
-		// upstream, not here: the isWaitingInput() guard above already rejected
-		// the auto flow, which stays waiting_browser because it owns a loopback
-		// listener. A local-callback flow is waiting_input ONLY if a manual
-		// starter created it, and every manual starter must set openaiManual.
-		// If you add another loopback mode, give it its own state or its own
-		// kind — do not make an auto flow wait for input, or a paste can drive it.
+		// by the state machine rather than by a separate check: beginInput only
+		// succeeds from waiting_input, and an auto flow stays waiting_browser
+		// because it owns a loopback listener. A local-callback flow is
+		// waiting_input ONLY if a manual starter created it, and every manual
+		// starter must set openaiManual. If you add another loopback mode, give
+		// it its own state or its own kind — do not make an auto flow wait for
+		// input, or a paste can drive it.
 		if strings.TrimSpace(req.Code) == "" {
 			writeError(w, http.StatusBadRequest, "paste the URL your browser was redirected to.")
 			return
 		}
-		f.setState(connectFlowRunning)
 		flowState, pasted := f.openaiManual, req.Code
-		crashguard.Go(func() {
-			cred, err := openaiManualExchangeFn(flowState, pasted)
-			completeConnectFlow(f, f.provider, cred, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		if !f.beginInput(cancel) {
+			cancel()
+			writeError(w, http.StatusConflict, fmt.Sprintf("flow is %s, it already started", f.getState()))
+			return
+		}
+		// auth.ExchangeOpenAIManual takes no context, so run it cancellably.
+		runConnectExchange(ctx, f, f.provider, func() (auth.Credential, error) {
+			return openaiManualExchangeFn(flowState, pasted)
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowRunning})
 
@@ -780,13 +982,18 @@ func (h *Handler) handleConnectFlowInput(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "Both x.com cookies (auth_token and ct0) are required.")
 			return
 		}
-		f.setState(connectFlowRunning)
-		ctx, cancel := context.WithCancel(context.Background())
-		f.cancel = cancel
 		authToken, ct0 := req.AuthToken, req.Ct0
+		ctx, cancel := context.WithCancel(context.Background())
+		// beginInput installs cancel under the flow lock, so the cancel
+		// endpoint can no longer race an unsynchronised write to f.cancel.
+		if !f.beginInput(cancel) {
+			cancel()
+			writeError(w, http.StatusConflict, fmt.Sprintf("flow is %s, it already started", f.getState()))
+			return
+		}
 		crashguard.Go(func() {
 			cred, err := grokSubscriptionLoginFn(ctx, authToken, ct0)
-			completeConnectFlow(f, f.provider, cred, err)
+			completeConnectFlow(ctx, f, f.provider, cred, err)
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowRunning})
 
@@ -808,6 +1015,11 @@ func (h *Handler) handleConnectFlowStatus(w http.ResponseWriter, r *http.Request
 
 // handleConnectFlowCancel aborts a running flow (its background
 // context is cancelled) and drops it from the registry.
+//
+// Once a flow has claimed the right to persist its credential (committing) the
+// cancel is refused with 409 rather than allowed to interleave with auth.Set —
+// the credential is already on its way to disk and reporting "cancelled" would
+// be a lie.
 func (h *Handler) handleConnectFlowCancel(w http.ResponseWriter, r *http.Request) {
 	flowID := r.PathValue("flowId")
 	f := connectFlows.get(flowID)
@@ -819,8 +1031,14 @@ func (h *Handler) handleConnectFlowCancel(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": f.getState()})
 		return
 	}
-	if f.cancel != nil {
-		f.cancel()
+	if f.getState() == connectFlowCommitting {
+		writeError(w, http.StatusConflict, "this flow is saving its credential and can no longer be cancelled")
+		return
+	}
+	// takeCancel reads f.cancel under the flow lock. It used to be read with no
+	// lock at all, racing the unlocked write that the input handler performed.
+	if cancel := f.takeCancel(); cancel != nil {
+		cancel()
 	}
 	f.setState(connectFlowCancelled)
 	connectFlows.remove(flowID)

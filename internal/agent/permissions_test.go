@@ -640,7 +640,7 @@ func TestPermissions_BashAutoAllowInRoot_PersistsProjectScopedRule(t *testing.T)
 	}
 
 	key := bashInRootKey("awk", resolvedWorkDir)
-	if _, exists := pm.bashPrefixes[key]; exists {
+	if _, exists := pm.bashPrefixSnapshot()[key]; exists {
 		t.Fatalf("did not expect mutating awk mode to persist in-root key %q", key)
 	}
 }
@@ -653,7 +653,9 @@ func TestPermissions_BashPersistedRule_DoesNotBypassOutOfRoot(t *testing.T) {
 	}
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
-	pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)] = PermissionAllow
+	pm.mutateBashPrefixes(func(rules map[string]PermissionLevel) {
+		rules[bashInRootKey("awk", resolvedWorkDir)] = PermissionAllow
+	})
 
 	dec := pm.Decide("bash", json.RawMessage(`{"command":"awk '{print $1}' /etc/hosts"}`))
 	if dec.Level != PermissionAsk {
@@ -781,7 +783,9 @@ func TestPermissions_ExportConfigSkipsInternalInRootRules(t *testing.T) {
 	}
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
-	pm.bashPrefixes[bashInRootKey("cat", resolvedWorkDir)] = PermissionAllow
+	pm.mutateBashPrefixes(func(rules map[string]PermissionLevel) {
+		rules[bashInRootKey("cat", resolvedWorkDir)] = PermissionAllow
+	})
 
 	exported := pm.ExportConfig()
 	for k := range exported.Bash.Prefixes {
@@ -811,7 +815,7 @@ func TestPermissions_BashAutoAllowInRoot_Awk(t *testing.T) {
 		t.Fatalf("expected in-root awk command to auto-allow, got %s", dec.Level)
 	}
 
-	if _, ok := pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)]; ok {
+	if _, ok := pm.bashPrefixSnapshot()[bashInRootKey("awk", resolvedWorkDir)]; ok {
 		t.Fatalf("did not expect temp-dir awk rule to persist as project-scoped allow")
 	}
 }
@@ -831,7 +835,7 @@ func TestPermissions_BashAutoAllowInRoot_Mkdir(t *testing.T) {
 	if dec.Level != PermissionAllow {
 		t.Fatalf("expected in-root mkdir command to auto-allow, got %s", dec.Level)
 	}
-	if _, exists := pm.bashPrefixes[bashInRootKey("mkdir", resolvedWorkDir)]; exists {
+	if _, exists := pm.bashPrefixSnapshot()[bashInRootKey("mkdir", resolvedWorkDir)]; exists {
 		t.Fatalf("did not expect mutating mkdir mode to persist in-root key")
 	}
 
@@ -1179,7 +1183,7 @@ func TestPermissions_BashAutoAllow_NeverAutoModeAsks(t *testing.T) {
 
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
-	pm.bashPrefixModes["awk"] = bashPrefixModeNever
+	pm.bashPrefixModes.mutate(func(m map[string]string) { m["awk"] = bashPrefixModeNever })
 
 	cmd := fmt.Sprintf(`{"command":"awk '{print $1}' %s"}`, outsidePath)
 	dec := pm.Decide("bash", json.RawMessage(cmd))

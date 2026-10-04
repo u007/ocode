@@ -86,8 +86,8 @@ export function RemoteProjectStatus({
   const sessions = projectState.sessionsByProject?.[projectSessionKey(project.path, host)]?.sessions ?? [];
   const openSessionIds = new Set((projectState.tabsByProject?.[project.path] ?? []).map((t) => t.id));
   // Only the chats the user is actually working with: open as a tab here, or
-  // running a turn on the host. `running` is fed by the per-host `runs` bus
-  // (App opens a stream per host and routes frames by session_id), so a remote
+  // running a turn on the host. `running` is fed by the host's `runs` events
+  // (relayed over the one event stream and routed by session_id), so a remote
   // session running with no local tab is still listed. Everything else — the
   // host's full history — is reachable through the Sessions dialog.
   const visibleSessions = sessions.filter((s) => openSessionIds.has(s.id) || running.has(s.id));

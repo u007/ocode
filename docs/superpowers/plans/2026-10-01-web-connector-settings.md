@@ -1,3 +1,14 @@
+---
+type: Plan
+title: Web/Desktop Connectors settings — implementation plan
+description: 'Implementation plan for web/desktop Connectors settings (TUI /connect parity): shared method catalog, credential-version invalidation, client methods/forms, OAuth flow wiring; records the 2026-10-02 connect-flow correctness fixes (commit gate, beginInput single authority, cancel-drops-credential, tail-only masking). Phase 0–1 done; Phase 2 partial.'
+tags:
+  - plan
+  - connectors
+  - oauth
+  - web
+timestamp: 2026-10-01T18:14:06Z
+---
 # Web/Desktop Connectors settings — implementation plan
 
 Spec: `docs/superpowers/specs/2026-10-01-web-connector-settings-design.md`
@@ -15,11 +26,21 @@ concurrent-session note were verified, not written, by this session:
 `npx vitest run src/components/Settings/` (17 files / 98 tests),
 `npm run typecheck`, and `npx vite build` all green.
 
+**2026-10-02 — connect-flow correctness fixes landed** (details in spec §8): the
+commit gate (`connectFlowCommitting` — a cancelled flow's credential is
+discarded; cancel is refused 409 while committing), `beginInput` as the single
+input authority (409, not 400, for a state that will not accept input), cancel
+actually cancelling the Anthropic/Google/manual-OpenAI exchanges
+(`runConnectExchange` runs their context-free exchanges under a cancellable
+wait), and tail-only credential masking (≥16-char keys show their last 4;
+shorter masked whole). Tests: `handler_connect_cancel_test.go` (12).
+
 ## Phase 0 — gate, then shared catalog (DRY)
 
 0. ~~**GATE: settle `handler_connect.go` provenance.**~~ Approved 2026-10-01. A
    baseline copy is in `/tmp/connect-baseline/` for this session only; the file
-   is STILL untracked, so it needs a commit before it can be relied on.
+   was untracked then and **needs a commit before it can be relied on** —
+   resolved: committed in `d81a7e58` (2026-10-01).
 1. [x] `internal/auth/methods.go`: `Method` (`ID`, `Label`, `Kind`) +
    `MethodsFor(*Provider)`. `Status` was already shared in `providers.go`, so
    only the methods needed extracting.
@@ -123,12 +144,16 @@ concurrent-session note were verified, not written, by this session:
 
     Two things the implementation settled:
     - **The auto/manual separation is enforced by flow STATE, not by a guard.**
-      An auto flow is `waiting_browser`, and the `isWaitingInput()` check above
-      the switch already rejects a paste, so a `local-callback` +
-      `waiting_input` flow can only be a manual one. My first version added a
-      defensive `f.openaiManual.State == ""` check; the mutation removing it
-      SURVIVED, and on inspection it was provably unreachable (only the manual
-      starter creates that combination, and it always sets State) — an
+      An auto flow is `waiting_browser`, so a `local-callback` + `waiting_input`
+      flow can only be a manual one. (Originally this note relied on "the
+      `isWaitingInput()` check above the switch already rejects a paste" —
+      **2026-10-02: that up-front check is gone.** `beginInput`'s
+      waiting_input→running compare-and-set is now the single authority: a paste
+      into a state that will not accept it gets **409** from `beginInput`, and an
+      auto flow stays `waiting_browser`, so it can never pass the CAS.) My first
+      version added a defensive `f.openaiManual.State == ""` check; the mutation
+      removing it SURVIVED, and on inspection it was provably unreachable (only
+      the manual starter creates that combination, and it always sets State) — an
       equivalent mutant, not a coverage gap. Deleted, with the invariant written
       down in its place.
     - **The auto start response now reports `state`.** It did not, so a client
@@ -143,7 +168,10 @@ concurrent-session note were verified, not written, by this session:
 15. Flow UI: one component per `connectFlowKind`, driven by
     `GET /flows/{flowId}` polling + `POST /flows/{id}/input` + `DELETE` cancel.
 16. Tests: flow lifecycle per kind; the `auto`/`manual` selection incl. the remote
-    case; cancel.
+    case; cancel. — **cancel: DONE 2026-10-02** (`handler_connect_cancel_test.go`,
+    12 tests: cancel discards the credential for all three context-free
+    exchanges, 409 while committing, double-submit starts exactly one exchange,
+    the mask never reveals a key's head).
 17. Test: `GET /flows/{id}` never returns the PKCE verifier or OAuth state.
 
 ## Phase 3 — the odd providers
@@ -165,6 +193,7 @@ concurrent-session note were verified, not written, by this session:
 - Every client method takes a trailing `host`. Any `toHaveBeenCalledWith`
   assertion on one must include the explicit `undefined` — vitest distinguishes
   two args from three-with-undefined.
-- Never render a stored key. Status and masked values only.
+- Never render a stored key. Status and masked values only (since 2026-10-02:
+  the mask is tail-4-only for keys ≥ 16 chars; shorter keys are masked whole).
 - `docs/` is bundle-owned: route the concept page through the `context` agent;
   this plan and the spec are plain files and may be edited directly.

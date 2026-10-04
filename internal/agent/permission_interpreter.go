@@ -510,7 +510,7 @@ func (a *Agent) verifyInterpreterEffectsWith(ie *InterpreterExec, resp *interpre
 		if isLocalhostDomain(domain) {
 			continue
 		}
-		if !relaxed["network"] && pm.webfetchDomains[domain] != PermissionAllow {
+		if !relaxed["network"] && pm.webfetchDomains.load()[domain] != PermissionAllow {
 			return false, "network target not allowed by policy: " + host
 		}
 	}
@@ -972,43 +972,188 @@ func numericAssignedVars(command string) map[string]bool {
 // own fragment. Both are needed: parseShellCommandLine lifts a leading "p=8080"
 // out of the curl fragment into parsedShellCommand.envVars, so judging the curl
 // fragment alone would not see the assignment its "$p" depends on.
+//
+// The rule is an ALLOWLIST, not an enumeration of badness: a variable counts as
+// numeric only when EVERY token that could be a write to it is exactly
+// "name=<digits>". Anything else that mentions the name as an assignment target
+// — a compound assignment, an assignment carrying a host, an array subscript —
+// poisons it, and a non-numeric write anywhere on the line poisons it even when
+// a numeric write also exists. Loops and branches can reorder execution, so this
+// is deliberately flow-INsensitive: the only sound rule is "all writes numeric".
 func numericAssignedVarsFrom(tokens, envVars []string) map[string]bool {
-	// LAST assignment wins, as in the shell. Collecting the first numeric one
-	// would be exploitable: "p=8080; p='1@evil.com'" must not be trusted
-	// because an earlier fragment happened to assign a number to p.
-	values := map[string]string{}
+	// A writer this predicate cannot see makes the whole verdict unsound, so
+	// fail closed for the line rather than reason about which var it hit.
+	if hasOpaqueVariableWriter(tokens, envVars) {
+		return map[string]bool{}
+	}
+	// seen is every variable written on the line; poisoned is the subset with
+	// at least one write that was not a plain decimal literal. A variable is
+	// trusted only when it was written and never poisoned.
+	seen := map[string]bool{}
+	poisoned := map[string]bool{}
 	for _, group := range [][]string{tokens, envVars} {
 		for _, tok := range group {
-			// splitShellFields does not split on ';', so a trailing separator
-			// stays attached to the value ("p=8080;") and must be trimmed
-			// before the digits test.
-			name, value, ok := strings.Cut(tok, "=")
-			if !ok || name == "" || strings.ContainsAny(name, `:"'$`) {
-				continue
+			if name, value, isWrite := shellAssignmentWrite(tok); isWrite {
+				seen[name] = true
+				// splitShellFields does not split on ';', so a trailing
+				// separator stays attached to the value ("p=8080;") and must
+				// be trimmed before the digits test.
+				if !isAllDigits(strings.TrimRight(value, ";")) {
+					poisoned[name] = true
+				}
 			}
-			values[name] = strings.TrimRight(value, ";")
 		}
 	}
 	out := map[string]bool{}
-	for name, value := range values {
-		if isAllDigits(value) {
+	for name := range seen {
+		if !poisoned[name] {
 			out[name] = true
 		}
 	}
 	// A numeric-literal `for` list is the other provably-numeric way a port
 	// variable gets its value: `for p in 8080 4096`. Every value the variable
-	// can take is a literal on the line, so this is as sound as an assignment —
-	// and without it the most common real form of a loopback port sweep still
-	// asks. It must be scanned on the RAW line (envVars), never on parsed
-	// fragments: parseShellCommandLine reduces `for p in 8080 4096; do curl …`
-	// to a bare `curl …$p…` fragment and discards the header entirely.
-	for name, numeric := range numericForLoopVars(envVars) {
-		out[name] = numeric
-	}
-	for name, numeric := range numericForLoopVars(tokens) {
-		out[name] = numeric
+	// can take is a literal on the line, so this is as sound as an assignment.
+	//
+	// It may only FILL a variable the scan above never saw written — it must
+	// never overwrite one. `for p in 8080; do p=1@evil.com; ...` has a numeric
+	// header and a hostile body, and numericForLoopVars stops at the `do`
+	// token, so it cannot see that write; letting the header win is the bypass.
+	//
+	// It must be scanned on the RAW line (envVars), never on parsed fragments:
+	// parseShellCommandLine reduces `for p in 8080 4096; do curl ...` to a bare
+	// `curl ...$p...` fragment and discards the header entirely.
+	for _, group := range [][]string{envVars, tokens} {
+		for name, isNumeric := range numericForLoopVars(group) {
+			if isNumeric && !seen[name] {
+				out[name] = true
+			}
+		}
 	}
 	return out
+}
+
+// shellAssignmentWrite reports whether tok is a plain assignment to a shell
+// variable, returning the variable name and the assigned value.
+//
+// It requires the text before the first "=" to be a bare identifier. That
+// deliberately rejects a compound assignment: "p+=x" cuts to the name "p+",
+// which is not the variable "p", so it is not reported as a write to p. This is
+// why opaqueVariableWriterForms must exist — the compound forms are caught by
+// refusing the whole line, not by classifying the token here.
+func shellAssignmentWrite(tok string) (name, value string, ok bool) {
+	head, value, found := strings.Cut(tok, "=")
+	if !found || head == "" || strings.ContainsAny(head, `:"'$`+"`") {
+		return "", "", false
+	}
+	// A leading word makes this a command's own "name=value" argument
+	// (env VAR=1, sudo -E p=1), not a shell write to a variable we track.
+	if strings.ContainsAny(head, " \t") {
+		return "", "", false
+	}
+	for i, r := range head {
+		alnum := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9')
+		if !alnum {
+			return "", "", false
+		}
+	}
+	return head, value, true
+}
+
+// opaqueVariableWriterForms are commands that can write a variable without
+// looking like "name=value", so the allowlist above cannot see the write. A line
+// containing any of them loses every numeric proof it carries.
+var opaqueVariableWriterForms = []string{
+	"eval", "read", "printf", "echo", "let", "declare", "typeset",
+	"export", "readonly", "getopts", "mapfile", "readarray", "unset", "coproc",
+}
+
+// hasOpaqueVariableWriter reports whether the line contains a construct that can
+// assign a variable in a form this predicate cannot enumerate. The list is not
+// exhaustive by construction — a shell has too many ways to write a variable —
+// which is why a hit discards every numeric proof on the line rather than
+// trying to decide which variable was affected.
+func hasOpaqueVariableWriter(tokens, envVars []string) bool {
+	for _, group := range [][]string{tokens, envVars} {
+		for _, tok := range group {
+			// Arithmetic contexts: ((p=8080)) and $((p=8080)).
+			if strings.HasPrefix(tok, "((") || strings.Contains(tok, "$((") {
+				return true
+			}
+			// A compound or subscripted write. shellAssignmentWrite rejects the
+			// name "p+" (it is not the identifier "p"), so "p+=x" is INVISIBLE
+			// to the allowlist scan rather than poisonous to it — which is the
+			// bypass: "p=8080; p+=@evil.com" would keep p's numeric proof. Catch
+			// the operator form explicitly.
+			if hasCompoundAssignment(tok) {
+				return true
+			}
+			for _, form := range opaqueVariableWriterForms {
+				if strings.HasPrefix(tok, form) && isWordPrefix(tok, len(form)) {
+					return true
+				}
+			}
+			// ${p:=default} and ${p=default} assign inside an expansion.
+			if hasEmbeddedAssignment(tok) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// compoundAssignOps are the bash operators that mutate a variable in place:
+// p+=x, p-=x, and the rest. Together with an array subscript (p[0]=x) these are
+// the writes shellAssignmentWrite cannot represent, because the text before "="
+// is not a bare identifier.
+const compoundAssignOps = "+-*/%^<>|&"
+
+// hasCompoundAssignment reports whether tok assigns through an operator or a
+// subscript. It only fires on a NON-empty head, so a bare comparison operator
+// ("==", "=~", or the "=" of [[ $a = b ]]) is not mistaken for a write.
+func hasCompoundAssignment(tok string) bool {
+	head, _, found := strings.Cut(tok, "=")
+	if !found || head == "" {
+		return false
+	}
+	if strings.ContainsAny(head, compoundAssignOps) {
+		return true
+	}
+	// Array/subscript assignment: p[0]=x. An expansion subscript (${p[i]}=x)
+	// lands here too, which is the safe direction.
+	return strings.Contains(head, "[")
+}
+
+// isWordPrefix reports whether tok continues past n with a word boundary, so
+// "readonly" is not matched as a "read" prefix.
+func isWordPrefix(tok string, n int) bool {
+	if len(tok) == n {
+		return true
+	}
+	switch tok[n] {
+	case ' ', '\t', '=', ';', '|', '&', '<', '>', ')', '(', '{', '}', '"', '\'':
+		return true
+	}
+	return false
+}
+
+// hasEmbeddedAssignment reports whether a token contains a ${var=...} or
+// ${var:=...} assignment inside an expansion.
+func hasEmbeddedAssignment(tok string) bool {
+	for i := 0; i+1 < len(tok); i++ {
+		if tok[i] != '$' || tok[i+1] != '{' {
+			continue
+		}
+		rest := tok[i+2:]
+		j := strings.IndexByte(rest, '}')
+		if j <= 0 {
+			continue
+		}
+		inner := rest[:j]
+		if inner[0] == '=' || strings.HasPrefix(inner, ":=") {
+			return true
+		}
+	}
+	return false
 }
 
 // numericForLoopVars reports, for each `for VAR in …` header in the token

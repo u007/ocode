@@ -555,8 +555,12 @@ func TestVerifyInterpreterEffects(t *testing.T) {
 		}
 	})
 	t.Run("allowed webfetch domain with port auto-allows", func(t *testing.T) {
-		a.permissions.webfetchDomains["api.example.com"] = PermissionAllow
-		defer delete(a.permissions.webfetchDomains, "api.example.com")
+		a.permissions.webfetchDomains.mutate(func(m map[string]PermissionLevel) {
+			m["api.example.com"] = PermissionAllow
+		})
+		defer a.permissions.webfetchDomains.mutate(func(m map[string]PermissionLevel) {
+			delete(m, "api.example.com")
+		})
 		r := base()
 		r.Effects.Writes = nil
 		r.Effects.Network = []string{"api.example.com:443", "https://api.example.com/v1"}

@@ -60,6 +60,17 @@ type PermissionEvent struct {
 	// answer persists this path root to extra_allowed_paths instead of any
 	// bash-prefix/tool rule.
 	OutOfScopePath string `json:"out_of_scope_path,omitempty"`
+	// UntrustedContent/Source/Summary carry a content-guardrail ask (scope
+	// "content") through SSE and the pending_asks reconcile payload. They are
+	// omitempty so every ordinary permission frame is byte-identical to before.
+	UntrustedContent string `json:"untrusted_content,omitempty"`
+	UntrustedSource  string `json:"untrusted_source,omitempty"`
+	UntrustedSummary string `json:"untrusted_summary,omitempty"`
+	// UntrustedScores / UntrustedFailure carry the per-question judge output and
+	// the reason the guardrail could not clear the result, so the browser shows
+	// the scores rather than one collapsed verdict.
+	UntrustedScores  []agent.ContentGuardScore `json:"untrusted_scores,omitempty"`
+	UntrustedFailure string                    `json:"untrusted_failure,omitempty"`
 }
 
 // newPermissionEvent projects a parsed PermissionRequest onto the SSE frame the
@@ -86,6 +97,11 @@ func newPermissionEvent(requestID string, req agent.PermissionRequest) Permissio
 		Scope:            scope,
 		Prefix:           req.Prefix,
 		OutOfScopePath:   req.OutOfScopePath,
+		UntrustedContent: req.UntrustedContent,
+		UntrustedSource:  req.UntrustedSource,
+		UntrustedSummary: req.UntrustedSummary,
+		UntrustedScores:  req.UntrustedScores,
+		UntrustedFailure: req.UntrustedFailure,
 	}
 }
 
@@ -280,7 +296,14 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// submit look hung with no result.
 	model := as.model
 	h.dispatchAskContinuation(sessID, as, func() {
-		if decision != PermDecisionDeny {
+		// A content-guardrail ask is about an ALREADY-EXECUTED result. Approval
+		// delivers the vetted text and denial withholds it; neither re-runs the
+		// tool. Re-executing would issue a second webfetch/MCP call — new,
+		// unvetted bytes plus a real side effect — and would discard the very
+		// content the user just reviewed.
+		if agent.IsContentAsk(permReq) {
+			working[askIdx].Content = agent.ResolveContentAsk(permReq, decision != PermDecisionDeny)
+		} else if decision != PermDecisionDeny {
 			pathRoot := agent.OutOfScopePathRoot(permReq)
 			result, err := executeApprovedWithTempPath(as.agent, permReq.ToolName, permReq.Args, bodyReq.RequestID, pathRoot)
 			if err != nil {

@@ -11,7 +11,7 @@ tags:
   - web
   - server
   - config
-timestamp: 2026-10-01T08:41:05Z
+timestamp: 2026-10-02T02:50:31Z
 ---
 # Design Spec: Reliable Large-Context Compaction (web/desktop `/compact`)
 
@@ -25,7 +25,7 @@ What actually landed, in the order the design specifies it:
 
 1. **Per-batch windows.** `runCompact` builds a **fresh** batch context *inside* the batch loop (`internal/agent/agent.go:2807-2824`) with `inactivityContextWithParent(operationCtx, idle, firstToken)` (`internal/agent/compact.go:1131`). The batch starts under `summary_first_token_timeout_seconds` (resolved default 300s); the first streamed delta performs the first `reset()`, after which later gaps are bounded by `summary_timeout_seconds`.
 2. **Fixed 30-minute cap.** `compactOverallCap = 30 * time.Minute` (`internal/agent/compact.go:214-217`, a package var so tests shorten it) applied via `newCompactOperationContext()` → `context.WithTimeoutCause(..., ErrCompactionTimeout)` (`compact.go:234-248`). Batch contexts are children of it, so the cap aborts a batch that is *still receiving tokens*. No config knob (§4 non-goal held).
-3. **Context-scoped delta callback.** `withDeltaCallback` / `deltaCallbackFromContext` (`internal/agent/client.go:65-79`) carry the reset hook through the request context; `ChatWithContext` reads it (`client.go:783`) and routes summary deltas to it instead of `GenericClient.OnDelta`. `runCompact` installs it at `agent.go:2823` and never calls `gc.SetOnDelta`; `chatWithDelta`'s shared `SetOnDelta`/`SetOnDelta(nil)` pair is unchanged as §6.3 required.
+3. **Context-scoped delta callback.** `withDeltaCallback` / `deltaCallbackFromContext` (`internal/agent/client.go:65-79`) carry the reset hook through the request context; `ChatWithContext` reads it (`client.go:794`) and routes summary deltas to it instead of `GenericClient.OnDelta`. `runCompact` installs it at `agent.go:2823` and never calls `gc.SetOnDelta`; `chatWithDelta`'s shared `SetOnDelta`/`SetOnDelta(nil)` pair is unchanged as §6.3 required.
 4. **Error taxonomy → 504.** `agent.ErrCompactionTimeout` (`internal/agent/compact.go:159`) is the only timeout cause. `HandleCompactSession` (`internal/server/handler.go:1871`, classification `:1923-1963`) maps `errors.Is(result.Err, agent.ErrCompactionTimeout)` → **504** with `"compaction timed out; transcript unchanged; retry the command"`; a dead request context is logged and **no response is written**; any other error stays **500**; 404/422 mappings unchanged. Classification is by sentinel identity only, never by message text.
 5. **Web sticky + app-wide error.** `handleCompact` (`web/src/components/Chat/commands.ts:1564-1599`) keeps the session-scoped `setCompactionState(sessionId, {status:"error", error})` **and** calls `reportActionError(err, "Compact conversation")` (`web/src/lib/actionErrors.ts:55`) in the same catch path, so the failure survives composer/tab remount.
 6. **Config.** `summary_first_token_timeout_seconds` is a real field: `internal/config/ocodeconfig.go:325` (field), `:1214` (default `300`), `:2130-2132` (merge); persisted raw — including explicit `0` — by `applyCompactConfig` (`ocodeconfig.go:2105`); normalized only in `resolveCompactRuntime` (`internal/agent/agent.go:2122`, `<= 0 → 300` at `:2171-2173`, idle `<= 0 → 600` at `:2167-2169`). Web row: `web/src/components/Settings/CompactForm.tsx:23` ("First-token timeout (s)").

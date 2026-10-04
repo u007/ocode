@@ -1,5 +1,237 @@
 # Changelog
 
+## 2026-10-02 — Auto-permission judge no longer told most commands are "unknown"
+
+The context sent to the auto-permission judge carried a "Command analysis" line
+that described only the first word of the command. Any line starting with `cd`,
+`python3`, a variable assignment or another unlisted word was reported as
+`Execute 'cd' (unknown command)`, and the judge read that as doubt, so ordinary
+compound commands were sent to you with "leaned allow but confidence is below
+the floor". An unlisted first word now gets no Command analysis line; listed
+commands (`git log`, `ls`, `curl`, …) keep theirs, and the allowed-roots scope
+block is unchanged. Measured on a replay of 165 past commands against the live
+judge: auto-allowed rose from about 16% to about 55% at the same 0.85 floor,
+with every hand-written dangerous command still deferred. The benchmark lives
+in `internal/agent/testdata/permission_judge_eval/`.
+
+## 2026-10-02 — All eight permission tables are copy-on-write; the TUI stops claiming rules it never stored
+
+Finishes the two follow-ups from the Settings rule-editor work.
+
+**Every permission table is now a copy-on-write store** (`cowMap`/`cowSlice`, new
+`internal/agent/cowmap.go`) instead of a plain map or slice. `rules`,
+`userConfirmedRules`, `patterns`, `pathPatterns`, `bashPrefixes`, `bashAutoAllow`,
+`bashPrefixModes` and `webfetchDomains` were each written by a goroutine that is not the
+agent's turn goroutine — `POST /api/permissions` for the tool rules, the
+permission/question continuation handlers for the confirmed-rule and webfetch-domain
+tables, the TUI `/permissions` command handlers for the auto-allow and prefix-mode
+tables, and `canAutoAllowWithMode` writing an in-root allow *from inside* `Decide`. Any of
+those overlapping a decision was a concurrent map read/write: a Go runtime **fatal**, so
+a settings save or a `/permissions` command during a running turn could kill the whole
+process. Writers now clone → apply → publish under a per-table mutex, so two concurrent
+writers cannot lose each other's change; readers take one immutable snapshot per
+decision, so several lookups cannot disagree if a save lands mid-decision.
+
+Two subtleties the conversion had to get right, both pinned by tests: a **map of slices**
+must copy its inner slice, because the clone shares the previous version's backing array
+and an in-place `append` would mutate a snapshot a reader is still ranging over
+(`SetPathRule`); and `cowSlice.mutate` **returns** the slice, since a slice is a value
+and `s = append(s, x)` inside the callback would otherwise only rebind its own
+parameter. The auto-permission judge's "run this approved call as user-confirmed"
+bookkeeping was a raw read-mutate-deferred-restore across two maps; it is now
+`RunWithTemporaryUserAllow`, where both transitions are single atomic writes.
+
+**The TUI no longer claims a rule it did not store.** `SetBashPrefixRule` silently
+discards a rule it refuses, so `/permissions bash:git allow` printed "Set allow
+permission…" and persisted nothing — the same bug the HTTP write paths just lost. Both
+TUI write paths now go through the shared `agent.ValidateBashPrefixRule`: `/permissions
+bash:<rule>` reports the rejection instead of claiming success, and the permission
+dialog's "always allow" still approves the call but tells the user the durable rule was
+not saved.
+
+**Tests:** `internal/agent/cowmap_test.go` (concurrent write during read, writers not
+losing each other, snapshot immutability, zero-value safety), and
+`permissions_tables_race_test.go` — one test per table, hammering every setter against
+`Decide` under `-race`, plus the temporary-allow restore and the path-pattern snapshot
+guard. `internal/tui/permissions_bash_rule_validation_test.go` covers the command and
+dialog paths (a rejected rule must not reach the manager **or** the config file, and a
+granular `git push` must still work). Three mutants were verified caught: in-place
+mutation reports a DATA RACE, dropping the writer mutex loses a concurrent write, and
+removing the TUI validator fails both rejection tests.
+
+## 2026-10-02 — Content guardrail no longer flags ocode's own denial text
+
+A network command that the permission layer blocked (or that you denied) could
+come back as a *content guardrail* ask saying "This tool already ran. Its result
+was flagged". The command had not run: the guardrail was judging ocode's own
+denial message, which is addressed to the agent ("do not retry the same call")
+and so looked like steering. The guardrail now vets a result only when the tool
+actually executed. The skip is keyed on execution, not on the text, so remote
+output that imitates a denial is still vetted.
+
+The judge's rubric now names shell output and states that the `source` field is
+the assistant's own command. A live eval
+(`internal/agent/testdata/contentguard_eval/`, `OCODE_JEV_EVAL=1 go test
+./internal/agent -run TestContentGuardJudgeEval`) replays a corpus against the
+real judge and writes a scorecard; with the new rubric every benign bash fixture
+is delivered and all 11 attack fixtures are flagged.
+
+## 2026-10-02 — Content guardrail dialog shows the whole bash command
+
+The content-guardrail ask used to clip a bash source to 120 characters
+(`bash: cd /tmp && curl … r=json.loa…`). The ask now carries the whole command;
+the web dialog renders it with its line breaks in a scrollable block and the TUI
+shows it in the scrolling dialog body. The judge still receives the clipped
+label. A result the guardrail could not clear (a `clean` verdict below the
+confidence floor) is now labelled "not cleared: the guardrail could not verify
+this content" instead of "unrecognised concern not_all_content_scanned".
+
+## 2026-10-02 — Settings can edit the bash rule list; the rule store is now copy-on-write
+
+The `/ban` list (`permissions.bash.prefixes` in `ocodeconfig.json`) is editable
+from **Settings → Permissions → Bash command rules** in the web and desktop app.
+Every rule is shown with its level, so the panel manages the whole set — not just
+the bans — and each row is an editable prefix, a `allow`/`ask`/`deny` selector and
+a Remove button. Edits are staged and applied by the form's existing **Save**,
+which sends one delta to the new authenticated `PUT /api/permissions/bash-rules`
+(`{set:{prefix:level}, remove:[prefix]}`). A rule another surface added in the
+meantime — TUI `/ban`, the `/ban` slash command — is never named in that payload,
+so a save cannot clobber it. The endpoint validates the entire payload before
+writing anything, so one bad rule is a 400 with no partial write, and it answers
+with the server's own sorted rule list, which the form adopts as truth.
+
+**Remove is a real delete** here: the key is dropped from the config file. `/ban
+remove` keeps its TUI behaviour of rewriting the rule to `ask`, which leaves an
+inert `"prefix": "ask"` line behind — that is now the only source of such cruft.
+
+Two defects surfaced while building it and are fixed rather than inherited:
+
+- **`git: allow` used to return 200 and store nothing.** `SetBashPrefixRule`
+  silently discards an invalid rule, and `POST /api/permissions/bash-rule` relied
+  on it to reject that combination, so the write looked successful while the rule
+  was absent. Validation is now a shared, exported boundary
+  (`agent.ValidateBashPrefixRule`) that every user-facing write path calls *before*
+  the setter; the batch endpoint answers 400 with the reason.
+- **The rule map was read and written concurrently.** `bashPrefixes` was a plain
+  map that the TUI `/ban` handler, both HTTP write paths and
+  `canAutoAllowWithMode` (which persists an in-root allow from *inside* `Decide`)
+  mutate while a turn goroutine reads it — a Go runtime **fatal** ("concurrent map
+  read and map write"), not merely a race warning, and this feature added a second
+  writer. It is now copy-on-write behind an `atomic.Pointer`: writers clone →
+  mutate → swap under a writer mutex, readers take one immutable snapshot per
+  decision. `go test -race` covers concurrent add/remove against `Decide`.
+
+**Tests:** Go `internal/agent/permissions_bashrules_test.go` (remove semantics,
+the shared validator, clone independence, and a `-race` concurrent
+write-during-`Decide` guard), `internal/config/bash_prefix_rule_test.go` (targeted
+delete, idempotent no-op, concurrent writers), `internal/server/handler_bash_rules_test.go`
+(delta reaches disk + `h.cfg` + every live agent; every invalid payload is a 400
+with nothing written; an externally added ban survives the save). Web
+`web/src/lib/bashRulesDiff.test.ts` and
+`web/src/components/Settings/PermissionsForm.bashRules.test.tsx` — including
+"does not call the API when nothing was staged", which pins the invariant that the
+two pre-existing `PermissionsForm` suites depend on.
+
+## 2026-10-02 — Compaction: one inline summary request on the main model
+
+Compaction now asks the session's own model for the summary as the next message
+of the conversation it already holds (`runInlineSummary`,
+`internal/agent/compact.go`): same system prompt, tools and transcript as a
+normal turn plus one user-role instruction, so the provider serves the prefix
+from its prompt cache. On a 467k-token session this took 1 call / 1m03s /
+$0.002 (warm cache) against 8 batches / 12m10s for the batched loop. The inline
+request always runs on the main model with its thinking budget —
+`compact.summary_model` and the small model apply only to the batched loop,
+which still runs when the conversation leaves less than
+`inlineSummaryReserveTokens` of window headroom, when the registry does not know
+the model's window/output cap, or when the inline request fails with a provider
+error. A timeout or cancel of the inline request fails the pass as before.
+
+## 2026-10-02 — The composer's quick-action strip is user-configurable
+
+The three hardcoded pills below the chat input (Compact, Continue, Recap) are
+now the seed of a user-owned list. Settings -> **Quick actions** adds, edits,
+deletes and drag-reorders chips; each has a label, an icon from a fixed 24-key
+lucide allowlist, a message, and a `fill`-or-`send` click mode. `fill` puts the
+message in the composer for review instead of spending a turn on it. The list is
+server-persisted (`quick_actions` in `ocodeconfig.json`) so it follows you across
+projects, browsers and the desktop app, and a fresh install still renders exactly
+the three pills it did before.
+
+The three starters are now ordinary entries rather than a parallel special case,
+with one exception. Compact and Recap survive as plain text because `/compact`
+and `/recap` are real slash commands. Continue cannot: the built-in behaviour
+resumes an interrupted turn, which a label + icon + message cannot express, so
+that one preset carries a hidden `seed` marker for it. Two more states are
+derived rather than stored, so they cannot drift when a chip's message is edited:
+a chip pointing at a compaction dims while one is running, and seeded chips hide
+on an empty session while custom ones stay. The strip's visibility gate therefore
+moved out of the JSX wrapper and into the chip itself.
+
+**Tests:** `TestSaveAndLoadOcodeQuickActionsPreservesEmptyStrip` (a `nil` versus
+empty-slice distinction, without which deleting every chip resurrects the
+starters), `TestQuickActionsRoutesAreRegistered` (the real mux, since a
+handler-only test cannot catch a missing route), `TestNormalizeQuickActionsDoesNotMutateItsArgument`,
+`web/src/lib/quickActions.test.ts`, `Settings/QuickActionsForm.test.tsx`,
+`Chat/ChatInput.quickActions.test.tsx`.
+
+## 2026-10-02 — HTR: a daemon whose spawner exited is reaped, not orphaned
+
+`shouldStopSharedDaemon` (`internal/browse/cdp/htr.go`) refused every process
+except the spawner, so in the TUI-spawns / desktop-adopts / TUI-exits sequence
+the daemon outlived the last lease and no ocode process could ever stop it
+(the Settings Stop button uses the same verdict). Stop rights now pass on when
+the recorded spawner is no longer running: the last lease release kills the
+daemon and the Stop button works for it. A live spawner's daemon is still never
+stopped by another instance, a marker with no recorded spawner is never
+inherited from, and inherited rights require the marker's executable + start
+token to match the running pid (the health probe alone is not enough). A
+user-started `htrcli serve` is unaffected: adopting it writes no marker. Tests:
+`TestFinalLeaseReleaseReapsDaemonWhoseSpawnerExited`,
+`TestInheritedStopRightsRefusals`.
+
+## 2026-10-02 — The Windows build compiles again: `SIGCONT` no longer breaks `internal/tui`
+
+`make build-windows` did not compile. `watchProgramSignals`
+(`internal/tui/tui.go`) passed `syscall.SIGCONT` to `signal.Notify` and
+compared against it, and **Windows has no `SIGCONT`** — so `internal/tui`
+failed with `undefined: syscall.SIGCONT` at two sites, and because the root
+`main` package imports `internal/tui`, the CLI binary, `build-all` and the
+Windows release targets produced nothing. `internal/tui` was the *only*
+package affected: every other `syscall.` / `x/sys/unix` reference in that
+package already sat behind a build tag in `crash_log_unix.go` or
+`tty_foreground_unix.go`.
+
+The fix follows the convention the package already used for platform splits
+(`crash_log_unix.go`/`crash_log_windows.go`,
+`tty_foreground_unix.go`/`tty_foreground_windows.go`): two small new files,
+`internal/tui/signals_unix.go` (`//go:build !windows`) and
+`internal/tui/signals_windows.go` (`//go:build windows`), supply
+`terminationSignals()` and `isResumeSignal()`. The watcher body in `tui.go` is
+unchanged and now has no `syscall` import and no `runtime.GOOS` branch.
+
+**Windows deliberately keeps `os.Interrupt`.** It is the only signal Windows
+has, and it is what drives the graceful cleanup request — dropping it would
+let a `Ctrl+C` hard-kill the process, skip bubbletea's tty restore, and leave
+the alt-screen plus mouse tracking enabled in the user's shell (the same
+class of damage the crash-terminal-reset hook exists to prevent). SIGCONT is
+the log-only resume signal and has no Windows equivalent, so
+`isResumeSignal` is `false` there.
+
+Verified: `GOOS=windows go build ./...` clean for all 83 packages and the
+resulting binary is a real `PE32+ executable x86-64`; `GOOS=linux` and darwin
+`./...` still clean; `go test -race ./internal/tui/` passes. The three new
+tests were mutation-checked — dropping SIGCONT from the watched set, forcing
+`isResumeSignal` to `false`, and forcing it to `true` each fail a distinct
+assertion, and each mutant was confirmed to compile first so the results are
+real catches rather than build breaks.
+
+**Still unverified on Windows:** nothing here has been *run* on Windows.
+`internal/tool`'s test files do not compile for Windows
+(`process_supervisor_test.go:291` uses `Setsid` unconditionally), and there
+is no CI, so no platform is checked automatically. Fixing the signal split
+makes Windows buildable; it does not make Windows tested.
+
 ## 2026-10-02 — An inbound content guardrail: fetched and MCP results are vetted before the model reads them
 
 The outbound-network guardrail (`docs/concepts/webfetch-websearch-guardrails.md`)
@@ -67,6 +299,33 @@ synchronous path. Pinned by `internal/agent/content_guard_typesafe_test.go`,
 `internal/tui/content_guard_dialog_test.go`,
 `internal/server/handler_content_guard_test.go`, and
 `web/src/components/Chat/PermissionDialog.contentGuard.test.tsx`.
+
+**A bug this shipped, found and fixed in the same session:** `TruncateToolResult`
+truncated an unresolved ask sentinel at 12k chars — cutting its JSON payload in
+half. Every host parses that payload (`parsePermissionRequest` in the TUI,
+`parsePermissionAsk` in the server, `livePendingAsks`), so a truncated prefix
+silently reported "no ask here" and the model received mangled sentinel text
+instead of a decision. Measured: a 12 KB flagged result produced an ask that
+recovered **0 bytes** of content (`invalid character '\n' in string`); 40 KB and
+200 KB likewise; 500 B was unaffected. The guardrail made this reachable **by
+design**, because its ask carries the whole flagged result so the user can review
+it, and a full fetched page or MCP response routinely exceeds the tool-output
+budget. `TruncateToolResult` now returns an ask sentinel unchanged at any size —
+a sentinel is control flow, not output. The bound is deferred, not lost: an ask is
+transient (the host replaces it in place when answered), whereas a tool result is
+permanent context. This also fixes the same latent exposure for `QUESTION_PROMPT:`,
+whose truncation dropped the trailing `SentinelWaitingForUser` — after which the
+ask could never be detected at all. Pinned by
+`internal/agent/truncate_sentinel_test.go`, including a guard that ordinary tool
+output is still truncated so the exemption is not a hole.
+
+Also fixed two chunk-boundary defects the first implementation got wrong:
+`chunkContentGuard` now returns an explicit truncation flag, because the old
+`len(chunks) == cap` test conflated content *exactly* cap-sized (fully scanned,
+must not escalate) with content *past* the cap (unread tail, must escalate) — it
+was raising a content-free dialog, exactly the noise that trains a user to click
+Allow reflexively. And the capped path no longer claims "32 chunks scanned" when
+zero were judged.
 
 ## 2026-10-02 — The TypeSafe judge can finally read a script it is asked to run
 
@@ -205,11 +464,15 @@ discarded), a cancel arriving during the write is refused with 409 rather than
 reporting a lie, and a stored API key's mask no longer reveals its first four
 characters.
 
-**Where you will and will not see the choice.** A plugin replaces a provider's
-built-in OAuth flow, so if you have a ChatGPT plugin installed, OpenAI offers that
-plugin's browser and device-code methods instead of the built-in login — and the
-built-in loopback flow (the one with a manual mode) is only offered by **OpenAI
-Codex**, which shares it. Install without the plugin and `openai` offers it too.
+**Where you will and will not see the choice — and why this is still incomplete.**
+The built-in `codex` plugin registers for provider id `openai`, and a plugin
+*replaces* a provider's built-in OAuth flow. So in every shipped binary `openai`
+offers an API key and two plugin methods (`ChatGPT Pro/Plus (browser)` and
+`(device code)`) and **no built-in OAuth method at all** — which means the
+manual mode described above is reachable through **OpenAI Codex**, not OpenAI.
+For OpenAI specifically, neither plugin method fills the gap from a remote host:
+the browser method binds a localhost callback on the *server's* machine, and the
+device-code method never shows the user their code. Tracked in TODO.md.
 
 Not done: **Google is still auto-only** (it needs user-supplied client
 credentials first), Grok cookie collection and Cloudflare prompts are unimplemented,

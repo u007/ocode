@@ -197,7 +197,7 @@ Remote chat runs **on the host** (`ocode serve --remote`) — never locally.
 - `resolveSessionProfile` order: `OCODE_PROFILE` > window profile > global fallback.
 - The active profile is authoritative **only** when the local proxy stamps
   `X-Ocode-Active-Profile` + `X-Ocode-Profile-Authoritative: 1`
-  (`injectProxiedActiveProfile`, `handler_remote_proxy.go:183`).
+  (`injectProxiedActiveProfile`, `handler_remote_proxy.go:187`).
   `applyProxiedActiveProfile` (`handler_profiles.go:218`) consumes it. A bare
   client-supplied profile header is **ignored** — no forge. Nothing is persisted
   on the remote.

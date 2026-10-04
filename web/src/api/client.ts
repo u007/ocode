@@ -28,6 +28,8 @@ import type {
   BrowseResponse,
   PermissionsResponse,
   PermissionModeConfigResponse,
+  PermissionRule,
+  BashRulesDelta,
   MemoryStatusResponse,
   UsageSummary,
   PluginInfo,
@@ -2945,6 +2947,14 @@ export const api = {
     fetchJSON<{ prefix: string; level: string }>("/api/permissions/bash-rule", {
       method: "POST",
       body: JSON.stringify({ prefix, level }),
+    }),
+  // Batch write behind the Settings → Permissions rule editor. The body is a
+  // DELTA, never a replacement map: a rule another surface added between the
+  // editor's load and its save (TUI /ban, the /ban slash command) must survive.
+  setBashRules: (delta: BashRulesDelta) =>
+    fetchJSON<{ bash_rules: PermissionRule[] }>("/api/permissions/bash-rules", {
+      method: "PUT",
+      body: JSON.stringify(delta),
     }),
   getAutoContinue: (host?: string) =>
     fetchJSON<{ enabled: boolean; model: string }>(

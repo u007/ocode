@@ -178,6 +178,88 @@ Pattern semantics: `*` matches any character sequence (including empty), so `Bas
 
 `PermissionDecision.DenyReason` is populated by `Decide` on every static-deny path (Claude deny pattern, user bash ban prefix, locked mode, tool/path/webfetch rules, hard blocks) and rendered into the tool-error text by `denyToolMessage` (`agent.go`), so a blocked call names the offending rule instead of a generic "permission rules" message. Remote SSH projects run the agent on the host, so **the host's** `.claude/settings.json` is the one that applies — a host carrying an over-broad `Bash(git stash *)` deny blocks read-only stash inspection even when the local machine's file allows it.
 
+### 5i. Every rule table is copy-on-write, and every write path validates first
+
+**EIGHT tables, not one.** `PermissionManager` holds `rules`, `userConfirmedRules`,
+`patterns` (the glob-style tool patterns), `pathPatterns`, `bashPrefixes`,
+`bashAutoAllow`, `bashPrefixModes` and `webfetchDomains`. All of them are
+`cowMap`/`cowSlice` (`internal/agent/cowmap.go`) — **not** plain maps or slices. None of
+them is confined to the agent's own goroutine:
+
+| Table | Writer | Where |
+|---|---|---|
+| `rules`, `patterns` | `SetRule` | `POST /api/permissions`, `LoadFromOcode` |
+| `userConfirmedRules` | `SetUserConfirmedRule` | permission continuation, `RunWithTemporaryUserAllow` |
+| `webfetchDomains` | `SetWebfetchDomain` | permission continuation, TUI dialog |
+| `bashAutoAllow`, `bashPrefixModes` | `SetBashAutoAllowPrefix`, `SetBashPrefixMode` | TUI `/permissions` |
+| `bashPrefixes` | `SetBashPrefixRule`, `RemoveBashPrefixRule` | `/ban`, both HTTP rule paths, **and `canAutoAllowWithMode` from inside `Decide`** |
+| `pathPatterns` | `SetPathRule` | agent permission maps, `LoadFromOcode` |
+
+A plain map made every one of those a concurrent read/write, which is a Go runtime
+**fatal** ("concurrent map read and map write"), not merely a race-detector warning — it
+takes the whole process down mid-turn. The contract (`cowMap`/`cowSlice` document the
+mechanism; `TestPermissionTablesConcurrentWriteDuringDecide` and `TestCow*` guard it):
+
+- **Writers** call `.mutate(fn)`: clone → apply → publish, serialised by the table's own
+  mutex so two concurrent writers cannot lose each other. `.set(m)` is for the
+  construction/clone/load paths only, never for a single user-facing rule change.
+- **Readers** call `.load()` (one snapshot per decision — take it ONCE and reuse it, so
+  several lookups cannot disagree if a save lands mid-decision) or `.get(k)`. Never index
+  or range a table field directly.
+- **A map of slices must copy the inner slice.** The clone shares the previous version's
+  backing array, so an in-place `append` would mutate a snapshot a reader is still
+  ranging over — this is why `SetPathRule` copies, and why `cowSlice.mutate` hands `fn` a
+  slice with no spare capacity. `TestSetPathRuleDoesNotMutateALiveSnapshot` pins it.
+- **`cowSlice.mutate` RETURNS the slice** (`func([]T) []T`): a slice is a value, so `fn`
+  doing `s = append(s, x)` would only rebind its own parameter and the append would be
+  silently dropped. A map has no such problem, which is why `cowMap.mutate` can pass a
+  plain map.
+- **Seed with `.init(m)`, not a constructor returning a value.** `cowMap` contains a
+  `sync.Mutex`, so returning it by value copies the lock (go vet: "return copies lock
+  value"). A zero-value table still answers reads (nil map), so a partially initialised
+  manager degrades to "no rules" instead of panicking.
+- `Clone()` gives the copy its own tables (inner slices included) and is a point-in-time
+  snapshot: a later write to the original does not change it, and vice versa.
+- **Machine-written keys are filtered, not edited.** `__inroot__:` keys
+  (`bashInRootPersistPrefix`) are per-workdir auto-allows; `BashPrefixRules()` skips
+  them and `agent.InternalBashPrefix` exposes the test so any listing surface skips
+  them too.
+
+**`RunWithTemporaryUserAllow(tool, fn)`** is the sanctioned way to run one call with a
+tool temporarily user-confirmed (the auto-permission judge uses it to execute an
+approved call with the gates a human "always allow" would lift). It existed as a raw
+read-mutate-deferred-restore over two plain maps in `agent.go`; both transitions are now
+single atomic mutates. The save and the restore are still two writes, so a concurrent
+writer on the **same** tool key inside the window is overwritten by the restore (last
+write wins) — that is pre-existing, the window is one tool call, and holding a lock
+across the call would freeze every other permission decision.
+
+**`SetBashPrefixRule` silently discards an invalid rule** (no return value), so a write
+that skipped validation reports success and stores nothing — that is how `git: allow`
+returned 200 and vanished, and how `/permissions bash:git allow` claimed it had set the
+rule. Every write path that receives user input must call
+`agent.ValidateBashPrefixRule(prefix, level)` FIRST and report the error; the setter is
+not the validation boundary. The TUI permission dialog reports it too, via
+`setPermissionRule` returning an error: the call is still approved, but the user is told
+the rule was not saved instead of seeing "Always allowing …".
+
+**Write paths (never a full-map replace):** `SaveSingleBashPrefixRule` /
+`DeleteBashPrefixRule` are per-entry load-modify-write under
+`withOcodeConfigLock`, and the batch endpoint sends a **delta**
+(`{set:{prefix:level}, remove:[prefix]}`) rather than the whole map, so a rule another
+surface added between the editor's load and its save is never clobbered. `remove` of
+an absent key is a no-op; a prefix in both maps resolves to the set (a rename).
+
+**Removals are real deletes.** Settings' Remove deletes the key. `/ban remove` instead
+rewrites the rule to `ask` (TUI parity) and therefore leaves an inert
+`"prefix": "ask"` line in `ocodeconfig.json` — expect to see those; they show up in
+`/permissions` and `/ban list` as "other bash rules".
+
+**YOLO does not consult these rules.** `Decide` returns `PermissionAllow` for bash in
+yolo mode *before* `decideSingleCommand` ever runs, so a `deny` rule does not apply
+there (sandbox re-checks it per fragment; normal reaches it). Treat yolo as "bans off"
+when explaining a surprise.
+
 ## 6. Path-based permissions
 
 ### 6a. Out-of-scope paths
@@ -410,6 +492,10 @@ Project config overrides global. The `opencode.json` `permission` field is a sep
 | `/permissions` | View current permission rules |
 | `/permissions bash:git allow` | Set a bash prefix rule |
 | `/permissions bash:rm deny` | Deny a bash prefix |
+| `/ban [list]` | List banned prefixes |
+| `/ban add <prefix…>` | Deny a prefix (bare `/ban <cmd>` is shorthand for add) |
+| `/ban remove <prefix…>` | Rewrite the rule back to `ask` — NOT a delete |
+| `/ban clear` | Confirm-gated: rewrite every ban to `ask` |
 | `/yolo` or `/yolo status` | Show YOLO mode status |
 | `/yolo on` | Enable YOLO mode |
 | `/yolo off` | Disable YOLO mode |

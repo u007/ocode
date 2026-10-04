@@ -397,6 +397,10 @@ type Agent struct {
 	client   LLMClient
 	tools    map[string]tool.Tool
 	mcpTools map[string]struct{}
+	// guardExecuted records the tool-call ids whose in-scope tool actually ran,
+	// so the content guardrail never judges a result the host wrote in place
+	// of one (a policy denial, a permission ask). See guardExecutedToolResult.
+	guardExecuted sync.Map
 	// disco holds discovery (skill/MCP retrieval) state when /discovery is on.
 	// nil means discovery is off → no gating, today's behavior.
 	disco *discoveryState
@@ -1457,6 +1461,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// unblock the next Step() without affecting this one — old goroutines still
 	// check the channel that was live when they started.
 	stopCh := a.StopCh()
+	// Content guardrail: cancelled when the turn is aborted (see contentGuardStepCtx).
+	guardCtx, guardCancel := contentGuardStepCtx(stopCh)
+	defer guardCancel()
 	isCancelled := func() bool {
 		select {
 		case <-stopCh:
@@ -1518,7 +1525,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// "plan" and "done" each fire at most once per user turn.
 	// Pass the pre-injection user goal explicitly — the tail may contain
 	// user-role discovery content that would mask the real request.
-	ckpt := a.newAdvisorCheckpointState(userGoal)
+	ckpt := a.newAdvisorCheckpointState(userGoal, messagesHavePendingAsk(messages))
 
 	for i := 0; ; i++ {
 		if isCancelled() {
@@ -1847,7 +1854,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					}
 					return result, images, err
 				}
-				dagMsgs, dagErr := runDAGFromValidated(parallelCalls, stopCh, isCancelled, groupBus, groupAgentIDs, groupTracker, dispatch, a.scanToolResult)
+				dagMsgs, dagErr := runDAGFromValidated(parallelCalls, stopCh, isCancelled, groupBus, groupAgentIDs, groupTracker, dispatch, a.scanToolResult, a.guardToolResult)
 				if dagErr != nil {
 					// Validation failed. Scope the error to the
 					// subagent dispatches that own the id
@@ -1885,6 +1892,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 							// so secrets must be masked first or the cache file
 							// (and its read-back notice) hand back raw content.
 							result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
+							result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 							content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
 							results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
 						}(i, k, tc)
@@ -1951,6 +1959,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						// the full text to disk — see comment at the DAG-fallback
 						// call site above.
 						result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
+						result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 						content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
 						results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
 					}(i, k, resp.ToolCalls[i], isCancelled)
@@ -2011,6 +2020,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			// Redact BEFORE truncation/disk-caching — see comment at the
 			// parallel-dispatch call sites above.
 			result = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, result)
+			result = a.guardExecutedToolResult(guardCtx, tc.ID, tc.Function.Name, tc.Function.Arguments, result)
 			fullResult := result
 			result = TruncateToolResult(tc.ID, result)
 			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
@@ -2063,7 +2073,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				}
 				a.OnMessage(toolMsg)
 			}
-			if strings.Contains(toolMsg.Content, tool.SentinelWaitingForUser) || strings.HasPrefix(toolMsg.Content, tool.SentinelPermissionAsk) {
+			if tool.UnansweredAsk(toolMsg.Content) {
 				pauseAfterResults = true
 			}
 		}
@@ -2794,6 +2804,22 @@ func (a *Agent) runCompactWithCtx(ctx context.Context, messages []Message, rt co
 	// Keeps signal density high without losing tool-call structure.
 	pruned := pruneToolResults(middle, compactPruneToolMaxChars)
 
+	// Inline summary first: one request on the main model that re-sends the
+	// conversation it already has cached and asks for the summary as the next
+	// message. The batched loop below remains for conversations that no longer
+	// fit the main model's window and for a failed inline request.
+	inlineStarted := time.Now()
+	inlineSummary, inlineRan, err := a.runInlineSummary(ctx, messages, rt, focus)
+	if err != nil {
+		if cerr := summaryContextErr(ctx); cerr != nil || errors.Is(err, ErrCompactionTimeout) {
+			a.emitDebug("COMPACT", fmt.Sprintf("inline summary failed after %s: %v", time.Since(inlineStarted).Round(time.Millisecond), err))
+			res.Err = err
+			return res
+		}
+		a.emitDebug("COMPACT", fmt.Sprintf("inline summary failed after %s, using the batched loop: %v", time.Since(inlineStarted).Round(time.Millisecond), err))
+		inlineRan = false
+	}
+
 	client := a.compactSummaryClient()
 
 	// Chunked anchored summarisation: when the middle exceeds the per-call
@@ -2801,27 +2827,17 @@ func (a *Agent) runCompactWithCtx(ctx context.Context, messages []Message, rt co
 	// order, feeding the running summary forward as the anchor. Nothing is
 	// dropped unsummarised — the old behaviour silently discarded the oldest
 	// middle messages once the prompt was over budget.
-	batches := chunkMiddleByBudget(pruned, rt.MaxSummaryInputTokens)
+	var batches [][]Message
+	if !inlineRan {
+		batches = chunkMiddleByBudget(pruned, rt.MaxSummaryInputTokens)
+		a.emitDebug("COMPACT", fmt.Sprintf("batched summary loop: %d msgs in %d batches on %s/%s", len(pruned), len(batches), client.GetProvider(), client.GetModel()))
+	}
 	running := prevSummary
 	totalDropped := 0
 	for bi, batch := range batches {
-		idle := time.Duration(rt.SummaryTimeoutSeconds) * time.Second
-		firstToken := time.Duration(rt.SummaryFirstTokenTimeoutSeconds) * time.Second
-		if firstToken <= 0 {
-			firstToken = idle
-		}
-		var batchCtx context.Context
-		var batchCancel context.CancelFunc
-		var reset func()
-		if rt.SummaryTimeoutSeconds > 0 {
-			batchCtx, batchCancel, reset = inactivityContextWithParent(ctx, idle, firstToken)
-		} else {
-			batchCtx, batchCancel = context.WithCancel(ctx)
-			reset = func() {}
-		}
-		if _, ok := client.(*GenericClient); ok {
-			batchCtx = withDeltaCallback(batchCtx, func(string, string) { reset() })
-		}
+		idle, firstToken := summaryTimeouts(rt)
+		_, isGeneric := client.(*GenericClient)
+		batchCtx, batchCancel := summaryWindowContext(ctx, rt, isGeneric)
 		batchStarted := time.Now()
 		summaryText, err := func() (string, error) {
 			defer batchCancel()
@@ -2837,9 +2853,13 @@ func (a *Agent) runCompactWithCtx(ctx context.Context, messages []Message, rt co
 			res.Err = err
 			return res
 		}
+		a.emitDebug("COMPACT", fmt.Sprintf("batch %d/%d done in %s (%d chars)", bi+1, len(batches), time.Since(batchStarted).Round(time.Millisecond), len(summaryText)))
 		running = summaryText
 	}
 	summaryText := running
+	if inlineRan {
+		summaryText = inlineSummary
+	}
 
 	if len(batches) > 1 || totalDropped > 0 {
 		var notes []string
@@ -2899,6 +2919,14 @@ func (a *Agent) runCompactWithCtx(ctx context.Context, messages []Message, rt co
 // nil if a.client is not a *GenericClient (custom/mock) — callers must
 // handle this by documenting the fallback limitation.
 func (a *Agent) noThinkingClient() LLMClient {
+	// compaction's batched loop must never use extended thinking
+	return a.mainClientClone(0)
+}
+
+// mainClientClone builds a fresh *GenericClient for the main provider/model
+// with the given thinking budget. Returns nil if a.client is not a
+// *GenericClient.
+func (a *Agent) mainClientClone(thinkingBudget int) LLMClient {
 	gc, ok := a.client.(*GenericClient)
 	if !ok {
 		return nil
@@ -2919,7 +2947,7 @@ func (a *Agent) noThinkingClient() LLMClient {
 		AccountID:       gc.AccountID,
 		CookieAuthToken: gc.CookieAuthToken,
 		CookieCt0:       gc.CookieCt0,
-		ThinkingBudget:  0, // compaction must never use extended thinking
+		ThinkingBudget:  thinkingBudget,
 		Temperature:     gc.Temperature,
 		TopP:            gc.TopP,
 		TopK:            gc.TopK,
@@ -3574,24 +3602,20 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 					allowed, reason, _, consulted := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
-						if a.permissions != nil {
-							prevLevel, hadLevel := a.permissions.rules[name]
-							prevConfirmed, hadConfirmed := a.permissions.userConfirmedRules[name]
-							a.permissions.SetUserConfirmedRule(name, PermissionAllow)
-							defer func() {
-								if hadLevel {
-									a.permissions.rules[name] = prevLevel
-								} else {
-									delete(a.permissions.rules, name)
-								}
-								if hadConfirmed {
-									a.permissions.userConfirmedRules[name] = prevConfirmed
-								} else {
-									delete(a.permissions.userConfirmedRules, name)
-								}
-							}()
-						}
-						return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
+						// Run the approved call with the tool's rule temporarily
+						// user-confirmed (the gates a human "always allow" would
+						// lift). The save/restore lives inside
+						// RunWithTemporaryUserAllow so neither half is a plain
+						// map write racing Decide on the turn goroutine.
+						var (
+							callResult string
+							callErr    error
+						)
+						_ = a.permissions.RunWithTemporaryUserAllow(name, func() error {
+							callResult, callErr = a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
+							return callErr
+						})
+						return callResult, callErr
 					}
 					if consulted {
 						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
@@ -4815,8 +4839,15 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 			Command string `json:"command"`
 		}
 		if err := json.Unmarshal(args, &params); err == nil && params.Command != "" {
-			explanation := explainBashCommand(params.Command)
-			addMeta("Command analysis:", explanation)
+			// Only a recognised command head is described. The table knows one
+			// word, so an unlisted head (`cd`, `python3`, a variable assignment)
+			// used to be reported as "(unknown command)" — on the whole compound
+			// line — which the judge read as doubt: measured against the live
+			// judge, that one line held auto-allows at 17% of commands the user
+			// went on to approve, against 54% without it.
+			if explanation := explainBashCommand(params.Command); explanation != "" {
+				addMeta("Command analysis:", explanation)
+			}
 			// Deterministically read executed custom scripts FIRST (advisor #2 & #3).
 			// These are local files that are actually EXECUTED (./foo.sh, bash script.sh,
 			// source ./env.sh) — not generic OS executables or mere data arguments.
@@ -5067,7 +5098,7 @@ func explainBashCommand(command string) string {
 		}
 		return explanation
 	}
-	return fmt.Sprintf("Execute '%s' (unknown command)", prefix)
+	return ""
 }
 
 // controlFlowExplanation describes a shell control-flow construct whose first
@@ -5126,12 +5157,27 @@ func extractFilesFromCommand(command string) []string {
 // for, so skipping scanToolResult here would leave the highest-risk result
 // unmasked in both the transcript sent to the model and the on-disk session
 // log. See agent.go's other three scanToolResult call sites for the pattern.
+//
+// The content guardrail runs here too, for the same reason: an approved call
+// re-executes and returns its result through this path, so without the guard a
+// user who approved a *tool* call would still receive an unvetted remote result.
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCallID string) (string, error) {
 	result, err := a.executeToolCall(name, args, nil, toolCallID)
 	if err != nil {
 		return result, err
 	}
-	return a.scanToolResult(name, string(args), result), nil
+	result = a.scanToolResult(name, string(args), result)
+	ctx, cancel := contextGuardBackground()
+	defer cancel()
+	return a.guardExecutedToolResult(ctx, toolCallID, name, string(args), result), nil
+}
+
+// contextGuardBackground is a non-turn-bound guard context.
+// HandleApprovedToolCall is reached from a host request goroutine rather than
+// from Step, so there is no stopCh to bind to and the per-chunk judge timeout
+// is the only bound.
+func contextGuardBackground() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
 }
 
 func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
@@ -5244,6 +5290,8 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	if err := a.waitToolBatchDelay(toolCtx); err != nil {
 		return "", err
 	}
+
+	a.markToolExecuted(toolCallID, name, string(args))
 
 	var result string
 	var err error

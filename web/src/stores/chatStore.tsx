@@ -53,6 +53,11 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
       scope: (req["scope"] as string) || undefined,
       prefix: (req["prefix"] as string) || undefined,
       out_of_scope_path: (req["out_of_scope_path"] as string) || undefined,
+      untrusted_content: (req["untrusted_content"] as string) || undefined,
+      untrusted_source: (req["untrusted_source"] as string) || undefined,
+      untrusted_summary: (req["untrusted_summary"] as string) || undefined,
+      untrusted_scores: (req["untrusted_scores"] as ContentGuardScore[]) || undefined,
+      untrusted_failure: (req["untrusted_failure"] as string) || undefined,
     };
   } catch {
     return null;
@@ -201,6 +206,28 @@ export interface PermissionRequest {
   prefix?: string;
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
+  /** Content-guardrail ask (scope "content"): the flagged result text. */
+  untrusted_content?: string;
+  /** Content-guardrail ask: one-line origin of the flagged content. */
+  untrusted_source?: string;
+  /** Content-guardrail ask: the guardrail's headline (concern + confidence). */
+  untrusted_summary?: string;
+  /** Content-guardrail ask: the per-question judge scores, one per judged chunk. */
+  untrusted_scores?: ContentGuardScore[];
+  /** Content-guardrail ask: why the guardrail could not clear this result. */
+  untrusted_failure?: string;
+}
+
+/** One chunk's judge output. Both questions are reported separately so the
+ *  dialog can show the raw scores instead of one collapsed verdict. */
+export interface ContentGuardScore {
+  chunk: number;
+  total: number;
+  verdict: string;
+  verdict_confidence: number;
+  concern?: string;
+  concern_confidence?: number;
+  probabilities?: Record<string, number>;
 }
 
 export interface QuestionRequest {

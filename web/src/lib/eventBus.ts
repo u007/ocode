@@ -1,18 +1,22 @@
-import { apiPath, authHeaders, readSSEStream, remoteApiBase, reportAuthFailure } from "../api/client";
+import { apiPath, authHeaders, readSSEStream, reportAuthFailure } from "../api/client";
 import { onWake } from "./wakeSignal";
 
 /**
  * eventBus — the single frontend transport for the unified server event bus.
  *
- * One long-lived `fetch()`-based SSE stream per host carries every event type
- * the server publishes (chat mirror frames, turn lifecycle, status, logs,
- * agent runs, git status, spending). The local server (`host === ""`) always
- * has a stream; each remote host with at least one open tab gets its own,
- * proxied through `/api/remote/<host>/api/events`. Consumers register
+ * ONE long-lived `fetch()`-based SSE stream carries every event type the
+ * server publishes (chat mirror frames, turn lifecycle, status, logs, agent
+ * runs, git status, spending) — for the local server AND for each remote host
+ * with at least one open tab. Remote hosts are named in `?hosts=`; the local
+ * server subscribes to each host's own stream and relays the frames down this
+ * one, tagged with `host`. It is one stream on purpose: a browser on a
+ * plain-HTTP origin (share URL, `ocode serve`) gets six connections per
+ * origin, and a stream per host pinned one each
+ * (docs/gotchas/share-url-http1-connection-cap.md). Consumers register
  * per-event-type handlers; handlers receive the full envelope so they can
  * route by `session_id` / `project`. Session ids are random on both sides, so
- * frames from different hosts never collide and all connections feed the same
- * subscriber path.
+ * frames from different hosts never collide and all feed the same subscriber
+ * path.
  *
  * `fetch` + `readSSEStream` (not `EventSource`) is used deliberately: the
  * stream must carry an `Authorization: Bearer` header for remote-mode auth,
@@ -21,22 +25,23 @@ import { onWake } from "./wakeSignal";
  * Reliability contract (design spec, Part 02/04):
  * - Reconnect with exponential backoff; on re-establishment every
  *   `onReconnect` handler fires so consumers can reconcile (state fetch +
- *   transcript refetch — never event replay). Back-off, liveness, and the seq
- *   watermark are per-connection, so one host's outage cannot disturb another.
- * - `seq` is a global monotonic counter per server process used for gap
- *   detection only: a gap logs a warning and fires the same reconcile
- *   handlers.
+ *   transcript refetch — never event replay). A remote host's upstream is
+ *   reconnected by the server, which announces each (re)open with a
+ *   `host_stream` envelope: the second one for a host fires the same
+ *   reconcile handlers.
+ * - `seq` is a monotonic counter per server process used for gap detection
+ *   only, so the watermark is kept per origin (local, and each remote host):
+ *   a gap logs a warning and fires the same reconcile handlers.
  * - The subscribed project list (declared via `setProjects`) drives the
  *   server's subscriber-aware git/spending emitters; changing it restarts
- *   each stream with the updated query, which also fires reconcile handlers.
+ *   the stream with the updated query, which also fires reconcile handlers.
  * - The set of remote hosts with an open tab (declared via `setHosts`) drives
- *   which per-host streams exist; adding/removing a host opens/closes only
- *   that stream.
+ *   which hosts the server relays; changing it restarts the stream the same
+ *   way.
  *
  * The bus is a singleton module-level instance. `on()`/`onReconnect()` calls
  * auto-start it on first use and it stays connected for the app lifetime
- * (one long-lived connection per host with an open tab, alongside the
- * terminal WebSocket).
+ * (one long-lived connection, alongside the terminal WebSocket).
  */
 
 export interface BusEnvelope<T = unknown> {
@@ -45,9 +50,10 @@ export interface BusEnvelope<T = unknown> {
   session_id?: string;
   seq: number;
   data: T;
-  /** The host this frame arrived from: "" for the local server, the remote
-   *  host string otherwise. Stamped by the connection, not by the server,
-   *  because the server has no idea it is being proxied. Consumers that
+  /** The host this frame came from: "" for the local server, the remote
+   *  host string otherwise. Set by the local server's relay on remote frames
+   *  (the remote itself has no idea it is being relayed) and defaulted to ""
+   *  here for local ones. Consumers that
    *  aggregate across hosts (e.g. the Pulse dashboard, whose list is built from
    *  the LOCAL server alone) need it to tell "unknown session" apart from
    *  "a session this client has no way of listing". */
@@ -66,35 +72,32 @@ export const RECONNECT_MAX_MS = 30_000;
  *  so the bus tears it down and reconnects itself. */
 export const LIVENESS_TIMEOUT_MS = 45_000;
 
-/** Per-host connection state. One instance per stream target: the local
- *  server (`host === ""`) plus each remote host with an open tab. Reconnect
- *  back-off, liveness, seq watermark, and the in-flight abort handle are all
- *  per-connection so one host's outage/reconnect cannot disturb another. */
-class HostConnection {
-  readonly host: string;
+/** The control envelope the server's relay emits each time a remote host's
+ *  upstream stream opens (handler_events_remote.go hostStreamEvent). */
+const HOST_STREAM_EVENT = "host_stream";
+
+/** State of the one stream: reconnect back-off, liveness, seq watermarks, and
+ *  the in-flight abort handle. */
+class StreamConnection {
   /** Identifies this connection's in-flight stream attempt. Aborting it (via
    *  closeConnection) and nulling this field is how a stale attempt's
    *  continuation (the fetch's `.then`/`.catch`, or a readSSEStream handler
    *  callback) knows to no-op instead of acting on/reconnecting a connection
    *  we deliberately tore down. */
   abortController: AbortController | null = null;
-  lastSeq = 0;
-  /** True once this host's connection has opened; subsequent opens are
-   *  "reconnects". */
+  /** Last seq seen per origin ("" = local, else the remote host) on the
+   *  current stream. A remote host has an entry once its `host_stream` marker
+   *  arrived; a second marker for it means its upstream re-established. */
+  readonly lastSeq = new Map<string, number>();
+  /** True once the stream has opened; subsequent opens are "reconnects". */
   hasOpenedOnce = false;
   reconnectDelay = RECONNECT_BASE_MS;
   reconnectTimer: number | undefined;
   livenessTimer: number | undefined;
-
-  constructor(host: string) {
-    this.host = host;
-  }
 }
 
 class EventBus {
-  /** The live connection per host (empty string = local). Kept in sync with
-   *  `hosts` by syncConnections. */
-  private readonly connections = new Map<string, HostConnection>();
+  private conn = new StreamConnection();
   private readonly handlers = new Map<string, Set<EnvelopeHandler>>();
   private readonly reconnectHandlers = new Set<ReconnectHandler>();
   private projects: string[] = [];
@@ -105,7 +108,7 @@ class EventBus {
   /** Unsubscribe for the shared wake trigger (online / visibilitychange). */
   private unsubscribeWake: (() => void) | null = null;
 
-  /** Wake signal: reconnect every stream now instead of waiting out the
+  /** Wake signal: reconnect the stream now instead of waiting out the
    *  backoff timer. `restartConnection` clears the pending timer and resets
    *  the per-connection delay, so a connection that had backed off to 30s
    *  recovers within a tick of the network returning. */
@@ -147,7 +150,7 @@ class EventBus {
   }
 
   /** Declare the project roots this client is viewing. Drives the server's
-   *  subscriber-aware git/spending emitters. Restarts each open stream when
+   *  subscriber-aware git/spending emitters. Restarts the open stream when
    *  the set changes (the stream's query params are fixed for the life of the
    *  request). */
   setProjects(projects: string[]): void {
@@ -159,20 +162,12 @@ class EventBus {
       return;
     }
     this.projects = next;
-    for (const conn of this.connections.values()) {
-      if (conn.abortController) {
-        // Controlled restart: the reconnect handlers reconcile, and the seq
-        // watermark resets (no gap warning for the new stream).
-        this.closeConnection(conn);
-        this.openStream(conn);
-      }
-    }
+    this.reopenForNewQuery();
   }
 
-  /** Declare the remote hosts that currently have at least one open tab. Each
-   *  gets its own `/api/remote/<host>/api/events` stream alongside the local
-   *  one. Adding a host opens only its stream; removing one aborts only its
-   *  stream, leaving every other connection's back-off/seq state untouched. */
+  /** Declare the remote hosts that currently have at least one open tab. The
+   *  server relays each one's events down the single stream. Restarts the
+   *  open stream when the set changes, like setProjects. */
   setHosts(hosts: string[]): void {
     const next = [...new Set(hosts.filter(Boolean))].sort();
     if (
@@ -182,68 +177,58 @@ class EventBus {
       return;
     }
     this.hosts = next;
-    this.syncConnections();
+    this.reopenForNewQuery();
   }
 
-  /** Start the connections. No-op when already connected/connecting. */
+  /** Controlled restart of an open stream whose query changed: the reconnect
+   *  handlers reconcile, and the seq watermarks reset (no gap warning for the
+   *  new stream). A stream waiting out its back-off picks the new query up
+   *  when it reopens. */
+  private reopenForNewQuery(): void {
+    if (!this.conn.abortController) return;
+    this.closeConnection(this.conn);
+    this.openStream(this.conn);
+  }
+
+  /** Start the connection. No-op when already connected/connecting. */
   start(): void {
     if (this.started || typeof fetch === "undefined") return;
     this.started = true;
     this.unsubscribeWake = onWake(this.onWakeSignal);
-    this.syncConnections();
-    for (const conn of this.connections.values()) this.openStream(conn);
+    this.openStream(this.conn);
   }
 
-  /** Tear every connection down and stop all timers (test/teardown only). Also
+  /** Tear the connection down and stop all timers (test/teardown only). Also
    *  resets every piece of state so a fresh start behaves like first boot. */
   stop(): void {
     this.started = false;
     this.unsubscribeWake?.();
     this.unsubscribeWake = null;
-    for (const conn of this.connections.values()) this.closeConnection(conn);
-    this.connections.clear();
+    this.closeConnection(this.conn);
+    this.conn = new StreamConnection();
     this.handlers.clear();
     this.reconnectHandlers.clear();
     this.projects = [];
     this.hosts = [];
   }
 
-  /** Restart every stream to pick up a new backend origin (apiPath).
+  /** Restart the stream to pick up a new backend origin (apiPath).
    *  Preserves subscriptions, project list, and host set; fires reconnect
    *  handlers like setProjects does. No-op when not yet started — next start()
    *  will use the new apiPath automatically. */
   restart(): void {
     if (!this.started) return;
-    for (const conn of this.connections.values()) this.restartConnection(conn);
+    this.restartConnection(this.conn);
   }
 
-  /** Create connections for `[""] ∪ hosts` and drop those whose host is gone. */
-  private syncConnections(): void {
-    const desired = ["", ...this.hosts];
-    const wanted = new Set(desired);
-    for (const [host, conn] of [...this.connections]) {
-      if (!wanted.has(host)) {
-        this.closeConnection(conn);
-        this.connections.delete(host);
-      }
-    }
-    for (const host of desired) {
-      if (!this.connections.has(host)) {
-        const conn = new HostConnection(host);
-        this.connections.set(host, conn);
-        if (this.started) this.openStream(conn);
-      }
-    }
-  }
-
-  private restartConnection(conn: HostConnection): void {
+  private restartConnection(conn: StreamConnection): void {
     if (!this.started) return;
     this.closeConnection(conn);
     conn.reconnectDelay = RECONNECT_BASE_MS;
     this.openStream(conn);
   }
 
-  private openStream(conn: HostConnection): void {
+  private openStream(conn: StreamConnection): void {
     if (conn.abortController || !this.started) return;
     const controller = new AbortController();
     conn.abortController = controller;
@@ -257,10 +242,11 @@ class EventBus {
    *  backoff reconnect — unless a deliberate closeConnection()/restart() already
    *  moved `abortController` on, in which case this attempt is stale and
    *  no-ops. */
-  private async runStream(conn: HostConnection, controller: AbortController): Promise<void> {
+  private async runStream(conn: StreamConnection, controller: AbortController): Promise<void> {
     const params = new URLSearchParams();
     if (this.projects.length > 0) params.set("projects", this.projects.join(","));
-    const url = apiPath(`${remoteApiBase(conn.host)}/api/events?${params.toString()}`);
+    if (this.hosts.length > 0) params.set("hosts", this.hosts.join(","));
+    const url = apiPath(`/api/events?${params.toString()}`);
 
     let lostConnection = false;
     try {
@@ -277,7 +263,7 @@ class EventBus {
       } else {
         // The server sends every envelope as `event: envelope\ndata: <json>`.
         conn.reconnectDelay = RECONNECT_BASE_MS;
-        conn.lastSeq = 0; // fresh stream — no gap warnings for the first frames
+        conn.lastSeq.clear(); // fresh stream — no gap warnings for the first frames
         if (conn.hasOpenedOnce) {
           this.fireReconnect("reconnect");
         }
@@ -290,11 +276,20 @@ class EventBus {
               console.error("eventBus: malformed envelope", env);
               return;
             }
-            // Stamp the originating host before dispatch: every host's frames
-            // feed the same handlers, and only the connection knows which is
-            // which. Mutated rather than copied — the bus is the hot path.
-            env.host = conn.host;
-            this.trackSeq(conn, env.seq);
+            // Local frames carry no host; relayed ones were tagged by the
+            // server. Mutated rather than copied — the bus is the hot path.
+            const host = typeof env.host === "string" ? env.host : "";
+            env.host = host;
+            if (env.event === HOST_STREAM_EVENT) {
+              // The host's upstream (re)opened: fresh seq watermark, and a
+              // reconcile unless this is its first open on this stream (a
+              // stream reopen has already reconciled everything).
+              const reopened = conn.lastSeq.has(host);
+              conn.lastSeq.set(host, 0);
+              if (reopened) this.fireReconnect("reconnect");
+              return;
+            }
+            this.trackSeq(conn, host, env.seq);
             this.handlers.get(env.event)?.forEach((h) => {
               try {
                 h(env);
@@ -325,7 +320,7 @@ class EventBus {
     }, delay);
   }
 
-  private closeConnection(conn: HostConnection): void {
+  private closeConnection(conn: StreamConnection): void {
     this.clearLiveness(conn);
     if (conn.reconnectTimer !== undefined) {
       clearTimeout(conn.reconnectTimer);
@@ -344,7 +339,7 @@ class EventBus {
    *  connection is known dead, so backoff would only delay recovery. */
   private withLiveness(
     res: Response,
-    conn: HostConnection,
+    conn: StreamConnection,
     controller: AbortController,
   ): Response {
     if (!res.body) return res;
@@ -371,23 +366,24 @@ class EventBus {
     return new Response(body, { status: res.status, headers: res.headers });
   }
 
-  private clearLiveness(conn: HostConnection): void {
+  private clearLiveness(conn: StreamConnection): void {
     if (conn.livenessTimer !== undefined) {
       clearTimeout(conn.livenessTimer);
       conn.livenessTimer = undefined;
     }
   }
 
-  /** Record the envelope's seq; a gap (missed events) warns and triggers the
+  /** Record the envelope's seq for its origin; a gap (missed events) warns and triggers the
    *  same reconcile the reconnect path uses. */
-  private trackSeq(conn: HostConnection, seq: number): void {
-    if (conn.lastSeq > 0 && seq > conn.lastSeq + 1) {
+  private trackSeq(conn: StreamConnection, host: string, seq: number): void {
+    const last = conn.lastSeq.get(host);
+    if (last !== undefined && last > 0 && seq > last + 1) {
       console.warn(
-        `eventBus: seq gap ${conn.lastSeq} → ${seq} — events may have been missed; reconciling`,
+        `eventBus: seq gap ${last} → ${seq} — events may have been missed; reconciling`,
       );
       this.fireReconnect("seq-gap");
     }
-    conn.lastSeq = seq;
+    conn.lastSeq.set(host, seq);
   }
 
   private fireReconnect(reason: "reconnect" | "seq-gap"): void {

@@ -2,11 +2,13 @@ package remote
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -125,6 +127,31 @@ func TestNewAPIProxy_ClosedBackend_502AndOnErr(t *testing.T) {
 	}
 	if lastErr == nil {
 		t.Error("onError received nil error")
+	}
+}
+
+// A caller that cancels its own request (browser reload, tab close) must not
+// trigger onError: onError drops the whole host connection, and the failure
+// says nothing about the remote.
+func TestNewAPIProxy_CallerCancelDoesNotFireOnErr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	var errCount atomic.Int32
+	proxy, err := NewAPIProxy(srv.URL, "tok", func(error) { errCount.Add(1) })
+	if err != nil {
+		t.Fatalf("NewAPIProxy: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	req := httptest.NewRequest("GET", "/api/test", nil).WithContext(ctx)
+	proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+	if n := errCount.Load(); n != 0 {
+		t.Errorf("onError called %d times for a caller-cancelled request, want 0", n)
 	}
 }
 

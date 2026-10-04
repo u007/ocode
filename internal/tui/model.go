@@ -15157,11 +15157,14 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 				if m.agent.Permissions() != nil {
 					m.agent.Permissions().SetWebfetchDomain(domain, agent.PermissionAllow)
 				}
+			} else if ruleErr := m.setPermissionRule(req, agent.PermissionAllow); ruleErr != nil {
+				// The call is still approved; only the durable rule failed, and
+				// saying so is better than a silent no-op that re-asks next time.
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed this call, but the rule was not saved: %v", ruleErr), transient: true})
 			} else {
-				m.setPermissionRule(req, agent.PermissionAllow)
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s (sub-agent).", permissionRuleLabel(req)), transient: true})
 			}
 			m.persistPermissions()
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s (sub-agent).", permissionRuleLabel(req)), transient: true})
 		case "t":
 			resp = agent.PermissionResponse{Level: agent.PermissionAllow, PersistTool: true}
 			log.Printf("[perm] sub-agent permission ALWAYS ALLOW (tool): tool=%s", toolName)
@@ -15230,8 +15233,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing webfetch for domain %q.", domain), transient: true})
 		default:
 			log.Printf("[perm] permission ALWAYS ALLOW (rule): tool=%s rule=%s", toolName, req.Rule)
-			m.setPermissionRule(req, agent.PermissionAllow)
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
+			if ruleErr := m.setPermissionRule(req, agent.PermissionAllow); ruleErr != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed this call, but the rule was not saved: %v", ruleErr), transient: true})
+			} else {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
+			}
 		}
 		m.persistPermissions()
 		// Execute the just-approved call via the approved path (no permission
@@ -15300,8 +15306,17 @@ type permDirtyFlags struct {
 	bashPrefixMode map[string]string // prefix -> mode for each changed entry
 }
 
-func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.PermissionLevel) {
+// setPermissionRule applies a permission answer to the rule tables. It returns
+// a non-nil error when the answer was ALLOWED for this call but the rule could
+// not be stored — SetBashPrefixRule silently discards a rule it refuses (a
+// blanket `git` allow), so without this the caller's "Always allowing …" message
+// would claim a rule that does not exist. The caller's control flow must not
+// change: the approved call still runs, only the reporting differs.
+func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.PermissionLevel) error {
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
+		if err := agent.ValidateBashPrefixRule(req.Prefix, level); err != nil {
+			return fmt.Errorf("bash prefix %q cannot be stored: %w", req.Prefix, err)
+		}
 		if m.agent != nil && m.agent.Permissions() != nil {
 			m.agent.Permissions().SetBashPrefixRule(req.Prefix, level)
 		}
@@ -15309,9 +15324,10 @@ func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.Permi
 			m.permDirty.bashPrefixes = make(map[string]string)
 		}
 		m.permDirty.bashPrefixes[req.Prefix] = string(level)
-		return
+		return nil
 	}
 	m.setToolPermission(req.ToolName, level)
+	return nil
 }
 
 func (m *model) setToolPermission(toolName string, level agent.PermissionLevel) {

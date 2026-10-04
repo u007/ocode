@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/u007/ocode/internal/redact"
 )
 
 // shellWrapperNames are interpreters that execute a local script file as their
@@ -77,6 +79,81 @@ func (a *Agent) resolveCustomScript(candidate string) string {
 		}
 	}
 	return abs
+}
+
+// executedScriptContext is one executed script whose source travels to the
+// TypeSafe judge as structured, untrusted state.
+type executedScriptContext struct {
+	Path       string
+	Text       string
+	SHA256     string
+	TotalLines int
+	Truncated  bool
+}
+
+// executedScriptsForJudge returns structured source for the scripts a command
+// actually EXECUTES, reusing detectExecutedCustomScripts so this path and the
+// chat judge's prose context can never disagree about WHICH files run.
+//
+// Why it exists: the TypeSafe judge has no read_file tool, so a command like
+//
+//	chmod +x /tmp/x/s.sh && /tmp/x/s.sh "q" 2>&1 | head -5
+//
+// reached it as a bare opaque path. It could not determine the effect, named
+// truncated_or_unknown, and returned a low-confidence allow that fell under the
+// confidence floor — an ordinary command forwarded to a human for no safety
+// gain. The chat judge already inlined these scripts (askPermissionModel); only
+// this structured path omitted them.
+//
+// Bounds mirror verifyAutoGrant's truncation guard EXACTLY (same line cap, same
+// byte ceiling), so what the judge is shown and what the deterministic guard
+// enforces can never diverge. Note that guard REFUSES a truncated script, so a
+// truncated entry here can never produce an auto-grant — it forces the human Ask
+// this function exists to avoid only for scripts that fit.
+//
+// Additive: nothing is allowed or denied here. A read failure omits the entry,
+// which leaves the pre-existing truncated_or_unknown deferral in place —
+// fail-closed.
+//
+// Known fail-closed limitation: a relative script path that only resolves after a
+// top-level `cd` is resolved against the pre-fold working directory by
+// resolveCustomScript, so it is usually omitted rather than mis-attributed.
+func (a *Agent) executedScriptsForJudge(command string, maxLines, maxSources int) []executedScriptContext {
+	if command == "" || maxSources <= 0 {
+		return nil
+	}
+	var out []executedScriptContext
+	for _, script := range a.detectExecutedCustomScripts(command) {
+		if len(out) >= maxSources {
+			break
+		}
+		// The judge is an LLM: never ship a credential-bearing file into its prompt.
+		// Same predicate the chat judge's context applies.
+		if redact.IsSensitiveFile(script) || isSecretMaterialPath(script) {
+			continue
+		}
+		content, totalLines, err := readFileSnippet(script, maxLines)
+		if err != nil || !isValidTextContent(content) {
+			continue
+		}
+		truncated := totalLines > maxLines
+		if len(content) > maxInterpreterSourceBytes {
+			content = content[:maxInterpreterSourceBytes]
+			truncated = true
+		}
+		clean, valid := sanitizeSource(content)
+		if !valid || strings.TrimSpace(clean) == "" {
+			continue
+		}
+		out = append(out, executedScriptContext{
+			Path:       script,
+			Text:       clean,
+			SHA256:     hashBytes([]byte(clean)),
+			TotalLines: totalLines,
+			Truncated:  truncated,
+		})
+	}
+	return out
 }
 
 // scriptRunnerPrefixes are runner wrappers whose first non-flag operand is

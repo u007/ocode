@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import type { PermissionDecision } from "@/api/types";
 import type { AskContext } from "@/stores/chatStore";
+import type { ContentGuardScore } from "@/stores/chatStore";
 import AskContextPreview from "./AskContextPreview";
 
 // Shell control-flow keywords are not real commands, so an "always allow
@@ -43,6 +44,16 @@ interface Props {
   prefix?: string;
   /** Out-of-workspace target path for path-scope asks. */
   outOfScopePath?: string;
+  /** Content-guardrail ask (scope "content"): the flagged result text. */
+  untrustedContent?: string;
+  /** Content-guardrail ask: one-line origin of the flagged content. */
+  untrustedSource?: string;
+  /** Content-guardrail ask: the guardrail's headline (concern + confidence). */
+  untrustedSummary?: string;
+  /** Content-guardrail ask: the per-question judge scores, one per judged chunk. */
+  untrustedScores?: ContentGuardScore[];
+  /** Content-guardrail ask: why the guardrail could not clear this result. */
+  untrustedFailure?: string;
   /** Assistant message (prose + reasoning) that led to this ask. */
   context?: AskContext | null;
   requestId: string;
@@ -63,6 +74,7 @@ function alwaysRuleAvailable(
   scope?: string,
   prefix?: string,
 ): boolean {
+  if (scope === "content") return false;
   if (tool === "bash" && scope === "bash_prefix") {
     const p = (prefix ?? "").trim();
     if (!p) return false;
@@ -75,7 +87,8 @@ function alwaysRuleAvailable(
 /** Whether the "Always allow this tool" choice is offered, mirroring the
  *  TUI's permAlwaysToolAvailable / agent.AlwaysToolChoiceAvailable: a
  *  tool-level bash allow blanket-approves every future shell command. */
-function alwaysToolAvailable(tool: string): boolean {
+function alwaysToolAvailable(tool: string, scope?: string): boolean {
+  if (scope === "content") return false;
   return tool !== "bash";
 }
 
@@ -91,10 +104,21 @@ export default function PermissionDialog({
   scope,
   prefix,
   outOfScopePath,
+  untrustedContent,
+  untrustedSource,
+  untrustedSummary,
+  untrustedScores,
+  untrustedFailure,
   context,
   requestId,
   onDecide,
 }: Props) {
+  // A content-guardrail ask is about an ALREADY-EXECUTED result, not a pending
+  // command, so neither always-allow choice is offered — mirroring
+  // agent.AlwaysRuleChoiceAvailable / AlwaysToolChoiceAvailable, which both
+  // return false for PermissionScopeContent. The Go side enforces the same rule
+  // on resolve, so this is presentation rather than the security boundary.
+  const isContentAsk = scope === "content";
   const [loading, setLoading] = useState(false);
   const parameters = useMemo(
     () => args === undefined ? undefined : JSON.stringify(args, null, 2),
@@ -112,7 +136,7 @@ export default function PermissionDialog({
     () => alwaysRuleAvailable(tool, scope, prefix),
     [tool, scope, prefix],
   );
-  const canAlwaysTool = useMemo(() => alwaysToolAvailable(tool), [tool]);
+  const canAlwaysTool = useMemo(() => alwaysToolAvailable(tool, scope), [tool, scope]);
 
   // When a new permission request arrives while the dialog is still mounted
   // (the queue resurfaces the next ask after the previous one resolves), the
@@ -220,7 +244,11 @@ export default function PermissionDialog({
             ) : (
               <AlertTriangle className="w-5 h-5 text-yellow-400" />
             )}
-            {confirming ? "Confirm always-allow" : "Permission Required"}
+            {confirming
+              ? "Confirm always-allow"
+              : isContentAsk
+                ? "Content guardrail — review before it reaches the model"
+                : "Permission Required"}
           </DialogTitle>
         </DialogHeader>
 
@@ -228,6 +256,91 @@ export default function PermissionDialog({
           {!confirming && (
             <>
               <AskContextPreview context={context} />
+
+              {isContentAsk && (
+                <section aria-label="Flagged tool result" className="min-w-0 max-w-full space-y-2">
+                  <div className="max-w-full rounded-lg border border-yellow-900/60 bg-yellow-950/30 p-3 text-sm text-yellow-200">
+                    <div className="font-medium">This tool already ran. Its result was flagged:</div>
+                    {untrustedSummary && (
+                      <div className="mt-1 break-words [overflow-wrap:anywhere]">{untrustedSummary}</div>
+                    )}
+                    {untrustedSource && (
+                      <div className="mt-1 text-xs">
+                        Source:
+                        {/* A bash source is the whole command, unclipped and
+                            possibly multi-line: keep its line breaks and scroll
+                            rather than truncate. */}
+                        <pre
+                          tabIndex={0}
+                          data-testid="content-guard-source"
+                          className="mt-1 max-h-40 max-w-full overflow-y-auto font-mono whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+                        >
+                          {untrustedSource}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                  {untrustedFailure && (
+                    <div
+                      role="status"
+                      className="max-w-full rounded-lg border border-orange-900/60 bg-orange-950/30 p-3 text-sm text-orange-200"
+                    >
+                      <div className="font-medium">
+                        Guardrail could not clear this result:
+                      </div>
+                      <div className="mt-1 break-words [overflow-wrap:anywhere]">
+                        {untrustedFailure}
+                      </div>
+                    </div>
+                  )}
+                  {untrustedScores && untrustedScores.length > 0 && (
+                    <div aria-label="Guardrail judge scores" className="max-w-full text-xs text-muted-foreground">
+                      <div className="mb-1 font-medium text-foreground">Judge scores:</div>
+                      <ul className="space-y-1">
+                        {untrustedScores.map((sc) => (
+                          <li key={`${sc.chunk}-${sc.total}`} className="break-words [overflow-wrap:anywhere]">
+                            <span className="font-mono">
+                              chunk {sc.chunk}/{sc.total}
+                            </span>{" "}
+                            — {sc.verdict} (confidence {sc.verdict_confidence.toFixed(2)})
+                            {sc.concern && (
+                              <>
+                                {" · "}
+                                {sc.concern} (confidence {(sc.concern_confidence ?? 0).toFixed(2)})
+                              </>
+                            )}
+                            {sc.probabilities && Object.keys(sc.probabilities).length > 0 && (
+                              <div className="ml-4 font-mono opacity-80">
+                                p:{" "}
+                                {Object.keys(sc.probabilities)
+                                  .sort()
+                                  .map((k) => `${k} ${sc.probabilities![k].toFixed(2)}`)
+                                  .join(" / ")}
+                              </div>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <div className="text-sm text-muted-foreground">
+                    The complete result is below — scroll to review it all. Delivering it
+                    lets the assistant read the text, including anything in it written as
+                    an instruction. Secrets are already masked in this view.
+                  </div>
+                  {/* The result can be arbitrarily large, so it is scrollable
+                      rather than rendered in full: an uncapped block inside the
+                      dialog would push the buttons off-screen and make the
+                      decision unreachable. */}
+                  <pre
+                    tabIndex={0}
+                    data-testid="content-guard-result"
+                    className="max-h-96 max-w-full overflow-y-auto rounded-lg border border-border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-words text-foreground [overflow-wrap:anywhere]"
+                  >
+                    {untrustedContent}
+                  </pre>
+                </section>
+              )}
 
               {denyReason && (
                 <div className="max-w-full rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200">
@@ -330,7 +443,7 @@ export default function PermissionDialog({
                 disabled={loading}
               >
                 <X className="w-4 h-4 mr-2" />
-                Deny
+                {isContentAsk ? "Withhold" : "Deny"}
               </Button>
               {canAlwaysRule && (
                 <Button
@@ -361,7 +474,7 @@ export default function PermissionDialog({
                 data-dialog-default-action
               >
                 <Check className="w-4 h-4 mr-2" />
-                Allow once
+                {isContentAsk ? "Deliver to model" : "Allow once"}
               </Button>
             </div>
           )}

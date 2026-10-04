@@ -588,12 +588,12 @@ func ListHTRTabs(port int) ([]HTRTab, error) {
 // unrelated process, and that process would inherit stop rights. Closing that
 // would need a spawner start token, which is a new field and out of scope here.
 //
-// Orphan note: if ocode is SIGKILLed the daemon outlives it. The next ocode run
-// adopts that orphan without stop rights (StartedByPID names a dead process), so
-// an orphan can outlive every ocode process. That is intended, not an oversight:
-// a survivor is indistinguishable from a daemon the user started themselves, and
-// the stop rule forbids killing those. The pid is surfaced in the Settings
-// status so the user can end a survivor deliberately; there is no auto-reaping.
+// Orphan note: the daemon outlives its spawner when ocode is SIGKILLed, or when
+// the spawner exits while another instance still holds a lease. Stop rights then
+// pass to whichever ocode process asks next (see shouldStopSharedDaemon): the
+// last lease release reaps it, and the Settings Stop button works for it. A
+// daemon the user started themselves is never confused with one, because
+// adopting a foreign daemon writes no marker.
 type htrOwner struct {
 	Identity string `json:"identity"`
 	PID      int    `json:"daemon_pid"`
@@ -924,7 +924,10 @@ var (
 //
 //  1. The marker names a daemon at all.
 //  2. This process is the one that spawned it (StartedByPID, never OwnerPID —
-//     adopting rewrites OwnerPID and must not buy stop rights).
+//     adopting rewrites OwnerPID and must not buy stop rights), OR the spawner
+//     is recorded and no longer running, in which case its stop rights pass to
+//     whichever ocode process asks. A LIVE spawner's daemon is never stopped by
+//     anyone else, and an unknown spawner (0) is never inherited from.
 //  3. That process is still alive, so a dead marker is a cleanup problem rather
 //     than a stop decision.
 //  4. The daemon is still attributable to ocode — either the marker's executable
@@ -932,7 +935,11 @@ var (
 //     answers. Two signals, either sufficient, exactly as before this rule
 //     existed: a daemon verified only by the probe is still ocode's, so
 //     demanding processMatchesOwner outright would refuse a stop the probe has
-//     already positively attributed.
+//     already positively attributed. Inherited stop rights are the exception:
+//     they demand processMatchesOwner, because in shared mode the probe also
+//     answers for a daemon the user started on the same port with the same
+//     token, and only the marker's executable and start token tie the running
+//     pid to the one ocode spawned.
 //  5. No OTHER ocode instance still holds a live lease on it.
 //
 // (false, nil) is a refusal, not a failure: the caller reports the daemon as
@@ -942,13 +949,18 @@ func shouldStopSharedDaemon(owner htrOwner) (bool, error) {
 	if owner.PID <= 0 {
 		return false, nil
 	}
-	if owner.StartedByPID != os.Getpid() {
+	inherited := owner.StartedByPID != os.Getpid()
+	if inherited && (owner.StartedByPID <= 0 || pidAliveFn(owner.StartedByPID)) {
 		return false, nil
 	}
 	if !pidAliveFn(owner.PID) {
 		return false, nil // marker cleanup is the caller's job
 	}
-	if !processMatchesFn(owner) && !htrHealthyForInstanceFn(owner.Port, owner.Socket, owner.Identity) {
+	if inherited {
+		if !processMatchesFn(owner) {
+			return false, fmt.Errorf("managed htr daemon pid %d outlived its spawner pid %d but could not be verified; refusing to stop it", owner.PID, owner.StartedByPID)
+		}
+	} else if !processMatchesFn(owner) && !htrHealthyForInstanceFn(owner.Port, owner.Socket, owner.Identity) {
 		return false, fmt.Errorf("managed htr daemon pid %d could not be verified; refusing to stop it", owner.PID)
 	}
 	active, err := activeHTRLeases(owner.Port, owner.Socket, owner.Identity, os.Getpid())
@@ -1056,8 +1068,9 @@ func terminateManagedHTR(port int, socket, identity string, lg *log.Logger) {
 	// record of who spawned the daemon, so deleting it would make the next run
 	// see "no daemon" rather than "not mine". This is the real kill path — it is
 	// what runs when the final lease is released — so the provenance clause is
-	// what keeps an ADOPTER from killing the daemon that the process which
-	// adopted it spawned. See shouldStopSharedDaemon.
+	// what keeps an ADOPTER from killing a daemon whose spawner is still
+	// running, and what lets it reap one whose spawner is gone. See
+	// shouldStopSharedDaemon.
 	stopped, err := shouldStopSharedDaemon(owner)
 	if err != nil || !stopped {
 		logHTRStopRefusal(lg, owner, err)

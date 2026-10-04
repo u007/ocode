@@ -1,7 +1,19 @@
+---
+type: Design
+title: Web/Desktop "Connectors" settings — TUI /connect parity — design
+description: 'Design spec for web/desktop Connectors settings (TUI /connect parity): shared auth method catalog, credential-version invalidation, OAuth completion modes (auto/manual), security rules, and the as-built 2026-10-02 connect-flow fixes (committing gate, atomic beginInput, cancel-discards-credential, tail-only masking, 409 input authority).'
+tags:
+  - design
+  - connectors
+  - oauth
+  - security
+  - web
+timestamp: 2026-10-02T02:51:21Z
+---
 # Web/Desktop "Connectors" settings — TUI `/connect` parity — design
 
 Date: 2026-10-01
-Status: proposed (server half already implemented, uncommitted)
+Status: proposed (server half committed 2026-10-01; §8 records the 2026-10-02 as-built fixes)
 
 ## Problem
 
@@ -12,32 +24,24 @@ components and not one for base credentials. `ProfilesManager.tsx` manages
 per-profile overlays (`auth.profiles.json`), a different layer entirely.
 
 The server half already exists and passes: `internal/server/handler_connect.go`
-(782 lines) with 8 routes registered in `registerRoutes()`, and
-`handler_connect_test.go` (16 test functions / 31 including subtests, all green;
-`go build ./internal/server/` clean). The web half does not exist. This spec
-covers the web half plus the four design decisions the existing server code
-forces us to confront.
+(1010 lines as of 2026-10-02) with 8 routes registered in `registerRoutes()`, and
+`handler_connect_test.go` (16 test functions, plus `handler_connect_manual_test.go`
+(4) and `handler_connect_cancel_test.go` (12), all green;
+`go build ./internal/server/` clean). The web half did not exist at design time;
+it landed with plan Phase 1 on 2026-10-01 (§5). This spec covers the web half
+plus the four design decisions the existing server code forces us to confront.
 
-### Provenance — READ BEFORE BUILDING ON IT
+### Provenance — resolved (2026-10-01/02)
 
-`handler_connect.go` and its test are **untracked (`??`) and were not written by
-the session that wrote this spec.** File mtimes are `14:32:27` / `14:35:59`;
-this spec's session started `16:15:47`, and the project's session directory
-shows ~8 other sessions writing concurrently this afternoon (the nearest,
-`ses_2026-10-01-125917-851d50cc`, last wrote `14:30:18` — two minutes before the
-file appeared).
-
-So this is another agent's in-flight work, and untracked means **no git history
-to recover from**. Before implementing Phase 1+:
-
-1. Confirm with the user that `handler_connect.go` is intended to land, or
-   coordinate with the owning session. Do not silently build a web client on top
-   of a file another agent may still be rewriting.
-2. If it is landing, commit it first. A committed 782-line backend with 16 tests
-   is a safe foundation; an untracked one is not.
-3. Re-run `go test ./internal/server/ -run Connect` immediately before starting —
-   the numbers above were measured at 2026-10-01 ~16:30 and a concurrent session
-   may change them.
+When this spec was written, `handler_connect.go` and its test were **untracked
+(`??`) and not written by the session that wrote this spec** (file mtimes
+`14:32:27`/`14:35:59` against a session start of `16:15:47`, ~8 sessions writing
+concurrently that afternoon). The risk — building on a file another agent might
+still rewrite, with no git history to recover from — was closed by committing
+the backend in `d81a7e58` (2026-10-01). The 2026-10-02 fixes in §8 sit on top of
+that commit. The standing rule remains: re-run
+`go test ./internal/server/ -run Connect` immediately before starting, because a
+concurrent session may change the numbers above.
 
 ## Scope
 
@@ -47,7 +51,7 @@ Full TUI parity, base store (`auth.json`), full provider catalog. Phased — see
 ## 1. OAuth completion mode depends on where the server runs
 
 The browser never binds a port. The **server** binds the OAuth loopback listener
-(`auth.StartOpenAIOAuth` listens on `127.0.0.1:1455`; Google on `:8080`), the
+(`auth.StartOpenAIOAuth` listens on `127.0.0.1:1455`; Google on `:8080`),
 browser navigates to the provider, and the provider redirects the *browser* to
 `localhost`. That reaches ocode only when the browser's machine is the server's
 machine.
@@ -97,23 +101,24 @@ extra `cancel` entry locally; the server does not. The TUI keeps its
 
 ## 3. A new key does NOT reach live agents today — this is a bug to fix
 
-`NewClientWithProfile` (`internal/agent/client.go:4559`) resolves the credential
+`NewClientWithProfile` (`internal/agent/client.go:4570`) resolves the credential
 **at client construction**: `auth.Get(provider)` at :4685,
 `auth.ResolveKeyForProfile` at :4808/:4828. An agent constructed before a
 connector write keeps the old key until it is rebuilt.
 
 There is a next-turn rebuild path — `reconcileProfileAgent`
-(`internal/server/agent_session.go:675-698`) compares `as.credVersion` against
-`auth.ProfileCredentialVersion()` and rebuilds on a mismatch. Its comment
+(`internal/server/agent_session.go:657-698`) compares `as.credVersion` against
+`auth.CredentialVersion()` and rebuilds on a mismatch. Its comment
 (:678-680) states the intent outright: *"The credential version is global, not
 per-profile: an in-place edit must invalidate the cached client."*
 
-**The intent is not met for the base store.** `auth.Set` and `auth.Remove`
-(`internal/auth/store.go:372`/`:384`) mutate the cache and call `persistLocked`,
-and **never bump `profileVersion`** — that counter lives in
-`internal/auth/profile_store.go` and is bumped only by profile mutations. So a
-write through `PUT /api/auth/connect/{provider}` leaves every live session on the
-old key until some unrelated model or profile change happens to rebuild it.
+**The intent was not met for the base store (design-time state; fixed —
+as-built note below).** `auth.Set` and `auth.Remove`
+(`internal/auth/store.go:373`/`:393`) mutate the cache and call `persistLocked`,
+and at the time **never bumped `profileVersion`** — that counter lives in
+`internal/auth/profile_store.go` and was bumped only by profile mutations. So a
+write through `PUT /api/auth/connect/{provider}` left every live session on the
+old key until some unrelated model or profile change happened to rebuild it.
 
 **Decision: one credential version, bumped by both stores.** Add a base-store
 counter bumped from `persistLocked` (the single choke point every base write
@@ -123,6 +128,15 @@ passes through) and have the reconcile check compare a single
 remember to read. Fire `OnCredentialsSaved` as today — it is what
 `internal/sync` already watches, and one path is better than two.
 
+**As-built (2026-10-01, plan item 5).** Implemented with one correction to the
+decision above: the bump lives directly in `Set`/`Remove`
+(`internal/auth/store.go:388` / `:407`), NOT in `persistLocked` — that also runs
+on the seed-on-load path that materialises an empty `auth.json` without changing
+a credential, which would invalidate every agent for a no-op write (14 tests
+failed until it moved). The reconcile check now compares the single
+`auth.CredentialVersion()` (`internal/server/agent_session.go:681`);
+`ProfileCredentialVersion()` remains as a delegating alias.
+
 Prompt-cache impact is nil: rebuilding an `LLMClient` touches neither the `tools`
 array nor the cached system prefix, so `docs/concepts/prompt-cache-stability.md`
 is unaffected. Rebuild happens on the **next turn**, never mid-turn — the same
@@ -131,9 +145,14 @@ contract as a model switch.
 ## 4. Security rules
 
 - **No endpoint returns a secret.** `handleConnectList` masks; pinned by
-  `TestConnectListMasksStoredKeys`. `GET /flows/{id}` returns `f.snapshot()`, an
-  explicit `map[string]interface{}` — the PKCE verifier and OAuth state are
-  unexported struct fields, so they cannot leak by construction. **Pin both.**
+  `TestConnectListMasksStoredKeys`. Since 2026-10-02 the mask shows **only the
+  trailing 4 characters, and only for keys ≥ 16 chars** — anything shorter is
+  masked whole (`maskConnectCredential`); the old 4+4 window rendered a 9-char
+  key as `1234••••6789`, disclosing 8 of 9 characters. Pinned additionally by
+  `TestMaskConnectCredentialNeverRevealsTheHead`. `GET /flows/{id}` returns
+  `f.snapshot()`, an explicit `map[string]interface{}` — the PKCE verifier and
+  OAuth state are unexported struct fields, so they cannot leak by construction.
+  **Pin both.**
 - **Middleware:** `s.authMiddleware` for all 8 routes, deliberately: these mutate
   a machine-global credential file, not project-scoped state. Never
   `healthMiddleware`. Wrapper choice is a documented decision per
@@ -147,7 +166,7 @@ contract as a model switch.
   `handleConnectTest` runs `testCredentialFn` (network) with no lock held.
   Keep it that way when the OAuth mode logic lands.
 - **Write serialisation is already correct.** `auth.Set` / `auth.Remove`
-  (`internal/auth/store.go:372`/`:384`) take `storeMu` and `persistLocked` writes
+  (`internal/auth/store.go:373`/`:393`) take `storeMu` and `persistLocked` writes
   the whole file under that lock, so the read-modify-write is atomic. No new lock
   needed.
 - **Per-host credentials, never a local fallback.** A remote project's agent runs
@@ -166,18 +185,23 @@ Server, done and green: `GET /api/auth/connect`,
 `POST /api/auth/connect/flows/{flowId}/input`,
 `DELETE /api/auth/connect/flows/{flowId}`.
 
-Web, missing: no client methods for any of the 8 (the `api.connectProvider` at
-`client.ts:2828` targets a different, older Server-level route), no
-`ConnectorsForm.tsx`, no `SettingsPanel` section. `connectors` goes immediately
-before `profiles` (`SettingsPanel.tsx:76`) — base creds are the layer beneath
-profile overlays.
+Web, landed 2026-10-01 (plan Phase 1): client methods for all 8 routes
+(`listConnectProviders`, `setConnectCredential`, `removeConnectCredential`,
+`testConnectCredential`, `startConnectFlow`, `getConnectFlow`,
+`submitConnectFlowInput`, `cancelConnectFlow`), `ConnectorsForm.tsx`, and the
+`SettingsPanel` section — `connectors` sits immediately before `profiles`
+(`SettingsPanel.tsx:78`) — base creds are the layer beneath profile overlays. The
+legacy `api.connectProvider` (`client.ts:2885`) is kept deliberately: it targets
+a different, older Server-level route.
 
 ## 6. Test obligations
 
 Per endpoint in `handler_connect_test.go`. Plus, new: TUI/server method-catalog
 parity; no-secret-leak on the flow-status payload; web flow lifecycle for all
 five flow kinds; `host` threading including the remote refusal; and a base-store
-credential write invalidating a live agent (the §3 bug).
+credential write invalidating a live agent (the §3 bug). 2026-10-02: the
+cancel/commit lifecycle, the input double-submit race, and the mask-head rule
+(`handler_connect_cancel_test.go`, 12 tests).
 
 ## 7. Documentation obligations
 
@@ -193,3 +217,65 @@ agent):
   — the same split as `gotchas/profile-switch-window-id-divergence.md`.
 - **No page covers OAuth flow endpoints or TUI `/connect` parity.** The new page
   is the first.
+
+## 8. As-built: 2026-10-02 security/correctness fixes
+
+Three defects in the shipped server half were fixed and regression-tested on
+2026-10-02. All three change wire-visible behaviour, so clients and tests must
+match the descriptions below, not the original design.
+
+### 8.1 Cancelling no longer persists, and commit is exclusive
+
+- New flow state `connectFlowCommitting`. `completeConnectFlow` now takes the
+  flow's `ctx` and refuses to persist unless `ctx.Err() == nil` AND
+  `f.beginCommit()` wins — which only succeeds from `running` or
+  `waiting_browser`. A cancelled or already-finished flow loses the claim and its
+  credential is DISCARDED; `waiting_input` is deliberately not claimable (no
+  exchange was ever started there).
+- Rationale: cancelling the Anthropic, Google and manual-OpenAI flows was a
+  complete no-op (no cancel func existed) yet `completeConnectFlow` still called
+  `auth.Set` — a cancelled connect still persisted its credential.
+- New helpers: `beginInput(cancel)` — an atomic waiting_input→running
+  compare-and-set that installs the cancel func under the same lock, replacing a
+  TOCTOU pair of separate lock acquisitions — plus `setCancel`,
+  `takeCancel` (single-use), `markCancelled` (never overwrites a terminal state),
+  and `runConnectExchange(ctx, f, providerID, exchange)` for the Anthropic /
+  Google / manual-OpenAI exchanges, which take NO context: it runs the exchange
+  on one goroutine and the wait on a second, dropping the credential on cancel.
+- `handleConnectFlowCancel` returns **409** while `committing` ("this flow is
+  saving its credential and can no longer be cancelled").
+- Pinned by `handler_connect_cancel_test.go` (12 tests), including
+  `TestConnectFlowCancelDiscardsAnthropicCredential`,
+  `TestConnectFlowCancelDiscardsManualOpenAICredential`,
+  `TestConnectFlowCancelDiscardsGoogleCredential`,
+  `TestConnectFlowCancelRefusedOnceCommitting`,
+  `TestBeginCommitOnlyFromExchangeBackedStates`,
+  `TestConnectFlowCancelRacesInputHandler`, and
+  `TestCompleteConnectFlowRefusesCancelledFlowWithLiveContext`.
+
+### 8.2 Masked key never reveals the head
+
+`maskConnectCredential` shows only the trailing 4 characters, and only when
+`len(key) >= 16`; anything shorter is masked whole. The old 4+4 window on a
+9-character key rendered `1234••••6789`, disclosing 8 of 9 characters. Pinned by
+`TestMaskConnectCredentialNeverRevealsTheHead` and the updated
+`TestConnectListMasksStoredKeys` (expects `••••••••••••mnop` for a 16-char key).
+
+### 8.3 Input endpoint: `beginInput` is the single authority
+
+`handleConnectFlowInput` no longer has an up-front `isWaitingInput()` check —
+`beginInput`'s compare-and-set is the authority for every branch. Consequences:
+
+- Pasting input into a flow whose state does not accept it now yields **409
+  Conflict** from `beginInput` rather than 400 Bad Request; the loser of a
+  double-submit is told `flow is <state>, it already started` and never starts a
+  second exchange (`TestConnectFlowInputDoubleSubmitStartsOneExchange`).
+- A device-code flow (which has no pasted-input branch) reports **400 "this flow
+  does not accept pasted input"** from the default case.
+- The old up-front check was a SEPARATE lock acquisition from the
+  `setState(running)` that followed, so two concurrent POSTs (a double-click or a
+  retried client) both passed it and both started an exchange; `beginInput` also
+  removes the unlocked cancel-func write that raced the cancel handler.
+
+`handler_connect.go` grew from 782 to 1010 lines across these fixes; the route
+list in §5 and the masking contract in §4 are the wire-level contracts to keep.

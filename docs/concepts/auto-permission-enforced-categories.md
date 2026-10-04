@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Auto-Permission Enforced Categories
-description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, and the 2026-09-29 environment-enumeration rubric carve-out.'
+description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, the 2026-09-29 environment-enumeration rubric carve-out, and the 2026-10-02 executed_scripts source disclosure.'
 resource: internal/agent/permission_typesafe.go
 tags:
   - permissions
@@ -12,7 +12,7 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-09-29T15:56:49Z
+timestamp: 2026-10-02T02:57:55Z
 ---
 # Auto-Permission Enforced Categories
 
@@ -103,6 +103,31 @@ This is the **only** category that triggers the opaque relaxation. Every other c
 
 `resolveAutoJudgeOpaqueMinConfidence()` (`internal/agent/permissions.go`) returns the configured value when `permissions.auto.min_confidence` is set, and the `autoJudgeOpaqueMinConfidenceDefault = 0.75` constant only when it is unset.
 
+## Executed scripts ship their source (2026-10-02 amendment)
+
+`buildTypesafePermissionState` now ships the source of the scripts a bash command **executes** under a new state key, **`executed_scripts`**. This is judge context, not a gate: **the key decides nothing.** No permission gate was added, removed, or relaxed — the worst outcome of an omitted entry is the pre-existing `truncated_or_unknown` deferral described under *Opaque floor* above, which fails closed.
+
+**The incident it fixes.** The TypeSafe judge has no `read_file` tool. The chat judge's prose context already inlines these files as `Executed custom script: …` sections, but the structured state builder did not, so a script reached Jev as a bare opaque path. Real record from the durable judge log (`permission-judge.log`):
+
+```
+command: chmod +x /tmp/aimssearch/gsearch.sh && /tmp/aimssearch/gsearch.sh "novita" 2>&1 | head -5
+{"choice":"allow","confidence":0.3,"probabilities":{"allow":0.65,"deny":0.35},"concern":"truncated_or_unknown","concern_confidence":0.84,"floor":0.85,"outcome":"deferred_below_floor"}
+```
+
+Jev could not determine what the script did (`truncated_or_unknown` at 0.84), so it returned `allow` at only 0.30 — under the 0.85 floor — and an ordinary command was forwarded to a human for no safety gain.
+
+**What travels.** `executedScriptsForJudge(command, maxLines, maxSources)` (`internal/agent/script_detection.go`) returns an `executedScriptContext{Path, Text, SHA256, TotalLines, Truncated}` per script; the state builder stores them as `{path, sha256, total_lines, truncated, text}` and **omits the key entirely** when no entry survives, so an absent key always means "could not read", never "found but nothing to show". It **reuses `detectExecutedCustomScripts`** — the same detector the chat judge and `verifyAutoGrant`'s truncation guard use — so the three paths can never disagree about which files run. Every constituent of a compound is inspected, so `chmod +x S && S args | head` is covered: `classifyInterpreterExecution` only inspects the FIRST command word, which is why that shape previously shipped no source at all.
+
+**Bounds mirror `verifyAutoGrant` exactly.** The per-source line cap comes from `permissions.auto.max_context_lines_per_source` (default 40) and the entry count from `permissions.auto.max_context_sources` (default 3) — the same knobs the other judge paths read — and every source is clipped at the same `maxInterpreterSourceBytes` (16 KiB) ceiling, so what the judge is shown and what the deterministic guard enforces cannot diverge.
+
+**Why shipping bounded source is safe.** `verifyAutoGrant` still **refuses a truncated script** ("partial content cannot be auto-granted"), so a `truncated: true` entry can never produce an auto-grant — it preserves the very Ask this change exists to avoid for scripts that fit. A new bullet in `typesafeJudgeInstructions` (inherited by `typesafeConcernInstructions`) tells the judge to judge a script's effects from its text as **untrusted data**, never to approve a `truncated: true` entry, and to name `truncated_or_unknown` — not `none` — when a plainly-executed script has NO entry.
+
+**Disclosure guards.** Entries are skipped for secret-material / sensitive paths (`redact.IsSensitiveFile` || `isSecretMaterialPath`); text passes through `redactFileText` with the `/mask` registry, exactly like `interpreter.source`; scope is enforced inside `resolveCustomScript` (`IsPathWithinAllowedRoots`); and an interpreter entrypoint already travelling in the `interpreter` block is not shipped twice.
+
+**Known fail-closed limitation.** A relative script path that only resolves after a top-level `cd` is resolved against the **pre-fold** working directory by `resolveCustomScript`, so it is usually omitted rather than mis-attributed.
+
+**Tests** — `internal/agent/permission_typesafe_script_test.go` (11, green): direct / shell-wrapper / `chmod`-then-run / relative / multi-script compounds, an oversized script marked `truncated`, a sensitive path omitted, non-script binaries and missing files omitted, interpreter source never double-shipped, and `TestTypesafeJudgeSourceDoesNotBypassTruncationGuard` (a truncated entry still fails `verifyAutoGrant`).
+
 ## Shell-variable expansion for the judges
 
 Neither judge can run anything, so a bash command built from variables (`MOD=$(go env GOMODCACHE); grep x "$MOD/y"`) was opaque: the judge could not tell where `"$MOD/y"` points, answered `truncated_or_unknown`, and deferred to the human. `expandBashForJudge` (`internal/agent/permission_shellvars.go`) resolves what it safely can before either judge sees the command:
@@ -117,13 +142,13 @@ Neither judge can run anything, so a bash command built from variables (`MOD=$(g
 The judges are separate model calls, so the main conversation's masking never reached them. With `/mask` on (`judgeMaskRegistry`, `internal/agent/redaction_helpers.go`):
 
 - **Arguments** are masked in chat mode (`redactText`), like the conversation. Tool args usually already carry OCSEC tokens: they are resolved back to raw values only in `executeToolCallWithContext`, after the permission check.
-- **Project context** and **interpreter source** (Jev) are masked in file mode (`redactFileText`: known formats only, no keyword/entropy heuristics).
+- **Project context**, **interpreter source** and **executed-script source** (`executed_scripts`) (Jev) are masked in file mode (`redactFileText`: known formats only, no keyword/entropy heuristics).
 - **Chat judge `read_file` results** are masked by the session `NetHook`, which `askPermissionModel` attaches to the per-request judge client.
 - Both rubrics tell the judge that `[[OCSEC:xxxxxx:N]]` is a masked secret, to be treated as the credential it stands for.
 
 `user_policy` is the user's own text and is sent as-is.
 
-Jev gets `expanded_command` and `resolved_variables` in its state plus a rubric line telling it to judge paths from the expanded form. The chat judge gets the same as an "Expanded command" section under `Arguments`. The expansion is judge context only: the command that runs is unchanged, and `verifyAutoGrant` still checks the original.
+Jev gets `expanded_command` and `resolved_variables` in its state plus a rubric line telling it to judge paths from the expanded form. The chat judge gets the same as an "Expanded command" section under `Arguments`. The expansion is judge context only: the command that runs is unchanged, and `verifyAutoGrant` still checks the original. Jev's state also carries `interpreter` source and `executed_scripts` (the source of scripts the command executes — see *Executed scripts ship their source* above).
 
 ## `cd` is resolved in Go, not by the judge (2026-09-30 amendment)
 

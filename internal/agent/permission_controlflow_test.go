@@ -256,3 +256,33 @@ func reqPrefix(dec PermissionDecision) string {
 	}
 	return dec.Request.Prefix
 }
+
+// An unlisted command head must not be reported as "(unknown command)": the
+// line described the first word of a whole compound command (`cd x && git log`),
+// and the judge read "unknown" as doubt.
+func TestExplainBashCommandIsSilentForUnlistedHeads(t *testing.T) {
+	for _, cmd := range []string{
+		"cd /tmp/x && git log --oneline -1 main",
+		"python3 /tmp/check.py 2>&1 | tail -5",
+		"FOO=1 make test",
+	} {
+		if got := explainBashCommand(cmd); got != "" {
+			t.Errorf("explainBashCommand(%q) = %q, want no description", cmd, got)
+		}
+	}
+	if got := explainBashCommand("git log --oneline -1 main"); !strings.Contains(got, "read-only") {
+		t.Errorf("a listed head must still be described, got %q", got)
+	}
+}
+
+func TestPermissionContextOmitsCommandAnalysisForUnlistedHeads(t *testing.T) {
+	a := NewAgent(nil, nil, &config.Config{}, nil)
+	args := json.RawMessage(`{"command":"cd /tmp/x && git log --oneline -1 main"}`)
+	ctx := a.buildPermissionContext("bash", args, 4096, 2, 80)
+	if strings.Contains(ctx, "Command analysis") || strings.Contains(ctx, "unknown command") {
+		t.Fatalf("context must not describe an unlisted head:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "Pre-authorized paths") {
+		t.Fatalf("context must still carry the scope boundary:\n%s", ctx)
+	}
+}

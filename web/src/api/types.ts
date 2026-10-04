@@ -1047,6 +1047,18 @@ export interface PermissionsResponse {
   bash_rules: PermissionRule[];
 }
 
+/** The three levels a bash prefix rule (or a tool rule) can carry. */
+export type PermissionLevelName = "allow" | "ask" | "deny";
+
+/** A staged change to the bash prefix rule set. Deliberately a DELTA: `set`
+ * carries added/changed rules, `remove` deleted keys. The server applies each
+ * entry with a targeted load-modify-write, so a rule another surface added
+ * between the editor's load and save is never clobbered. */
+export interface BashRulesDelta {
+  set?: Record<string, PermissionLevelName>;
+  remove?: string[];
+}
+
 /** The persisted default permission mode new TUI/web/RC sessions start in —
  * distinct from the live mode in PermissionsResponse. */
 export interface PermissionModeConfigResponse {

@@ -532,6 +532,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
 	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
 	s.mux.HandleFunc("POST /api/permissions/bash-rule", s.authMiddleware(s.handleSetBashRule))
+	// Batch delta write behind the Settings → Permissions rule editor. Same
+	// authMiddleware as its sibling: these endpoints mutate the live permission
+	// state of every agent, so they must never be reachable unauthenticated.
+	s.mux.HandleFunc("PUT /api/permissions/bash-rules", s.authMiddleware(s.handleSetBashRules))
 	s.mux.HandleFunc("POST /api/questions", s.authMiddleware(s.handleAnswerQuestion))
 	s.mux.HandleFunc("POST /api/questions/cancel", s.authMiddleware(s.handleDismissQuestion))
 	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
@@ -2277,6 +2281,9 @@ func (s *Server) handleSetAutoContinue(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetBashRule(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetBashRule(w, r)
+}
+func (s *Server) handleSetBashRules(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetBashRules(w, r)
 }
 func (s *Server) handleGetLimitsConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetLimitsConfig(w, r)

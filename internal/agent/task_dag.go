@@ -23,6 +23,7 @@ package agent
 // child.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -363,6 +364,18 @@ type dagScheduler struct {
 	// see already-masked text.
 	redact func(toolName, toolArgs, content string) string
 
+	// guard, when non-nil, vets the SAME content the redact hook just masked and
+	// returns either the original text or a PERMISSION_ASK sentinel. It is a
+	// separate field rather than being folded into redact because it has a
+	// different contract: redaction is a pure content transform, while the guard
+	// may emit a control-flow sentinel, and conflating them would make it
+	// ambiguous which one a failure belonged to. Order is load-bearing —
+	// redact, then guard — so what the judge reads is already masked.
+	guard func(ctx context.Context, toolName, toolArgs, content string) string
+
+	// ctx bounds the content-guardrail judge round trips for this DAG run.
+	ctx context.Context
+
 	// perNode stores the final per-node outcome; the caller reads it
 	// once we return and copies into the `results []Message` slice.
 	perNode []*dagNodeResult
@@ -391,13 +404,19 @@ type dagScheduler struct {
 // newDAGScheduler wires the parsed graph, the stop channel, and the
 // dispatch closure. It does not start any work — the caller invokes
 // `run`.
-func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn, redact func(toolName, toolArgs, content string) string) *dagScheduler {
+func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn, redact func(toolName, toolArgs, content string) string, guard ...func(ctx context.Context, toolName, toolArgs, content string) string) *dagScheduler {
+	var guardFn func(ctx context.Context, toolName, toolArgs, content string) string
+	if len(guard) > 0 {
+		guardFn = guard[0]
+	}
 	s := &dagScheduler{
 		parsed:      parsed,
 		stopCh:      stopCh,
 		isCancelled: isCancelled,
 		dispatch:    dispatch,
 		redact:      redact,
+		guard:       guardFn,
+		ctx:         contentGuardStepCtxCtx(stopCh),
 		perNode:     make([]*dagNodeResult, len(parsed.nodes)),
 		doneCh:      make(map[*dagNode]chan struct{}, len(parsed.nodes)),
 		failed:      make(map[*dagNode]bool, len(parsed.nodes)),
@@ -598,6 +617,13 @@ func (s *dagScheduler) run(groupBus *notebus.Bus, groupAgentIDs []string, groupT
 			// must only ever see already-masked text.
 			if s.redact != nil && err == nil {
 				result = s.redact(n.toolCall.Function.Name, n.toolCall.Function.Arguments, result)
+			}
+
+			// Vet AFTER redaction, so the judge never receives raw secrets.
+			// Skipped on error for the same reason redaction is: an error string
+			// is our own text, not remote content.
+			if s.guard != nil && err == nil {
+				result = s.guard(s.ctx, n.toolCall.Function.Name, n.toolCall.Function.Arguments, result)
 			}
 
 			// Store the (now-redacted) result and the error; the error-text
@@ -895,6 +921,7 @@ func runDAGFromValidated(
 	groupTracker *groupTracker,
 	dispatch dagDispatchFn,
 	redact func(toolName, toolArgs, content string) string,
+	guard ...func(ctx context.Context, toolName, toolArgs, content string) string,
 ) ([]Message, error) {
 	parsed, err := buildDAG(parallelCalls)
 	if err != nil {
@@ -908,7 +935,7 @@ func runDAGFromValidated(
 		// dropping the work.
 		return nil, fmt.Errorf("%sbatch passed the gate but contains no declared dependencies", errDAGValidationPrefix)
 	}
-	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, redact)
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, redact, guard...)
 	sched.run(groupBus, groupAgentIDs, groupTracker)
 	// parallelIdx is the position-to-result mapping: every entry is
 	// just `i` because the caller passed the parallel slice directly

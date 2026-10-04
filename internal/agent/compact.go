@@ -857,8 +857,6 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 	if client == nil {
 		return "", errors.New("compact: no summary client")
 	}
-	var lastErr error
-	malformed := ""
 	// Capping max_tokens explicitly (rather than leaving it unset) matters
 	// specifically for large-context summarisation: some OpenAI-compatible
 	// routers (e.g. opencode-go) default an omitted max_tokens to the
@@ -876,6 +874,20 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 		maxOutputTokens = compactSummaryMaxOutputTokensFallback
 	}
 	summaryCtx := context.WithValue(ctx, ctxKeyMaxTokens, int(maxOutputTokens))
+	return runSummaryCall(ctx, maxRetries, recordUsage, func() (*Message, error) {
+		if gc, ok := client.(*GenericClient); ok {
+			return gc.ChatWithContext(summaryCtx, []Message{{Role: "user", Content: prompt}}, nil)
+		}
+		return client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
+	})
+}
+
+// runSummaryCall owns the retry, validation and cancellation handling shared by
+// the batched summary (runSummary) and the inline summary (runInlineSummary);
+// call performs one summary request.
+func runSummaryCall(ctx context.Context, maxRetries int, recordUsage func(*Message), call func() (*Message, error)) (string, error) {
+	var lastErr error
+	malformed := ""
 	// +1 grants one dedicated retry when the only failure is a malformed
 	// (template-violating) summary, even with maxRetries=0.
 	maxAttempts := maxRetries + 1
@@ -892,13 +904,7 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 		}
 		done := make(chan summaryResult, 1)
 		crashguard.Go(func() {
-			var resp *Message
-			var err error
-			if gc, ok := client.(*GenericClient); ok {
-				resp, err = gc.ChatWithContext(summaryCtx, []Message{{Role: "user", Content: prompt}}, nil)
-			} else {
-				resp, err = client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
-			}
+			resp, err := call()
 			if err != nil {
 				done <- summaryResult{"", err}
 				return
@@ -1222,4 +1228,124 @@ type compactRuntime struct {
 	// conservative default ratio (see charsPerTokenFor).
 	Provider string
 	Model    string
+}
+
+// summaryTimeouts resolves the idle and first-token windows of one summary
+// request.
+func summaryTimeouts(rt compactRuntime) (idle, firstToken time.Duration) {
+	idle = time.Duration(rt.SummaryTimeoutSeconds) * time.Second
+	firstToken = time.Duration(rt.SummaryFirstTokenTimeoutSeconds) * time.Second
+	if firstToken <= 0 {
+		firstToken = idle
+	}
+	return idle, firstToken
+}
+
+// summaryWindowContext derives the per-request context of one summary call: a
+// fresh first-token/idle inactivity window under the operation context, reset
+// by stream deltas when the client can deliver them per call.
+func summaryWindowContext(parent context.Context, rt compactRuntime, perCallDeltas bool) (context.Context, context.CancelFunc) {
+	if rt.SummaryTimeoutSeconds <= 0 {
+		return context.WithCancel(parent)
+	}
+	idle, firstToken := summaryTimeouts(rt)
+	ctx, cancel, reset := inactivityContextWithParent(parent, idle, firstToken)
+	if perCallDeltas {
+		ctx = withDeltaCallback(ctx, func(string, string) { reset() })
+	}
+	return ctx, cancel
+}
+
+// inlineSummaryReserveTokens is the window headroom the inline summary needs
+// on top of the conversation and the main model's thinking budget. The summary
+// itself targets ~1500 tokens; the rest absorbs the instruction, a retry's
+// drift and the gap between the last provider reading and the current
+// transcript.
+const inlineSummaryReserveTokens = 16384
+
+// inlineSummaryInstruction is the user-role turn appended to the live
+// conversation. It follows compactionSystemPrompt and summaryTemplate.
+const inlineSummaryInstruction = "Stop working on the task and do not call any tools. " +
+	"The conversation segment is the ENTIRE conversation above this message. " +
+	"If it contains an earlier compaction summary, treat that as the <previous-summary> and update it. " +
+	"Respond now with ONLY the summary, starting with the \"## Original Request\" header and containing every template section in order."
+
+// runInlineSummary asks the main model for the compaction summary as the next
+// message of the conversation it is already holding: the request is the same
+// system prompt, tools and transcript a normal turn sends, plus one user-role
+// instruction, so the provider serves the whole prefix from its prompt cache
+// and the summary costs one call instead of one per batch.
+//
+// It always runs on the session's own model (a clone of the main client with
+// the same thinking budget, never compact.summary_model or the small model): a
+// different model or thinking setting cannot reuse the cached prefix, and a
+// summary model may not have the window for the whole conversation.
+//
+// ran is false, with a nil error, when the inline request is not possible:
+// the main client is not a *GenericClient, the registry does not know the
+// model's window or output cap, or the conversation leaves too little headroom.
+func (a *Agent) runInlineSummary(ctx context.Context, messages []Message, rt compactRuntime, focus string) (summary string, ran bool, err error) {
+	main, ok := a.client.(*GenericClient)
+	if !ok {
+		return "", false, nil
+	}
+	modelID := main.Provider + "/" + main.Model
+	maxOutput := int(ModelMaxOutputTokens(modelID))
+	if rt.WindowTokens <= 0 || maxOutput <= 0 {
+		a.emitDebug("COMPACT", fmt.Sprintf("inline summary skipped: %s window=%d max_output=%d unknown to the registry", modelID, rt.WindowTokens, maxOutput))
+		return "", false, nil
+	}
+	request := a.PrepareMessages(messages, "")
+	used := int(a.LastInputTokens())
+	if used <= 0 {
+		used = messagesTokens(request, charsPerTokenFor(rt.Provider, rt.Model))
+	}
+	headroom := rt.WindowTokens - used
+	if headroom < inlineSummaryReserveTokens+main.ThinkingBudget {
+		a.emitDebug("COMPACT", fmt.Sprintf("inline summary skipped: ~%d tokens used of window=%d leaves %d headroom", used, rt.WindowTokens, headroom))
+		return "", false, nil
+	}
+	if maxOutput > headroom {
+		maxOutput = headroom
+	}
+
+	var instruction strings.Builder
+	instruction.WriteString(compactionSystemPrompt)
+	instruction.WriteString("\n\n")
+	instruction.WriteString(summaryTemplate)
+	instruction.WriteString("\n\n")
+	if f := strings.TrimSpace(focus); f != "" {
+		fmt.Fprintf(&instruction, "The user asked this compaction to pay particular attention to: %s\n\n", f)
+	}
+	instruction.WriteString(inlineSummaryInstruction)
+	request = append(request[:len(request):len(request)], Message{Role: "user", Content: instruction.String()})
+	toolDefs := a.GetToolDefinitions()
+
+	client, ok := a.mainClientClone(main.ThinkingBudget).(*GenericClient)
+	if !ok {
+		return "", false, errors.New("compact: main client clone is not a GenericClient")
+	}
+	callCtx, cancel := summaryWindowContext(ctx, rt, true)
+	defer cancel()
+	callCtx = context.WithValue(callCtx, ctxKeyMaxTokens, maxOutput)
+	a.emitDebug("COMPACT", fmt.Sprintf("inline summary on %s: %d msgs, ~%d tokens used of window=%d, max_tokens=%d", modelID, len(request), used, rt.WindowTokens, maxOutput))
+	started := time.Now()
+	usage := "usage not reported"
+	summary, err = runSummaryCall(callCtx, rt.SummaryMaxRetries, func(resp *Message) {
+		a.RecordSideUsageFromMessage(resp)
+		if u := resp.Usage; u != nil && u.PromptTokens != nil && u.CompletionTokens != nil {
+			cached := int64(0)
+			if u.CacheReadTokens != nil {
+				cached = *u.CacheReadTokens
+			}
+			usage = fmt.Sprintf("prompt=%d cached=%d completion=%d", *u.PromptTokens, cached, *u.CompletionTokens)
+		}
+	}, func() (*Message, error) {
+		return client.ChatWithContext(callCtx, request, toolDefs)
+	})
+	if err != nil {
+		return "", true, err
+	}
+	a.emitDebug("COMPACT", fmt.Sprintf("inline summary done in %s: %d chars, %s", time.Since(started).Round(time.Millisecond), len(summary), usage))
+	return summary, true, nil
 }

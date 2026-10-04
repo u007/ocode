@@ -95,7 +95,11 @@ func NewAPIProxy(apiURL string, remoteToken string, onError func(error)) (*httpu
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("remote proxy: %s %s: %v", r.Method, r.URL.Path, err)
-		if onError != nil {
+		// A cancelled request context means the CALLER went away (browser
+		// reload, tab close), not that the remote is unreachable. onError
+		// drops the whole host connection, so firing it here would tear a
+		// healthy tunnel down under every other in-flight request.
+		if onError != nil && r.Context().Err() == nil {
 			onError(err)
 		}
 		http.Error(w, "Remote server unreachable", http.StatusBadGateway)
