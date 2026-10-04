@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -56,6 +57,77 @@ func (m *model) startQuestionPrompt(toolCallID string, prompts []tool.QuestionPr
 	}
 	m.questionInput.Reset()
 	m.layout() // shrink the transcript viewport to make room for the dialog
+}
+
+// ── question-ask queue ────────────────────────────────────────────────────────
+//
+// Deliberately the same shape as the permission-ask queue in model.go
+// (permAskQueue / queuedPermAsk): one slice on the model, an enqueue-or-show
+// helper, and a single promotion site. It is not folded into a shared generic
+// type because the two slots carry different payloads (a sub-agent response
+// channel vs an /rc bridge slot) and, more importantly, drain differently: a
+// permission answer hands its replacement command back to the caller, whereas a
+// question answer resumes the agent from inside submitQuestionAnswers. Sharing
+// the container would hide that asymmetry rather than remove code.
+//
+// A question prompt and a permission ask are two independent FIFOs. They do NOT
+// block each other: whichever arrives first takes the dialog, and the other
+// queues in its own queue. Round order within one batch is preserved because the
+// agent hands results to OnMessage in tool-call order.
+
+// questionAskSlotBusy reports whether the question dialog can take the screen.
+// rcPendingQuestion is included because an /rc-owned prompt occupies the same
+// slot, and showPermDialog because a permission ask shares that single screen
+// slot (see permAskSlotBusy) — two simultaneously-open modal dialogs is a TUI
+// layout corruption, not a cosmetic overlap.
+func (m *model) questionAskSlotBusy() bool {
+	return m.showQuestionDialog || m.rcPendingQuestion != nil || m.showPermDialog
+}
+
+// showQuestionAsk loads one prompt into the dialog slot and opens the dialog.
+func (m *model) showQuestionAsk(q queuedQuestionAsk) {
+	m.startQuestionPrompt(q.toolCallID, q.prompts)
+	if q.rc != nil {
+		m.rcPendingQuestion = q.rc
+	}
+}
+
+// enqueueQuestionAsk records a newly arrived prompt. When the dialog slot is free
+// the prompt is shown immediately; otherwise it joins the back of
+// questionAskQueue and is promoted once the current prompt is answered or
+// dismissed. Callers append their own transcript line either way.
+func (m *model) enqueueQuestionAsk(q queuedQuestionAsk) {
+	if !m.questionAskSlotBusy() {
+		m.showQuestionAsk(q)
+		return
+	}
+	log.Printf("[question] prompt dialog busy; queued tool_call_id=%s headers=%d (depth=%d)",
+		q.toolCallID, len(q.prompts), len(m.questionAskQueue)+1)
+	m.questionAskQueue = append(m.questionAskQueue, q)
+}
+
+// promoteNextQuestionAsk moves the oldest queued prompt into the dialog slot,
+// which the caller must have just freed. Returns false when nothing was waiting.
+func (m *model) promoteNextQuestionAsk() bool {
+	if len(m.questionAskQueue) == 0 {
+		return false
+	}
+	q := m.questionAskQueue[0]
+	m.questionAskQueue = m.questionAskQueue[1:]
+	log.Printf("[question] promoting queued prompt tool_call_id=%s (remaining=%d)", q.toolCallID, len(m.questionAskQueue))
+	m.showQuestionAsk(q)
+	m.renderTranscript()
+	m.rerenderTranscriptAndMaybeScroll()
+	return true
+}
+
+// clearQuestionAskState drops the dialog and every queued prompt. Called wherever
+// the transcript is rebuilt from a different session (session load, /new, an /rc
+// rewind): a prompt names a tool call in the round that produced it, so keeping
+// it would collect an answer against a transcript that no longer holds that call.
+func (m *model) clearQuestionAskState() {
+	m.questionAskQueue = nil
+	m.clearQuestionPrompt()
 }
 
 func (m *model) renderQuestionDialog(width int) string {
@@ -148,7 +220,6 @@ func (m *model) renderQuestionDialog(width int) string {
 	}
 	body.WriteString(submitStyle.Render(submitCursor + "[Submit]"))
 
-
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(body.String())
 }
 
@@ -185,6 +256,7 @@ func (m model) handleQuestionKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (te
 	switch keyStr {
 	case "esc":
 		m.clearQuestionPrompt()
+		m.promoteNextQueuedAsk()
 		return m, nil
 	case "left", "h":
 		m.questionTab = (m.questionTab - 1 + len(m.questionPrompts)) % len(m.questionPrompts)
@@ -380,6 +452,12 @@ func (m model) submitQuestionAnswers() (tea.Model, tea.Cmd) {
 	m.renderTranscript()
 	m.viewport.GotoBottom()
 	m.saveSession()
+	if m.promoteNextQueuedAsk() {
+		// Another ask from the same round still needs an answer. Hold the turn:
+		// resuming now would strip the remaining sentinels in
+		// buildAgentMessagesSnapshot and turn them into orphan re-executions.
+		return m, nil
+	}
 	if m.agent == nil {
 		return m, nil
 	}

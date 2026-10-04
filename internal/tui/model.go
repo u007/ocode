@@ -122,6 +122,25 @@ type queuedPermAsk struct {
 	subResp chan agent.PermissionResponse
 }
 
+// queuedQuestionAsk is one question prompt waiting for its turn in the dialog.
+//
+// Same defect class as queuedPermAsk, and for the same reason: one assistant
+// message can carry TWO `question` tool calls, Step collects the whole round's
+// results and hands each to OnMessage in order, so both QUESTION_PROMPT: tool
+// messages arrive back-to-back in one frame. The dialog slot holds one prompt,
+// so the second overwrote the first and the earlier question was never shown
+// while its prompt sat in the transcript.
+//
+// Unlike the permission case this needs no parallel batch: `question` is
+// Parallel() == false, and a single message with two question calls is enough.
+type queuedQuestionAsk struct {
+	toolCallID string
+	prompts    []tool.QuestionPrompt
+	// rc is non-nil when this prompt is owned by the /rc bridge (a web/Telegram
+	// remote answer), and must be restored alongside the dialog slot.
+	rc *rcPendingQuestion
+}
+
 type scrollbarDragTarget int
 
 const (
@@ -1482,7 +1501,8 @@ type model struct {
 	pendingToolArgs          json.RawMessage
 	pendingToolCallID        string
 	pendingPermission        agent.PermissionRequest
-	permAskQueue             []queuedPermAsk // permission asks waiting for the dialog, in arrival order (see queuedPermAsk)
+	permAskQueue             []queuedPermAsk     // permission asks waiting for the dialog, in arrival order (see queuedPermAsk)
+	questionAskQueue         []queuedQuestionAsk // question prompts waiting for the dialog, in arrival order (see queuedQuestionAsk)
 	styles                   Styles
 	modalStack               *ModalStack
 	streaming                bool
@@ -4034,6 +4054,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !stop && m.showPermDialog {
 				stop = true
 			}
+			// Same hold for an unanswered question prompt: the agent strips every
+			// QUESTION_PROMPT sentinel in buildAgentMessagesSnapshot, so re-stepping
+			// with one outstanding turns it into an orphan re-execution.
+			if !stop && m.showQuestionDialog {
+				stop = true
+			}
 			if !stop {
 				return m, m.askAgent()
 			}
@@ -5048,6 +5074,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// as pending. No agent Step runs — the user's next message
 				// starts a fresh turn, mirroring Esc on the local dialog.
 				m.clearQuestionPrompt()
+				m.promoteNextQueuedAsk()
 				if idx := m.findToolMessageIndexByToolID(res.RequestID); idx >= 0 {
 					if m.messages[idx].raw != nil {
 						m.messages[idx].raw.Content = tool.QuestionDismissedResult
@@ -11324,6 +11351,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
 			m.clearPermAskState()
+			m.clearQuestionAskState()
 			m.resetTranscriptWindow()
 			m.streamingThinkingIdx = -1
 			roleCounts := map[string]int{}
@@ -11721,6 +11749,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 
 	m.messages = []message{}
 	m.clearPermAskState()
+	m.clearQuestionAskState()
 	m.invalidateDelayedChatInput()
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
@@ -14786,6 +14815,9 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				m.messages = append(m.messages, message{role: roleAssistant, text: renderPermissionPrompt(req), raw: &copyMsg})
 			}
 		} else if prompts, ok := parseQuestionPrompt(am.Content); ok {
+			// rcAsk travels with the prompt through the queue instead of being
+			// written straight into m.rcPendingQuestion, which holds exactly one.
+			var rcAsk *rcPendingQuestion
 			// Surface the question to any external client via the SSE stream.
 			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
 				ev := server.QuestionEvent{RequestID: am.ToolID, Questions: prompts}
@@ -14796,15 +14828,23 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				// Also surface it to the web /rc UI (mirror SSE) so it can
 				// render the same inline question dialog.
 				m.broadcastRC("question", ev)
-				m.rcPendingQuestion = &rcPendingQuestion{requestID: am.ToolID, questions: prompts}
+				rcAsk = &rcPendingQuestion{requestID: am.ToolID, questions: prompts}
 			}
 			// Telegram: pause for the remote answer; do not open the local dialog.
 			if m.pendingRC != nil && m.pendingRC.RemoteApproval && m.pendingRC.StreamCh != nil {
+				// The remote client owns this prompt, so it stays in the slot rather
+				// than going through the local queue.
+				m.rcPendingQuestion = rcAsk
 				m.messages = append(m.messages, message{role: roleAssistant, text: "❓ Question sent to Telegram.", raw: &copyMsg})
 				m.rerenderTranscriptAndMaybeScroll()
 				return
 			}
-			m.startQuestionPrompt(am.ToolID, prompts)
+			// A round can raise several prompts: enqueueQuestionAsk shows this one
+			// only if the dialog slot is free, and otherwise queues it in arrival
+			// order. Calling startQuestionPrompt unconditionally (the old shape) made
+			// the last prompt of the batch silently replace every earlier one — and
+			// the /rc slot had the same single-slot overwrite.
+			m.enqueueQuestionAsk(queuedQuestionAsk{toolCallID: am.ToolID, prompts: prompts, rc: rcAsk})
 			m.messages = append(m.messages, message{role: roleAssistant, text: renderQuestionTranscriptNotice(prompts), raw: &copyMsg})
 		} else {
 			toolName := m.lookupToolName(am.ToolID)
@@ -14912,12 +14952,47 @@ func (m *model) recordUsage(am agent.Message) {
 	})
 }
 
-// permAskSlotBusy reports whether the single permission dialog slot is already
-// holding an ask. pendingSubAgentResp is included because a sub-agent dialog
-// occupies the same slot: leaving it out would let a main-agent sentinel stamp
-// over the request whose respCh is still parked.
+// permAskSlotBusy reports whether the permission dialog can take the screen.
+// pendingSubAgentResp is included because a sub-agent dialog occupies the same
+// slot: leaving it out would let a main-agent sentinel stamp over the request
+// whose respCh is still parked. showQuestionDialog is included because a question
+// prompt and a permission ask share ONE screen slot — two simultaneously-open
+// modal dialogs is a TUI layout corruption, not a cosmetic overlap.
 func (m *model) permAskSlotBusy() bool {
-	return m.showPermDialog || m.pendingSubAgentResp != nil
+	return m.showPermDialog || m.pendingSubAgentResp != nil || m.showQuestionDialog
+}
+
+// promoteNextQueuedAsk hands the screen to the next waiting ask of EITHER kind,
+// and reports whether one was promoted. Every terminal answer path calls this,
+// so a mixed round (a permission ask plus a question prompt) never strands the
+// second item behind a closed dialog.
+//
+// Permission asks are drained first: a permission decision gates whether a tool
+// runs at all, so it is the more urgent thing to put in front of the user. Each
+// queue still preserves its own arrival order.
+func (m *model) promoteNextQueuedAsk() bool {
+	if m.promoteNextPermAsk() {
+		return true
+	}
+	if m.promoteNextQuestionAsk() {
+		// A question now owns the screen, so the answered permission ask's slot
+		// must not linger: pendingToolCallID is what executeApprovedTool and
+		// permissionDeniedToolResult key on, and a stale value left behind by a
+		// cross-kind promotion would let any later handlePermissionChoice
+		// resolve against a dead tool call. The reverse direction needs no
+		// equivalent, because each kind's own drain path already cleared its own
+		// slot before we got here.
+		m.clearPendingPermAskSlot()
+		return true
+	}
+	return false
+}
+
+// anyAskPending reports whether anything at all is waiting on the user, across
+// both ask kinds. The turn may only resume when this is false.
+func (m *model) anyAskPending() bool {
+	return len(m.permAskQueue) > 0 || len(m.questionAskQueue) > 0 ||
+		m.showPermDialog || m.pendingSubAgentResp != nil || m.showQuestionDialog
 }
 
 // showPermAsk loads one ask into the dialog slot and opens the dialog. It is the
@@ -15257,7 +15332,7 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 // path from double-promoting.
 func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 	cmd, terminal := m.answerPermAsk(choice)
-	if terminal && !m.promoteNextPermAsk() {
+	if terminal && !m.promoteNextQueuedAsk() {
 		// Nothing left waiting: leave no half-populated slot behind.
 		m.clearPendingPermAskSlot()
 	}
@@ -16196,6 +16271,7 @@ func (m *model) commitRCRequestRewind(req server.RCRequest) (int, error) {
 	// appendAgentMessage, which would double-record usage and may re-request a
 	// title for already-seen rows.
 	m.clearPermAskState()
+	m.clearQuestionAskState()
 	m.messages = nil
 	for _, am := range result.KeptPrefix {
 		copyMsg := am
@@ -16633,6 +16709,10 @@ func (m *model) submitRCQuestionAnswers(requestID string, questions []tool.Quest
 		raw:  &toolMsg,
 	})
 	m.saveSession()
+	if m.promoteNextQueuedAsk() {
+		// Promoted an ask that still needs an answer — hold the turn.
+		return nil
+	}
 	if m.agent == nil {
 		return nil
 	}

@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-10-04 — The `question` prompt queues too, and both ask kinds now share one screen slot
+
+- **The question prompt had the same defect as the permission dialog, and it was
+  worse in one respect: it needed no parallel batch.** `question` is
+  `Parallel() == false`, but a single assistant message carrying TWO `question`
+  tool calls is enough — `Step` collects the whole round's results and hands each
+  to `OnMessage` in order, so both `QUESTION_PROMPT:` tool messages arrive
+  back-to-back in one frame. `appendAgentMessage`'s `parseQuestionPrompt` branch
+  then called `startQuestionPrompt` unconditionally, so the second prompt
+  replaced the first and the earlier question was **never shown** while its prompt
+  sat in the transcript. `m.rcPendingQuestion` was a second, independent
+  single-slot overwrite on the same branch.
+- **`questionAskQueue` / `queuedQuestionAsk` mirror the permission queue.** Each
+  entry keeps its own tool-call id, prompt list and `/rc` slot, so a promoted
+  prompt resolves against the call it was raised for. Dismissing with Esc
+  advances the queue too — it is terminal for that prompt even though it does not
+  resume the turn — otherwise the rest of the round was stranded behind a closed
+  dialog.
+- **The turn is now held for an unanswered question prompt**, for the same reason
+  as for a permission ask: the agent strips every `QUESTION_PROMPT` sentinel in
+  `buildAgentMessagesSnapshot`, so re-stepping with one outstanding turns it into
+  an orphan that `recoverOrphanedToolCalls` re-executes — a duplicate question
+  the user never chose.
+- **Both ask kinds now share ONE screen slot, and answering either advances the
+  other.** This was the real design gap, and two tests caught it: while wiring
+  the second queue it was possible to have a permission dialog and a question
+  dialog open *simultaneously*, which is a TUI layout corruption rather than a
+  cosmetic overlap. Both slot-busy predicates now account for the other dialog,
+  and `promoteNextQueuedAsk` hands the screen to the next waiting ask of either
+  kind. Permission asks are drained first — a permission decision gates whether a
+  tool runs at all — while each queue keeps its own arrival order.
+- **A cross-kind promotion also clears the outgoing slot.** When a question took
+  the screen after a permission answer, the answered ask's `pendingToolCallID`
+  lingered; that is the field `executeApprovedTool` and
+  `permissionDeniedToolResult` key on, so a stray `handlePermissionChoice` could
+  have resolved against a dead tool call.
+- **The web/desktop app still drops the first question.** `QUESTION_REQUEST` in
+  `chatStore.tsx` keeps a single `pendingQuestion` (newest wins) while
+  `PERMISSION_REQUEST` already queues into `permissionQueue`. It needs its own
+  change because of the reopenable-dialog contract (`QUESTION_HIDE` /
+  `QUESTION_SHOW`, `hiddenQuestionRequestId`) — a queue must not resurrect a
+  locally hidden prompt. Recorded in `TODO.md`.
+- Tests: `internal/tui/question_ask_queue_test.go` (7 cases, including both
+  cross-kind orderings). Mutation-verified — **10/10** mutants caught, each
+  confirmed to compile first.
+
 ## 2026-10-04 — A second permission ask no longer replaces the first in the TUI
 
 - **One assistant message could raise two permission asks, and the TUI showed
@@ -91,8 +137,9 @@
   server can serve it mid-turn without writing to the transcript, which is
   documented at the definition.
 - Tests: `internal/server/handler_btw_test.go` (injects mid-turn with the
-  transcript unchanged; still appends when idle; unknown session still 404) and
-  `web/src/lib/instantCommands.test.ts` +
+  transcript unchanged; still appends when idle; unknown session still 404; the
+  injection emits the `user_message` frame a connected browser needs to show the
+  aside) and `web/src/lib/instantCommands.test.ts` +
   `web/src/components/Chat/ChatInput.instantCommands.test.tsx` (runs during
   streaming, a pending permission, and the interrupt barrier; still queues during
   compaction; leaves other commands queued).
