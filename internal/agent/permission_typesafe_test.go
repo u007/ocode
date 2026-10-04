@@ -301,9 +301,9 @@ func TestPermissionJudgeLog_RecordsOutcomeEndToEnd(t *testing.T) {
 				t.Errorf("outcome = %q, want %q", recs[0].Outcome, tc.outcome)
 			}
 			// Provider-qualified: the judges label with deciderLabel(client) rather than the
-		// bare model name, so a second decision backend is distinguishable in the
-		// log without having to know which slot produced the record.
-		if recs[0].Model != "typesafe/jev-latest" || recs[0].Tool != "bash" {
+			// bare model name, so a second decision backend is distinguishable in the
+			// log without having to know which slot produced the record.
+			if recs[0].Model != "typesafe/jev-latest" || recs[0].Tool != "bash" {
 				t.Errorf("record lost model/tool: %+v", recs[0])
 			}
 		})

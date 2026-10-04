@@ -31,10 +31,16 @@ import type { Message, PulseStatus } from "../../api/types";
  * disabled — cannot write into the new card's state.
  */
 
-/** Lines kept. Enough to see the shape of the answer, few enough to stay a
- *  preview rather than a transcript. Sized to the height PulseCard reserves for
- *  its on-card stream (CARD_MIN_H) — going higher would just be clipped there,
- *  going lower would leave the reserved region empty. */
+/** Logical lines kept. Enough to see the shape of the answer, few enough to stay a
+ *  preview rather than a transcript.
+ *
+ *  These are lines of the STREAM TEXT (newline-delimited), not lines of screen.
+ *  On the card they soft-wrap, so one of these can fill several screen lines and
+ *  PULSE_TAIL_LINES no longer has to equal the reserved height — anything past
+ *  what the box holds overflows out of the top and is clipped. The cap still
+ *  bounds the buffer and the DOM, which is what it is for; the height budget is
+ *  PulseCard's `CARD_MIN_H`. In the overlay each of these is exactly one
+ *  truncated screen line, so there the count still is the visible height. */
 export const PULSE_TAIL_LINES = 7;
 
 /**

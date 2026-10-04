@@ -12,16 +12,10 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-10-02T02:57:55Z
+timestamp: 2026-10-04T12:33:27Z
 ---
 # Auto-Permission Enforced Categories
 
-**Type:** Concept  
-**Description:** 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, and the opaque-floor override for truncated_or_unknown.'  
-**Resource:** internal/agent/permission_typesafe.go  
-**Tags:** permissions, auto-permission, typesafe, jev, config, settings, web, interpreter  
-
----
 ## Decision
 
 Users can switch off individual concern categories that the LLM auto-permission judge **and the interpreter-effect verifier** must enforce. The control lives in **Web Settings → Permissions → "Categories the judge must enforce"** (`web/src/components/Settings/PermissionsForm.tsx`); all categories are ticked (enforced) by default.
@@ -54,7 +48,7 @@ The closed set is `typesafeConcerns` in `internal/agent/permission_typesafe.go` 
 
 The relaxed keys are rendered after the base rules on every judge path, so the user's opt-out outranks the shipping policy (which hard-codes e.g. "deny when a credential appears").
 
-- **Jev / TypeSafe path** (`askPermissionModelTypesafe`): the relaxed clause is appended to **both** the verdict and the concern question instructions (`relaxedConcernsClause`), and mirrored into `state["relaxed_concerns"]`. Deterministically, a **DENY whose single named concern is in the relaxed set is converted to an allow**, logged `tier=auto_typesafe_relaxed`. A deny that names `none`, nothing, or a still-enforced category is **not attributable and stands** (fail closed). Because the clause is appended after the bundled addendum, it wins over the shipping policy.
+- **Decision-backend path** (`askPermissionModelTypesafe`): the relaxed clause is appended to **both** the verdict and the concern question instructions (`relaxedConcernsClause`), and mirrored into `state["relaxed_concerns"]`. Deterministically, a **DENY whose single named concern is in the relaxed set is converted to an allow**, logged `tier=auto_typesafe_relaxed`. A deny that names `none`, nothing, or a still-enforced category is **not attributable and stands** (fail closed). Because the clause is appended after the bundled addendum, it wins over the shipping policy.
 - **Chat judge path** (`askPermissionModel`): instruction-only, as a per-request section ("Relaxed concern categories") placed next to the banned-prefix facts. The chat verdict carries **no category**, so a chat-judge deny cannot be attributed to an opted-out class and **stands**. (Unchanged — still instruction-only.)
 - **Interpreter-effect path** (`askPermissionModelInterpreter` / `verifyInterpreterEffects` in `internal/agent/permission_interpreter.go`): `verifyInterpreterEffects` is a thin wrapper — `return a.verifyInterpreterEffectsWith(..., a.relaxedConcernSet())`. The new `verifyInterpreterEffectsWith(..., relaxed map[string]bool)` holds the gates; the pre-existing call sites and tests are unchanged, and `relaxed == nil` means **everything enforced** (that nil form is also used to ask "would this have passed strictly?"). A relaxation-load-bearing allow — one that *needed* an opt-out to pass — is granted for the invocation only and logged `tier=auto_interp_relaxed_allow`; a durable `interpreter_exact` grant is persisted **only** when the same response would also have passed strictly, so re-ticking a category takes effect on the next invocation instead of being shadowed by a saved grant.
 
@@ -88,7 +82,7 @@ Several categories carry a UI `note` (from `relaxableConcernNotes`, kept next to
 | `system_or_git_history` | Relaxes what reached the judge; hard-blocked git forms and a force-push never get here at all. |
 | `truncated_or_unknown` | Allows a call even when the judge cannot tell what it does, including interpreter sources with unresolved effects or truncated source. |
 
-## Opaque floor (TypeSafe/Jev path)
+## Opaque floor (decision-backend path)
 
 Some requests are **opaque**: the command head is something the model cannot determine the effect of — a command whose first token is an undefined shell variable (e.g. `$g --version`), an interpreter script whose source cannot be read, or any other call whose effects cannot be determined. When `askPermissionModelTypesafe` returns a concern of `truncated_or_unknown` for such a request, the confidence floor for an `allow` verdict changes.
 
@@ -242,3 +236,24 @@ A single new bullet was added to the `typesafeJudgeInstructions` raw-string gate
 - `TestTypesafeEnvironmentCarveOutIsInVerdictRubric` — asserts the clause is in the **verdict** rubric (not only the concern rubric, since the verdict answer is the one gated by the floor) and that the raw string contains no backtick.
 
 **Prose mirror.** The rubric's prose copy gained a parallel bullet right after the `.env`/psql carve-out: `skills/ocode-permissions/SKILL.md` (the source; the `Makefile` copies `skills/` into `cmd/ocode-desktop/embedded-assets/skills/` at build time, and that mirrored copy carries the same bullet).
+
+## Amendment (2026-10-04): The permission judge resolves through `resolveDecider(slotPermission)`
+
+The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:229`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:112`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
+
+`isTypesafeModel` was **deleted** from `internal/agent/permission_typesafe.go`. It tested a literal `typesafe/` prefix and had exactly one caller — `consultPermissionModel`'s decision-model gate — which now uses `isDecisionModel` (`internal/agent/decider.go:214`) instead. `isDecisionModel` is the single place that decides which provider/model ids route to a decision backend, so a new decision provider is taught there once.
+
+The fail-open contract, the confidence floors, and the opaque-floor override are unchanged. The **deterministic Go safety boundary did change** — see the amendment below.
+
+## Amendment (2026-10-04): `rm` inside the allowed roots is in scope; the boundary refuses the rest
+
+`dangerousRmReason` (`internal/agent/permissions.go`) — the pre-existing "does this `rm` destroy something it must not?" check — gained four refusals so the boundary agrees with what the rubric now tells the judge:
+
+- **Glob / variable / substitution targets are refused outright.** A target containing any of `*?[]{}$\`~` has no single path to scope-check; the shell decides the real targets, so the judge's "inside the roots" reading cannot be verified. Refused rather than guessed (`rm -rf build/*`, `rm -rf $DIR`).
+- **The project directory, or any parent of it, is refused.** Deleting *inside* the workdir is ordinary development; deleting the workdir itself is not something a judge's word or a prefix rule should grant.
+- **An allowed root itself is refused** — deleting a whole configured root is a different act from deleting a file inside one.
+- **Anything under `.git` is refused**, matched per path component *below the owning root only*, so a project that merely happens to be checked out under a directory named `.git` is still deletable. Comparison is `strings.EqualFold`, so `.GIT` on a case-insensitive filesystem is caught too.
+
+Path handling: `canonicalPath` (`filepath.Clean` + `filepath.EvalSymlinks`, resolving through the nearest existing ancestor so a not-yet-created target is judged by where it WOULD live) and `pathsEqual` (case-insensitive on darwin/windows) mean neither a symlink nor a spelling difference slips past. `pathUnder` treats `/` explicitly, because `parent + sep` would be `//` and match nothing.
+
+**Tests:** `internal/agent/rm_guard_paths_test.go`, plus the `TestPermissions_*` cases in `permission_overwrites_test.go`.

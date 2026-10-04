@@ -32,7 +32,9 @@ import type { PulseRow, PulseStatus, PulseTodoState } from "../../api/types";
  * entire reason to open this dashboard, and making the user hover every card
  * to learn what it is doing inverts that. The stream renders in exactly ONE
  * place per card — the overlay for every other status — so the same lines are
- * never on screen twice and `pulse-tail` stays unique.
+ * never on screen twice and `pulse-tail` stays unique. The on-card stream
+ * SOFT-WRAPS inside its reserved height; the overlay's truncates, because
+ * only the card has a fixed box to fill.
  *
  * Settled rows keep the hover-only preview deliberately: seeding one costs a
  * 200-message transcript fetch, on a dashboard that pages up to 50 rows. Live
@@ -73,14 +75,34 @@ const STREAM_ON_CARD: ReadonlySet<PulseStatus> = new Set<PulseStatus>([
 /**
  * Reserved height for the on-card stream.
  *
- * This has to be the FLOOR, not a hint: with `min-h` smaller than the content,
- * the content governs and a card grows from 224px to 240px as tail lines arrive
- * — which reflows the whole grid row on every streaming delta. Measured in
- * headless Chromium against the built CSS, a full card (status row, title,
- * task, todo bar) plus the full PULSE_TAIL_LINES-line preview is 240.5px, so
- * 16rem leaves ~15px of slack and the height is genuinely constant.
+ * The FLOOR (below) alone is not a height budget, and mistaking it for one is
+ * what lets the card grow: `min-h` sets a minimum, so content still governs
+ * above it, and a `flex-1` child of an auto-height column is sized from its own
+ * content — `flex-basis: 0%` does not cap it. With per-line truncation the
+ * content was self-limiting (7 entries × 1 line box ≈ 120px), so the floor held
+ * in practice; measured in headless Chromium against the built CSS, a full card
+ * (status row, title, task, todo bar) plus that preview is 240.5px, so 16rem
+ * leaves ~15px of slack.
+ *
+ * Now that the stream WRAPS, that self-limiting property is gone — a long turn
+ * is thousands of soft-wrapped lines — so the budget has to be explicit
+ * (`STREAM_MAX_H` on the region). It is sized to what the truncated layout was
+ * implicitly spending: 7 lines at the measured 16.5px line-height plus the 2px
+ * `gap-0.5` between them = 127.5px, i.e. 8rem. Measured with a 250-line stream,
+ * the capped card is byte-for-byte the height of the truncated one, and the
+ * excess is clipped at the TOP so the newest text stays visible.
  */
 const CARD_MIN_H = "min-h-[16rem]";
+
+/**
+ * Hard ceiling for the on-card stream, and the thing that actually makes the
+ * card height constant. See CARD_MIN_H: the floor alone never did that.
+ *
+ * 8rem = 128px = PULSE_TAIL_LINES at the built 16.5px line-height + the 2px
+ * gaps. It must be re-derived from that measurement if the tail font size or
+ * the gap changes; it is a layout constant, not a guess.
+ */
+const STREAM_MAX_H = "max-h-[8rem]";
 
 const STATUS_META: Record<PulseStatus, { glyph: string; label: string; className: string }> = {
   needs_permission: { glyph: "◆", label: "needs permission", className: "text-amber-400" },
@@ -129,15 +151,52 @@ function formatAgo(iso: string, now: number): string {
  * laid out on the card for a live row and in the overlay for every other
  * status. Rendering both at once would duplicate the lines on screen and make
  * `pulse-tail` ambiguous to the tests.
+ *
+ * `wrap` is the whole difference between the two call sites, and it is not
+ * cosmetic. On the card the block sits in a FIXED-height reserved region, so
+ * each entry soft-wraps and fills the space the card already reserves — model
+ * prose carries no newlines, so truncating per entry left a running card
+ * showing a single clipped line in seven lines of space. In the overlay there
+ * is no height budget, so the same text would balloon the panel into a
+ * page-height box; there each entry stays one truncated line.
+ *
+ * The wrapping variant deliberately carries NO `min-h-0` and no `shrink-0` on
+ * its entries, and that absence is the load-bearing detail rather than an
+ * oversight: an entry is a flex item of this block, so its AUTOMATIC minimum
+ * size is its min-content height and it cannot be compressed to fit. Combined
+ * with `justify-end` + `overflow-hidden` on the block, an over-tall entry
+ * overflows out of the TOP, where the clip discards it, leaving the newest line
+ * flush with the bottom edge. Give an entry `min-h-0` (or make this a block
+ * container) and the excess overflows the bottom instead — the clip then hides
+ * the very text being streamed. Measured in headless Chromium: the drop is
+ * invisible until an entry carries `min-h-0`, at which point the newest line
+ * sits ~2000px below the visible region. `PulseCard.test.tsx` pins the absence.
  */
-function PulseStream({ tail, className }: { tail: PulseTail; className?: string }) {
+function PulseStream({
+  tail,
+  className,
+  wrap = false,
+}: {
+  tail: PulseTail;
+  className?: string;
+  wrap?: boolean;
+}) {
   return (
-    <div data-testid="pulse-tail" className={cn("flex flex-col gap-0.5", className)}>
+    <div
+      data-testid="pulse-tail"
+      className={cn("flex flex-col gap-0.5", wrap && "whitespace-pre-wrap break-words", className)}
+    >
       {tail.error ? (
         <span className="text-[11px] text-destructive">{tail.error}</span>
       ) : (
         tail.lines.map((line, i) => (
-          <div key={`${i}-${line}`} className="truncate font-mono text-[11px] text-muted-foreground">
+          <div
+            key={`${i}-${line}`}
+            className={cn(
+              "font-mono text-[11px] text-muted-foreground",
+              wrap ? undefined : "truncate",
+            )}
+          >
             {line}
           </div>
         ))
@@ -355,15 +414,20 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
                 </span>
               </div>
             )}
-            {/* The reserved live region. flex-1 + justify-end pins the newest
-                line to the bottom edge, nearest the eye, the way a terminal
-                tail reads. min-h-0 lets it shrink rather than push the card
-                taller if the budget is ever exceeded; truncate per line stops
-                a long streamed line from wrapping. */}
+            {/* The live region, and the card's only real height budget.
+                min-h-0 + max-h (STREAM_MAX_H) cap it; flex-1 fills the
+                leftover card height; justify-end + overflow-hidden keep the
+                newest line flush with the bottom edge and discard the excess
+                at the top. wrap fills that budget with soft-wrapped prose
+                instead of one clipped line per newline. */}
             {streamOnCard && (
               <PulseStream
                 tail={tail}
-                className="mt-0.5 min-h-0 flex-1 justify-end overflow-hidden"
+                wrap
+                className={cn(
+                  "mt-0.5 min-h-0 flex-1 justify-end overflow-hidden",
+                  STREAM_MAX_H,
+                )}
               />
             )}
           </>

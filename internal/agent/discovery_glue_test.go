@@ -845,8 +845,8 @@ func TestDiscoveryStatusReportsJudge(t *testing.T) {
 	a.RunDiscovery(discoveryGlueQuery)
 
 	st := a.DiscoveryStatus()
-	if st.Judge != discoveryJudgeModel {
-		t.Fatalf("Judge = %q, want %q", st.Judge, discoveryJudgeModel)
+	if st.Judge != defaultJudgeModel {
+		t.Fatalf("Judge = %q, want %q", st.Judge, defaultJudgeModel)
 	}
 	if st.JudgeVetoed != 1 {
 		t.Fatalf("JudgeVetoed = %d, want 1", st.JudgeVetoed)

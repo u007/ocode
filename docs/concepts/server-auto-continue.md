@@ -3,7 +3,7 @@ type: Concept
 title: "Server-Side Auto-Continue Loop"
 description: 'Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, typesafe/chat judge dispatch, the decisive awaiting_user stop, and visible end-of-turn status.'
 tags: [server, auto-continue, agent-loop, architecture, typesafe, scheduled-jobs]
-timestamp: 2026-09-30T00:00:00Z
+timestamp: 2026-10-04T12:33:29Z
 ---
 # Server-Side Auto-Continue Loop
 
@@ -32,7 +32,7 @@ The server-side auto-continue loop automatically re-polls the LLM after each tur
 
 ### Typesafe Judge Path
 
-When `auto_continue_model` is a `typesafe/*` route, the judge runs via `runAutoContinueJudgeTypesafe` — a single `Decide()` call answering a typed **continue/end** choice over the transcript tail. This never generates text; it returns a structured decision with a confidence score. The confidence is thresholded against `resolveAutoContinueMinConfidence()`, which is intentionally lower than the auto-permission floor (`resolveAutoJudgeMinConfidence()`) because a false-positive continue is cheap — the chain is capped.
+When `auto_continue_model` is a decision-backend route (any id where `isDecisionModel` returns true — currently `typesafe/*` and Cloudflare Workers AI clef models), the judge runs via `runAutoContinueJudgeTypesafe` — a single `Decide()` call answering a typed **continue/end** choice over the transcript tail. This never generates text; it returns a structured decision with a confidence score. The confidence is thresholded against `resolveAutoContinueMinConfidence()`, which is intentionally lower than the auto-permission floor (`resolveAutoJudgeMinConfidence()`) because a false-positive continue is cheap — the chain is capped.
 
 The same call also answers a typed **reason** describing how the last reply ended. The closed set, in the order it is presented to the judge, is:
 
@@ -44,9 +44,11 @@ The same call also answers a typed **reason** describing how the last reply ende
 
 For every reason **except `awaiting_user`** the verdict decides and the reason is advisory prose in the outcome detail. `awaiting_user` is **decisive**: when the judge categorizes the reply as waiting on the user, a `continue` verdict is vetoed at **any** confidence and the turn ends (reason `typesafeAutoContinueAwaitingUser` in `runAutoContinueJudgeTypesafe`). The veto exists because the judge sometimes reads a question-ending reply (e.g. "Which option do you want?") as unfinished mid-task work; resuming would answer the user's question on their behalf. The rubric sent to the judge carries this explicitly — the `end` criterion reads "the last reply completed the request, is waiting on the user (it asks a question or requests feedback/confirmation/input), or ends on a blocking error", and the instructions state that a reply ending in a question "is not a cut-off mid-task reply" and that the next move belongs to the user. The `awaiting_user` reason label is exactly that criterion.
 
+**Since 2026-10-04**, the auto-continue judge is reached through the same `Decider` seam as the other judges. `runAutoContinueJudgeTypesafe` (`internal/agent/autocontinue_typesafe.go:104`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotAutoContinue)` (`internal/agent/decider.go:112`), which reads the `auto_continue_model` config key (unchanged; not moved or renamed). The key still accepts any decision-backend id — `isDecisionModel` is the single gate, not a hardcoded `typesafe/` prefix.
+
 ### Chat Judge Path
 
-When `auto_continue_model` is anything other than a `typesafe/*` route, the judge runs via `runAutoContinueJudge` (`internal/agent/agent.go`): the transcript tail is sent to the configured chat model as one user message and a bare `YES`/`NO` is expected. Any error, empty response, or answer that does not unambiguously start with `YES` fails closed to **stop**.
+When `auto_continue_model` is anything other than a decision-backend route, the judge runs via `runAutoContinueJudge` (`internal/agent/agent.go`): the transcript tail is sent to the configured chat model as one user message and a bare `YES`/`NO` is expected. Any error, empty response, or answer that does not unambiguously start with `YES` fails closed to **stop**.
 
 The prompt also covers the awaiting-user stop, independently of the configured model: it instructs the judge to answer **NO** when the reply is waiting on the user — "if it ends by asking a question, or requests clarification, confirmation, feedback, approval, or a decision, answer NO — the user must respond first. A reply that ends in a question is not a cut-off mid-task reply."
 

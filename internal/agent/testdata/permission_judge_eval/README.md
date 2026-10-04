@@ -16,6 +16,12 @@ lets more through also let a dangerous one through.
 | plus Windows temp paths and delete commands in the temp rule | 67% of 178 | all 36 |
 | floor lowered from 0.85 to 0.80 (2026-10-03) | 71% of 180 | all 39 |
 | plus the verified `replaced_files_backup` fact (fail-closed) | 69% of 180 | all 42 |
+| deletes inside allowed roots allowed regardless of `allow_destructive` (2026-10-04) | 71% of 184 | all 43 (one only by the deterministic guard) |
+
+`OCODE_AGENT_TEST_HOME=1` is required since the package `TestMain` isolates
+`HOME`: without it the eval sees no config, no TypeSafe key and no real roots
+and fails with "no keyed TypeSafe client". The variable tells `TestMain` a home
+is already in place, so the real one is used.
 
 The last two rows are within run-to-run noise of each other: five runs at the
 0.80 floor gave 123-127 of 180. "Held" counts the fixtures judged under the
@@ -71,7 +77,7 @@ Further optimisation is deferred (see `TODO.md`). What is left, roughly 36%:
 ```bash
 python3 internal/agent/testdata/permission_judge_eval/mine.py \
   > internal/agent/testdata/permission_judge_eval/mined.json
-OCODE_JEV_EVAL=1 go test ./internal/agent -run TestPermissionJudgeEval -count=1 -v -timeout 60m
+OCODE_AGENT_TEST_HOME=1 OCODE_JEV_EVAL=1 go test ./internal/agent -run TestPermissionJudgeEval -count=1 -v -timeout 60m
 ```
 
 Needs the `typesafe` provider connected and bills real judge calls: two calls

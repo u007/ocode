@@ -173,19 +173,7 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 	// parameter and auto-share is the only boot-time consumer, so threading one
 	// would touch every caller for no other benefit. A read failure is logged
 	// and treated as OFF — auto-share must never block boot.
-	if autoShareEnabledAtBoot() {
-		crashguard.Go(func() {
-			url, hint := srv.StartAutoShare()
-			switch {
-			case url != "":
-				log.Printf("desktop: auto-share active at %s", url)
-			case hint != "":
-				log.Printf("desktop: auto-share unavailable: %s", hint)
-			default:
-				log.Printf("desktop: auto-share requested but tailscale is not available")
-			}
-		})
-	}
+	startAutoShareIfEnabled(srv)
 
 	// Browse origin: a second loopback listener, isolated from the SPA
 	// origin, backing the embedded browser panel. Failing to bind it means
@@ -215,16 +203,53 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 	}, nil
 }
 
+// startAutoShareIfEnabled starts the auto-share exposure when, and only when,
+// the config opts in. It is a separate function (not an inline `if` in
+// StartServer) so the whole gate is one testable unit: a test can assert that an
+// unreadable config spawns NO tailscale process, which is the safety property
+// that matters and which the bare decision helper cannot show on its own.
+//
+// Returns whether it started. The exposure itself runs in its own goroutine
+// because tailscale.StartServeExpose waits on the `serve --bg` child for up to
+// 2s; blocking StartServer would delay the window appearing.
+func startAutoShareIfEnabled(srv *server.Server) bool {
+	if !autoShareEnabledAtBoot() {
+		return false
+	}
+	crashguard.Go(func() {
+		url, hint := srv.StartAutoShare()
+		switch {
+		case url != "":
+			log.Printf("desktop: auto-share active at %s", url)
+		case hint != "":
+			log.Printf("desktop: auto-share unavailable: %s", hint)
+		default:
+			log.Printf("desktop: auto-share requested but tailscale is not available")
+		}
+	})
+	return true
+}
+
 // autoShareEnabledAtBoot reports whether auto-share-on-start is configured.
 //
-// Fail-safe by construction: any error reading the config (missing file, corrupt
-// JSON, unwritable dir) returns false, so a broken config can never be the
-// reason an instance gets published to the tailnet. Reads a COPY — the live
-// config is shared with the running TUI/server, and LoadOcodeConfigCopy is the
-// non-mutating accessor for it.
+// DELIBERATE fail-safe-off: config.LoadOcodeConfigCopy is a strict loader that
+// errors on corrupt/truncated JSON and on unreadable paths, and any error here
+// returns false. When the config cannot be read, "off" is the only safe answer
+// for a feature that publishes the instance to the network — the alternative
+// would let one malformed byte decide that ocode shares itself.
+//
+// The trade-off: the failure is logged (the line below) but nothing surfaces the
+// corruption in the UI. That is a deliberate narrowing of the usual fail-fast
+// rule, scoped to this one read.
+//
+// Reads a COPY: the live config is shared with the running TUI/server, and
+// LoadOcodeConfigCopy is the non-mutating accessor for it.
 func autoShareEnabledAtBoot() bool {
 	cfg, err := config.LoadOcodeConfigCopy()
 	if err != nil {
+		// fail-safe: an unreadable config must leave auto-share OFF, because this
+		// feature publishes the server to the network. Deliberate exception to the
+		// no-silent-fallback rule — logged above, never surfaced in the UI.
 		log.Printf("desktop: auto-share: could not read config, leaving disabled: %v", err)
 		return false
 	}

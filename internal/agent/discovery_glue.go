@@ -526,10 +526,12 @@ func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 		st.Active = a.disco.enabled
 		st.InitErr = a.disco.initErr
 		st.JudgeVetoed = int(a.disco.judgeVetoed.Load())
-		// The judge's activation condition is TypeSafe connectivity (the shared
-		// factory yielding a keyed *TypesafeClient), the sole "connected" check.
+		// The judge's activation condition is decision-backend connectivity for
+		// this slot (a resolvable Decider with a usable credential), which is the
+		// sole "connected" check. Report the CONFIGURED model rather than a
+		// constant, so /discovery status names the backend this session uses.
 		if a.disco.enabled && a.discoveryJudgeClient() != nil {
-			st.Judge = discoveryJudgeModel
+			st.Judge = a.slotModel(slotDiscovery)
 		}
 		if a.disco.session != nil {
 			st.Attached = a.disco.session.Attached()

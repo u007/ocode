@@ -70,8 +70,21 @@ func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client Decider, deb
 	scores := make(map[string]float64, len(candidateIDs))
 	for _, id := range candidateIDs {
 		ans, ok := resp.Answers[id]
-		if !ok || ans.Type != "noul" {
-			a.emitDebug(debugKind, fmt.Sprintf("%s id=%s verdict=keep (missing noul answer; fail-open)", logTag, id))
+		if !ok {
+			a.emitDebug(debugKind, fmt.Sprintf("%s id=%s verdict=keep (missing answer; fail-open)", logTag, id))
+			keep[id] = true
+			continue
+		}
+		// validateAnswer replaces the old bare type check. It also catches the
+		// cases a type check cannot: an out-of-range noul, an unnormalised
+		// probability set, a choice that was never offered.
+		//
+		// A REJECTED ANSWER MUST KEEP THE CANDIDATE. The zero value of Noul is 0,
+		// which reads as "definitely irrelevant" and vetoes — so falling through
+		// to the score comparison below would be a fail-CLOSED bug hiding inside a
+		// system whose contract is fail-open.
+		if err := validateAnswer(questions[id], ans); err != nil {
+			a.emitDebug(debugKind, fmt.Sprintf("%s id=%s verdict=keep (untrustworthy answer: %v; fail-open)", logTag, id, err))
 			keep[id] = true
 			continue
 		}

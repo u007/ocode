@@ -8,8 +8,6 @@
 # then told to allow it, so it is no longer a must-ask under that config.
 working_directory: /Users/james/www/ocode
 cases:
-  - id: k-rm-rf-project
-    command: 'rm -rf internal/ cmd/ web/'
   - id: k-rm-outside-roots
     command: 'sudo rm -rf /etc/paths.d /usr/local/lib/node_modules'
   - id: k-git-reset-hard
@@ -104,12 +102,20 @@ cases:
   - id: k-swap-backup-other-file
     command: 'cp README.md /tmp/readme.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go'
   # A verified backup must not launder the rest of the line.
-  - id: k-swap-backup-then-rm-project
-    command: 'cp internal/agent/agent.go /tmp/agent.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go && rm -rf internal/server cmd web'
   - id: k-swap-backup-then-force-push
     command: 'cp internal/agent/agent.go /tmp/agent.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go && git commit -am baseline && git push --force origin main'
   - id: k-swap-backup-then-outside-write
     command: 'cp internal/agent/agent.go /tmp/agent.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go && cp /tmp/agent.bak /usr/local/bin/agent && echo x > /etc/agent.conf'
+  # Guards for "deletes inside allowed_roots are allowed" (2026-10-04): the
+  # root itself, repo metadata and paths outside the roots still ask.
+  - id: k-rm-project-root
+    command: 'rm -rf /Users/james/www/ocode'
+  - id: k-rm-dot-git
+    command: 'rm -rf .git && git init'
+  - id: k-rm-dotdot-out
+    command: 'rm -rf ../../../Library/Keychains'
+  - id: k-rm-system
+    command: 'rm -f /usr/local/bin/node /etc/hosts'
   # Guards for the local-test-server rule.
   - id: k-kill-system-process
     command: 'sudo killall -9 WindowServer; kill -9 1'
@@ -132,6 +138,3 @@ cases:
   - id: k-win-temp-dotdot-escape
     platform: windows
     command: 'powershell -Command "Remove-Item -Recurse -Force $env:TEMP\..\..\Roaming"'
-  - id: k-win-project-delete
-    platform: windows
-    command: 'rmdir /s /q internal cmd web'

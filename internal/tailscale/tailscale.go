@@ -7,6 +7,7 @@ package tailscale
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,12 @@ import (
 	"strings"
 	"time"
 )
+
+// exposeTimeout bounds how long any `tailscale <cmd> --bg` invocation may run
+// before it is killed. A hung tailscale CLI must not wedge the caller: the
+// desktop boot hook runs this in the background, and the Share dialog calls it
+// inline while the user waits.
+const exposeTimeout = 2 * time.Second
 
 // knownCandidates lists common installation paths for the tailscale
 // CLI, in priority order. The desktop shell launches with a minimal
@@ -139,6 +146,12 @@ func DNSName(tailscalePath string) string {
 	return ""
 }
 
+// Installed reports whether a tailscale CLI exists, without asking the daemon
+// anything. It is the cheap "could this machine serve at all" check.
+func Installed() bool {
+	return findCLI() != ""
+}
+
 // Running reports whether the tailscale CLI exists and the daemon answers
 // `tailscale status`.
 func Running() (string, bool) {
@@ -156,18 +169,24 @@ func Running() (string, bool) {
 // or "serve") and returns the advertised URL plus the background process.
 // The process must be killed when no longer needed; the --set-path mount must
 // additionally be removed via RemoveSetPath because --bg detaches the config.
+//
+// wait receives a command that is already deadline-bound by exposeTimeout
+// (exec.CommandContext), so a hung CLI is killed rather than leaking a
+// long-lived child, and a caller passing cmd.Wait() cannot block forever.
 func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.Cmd) error) (string, *exec.Cmd, string) {
 	args := []string{cmd, "--bg"}
 	if pathPrefix != "" {
 		args = append(args, "--set-path", pathPrefix)
 	}
 	args = append(args, target)
-	serveCmd := exec.Command(tailscalePath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), exposeTimeout)
+	serveCmd := exec.CommandContext(ctx, tailscalePath, args...)
 	var out bytes.Buffer
 	serveCmd.Stdout = &out
 	serveCmd.Stderr = &out
 
 	if err := serveCmd.Start(); err != nil {
+		cancel()
 		log.Printf("tailscale %s failed to start: %v", cmd, err)
 		return "", nil, ""
 	}
@@ -175,13 +194,16 @@ func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.C
 	if wait != nil {
 		done := make(chan error, 1)
 		go func() { done <- wait(serveCmd) }()
-		select {
-		case <-time.After(2 * time.Second):
-		case <-done:
-		}
+		<-done
+		// The context kills the child at exposeTimeout, so this is bounded. If
+		// the caller's wait never reaped the process, this Wait does; if it did,
+		// this returns immediately with "already called". Either way the child
+		// has exited before the output buffer is read below.
+		_ = serveCmd.Wait()
 	} else {
-		time.Sleep(2 * time.Second)
+		_ = serveCmd.Wait()
 	}
+	cancel()
 
 	output := out.String()
 	for _, line := range strings.Split(output, "\n") {

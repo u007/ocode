@@ -44,11 +44,9 @@ import (
 //
 // The guardrail can only INTERRUPT, never rewrite. A flagged chunk escalates to
 // a human ask; it never redacts, never silently drops, and never edits the
-// content. There is no config flag: it exists exactly when the shared client
-// factory yields a keyed TypeSafe client (contentGuardClient), the same
-// "provider connected" convention the other three judges use.
-
-const contentGuardJudgeModel = "typesafe/jev-latest"
+// content. There is no config flag: it exists exactly when the slot's
+// provider is connected (contentGuardClient resolves a Decider with a usable
+// credential), the same "provider connected" convention the other judges use.
 
 // contentGuardJudgeTimeout bounds one chunk round trip. Same reasoning as
 // networkGuardJudgeTimeout: a stalled provider must not turn into a hang in

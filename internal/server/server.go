@@ -184,6 +184,8 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.portMaps = newPortMapRegistry(s.procSup)
 	h.remoteHosts = newRemoteHostRegistry(s.procSup)
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
+	// Let the config handlers report exposure state without starting one.
+	h.tailscaleShareSnapshot = s.tsShare.peek
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
 	return s
@@ -474,6 +476,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/config/ocode/htr/start", s.authMiddleware(s.handleStartHTR))
 	s.mux.HandleFunc("POST /api/config/ocode/htr/stop", s.authMiddleware(s.handleStopHTR))
 	s.mux.HandleFunc("GET /api/config/ocode/htr/tabs", s.authMiddleware(s.handleListHTRTabs))
+	s.mux.HandleFunc("GET /api/config/ocode/auto-share", s.authMiddleware(s.handleGetAutoShareConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/auto-share", s.authMiddleware(s.handleSetAutoShareConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/chat-verbosity", s.authMiddleware(s.handler.HandleGetChatVerbosityConfig))
@@ -2307,6 +2311,14 @@ func (s *Server) handleSetBrowserConfig(w http.ResponseWriter, r *http.Request) 
 }
 func (s *Server) handleGetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetFeaturesConfig(w, r)
+}
+
+func (s *Server) handleGetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAutoShareConfig(w, r)
+}
+
+func (s *Server) handleSetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAutoShareConfig(w, r)
 }
 func (s *Server) handleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetFeaturesConfig(w, r)

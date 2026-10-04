@@ -4649,6 +4649,7 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 		if cred, ok := auth.GetProfileCredential(profile, provider); ok {
 			switch cred.Kind {
 			case auth.KindAPIKey:
+				accountID = cred.AccountID
 				if cred.Key != "" {
 					apiKey = cred.Key
 					emitDebug("AGENT", fmt.Sprintf("NewClient: profile %q credential — kind=%s apiKey=%s", profile, cred.Kind, maskKey(apiKey)))
@@ -4728,6 +4729,7 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 				switch cred.Kind {
 				case auth.KindAPIKey:
 					apiKey = cred.Key
+					accountID = cred.AccountID
 				case auth.KindOAuth:
 					if provider == "grok" {
 						// Grok subscription: SSO bearer token routes to the
@@ -4914,6 +4916,18 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	if provider == "typesafe" {
 		emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s (decision-only client)", provider, model, maskKey(apiKey)))
 		return newTypesafeClient(apiKey, model, baseURL)
+	}
+
+	// Cloudflare Workers AI serves clef from its native /ai/run/ endpoint, not the
+	// OpenAI-compatible chat path, so a clef model needs its own client even though
+	// the provider id is shared with chat models. Routing on the MODEL (via
+	// isDecisionModel) rather than the provider is what keeps every other
+	// cloudflare-workers model on GenericClient.
+	if provider == cloudflareWorkersProvider && isDecisionModel(provider+"/"+model) {
+		c := newClefClient(apiKey, accountID, model)
+		c.BaseURL = baseURL
+		emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s account=%s (decision-only client)", provider, model, maskKey(apiKey), maskKey(accountID)))
+		return c
 	}
 
 	emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s useOAuth=%v ws=%v", provider, model, maskKey(apiKey), useOAuth, cfg != nil && cfg.UseWebSocket))

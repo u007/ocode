@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"strings"
 )
@@ -46,16 +47,53 @@ type Decider interface {
 
 // slotModel returns the model id configured for a slot.
 //
-// This part of the work returns defaultJudgeModel unconditionally. The
-// per-slot config lookup replaces this one function body; keeping it separate
-// from resolveDecider is what makes that a single-function change rather than a
-// rewrite of seven call sites.
+// permission and auto_continue are deliberately NOT read here: those two already
+// have their own long-standing keys (permissions.auto.model and
+// auto_continue_model) and keep them, so existing configs and the settings UI
+// keep working untouched. The other five read their own judge_model key.
 //
-// A blank result would be a bug, not a "disabled" signal: resolveDecider turns a
-// blank model into a nil client, and a nil client silently disables a judge the
-// user never touched. Default rather than propagate empty.
+// Every path falls back to defaultJudgeModel. A blank result would be a bug, not
+// a "disabled" signal: resolveDecider turns a blank model into a nil client, and a
+// nil client silently disables a judge the user never touched.
 func (a *Agent) slotModel(slot judgeSlot) string {
-	_ = slot
+	if a == nil || a.config == nil {
+		return defaultJudgeModel
+	}
+	switch slot {
+	case slotPermission:
+		// autoPermissionModelName already handles its own override chain and
+		// returns "unavailable" when nothing is configured.
+		if m := a.autoPermissionModelName(); m != "" && m != "unavailable" {
+			return m
+		}
+		return defaultJudgeModel
+	case slotAutoContinue:
+		if m := strings.TrimSpace(a.config.Ocode.AutoContinueModel); m != "" {
+			return m
+		}
+		return defaultJudgeModel
+	}
+
+	oc := a.config.Ocode
+	var v string
+	switch slot {
+	case slotDiscovery:
+		v = oc.Discovery.JudgeModel
+	case slotDocSearch:
+		v = oc.DocSearch.JudgeModel
+	case slotCodeSearch:
+		// The code-search judge reads the `search` key. Slot name and key name
+		// differ deliberately: `search` is also the tool name, and renaming the
+		// slot to match would read as though the tool itself were being configured.
+		v = oc.Search.JudgeModel
+	case slotNetworkGuard:
+		v = oc.NetworkGuard.JudgeModel
+	case slotContentGuard:
+		v = oc.ContentGuard.JudgeModel
+	}
+	if v = strings.TrimSpace(v); v != "" {
+		return v
+	}
 	return defaultJudgeModel
 }
 
@@ -82,14 +120,30 @@ func (a *Agent) resolveDecider(slot judgeSlot) Decider {
 	}
 	// A keyless client would 401 on first use. Refuse to hand it back so callers
 	// treat the judge as disabled instead of surfacing a deferred 401.
-	if tc, ok := client.(*TypesafeClient); ok && tc.APIKey == "" {
-		return nil
+	//
+	// Clef additionally needs an account id: its URL is account-scoped, so an API
+	// key alone produces a request to a path with an empty account. Returning nil
+	// here would make a clef slot look like "judge disabled" rather than
+	// "half-configured", so the reason is logged instead.
+	switch d := client.(type) {
+	case *TypesafeClient:
+		if d.APIKey == "" {
+			return nil
+		}
+	case *ClefClient:
+		if d.APIKey == "" {
+			return nil
+		}
+		if d.AccountID == "" {
+			emitDebug("AGENT", fmt.Sprintf("resolveDecider: slot=%s model=%s has a CLOUDFLARE_API_KEY but no account id; run /connect cloudflare-workers to add it. Judge is disabled.", slot, d.Model))
+			return nil
+		}
 	}
-	d, ok := client.(Decider)
+	dec, ok := client.(Decider)
 	if !ok {
 		return nil
 	}
-	return d
+	return dec
 }
 
 // deciderLabel returns the fully-qualified "provider/model" id for a decision
@@ -148,9 +202,6 @@ func clefBodySelector(model string) string {
 // "<provider>/<model>" form and a bare model id, since the latter is what the
 // selector is keyed on.
 func isCloudflareDecisionModel(modelID string) bool {
-	if _, ok := clefBodySelectors[modelID]; ok {
-		return true
-	}
 	provider, rest, found := strings.Cut(modelID, "/")
 	if !found {
 		return false

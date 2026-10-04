@@ -1,5 +1,206 @@
 # Changelog
 
+## 2026-10-04 — Clef as a second decision backend, a per-judge model key, and one shared state budget for every judge request
+
+- **Cloudflare Workers AI clef is now usable as a judge backend.**
+  `internal/agent/clef.go` adds `ClefClient`, a drop-in for `*TypesafeClient`
+  behind the existing `Decider` interface. It cannot reuse `GenericClient`:
+  clef is served only from Cloudflare's native
+  `/ai/run/@cf/cloudflare/...` endpoint, never from the OpenAI-compatible
+  `/v1/chat/completions` path every chat provider uses, so a generic client
+  would POST to the chat endpoint and produce an error that reads as "bad model"
+  rather than "wrong endpoint". `clefRunURL` maps the stored Workers AI
+  credential base onto that run endpoint; the port is deliberately left alone
+  when trimming the `/ai/` marker, because resetting it turns a scheme-less
+  `host:port/path` authority into a portless one and hides the very component
+  that decides the destination. Routing keys on the **model**, not the
+  provider (`isDecisionModel`), so every other `cloudflare-workers` model stays
+  on the chat path. `ErrClefDecisionOnly` mirrors `ErrTypesafeDecisionOnly` so
+  selecting clef for chat fails loudly instead of producing empty content.
+  `resolveDecider` refuses a clef slot that has a `CLOUDFLARE_API_KEY` but no
+  account id (the URL is account-scoped, so a key alone builds a request with an
+  empty account) and **logs the reason** rather than letting it read as "this
+  judge is disabled".
+- **Each judge can now name its own model.** Five new `judge_model` keys —
+  `discovery`, `doc_search`, `search`, `network_guard`, `content_guard` — all
+  defaulting to `typesafe/jev-latest`, so an unconfigured install is unchanged.
+  `permission` and `auto_continue` deliberately keep their existing keys
+  (`permissions.auto.model`, `auto_continue_model`). This un-shares
+  `doc_search` and code search, which previously called the same
+  `discoveryJudgeClient()` and so moved together with discovery's key: setting
+  one model silently changed all three. A blank `judge_model` never clears a
+  slot — clearing resolves to a nil client and would disable a judge the user
+  never touched — it leaves the default in place.
+  `discoveryJudgeModel` / `networkGuardJudgeModel` / `contentGuardJudgeModel`
+  are deleted; `defaultJudgeModel` in `internal/config/ocodeconfig.go` is the one
+  place the incumbent now lives. The three hardcoded `model=typesafe/...` debug
+  labels became `deciderLabel(client)`, so the usage ledger books spend to the
+  backend that actually answered instead of to TypeSafe.
+- **One shared pre-flight state budget, enforced by both clients.**
+  `prepareDecisionState` (`internal/agent/state_budget.go`) measures the
+  **marshalled** state against `decisionStateBudgetBytes` (96 KB, from Jev's
+  stricter 32k `state` limit at ~3 bytes/token rather than the usual 4, which
+  under-counts source and JSON), projects an explicit **allowlist** of bulky
+  keys to a bounded preview at progressively smaller sizes, and **refuses** if
+  it still does not fit. Both `TypesafeClient` and `ClefClient` call the same
+  function, so they cannot drift. Three properties are load-bearing:
+  - **Projection is signalled.** A clipped state carries a structured top-level
+    `_projection` field naming what was cut, because the permission judge is
+    already taught to distrust `interpreter.source.truncated`. An un-signalled
+    truncation would let the auto-allow path grade a clipped `write` as if it
+    had seen the whole body. The rubric gained the matching instruction.
+  - **Refusal does not silently switch backend and does not send an
+    over-budget state.** A silent provider swap would make "which model decided
+    this?" unanswerable on the permission path, and silently truncating the
+    command under review is a safety problem, not a UX one. Both callers surface
+    the error to their caller, which already defers to the human.
+  - **The budget is an estimate and errs toward NOT asking.** There is no real
+    tokenizer in this package, so `TestSharedStateBudget_WorstCaseProductionPayloads`
+    measures each judge at its worst realistic size and is the safety net.
+- **A rejected judge answer now keeps the candidate instead of vetoing it.**
+  `validateAnswer` (`state_budget.go`) replaces a bare `ans.Type != "noul"`
+  check in the relevance judge's per-candidate path, and also catches what a
+  type check cannot: an out-of-range `noul`, a non-finite or out-of-range
+  `confidence`, an unnormalised probability set, a choice that was never
+  offered. **The rejection must KEEP the candidate** — `Noul`'s zero value is
+  `0`, which reads as "definitely irrelevant" and vetoes, so falling through to
+  the score comparison would be a fail-*closed* bug hiding inside a system whose
+  contract is fail-open. That path is the only consumer; the MCP tool gate
+  (`discoveryAllows`) consults no judge and so cannot fail open.
+- **The fail-open contract is now pinned structurally, not by grep.**
+  `internal/agent/judge_failopen_test.go` parses this package's own source and
+  asserts the invariant over the whole tree, so a **new** judge is covered
+  automatically instead of having to be added to a hand-kept enumeration that
+  can fall out of date. The tests guard against a vacuous scan (a filter change
+  that resolved zero files fails loudly instead of passing).
+- **`/connect` now takes effect on the next judge call.** The discovery judge's
+  client cache was a `sync.Once` that pinned whatever resolved first for the
+  whole session; it is now a mutex plus a stored model id, and **a nil client is
+  deliberately not cached**, so connecting a provider mid-session no longer
+  requires a `/discovery` toggle or a restart.
+- **Tests.** New `internal/agent/clef_test.go`, `clef_guards_test.go`,
+  `judge_failopen_test.go`, `state_budget_test.go`, `rm_guard_paths_test.go`,
+  `internal/config/judge_model_config_test.go`. Extended:
+  `discovery_glue_test.go`, `permission_typesafe_test.go`,
+  `content_guard_eval_test.go`, `permission_overwrites_test.go`, and the eval
+  fixtures (`must_ask.yaml` / `should_allow.yaml`) for the delete-inside-roots
+  rule and the `_projection` instruction.
+- **Docs.** `CLAUDE.md` gained the shared-state-budget and `Decider`-seam
+  contracts (the always-on rules a future change must not break);
+  `discovery-typesafe-judge`, `doc-search-relevance-judge` and
+  `auto-permission-enforced-categories` record the per-slot keys, the
+  non-cached nil, and the hardened `rm` boundary.
+
+## 2026-10-04 — Pulse: each card streams multiple lines instead of one clipped line
+
+- **A running card showed a single truncated line in seven lines of reserved
+  space.** `PulseStream` rendered one `<div class="truncate">` per
+  newline-delimited line, and model prose carries no newlines — so
+  `lastLines()` returned one entry and the card showed one clipped fragment of
+  it. Entries on the card now soft-wrap (`whitespace-pre-wrap break-words`), so
+  the region the card already reserved is filled with real text: measured in
+  headless Chromium against the built CSS, one 250-line un-newlined entry
+  renders **138 lines** instead of 1. The hover overlay deliberately keeps one
+  truncated line per entry — it has no height budget, so wrapping there turns a
+  7-entry preview into a page-height panel.
+- **The height budget had to become explicit, and the old comment was wrong
+  about why.** `min-h-[16rem]` is a *floor*: `min-h` sets a minimum, and a
+  `flex-1` child of an auto-height column is sized from its own content
+  (`flex-basis: 0%` caps nothing). The card was only ever height-stable because
+  truncation made the content self-limiting (7 entries × 1 line box). Wrapping
+  removes exactly that property: uncapped, the same stream measured a **2236px**
+  card. The region now carries `STREAM_MAX_H` = `max-h-[8rem]`, derived from
+  `PULSE_TAIL_LINES` × the measured 16.5px tail line-height + the 2px gaps
+  (127.5px ≈ 8rem) — the same budget truncation was spending implicitly. With
+  it, the card measures 256px, identical to the truncate baseline.
+- **The newest text stays visible because of the automatic minimum size, and
+  that is worth stating before someone "fixes" it.** The region is a capped
+  `flex-col justify-end overflow-hidden`, so an over-tall entry overflows out of
+  the TOP, where the clip discards it, leaving the newest line flush with the
+  bottom edge. Each entry is a flex item, and a flex item's automatic minimum
+  size is its min-content height, so it cannot be compressed. An earlier draft
+  put `shrink-0` on entries for this; measured, it changed nothing, so it was
+  dropped rather than shipped as a dead class with a load-bearing-sounding
+  comment. Adding `min-h-0` is the real hazard: the entry compresses, the
+  overflow lands at the bottom, and the clip hides the text being streamed
+  (measured: newest line 2147px below the visible region).
+  `PulseCard.test.tsx` asserts the absence of `min-h-0`, `shrink-0` and
+  `truncate` on a wrapping entry for that reason.
+- **`PULSE_TAIL_LINES` now counts logical lines, not lines of screen.** Its
+  comment claimed it was sized to the card's reserved height; with wrapping that
+  correspondence is gone (one logical line can fill several screen lines). It
+  still caps the buffer and the DOM, which is what it is for. jsdom cannot check
+  any of the layout above — it has no layout engine — so the height, wrap and
+  bottom-anchor claims are pinned as CSS-contract assertions in the component
+  test and verified by the Chromium measurement quoted here.
+
+## 2026-10-04 — Auto-permission judge allows deletes inside the allowed directories
+
+With `allow_destructive` off, the judge denied any `rm` of a project file, even
+a scratch script the agent had just run (`rm -f .worktrees/cmp.py`, deny 0.69).
+Deleting files and directories inside the allowed roots is now allowed without
+asking, including `rm -rf` of project subdirectories; `allow_destructive` now
+only governs repository history and database state (`git reset --hard`,
+`git clean`, `DROP`/`TRUNCATE`). Still asked, and enforced in code rather than
+left to the judge: deleting the project directory itself or a parent of it, an
+allowed root itself, anything under `.git`, and any path outside the roots.
+
+## 2026-10-04 — Auto share on start: a toggle that publishes the instance at boot, tailnet-only
+
+- **Sharing ocode from a phone meant opening the Share dialog every launch.**
+  Nothing started the tailscale exposure on its own, so a device on the tailnet
+  could only reach the instance after a deliberate click. `auto_share_on_start`
+  (a top-level `ocodeconfig.json` bool, **default off**) starts the exposure
+  during desktop boot instead. Toggle lives in two places writing the same key:
+  Settings → **Auto Share** (`web/src/components/Settings/AutoShareForm.tsx`)
+  and TUI `/auto-share [on|off|status]`.
+- **Auto-share is `serve`-only; the Share dialog keeps funnel-first.**
+  `StartExpose` (the dialog) tries `tailscale funnel` first, which publishes to
+  the **public internet** — an appropriate response to an explicit, informed
+  click. Auto-share fires unattended, so it uses the new
+  `tailscale.StartServeExpose`, which is tailnet-only and has **no funnel
+  fallback**: when `serve` exposes nothing it returns empty rather than a bare
+  `DNSName` guess, because there is no dialog to render a setup hint next to an
+  unproven URL. `TestStartServeExposeNeverFunnels` asserts this on the recorded
+  argv, not on a return value — a funnel attempt would still hand back a working
+  serve URL.
+- **One exposure slot, and that is load-bearing rather than tidier.**
+  `ensureServe` (boot) and `ensure` (dialog) share `tailscaleShare`'s single
+  cached slot and the **first caller wins**, because
+  `tailscale serve --bg --set-path /desktop` is one **global** mount per node: a
+  second exposure would silently retarget the first. The visible consequence is
+  deliberate — once auto-share warms the cache, the dialog reports the tailnet
+  URL instead of trying funnel.
+- **Reading the setting can never publish anything.** `GET
+  /api/config/ocode/auto-share` reports the cached exposure through
+  `tailscaleShare.peek` via an injected `Handler.tailscaleShareSnapshot` seam, so
+  merely opening Settings is side-effect free and the endpoint is safe to poll.
+  The seam also keeps `h.mu` (a map lock) off any tailscale work. Both config
+  routes sit behind `authMiddleware`: the toggle changes network exposure, so an
+  open route would let any tailnet peer switch sharing on.
+- **The boot read is deliberately fail-safe-off.** `config.LoadOcodeConfigCopy`
+  is a *strict* loader — it errors on corrupt/truncated JSON and on unreadable
+  paths — and `autoShareEnabledAtBoot` treats any error as OFF, so one malformed
+  byte in `ocodeconfig.json` can never be why ocode publishes itself. The
+  trade-off is that the failure is only logged, never surfaced in the UI: a
+  deliberate narrowing of fail-fast, scoped to this single read.
+- **Two real hazards found while testing this.** (1) A tailscale exposure test
+  that isolated only `PATH` still shelled out to the **real**
+  `/usr/local/bin/tailscale`, because `findCLIImpl` falls back to absolute
+  `knownCandidates` paths; it created a live `/desktop → localhost:1234` mount
+  on this machine. Tests must now neutralise `knownCandidates` too. (2) A config
+  test isolated only `OPENCODE_CONFIG_DIR`, which `internal/config`'s own
+  `TestMain` overrides via `HOME`/`XDG_CONFIG_HOME` — so a "malformed config"
+  test was reading a path that was never written and passed vacuously. Both are
+  corrected, and each fix is mutation-verified.
+- `Expose` now bounds the `tailscale <cmd> --bg` child with
+  `exec.CommandContext` and a 2s `exposeTimeout`, so a hung CLI is killed
+  instead of leaking a long-lived process. `Shutdown` already removed only the
+  `--set-path /desktop` mount, so the boot-started exposure is torn down with the
+  server without disturbing TUI `/rc` sessions on the same node.
+- Docs: `docs/concepts/auto-share-on-start.md` (new; the durable-token mechanics
+  stay in `docs/concepts/desktop-share-token.md`).
+
 ## 2026-10-04 — A parked sub-agent ask is now visible and answerable, and the bash gates stop trusting the first word
 
 - **A sub-agent that needed permission produced no dialog and no error.** The

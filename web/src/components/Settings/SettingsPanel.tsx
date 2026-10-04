@@ -16,6 +16,7 @@ import TUIForm from "./TUIForm";
 import EditorModeForm from "./EditorModeForm";
 import PathsForm from "./PathsForm";
 import FeaturesForm from "./FeaturesForm";
+import AutoShareForm from "./AutoShareForm";
 import LimitsForm from "./LimitsForm";
 import ImageGenForm from "./ImageGenForm";
 import OcodePluginsForm from "./OcodePluginsForm";
@@ -59,6 +60,7 @@ export type SettingsGroupId =
   | "paths"
   | "limits"
   | "features"
+  | "auto-share"
   | "plugins"
   | "theme"
   | "opencode-mcp"
@@ -98,6 +100,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "paths", label: "Paths & Uploads" },
   { id: "limits", label: "Limits" },
   { id: "features", label: "Features" },
+  { id: "auto-share", label: "Auto Share" },
   { id: "plugins", label: "Plugins & Local Models" },
   { id: "theme", label: "Theme" },
 ];
@@ -167,6 +170,8 @@ function renderGroup(id: SettingsGroupId) {
       return <PathsForm />;
     case "features":
       return <FeaturesForm />;
+    case "auto-share":
+      return <AutoShareForm />;
     case "limits":
       return <LimitsForm />;
     case "imagegen":

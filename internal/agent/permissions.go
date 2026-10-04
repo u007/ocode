@@ -5545,12 +5545,90 @@ func dangerousRmReason(pm *PermissionManager, fields []string) string {
 		return ""
 	}
 	for _, t := range targets {
+		// A glob, variable or substitution has no single path to scope-check:
+		// the shell decides the real targets, so the judge's "inside the roots"
+		// reading cannot be verified. Refuse rather than guess.
+		if strings.ContainsAny(t, "*?[]{}$`~") {
+			return fmt.Sprintf("rm target %q is a glob, variable or substitution and cannot be scope-checked", t)
+		}
 		resolved := resolvePath(t, pm.workDir)
 		if !isWithinAllowedScope(pm, resolved) {
 			return fmt.Sprintf("rm target %q resolves outside allowed scope", t)
 		}
+		// Deleting INSIDE a root is in scope; deleting the root itself, the
+		// project directory (or a parent of it), or repository metadata is not
+		// something a judge's word or a prefix rule should grant. Paths are
+		// symlink-resolved and compared with the filesystem's own case rules,
+		// so neither a symlink nor ".GIT"/"/Users/X" spelling slips past.
+		clean := canonicalPath(resolved)
+		wd := canonicalPath(pm.workDir)
+		if pathsEqual(clean, wd) || pathUnder(wd, clean) {
+			return fmt.Sprintf("rm target %q is the project directory or a parent of it", t)
+		}
+		scopeRoot := ""
+		for _, root := range pm.AllowedRoots() {
+			cr := canonicalPath(root)
+			if pathsEqual(clean, cr) {
+				return fmt.Sprintf("rm target %q is an allowed root itself", t)
+			}
+			if pathUnder(clean, cr) && len(cr) > len(scopeRoot) {
+				scopeRoot = cr
+			}
+		}
+		// Only components BELOW the owning root count: a project checked out
+		// under a directory that happens to be named ".git" is still deletable.
+		below := clean
+		if scopeRoot != "" {
+			below = clean[len(scopeRoot):]
+		}
+		for _, part := range strings.Split(below, string(filepath.Separator)) {
+			if strings.EqualFold(part, ".git") {
+				return fmt.Sprintf("rm target %q is repository metadata", t)
+			}
+		}
 	}
 	return ""
+}
+
+// canonicalPath cleans p and resolves symlinks. A path that does not exist yet
+// resolves through its nearest existing ancestor, so rm of a missing target is
+// still judged by where it WOULD live.
+func canonicalPath(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if real, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(real, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// pathsEqual compares cleaned paths, case-insensitively on the platforms whose
+// default filesystems are case-insensitive.
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// pathUnder reports whether child is strictly inside parent. The root "/" is
+// handled explicitly: parent+sep would be "//" and match nothing.
+func pathUnder(child, parent string) bool {
+	prefix := parent
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	if len(child) <= len(prefix) {
+		return false
+	}
+	return pathsEqual(child[:len(prefix)], prefix)
 }
 
 func isHardBlockedCommand(command string) bool {

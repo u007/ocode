@@ -200,7 +200,7 @@ func TestContentGuardJudgeEval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, ok := newClientFn(cfg, contentGuardJudgeModel).(*TypesafeClient)
+	client, ok := newClientFn(cfg, defaultJudgeModel).(*TypesafeClient)
 	if !ok || client == nil || client.APIKey == "" {
 		t.Fatal("no keyed TypeSafe client; connect the typesafe provider first")
 	}

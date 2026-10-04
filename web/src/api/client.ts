@@ -1,4 +1,5 @@
 import type {
+  AutoShareConfig,
   ChatResponse,
   SessionInfo,
   SessionDetail,
@@ -2210,6 +2211,15 @@ export const api = {
     fetchJSON<import("../api/types").OcrModelsResponse>("/api/ocr/models"),
 
   // ── Computer use ──
+  // Auto-share-on-start. Reading is side-effect free: the server reports the
+  // cached exposure only, never starts one, so this is safe to call on mount.
+  getAutoShareConfig: () =>
+    fetchJSON<AutoShareConfig>("/api/config/ocode/auto-share"),
+  setAutoShareConfig: (enabled: boolean) =>
+    fetchJSON<AutoShareConfig>("/api/config/ocode/auto-share", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
   getComputerUseConfig: () =>
     fetchJSON<import("../api/types").ComputerUseConfig>(
       "/api/config/computer-use",

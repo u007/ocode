@@ -762,6 +762,52 @@ type DiscoveryConfig struct {
 	// The built-in defaults always include skills/, .opencode/, .claude/, .qwen/,
 	// .agent/, .pnpm/, node_modules/, vendor/, .git/, dist/, build/, and target/.
 	IgnorePaths []string
+	// JudgeModel is the decision-judge model for the discovery relevance judge —
+	// a full provider/model id. It is deliberately SEPARATE from EmbeddingModel:
+	// that one picks the embedder, this one picks the judge, and conflating them
+	// would make "make discovery cheaper" ambiguous between the two.
+	JudgeModel string
+}
+
+// JudgeModelConfig is the decision-judge model selection for one judge call site.
+// One exists per slot so a user can point, say, the permission judge at a
+// different backend than the egress guard without touching the others.
+//
+// JudgeModel is a full provider/model id ("typesafe/jev-latest",
+// "cloudflare-workers/@cf/cloudflare/clef-flash"). It defaults to
+// "typesafe/jev-latest", the constant these judges used before per-slot
+// selection existed.
+type JudgeModelConfig struct {
+	JudgeModel string
+}
+
+// defaultJudgeModel is the incumbent decision backend every judge slot falls back
+// to. It is "typesafe/jev-latest" — the exact value of the discoveryJudgeModel,
+// networkGuardJudgeModel and contentGuardJudgeModel constants this replaces — so
+// an unconfigured install resolves identically. Defined once, here, so there is a
+// single thing to change if the incumbent ever moves.
+const defaultJudgeModel = "typesafe/jev-latest"
+
+// applyJudgeModelConfig writes a slot's judge model only when the file value is
+// non-blank.
+//
+// A blank judge_model must NOT clear the slot. Clearing it would resolve to no
+// client and silently DISABLE a judge the user never touched. Disabling fails
+// open (candidates are kept), so it is not a safety problem — but it is invisible,
+// and the user has no way to notice or undo it. Leave the default in place.
+func applyJudgeModelConfig(dst *string, v string) {
+	if v = strings.TrimSpace(v); v != "" {
+		*dst = v
+	}
+}
+
+// defaultJudgeModelConfig is the single place a judge slot's default is defined.
+// defaultJudgeModel is "typesafe/jev-latest" — the exact value of the three
+// hardcoded judge constants this replaces, so an unconfigured install is
+// unchanged. It is a named resolver rather than an inline literal at each use so
+// there is one thing to change if the incumbent ever moves.
+func defaultJudgeModelConfig() JudgeModelConfig {
+	return JudgeModelConfig{JudgeModel: defaultJudgeModel}
 }
 
 // LocalModelConfig is one user-registered local chat/completion model
@@ -823,6 +869,15 @@ type OcodeConfig struct {
 	LocalModels map[string]LocalModelConfig
 	Security    SecurityConfig
 	Discovery   DiscoveryConfig
+	// DocSearch, Search, NetworkGuard and ContentGuard select the decision-judge
+	// model for one judge call site each. They are separate fields rather than one
+	// shared judge setting because doc_search and Search used to share discovery's
+	// client, and un-sharing them is the point: each judge can now be moved
+	// independently.
+	DocSearch    JudgeModelConfig
+	Search       JudgeModelConfig
+	NetworkGuard JudgeModelConfig
+	ContentGuard JudgeModelConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
 	MemoryEnabled bool
@@ -1148,6 +1203,33 @@ type discoveryConfigFile struct {
 	LocalServerURL   string   `json:"local_server_url,omitempty"`
 	PinnedSkills     []string `json:"pinned_skills,omitempty"`
 	IgnorePaths      []string `json:"ignore_paths,omitempty"`
+	// JudgeModel selects the decision-judge model for the discovery relevance
+	// judge. Distinct from embedding_model above, which selects the embedder.
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+// Each judge_model field below selects the decision-judge model for ONE judge call
+// site. All default to typesafe/jev-latest, the constant those judges used before
+// per-slot selection existed, so an unconfigured install is unchanged.
+//
+// doc_search and search (code search) were previously served by the SAME client as
+// discovery — all three called discoveryJudgeClient — so one key moved all three.
+// They are now independent: setting discovery.judge_model no longer silently
+// changes the other two.
+type docSearchConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+type searchConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+type networkGuardConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+type contentGuardConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
 }
 
 // browserConfigFile is the on-disk mirror of BrowserConfig. Extensions is read
@@ -1179,6 +1261,10 @@ type ocodeConfigFile struct {
 	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
 	Security                securityConfigFile          `json:"security"`
 	Discovery               discoveryConfigFile         `json:"discovery"`
+	DocSearch               docSearchConfigFile         `json:"doc_search"`
+	Search                  searchConfigFile            `json:"search"`
+	NetworkGuard            networkGuardConfigFile      `json:"network_guard"`
+	ContentGuard            contentGuardConfigFile      `json:"content_guard"`
 	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
 	AutoShareOnStart        *bool                       `json:"auto_share_on_start,omitempty"`
@@ -1280,6 +1366,10 @@ func defaultOcodeConfig() OcodeConfig {
 		SpeechSummaryEnabled:    true,
 		Security:                defaultSecurityConfig(),
 		Discovery:               defaultDiscoveryConfig(),
+		DocSearch:               defaultJudgeModelConfig(),
+		Search:                  defaultJudgeModelConfig(),
+		NetworkGuard:            defaultJudgeModelConfig(),
+		ContentGuard:            defaultJudgeModelConfig(),
 		RecapTimeoutSeconds:     120,
 		UndoMaxAgeDelta:         10,
 		MaxConcurrentAgents:     2,
@@ -1302,6 +1392,7 @@ func defaultDiscoveryConfig() DiscoveryConfig {
 		LocalModelStatus: "none",
 		PinnedSkills:     []string{"brainstorming", "using-superpowers"},
 		IgnorePaths:      DefaultDiscoveryIgnorePaths(),
+		JudgeModel:       defaultJudgeModel,
 	}
 }
 
@@ -1571,6 +1662,23 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["discovery"]; ok {
 		applyDiscoveryConfig(&cfg.Discovery, file.Discovery)
 		delete(raw, "discovery")
+	}
+
+	if _, ok := raw["doc_search"]; ok {
+		applyJudgeModelConfig(&cfg.DocSearch.JudgeModel, file.DocSearch.JudgeModel)
+		delete(raw, "doc_search")
+	}
+	if _, ok := raw["search"]; ok {
+		applyJudgeModelConfig(&cfg.Search.JudgeModel, file.Search.JudgeModel)
+		delete(raw, "search")
+	}
+	if _, ok := raw["network_guard"]; ok {
+		applyJudgeModelConfig(&cfg.NetworkGuard.JudgeModel, file.NetworkGuard.JudgeModel)
+		delete(raw, "network_guard")
+	}
+	if _, ok := raw["content_guard"]; ok {
+		applyJudgeModelConfig(&cfg.ContentGuard.JudgeModel, file.ContentGuard.JudgeModel)
+		delete(raw, "content_guard")
 	}
 
 	if _, ok := raw["browser"]; ok {
@@ -2188,6 +2296,7 @@ func applyDiscoveryConfig(dst *DiscoveryConfig, src discoveryConfigFile) {
 	if src.IgnorePaths != nil {
 		dst.IgnorePaths = mergeDiscoveryIgnorePaths(DefaultDiscoveryIgnorePaths(), src.IgnorePaths)
 	}
+	applyJudgeModelConfig(&dst.JudgeModel, src.JudgeModel)
 }
 
 func applyBrowserConfig(dst *BrowserConfig, src browserConfigFile) error {

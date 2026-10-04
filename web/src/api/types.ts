@@ -476,6 +476,16 @@ export interface OcrConfig {
   paddle: { endpoint: string; variant: string };
 }
 
+/** Auto-share-on-start toggle plus the server's current share exposure.
+ *  `url` is the cached exposure (empty until auto-share or the Share dialog
+ *  starts one); `available` reports whether tailscale could serve at all. */
+export interface AutoShareConfig {
+  enabled: boolean;
+  available: boolean;
+  url?: string;
+  hint?: string;
+}
+
 export interface ComputerUseConfig {
   enabled: boolean;
   status_lines: string[];

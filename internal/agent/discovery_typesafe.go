@@ -8,15 +8,6 @@ import (
 	"github.com/u007/ocode/internal/discovery"
 )
 
-// discoveryJudgeModel is the TypeSafe System One model (Jev) consulted to
-// decide whether each embedder-selected discovery candidate is in scope for the
-// current request (the lenient relevance rule — see relevance_typesafe.go).
-// There is no separate config flag for the judge: "connected" means the shared
-// client factory yields a TypesafeClient with a non-empty API key (see
-// discoveryJudgeClient, which is also the shared connected check for the
-// doc_search relevance judge).
-const discoveryJudgeModel = "typesafe/jev-latest"
-
 // discoveryJudgeSummaryCap bounds one candidate's summary in the judge state so
 // a large project-doc summary cannot blow up the request.
 const discoveryJudgeSummaryCap = 1000

@@ -8,7 +8,7 @@ rubric) is measured instead of guessed.
 ## Run
 
 ```bash
-OCODE_JEV_EVAL=1 go test ./internal/agent -run TestContentGuardJudgeEval -count=1 -v
+OCODE_AGENT_TEST_HOME=1 OCODE_JEV_EVAL=1 go test ./internal/agent -run TestContentGuardJudgeEval -count=1 -v
 ```
 
 Needs the `typesafe` provider connected (it uses the same client the guardrail

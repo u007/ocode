@@ -42,6 +42,13 @@
 
 ## 2026-10-04
 
+* **Update**: Pulse — cross-project live-sessions dashboard ([concepts/pulse-dashboard.md](/concepts/pulse-dashboard.md))
+* **Update**: Server-Side Auto-Continue Loop ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Doc Search Relevance Judge ([concepts/doc-search-relevance-judge.md](/concepts/doc-search-relevance-judge.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Update**: Pulse — cross-project live-sessions dashboard ([concepts/pulse-dashboard.md](/concepts/pulse-dashboard.md))
+* **Creation**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
 * **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
 * **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
 * **Update**: 'TUI User Interaction: Slash Command Queuing' ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))

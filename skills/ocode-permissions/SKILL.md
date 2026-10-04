@@ -389,7 +389,7 @@ apply, so relaxing a category can never auto-grant those. Catalog: `agent.Relaxa
 - The **TypeSafe/Jev** judge is different: `askPermissionModelTypesafe` answers a typed `choice` of `allow`/`deny` (see the Jev subsection below). Do not carry the chat judge's allow/ask-only limit over to it — a Jev `deny` is a real verdict, and a Jev `allow` must clear the confidence floor before it grants.
 - Hard blocks (`IsHarmfulBashCommand`) are **deterministic and final** — the auto layer cannot override them.
 - The auto layer cannot escalate the permission mode or widen past static guardrails.
-- `allow_destructive: false` instructs the model to conservatively deny operations it cannot confidently approve.
+- `allow_destructive: false` instructs the model to deny operations that destroy repository history or database state (`git reset --hard`, `git clean`, `DROP`/`TRUNCATE`). Since 2026-10-04 it does NOT cover file deletion: `rm`/`rm -rf` of paths inside the allowed roots is allowed by the rubric. The limits are enforced in code by `dangerousRmReason` (`permissions.go`): a forced or recursive `rm` of the project directory or a parent, an allowed root itself, a `.git` path, or anything outside the roots always asks a human, in `Decide` and again in `verifyAutoGrant`.
 
 ### Judge backends (chat vs TypeSafe/Jev)
 

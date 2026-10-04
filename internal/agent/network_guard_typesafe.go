@@ -36,9 +36,6 @@ import (
 // client factory yields a keyed TypeSafe client, the same "provider connected"
 // convention the discovery and doc_search judges use (discovery_typesafe.go).
 
-// networkGuardJudgeModel is the System One model consulted for egress verdicts.
-const networkGuardJudgeModel = "typesafe/jev-latest"
-
 // networkGuardJudgeTimeout bounds one round trip. Jev answers in roughly 0.8s;
 // 4s is ~5x the median and mirrors searchJudgeTimeout. It is a var so tests can
 // shrink it; production never mutates it. The ceiling is deliberately shorter
@@ -358,7 +355,7 @@ func (a *Agent) checkNetworkGuardCtx(ctx context.Context, toolName string, args 
 	start := time.Now()
 	resp, err := client.DecideCtx(jctx, state, networkGuardQuestions())
 	if err != nil {
-		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_fail tool=%s model=%s err=%v", toolName, networkGuardJudgeModel, err))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_fail tool=%s model=%s err=%v", toolName, deciderLabel(client), err))
 		// Fail open on purpose. webfetch and websearch are Ask by default and
 		// bash network calls are gated by the deterministic exfiltration
 		// detectors, so a provider outage removes this layer without removing
@@ -371,7 +368,7 @@ func (a *Agent) checkNetworkGuardCtx(ctx context.Context, toolName string, args 
 
 	ans, ok := resp.Answers[networkGuardVerdictKey]
 	if !ok || ans.Type != "choice" {
-		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_fail tool=%s model=%s err=no_verdict answers=%d", toolName, networkGuardJudgeModel, len(resp.Answers)))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_fail tool=%s model=%s err=no_verdict answers=%d", toolName, deciderLabel(client), len(resp.Answers)))
 		return networkGuardResult{Applies: true}
 	}
 
@@ -394,12 +391,12 @@ func (a *Agent) checkNetworkGuardCtx(ctx context.Context, toolName string, args 
 		// An answer this build does not understand is not consent. Fail open
 		// rather than guess, but say so — a silently ignored guardrail is worse
 		// than a noisy one.
-		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_fail tool=%s model=%s err=unknown_choice choice=%q", toolName, networkGuardJudgeModel, ans.Choice))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_fail tool=%s model=%s err=unknown_choice choice=%q", toolName, deciderLabel(client), ans.Choice))
 		return networkGuardResult{Applies: true}
 	}
 
 	if res.Escalate {
-		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_escalate tool=%s model=%s concern=%s confidence=%.2f targets=%d elapsed=%s", toolName, networkGuardJudgeModel, concern, ans.Confidence, len(targets), time.Since(start)))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=netguard_escalate tool=%s model=%s concern=%s confidence=%.2f targets=%d elapsed=%s", toolName, deciderLabel(client), concern, ans.Confidence, len(targets), time.Since(start)))
 	}
 	return res
 }

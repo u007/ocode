@@ -21,6 +21,7 @@ import (
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/remote"
+	"github.com/u007/ocode/internal/tailscale"
 )
 
 func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {
@@ -2827,4 +2828,78 @@ func (h *Handler) HandleSetFakeAgentConfig(w http.ResponseWriter, r *http.Reques
 
 func (h *Handler) HandleGetNetworkIP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ip": network.GetIP()})
+}
+
+// autoShareResponse is the auto-share-on-start toggle plus what the server
+// currently has exposed, so the Settings UI can show the live consequence of
+// the flag instead of asking the user to trust it.
+//
+// `url` is the CACHED exposure (empty until the boot hook or the Share dialog
+// starts one); `available` says whether tailscale could serve at all. Neither
+// is required to render the toggle — the toggle works on a machine with no
+// tailscale installed.
+type autoShareResponse struct {
+	Enabled   bool   `json:"enabled"`
+	Available bool   `json:"available"`
+	URL       string `json:"url,omitempty"`
+	Hint      string `json:"hint,omitempty"`
+}
+
+// HandleGetAutoShareConfig reports the auto-share toggle and the current
+// exposure. Reading it never STARTS an exposure: this endpoint must stay safe
+// to poll, or merely opening Settings would publish the instance — the exact
+// surprise the opt-in default exists to prevent.
+func (h *Handler) HandleGetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	enabled := false
+	if h.cfg != nil {
+		enabled = h.cfg.Ocode.AutoShareOnStart
+	}
+	h.mu.Unlock()
+
+	resp := autoShareResponse{Enabled: enabled}
+	// Read the exposure without holding h.mu across any tailscale work (the
+	// Handler mutex is a map lock, per the web-server locking rules). Access
+	// goes through the injected accessor so this handler needs no Server ref.
+	if h.tailscaleShareSnapshot != nil {
+		url, hint := h.tailscaleShareSnapshot()
+		resp.URL = url
+		resp.Hint = hint
+		resp.Available = url != "" || tailscale.Installed()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// HandleSetAutoShareConfig persists the auto-share toggle.
+//
+// Takes effect on the NEXT launch: the exposure is created at boot, and
+// turning it off does not tear down a share that is already running (that is
+// Shutdown's job, and the Share dialog's own reset flow). The response reports
+// the stored value so the UI can echo exactly what was persisted.
+func (h *Handler) HandleSetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveAutoShareOnStart(req.Enabled); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.AutoShareOnStart = req.Enabled
+	}
+	h.mu.Unlock()
+
+	resp := autoShareResponse{Enabled: req.Enabled}
+	if h.tailscaleShareSnapshot != nil {
+		url, hint := h.tailscaleShareSnapshot()
+		resp.URL = url
+		resp.Hint = hint
+		resp.Available = url != "" || tailscale.Installed()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

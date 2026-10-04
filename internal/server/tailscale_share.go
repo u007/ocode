@@ -195,3 +195,13 @@ func (s *Server) handleGetTailscaleURL(w http.ResponseWriter, r *http.Request) {
 		"hint":      hint,
 	})
 }
+
+// peek returns the cached exposure WITHOUT starting one. This is what the
+// config handlers read so that opening Settings can never publish the instance:
+// only the boot hook (StartAutoShare) and the Share dialog (ensure) may start an
+// exposure, and both do so deliberately.
+func (t *tailscaleShare) peek() (url, hint string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.url, t.hint
+}

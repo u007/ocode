@@ -1,5 +1,31 @@
 # TODO
 
+## Auto-share-on-start: deferred items (2026-10-04)
+
+- **Turning the toggle OFF does not un-share the running instance.** `PUT
+  /api/config/ocode/auto-share` persists the flag and the response says so, but
+  the live `tailscaleShare` exposure survives until `Server.Shutdown` or the
+  Share dialog's own reset flow. Deliberate for now: `cleanup()` removes the
+  `--set-path` mount, so a mid-session un-share would also need to decide
+  whether to kill the `serve --bg` child (which would break an in-use shared
+  URL). The UI states "takes effect on the next launch". If asked for an
+  immediate un-share, add `Server.StopAutoShare()` and call it from the PUT
+  handler — do NOT call `cleanup()` directly from the config handler, it resets
+  the shared cache the Share dialog also reads.
+- **The web toggle shows the exposure URL but the TUI command does not.** `/rc`
+  in the TUI owns its own tailscale mount, so surfacing the desktop exposure URL
+  there would need the same `peek` seam plumbed into the TUI model. Low value:
+  the URL is in the desktop log line and the Share dialog.
+- **`auto_share_on_start` has no per-project scope.** It is machine-level by
+  design (a profile switch must never publish/unpublish), so a project-scoped
+  opt-in would need a different key and a decision about which wins.
+- **No live end-to-end run against a real tailnet.** Verified by unit tests,
+  route tests through the real mux, and mutation checks; the tailscale CLI was
+  never exercised live in this session (doing so mutates the node-wide serve
+  config). Worth one manual pass: enable the toggle, restart the desktop app,
+  confirm `desktop: auto-share active at ...` in the log and that the tailnet URL
+  opens from a second device.
+
 ## DONE: `docs/concepts/tui-slash-command-queuing.md` — web instant-command path documented (2026-10-04)
 
 **RESOLVED** — amended via the `context` sub-agent's `doc_write` once the weekly
@@ -4597,33 +4623,53 @@ identified and deliberately left out of that change.
       Interim mitigation ALREADY SHIPPED: both `using-git-worktrees` skill copies corrected so
       the manual fallback at least works (see next-but-one entry).
 
-- [ ] **Fix the CONFIRMED data race in `Agent.SetWorkDir` / the env-prompt cache** (2026-10-04).
-      FIX IMPLEMENTED AND VERIFIED IN A WORKTREE; NOT YET IN THE MAIN TREE — see the blocker below.
-      Approach: one dedicated `Agent.projectCtxMu sync.Mutex` guarding `workDir`, `projectHost` and
-      the six `envPrompt*` fields (NOT `compactMu` — wrong scope). Guarded sites: the read at
-      prompt.go:92 (`PrepareMessages`), the read+write in `environmentPrompt` (snapshots its inputs
-      under the lock, computes UNLOCKED, stores under the lock — deliberately not holding it across
-      the prompt build), the write in `clearEnvironmentPromptCache` (split into a locking wrapper
-      plus `clearEnvironmentPromptCacheLocked` so `SetWorkDir` can hold the lock once without
-      self-deadlocking), and the accessors `WorkDir`/`effectiveWorkDir`/`ProjectHost`/`SetProjectHost`.
-      Verification (in `.worktrees/race-fix`, pristine HEAD 9a22eb37 + the fix + the new regression
-      test `internal/agent/envprompt_race_test.go`): build clean, `gofmt` clean, `go vet` clean.
-      The test asserts nothing — `-race` is the assertion — giving a clean RED/GREEN pair in the
-      SAME tree: pristine HEAD = **23 DATA RACE reports**; with the fix = `ok`. So it is a real
-      regression guard, not a probe that must be deleted.
-      BLOCKER to landing it in the main tree: `internal/agent` currently DOES NOT COMPILE because of
-      a peer session's in-flight `Decider` refactor — 11 errors, all in peer-modified
-      `*_typesafe.go` files (`autocontinue_typesafe.go`, `content_guard_typesafe.go`,
-      `discovery_typesafe.go`, `network_guard_typesafe.go`) plus `discovery_glue.go`; none in the
-      files this fix touches. The fix therefore cannot be compile-verified in the main tree until
-      the peer's refactor lands. My main-tree working copy carries the fix in `agent.go`/`prompt.go`/
-      `md_discovery.go` uncommitted.
-      SIBLING FINDING, same class, NOT covered by this fix: `a.client` is READ in
-      `environmentPrompt` (prompt.go ~305-307, for provider/model) and WRITTEN unlocked at
-      agent.go:5740 just before `clearEnvironmentPromptCache()`. Not reproduced (the test does not
-      swap the client), and it is a different subsystem, so it was deliberately left out rather than
-      bundled in. Verify and guard it the same way before calling the env-prompt path fully race-free.
-      SHOULD RUN the full `go test -race ./internal/agent/` once the package compiles again.
+- [ ] **`Agent` project-context race fix — LANDED, needs follow-ups** (2026-10-04).
+      The fix IS IN THE MAIN TREE AND COMMITTED — but accidentally: a peer session's all-files
+      commit `259dfcc4 "feat(perms): sub-agent asks + judge hardening"` swept this uncommitted
+      working-tree fix into itself, so it is durable but carries a message that does not describe it.
+      Verified present in `HEAD`: all 13 swept sites (`a.WorkDir()` x12 + `a.ProjectHost()` x1 across
+      agent.go/prompt.go/md_discovery.go/ask.go/discovery_glue.go/dir_docs.go/discovery_autoinject.go)
+      plus the committed regression test `internal/agent/envprompt_race_test.go`.
+      WHAT WAS FIXED: one dedicated `Agent.projectCtxMu sync.Mutex` guards `workDir`, `projectHost`
+      and the six `envPrompt*` fields (NOT `compactMu` — wrong scope). `environmentPrompt` snapshots
+      its inputs under the lock, computes UNLOCKED, stores under the lock. `clearEnvironmentPromptCache`
+      is split into a locking wrapper + `clearEnvironmentPromptCacheLocked` so `SetWorkDir`/
+      `SetProjectHost` hold the lock once without self-deadlocking. Lock order is safe — `projectCtxMu`
+      is NEVER held while acquiring another lock (`SetWorkDir` unlocks before touching
+      `snapshotStore`/`permissions`; accessors lock→return→unlock), so no inversion with
+      `agentSession.mu` → `h.mu`.
+      TEST EVIDENCE (all in `.worktrees/race-fix`, pristine 9a22eb37 + fix; the working tree is at
+      259dfcc4 which already contains the fix):
+        - `go test -race -count=10 -timeout 1500s ./internal/agent/ -run
+          'TestPrepareMessagesConcurrentWithCacheInvalidation|TestSubagent|TestSubAgent|TestDirDocs|
+          TestDirMD|TestDiscoveryAutoinject|TestEffectiveWorkDir|TestWorkDir'
+          -skip 'TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent'` → **ok, 51.9s, 0 races, 0 failures**.
+        - One FULL `-race` pass over `./internal/agent/` (timeout 900s) → **0 DATA RACE occurrences**;
+          1 failure, `TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent`, which reproduces IDENTICALLY
+          at pristine HEAD with the fix reverted — pre-existing, not caused here. NOT verified on the
+          main tree (it does not compile — see below), so treat that as unconfirmed rather than fixed.
+        - `TestPrepareMessagesConcurrentWithCacheInvalidation` alone: 5/5 green.
+      CORRECTIONS I OWE THE NEXT READER: (1) an early revision of this entry claimed a clean RED/GREEN
+      with only five sites guarded — FALSE POSITIVE, `-race` only reports races it observes; the
+      broader subset then failed at an unguarded `a.workDir` in `BasePromptMessages` (prompt.go:202),
+      and the 11-site sweep is what actually fixes it. (2) I next called
+      `TestPermissionTablesConcurrentWriteDuringDecide` a "pre-existing HANG in DarwinUserDirs" — also
+      WRONG; it PASSES alone in 96.1s with the fix applied. It is slow, not hung: every `pm.Decide`
+      calls `AllowedRoots` → `DarwinUserDirs` → `filepath.Glob` (measured 669µs/glob). No deadlock
+      from `projectCtxMu`.
+      REMAINING FOLLOW-UPS (none block the fix, which is committed):
+        - The commit message does not describe this change. Split or re-message it if that matters
+          (it is pushed/shared history now, so weigh that first).
+        - `a.client` — same class, NOT fixed: read in `environmentPrompt` (prompt.go ~305-307) and
+          written unlocked at agent.go ~5740 just before `clearEnvironmentPromptCache()`. Not
+          reproduced; different subsystem. Should be its own entry if you want it tracked separately.
+        - No lock-order note in `CLAUDE.md`/`docs/concepts` — the invariant lives only in the
+          `projectCtxMu` code comment. `CLAUDE.md` has unrelated peer edits; `docs/` is bundle-owned
+          (context agent only).
+        - `.worktrees/race-fix` still exists — remove it once satisfied. `/tmp/racefix/` holds logs.
+        - The main tree does NOT compile for a reason unrelated to this fix: `internal/config/
+          ocodeconfig.go:2235 undefined: applyJudgeModelConfig` (peer WIP file). Re-run the full
+          suite once that clears.
       ```
       WARNING: DATA RACE
       Write at 0xc0003a80d0 by goroutine 24:
@@ -5015,3 +5061,229 @@ Plan: `docs/superpowers/plans/2026-10-03-clef-judge-backend/`. Spec:
       there), and choice option-order bias (the permission judge's criteria are exactly
       a two-option choice). Both are documented by the vendor and both are cheap to
       measure with the eval above.
+- [ ] **Re-derive 215 doc anchors that resolve into Part-01-edited files.** Part 01
+      (the `Decider` seam) changed `agent.go`, `client.go`, `permission_typesafe.go`,
+      `relevance_typesafe.go`, `discovery_typesafe.go`, `discovery_glue.go`,
+      `typesafe.go`, `search_typesafe.go`, `doc_search_typesafe.go`,
+      `autocontinue_typesafe.go`, `network_guard_typesafe.go` and
+      `content_guard_typesafe.go`. A mechanical sweep found **215 distinct
+      `file.go:NNN` anchors** in `docs/concepts/*.md`, `docs/*.md` and `CLAUDE.md`
+      that resolve into those files, and at least one is already visibly stale —
+      `network_guard_typesafe.go:377` now lands on a **blank line** (it was a
+      `RecordSideUsage` site that became `deciderLabel(client)`). 215 is too many
+      to correct by hand and each needs its source line printed, not assumed.
+      **Blocked on the `context` sub-agent** (`docs/` is an active OKF bundle;
+      `CLAUDE.md`'s sole-automated-writer invariant bars a direct write). Sweep
+      script kept at `/tmp/anchor_drift.py` — it prints the resolved line for
+      every anchor rather than auto-judging drift.
+- [ ] **Update the four judge concept pages for Part 01's behaviour changes.**
+      `docs/concepts/discovery-typesafe-judge.md` describes a judge client cached
+      with `sync.Once`; that is now a mutex + model-id key, and a **nil is
+      deliberately re-resolved** so a mid-session `/connect` takes effect
+      immediately (previously it needed a `/discovery` toggle or restart).
+      `docs/concepts/auto-permission-enforced-categories.md` and
+      `docs/concepts/doc-search-relevance-judge.md` describe judge labels as a bare
+      model name; they are now **provider-qualified** via `deciderLabel(client)`.
+      `CLAUDE.md` has already been updated directly (it is not bundle content).
+      Also blocked on `context`.- [ ] **Fix 6 stale `decider.go` anchors introduced by the 2026-10-04 doc amendment.**
+      A `context` sub-agent amended four concept pages and re-derived 14 anchors;
+      I verified all 14 by printing the real source line. **13 were correct, 2
+      were wrong** — it invented anchors for the then-new `decider.go`, and my
+      Part 03 edits to that same file shifted the lines underneath it mid-run.
+      This is the "code anchors drift silently" trap, and it is the reason a
+      sub-agent's "anchors corrected" list must never be trusted.
+      Verified corrections:
+      - `decider.go:112` → **`decider.go:113`** (`func (a *Agent) resolveDecider`).
+        Cited 4x: `concepts/auto-permission-enforced-categories.md:102`,
+        `concepts/discovery-typesafe-judge.md:23`,
+        `concepts/server-auto-continue.md:47`.
+      - `decider.go:214` → **`decider.go:231`** (`func isDecisionModel`).
+        Cited 2x: `concepts/auto-permission-enforced-categories.md:104`,
+        `concepts/discovery-typesafe-judge.md:101`.
+      Apply via `context` → `doc_write` (bundle-owned). **Defer to the FINAL
+      anchor sweep**, after Parts 04–09 land — fixing now means fixing twice, since
+      `clef.go` and the guard work will move `decider.go` again. Until then these
+      two numbers are known-wrong and the surrounding prose is correct.
+- [ ] **`concepts/inbound-content-guardrail.md:38` is stale** and was NOT in the
+      2026-10-04 amendment scope. It still quotes
+      `newClientFn(a.config, contentGuardJudgeModel).(*TypesafeClient)` and
+      `content_guard_typesafe.go:51` — both removed by Part 02. It needs the same
+      treatment: `resolveDecider(slotContentGuard)` + provider-qualified labels.
+      Add it to the final sweep.
+- [ ] **Re-derive `discovery_glue.go` anchors the amendment declined to touch.**
+      The agent verified the anchors it changed and explicitly left the rest,
+      reasoning that its own amendment text was dated. But Part 01 rewrote the
+      discovery judge cache in `discovery_glue.go` (added `judgeMu`, removed
+      `judgeOnce`, changed the `st.Judge` assignment to `a.slotModel(...)`), so
+      those anchors moved independently of any doc edit. Verify every
+      `discovery_glue.go:NNN` on the judge pages against the real file.
+- [ ] **Pre-existing test-isolation gap, not introduced by this work.**
+      `internal/config/ocodeconfig_test.go:70` (and neighbours) set only `HOME`
+      before calling `LoadOcodeConfig`. `paths.GlobalConfigDir` reads
+      `XDG_CONFIG_HOME` *before* the `HOME` fallback
+      (`internal/paths/paths.go:172`), so on a machine where that variable is set
+      those tests can read the developer's real `ocodeconfig.json`. The new
+      `judge_model_config_test.go` sets BOTH via an `isolateConfigEnv` helper.
+      Worth fixing the older tests separately; left alone deliberately rather than
+      editing tests this change does not own.
+- [ ] **Doc anchor + fact sweep after the Clef work (Part 04 findings).** All verified
+      by printing the real source line, not by trusting an agent's list.
+      **(a) `typesafe.go` anchors shifted by MY Part 04 edit** (extracted
+      `marshalRequestBody`, −6 lines at :112, +19 at :153):
+      - `typesafe.go:88` cited as `DecideCtx` now points at `Decide`.
+        Correct: `Decide` = **:88**, `DecideCtx` = **:100**. Cited in
+        `concepts/code-search-relevance-judge.md:63`.
+      - `typesafe.go:76` cited as `Decide` is now a **blank line**. Correct
+        `Decide` = **:88**. Cited in `concepts/code-search-relevance-judge.md:64`.
+      - `typesafe.go:23` (`typesafeRequestTimeout`) is still correct.
+      **(b) `concepts/code-search-relevance-judge.md` was never amended.** It is
+      the 5th judge page and it was missed: it still cites
+      `discovery_typesafe.go:41` (now **:35**) and `search_typesafe.go` lines that
+      Part 01 moved. Together with `concepts/inbound-content-guardrail.md` that
+      makes **two** stale judge pages, not one.
+      **(c) The permission confidence floor is 0.80, not 0.85 — the docs are
+      stale from a 2026-10-03 change.** `autoJudgeMinConfidenceDefault = 0.80`
+      (`internal/agent/permissions.go:6811`) and the config default is also
+      `MinConfidence: 0.80` (`internal/config/ocodeconfig.go:1467`);
+      `autoJudgeOpaqueMinConfidenceDefault = 0.75`. `auto-permission-judge-eval.md`
+      correctly records "floor lowered from 0.85 to 0.80 (2026-10-03)", but three
+      pages were never updated and still assert 0.85:
+      `concepts/discovery-typesafe-judge.md:27` and `:37`,
+      `concepts/code-search-relevance-judge.md:87`.
+      This is PRE-EXISTING staleness, not caused by the Clef work — but it is why
+      my own plan part files say "shared 0.85/0.5 floors" and that wording must be
+      corrected there too. `judge_failopen_test.go` now logs the true values
+      (permission 0.8, opaque 0.75, relevance 0.5, auto-continue 0.6, network
+      guard 0.9) so a future drift shows up in test output.
+      **(d)** Re-derive every `decider.go:NNN` and `discovery_glue.go:NNN` anchor on
+      the judge pages (see the separate entries above for the verified values).
+- [ ] **FIXED (2026-10-04): the AST scan now has teeth.** It was recorded as a
+      vacuous-pass risk and closed immediately rather than deferred:
+      `agentPkgFiles` now fails if it parses 0 or fewer than 5 files, and the
+      two-value scan asserts it actually observed the accesses it polices.
+      `TestJudges_ReadAnswersWithTheTwoValueForm` logs "scanned 89 files,
+      verified 9 two-value Answers reads". A matcher that stopped matching would
+      otherwise report a clean bill of health.
+      Depends on `parser.ParseDir` accepting `.`, so the test must keep running
+      from the package directory.
+- [ ] **Two of my own mutation harnesses were wrong, and the tests they nearly
+      certified were vacuous.** Recorded because the pattern will recur.
+      (a) An M7 "demux materialises a zero answer" mutant was written as
+      `out.Answers[orig] = ans; _ = orig` — an **equivalent mutant** (a no-op). It
+      reported SURVIVED, which said nothing about coverage. The real mutant (fill
+      a zero `TypesafeAnswer` for every unanswered question) is CAUGHT.
+      (b) `TestClefQuestionPlan_IsDeterministic` originally used 40 ids that
+      collapsed to 7 **collision-free** sanitised forms. With no collision, map
+      iteration order cannot affect the mapping, so the test would have passed with
+      `sort.Strings` deleted. The strengthened fixture (3 ids that all sanitise to
+      `a_0`) now CATCHES that mutation. General rule: **a determinism test needs a
+      fixture where order is actually observable**, and it should assert the
+      fixture collides before relying on it — the same discipline as the
+      "missing fixture must fail loudly, never skip" rule.
+- [ ] **Still unmeasured: does Jev truncate or 400 on an oversized `state`?**
+      Gates Part 05 (the shared state budget). `internal/agent/typesafe.go` has no
+      existing guard, and a non-2xx already becomes `newProviderStatusError` at
+      `typesafe.go` DecideCtx, so the failure mode would be "model unavailable" →
+      human ask. Needs one live probe against a deliberately oversized payload.- [ ] **Part 05 shipped with ONE unresolved premise, deliberately not papered
+      over: nobody knows whether Jev truncates or rejects an oversized `state`.**
+      `TestOversizedStateProbe_TruncateOrReject`
+      (`internal/agent/state_budget_test.go`, gated on `OCODE_JEV_EVAL=1`
+      matching the existing live-judge eval tests) resolves it. Run it with the
+      typesafe provider connected and record the outcome.
+      Severity differs sharply between the two answers: a 4xx is a deferral to
+      the human carrying a confusing message (UX); a 200 that silently truncated
+      means the judge graded an invisible command tail (SAFETY).
+      The guard is correct either way, which is why the probe deliberately
+      asserts almost nothing — encoding either behaviour as "expected" would be
+      asserting something nobody observed. NOTE: a 200 does NOT prove the tail
+      was truncated-safe, so the probe logs that distinction explicitly.
+- [ ] **The 96 KB budget is an ESTIMATE and can still under-ask.** Derived from
+      Jev's stricter 32k `state` limit at 3 bytes/token (not 4, because a
+      chars/4 estimate under-estimates tokens for code and JSON; measured ratio
+      on the 200 KB write payload is ~3.6). A state just under 96 KB may exceed
+      32k real tokens. Tightening needs a real tokenizer, which this package
+      does not carry. `TestSharedStateBudget_WorstCaseProductionPayloads` is the
+      load-bearing safety net — if a future change grows a payload past the
+      ceiling it fails there rather than degrading auto-mode silently.
+- [ ] **PROCESS ERROR worth remembering: a mutation harness and a `go test` run
+      must never overlap on the same package.** I ran the Part 05 mutation
+      harness concurrently with a full suite over `internal/agent`. The harness
+      was writing mutants into `state_budget.go` WHILE the suite ran, so that
+      suite's green result was untrustworthy even though it passed. Caught by
+      comparing source mtimes against the log timestamp — the same check that
+      caught a stale `-race` claim last turn. Re-ran cleanly afterwards. Treat
+      "the suite passed" as unproven whenever a concurrent writer touched the
+      package.
+- [ ] **M3 survived round 1: projection mutating the caller's map.** My comment
+      claimed projection "never mutates the caller's map" and that claim had no
+      test behind it. Added
+      `TestSharedStateBudget_ProjectionDoesNotMutateTheCallersState`, which also
+      catches the NESTED case (a top-level-only copy would still share inner
+      maps); re-ran the mutant: CAUGHT. Lesson: a comment asserting a safety
+      property is a claim, not a guarantee — if it matters, mutate-test it.
+- [ ] **SAFETY FIX (2026-10-04, Part 05): projection must be signallable, and an
+      advisor review is what caught it.** I introduced a SECOND, UNSIGNALLED
+      truncation. The codebase already had a truncation protocol —
+      `interpreter.source.truncated`, `executed_scripts[].truncated`, the
+      instruction "do not approve on a partial view", and the
+      `truncated_or_unknown` concern that drops the confidence floor — but my
+      state projection clipped `arguments.content` / `file_content` with only a
+      marker buried inside the preview string and no structured flag. A model
+      explicitly taught to distrust partial views would have auto-ALLOWED a 200 KB
+      `write` on a clipped view of the very bytes that make it harmful.
+      FIX: `prepareDecisionState` now attaches a top-level `_projection`
+      `{applied, fields[]}` naming the clipped dotted paths, and a new
+      `typesafeJudgeInstructions` line teaches the rule, routing to
+      `truncated_or_unknown` so the existing opaque-floor drop applies.
+      Tests: `TestSharedStateBudget_ProjectionIsSignalledStructurally`,
+      `TestSharedStateBudget_NoProjectionMarkerOnAFittingState` (a fitting state
+      must NOT carry the marker, or every auto-allow would trip the rule),
+      `TestPermissionJudgeInstructions_TeachTheProjectionRule`.
+      **General rule this establishes: any new truncation path in this repo must
+      emit a structured signal the judge is explicitly taught to distrust.
+      A human-readable marker inside the clipped content is not a signal.**
+- [ ] **TEST-QUALITY FINDING: global-substring assertions can pass for the wrong
+      reason.** `TestPermissionJudgeInstructions_TeachTheProjectionRule`
+      originally checked the WHOLE instruction block for "_projection", "do not
+      approve on a partial view" and "truncated_or_unknown". Two mutants that
+      deleted exactly this rule SURVIVED — because the pre-existing interpreter
+      and executed_scripts rules already contain all three phrases. The test was
+      green while the rule it exists to protect was gone.
+      FIX: assert on the SPECIFIC line that mentions the marker, then assert that
+      line carries each required phrase. Both mutants now CAUGHT.
+      General rule: **when asserting that prose X teaches rule Y, scope the
+      assertion to X's own text.** A substring match against a large block only
+      proves the phrase occurs somewhere in the block.
+- [ ] **INEFFECTIVE MUTANT, recorded so it is not mistaken for a coverage gap.**
+      My round-1 "M3: delete the _projection instruction" only replaced the
+      line's opening clause. The surviving text still read "_projection.fields …
+      do not approve on a partial view: name the truncated_or_unknown concern",
+      i.e. it still taught the rule — so the test was RIGHT to pass. Redone as a
+      whole-line deletion (`/tmp/mutate_m3b.py`): CAUGHT.
+      Distinguish the three failure modes explicitly, because they look identical
+      in the output: a mutant that breaks only the build is INVALID; one that
+      changes nothing observable is INEFFECTIVE; only one that survives a real
+      behavioural change is a genuine coverage gap.
+- [ ] **Parts 06–09 of the Clef plan are NOT DONE** (plan:
+      `docs/superpowers/plans/2026-10-03-clef-judge-backend/`):
+      - **06** budget regression test — DONE as
+        `TestSharedStateBudget_WorstCaseProductionPayloads`; re-check against
+        Part 06's intent before marking the part complete.
+      - **07** the agreement eval between clef and Jev, gated on **directional**
+        disagreement (a clef-allows / Jev-denies pair vetoes adoption), plus the
+        calibration comparison and the option-order check. **Unrun — needs live
+        credentials.**
+      - **08** provider-agnostic attribution. Partially in place via
+        `deciderLabel`; confirm what remains.
+      - **09** docs. See the doc-debt entries above.
+- [ ] **`docs/concepts/*` pages still need the Part 05 write-up**, and must go
+      through the `context` agent because `docs/` is bundle-owned. Specifically:
+      - `auto-permission-enforced-categories.md` — the 96 KB budget, the
+        project-then-refuse order, and the `_projection` signal that stops an
+        auto-allow on a clipped view.
+      - `discovery-typesafe-judge.md`, `doc-search-relevance-judge.md`,
+        `code-search-relevance-judge.md` — `validateAnswer` on the per-candidate
+        path, and that a rejected answer KEEPS the candidate.
+      - Plus the anchor/fact sweep already recorded above (0.85 vs 0.80 floors,
+        `typesafe.go` anchors, six `decider.go` citations, two never-amended
+        pages).

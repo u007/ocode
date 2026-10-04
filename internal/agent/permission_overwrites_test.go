@@ -114,3 +114,33 @@ func TestFileBackupsAllSavedFirstFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// Deleting inside a root is in scope, but the root itself, the project
+// directory (or a parent) and repository metadata always need a human.
+func TestDangerousRmReasonGuardsRootsAndRepoMetadata(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.MkdirTemp(home, ".ocode-rm-guard-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	root := filepath.Join(parent, "proj")
+	if err := os.MkdirAll(filepath.Join(root, "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(root)
+	for _, cmd := range []string{"rm -rf " + root, "rm -rf .", "rm -rf ..", "rm -rf .git", "rm -rf internal/../.git/hooks", "rm -f .git/config"} {
+		if dangerousRmReason(pm, splitShellFields(cmd)) == "" {
+			t.Errorf("dangerousRmReason(%q) = \"\", want a reason", cmd)
+		}
+	}
+	for _, cmd := range []string{"rm -rf internal", "rm -f internal/a.go", "rm -rf internal/ cmd/ web/", "rm -f .gitignore"} {
+		if reason := dangerousRmReason(pm, splitShellFields(cmd)); reason != "" {
+			t.Errorf("dangerousRmReason(%q) = %q, want none", cmd, reason)
+		}
+	}
+}

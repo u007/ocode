@@ -47,6 +47,13 @@ type Handler struct {
 	// computer use. Overridable in tests so the suite never fires a real
 	// consent dialog; nil falls back to computer.RequestPermissions.
 	requestComputerPermissions func(context.Context) computer.PermissionReport
+	// tailscaleShareSnapshot reports the server's CURRENTLY cached tailscale
+	// exposure as (url, hint) without starting one. Injected rather than held as
+	// a *Server reference so the Handler stays decoupled, and so the config
+	// handlers can read exposure state without taking h.mu across any tailscale
+	// work (Handler.mu is a map lock, never a work lock). nil = no exposure
+	// subsystem, which the handlers treat as "nothing shared".
+	tailscaleShareSnapshot func() (url, hint string)
 	// sysPermMu serializes read-modify-write of the system-permissions
 	// sub-tree (persisted + the in-memory h.cfg copy).
 	sysPermMu sync.Mutex

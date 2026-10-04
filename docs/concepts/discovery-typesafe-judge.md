@@ -3,26 +3,24 @@ type: Concept
 title: "Discovery TypeSafe Relevance Judge"
 description: TypeSafe relevance judge that vets discovery candidates per-turn (fail-open attach, shared with doc_search) plus the fail-closed auto-injection of the top-scoring skill body with its own 0.8 floor; score plumbing, selection, dedupe, bounding, user-role injection.
 tags: [discovery, typesafe, skills, architecture, observability, auto-inject]
-timestamp: 2026-10-01T17:14:06Z
+timestamp: 2026-10-04T12:31:48Z
 resource: internal/agent/discovery_glue.go
 ---
 # Discovery TypeSafe Relevance Judge
 
 ## Overview
 
-When discovery is enabled and the TypeSafe provider is connected, a per-turn judge asks Jev (the `typesafe/jev-latest` model) whether each embedder-selected candidate — a skill, project markdown doc, or MCP tool — is actually in scope for the current request. Only confirmed candidates join the sticky attached set. The judge can only ever veto; it never attaches fewer docs than the pre-judge attach-everything behavior.
+When discovery is enabled and a decision backend is connected, a per-turn judge asks whether each embedder-selected candidate — a skill, project markdown doc, or MCP tool — is actually in scope for the current request. Only confirmed candidates join the sticky attached set. The judge can only ever veto; it never attaches fewer docs than the pre-judge attach-everything behavior.
 
-The judge now shares mechanics with the [doc_search relevance judge](concepts/doc-search-relevance-judge.md) through a common core (`judgeRelevanceQuestions` in `internal/agent/relevance_typesafe.go`), including the lenient confidence floor and the "slight relevancy kept, different scope skipped" rubric.
+The judge shares mechanics with the [doc_search relevance judge](concepts/doc-search-relevance-judge.md) through a common core (`judgeRelevanceQuestions` in `internal/agent/relevance_typesafe.go`), including the lenient confidence floor and the "slight relevancy kept, different scope skipped" rubric.
 
 Since 2026-10-01 the judge's raw per-candidate scores also drive a second, **fail-closed** consumer: auto-injection of the single top-scoring skill's full body into the prompt (see the 2026-10-01 amendment below). That changes nothing about the attach contract above — attach stays veto-only and fail-open.
 
 ## Activation condition
 
-There is no separate config flag. `discoveryJudgeClient()` in `internal/agent/discovery_typesafe.go:41` returns a `*TypesafeClient` only when `newClientFn(a.config, "typesafe/jev-latest")` yields a client with a non-empty API key. A nil config, a non-TypeSafe factory result, or a keyless client all mean "no judge", and discovery behaves exactly as before (every candidate is seeded).
+There is no separate config flag. `discoveryJudgeClient()` in `internal/agent/discovery_typesafe.go:35` returns a `Decider` only when `resolveDecider(slotDiscovery)` yields a client with a non-empty API key. A nil config, a non-decision factory result, or a keyless client all mean "no judge", and discovery behaves exactly as before (every candidate is seeded).
 
-`discoveryJudgeClient` is the **shared connected check** for both the discovery relevance judge and the doc_search relevance judge — both use the same factory, model, and caching behaviour.
-
-The resolution is cached once per discovery state (`discoveryState.judge`, guarded by `sync.Once`), so the factory and its "no API key ... refusing to build client" debug line run once per session rather than on every turn and every `/discovery` status read. Connecting TypeSafe mid-session takes effect after the next `ResetDiscovery` (toggle `/discovery` off and on) or a restart.
+`discoveryJudgeClient` is the **connected check** for the discovery relevance judge. It resolves through `resolveDecider(slotDiscovery)` (`internal/agent/decider.go:112`), which reads the `discovery.judge_model` config key (default `typesafe/jev-latest`). The result is cached per discovery state (`discoveryState.judge`, guarded by `judgeMu`), keyed on the slot's model id. A nil client is deliberately NOT cached, so connecting a provider mid-session takes effect on the next judge call without requiring a `/discovery toggle` or restart.
 
 ## Confidence floor
 
@@ -46,20 +44,20 @@ Why the auto-inject floor is neither of the other two is argued in the 2026-10-0
 
 ## State and question shape
 
-`buildDiscoveryJudgeState` (pure, `internal/agent/discovery_typesafe.go:108`) assembles a structured map with three keys:
+`buildDiscoveryJudgeState` (pure, `internal/agent/discovery_typesafe.go:112`) assembles a structured map with three keys:
 
 - `request` — the discovery query text (the user's message, optionally enriched with project-type signal).
 - `transcript_tail` — the last 6 non-empty messages (`discoveryJudgeTailN`), each capped at 4000 chars (`discoveryJudgeTailCap`). Empty messages are skipped.
 - `candidates` — one `{id, kind, name, summary}` per candidate. Summary is `discovery.Doc.Text` capped at 1000 chars (`discoveryJudgeSummaryCap`).
 
-`judgeDiscoveryCandidates` (`internal/agent/discovery_typesafe.go:77`) delegates to `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:57`), which sends one `noul` (yes-probability) question per candidate in a single `Decide` call, keyed by doc ID. The question text is built by `discoveryJudgeInstructions` and references the candidate by its backticked state path (`candidates[i]`).
+`judgeDiscoveryCandidates` (`internal/agent/discovery_typesafe.go:81`) delegates to `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:57`), which sends one `noul` (yes-probability) question per candidate in a single `DecideCtx` call, keyed by doc ID. The question text is built by `discoveryJudgeInstructions` and references the candidate by its backticked state path (`candidates[i]`).
 
 **Return shape (since 2026-10-01).** `judgeRelevanceQuestions` returns a THIRD value beside the keep map: `scores map[string]float64` — the raw per-candidate `noul` for every candidate that got a real noul answer (`internal/agent/relevance_typesafe.go:80`). Its contract:
 
 - Keep/veto semantics of ALL THREE judges sharing the helper are UNCHANGED — the boolean keep map remains the authority, and the signature change is additive. The other two callers discard the scores with `_`: doc_search (`internal/agent/doc_search_typesafe.go:107`) and tool/code-search (`internal/agent/search_typesafe.go:121`).
 - A VETOED candidate still reports its real score (the score is written at `:80` before the floor comparison at `:81`) — that is what lets a caller see how close a turn came to firing.
 - A MISSING or non-noul answer is ABSENT from the scores map, never defaulted to 0.0 (that path `continue`s at `internal/agent/relevance_typesafe.go:73-76` before the write). Absent means "unknown"; callers must treat it that way, never as a zero score.
-- `judgeDiscoveryCandidates` correspondingly returns `([]discovery.Doc, map[string]float64, error)` (`internal/agent/discovery_typesafe.go:77`, returning at `:102`); `runDiscovery` captures the map as `judgeScores` (`internal/agent/discovery_glue.go:435`, assigned at `:443`).
+- `judgeDiscoveryCandidates` correspondingly returns `([]discovery.Doc, map[string]float64, error)` (`internal/agent/discovery_typesafe.go:81`, returning at `:106`); `runDiscovery` captures the map as `judgeScores` (`internal/agent/discovery_glue.go:435`, assigned at `:443`).
 
 ## Split Select/Seed
 
@@ -75,8 +73,8 @@ The judge path in `runDiscovery` (`internal/agent/discovery_glue.go:356`) calls 
 
 | Condition | Behaviour |
 |---|---|
-| TypeSafe not connected (`discoveryJudgeClient()` returns nil) | Seed all candidates — attach-everything |
-| Transport or decode error from `Decide` | Seed all candidates (logged via `emitDebug("DISCOVERY", ...)`) |
+| No decision backend connected (`discoveryJudgeClient()` returns nil) | Seed all candidates — attach-everything |
+| Transport or decode error from `DecideCtx` | Seed all candidates (logged via `emitDebug("DISCOVERY", ...)`) |
 | Candidate answer missing or not `type:"noul"` | That candidate is kept (fail-open per candidate) |
 | Real below-threshold noul (Noul < 0.5) | Vetoes only that candidate |
 
@@ -90,9 +88,11 @@ The sections above describe the judge as a per-turn `runDiscovery` mechanism. Th
 
 **Every retrieval attach path is now judged.** `discover_more` (`discoverMoreTool.Execute`, `internal/agent/discovery_glue.go:953`) used to call `Session.Discover` (Select+Seed, no judge), so a model that named a need bypassed Jev entirely — the exact guard-bypass class where a fallback path skips the gate the primary path runs. It now calls `Session.Select` (`:972`), then `judgeDiscoveryCandidates` when `discoveryJudgeClient()` resolves (`:977`), then `Seed`s only the survivors (`:994`).
 
-**Its fail-open matrix is identical to the table above.** Same four rows: TypeSafe not connected → seed all candidates; `Decide` transport/decode failure → seed all (logged as `discover_more judge failed (fail-open, all attached): ...`, `:982`); missing or non-`noul` answer → keep that candidate; below-threshold noul → veto that candidate. Real vetoes increment the **same** `discoveryState.judgeVetoed` counter the per-turn path uses (`:986` vs. `:445`), so `/discovery status`'s `vetoed N` totals both paths. The path's own debug line is `discover_more("<need>") → +N tools (judge kept N/M)` (`:995`).
+**Its fail-open matrix is identical to the table above.** Same four rows: no backend connected → seed all candidates; `DecideCtx` transport/decode failure → seed all (logged as `discover_more judge failed (fail-open, all attached): ...`, `:982`); missing or non-`noul` answer → keep that candidate; below-threshold noul → veto that candidate. Real vetoes increment the **same** `discoveryState.judgeVetoed` counter the per-turn path uses (`:986` vs. `:445`), so `/discovery status`'s `vetoed N` totals both paths. The path's own debug line is `discover_more("<need>") → +N tools (judge kept N/M)` (`:995`).
 
 **The on-demand judge sees the conversation too.** `noteDiscoveryTail` / `discoveryTail` (`:926` / `:944`) record a bounded copy of the turn's last `discoveryJudgeTailN` (6) messages on `discoveryState.tail`, guarded by `tailMu`. `runDiscovery` records it right after `ensureDiscovery()` and **before** its early returns (`:364-369`) — the cold-cache deferral is precisely the turn where nothing is attached and the model must fall back to `discover_more`.
+
+**The reply distinguishes veto-all from no-match.** When candidates matched but the judge vetoed all of them, `discover_more` now returns `N tool(s) matched that need but were judged out of scope for this request. Try a different need, or continue without them.` instead of the old `No additional tools matched that need.` — so the model can distinguish "nothing matched" from "matched but out of scope" and retry rather than conclude the capability is missing.
 
 **The reply distinguishes veto-all from no-match.** When candidates matched but the judge vetoed all of them, `discover_more` now returns `N tool(s) matched that need but were judged out of scope for this request. Try a different need, or continue without them.` instead of the old `No additional tools matched that need.` — so the model can distinguish "nothing matched" from "matched but out of scope" and retry rather than conclude the capability is missing.
 
@@ -198,3 +198,26 @@ Auto-injection adds **no extra `Decide`** — it reuses the same turn's score ma
 - [Discovery Web Surfaces](concepts/discovery-web-surfaces.md) — how discovery status and live notices are surfaced in the web/desktop UI, including the runtime status endpoint and the map-race safety rule for reading agent state.
 - [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md) — the names-only index vs. callable definitions split, the strict no-warm-fail-open gate, and the `discover_more` recovery path this amendment's judge path serves.
 - [Prompt Cache Stability](concepts/prompt-cache-stability.md) — the tools → system → messages prefix order and the role-determines-caching rule the user-role auto-inject block obeys.
+
+## Amendment (2026-10-04): Per-slot model configuration, the Decider seam, and the cache that finally lets `/connect` take effect
+
+**The `Decider` interface.** A new file `internal/agent/decider.go` introduces a `Decider` interface with exactly four methods: `DecideCtx`, `Decide`, `GetProvider`, `GetModel`. It is deliberately narrower than `LLMClient` so a decision-only backend cannot reach the chat, compaction, small-model or interpreter-effects paths. `*TypesafeClient` satisfies it unchanged. `isDecisionModel(modelID)` (`internal/agent/decider.go:214`) is the single place that decides which provider/model ids route to a decision backend (currently `typesafe/*` and Cloudflare Workers AI clef models).
+
+**Per-judge model configuration.** Five new config keys, each `omitempty`, each defaulting to `typesafe/jev-latest`:
+- `discovery.judge_model`
+- `doc_search.judge_model`
+- `search.judge_model`
+- `network_guard.judge_model`
+- `content_guard.judge_model`
+
+`permission` and `auto_continue` keep their existing keys (`permissions.auto.model` and `auto_continue_model`) — they were not moved or renamed. The default `typesafe/jev-latest` lives in one place: `defaultJudgeModel` in `internal/config/ocodeconfig.go:789`.
+
+**The three hardcoded constants are deleted.** `discoveryJudgeModel`, `networkGuardJudgeModel`, and `contentGuardJudgeModel` no longer exist. The default `typesafe/jev-latest` lives in `defaultJudgeModel` (`internal/config/ocodeconfig.go:789`).
+
+**doc_search and code search are now independent of discovery.** Previously all three relevance judges called the single `discoveryJudgeClient()` and shared one client, so setting one model moved all three. Each is now its own slot with its own key. The `code_search` SLOT reads the `search` KEY, because `search` is also a tool name and naming the slot to match would read as though the tool itself were configured.
+
+**The judge client cache changed, and this fixes a real bug.** It used to be a `sync.Once` that pinned whatever resolved first for the whole session. It is now a mutex plus a stored model id, and — the point — **a nil client is deliberately NOT cached.** Consequence: `/connect <provider>` now takes effect on the next judge call instead of requiring a `/discovery toggle` or a restart.
+
+**Debug labels and ledger attribution are now provider-qualified** via `deciderLabel(client)` (provider + "/" + model), replacing reads of the concrete client's `Model` field with a hardcoded `typesafe/` prefix. Judge log lines, `/discovery status`'s `Judge` field, and `RecordSideUsage` spend attribution all now name the backend that actually answered. This matters for the usage ledger: before, every decision backend's tokens would have been booked to TypeSafe.
+
+**Unchanged and worth stating explicitly**, since it is the load-bearing invariant: the fail-open contract is untouched. A judge may only ever *hide* a retrieval result, never invent one; a transport or decode error keeps every candidate; the relevance confidence floor (`relevanceJudgeMinConfidenceDefault` = 0.5) and the permission floor are unchanged; `permissions.auto.min_confidence` still governs the opaque relaxation; and the MCP tool gate (`discoveryAllows`) is untouched and still must never fail open.

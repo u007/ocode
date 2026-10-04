@@ -346,14 +346,65 @@ describe("PulseCard streams a live row on the card itself", () => {
     render(<PulseCard row={makeRow()} compact={false} />);
 
     expect(cardButton().className).toContain("min-h-[16rem]");
-    // flex-1 + justify-end pins the newest line to the bottom of the reserved
-    // region; overflow-hidden plus the per-line truncate is what stops a long
-    // streamed line from growing the card past that height.
+    // The FLOOR above is not the budget that keeps the height constant: min-h
+    // only sets a minimum, and a flex-1 child of an auto-height column is sized
+    // from its own content, so `flex-basis: 0%` caps nothing. Truncation used to
+    // make the content self-limiting (7 entries x 1 line box); wrapping removed
+    // that property, so the ceiling below is what actually pins the height.
+    // Measured in headless Chromium against the built CSS: uncapped, a long
+    // wrapped stream grew the card to 2236px.
     const stream = screen.getByTestId("pulse-tail");
+    expect(stream.className).toContain("max-h-[8rem]");
+    // flex-1 + justify-end pins the newest line to the bottom of the region, and
+    // overflow-hidden clips whatever the cap cuts off.
     expect(stream.className).toContain("flex-1");
     expect(stream.className).toContain("justify-end");
     expect(stream.className).toContain("overflow-hidden");
-    expect(within(stream).getByText("streaming line a").className).toContain("truncate");
+    expect(stream.className).toContain("min-h-0");
+    // NO min-h-0 and NO shrink-0 on a wrapping entry. It is a flex item of the
+    // stream block, so its automatic minimum size is its min-content height and
+    // it cannot be compressed: the excess overflows out of the TOP, where the
+    // block's overflow-hidden discards it and the newest line stays flush with
+    // the bottom edge. Add min-h-0 (or make the block a plain container) and the
+    // excess overflows the bottom instead, so the clip hides the text being
+    // streamed — measured in headless Chromium, the newest line then sits ~2000px
+    // below the visible region. This is the one class that must NOT appear here.
+    const entry = within(stream).getByText("streaming line a").className;
+    expect(entry).not.toContain("truncate");
+    expect(entry).not.toContain("min-h-0");
+    expect(entry).not.toContain("shrink-0");
+  });
+
+  it("wraps a streamed line that carries no newlines, so the card is multi-line", () => {
+    // Model prose is one long line with no \n. Truncating per line is what left
+    // a running card showing a single clipped line in seven lines of space.
+    const prose = "Inspecting the permission matrix and the sandbox carve-outs in detail. ";
+    mockTail.mockReturnValue({ lines: [prose.repeat(4).trimEnd()], error: null, loading: false });
+
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    const stream = screen.getByTestId("pulse-tail");
+    expect(stream.className).toContain("whitespace-pre-wrap");
+    expect(stream.className).toContain("break-words");
+    // ONE DOM node: the extra lines are soft-wrapped by the layout, never
+    // synthesised in JS, so there is nothing to re-render per delta beyond the
+    // text itself and no reflow of the reserved box.
+    const line = within(stream).getByText(prose.repeat(4).trimEnd());
+    expect(line.className).not.toContain("truncate");
+    expect(stream.querySelectorAll("div")).toHaveLength(1);
+  });
+
+  it("keeps the hover overlay one line per entry, since it has no height budget", async () => {
+    const prose = "A settled turn's last assistant message, which may be one long line. ";
+    mockTail.mockReturnValue({ lines: [prose.repeat(3).trimEnd()], error: null, loading: false });
+    // Idle, so the preview genuinely lives in the overlay. Wrapping there would
+    // turn a 3-entry preview into a full-page panel.
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+
+    await expand();
+
+    const line = within(overlay()!).getByText(prose.repeat(3).trimEnd());
+    expect(line.className).toContain("truncate");
   });
 
   it("leaves an idle row hover-gated: nothing renders and nothing is fetched until hover", async () => {

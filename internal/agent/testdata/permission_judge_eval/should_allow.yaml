@@ -110,3 +110,31 @@ cases:
     scope: bash_prefix
     command: |-
       cd /Users/james/www/ocode && cp internal/server/handler_connect.go /tmp/m_hc.go && cp /tmp/s_hc2.go internal/server/handler_connect.go 2>/dev/null || git show :internal/server/handler_connect.go > internal/server/handler_connect.go; mv internal/server/handler_connect_cancel_atomic_test.go /tmp/m_hcat.go; echo "=== BASELINE (my handler_connect.go + my test file removed), same test x20 ==="; go test -race -timeout 10m -count=20 -run 'TestConnectFlowCancelRacesInputHandler' ./internal/server/ 2>&1 | grep -E "WARNING: DATA RACE|^(ok|FAIL|--- FAIL)" | head -4
+  # Deletes inside allowed_roots are allowed regardless of allow_destructive
+  # (user decision 2026-10-04). The first is modelled on the logged case
+  # `python3 .worktrees/cmp.py; rm -f .worktrees/cmp.py` (deny 0.69,
+  # destructive). The script no longer exists, and a missing executed script
+  # is denied as truncated_or_unknown, so the replay keeps only the delete.
+  - id: s-rm-scratch-in-project
+    rule: bash.prefix.rm
+    scope: bash_prefix
+    command: 'ls .worktrees; rm -f .worktrees/cmp.py'
+  - id: s-rm-project-files
+    rule: bash.prefix.rm
+    scope: bash_prefix
+    command: 'rm -f internal/agent/zz_probe_test.go web/dist/index.html && rm -rf web/dist/assets coverage'
+  - id: s-rm-rf-project-dirs
+    rule: bash.prefix.rm
+    scope: bash_prefix
+    command: 'rm -rf internal/ cmd/ web/'
+  - id: s-win-project-delete
+    platform: windows
+    rule: bash.prefix.rmdir
+    scope: bash_prefix
+    command: 'rmdir /s /q internal cmd web'
+  # Logged 2026-10-04 23:01: allow 0.76 < floor 0.80, deferred. Pure read-only
+  # git/echo compound; dialog labelled only the `git rev-parse` fragment.
+  - id: s-readonly-git-branch-compound
+    rule: bash.prefix.git rev-parse
+    scope: bash_prefix
+    command: 'echo "=== ground truth: worktree git status ===" && git status --short && echo "--- branch ---" && git rev-parse --abbrev-ref HEAD && echo "=== ground truth: main repo ===" && git rev-parse --abbrev-ref HEAD && git status --short | wc -l'

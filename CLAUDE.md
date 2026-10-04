@@ -30,6 +30,51 @@ two when both exist, so a second file would never be seen. Do not recreate it.
   All send the request as structured state. Each judge has its own confidence
   floor, scaled to the cost of a wrong decision, and an explicitly configured
   `permissions.auto.min_confidence` always governs the opaque relaxation.
+  **Every decision request passes one shared state budget**
+  (`prepareDecisionState`, `internal/agent/state_budget.go`): measure the
+  MARSHALLED state against `decisionStateBudgetBytes` (96 KB, from Jev's
+  stricter 32k `state` limit at ~3 bytes/token), then project an allowlist of
+  bulky keys to a bounded preview, then REFUSE if it still does not fit. Both
+  clients call the same function so clef and Jev cannot drift. Rules that are
+  easy to get wrong:
+  - **Measure marshalled size, never payload size.** JSON framing is real (a
+    100-byte payload marshals to 116 bytes), so a guard or test sized on the
+    payload never reaches the comparison it is meant to exercise.
+  - **The budget is an estimate and errs toward NOT asking.** There is no real
+    tokenizer here; `TestSharedStateBudget_WorstCaseProductionPayloads` is the
+    safety net.
+  - **Projection must be SIGNALLABLE.** A clipped state carries a structured
+    top-level `_projection` field naming what was cut, because the permission
+    judge already treats `interpreter.source.truncated` as "do not approve on a
+    partial view". A preview the judge is not told about lets it auto-allow a
+    `write` on the clipped bytes. Never add a truncation path here without one.
+  - **Refusal must not fall back to the other backend**, and must not silently
+    send an over-budget state: both callers already surface the error as a
+    deferral to the human.
+- **`validateAnswer`** (`state_budget.go`) gates whether a returned answer may be
+  trusted: type must match the question, `noul`/`confidence`/probabilities in
+  [0,1] and finite, a choice must be one actually offered, probabilities must sum
+  to 1 within 1e-3. **A rejected answer must KEEP the candidate** — the zero
+  value of `Noul` is 0, which reads as "definitely irrelevant" and vetoes, so a
+  rejection that fell through to the score comparison would be a fail-*closed*
+  bug inside a fail-open system. It is called from exactly one place, the
+  relevance judge's per-candidate path; `discoveryAllows` (the MCP tool gate)
+  never consults a judge and so cannot fail open.
+  **Decision backends go through the `Decider` interface** (`internal/agent/decider.go`)
+  — four methods (`Decide`, `DecideCtx`, `GetProvider`, `GetModel`), deliberately
+  narrower than `LLMClient` so a decision-only backend cannot reach the chat,
+  compaction, small-model or interpreter-effects paths. `*TypesafeClient`
+  satisfies it unchanged; `isDecisionModel` is the single place that decides
+  which ids route to a decision backend. `resolveDecider(slot)` resolves one of
+  seven `judgeSlot`s (permission, auto_continue, discovery, doc_search,
+  code_search, network_guard, content_guard); all currently default to
+  `typesafe/jev-latest`. Judges label their requests with `deciderLabel(client)`
+  — provider-qualified, never a hardcoded prefix — so the usage ledger does not
+  book one backend's tokens to another.
+  **Never** widen `Decider` with a `Chat` method, and never cache a nil decision
+  client: a nil is deliberately re-resolved each call so a mid-session `/connect`
+  takes effect immediately (`warnedNoAPIKey` in `NewClient` dedupes the "no API
+  key" debug line per provider+model, so re-resolving does not spam the log).
   Jev's `confidence` is a distribution-shape statistic that runs below
   `probabilities[choice]`, so never reuse the permission floor for a
   lower-stakes judge. Per-judge detail: `docs/concepts/auto-permission-enforced-categories.md`,
