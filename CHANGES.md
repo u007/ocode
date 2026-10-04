@@ -1,5 +1,303 @@
 # Changelog
 
+## 2026-10-04 — A second permission ask no longer replaces the first in the TUI
+
+- **One assistant message could raise two permission asks, and the TUI showed
+  only the second.** `webfetch`, `websearch`, the `github_*` tools and every MCP
+  tool are `Parallel() == true` *and* default-ask, and a parallel ask can sit
+  next to a sequential one (`bash`, `delete`). `Agent.Step` dispatches the whole
+  round and then hands **every** result to `OnMessage` in order, so N asks arrive
+  back-to-back in a single frame — but the TUI keeps exactly one dialog
+  (`showPermDialog` + `pendingPermission` + `pendingToolCallID` +
+  `pendingSubAgentResp`), and the sentinel handler assigned all of them
+  unconditionally. The last ask won the dialog and the earlier ones were dropped
+  from it entirely, while the transcript had already listed **all** of their
+  prompts. You therefore read one prompt in the transcript and pressed a key that
+  decided a different ask.
+- **The dropped asks came back, out of order, as duplicates.**
+  `buildAgentMessagesSnapshot` strips every `PERMISSION_ASK:` sentinel, so an
+  unresolved ask's `tool_call` is left orphaned and `recoverOrphanedToolCalls`
+  re-executes it — raising the ask a second time. Worse, answering the second ask
+  with "always allow" could make the first one moot before it was ever shown.
+- **Asks are now queued.** A FIFO `permAskQueue` holds every ask that arrives
+  while the dialog is busy, in arrival order, and each entry keeps its own
+  request, tool-call id, `/rc` slot and sub-agent response channel. They are
+  presented one at a time as each is answered, so nothing is dropped and the
+  order matches what the agent produced.
+- **The turn is held until every ask is answered.** `case []agent.Message` now
+  also stops on an open permission dialog, not just on a sentinel in the incoming
+  batch. Without that, answering one ask of several re-stepped the agent with the
+  rest outstanding — which is what turned the remaining asks into orphans.
+- **Promotion happens in exactly one place.** `handlePermissionChoice` is now a
+  thin wrapper that calls `answerPermAsk`, which reports whether the outcome was
+  terminal, and only then advances the queue. This matters beyond tidiness:
+  `executeApprovedTool` and friends are value receivers that read
+  `pendingToolCallID` when they are **called**, so promoting before building the
+  replacement command would resolve every ask against whichever one is then on
+  screen. Non-terminal outcomes — the always-allow confirmation step, backing out
+  of it, an unrecognised key, and a harmful request that cannot be always-allowed
+  — deliberately do not advance the queue, so the dialog never swaps an ask in
+  underneath the message the user is reading.
+- **Sub-agent asks share the queue.** A main-agent sentinel arriving while a
+  sub-agent dialog was open used to overwrite `pendingPermission` while leaving
+  `pendingSubAgentResp` set, so the answer went to a goroutine waiting on a
+  different request. Sub-agent asks now enter the same queue (their goroutine is
+  already parked, so queueing costs it nothing).
+- **Asks do not survive a session change.** Session load, `/new` and an `/rc`
+  rewind clear the dialog and the queue: an ask names a tool call in the round
+  that produced it, so keeping it would resolve a decision against a transcript
+  that no longer holds that call.
+- **The web/desktop app was already correct** and is unchanged: `chatStore.tsx`
+  queues a superseded ask into `permissionQueue`, and the server scans the whole
+  trailing tool run (`trailingToolRunStart`) rather than just the last message.
+  The TUI was the odd one out.
+- **`~/.config/opencode/skills/ocode-tools/SKILL.md` was wrong about the tool
+  split** — it listed `webfetch` as sequential and `websearch` as unknown, which
+  is exactly the fact whose staleness makes this bug look unreachable. Corrected
+  to `Parallel() == true` for both, with a note to re-grep the source.
+- Tests: `internal/tui/perm_ask_queue_test.go` (10 cases, including the
+  sub-agent and turn-hold paths). Mutation-verified — 9 of 10 mutants caught,
+  each confirmed to compile first; the survivor is a documented equivalent
+  (`pendingSubAgentResp != nil && !showPermDialog` is unreachable because the two
+  are always set and cleared together). Deferred: the `question` prompt still has
+  the single-slot bug, recorded in `TODO.md`.
+
+## 2026-10-04 — `/btw` is no longer queued in the web and desktop app
+
+- **`/btw` ran only after the turn ended in the web/desktop UI.** The TUI has
+  dispatched it mid-stream since 0.8.55, but the web had no instant-command list
+  at all, so every `/command` typed while a turn was busy was queued and an
+  aside waited silently for the turn to finish. `/btw` and `/by-the-way` now
+  dispatch immediately, matching the TUI.
+- **It could not simply bypass the queue — the server had to change first.**
+  `/btw` records the aside in the transcript, and writing to the transcript
+  underneath a running turn silently loses the rest of that turn: the stored
+  transcript stops being a prefix of the in-memory snapshot, so every later
+  live snapshot is dropped (`session.liveAppendStart`), and the turn-end save
+  then fails with a transcript conflict. Both failures were only logged, so the
+  remainder of the turn was missing on reload.
+- **`HandleBtw` now injects the aside into the running turn** instead of writing
+  to disk, reusing the same mid-turn path a message sent during a turn already
+  uses. The message therefore stays inside the session's in-memory copy, so live
+  snapshots and the turn-end save remain consistent. With no turn running it
+  takes the previous concurrent-safe append path unchanged, and an aside that
+  loses the race with the turn ending is dispatched as a follow-up turn rather
+  than dropped.
+- **Compaction still queues every command, including `/btw`.** A compaction
+  replaces the transcript wholesale when it lands, so a concurrently recorded
+  aside would be lost.
+- The web instant list is a new pure module (`web/src/lib/instantCommands.ts`).
+  Adding to it is a persistence-safety decision: a command qualifies only if the
+  server can serve it mid-turn without writing to the transcript, which is
+  documented at the definition.
+- Tests: `internal/server/handler_btw_test.go` (injects mid-turn with the
+  transcript unchanged; still appends when idle; unknown session still 404) and
+  `web/src/lib/instantCommands.test.ts` +
+  `web/src/components/Chat/ChatInput.instantCommands.test.tsx` (runs during
+  streaming, a pending permission, and the interrupt barrier; still queues during
+  compaction; leaves other commands queued).
+
+## 2026-10-04 — Eight review findings fixed across HTR settings, permissions, compaction and the web client
+
+- **Settings showed an adopted HTR daemon as stopped.** When ocode attached to an
+  `htrcli serve` you started yourself, Settings > Browser reported "Stopped" and
+  "List tabs" failed. Both now recognise the adopted daemon.
+- **Adopt-only mode could not adopt.** With an htrcli config ocode may not spawn
+  from (for example a non-loopback `server`), a daemon you were already running
+  was refused with "no htrcli daemon". It is now adopted.
+- **A judge-approved tool could stay approved.** Two overlapping auto-approved
+  calls to the same tool (two parallel `webfetch` calls) could leave that tool
+  marked "always allow" for the rest of the session. The temporary allow is now
+  withdrawn when the last of them finishes.
+- **`depends_on` batches judged ocode's own text as remote content.** A
+  `webfetch`, `websearch` or MCP call in a batch with `depends_on` that was
+  denied or needed approval had that message sent to the content guardrail.
+- **A sub-agent permission dialog could become unanswerable.** Changing an MCP
+  server, plugin or model while a sub-agent was waiting on a permission dialog
+  made the answer fail and the turn hang for up to 10 minutes.
+- **Compaction could replace history with a non-summary.** If the main model
+  answered the inline summary request by carrying on with the task, that text
+  became the summary. ocode now falls back to the batched summary.
+- **Remote sessions could miss events after opening a tab.** Opening or closing
+  a remote tab restarts the event stream; events the remote host sent before it
+  was re-subscribed were lost, leaving a stale "running" turn. The client now
+  re-syncs when each host comes back.
+- **"Start over" on a sign-in did not cancel the previous attempt.** The new
+  attempt could fail to bind the callback port, and the abandoned one could
+  still finish and save a credential. Cancelling now also waits (up to 3s) for
+  the callback port to be released, so an immediate restart finds it free.
+- **Sub-agents start faster.** Every sub-agent re-ran `node --version`,
+  `npm --version` and similar probes while building its prompt, around a second
+  per dispatch. Each tool is now probed once per ocode process.
+
+## 2026-10-03 — Auto-permission judge allows a baseline swap whose backup ocode verified
+
+A command that saves a project file to a temp dir, puts its staged or committed
+version in place (`git show :path > path`, or a temp copy) and runs a build or
+test used to ask (judge confidence about 0.7). ocode now works out itself which
+files a command replaces and whether that same command saved each one to a temp
+dir first, and tells the judge the result. With the backup verified the command
+is auto-allowed (0.92). Overwriting an existing file from `git show` with no
+backup, or with a backup of a different file, is now a firm deny (0.99, was a
+hesitant 0.71 allow). A verified backup does not excuse anything else on the
+line: a swap followed by `rm -rf` of project dirs, a force-push, or a write
+outside the allowed roots is still denied. The check fails closed: if the
+command contains any write ocode cannot account for (an unresolved path, `tee`,
+`sed`, `rm`, another `git` write, or the backup being touched again), no backup
+claim is made and the command is judged as before.
+
+## 2026-10-03 — Auto-permission confidence floor defaults to 0.80
+
+The default for `permissions.auto.min_confidence` dropped from 0.85 to 0.80, so
+the TypeSafe judge auto-allows a command it scores at 0.80 or higher. A value
+you have set yourself still wins. The lower floor for requests the judge could
+not resolve (0.75) is unchanged. On the replay benchmark this moves auto-allowed
+from 68% to 71% of 180 commands, with no hand-written must-ask case leaking.
+
+## 2026-10-03 — Ten review findings fixed: HTR settings addressed the wrong daemon, and an approved tool call could hand flagged content to the model
+
+A review of the shared-HTR-daemon and inbound-content-guardrail changes turned up
+ten defects across six files. The two that mattered most were both silent.
+
+**Settings managed a daemon that was never there (#1).** `startManagedHTR`
+starts the shared daemon on htrcli's port (3845 by default) because
+`resolveManagedHTROptions` overwrites the port with the resolved one — but the
+status, stop and list-tabs endpoints all still read the configured
+`browser.htr_port` (3846). So against a healthy shared daemon Settings showed
+**Stopped**, "List tabs" always errored, and **Stop returned `stopped: true`
+while the daemon kept running**. All four now use the resolved descriptor. In
+private mode `ResolveSharedDaemon` echoes the legacy values verbatim, so that
+path is unchanged (pinned by a test, because it is the half that would break
+silently if the resolver stopped echoing).
+
+**An approved tool call could deliver flagged content to the model (#2).** The
+guardrail vets a tool *result*, but the approval path re-executes the call and
+fed the result straight into `Step`. When the re-execution's own verdict was
+"flagged", `TruncateToolResult` passed the ask sentinel through untouched (by
+design — cutting an ask makes it unparseable and the question vanishes), so the
+model received the sentinel JSON, full unvetted content included, with no dialog
+and nobody asked. The TUI already stopped on the sentinel prefix; the server did
+not. It now does the same: the ask stays in the transcript, is persisted, and is
+announced with an explicit `permission` frame — the same request id, since a
+re-ask cannot invent a new one, which the client's `PERMISSION_REQUEST` reducer
+already handles by replacing the dialog.
+
+Also fixed: approved content-guardrail asks were delivered **untruncated** in
+both hosts (#3) — the ask deliberately carries the full flagged text so the user
+can judge it, and the resolver handed it back verbatim, so a 192KB MCP response
+entered the context whole on one approval click; the TUI comment claimed the
+opposite. The bash-rules editor ate the space in "git push" by normalising on
+every keystroke (#4), and backspacing a rename onto an existing prefix silently
+deleted that unrelated rule on Save (#5) — collisions are now reported, not
+resolved behind the user's back. A dead daemon's verification failure was
+swallowed as a repeat of its predecessor's (#6). A marker could be written for a
+pid that died during startup (#7). A connect-flow cancel could report
+"cancelled" while the credential it was meant to stop was written to disk (#9) —
+the check and the act were four separate lock acquisitions, so a commit could
+win the gap; the claim is now atomic. And each DAG batch parked a goroutine plus
+a live context for the rest of the session (#10), because the guard ctx's cancel
+was deliberately dropped.
+
+`browser.htr_token`'s precedence (#8) turned out to be a documentation defect,
+not a code one: the code matches the spec ("`browser.htr_token` if set, else the
+token in htrcli's config") and it is right — ocode spawns a shared daemon with
+`HTR_MANAGED_ID` set to that very token. The code comment and the skill doc both
+claimed it only applies when htrcli's config is tokenless; both now state the
+real precedence.
+
+## 2026-10-03 — A sub-agent's permission ask now reaches you instead of silently ending its run
+
+A sub-agent that needed a decision on the web/desktop server used to abort
+mid-work with no dialog, no error, and its run recorded as **done**. Observed in
+`ses_2026-10-02-094643-b014b5ba` (agent-run-4): 1m46s, a preamble, no edits,
+because a `python3 -c` anchor dump tripped `bash.interpreter.python` and the
+judge leaned allow at 0.76 — under the 0.85 floor.
+
+Two independent reasons it was invisible, both now fixed:
+
+- The turn lock was held for the whole ask. `runTurn` holds `as.mu` for the
+  entire turn, and a synchronous sub-agent dispatch parks **inside** that turn,
+  so the `/api/sessions/:id/state` poll could not see the ask for exactly as
+  long as the ask existed. The sub-agent registry now lives outside `as.mu`
+  (own mutex) and is read unconditionally; the transcript scan keeps its
+  `TryLock` semantics for main-agent asks.
+- Nothing emitted the frame. The server never wired `Agent.OnSubAgentMessage`,
+  and a child's messages never reach the parent's `OnMessage` mirror, so a
+  child's sentinel ask was never broadcast. Headless server sessions now install
+  a sub-agent permission-ask callback that emits the `permission` frame and
+  blocks the child's goroutine on the answer.
+
+Answering delivers the real decision straight into the channel the child is
+parked on — no sentinel to rewrite, no continuation to re-`Step`. "Always allow"
+runs the same guards as a main-agent ask (`AlwaysRuleChoiceAvailable`,
+`AlwaysToolChoiceAvailable`, `IsHarmfulRequest`) and persists through the same
+`persistAlwaysAllow`, and nothing is delivered when a guard refuses. The dialog
+names the sub-agent that is asking.
+
+Nothing hangs indefinitely: cancelling the turn, a 10-minute park timeout, and
+session eviction each auto-deny the pending asks, and each broadcasts
+`permission_resolved` so the dialog closes by itself rather than inviting a click
+that can only fail. A turn parked on a sub-agent ask keeps publishing
+`turn_heartbeat`, so the 30s stall watchdog does not report it as stalled. The
+desktop badge and quit dialog now count these asks too.
+
+The TUI, ACP, `runcli` and RC-bridged sessions are unchanged — the new callback
+is installed only where `buildAgentSession` runs, and a bridged session's agent
+is stepped by the TUI. Still deliberately unfixed: cancelling the parent turn
+does not stop a sub-agent that is mid-`Step`, so after an auto-deny the child
+runs on to its own conclusion. Design:
+`docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md`.
+
+## 2026-10-03 — Sandbox mode no longer asks about text inside a quoted heredoc
+
+In sandbox mode a command such as `python3 - <<'PY' … PY` whose body contained
+markdown backticks asked with `sandbox.opaque_command`, because each body line
+was parsed as a shell command. The body of a quoted, terminated heredoc fed to a
+non-shell program is now treated as data. Bodies the shell would expand or run
+are still checked: unquoted heredocs, heredocs consumed by `bash`/`sh`/`ssh`/
+`source`/`eval` or piped into a shell, and every command after the terminator.
+
+## 2026-10-03 — Claude Code deny rules no longer ban commands in ocode
+
+ocode used to treat every `Bash(...)` entry under `permissions.deny` in
+`~/.claude/settings.json`, `.claude/settings.json` and
+`.claude/settings.local.json` as a hard block that nothing could override. Because
+`*` is a wildcard, a rule such as `Bash(rm -rf /*)` blocked every `rm -rf` of an
+absolute path, including scratch cleanup under `/tmp`. Those deny lists are no
+longer read: banned commands come only from ocode's own config (`/ban`). Claude
+Code `allow` and `ask` entries are still honoured. ocode's built-in hard blocks
+(for example `rm -rf /`) and the harmful-command asks are unchanged.
+
+## 2026-10-02 — Auto-permission judge treats temp dirs as scratch space and allows local test servers
+
+Two more rules in the TypeSafe auto-permission judge's rubric. Temp roots (`/tmp`,
+`/private/tmp`, `/var/tmp`, `$TMPDIR`, `mktemp` directories and the temp aliases)
+are scratch space: read, write, move and delete there run without asking,
+including `rm -rf` of a path under a temp root even when destructive commands
+are otherwise denied. Starting the project's own or a just-built server on
+localhost, probing it, and stopping it with `kill`/`pkill` by name or PID is
+allowed. Still asked: a path elsewhere with "tmp" in its name, a `..` path that
+leaves the temp root, copying from temp to outside the allowed roots, killing
+system or unrelated processes, `sudo`, and exposing a server beyond localhost.
+The temp rule also names the Windows temp dir (`%TEMP%`, `%TMP%`, `$env:TEMP`,
+`AppData\Local\Temp`) and delete commands (`rmdir /s /q`, `rd`, `del`,
+`Remove-Item -Recurse -Force`). Measured: 67% of 178 commands auto-allowed, all
+36 hand-written must-ask fixtures still deferred; a public tunnel and a `0.0.0.0` file server went from
+a hesitant allow to a firm deny.
+
+## 2026-10-02 — Auto-permission judge allows ordinary git writes and scratch workflows
+
+Three rules were added to the TypeSafe auto-permission judge's rubric. A compound
+command is allowed when every command in it is. Ordinary version-control writes
+inside the allowed roots run without asking: `git add`, `commit`, `push` (without
+`--force`), `pull`, `fetch`, `merge`, tag and branch creation, `worktree add`.
+Backing a project file up to a temp root, editing it in place, running tests and
+restoring it is allowed. The destructive git forms still ask: force-push, history
+rewrite, `reset --hard`, `clean`, and deleting branches, tags or worktrees; a
+`/ban` rule still blocks before the judge is consulted. Measured on a replay of
+165 past commands: auto-allowed rose from 53% to 63%, with all 23 must-ask
+fixtures still deferred.
+
 ## 2026-10-02 — Auto-permission judge no longer told most commands are "unknown"
 
 The context sent to the auto-permission judge carried a "Command analysis" line

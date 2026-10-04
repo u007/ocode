@@ -91,6 +91,37 @@ type rcPendingQuestion struct {
 	questions []tool.QuestionPrompt
 }
 
+// queuedPermAsk is one permission ask waiting for its turn in the dialog.
+//
+// A single model message can dispatch several ask-capable tool calls at once:
+// webfetch, websearch, the github_* tools and every MCP tool are
+// Parallel() == true and default-ask, and a parallel ask can also sit next to a
+// sequential one (bash, delete). Agent.Step dispatches the whole round, then
+// hands every result to OnMessage in order (internal/agent/agent.go, the
+// pauseAfterResults scan), so N asks reach the host back-to-back in one frame.
+//
+// The dialog slot (showPermDialog + pendingPermission + pendingToolCallID +
+// pendingSubAgentResp) holds exactly one ask, so without this queue the Nth ask
+// overwrote the one before it: the user answered against a transcript whose
+// visible prompt belonged to a different ask, and each dropped ask later came
+// back as a duplicate orphan-recovery ask (buildAgentMessagesSnapshot skips
+// every sentinel, so the discarded tool_call becomes an orphan and
+// recoverOrphanedToolCalls re-executes it).
+//
+// Entries keep their own identity — request, tool-call id, /rc slot and
+// sub-agent response channel — so a promoted ask resolves against the call it
+// was actually raised for.
+type queuedPermAsk struct {
+	req        agent.PermissionRequest
+	toolCallID string
+	// rc is non-nil when this ask is owned by the /rc bridge (a web/Telegram
+	// remote decision), and must be restored alongside the dialog slot.
+	rc *rcPendingPerm
+	// subResp is non-nil for a sub-agent ask; the sub-agent goroutine is parked
+	// on it and would block forever if the channel were dropped on promotion.
+	subResp chan agent.PermissionResponse
+}
+
 type scrollbarDragTarget int
 
 const (
@@ -1451,6 +1482,7 @@ type model struct {
 	pendingToolArgs          json.RawMessage
 	pendingToolCallID        string
 	pendingPermission        agent.PermissionRequest
+	permAskQueue             []queuedPermAsk // permission asks waiting for the dialog, in arrival order (see queuedPermAsk)
 	styles                   Styles
 	modalStack               *ModalStack
 	streaming                bool
@@ -3992,6 +4024,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+			// A permission dialog still open means this round has asks the user
+			// has not answered yet — promoteNextPermAsk moves the next one into
+			// the slot as each is resolved. Resuming now would re-Step the agent
+			// on a transcript whose remaining sentinels
+			// buildAgentMessagesSnapshot strips, so every outstanding ask would
+			// come back as an orphan re-execution (recoverOrphanedToolCalls)
+			// instead of the decision the user is being asked for.
+			if !stop && m.showPermDialog {
+				stop = true
+			}
 			if !stop {
 				return m, m.askAgent()
 			}
@@ -5743,18 +5785,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A sub-agent tool call needs a permission decision. Reuse the same
 		// permission dialog the main agent uses. The sub-agent goroutine is
 		// blocked on resp.respCh until handlePermissionChoice answers it.
+		//
+		// The sub-agent asker is serialised by subAgentPermMu, so only one
+		// sub-agent ask is in flight at a time — but a main-agent sentinel from
+		// the round that spawned this sub-agent can land in the same frame. Go
+		// through the same queue as every other ask so the parked respCh is
+		// always paired with the request it belongs to; the sub-agent goroutine
+		// is already parked, so queueing costs it nothing.
 		req := msg.req
 		log.Printf("[perm] sub-agent permission dialog shown: tool=%s rule=%s command=%q", req.ToolName, req.Rule, req.Command)
-		m.pendingSubAgentResp = msg.respCh
-		m.showPermDialog = true
-		m.permConfirm = ""
-		m.activeTab = tabChat
-		m.chatUnread = false
-		m.pendingPermission = req
-		m.pendingToolName = req.ToolName
-		m.pendingToolArgs = req.Args
-		m.pendingToolCallID = ""
-		m.layout() // shrink the transcript viewport to make room for the dialog
+		m.enqueuePermAsk(queuedPermAsk{req: req, subResp: msg.respCh})
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
@@ -11283,6 +11323,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
+			m.clearPermAskState()
 			m.resetTranscriptWindow()
 			m.streamingThinkingIdx = -1
 			roleCounts := map[string]int{}
@@ -11679,6 +11720,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 
 	m.messages = []message{}
+	m.clearPermAskState()
 	m.invalidateDelayedChatInput()
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
@@ -14733,16 +14775,14 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				// Otherwise open the local TUI dialog. (Web /rc users also get the
 				// inline buttons from the event above, so this is a terminal-side
 				// fallback they can use instead.)
+				//
+				// A round can raise several asks: enqueuePermAsk shows this one
+				// only if the dialog slot is free, and otherwise queues it in
+				// arrival order. Assigning the slot fields unconditionally (the
+				// old shape here) made the last ask of the batch silently
+				// replace every earlier one.
 				log.Printf("[perm] permission dialog shown: tool=%s rule=%s command=%q", req.ToolName, req.Rule, req.Command)
-				m.showPermDialog = true
-				m.permConfirm = ""
-				m.activeTab = tabChat
-				m.chatUnread = false
-				m.pendingPermission = req
-				m.pendingToolName = req.ToolName
-				m.pendingToolArgs = req.Args
-				m.pendingToolCallID = am.ToolID
-				m.layout() // shrink the transcript viewport to make room for the dialog
+				m.enqueuePermAsk(queuedPermAsk{req: req, toolCallID: am.ToolID})
 				m.messages = append(m.messages, message{role: roleAssistant, text: renderPermissionPrompt(req), raw: &copyMsg})
 			}
 		} else if prompts, ok := parseQuestionPrompt(am.Content); ok {
@@ -14870,6 +14910,97 @@ func (m *model) recordUsage(am agent.Message) {
 			log.Printf("usage: record: %v", err)
 		}
 	})
+}
+
+// permAskSlotBusy reports whether the single permission dialog slot is already
+// holding an ask. pendingSubAgentResp is included because a sub-agent dialog
+// occupies the same slot: leaving it out would let a main-agent sentinel stamp
+// over the request whose respCh is still parked.
+func (m *model) permAskSlotBusy() bool {
+	return m.showPermDialog || m.pendingSubAgentResp != nil
+}
+
+// showPermAsk loads one ask into the dialog slot and opens the dialog. It is the
+// single writer of pendingPermission/pendingToolName/pendingToolArgs/
+// pendingToolCallID/pendingSubAgentResp, so every path that fills the slot goes
+// through here or through promoteNextPermAsk.
+func (m *model) showPermAsk(q queuedPermAsk) {
+	m.showPermDialog = true
+	m.permConfirm = ""
+	m.activeTab = tabChat
+	m.chatUnread = false
+	m.pendingPermission = q.req
+	m.pendingToolName = q.req.ToolName
+	m.pendingToolArgs = q.req.Args
+	m.pendingToolCallID = q.toolCallID
+	m.pendingSubAgentResp = q.subResp
+	if q.rc != nil {
+		m.rcPendingPerm = q.rc
+	}
+	m.layout() // shrink the transcript viewport to make room for the dialog
+}
+
+// enqueuePermAsk records a newly arrived ask. When the dialog slot is free the
+// ask is shown immediately; otherwise it joins the back of permAskQueue and is
+// promoted once the current ask is answered.
+//
+// Callers append their own transcript line either way, so the transcript lists
+// every ask of a multi-ask round in the order the agent produced them — the user
+// can see what is coming before answering what is on screen.
+func (m *model) enqueuePermAsk(q queuedPermAsk) {
+	if !m.permAskSlotBusy() {
+		m.showPermAsk(q)
+		return
+	}
+	log.Printf("[perm] permission dialog busy; queued ask tool=%s rule=%s command=%q (depth=%d)",
+		q.req.ToolName, q.req.Rule, q.req.Command, len(m.permAskQueue)+1)
+	m.permAskQueue = append(m.permAskQueue, q)
+}
+
+// promoteNextPermAsk moves the oldest queued ask into the dialog slot, which the
+// caller must have just freed. Returns false when nothing was waiting.
+//
+// Called from exactly one place — the terminal exits of handlePermissionChoice —
+// so every answer path (keyboard, mouse button, always-allow confirm, sub-agent
+// respCh, /rc remote resolve) advances the queue exactly once and no path can
+// double-promote.
+func (m *model) promoteNextPermAsk() bool {
+	if len(m.permAskQueue) == 0 {
+		return false
+	}
+	q := m.permAskQueue[0]
+	m.permAskQueue = m.permAskQueue[1:]
+	log.Printf("[perm] promoting queued ask tool=%s rule=%s (remaining=%d)", q.req.ToolName, q.req.Rule, len(m.permAskQueue))
+	m.showPermAsk(q)
+	m.rerenderTranscriptAndMaybeScroll()
+	return true
+}
+
+// clearPendingPermAskSlot empties the dialog slot without touching the queue.
+// Called after the final ask of a round is answered so no half-populated slot
+// survives: pendingToolCallID is what the substitution helpers key on, and a
+// stale one would let a later, unrelated answer resolve against an already
+// decided tool call.
+func (m *model) clearPendingPermAskSlot() {
+	m.showPermDialog = false
+	m.permConfirm = ""
+	m.permHoverChoice = ""
+	m.pendingPermission = agent.PermissionRequest{}
+	m.pendingToolName = ""
+	m.pendingToolArgs = nil
+	m.pendingToolCallID = ""
+	m.pendingSubAgentResp = nil
+	m.rcPendingPerm = nil
+}
+
+// clearPermAskState drops the dialog and every queued ask. Called wherever the
+// transcript is rebuilt from a different session (session load, /new, an /rc
+// rewind), because an ask refers to a tool call in the round that produced it:
+// keeping it would resolve a decision against a transcript that no longer holds
+// that call, and a parked sub-agent respCh would leak its goroutine.
+func (m *model) clearPermAskState() {
+	m.permAskQueue = nil
+	m.clearPendingPermAskSlot()
 }
 
 func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
@@ -15113,10 +15244,35 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 	return m.handlePermissionChoice(choice), true
 }
 
+// handlePermissionChoice answers the ask currently in the dialog and, when the
+// answer was a terminal one, promotes the next queued ask (see permAskQueue)
+// into the now-free slot.
+//
+// The split matters: answerPermAsk's returned command captures the answered
+// ask's identity at build time (executeApprovedTool and friends are value
+// receivers reading pendingToolCallID), so the queue may only advance AFTER the
+// command is built. Every answer path — keyboard, mouse button, the always-allow
+// confirm step, a parked sub-agent's respCh, and an /rc remote resolve — funnels
+// through here, which keeps promotion to exactly one call site and stops any
+// path from double-promoting.
 func (m *model) handlePermissionChoice(choice string) tea.Cmd {
+	cmd, terminal := m.answerPermAsk(choice)
+	if terminal && !m.promoteNextPermAsk() {
+		// Nothing left waiting: leave no half-populated slot behind.
+		m.clearPendingPermAskSlot()
+	}
+	return cmd
+}
+
+// answerPermAsk applies one answer to the ask in the dialog. The bool result
+// reports whether the outcome freed the dialog slot (an allow, a deny, or an
+// always-allow after its confirmation step) and the queue should therefore
+// advance. A rejected choice, or a harmful request that cannot be always-allowed,
+// keeps the same ask on screen and returns false.
+func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 	log.Printf("[perm] permission choice received: choice=%q tool=%s", choice, m.pendingToolName)
 	if m.agent == nil {
-		return func() tea.Msg { return errorMsg(fmt.Errorf("no agent configured")) }
+		return func() tea.Msg { return errorMsg(fmt.Errorf("no agent configured")) }, true
 	}
 	req := m.pendingPermission
 	toolName := m.pendingToolName
@@ -15179,11 +15335,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			m.pendingSubAgentResp = respCh
 			m.updatePermButtonRegions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
-			return nil
+			return nil, false
 		}
 		respCh <- resp
 		// Re-arm the listener so subsequent sub-agent asks are still received.
-		return m.armSubAgentPermListener()
+		return m.armSubAgentPermListener(), true
 	}
 
 	// A local terminal decision resolves (and supersedes) any pending remote
@@ -15204,16 +15360,16 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		// here would issue a second webfetch/MCP call — new, unvetted bytes and a
 		// real side effect — and defeat the scan that produced this ask.
 		if agent.IsContentAsk(req) {
-			return m.contentAskResolved(req, true)
+			return m.contentAskResolved(req, true), true
 		}
-		return m.executeApprovedTool(toolName, args, pathRoot)
+		return m.executeApprovedTool(toolName, args, pathRoot), true
 	case "a", "always", "always allow":
 		if agent.IsHarmfulRequest(req) {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow %s — this operation is considered harmful and always requires human approval.", permissionRuleLabel(req)), transient: true})
 			m.showPermDialog = true
 			m.updatePermButtonRegions()
-			return nil
+			return nil, false
 		}
 		m.allowOutOfScopePath(req, true)
 		// Special handling for webfetch domains
@@ -15246,14 +15402,14 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		// persisted rule didn't fully cover the request (un-persistable broad
 		// prefixes, out-of-scope redirections/env vars, or compound commands
 		// where the next sub-command still needs approval).
-		return m.executeApprovedTool(toolName, args, outOfScopePathRoot(req))
+		return m.executeApprovedTool(toolName, args, outOfScopePathRoot(req)), true
 	case "t":
 		if agent.IsHarmfulRequest(req) {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful tool): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow tool %q — this operation is considered harmful and always requires human approval.", toolName), transient: true})
 			m.showPermDialog = true
 			m.updatePermButtonRegions()
-			return nil
+			return nil, false
 		}
 		pathRoot := outOfScopePathRoot(req)
 		log.Printf("[perm] permission ALWAYS ALLOW (tool): tool=%s", toolName)
@@ -15262,20 +15418,20 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName), transient: true})
 		// Approved path (no re-check) for this call; the tool rule persisted
 		// above governs future calls. See the "a" branch above for why.
-		return m.executeApprovedTool(toolName, args, pathRoot)
+		return m.executeApprovedTool(toolName, args, pathRoot), true
 	case "n", "no", "deny":
 		log.Printf("[perm] permission DENIED: tool=%s", toolName)
 		// Content asks deny by withholding the result rather than by refusing a
 		// re-run, for the same reason they approve without one.
 		if agent.IsContentAsk(req) {
-			return m.contentAskResolved(req, false)
+			return m.contentAskResolved(req, false), true
 		}
-		return m.permissionDeniedToolResult(toolName)
+		return m.permissionDeniedToolResult(toolName), true
 	default:
 		m.showPermDialog = true
 		m.updatePermButtonRegions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
-		return nil
+		return nil, false
 	}
 }
 
@@ -15517,15 +15673,24 @@ func (m model) permissionDeniedToolResult(toolName string) tea.Cmd {
 
 // contentAskResolved resolves a content-guardrail ask. The tool already ran, so
 // there is nothing to execute: approval substitutes the content the guardrail
-// inspected (still truncated through the normal path, so an approved result is
-// bounded exactly like any other), and denial substitutes the refusal notice.
+// inspected, and denial substitutes the refusal notice.
+//
+// The approved branch goes through TruncateToolResult like every other tool
+// result, so an approved result is bounded exactly like any other: the ask
+// deliberately carries the FULL flagged text (the user cannot judge a result is
+// safe without reading it), and ResolveContentAsk hands that text back verbatim,
+// so without this a 200KB MCP response or fetched page would land whole in the
+// context on the strength of one approval click. Truncation happens HERE, after
+// the dialog, never before it — the ask payload must stay complete. It is safe
+// on this string because ResolveContentAsk has already replaced the sentinel,
+// so the "never cut an ask" rule in truncate.go does not apply.
 //
 // The substitution is keyed on m.pendingToolCallID, the same field
 // executeApprovedTool uses, so the sentinel is replaced in place by ToolID and a
 // round holding several asks resolves each one independently.
 func (m model) contentAskResolved(req agent.PermissionRequest, approved bool) tea.Cmd {
 	return func() tea.Msg {
-		content := agent.ResolveContentAsk(req, approved)
+		content := agent.TruncateToolResult(m.pendingToolCallID, agent.ResolveContentAsk(req, approved))
 		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: content}}
 	}
 }
@@ -16030,6 +16195,7 @@ func (m *model) commitRCRequestRewind(req server.RCRequest) (int, error) {
 	// by row count would truncate too little. It deliberately avoids
 	// appendAgentMessage, which would double-record usage and may re-request a
 	// title for already-seen rows.
+	m.clearPermAskState()
 	m.messages = nil
 	for _, am := range result.KeptPrefix {
 		copyMsg := am

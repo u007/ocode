@@ -1,9 +1,58 @@
 # TODO
 
+## BLOCKED: `docs/concepts/tui-slash-command-queuing.md` is stale — the bundle's sole writer is rate-limited (2026-10-04)
+
+`/btw` is now instant on the web/desktop app as well as the TUI, but that page
+still describes only the TUI's `isInstantCmd` chain. It could not be amended:
+`docs/` is an active OKF bundle (`docs/index.md` carries `okf_version: "0.1"`)
+and `CLAUDE.md`'s sole-automated-writer invariant bars any path outside the
+`context` sub-agent. The context agent was dispatched twice and both attempts
+failed with `429 GoUsageLimitError` (`limitName: weekly`) — a hard weekly cap,
+not transient. Retry via `doc_write` on path **`concepts/tui-slash-command-queuing.md`**
+(doc_write prepends `docs/` itself; passing `docs/concepts/…` creates
+`docs/docs/concepts/…`). Do not hand-edit `docs/index.md` / `docs/log.md` — they
+are auto-managed.
+
+What the page needs to say:
+
+- The web SPA has its OWN per-tab queue (`web/src/lib/tabQueue.ts`, mirroring the
+  TUI's `queuedItems`), decided in `handleSend` in `ChatInput.tsx`. It had no
+  instant-command list at all, so every `/command` and `!shell` typed while busy
+  was queued. `/btw` and `/by-the-way` now bypass it, for TUI parity.
+- **`HandleBtw` injects into a live turn** via `h.tryEnqueueInjection` — the same
+  path a mid-turn message uses — instead of appending to the transcript. With no
+  turn live it falls through to the unchanged `AppendUserMessageForDir` tail-insert.
+  This is not an optimisation: a mid-turn transcript append makes the stored
+  transcript stop being a prefix of the in-memory snapshot, so
+  `session.liveAppendStart` → `samePrefix` drops every later live snapshot AND
+  the turn-end save returns `ErrTranscriptConflict`. Both are only logged, so the
+  rest of the turn silently vanishes on reload.
+- **Compaction still queues every command, instant ones included** —
+  `applyCompactResult` persists via `h.replaceSession`, replacing the transcript
+  wholesale and dropping a concurrently recorded aside.
+- Membership in the web instant list (`web/src/lib/instantCommands.ts`) is a
+  persistence-safety predicate: add a command only once its handler has a
+  mid-turn path keeping the message inside `as.messages`.
+- Web and TUI `/btw` differ in MECHANISM on purpose — TUI runs an independent
+  side-query child agent that never touches the main turn or transcript; the
+  web's records the aside into the conversation. Do not call them identical.
+- Tests: `internal/server/handler_btw_test.go`, `web/src/lib/instantCommands.test.ts`,
+  `web/src/components/Chat/ChatInput.instantCommands.test.tsx`.
+
+The invariant is already captured for agents in `skills/ocode-web/SKILL.md`
+(gotcha 62 + file-map entry), so the knowledge gap is documentation-only until
+the cap resets.
+
 ## Auto-permission judge — findings from the live eval (2026-10-02)
 
-Measured with `internal/agent/testdata/permission_judge_eval/` (171 mined cases,
-3 runs). None of these is fixed; each needs a decision.
+**Further optimisation is deferred (user decision, 2026-10-02).** State: 65% of
+173 should-allow commands auto-allowed, all 31 hand-written must-ask cases held
+(after the temp-root and local-test-server rules).
+Resume from `docs/concepts/auto-permission-judge-eval.md` ("Deferred") when this
+is picked up again; the open items below are the starting points.
+
+Measured with `internal/agent/testdata/permission_judge_eval/` (171 mined cases).
+Checked items are done; the unchecked ones each need a decision.
 
 - [x] **"Command analysis" labelled most commands "(unknown command)".**
       `explainBashCommand` describes only the first word of the line, so every
@@ -13,8 +62,17 @@ Measured with `internal/agent/testdata/permission_judge_eval/` (171 mined cases,
       the unchanged 0.85 floor; all hand-written must-ask cases still defer.
       `project_context` itself stays: the scope fixtures (`k-scope-*`,
       `s-scope-*`) score better with it than without.
-- [ ] **Three user-denied mined cases are now allowed by the judge** (`m040`,
-      `m048`, `m116`). Review whether they are label noise or real misses.
+- [ ] **No single state field explains the remaining deferrals.** Ablation
+      (2 runs, worst kept, 165 should-allow): removing any one of allowed
+      prefixes, banned prefixes, user policy, temp aliases, relaxed concerns,
+      project_context or the concern question moves the count by at most 6
+      (87 shipped). Removing project_context or temp aliases LOSES 6.
+- [x] **Three rubric lines adopted 2026-10-02** (compound commands, ordinary git
+      writes, temp-root backup/edit/restore) in `typesafeJudgeInstructions`.
+      Measured 104/165 (63%) against 87 (53%) with no hand-written must-ask leak.
+      The chat judge's prose prompt is unchanged and unmeasured.
+- [ ] **Four user-denied mined cases are now allowed by the judge** (`m040`,
+      `m048`, `m098`, `m116`). Review whether they are label noise or real misses.
 - [ ] **Raising the context budget does not help and can break the call.** With
       `max_context_bytes` 60000 / sources 20 / lines 2000 the auto-allow rate is
       unchanged (15-17%), and one 98 KB state came back
@@ -29,6 +87,10 @@ Measured with `internal/agent/testdata/permission_judge_eval/` (171 mined cases,
       `$(grep '^DATABASE_URL=' .env | cut -d= -f2-)` are stored as always-allow
       prefixes (about 3 KB of the judge state). They name no program. Find the
       path that persists them and stop it; decide whether to prune existing ones.
+- [ ] **The judge log lost its real history.** It is capped at 2 MB, one
+      generation; test rows rotated the real ones out, so `mine.py` now returns 15
+      cases instead of 171. `mined.json` is the only copy. Fixing the item below
+      stops it recurring.
 - [ ] **Unit tests write to the real `permission-judge.log`.** 2,852 of its 3,188
       rows came from `go test` in `internal/agent` with a fake judge. Point the
       log at a temp dir under test.
@@ -67,7 +129,7 @@ through `agent.ValidateBashPrefixRule` so no surface can claim a rule it did not
       when the startup default is yolo, but "bans silently stop applying in yolo" is
       a security-policy decision, not a UI bug — decide whether yolo should honour
       explicit user denies, and if so move the check above the yolo shortcut
-      (it already runs above the sandbox one at `permissions.go:1867`).
+      (it already runs above the sandbox one at `permissions.go:1885`).
 - [ ] **`/ban remove` leaves an inert `"prefix": "ask"` entry in the config file.**
       The Settings Remove is a true delete; the TUI/web slash command is not, for
       parity with its own history. Every unbanned command accumulates a dead rule
@@ -81,7 +143,7 @@ through `agent.ValidateBashPrefixRule` so no surface can claim a rule it did not
       change (concurrent sessions added `PermissionScopeContent`, the `Untrusted*`
       fields, the loopback hardening and others without re-deriving anchors), so this
       is not a single-session regression — but the bash-rule work adds a further
-      **+108 lines** to that file, shifting every anchor below `permissions.go:193`.
+      **+108 lines** to that file, shifting every anchor below `permissions.go:194`.
       `docs/` is owned by the `context` sub-agent, so route the re-derivation there
       (or do the mechanical pass by hand: print the real line for every
       `file.go:NNN` and eyeball it — a text-matching script resolves `}`, `i++` and
@@ -150,6 +212,138 @@ Two things this cost, both worth not repeating:
       `stat -f "%Sm" <file>` plus `find ~/.local/share/opencode/project/<slug>/sessions
       -maxdepth 1 -newermt "-6 minutes" -name "*.sqlite" | wc -l`. mtime vs your own
       session's start time is the fastest tell.
+
+## PRE-EXISTING `-race` failure in `TestConnectFlowCancelRacesInputHandler` (2026-10-03)
+
+Found while running the `go test -race` gate over the ten review fixes. **Not
+caused by that work** — verified by reverting `handler_connect.go` and the new
+`handler_connect_cancel_atomic_test.go` and re-running: the race still fires.
+
+```
+WARNING: DATA RACE
+Write at ... by goroutine:  stubConnectSeam[...].func1()      handler_connect_test.go:83
+                           testing.(*common).Cleanup.func1()
+Previous read at ...:       (*Handler).handleConnectFlowInput.func3()
+                                                        handler_connect.go:1054
+                           internal/crashguard.Go.func1()
+```
+
+**Cause.** `handleConnectFlowInput` reads the package-level seam
+`grokSubscriptionLoginFn` from INSIDE a `crashguard.Go` body (line 1054).
+`TestConnectFlowCancelRacesInputHandler` stubs that seam with a function that
+blocks on `<-ctx.Done()`, then joins only the two `connectDo` calls with
+`wg.Wait()`. The handler answers 200 immediately after spawning, so `wg.Wait()`
+returns while the spawned goroutine is still starting or parked — and the test's
+`t.Cleanup` then writes the seam back. The spawn is never joined.
+
+**Reproduces deterministically:** `go test -race -count=20 -run
+TestConnectFlowCancelRacesInputHandler ./internal/server/` fails ~1 run in 20.
+
+**Fix direction (not taken — it is another session's file).** Join the spawned
+goroutine (or have the stub signal completion and the test wait on it) so the
+seam outlives every reader; alternatively read the seam into a local BEFORE
+`crashguard.Go`, which is the cheaper and more robust change since it removes the
+window entirely rather than narrowing it. `handler_connect.go` currently carries
+other sessions' in-flight work — check ownership before editing.
+
+**Also pre-existing and unrelated:** `TestPermissionTablesConcurrentWriteDuringDecide`
+(internal/agent) is flaky — `-count=5` fails ~1 run in 5 with
+`read rule = "ask", want the default allow to survive`. Reproduced with my
+`internal/agent` changes fully reverted, so it belongs to the concurrent
+permission-tables work in `permissions.go` (an 868-line unstaged diff adding
+`bashPrefixSnapshot` / `mutateBashPrefixes` to the very tables this test hammers).
+
+## BLOCKED: docs/ update for the ten review fixes — the bundle's sole writer is rate-limited (2026-10-03)
+
+The fixes are landed and tested, but **`docs/` could not be updated**: `doc_write`
+is reachable only through the `context` sub-agent (sole-automated-writer
+invariant), and every dispatch now fails with
+`opencode-go 429 {"type":"GoUsageLimitError","limitName":"weekly"}`. Two attempts
+were made; both failed after 6 attempts each. Hand-editing is not an option — it
+would desync the auto-managed `docs/index.md` / `docs/log.md`, which is exactly
+the hazard recorded below.
+
+**Re-run this once the quota resets.** A `context` agent was already dispatched
+and produced the findings below, so the work is scoped, not speculative.
+
+### 1. `superpowers/specs/2026-09-09-embedded-htr-extension-design.md` — AMEND, it now contradicts the code
+
+- `:121` — "`stopManagedHTR` reads `bcfg.HTRPort` and acts on it" is **false**.
+  It now resolves the descriptor (`resolveHTRShared()`) and calls
+  `stopHTRServeFn(h.procSup, shared.Port, …)`.
+- `:122` — "the managed daemon listens on `3846` by default … standalone on
+  `3845` is never stopped by them" is **stale**: under the shipped default
+  `browser.htr_shared: true` the managed daemon is on **3845**
+  (`cdp.DefaultHTRCLIPort`); 3846 is now the private-mode port only.
+- `:78-79` — the status example JSON shows `"port": 3846` / `"addr":
+  "127.0.0.1:3846"`; under the shared default it would be 3845.
+- Status and list-tabs were addressed at `bcfg.HTRPort` too, and are now on the
+  resolved descriptor. Amend as corrections so the approved-design history stays
+  readable.
+
+### 2. `concepts/htr-shared-daemon.md` — ADD only, nothing here is wrong
+
+Its claim that `resolveManagedHTROptions` resolves "for every caller (browse
+server, **Settings API**, TUI)" was false until this fix and is now true; keep it
+and note the Settings path goes through `resolveHTRShared()`. Add the new test
+files to its regression-test listing (`internal/server/handler_config_htr_port_test.go`,
+`internal/browse/cdp/htr_verify_outcome_test.go`), plus three facts: the
+`browser.htr_token` precedence (wins over a present config token; stale value →
+401 against an adopted daemon), the death-path `resetHTRVerifyOutcome`, and the
+two un-tested marker-retraction halves.
+
+### 3. `concepts/inbound-content-guardrail.md` — AMEND one wrong citation, ADD two facts
+
+- **The citation was itself the bug.** The page claims an approved content result
+  "still goes through `TruncateToolResult` on the normal path (TUI comment
+  `model.go:15366`), so approving a 192 KB result does not inject 192 KB". The
+  comment ASSERTED it; neither host did it. Cite the code, not the comment.
+- ADD: the server must not `Step` on a content ask raised by an approved
+  re-execution (the TUI already stopped on the sentinel prefix).
+- ADD, only if the page covers server ask plumbing: the connect-flow cancel race.
+- If the placement section cites `contentGuardStepCtxCtx`, drop it (deleted).
+
+## HTR daemon-death marker cleanup: both halves are correct but UNTESTED (2026-10-03)
+
+Fixing review finding #7 added two complementary guards against a marker being
+written for a pid that died mid-startup: a second marker sweep in
+`watchHTRExitNotify` AFTER the death signal, and a post-write `<-died` check in
+`EnsureHTRServe`. Together they close the interleaving in either order.
+
+Neither is test-pinned, and a mutation run says so plainly:
+
+- **"drop the post-signal sweep" SURVIVES.** `TestDaemonDeathRetractsAMarkerWrittenForIt`
+  writes the marker BEFORE calling the watcher, so the watcher's ORIGINAL
+  pre-signal sweep already removes it. Only the gap between the two sweeps — a
+  marker written by a racing ensure while the death is being accounted for — is
+  untested.
+- **The boot-path `select { case <-died: }` check is untested entirely.**
+  `sharedSpawnConfirmBudget` is a `const`, so a test cannot shrink the window,
+  and landing a real death inside it is not schedulable.
+
+Closing this needs a second production test hook in `internal/browse/cdp`
+(the connect-flow cancel got `connectFlowCancelHook` for exactly this reason).
+Not done: a hook purely for a LOW-severity race is more production surface than
+the defect warrants, and the alternative — leaving the code with no test at all —
+was judged worse. Revisit if the marker ever shows up stale in the field.
+
+## A stale `browser.htr_token` makes every probe 401 against an ADOPTED daemon (2026-10-03)
+
+Review finding #8 was reported as a code defect but is a **documentation** one:
+the resolver's precedence is `browser.htr_token` if set, else htrcli's config
+token, which matches the spec and is deliberate (ocode spawns a shared daemon
+with `HTR_MANAGED_ID` set to that token). The code comment and
+`skills/ocode-web/SKILL.md` both claimed it only applies when htrcli's config is
+tokenless; both are corrected. **The underlying hazard is real and unfixed:**
+
+With a stale `browser.htr_token` set and a user-run `htrcli serve` adopted,
+ocode presents a bearer the daemon does not hold, every authenticated probe
+401s, and a later `EnsureHTRServe` can find the port busy and unable to
+authenticate. The fix is "clear `browser.htr_token`", which is undiscoverable
+from the symptom. A preflight that compares the configured token against the one
+a healthy daemon accepts, and refuses to adopt with a clear notice, would close
+it — but that changes adoption semantics, so it needs a decision rather than a
+patch.
 
 ## Discovery skill auto-injection: two open decisions (2026-10-01)
 
@@ -249,7 +443,7 @@ Neither is a bug; both are calls the user has not made yet.
 
 - **In YOLO mode the guardrail is the only egress guard, and it fails open.**
   `PermissionManager.Decide` returns a bare `PermissionAllow` for bash at
-  `internal/agent/permissions.go:1639` and for every tool at `:1793` — both BEFORE
+  `internal/agent/permissions.go:1657` and for every tool at `:1793` — both BEFORE
   `isExfiltrationRiskBash` (`:1695`, `:1723`) and before the webfetch domain check (`:1905`). So in
   YOLO neither the exfiltration detector nor the domain policy ever runs. Separately, a persisted
   `curl` bash-prefix allow only trips `isExfiltrationRiskCurl` (`:920`) on its risky flag forms, so a
@@ -260,7 +454,7 @@ Neither is a bug; both are calls the user has not made yet.
   only (safer, but prompts users who asked never to be prompted). Do not resolve this by editing the
   fail-open table without the user's answer — the table is the shipped contract.
 - **`handleToolCallWithImages` takes no context, so no tool is cancellable on an ordinary turn.**
-  It hardcodes `context.Background()` at `internal/agent/agent.go:3181`, and the main dispatch sites
+  It hardcodes `context.Background()` at `internal/agent/agent.go:3190`, and the main dispatch sites
   (`:1756`, `:1852`, `:1910`) all route through it. The guardrail honours a caller ctx and is
   cancellable on the orphan-recovery path (`:6209`), but an abort on a normal turn does not reach an
   in-flight call — it runs to its own timeout instead. This is **pre-existing and agent-wide**, not
@@ -289,7 +483,7 @@ useful part.
   touched. I read 56 of them side by side (doc claim vs the real source line, both range
   endpoints) and **30 of those 56 (54%) already pointed at unrelated code at HEAD.** Verified
   wrong examples (cited → actual):
-  `reconcileProfileAgent` `agent_session.go:430` → **657** (4 pages);
+  `reconcileProfileAgent` `agent_session.go:668` → **657** (4 pages);
   `persistTurnTranscript` `:933-959` and `:1153` → **1425**;
   `reconcileTurnSave` `:963-968` → **1475**; `dispatchTurn` `:1623` → **1655**;
   `runTurn` `:1092` → **1049**; `turnBaseLen` capture `:623-629` → **1073**;
@@ -397,7 +591,7 @@ engine (`internal/reminders`), its store, its REST surface and the web UI are al
   "TypeSafe judge leaned allow but confidence 0.72 is below the 0.85 floor" — no category, no
   indication of what the judge was unsure about. Two costs in one answer: the prompt explains
   nothing, and because the concern is not `truncated_or_unknown` the opaque 0.75 relief
-  (`resolveAutoJudgeOpaqueMinConfidence`, `permissions.go:6422`) never engages. The rubric already
+  (`resolveAutoJudgeOpaqueMinConfidence`, `permissions.go:6457`) never engages. The rubric already
   instructs against this ("Reserve \"none\" for a call that gives you no pause", line 202) and the
   model ignored it, so prompting harder is not the fix. Fix belongs in the FALLBACK reason: when an
   `allow` lands below the floor, treat the absence of a usable concern as its own signal and say so
@@ -425,9 +619,9 @@ engine (`internal/reminders`), its store, its REST surface and the web UI are al
   contains `auto_typesafe_verdict`).
 - **The real defect: for any command containing `&&`, `||`, `;`, `|`, `` ` ``, `$(`, `>` or
   `<`, NO deterministic scope check runs anywhere.** `shellCompound`
-  (`permissions.go:4849`) makes `canAutoAllowInRoot` return false (`:4929`) and
+  (`permissions.go:4884`) makes `canAutoAllowInRoot` return false (`:4929`) and
   `firstOutOfScopePath` return `""` (`:4989`). So `req.OutOfScopePath` is never populated
-  and `verifyAutoGrant`'s scope guard (`agent.go:4051`) is **structurally unreachable**.
+  and `verifyAutoGrant`'s scope guard (`agent.go:4060`) is **structurally unreachable**.
   The command takes a generic bash Ask and the LLM's scope reading is the *only* scope
   signal before a human. The bail is deliberate (a substitution's path is runtime-only, so
   a static path would falsely reject), but the consequence is that compound commands are
@@ -526,9 +720,9 @@ recovers 0.85 on its own.
 ## Permission prompt hides the env assignment that triggered the ask (2026-09-29)
 
 - **A `bash.env.*` ask renders a command with the assignment stripped.** `envVarPermissionRequest`
-  (`internal/agent/permissions.go:6360`) sets `Command: rebuildCommandLine(cmd.cmdWords)`, and
+  (`internal/agent/permissions.go:6395`) sets `Command: rebuildCommandLine(cmd.cmdWords)`, and
   `cmdWords` excludes the leading `NAME=value` tokens (they are folded into `cmd.envVars`,
-  `permissions.go:6024‑6043`). So an ask whose rule is `bash.env.out_of_scope` is shown as the bare
+  `permissions.go:6059‑6043`). So an ask whose rule is `bash.env.out_of_scope` is shown as the bare
   remaining command, with no hint of which variable/path pushed it out of scope. Observed live:
   `SQLACC_IT_DB=/var/lib/firebird/data/ods12.fdb … SQLACC_IT_PASSWORD=masterkey go test … ./internal/runner/`
   surfaced as `go test -p 1 -count=1 -v -run Integration ./internal/runner/`, which reads as an
@@ -707,13 +901,13 @@ path-scoped tools (see CHANGES.md 2026-09-24):
 - **Other explicit tool denies are still not hard.** `bash: "deny"` (`Decide`
   ~:1692), `computer: "deny"` (~:1868) and the bottom-of-`Decide` deny
   (~:1874) return a non-`HardDeny`, so the auto-permission judge can override
-  them (`agent.go:3216-3234`). The path-scoped deny is now `HardDeny`; align
+  them (`agent.go:3225-3243`). The path-scoped deny is now `HardDeny`; align
   the rest, or document why they differ.
 - **YOLO ignores explicit tool denies.** `Decide` returns Allow for YOLO
   (~:1719) before the path-scoped rule check, so `write: "deny"` is not
   enforced in YOLO mode. Pre-existing and arguably intended (YOLO = allow all),
   but worth stating.
-- **`ExportConfig` emits every rule, including defaults** (permissions.go:4493),
+- **`ExportConfig` emits every rule, including defaults** (permissions.go:4511),
   so a config-sourced `allow` is indistinguishable from a built-in default after
   the TUI `ExportConfig` → `LoadFromOcode` round-trip (tui/model.go:9012). That
   is why a persisted allow cannot be marked user-confirmed without laundering
@@ -1433,7 +1627,7 @@ treat the terminal-tab item above as a separate, lower-priority finding.
   count stayed ~10–16 throughout; no growth, no hang. So the minimal
   "inject one message mid-tool-call" path is *not* itself the bug.
 - **False lead, worth recording so it isn't retried:** `GET /api/chat/messages`
-  (`HandleSessionMessages`, `internal/server/handler_sse.go:281`) is an SSE
+  (`HandleSessionMessages`, `internal/server/handler_sse.go:311`) is an SSE
   endpoint (`Content-Type: text/event-stream`) that intentionally never closes
   — it streams the initial history then blocks forever on `<-sub`/`<-ctx.Done()`.
   A plain `curl` against it (no `-N`, no client timeout) looks exactly like a
@@ -2916,7 +3110,7 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
   act rather than a cleanup.
 
 - [ ] **Remote conflicted paths containing `:` cannot be resolved.**
-  `remoteSafeSpec` (`internal/server/handler_remote_work.go:409`) rejects `:`
+  `remoteSafeSpec` (`internal/server/handler_remote_work.go:547`) rejects `:`
   among many other characters, but a colon is legal in a git path, so such a
   file is unresolvable on a remote project. The endpoint surfaces the
   validator's error rather than skipping the file silently. Fixing it means
@@ -3870,7 +4064,7 @@ in the debug panel:
       (`loadHTRcliConfig` → `os.ReadFile`), and every production entry point
       resolves immediately before use — the TUI's `m.ensureSharedHTRDaemon`
       (`internal/tui/model.go:2981`, at-most-once per session), and the settings
-      start button's `startManagedHTR` (`internal/server/handler_config.go:2221`),
+      start button's `startManagedHTR` (`internal/server/handler_config.go:2228`),
       which calls `htrBrowserConfig()` + `htrOptionsFn` per click. A `SharedDaemon`
       is stored in exactly one place: a local `HTROptions` inside a single
       `EnsureHTRServe` call. So no mid-session token or port edit can be missed.
@@ -3893,7 +4087,7 @@ in the debug panel:
       (`htrHealthyForeign`), and a foreign service that rejects both is
       indistinguishable from an open port. So `EnsureHTRServe` reaches the spawn
       branch, the child fails to bind, and `confirmSharedSpawnAlive`
-      (`internal/browse/cdp/htr.go:1605`) surfaces the failure **with the child's
+      (`internal/browse/cdp/htr.go:1621`) surfaces the failure **with the child's
       own output** — so the user does see a real error, but only after a wasted
       process, and the diagnosis is indirect ("address already in use" from a
       child, not "something else owns this port").
@@ -3924,21 +4118,120 @@ permission or question dialog is unanswered (`advisorCheckpointState.pendingAsk`
 gated in `internal/agent/advisor_pending_ask.go`). Two adjacent gaps were
 identified and deliberately left out of that change.
 
-- [ ] **The server never installs `subAgentPermAsker`, so a sub-agent's or the
-      advisor's OWN permission ask gets an inert sentinel instead of a dialog.**
-      `internal/agent/advisor_tool.go:355-360` and `internal/agent/subagent.go:552`
-      both hand the child `t.mainAgent.subAgentPermAsker`, but only the TUI ever
-      sets it (`internal/tui/model.go:18356`). On the web/desktop server the field
-      is nil, so an out-of-scope tool call inside the advisor's (or a task
-      sub-agent's) own loop returns `tool.SentinelPermissionAsk` + JSON as a tool
-      result the advisor model cannot act on — it silently proceeds instead of
-      asking. Fixing it needs a decision the current code makes implicitly: a
-      sub-agent ask raised while the main turn is already showing a dialog has
-      nowhere to render. Most likely shape is a queue on `agentSession` surfaced
-      through `pending_asks` plus the existing `dispatchAskContinuation`
-      machinery. Verify against the "don't hold `h.mu` across slow work" and
-      "don't pin a connection for a turn" rules in
-      `docs/concepts/web-server-locking-and-liveness-rules.md`.
+- [x] **The server never installed `subAgentPermAsker`, so a sub-agent's or the
+      advisor's OWN permission ask got an inert sentinel instead of a dialog.**
+      FIXED 2026-10-03. `buildAgentSession` now installs a sub-agent asker
+      (`internal/server/agent_session.go`, `ag.SetSubAgentPermAsker`), the only
+      new install site — the TUI/ACP/runcli keep theirs, and an RC-bridged
+      session's agent is owned and stepped by the TUI so the server asker never
+      fires on it. The ask is emitted as a `permission` SSE frame and the child's
+      goroutine blocks on the answer; `livePendingAsks` and
+      `PendingPermissionAsks` read a per-session registry that has its OWN mutex
+      and never takes `as.mu`, because `runTurn` holds `as.mu` for the whole turn
+      and a synchronous sub-agent dispatch parks inside it. `POST
+      /api/permissions/resolve` gained a registry-first branch BEFORE
+      `findPendingSession` (which takes a blocking `as.mu`) carrying the same
+      always-allow guards. Design + tests:
+      `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md`,
+      `internal/server/child_perm_asks_test.go`.
+
+- [ ] **Bundle docs for the sub-agent permission-ask fix are incomplete — the
+      `context` sub-agent is the only permitted writer of `docs/` and is
+      unavailable (weekly provider usage limit, then a dispatch-loop guard).**
+      Done so far: `gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md`
+      (dropped the false "server never installs `subAgentPermAsker`" claim) and
+      `gotchas/pending-ask-recovery-live-session-state.md` (TryLock rule restated
+      as sentinel-only, plus the unconditional registry read). Also updated
+      outside the bundle: `CHANGES.md`, `TODO.md`, `skills/ocode-web/SKILL.md`
+      item 14. Still owed, via the `context` agent (`doc_write`, paths WITHOUT a
+      `docs/` prefix; do not hand-edit `docs/index.md` / `docs/log.md`):
+
+  1. **NEW page `gotchas/subagent-permission-asks-park-outside-the-turn-lock.md`**,
+     same `okf` frontmatter shape as its neighbours. Cover: `runTurn` holds
+     `as.mu` for the whole turn and a synchronous sub-agent dispatch parks
+     INSIDE it, so the old `TryLock` read could not see a child ask for exactly
+     the ask's lifetime; the SECOND invisible reason (the server never wired
+     `OnSubAgentMessage` and child messages never reach the parent's `OnMessage`
+     mirror, so no `permission` frame was emitted either — fixing one reason
+     leaves it invisible); the registry-with-its-own-mutex rule ("never gate a
+     registry read on a `TryLock` of `as.mu`"); why the resolve branch sits
+     BEFORE `findPendingSession` (that helper takes a BLOCKING `as.mu`, so
+     reaching it first pins the HTTP connection); the plain-allow delivery rule
+     and why `PersistRule`/`PersistTool` are wrong (blanket
+     `SetUserConfirmedRule(toolName)` on an out-of-scope-path ask); that every
+     auto-deny arm must broadcast `permission_resolved` with the exact
+     `request_id` (an empty one dismisses the WRONG dialog); the resolved-id TTL;
+     the `as.mu → registry.mu` / `h.mu → registry.mu` orderings with `denyAll`
+     delivering after releasing the registry lock; and that the park timeout — not
+     the cancel path — bounds the exposure because parent cancellation still does
+     not reach a sub-agent mid-`Step` (pre-existing, unfixed). Link the spec, do
+     not retell it. Regression tests to name:
+     `internal/server/child_perm_asks_test.go`
+     (`TestLivePendingAsksReportsChildAskWhileTurnLockHeld`,
+     `TestResolveChildAskEnforcesAlwaysAllowGuards`,
+     `TestChildAgentAskIsVisibleAndResumable`) and
+     `internal/agent/subagent_perm_attribution_test.go`.
+
+  2. **`concepts/web-server-locking-and-liveness-rules.md`** — (a) its sentence
+     "`PendingPermissionAsks` (desktop badge watcher, quit dialog) uses `TryLock`
+     (mid-turn ⇒ not pending)" is now incomplete: `PendingPermissionAsks` reads
+     `as.childAsks` (own mutex, no `as.mu`) BEFORE the TryLock skip, so a session
+     parked on a sub-agent ask IS counted. (b) In the "a pending ask must be
+     recoverable from live session state" section, record that `pending_asks` is
+     now a MERGE (registry read unconditionally + transcript scan under TryLock)
+     and that `POST /api/permissions/resolve` gained a registry-first branch
+     placed BEFORE `findPendingSession` because that helper takes a BLOCKING
+     `as.mu`; add the third-lock rule `as.mu → registry.mu` and
+     `h.mu → registry.mu`, never the reverse.
+
+  3. **`concepts/inbound-content-guardrail.md`** — it cites
+     `handler_permissions_resolve.go:250-262` for the server-side always-allow
+     re-check; those anchors MOVED because the registry-first branch was inserted
+     above them. Add that a sub-agent content ask now arrives through the
+     per-session registry rather than the parent's transcript, that the
+     registry-first branch runs the SAME guards before delivering (delivering
+     nothing when a guard fires), and that it never re-executes the tool and
+     never rewrites a parent-transcript row — there is none, the child applies
+     `ResolveContentAsk` itself.
+
+  For all three: re-derive EVERY `file.go:NNN` anchor, both endpoints of any range,
+  by printing the real source line. A text-matching script is not acceptable — it
+  resolves `}` to its first occurrence and silently corrupts unrelated anchors.
+
+- [ ] **46 high-signal stale `file.go:NNN` anchors across 16 bundle pages, into the
+      nine Go files this change touched — and most of the drift is NOT from this
+      change.** The nine files (`internal/agent/{agent.go,subagent.go,
+      advisor_tool.go,permissions.go}`, `internal/server/{handler.go,
+      agent_session.go,handler_permissions_resolve.go,handler_session_state.go,
+      run_states.go}`) are also being edited concurrently, so their line counts
+      moved for combined reasons and this change cannot be blamed for all of it.
+      Hand-verified example: `concepts/code-search-relevance-judge.md` cites
+      `agent.go:4933` for `executeToolCallWithContext` and `:5023` for the
+      `tool.WithSearchResultJudge` attach; those lines are now **5187** and
+      **5286**, a ~263-line drift. This change's only insertion into `agent.go`
+      sits at ~6161 — BELOW 4924 — so it could only have moved that anchor to
+      ~4952. Per-page suspect counts (single anchor landing on a brace/blank, or
+      out of range): `concepts/compaction-config.md` 11,
+      `gotchas/auto-permission-judge-withholds-credentials.md` 7,
+      `concepts/compaction-cancellation.md` 5,
+      `concepts/discovery-mcp-tool-gating.md` 4,
+      `gotchas/web-ask-dialog-resolved-before-continuation.md` 3,
+      `concepts/webfetch-websearch-guardrails.md` 3, then 1-2 each in
+      `gotchas/session-snapshot-stale-derived-fields.md`,
+      `gotchas/profile-switch-window-id-divergence.md`,
+      `gotchas/auto-permission-settings-not-applied-to-live-chat.md`,
+      `gotchas/subagent-feedback-loop-guard.md`,
+      `gotchas/session-writers-conflict-recovery.md`,
+      `gotchas/auto-permission-dependency-bin-policy.md`,
+      `concepts/per-chat-mcp-toggle.md`, `concepts/inbound-content-guardrail.md`,
+      `concepts/discovery-typesafe-judge.md`, `concepts/code-search-relevance-judge.md`.
+      Re-derive against the CURRENT tree (it moves under you), and treat landing
+      on a COMMENT as not-yet-disproven — many pages cite the doc comment above a
+      function deliberately. A range endpoint landing on `}` is normal and is not
+      evidence; only single anchors and out-of-range numbers are. This list is a
+      screening result, not a verdict: every entry still needs a real read of the
+      page's claim. Owner: `context` (sole permitted writer of `docs/`).
+
 - [ ] **The model-invoked `advisor` TOOL is not gated on a pending ask** — only
       the two loop checkpoints are. A model that calls `advisor` from inside a
       continuation Step can still start one with a dialog open. Left alone
@@ -4179,10 +4472,10 @@ identified and deliberately left out of that change.
       comment and a new `contextGuardBackground` helper, which shifted that region down.
       The four `scanToolResult` call-site rows and the `agent.go:1461` `guardCtx` anchor in
       the SAME table are already correct — leave them alone.
-      - Table row 4: `agent.go:5144` -> `agent.go:5162`; `agent.go:5147` -> `agent.go:5165`;
-        `agent.go:5139` -> `agent.go:5157` (the `HandleApprovedToolCall` decl).
-      - Prose directly under that table: `contextGuardBackground()` (`agent.go:5145`) ->
-        `agent.go:5163`.
+      - Table row 4: `agent.go:5153` -> `agent.go:5171`; `agent.go:5156` -> `agent.go:5174`;
+        `agent.go:5148` -> `agent.go:5166` (the `HandleApprovedToolCall` decl).
+      - Prose directly under that table: `contextGuardBackground()` (`agent.go:5154`) ->
+        `agent.go:5172`.
       Verified targets: `5157` = the `func` decl, `5162` = `a.scanToolResult(name, ...)`,
       `5163` = `ctx, cancel := contextGuardBackground()`, `5165` = `a.guardToolResult(ctx, ...)`.
       The old cited lines are now blank or inside an unrelated comment block, which is why
@@ -4191,3 +4484,223 @@ identified and deliberately left out of that change.
       file and returned WITHOUT writing (mtime unchanged). Hand-editing would desync the
       auto-managed `docs/index.md` / `docs/log.md`, so it is left tracked rather than forced
       — unless the sole-writer rule is relaxed for mechanical number fixes.
+- [ ] **Build `activeCwd` so the agent can actually work in a worktree** (2026-10-04).
+      Research + design only; NO implementation code written. Design doc:
+      `.opencode/plans/2026-10-04-agent-active-cwd-worktree-design.md` (read it first — it
+      records the reproduced evidence and the load-bearing constraint).
+      Problem: ocode has no worktree support beyond one prompt line at
+      `internal/agent/prompt.go:328`, AND no persistent shell cwd — `BashTool` spawns a fresh
+      process per call with `cmd.Dir = workDirFromContext(ctx)` (`internal/tool/exec.go:225`).
+      Verified by reproduction: `cd .worktrees/x && pwd` then `pwd` in the next call returns the
+      REPO ROOT. It fails SILENTLY because the worktree is inside `workDir`, so containment
+      passes. Now pinned by `internal/tool/exec_workdir_test.go` (mutation-verified).
+      THE CONSTRAINT THAT DECIDES THE ARCHITECTURE: do NOT reuse `Agent.SetWorkDir`
+      (`internal/agent/agent.go:3156`) — it calls `projectSnapshotsDir()` ->
+      `paths.ProjectSlug(a.workDir)`, so moving workDir into a worktree relocates the snapshot
+      store to a different slug than the web Changes tab resolves from => empty Changes tab +
+      broken undo. Add a SEPARATE mutable `activeCwd` with its own narrow setter; keep
+      `workDir` as the immutable home root. Session storage/`ProjectSlug`/tabs/termtabs/
+      `project_path` stay pinned to the home root.
+      Also: `paths.ProjectSlug` uses `git rev-parse --show-toplevel`
+      (`internal/paths/paths.go:104`), which returns the WORKTREE path inside a linked worktree
+      — so per-worktree session/snapshot/todo isolation already works for free (verified:
+      `dcd5a911f8bd` vs `c15722e4677b` vs `b4d81cd01366`). Claude Code's transcript relocation
+      is therefore unnecessary; the open product question is whether a worktree session should
+      APPEAR under the main project.
+      ANSWER THESE BEFORE CODING: (1) does the transcript move to the worktree slug or stay at
+      the home root? (2) does `EnterWorktree` relocate or create-and-enter? (3) cleanup policy on
+      exit — ocode has neither Claude Code's prompt nor opencode's reset/remove API. (4) subagent
+      `isolation: worktree` — in or out of scope for v1? (5) prompt cache: `<env>` sits in the
+      cached system prompt, so emit a user-role `[ocode:worktree]` tail notice (the
+      `injectLSPDelta` pattern) and never rewrite `<env>` per turn.
+      Interim mitigation ALREADY SHIPPED: both `using-git-worktrees` skill copies corrected so
+      the manual fallback at least works (see next-but-one entry).
+
+- [ ] **Verify (and likely fix) the unguarded `Agent.SetWorkDir` write** (2026-10-04).
+      `internal/agent/agent.go:3156-3157` does `a.workDir = dir` WITHOUT holding `a.mu`
+      (declared at `agent.go:59`), while there are 21 read sites for `a.WorkDir()` /
+      `a.effectiveWorkDir()` in `internal/agent/`. No existing test calls `SetWorkDir`
+      concurrently, so `go test -race ./internal/agent/` CANNOT currently catch it — the race is
+      latent, not proven. Confirm with a targeted concurrent test; if it is real, fix the
+      locking. This blocks the `activeCwd` work above: a second mutable cwd field must not
+      inherit an unguarded-write pattern, so decide the locking discipline (dedicated
+      `sync.RWMutex` or `atomic.Value`; subagents SNAPSHOT the value at spawn) as part of that
+      design rather than after it.
+
+- [x] **Push the `using-git-worktrees` skill fix to `u007/superpowers`** (2026-10-04). DONE.
+      Corrected the skill so the manual `git worktree add` fallback operates on the worktree instead
+      of silently building the MAIN checkout. What changed:
+      - Removed the one-shot `cd "$path"` and added an explicit "**`cd` does not persist**" warning:
+        ocode spawns a fresh process per bash call with `cwd = <session project root>`, so the `cd`
+        died with that invocation and every later `go build` / `git add` hit the main checkout.
+      - Made the path absolute: `WT="$(cd "$LOCATION" && pwd)/$BRANCH_NAME"`.
+      - Anchored setup detection + baseline tests to the worktree (`[ -f "$WT/go.mod" ]`). This was
+        the actively-harmful part: it previously detected the MAIN checkout's manifests, so
+        `npm install` ran in the wrong tree.
+      - Fixed a latent bug, now VERIFIED BY REPRODUCTION: the skill used `path="..."` as a shell
+        variable, and in zsh `path` is an array bound to `$PATH`, so that assignment destroys the
+        command search path. Measured: `zsh -c 'path=/tmp/x; command -v rm'` -> NOT resolvable,
+        while the same line under `bash -c` leaves `rm` resolvable. It is zsh-only, and since
+        every bash tool call is a fresh shell, the skill's own `git worktree add` line was
+        self-sabotaging. Renamed the variable to `WT` (and made `WT` absolute) so nothing in the
+        snippet can collide with a zsh special parameter again.
+      Landed on the plugin copy via local commit `9a58e22` ("customize(skills): non-code plan detail
+      level; worktree only on request"), which bundled 3 unrelated skill customizations with it, and
+      was **pushed as a fast-forward `08d2529..9a58e22 main -> main`** on 2026-10-04. Verified
+      post-push: `main` in sync with `origin/main` = `9a58e2216ed557c0406b695371a9a32a21adf0be`, and
+      the corrected file is what `origin/main` actually serves.
+      Residual: the fix shares a commit with 3 unrelated skill edits under a subject that doesn't
+      mention it, so reverting that commit for the other three would also drop this fix, and a
+      future `git pull` touching this file can conflict. Giving it its own commit now means
+      rewriting a pushed commit — only worth it if you want independent revertibility.
+
+- [ ] **The `~/.agents/skills` copy of `using-git-worktrees` is in no version control** (2026-10-04).
+      The same corrected content exists at `~/.agents/skills/using-git-worktrees/SKILL.md`, but that
+      directory is **NOT a git repo** (`git rev-parse` → "not a git repository"), so it has no
+      history, is tracked by nothing, and is silently lost if regenerated or reinstalled. The
+      versioned copy now lives in `u007/superpowers`; decide whether the `~/.agents` copy should
+      (a) become a symlink to a checkout, (b) be dropped in favour of the plugin copy, or (c) be
+      deliberately kept local and accepted as ephemeral. Check which one ocode's
+      `SkillSearchPathsForRoot` actually prefers for this skill before changing anything — the
+      plugin path and this path can both be on the search list, and the winner is not obvious.
+## The `question` prompt has no ask queue — same class as the fixed permission dialog (2026-10-04)
+
+The permission dialog gained a FIFO queue this date (`permAskQueue` /
+`queuedPermAsk` in `internal/tui/model.go`), because one model message can
+dispatch several ask-capable tool calls and the single dialog slot made the last
+ask overwrite the earlier ones. `question` still has that bug, unchanged:
+
+- `internal/tui/model.go` `appendAgentMessage`'s `parseQuestionPrompt` branch
+  calls `m.startQuestionPrompt(am.ToolID, prompts)` and assigns
+  `m.rcPendingQuestion = &rcPendingQuestion{...}` unconditionally — same
+  unconditional-stomp shape the permission path had.
+- Two `question` calls in ONE assistant message therefore show only the second
+  prompt. `question` is `Parallel() == false`, so this needs no parallel batch:
+  a single message with two `question` tool calls is enough.
+- The web has the same gap: `QUESTION_REQUEST` in
+  `web/src/stores/chatStore.tsx` keeps a single `pendingQuestion` (newest wins,
+  earlier one dropped), while `PERMISSION_REQUEST` already queues into
+  `permissionQueue`. The fix is to mirror the permission queue shape.
+- Not done here deliberately: the question path has its own prompt flow
+  (`startQuestionPrompt`, `questionInput` textarea, `hiddenQuestionRequestId`,
+  multi-question rendering) and its own resume/dismiss semantics, so folding it
+  into `permAskQueue` needs its own design and its own regression tests. Doing it
+  blind risks breaking the reopenable-dialog contract added 2026-09-25
+  (`QUESTION_HIDE` / `QUESTION_SHOW`, `QuestionDialog` X/Escape).
+## BLOCKED: `internal/tui/model.go` anchors are stale — the permission-ask queue added ~200 lines (2026-10-04)
+
+The permission-ask queue change (`permAskQueue` / `queuedPermAsk`) added ~200
+lines to `internal/tui/model.go`, which moved **every** `model.go:NNN` anchor in
+the bundle. All 60 were verified correct against `HEAD` before the change and are
+wrong now. `CLAUDE.md`'s sole-automated-writer invariant bars any path outside
+the `context` sub-agent from writing `docs/`, and the context agent was
+rate-limited twice today (`429 GoUsageLimitError`, `limitName: weekly`).
+
+The corrections below are computed from `git diff -U0` on that one file, not
+guessed — but **verify each one by printing the real source line before applying**
+(a text-matching script resolves `}`, `return nil` and `return false` to their
+first occurrence and will silently corrupt an unrelated anchor if trusted).
+Regenerate with the same method after any further edits to the file.
+
+## shift +31
+
+- `docs/gotchas/git-action-errors-disappear.md:59` — `model.go:660` -> `model.go:691`  (was: `event server.SSEEvent`)
+- `docs/gotchas/git-action-errors-disappear.md:61` — `model.go:690` -> `model.go:721`  (was: `// autoRefreshTickMsg fires periodically to quietly refresh the git tab and`)
+- `docs/gotchas/git-action-errors-disappear.md:62` — `model.go:731` -> `model.go:762`  (was: `// at startup, so the sidebar can re-render and show the resolved context window`)
+- `docs/gotchas/git-action-errors-disappear.md:63` — `model.go:674` -> `model.go:705`  (was: `bridge       *server.RCBridge`)
+- `docs/gotchas/git-action-errors-disappear.md:65` — `model.go:136` -> `model.go:167`  (was: `if !m.lastTurnWasAutoContinue {`)
+- `docs/gotchas/git-action-errors-disappear.md:80` — `model.go:625` -> `model.go:656`  (was: `}`)
+- `docs/gotchas/git-action-errors-disappear.md:89` — `model.go:648` -> `model.go:679`  (was: `req server.RCRequest`)
+
+## shift +32
+
+- `docs/concepts/inbound-content-guardrail.md:236` — `model.go:3979` -> `model.go:4011`  (was: `if am.Role == "tool" && strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {`)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:19` — `model.go:1936` -> `model.go:1968`  (was: `marker, _, ok := splitTodoMarker(trimmed)`)
+- `docs/superpowers/specs/2026-09-22-laya-local-judge-evaluation.md:254` — `model.go:2757` -> `model.go:2789`  (was: `m.files.SetEditor(editor)`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:14` — `model.go:3235` -> `model.go:3267`  (was: `if mouseOverTree {`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:26` — `model.go:3235` -> `model.go:3267`  (was: `if mouseOverTree {`)
+- `docs/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md:41` — `model.go:2244` -> `model.go:2276`  (was: `}`)
+- `skills/ocode-tools/SKILL.md:54` — `model.go:2270` -> `model.go:2302`  (was: `m.lspEventCh = make(chan lsp.ServerStartedEvent, 16)`)
+
+## shift +40
+
+- `docs/concepts/compaction-config.md:155` — `model.go:9072` -> `model.go:9112`  (was: `}`)
+- `docs/concepts/compaction-config.md:155` — `model.go:9109` -> `model.go:9149`  (was: `func mergeQueuedIntoDraft(queued []string, draft string) (string, int) {`)
+- `docs/concepts/compaction-config.md:155` — `model.go:9135` -> `model.go:9175`  (was: `func (m *model) restoreQueuedMessagesToComposer() bool {`)
+- `docs/concepts/compaction-config.md:157` — `model.go:9173` -> `model.go:9213`  (was: `func (m *model) discardPickedUpInjections(parts []string) {`)
+- `docs/concepts/compaction-config.md:157` — `model.go:9196` -> `model.go:9236`  (was: `func (m *model) drainQueuedItems() (tea.Cmd, bool) {`)
+- `docs/concepts/sandbox-permission-mode.md:35` — `model.go:14755` -> `model.go:14795`  (was: `}`)
+- `docs/gotchas/main-model-pick-also-sets-global-default.md:19` — `model.go:9765` -> `model.go:9805`  (was: `func (m *model) finishModelSwitch(modelID string) tea.Cmd {`)
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:47` — `model.go:8651` -> `model.go:8691`  (was: `m.gitSel.endLine = contentLine`)
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md:7` — `model.go:6034` -> `model.go:6074`  (was: `case "ctrl+a":`)
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md:17` — `model.go:8103` -> `model.go:8143`  (was: `}{`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:14` — `model.go:8835` -> `model.go:8875`  (was: `func (m model) mouseOverChatWheelRegion(mouse tea.Mouse) bool {`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:32` — `model.go:8611` -> `model.go:8651`  (was: `topY := m.inputAreaTopY()`)
+
+## shift +41
+
+- `docs/scheduled-jobs.md:62` — `model.go:11611` -> `model.go:11652`  (was: `m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error ex`)
+
+## shift +42
+
+- `docs/concepts/compaction-config.md:141` — `model.go:5222` -> `model.go:5264`  (was: `// chain settles (the branch at the top of this case).`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5224` -> `model.go:5266`  (was: `return m, m.fireAutoContinue(true)`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5349` -> `model.go:5391`  (was: `text:      hintStyle.Render("↩ background job(s) completed — resuming"),`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5434` -> `model.go:5476`  (was: `case compactFinishedMsg:`)
+- `docs/concepts/compaction-config.md:161` — `model.go:5361` -> `model.go:5403`  (was: `// continuation path above has declined. Not scoped to /goal or`)
+- `docs/concepts/compaction-config.md:161` — `model.go:5363` -> `model.go:5405`  (was: `// StepLimitHit signal (free, no extra LLM call) fires`)
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:45` — `model.go:4767` -> `model.go:4809`  (was: `}`)
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:46` — `model.go:5143` -> `model.go:5185`  (was: `// Handled as its own self-contained branch, deliberately NOT falling`)
+- `docs/superpowers/specs/2026-09-25-deferred-session-rewind-design.md:30` — `model.go:4746` -> `model.go:4788`  (was: `if m.agent != nil {`)
+
+## shift +131
+
+- `docs/concepts/inbound-content-guardrail.md:205` — `model.go:15006` -> `model.go:15137`  (was: `func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14937` -> `model.go:15068`  (was: `if req.Scope == agent.PermissionScopeContent {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14942` -> `model.go:15073`  (was: `lines = append(lines, "🛡 Content guardrail — this tool's result was flagged:")`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14960` -> `model.go:15091`  (was: `lines = append(lines, req.UntrustedContent)`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:15006` -> `model.go:15137`  (was: `func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {`)
+
+## shift +156
+
+- `docs/concepts/compaction-config.md:141` — `model.go:15398` -> `model.go:15554`  (was: `if bashPrefixModeDirty && len(m.permDirty.bashPrefixMode) == 0 {`)
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15206` -> `model.go:15362`  (was: `return m.executeApprovedTool(toolName, args, pathRoot)`)
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15270` -> `model.go:15426`  (was: `m.updatePermButtonRegions()`)
+- `docs/concepts/sandbox-permission-mode.md:33` — `model.go:15346` -> `model.go:15502`  (was: `// previously clamped sandbox to normal here so it could never become`)
+- `docs/concepts/sandbox-permission-mode.md:112` — `model.go:15346` -> `model.go:15502`  (was: `// previously clamped sandbox to normal here so it could never become`)
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md:18` — `model.go:15346` -> `model.go:15502`  (was: `// previously clamped sandbox to normal here so it could never become`)
+
+## shift +165
+
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15535` -> `model.go:15700`  (was: `func (m *model) askAgent() tea.Cmd {`)
+- `docs/concepts/inbound-content-guardrail.md:232` — `model.go:15537` -> `model.go:15702`  (was: `// short-circuited by a stopCh that was closed by a previous Escape/Cancel.`)
+- `docs/gotchas/session-snapshot-stale-derived-fields.md:29` — `model.go:15714` -> `model.go:15879`  (was: `// Stream shared-notes bus entries to the delta channel so the`)
+- `docs/superpowers/specs/2026-09-25-deferred-session-rewind-design.md:30` — `model.go:16029` -> `model.go:16194`  (was: `}`)
+
+## shift +166
+
+- `docs/architecture/sidebar-tui-parity-gaps.md:29` — `model.go:20890` -> `model.go:21056`  (was: `if i < len(filePaths) {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:17048` -> `model.go:17214`  (was: `if m.syncClient == nil || m.syncDeviceCode == "" {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:17123` -> `model.go:17289`  (was: `}`)
+- `docs/concepts/inbound-content-guardrail.md:253` — `model.go:16972` -> `model.go:17138`  (was: `defs = append(defs, b)`)
+- `docs/concepts/inbound-content-guardrail.md:253` — `model.go:16980` -> `model.go:17146`  (was: `func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string) string `)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:15` — `model.go:20957` -> `model.go:21123`  (was: `if m.agent != nil {`)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:15` — `model.go:21356` -> `model.go:21522`  (was: `}`)
+- `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md:58` — `model.go:18557` -> `model.go:18723`  (was: `m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse `)
+- `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md:64` — `model.go:18557` -> `model.go:18723`  (was: `m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse `)
+
+
+Additionally, these pages describe behaviour this change alters and need a prose
+amendment, not just a renumber:
+
+- **`docs/concepts/inbound-content-guardrail.md`** — §"TUI" wiring and the
+  allow/deny routing bullets. `handlePermissionChoice` is now a wrapper over
+  `answerPermAsk`, and every content ask now goes through the queue; the page
+  still describes it as routing directly to `contentAskResolved`.
+- **`docs/concepts/tui-slash-command-queuing.md`** — should state that the
+  permission-ask queue is a SEPARATE mechanism from `queuedItems`, drained on a
+  user decision rather than at a turn boundary, so nobody "unifies" them.
+- A new `docs/gotchas/` page is warranted for the bug class itself: **one
+  dialog slot + N simultaneous asks = silent replacement**, with the
+  `buildAgentMessagesSnapshot` sentinel-strip → orphan-recovery loop as the
+  reason a dropped ask returns as a duplicate.
