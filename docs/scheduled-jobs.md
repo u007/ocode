@@ -59,13 +59,13 @@ fire unless a long-lived host is running. Document this in user-facing docs.
   ```
 - Constructs a per-job agent via `agent.NewAgent(client, tools, cfg, lspMgr)`
   and runs `ag.Step(msgs)` — the same entry the server SSE and TUI stream paths
-  use (`internal/server/handler_sse.go:198-229`, `internal/tui/model.go:11611`).
+  use (`internal/server/handler_sse.go:198-229`, `internal/tui/model.go:11700`).
 - Uses a **persistent per-job session** `cron:<id>` so context accumulates
   across firings. Retention: `capMessages(result, 80)` keeps the seeded context
   + the 79 most recent turns so the transcript never grows unbounded
   (`session.Save` overwrites the full transcript and never prunes).
 - Per-job permission mode is bound via `ag.Permissions().SetMode(...)` (the
-  runtime mutation point in `internal/agent/permissions.go:2372`). Safe default
+  runtime mutation point in `internal/agent/permissions.go:2390`). Safe default
   is `normal`; `yolo`/`locked` are explicit opt-in.
 
 ### Dispatch semantics (mirroring Claude Code)
@@ -368,7 +368,7 @@ HTTP behaviour:
     (400, a field error the form can show) while a known value the machine
     forbids is a state CONFLICT (409, meaning re-read and re-render). Collapsing
     them made an unknown status answer 409, which is what
-    `TestUnknownStatusIsRejected` (`internal/server/reminders_test.go:165`)
+    `TestUnknownStatusIsRejected` (`internal/server/reminders_test.go:172`)
     caught — the two are now checked separately and the whole
     `internal/server` package is green.
 - **PATCH validates the transition BEFORE applying field edits**
@@ -412,7 +412,7 @@ no new plumbing:
   is what lets the shared drainer tell a routable reminder delivery from a
   genuinely orphaned cron delivery.
 - **Agent turns reuse the existing cron runner:**
-  `reminderItemAsCronJob` (`internal/server/scheduler_reminders_runner.go:56`)
+  `reminderItemAsCronJob` (`internal/server/scheduler_reminders_runner.go:74`)
   projects an `Item` onto a `*scheduler.Job` with id **`rt-<id>`**
   (`:51`; session id `cron:rt-<id>`, `:26`) and `Schedule{Kind: KindAt}`,
   then calls `server.RunScheduledJob` (`:46`) — so a reminder turn inherits
@@ -441,7 +441,7 @@ both collections:
   (`internal/reminders/service.go:165-174`, sort call at `:191`), and
   paginated: `limit` (default **50**, max **200** — `DefaultPageSize` /
   `MaxPageSize`, `service.go:147,149`; the effective value is echoed back
-  via `effectiveLimit`, `reminders.go:403`), `offset`, optional `status`
+  via `effectiveLimit`, `reminders.go:433`), `offset`, optional `status`
   filter. Response shape `{items,total,limit,offset}`
   (`reminderListResponse`, `reminders.go:53`). A malformed `limit`/`offset`
   is a **400**, never a silent `0` (`reminders.go:76-84`).
@@ -518,7 +518,7 @@ event (`ReminderFiredEvent`, `reminders_host.go:20`). Call sites:
   set as grow-only/sticky within a session.
 - **No exported `Agent.SetPermissions`**: `SetMode` is workflow mode, not
   permission mode. Per-job permission mode is set on the `PermissionManager`
-  after `NewAgent` (`internal/agent/permissions.go:2372`).
+  after `NewAgent` (`internal/agent/permissions.go:2390`).
 - **Persistent session trade-off**: a recurring `cron:<id>` session
   accumulates context across firings (good for jobs that need history) but
   must be capped — `session.Save` never prunes. The current cap is 80 messages;

@@ -480,6 +480,13 @@ type agentSession struct {
 	// turns, where the TUI persists its own transcript.
 	liveAppend func(agent.Message)
 	mu         sync.Mutex
+	// childAsks is the registry of sub-agent permission asks parked on this
+	// session. It deliberately lives OUTSIDE as.mu (own mutex, never takes
+	// as.mu): runTurn holds as.mu for the whole turn and a synchronous sub-agent
+	// dispatch is parked inside that turn, so the ask could not otherwise be
+	// reported to — or answered by — an HTTP caller. nil is a valid empty
+	// registry (see childPermAsks).
+	childAsks *childPermAsks
 	// spentMicros is this session's accumulated LLM spend in USD micros
 	// (1e-6 USD), summed from each turn's Step messages' Spend plus side-path
 	// calls (advisor/compact) via OnSideUsage. Atomic: written by the turn
@@ -588,8 +595,16 @@ func NewHandler() *Handler {
 		h.turnMu.Unlock()
 		// Shut down the released agent so plugin/LSP/background workers
 		// don't linger past eviction (mirrors the register-dedup path).
-		if as != nil && as.agent != nil {
-			as.agent.Shutdown()
+		if as != nil {
+			// Deny every parked sub-agent permission ask first, so no child
+			// goroutine is left waiting on a channel whose session is gone.
+			// Agent.Shutdown closes the stop channel too, which the asker also
+			// watches — but it does so asynchronously behind a bounded wait, and
+			// the asker's own auto-deny is what guarantees the registry empties.
+			as.childAsks.denyAll()
+			if as.agent != nil {
+				as.agent.Shutdown()
+			}
 		}
 		// Drop any per-session MCP overrides so the map doesn't grow one entry
 		// per session id the process has ever served.
@@ -1977,7 +1992,16 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 	compacted = append(compacted, after...)
 	as.messages = compacted
 
-	_ = h.saveSession(id, "", as.messages, nil)
+	// Compaction SHRINKS the transcript, so it must persist through the
+	// replace path. An ordinary save can never delete stored rows: with
+	// replace=false, sqlitestore.go refuses a shorter snapshot with
+	// ErrTranscriptConflict. Using it here left memory compacted while disk
+	// stayed whole, so every later save conflicted and the session silently
+	// lost turns (ses_2026-10-02-205400-f1e06e02). Same contract as
+	// applyCompactResult, which already used replaceSession.
+	if err := h.replaceSession(id, "", as.messages, nil); err != nil {
+		log.Printf("serve: persisting compacted transcript for session %s: %v", id, err)
+	}
 
 	// Broadcast the compacted snapshot so the SSE mirror (and every connected
 	// browser) replaces its stale message list — otherwise the web transcript
@@ -2105,13 +2129,36 @@ func (h *Handler) HandleShareSession(w http.ResponseWriter, r *http.Request, id 
 	writeJSON(w, http.StatusOK, map[string]string{"markdown": b.String()})
 }
 
-// HandleBtw appends a "By the way" user message to a session.
+// HandleBtw records a "By the way" aside for a session. While a turn is
+// running it is INJECTED into that turn (the same path a message sent mid-turn
+// takes, handler.go's tryEnqueueInjection call site) rather than appended to
+// the transcript; with no turn live it takes the concurrent-safe append path.
 func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
 	var req struct {
 		Content string `json:"content"`
 	}
 	if err := readBodyJSON(r, &req); err != nil || req.Content == "" {
 		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+
+	content := "By the way: " + req.Content
+
+	// A live turn takes the aside INSTEAD of an on-disk append. Appending to
+	// the transcript underneath a running turn is what previously forced the
+	// web client to queue /btw until the turn ended, and it is not merely
+	// racy: every later live snapshot fails its prefix check (stored is no
+	// longer a prefix of the snapshot, since liveAppendStart → samePrefix
+	// bails on len(b) < n) and is dropped, and the turn-end sync save then
+	// reports ErrTranscriptConflict (a shorter non-replace snapshot than
+	// stored). Both failures are only logged, so the remainder of the turn
+	// would be missing from disk on reload. Injection keeps the message inside
+	// as.messages — Step returns it in resp and fires OnMessage — so the live
+	// snapshots and the turn-end save both stay consistent. If the turn ends
+	// before the injection is spliced in, flushStrandedInjections dispatches
+	// it as an ordinary follow-up turn; nothing is silently dropped.
+	if h.tryEnqueueInjection(id, content) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "noted"})
 		return
 	}
 
@@ -2126,7 +2173,6 @@ func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	content := "By the way: " + req.Content
 	if err := session.AppendUserMessageForDir(entry.ProjectRoot, id, content); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

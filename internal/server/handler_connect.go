@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -168,6 +169,51 @@ func (f *connectFlow) takeCancel() context.CancelFunc {
 	return cancel
 }
 
+// cancelOutcome is the result of claiming a flow for cancellation.
+type cancelOutcome int
+
+const (
+	cancelClaimed           cancelOutcome = iota // the caller owns the cancel
+	cancelRefusedCommitting                      // 409: the credential is already on its way
+	cancelAlreadyTerminal                        // 200: nothing to cancel
+)
+
+// claimCancel atomically claims the right to cancel this flow: it takes the
+// cancel func, moves the flow to cancelled, and reports which of the three
+// outcomes applies — ALL in one locked step.
+//
+// The handler used to do this as four separate acquisitions: isTerminal(), then
+// getState() == committing, then takeCancel(), then setState(cancelled).
+// Nothing tied them together, so beginCommit could win the gap between the
+// committing check and the take. The committer had already been authorised, so
+// it went on to auth.Set and wrote the credential to disk — while the handler,
+// which had already passed its check, replied state:cancelled. That is exactly
+// the lie this endpoint's own comment promises never to tell, and it left the
+// user believing a credential they had cancelled was never saved.
+//
+// Claiming under the lock is what closes it: once the state is cancelled,
+// beginCommit can no longer succeed (it only proceeds from running or
+// waiting_browser), so there is no window for a committer to be authorised
+// after the fact.
+func (f *connectFlow) claimCancel() (context.CancelFunc, cancelOutcome) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch f.state {
+	case connectFlowComplete, connectFlowFailed, connectFlowCancelled:
+		return nil, cancelAlreadyTerminal
+	case connectFlowCommitting:
+		return nil, cancelRefusedCommitting
+	}
+	if connectFlowCancelHook != nil {
+		connectFlowCancelHook()
+	}
+	cancel := f.cancel
+	f.cancel = nil
+	f.state = connectFlowCancelled
+	f.updatedAt = time.Now()
+	return cancel, cancelClaimed
+}
+
 // beginCommit claims the exclusive right to persist this flow's credential.
 //
 // It succeeds only from a state a background exchange can legitimately finish
@@ -259,6 +305,20 @@ type connectFlowRegistry struct {
 }
 
 var connectFlows = &connectFlowRegistry{flows: map[string]*connectFlow{}}
+
+// connectFlowCancelHook, when non-nil, is called by claimCancel AFTER it has
+// inspected the state and BEFORE it takes the cancel func — with f.mu held.
+//
+// It exists because the property claimCancel provides is a LOCKING property, and
+// a probabilistic race cannot test one: the window between the state check and
+// the take is a few instructions wide, so hammering it from two goroutines
+// exercises the old check-then-act thousands of times without ever landing
+// inside it. The hook parks the claim exactly there so a test can observe what a
+// concurrent beginCommit does — which, because the mutex is held, is nothing.
+//
+// Nil in production, so the cost is one predictable branch on a path that is
+// already several lock acquisitions.
+var connectFlowCancelHook func()
 
 func (r *connectFlowRegistry) add(f *connectFlow) {
 	r.mu.Lock()
@@ -619,6 +679,11 @@ func (h *Handler) startAnthropicConnectFlow(w http.ResponseWriter, p *auth.Provi
 	})
 }
 
+// openaiCancelReleaseWait bounds how long cancelling an auto OpenAI flow waits
+// for its loopback listener to be released. finish returns as soon as the
+// context is cancelled unless it is mid token exchange, which takes no context.
+const openaiCancelReleaseWait = 3 * time.Second
+
 // startOpenAIConnectFlow begins the ChatGPT login.
 //
 // mode "auto" (the default) binds 127.0.0.1:1455 and finishes when the provider
@@ -645,12 +710,27 @@ func (h *Handler) startOpenAIConnectFlow(w http.ResponseWriter, p *auth.Provider
 	f.url = authURL
 	f.instructions = "Sign in in the new tab; ocode finishes the sign-in automatically when the page returns to localhost."
 	connectFlows.add(f)
-	// setCancel, not a bare assignment: the flow is already reachable through
-	// the registry here, so a cancel can race the write.
-	f.setCancel(cancel)
+	// finished closes once finish has returned, which is when the loopback
+	// listener is released. Cancelling waits for it (bounded), so a client that
+	// cancels and immediately starts over finds the port free instead of racing
+	// the release and failing to bind. The goroutine is started BEFORE setCancel:
+	// setCancel invokes the func at once for an already-cancelled flow, and that
+	// wait needs a running finish to end.
+	finished := make(chan struct{})
 	crashguard.Go(func() {
+		defer close(finished)
 		cred, err := finish()
 		completeConnectFlow(ctx, f, p.ID, cred, err)
+	})
+	// setCancel, not a bare assignment: the flow is already reachable through
+	// the registry here, so a cancel can race the write.
+	f.setCancel(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(openaiCancelReleaseWait):
+			log.Printf("connect: openai flow %s still holds the callback listener %s after cancel", f.id, openaiCancelReleaseWait)
+		}
 	})
 	// `state` is reported for symmetry with the manual flow, so a client can
 	// branch on the completion mode without a second status poll.
@@ -1027,20 +1107,26 @@ func (h *Handler) handleConnectFlowCancel(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "unknown flow")
 		return
 	}
-	if f.isTerminal() {
+	// One locked claim, not a check-then-act sequence: see claimCancel. A cancel
+	// that arrives while a commit is starting must either win outright or be
+	// refused with 409 — never slip through the gap and have the credential
+	// written anyway.
+	cancel, outcome := f.claimCancel()
+	switch outcome {
+	case cancelAlreadyTerminal:
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": f.getState()})
 		return
-	}
-	if f.getState() == connectFlowCommitting {
+	case cancelRefusedCommitting:
 		writeError(w, http.StatusConflict, "this flow is saving its credential and can no longer be cancelled")
 		return
 	}
-	// takeCancel reads f.cancel under the flow lock. It used to be read with no
-	// lock at all, racing the unlocked write that the input handler performed.
-	if cancel := f.takeCancel(); cancel != nil {
+	// The cancel func is invoked OUTSIDE the flow lock. The claim already moved
+	// the state to cancelled, so no committer can be authorised in the meantime;
+	// keeping the call out of the critical section avoids running an arbitrary
+	// context walk under f.mu.
+	if cancel != nil {
 		cancel()
 	}
-	f.setState(connectFlowCancelled)
 	connectFlows.remove(flowID)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowCancelled})
 }

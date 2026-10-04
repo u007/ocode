@@ -1,9 +1,14 @@
 package cdp
 
 import (
+	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -139,5 +144,68 @@ func TestDaemonOutputIsCapturedNotInherited(t *testing.T) {
 		if f, ok := s.Writer.(*os.File); ok {
 			t.Fatalf("daemon %s must not be an *os.File (would paint the alt-screen); got %v", s.name, f)
 		}
+	}
+}
+
+// Catches: gating the foreign probe on !AdoptOnly. Adopt-only means "never
+// spawn", not "never adopt": a config that cannot authorise a spawn (here, one
+// resolved with a token but flagged adopt-only) must still attach to the daemon
+// the user is already running, instead of telling them none exists.
+func TestAdoptOnlyStillAdoptsForeignDaemon(t *testing.T) {
+	isolateHTROwnerState(t)
+	withStubbedProbes(t, false, true)
+
+	st, err := EnsureHTRServe(nil, HTROptions{
+		Enabled: true, Port: 3845,
+		Shared: SharedDaemon{Mode: "shared", AdoptOnly: true, Port: 3845, Socket: "/tmp/x.sock", Token: "tok"},
+	}, discardLogger())
+	if err != nil {
+		t.Fatalf("adopt-only must adopt a running foreign daemon, got: %v", err)
+	}
+	if !st.Running || st.StartedByOcode {
+		t.Fatalf("running=%v startedByOcode=%v, want true/false", st.Running, st.StartedByOcode)
+	}
+	if _, err := readHTROwner(); err == nil {
+		t.Error("adopting a foreign daemon must not write an ocode owner marker")
+	}
+}
+
+// Catches: a marker-only status. Adoption writes no owner marker, so the
+// settings snapshot has to find an adopted daemon through the shared token or
+// it reports a daemon ocode is using as stopped.
+func TestHTRDaemonStatusReportsAdoptedForeignDaemon(t *testing.T) {
+	isolateHTROwnerState(t)
+	withStubbedProbes(t, false, true)
+
+	info := HTRDaemonStatus(3845, "/tmp/x.sock", "tok")
+	if !info.Running {
+		t.Fatalf("an adopted foreign daemon must report running: %+v", info)
+	}
+	if info.Managed {
+		t.Errorf("a daemon with no owner marker must not be reported as managed: %+v", info)
+	}
+}
+
+// Catches: a tabs query that refuses without a marker. The adopted daemon is
+// authenticated with the shared token instead.
+func TestListHTRTabsQueriesAdoptedDaemonWithSharedToken(t *testing.T) {
+	isolateHTROwnerState(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tabs" || r.Header.Get("Authorization") != "Bearer tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"ok":true,"data":[{"id":1,"url":"https://example.com","title":"Example"}]}`)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	port, _ := strconv.Atoi(u.Port())
+
+	tabs, err := ListHTRTabs(port, "tok")
+	if err != nil {
+		t.Fatalf("list tabs on an adopted daemon: %v", err)
+	}
+	if len(tabs) != 1 {
+		t.Fatalf("tabs = %+v, want 1", tabs)
 	}
 }

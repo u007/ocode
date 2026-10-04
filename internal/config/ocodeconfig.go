@@ -830,6 +830,15 @@ type OcodeConfig struct {
 	// prompt into the agent's system prompt so it reads existing docs before
 	// implementing and updates them afterward.
 	DocPromptEnabled bool
+	// AutoShareOnStart starts the tailscale share exposure automatically when
+	// the desktop app boots, instead of waiting for the user to open the Share
+	// dialog. Default OFF: it publishes this instance to the tailnet, so it
+	// must be an explicit opt-in.
+	//
+	// Deliberately NOT part of ProfileDelta: boot-time network exposure is a
+	// property of the machine, not of a model/provider profile, so switching
+	// profiles must never silently publish or un-publish the instance.
+	AutoShareOnStart bool
 	// ProfileDebug toggles verbose profile debugging to the log tab, emitting
 	// the active profile and its effective overrides (model, provider, creds,
 	// mcp, etc.) when a session is built or the profile switches. Default
@@ -1172,6 +1181,7 @@ type ocodeConfigFile struct {
 	Discovery               discoveryConfigFile         `json:"discovery"`
 	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
+	AutoShareOnStart        *bool                       `json:"auto_share_on_start,omitempty"`
 	ProfileDebug            *bool                       `json:"profile_debug,omitempty"`
 	TerminalScrollbackLines *int                        `json:"terminal_scrollback_lines,omitempty"`
 	TerminalFontFamily      string                      `json:"terminal_font_family,omitempty"`
@@ -1363,7 +1373,7 @@ func defaultPermissionConfig() PermissionConfig {
 			MaxContextBytes:          4096,
 			MaxContextSources:        2,
 			MaxContextLinesPerSource: 80,
-			MinConfidence:            0.85,
+			MinConfidence:            0.80,
 			Grants:                   nil,
 		},
 	}
@@ -1777,6 +1787,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.DocPromptEnabled = *file.DocPromptEnabled
 		}
 		delete(raw, "doc_prompt_enabled")
+	}
+
+	if _, ok := raw["auto_share_on_start"]; ok {
+		if file.AutoShareOnStart != nil {
+			cfg.AutoShareOnStart = *file.AutoShareOnStart
+		}
+		delete(raw, "auto_share_on_start")
 	}
 
 	if _, ok := raw["profile_debug"]; ok {
@@ -2445,6 +2462,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
+	payload["auto_share_on_start"] = cfg.AutoShareOnStart
 	payload["profile_debug"] = cfg.ProfileDebug
 	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
 	if cfg.TerminalFontFamily != "" {
@@ -3965,6 +3983,18 @@ func SaveOcodeFeatures(memoryEnabled, docPromptEnabled bool) error {
 	return withOcodeConfigLock(func(c *OcodeConfig) error {
 		c.MemoryEnabled = memoryEnabled
 		c.DocPromptEnabled = docPromptEnabled
+		return nil
+	})
+}
+
+// SaveAutoShareOnStart persists the auto-share-on-boot toggle.
+//
+// Targeted load-modify-write (via withOcodeConfigLock), never a whole-snapshot
+// save: concurrent writers (TUI command, web Settings PUT) would otherwise
+// clobber each other's unrelated keys.
+func SaveAutoShareOnStart(enabled bool) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.AutoShareOnStart = enabled
 		return nil
 	})
 }

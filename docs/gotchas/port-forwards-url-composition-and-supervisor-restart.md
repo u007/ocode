@@ -190,7 +190,7 @@ Net effect: the panel showed a live forward with nothing listening on the local 
 
 ### Fix A — a reaper owns each child (`internal/remote/portmap.go`)
 
-- `forwardProcess` (`internal/remote/portmap.go:38`) holds the `exec.Cmd`, start time, a
+- `forwardProcess` (`internal/remote/portmap.go:63`) holds the `exec.Cmd`, start time, a
   `done` channel, and a `stopped` flag that distinguishes a requested teardown from an
   unexpected exit.
 - `Start` (`internal/remote/portmap.go:209-211`) registers the live entry and starts the reaper
@@ -234,12 +234,12 @@ Detection alone only clears the lie; something has to re-open the forward. One
   every attempt and be re-opened forever.
 - **Event-driven, ticker as safety net.** The `SetOnExit` hook installed in
   `portMapRegistry.entry` (`internal/server/handler_portmaps.go:88-91`) records the exit and
-  nudges `wakeMonitor` (`internal/server/portmap_watchdog.go:260`) — a non-blocking send
+  nudges `wakeMonitor` (`internal/server/portmap_watchdog.go:332`) — a non-blocking send
   into the buffered-by-one `wake` channel (`internal/server/handler_portmaps.go:41`), since
   the sender is a reaper goroutine that must never block. `portMapWatchdogLoop`
-  (`internal/server/portmap_watchdog.go:188`) waits on `wake` and on the 10s ticker, then
-  runs `portMapWatchdogPass` (`internal/server/portmap_watchdog.go:208`) →
-  `monitorPortMaps` (`internal/server/portmap_watchdog.go:220`), which reconciles each
+  (`internal/server/portmap_watchdog.go:260`) waits on `wake` and on the 10s ticker, then
+  runs `portMapWatchdogPass` (`internal/server/portmap_watchdog.go:280`) →
+  `monitorPortMaps` (`internal/server/portmap_watchdog.go:292`), which reconciles each
   project's *persisted* forwards against `IsLive`: disabled → `forget`, live →
   `noteHealthy`, dead + enabled → `policy.tryStart`. Every restart, every failure, and the
   give-up are logged (`port forwards: monitor restarted|failed|gave up …`), and a store-read

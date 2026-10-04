@@ -187,7 +187,7 @@ func TestHTRStatusReportsDaemonPIDAndStartedByOcode(t *testing.T) {
 			// A running daemon is the precondition for consulting provenance at
 			// all: a marker whose pid is gone names a process that no longer
 			// exists, and its number would read as a live daemon.
-			htrDaemonStatusFn = func(port int, socketPath string) cdp.HTRDaemonInfo {
+			htrDaemonStatusFn = func(port int, socketPath, _ string) cdp.HTRDaemonInfo {
 				return cdp.HTRDaemonInfo{Running: true, Managed: true, Addr: "127.0.0.1:3846", Port: 3846}
 			}
 
@@ -218,7 +218,7 @@ func TestHTRStatusHidesDaemonPIDWhenStopped(t *testing.T) {
 		provenanceAsked = true
 		return cdp.HTRProvenance{DaemonPID: 4242, StartedByOcode: true}
 	}
-	htrDaemonStatusFn = func(port int, socketPath string) cdp.HTRDaemonInfo {
+	htrDaemonStatusFn = func(port int, socketPath, _ string) cdp.HTRDaemonInfo {
 		return cdp.HTRDaemonInfo{Running: false, Addr: "127.0.0.1:3846", Port: 3846}
 	}
 

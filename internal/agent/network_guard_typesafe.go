@@ -47,7 +47,7 @@ const networkGuardJudgeModel = "typesafe/jev-latest"
 var networkGuardJudgeTimeout = 4 * time.Second
 
 // networkGuardMinConfidenceDefault is the confidence an `allow` must clear.
-// It is stricter than the shared autoJudgeMinConfidenceDefault (0.85) because
+// It is stricter than the shared autoJudgeMinConfidenceDefault (0.80) because
 // this judge runs *after* every other gate and is the last automatic check
 // before bytes leave the machine: by the time a call reaches here the
 // deterministic exfiltration detectors, the banned-prefix list and the domain
@@ -305,18 +305,11 @@ type networkGuardResult struct {
 	Concern string
 }
 
-// networkGuardJudgeClient resolves the egress judge, or nil when TypeSafe is
-// not connected. Same "connected" definition as the discovery judge: the shared
-// factory must yield a *TypesafeClient with a non-empty API key.
-func (a *Agent) networkGuardJudgeClient() *TypesafeClient {
-	if a == nil || a.config == nil {
-		return nil
-	}
-	client, ok := newClientFn(a.config, networkGuardJudgeModel).(*TypesafeClient)
-	if !ok || client == nil || client.APIKey == "" {
-		return nil
-	}
-	return client
+// networkGuardJudgeClient resolves the egress judge, or nil when no decision
+// backend is connected for this slot. Same "connected" definition as the
+// discovery judge: the slot must resolve to a Decider with usable credentials.
+func (a *Agent) networkGuardJudgeClient() Decider {
+	return a.resolveDecider(slotNetworkGuard)
 }
 
 // checkNetworkGuard is checkNetworkGuardCtx with a background context.
@@ -374,7 +367,7 @@ func (a *Agent) checkNetworkGuardCtx(ctx context.Context, toolName string, args 
 		// for.
 		return networkGuardResult{Applies: true}
 	}
-	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)
+	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, deciderLabel(client))
 
 	ans, ok := resp.Answers[networkGuardVerdictKey]
 	if !ok || ans.Type != "choice" {

@@ -45,7 +45,10 @@ and the healthy SSH tunnel was torn down under every other in-flight request
   backoff (1s → 30s) and treats 45s of silence as dead (the browser cannot: the
   local stream's pings keep its own liveness timer armed). Each upstream open
   emits a `host_stream` envelope; the SPA resets that host's seq watermark on
-  it and reconciles from the second one on.
+  it and reconciles from the second one on — and on the first one too when the
+  browser's own stream is a reopen (a `setHosts`/`setProjects` restart or a
+  reconnect): the reconcile fired at stream open runs before the server has
+  re-subscribed the host, so frames the host emitted in that gap were lost.
 - **`seq` is tracked per origin** in `eventBus.ts` (local, and each host) —
   each server process has its own counter, so one watermark would report a gap
   on every interleaved frame.

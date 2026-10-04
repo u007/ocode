@@ -2933,6 +2933,16 @@ func TestSandboxOSBoundaryGrantsSharedProjectWrites(t *testing.T) {
 		os.Remove(outerProbe)
 	}
 
+	// The data dir is expanded into the entries that exist, so the two stores
+	// probed below must exist before the root set is built. On a developer's
+	// real home they always did; under the package's isolated test home they
+	// do not until something creates them.
+	for _, sub := range []string{"project", "memory"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir %s store: %v", sub, err)
+		}
+	}
+
 	pm := NewPermissionManager()
 	pm.SetWorkDir(t.TempDir())
 	roots := sandbox.NewRootSet(pm.AllowedRootsClassified())
@@ -3389,15 +3399,15 @@ func TestGitBranchListingFormsAutoAllow(t *testing.T) {
 // project's over-broad `.claude/settings.json` deny look like "bash is always
 // blocked").
 func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
-	// Case 1: Claude Code settings deny names the offending pattern. HOME is
-	// redirected so the developer's real ~/.claude/settings.json (which carries
-	// its own deny rules) cannot leak in and mask the assertion.
-	t.Run("claude settings", func(t *testing.T) {
+	// Case 1: a Claude Code settings deny is NOT a ban in ocode. Banned
+	// commands come only from ocode's own config, so a matching Claude deny
+	// pattern must not produce a Deny.
+	t.Run("claude settings deny is ignored", func(t *testing.T) {
 		home := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		settings := `{"permissions":{"allow":[],"deny":["Bash(git stash *)"]}}`
+		settings := `{"permissions":{"allow":[],"deny":["Bash(git stash *)","Bash(rm -rf /*)","Bash"]}}`
 		if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -3405,12 +3415,14 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
-		dec := pm.Decide("bash", json.RawMessage(`{"command":"git stash list"}`))
-		if dec.Level != PermissionDeny {
-			t.Fatalf("Claude wildcard deny: level=%s, want deny", dec.Level)
-		}
-		if !strings.Contains(dec.DenyReason, "Bash(git stash *)") || !strings.Contains(dec.DenyReason, ".claude/settings.json") {
-			t.Fatalf("Claude deny reason=%q, want it to name Bash(git stash *) in .claude/settings.json", dec.DenyReason)
+		for _, command := range []string{"git stash list", "rm -rf /tmp/ocode-scratch", "echo hi; git stash list"} {
+			args, err := json.Marshal(map[string]string{"command": command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dec := pm.Decide("bash", args); dec.Level == PermissionDeny {
+				t.Fatalf("Decide(bash %q) = deny (%s), want Claude deny rules ignored", command, dec.DenyReason)
+			}
 		}
 	})
 
@@ -3465,8 +3477,8 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 // TestDenyToolMessageSurfacesReason proves the reason reaches the model as a
 // tool result, and that an unset reason keeps the legacy generic wording.
 func TestDenyToolMessageSurfacesReason(t *testing.T) {
-	withReason := denyToolMessage("bash", PermissionDecision{Level: PermissionDeny, DenyReason: `Claude Code deny rule "Bash(git stash *)" in .claude/settings.json`})
-	if !strings.Contains(withReason, `Bash(git stash *)`) {
+	withReason := denyToolMessage("bash", PermissionDecision{Level: PermissionDeny, DenyReason: `user-defined bash ban "git stash"`})
+	if !strings.Contains(withReason, `user-defined bash ban "git stash"`) {
 		t.Fatalf("message=%q, want it to include the deny reason", withReason)
 	}
 	if !strings.Contains(withReason, `tool "bash"`) {

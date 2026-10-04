@@ -1055,10 +1055,10 @@ func stubHTRSeams(t *testing.T) (*int, *int, *bool) {
 		running = false
 		return cdp.HTRStatus{Running: false}, nil
 	}
-	htrDaemonStatusFn = func(port int, socketPath string) cdp.HTRDaemonInfo {
+	htrDaemonStatusFn = func(port int, socketPath, _ string) cdp.HTRDaemonInfo {
 		return cdp.HTRDaemonInfo{Running: running, Managed: running, Addr: "127.0.0.1:3846", Port: 3846, Binary: "/opt/htrcli"}
 	}
-	listHTRTabsFn = func(port int) ([]cdp.HTRTab, error) {
+	listHTRTabsFn = func(port int, _ string) ([]cdp.HTRTab, error) {
 		return []cdp.HTRTab{{ID: 3, URL: "https://example.com", Title: "Example", Active: true, Browser: "chrome"}}, nil
 	}
 	htrOptionsFn = func(browser config.BrowserConfig) (cdp.HTROptions, string) {
@@ -1174,7 +1174,7 @@ func TestHandleStartHTRSurfacesFailure(t *testing.T) {
 	htrOptionsFn = func(browser config.BrowserConfig) (cdp.HTROptions, string) {
 		return cdp.HTROptions{Enabled: true}, ""
 	}
-	htrDaemonStatusFn = func(port int, socketPath string) cdp.HTRDaemonInfo {
+	htrDaemonStatusFn = func(port int, socketPath, _ string) cdp.HTRDaemonInfo {
 		return cdp.HTRDaemonInfo{Addr: "127.0.0.1:3846", Port: 3846}
 	}
 	ensureHTRServeFn = func(sup *tool.ProcessSupervisor, opts cdp.HTROptions, lg *log.Logger) (cdp.HTRStatus, error) {

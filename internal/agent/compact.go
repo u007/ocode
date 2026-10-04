@@ -1346,6 +1346,15 @@ func (a *Agent) runInlineSummary(ctx context.Context, messages []Message, rt com
 	if err != nil {
 		return "", true, err
 	}
+	// runSummaryCall hands back a template-violating response once its retries
+	// are spent, which suits the batched loop (it has nothing better). Here the
+	// main model was interrupted mid-task with its tools attached, so such a
+	// response is usually it carrying on with the task, not a thin summary:
+	// report it as a failure so the caller runs the batched loop instead of
+	// replacing the history with it.
+	if verr := validateSummary(summary); verr != nil {
+		return "", true, fmt.Errorf("compact: inline summary rejected: %w", verr)
+	}
 	a.emitDebug("COMPACT", fmt.Sprintf("inline summary done in %s: %d chars, %s", time.Since(started).Round(time.Millisecond), len(summary), usage))
 	return summary, true, nil
 }

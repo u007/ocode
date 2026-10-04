@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unicode"
 
@@ -139,6 +140,14 @@ type PermissionRequest struct {
 	// so a failed guardrail is visible rather than indistinguishable from a
 	// clean pass.
 	UntrustedFailure string `json:"untrusted_failure,omitempty"`
+	// AgentName names the SUB-AGENT that raised the ask, and is empty for the
+	// main agent. The permission-ask callback is installed once on the parent
+	// and shared by every child it dispatches, so the callback itself cannot
+	// know who is asking — the dispatch site stamps the name per dispatch (see
+	// attributePermAsker). Without it the prompt can only say "a sub-agent
+	// asked", which is useless when several run at once. omitempty keeps every
+	// existing frame byte-identical, same precedent as the Untrusted* fields.
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -150,7 +159,7 @@ type PermissionDecision struct {
 	// they cannot be overridden even when auto-permission is enabled.
 	HardDeny bool
 	// DenyReason is a short, user-facing explanation of which policy produced
-	// a static Deny (e.g. a Claude Code deny rule, a user bash ban, locked
+	// a static Deny (e.g. a user bash ban, locked
 	// mode, or a hard block). It is surfaced verbatim in the tool error so a
 	// blocked call names the offending rule instead of a generic "permission
 	// rules" message the user cannot act on. Empty when Level != PermissionDeny
@@ -211,14 +220,29 @@ type PermissionManager struct {
 	autoPermissionEnabled atomic.Bool
 	autoConfig            atomic.Pointer[config.AutoPermissionConfig]
 	claudeBashAllow       []string
-	claudeBashDeny        []string
 	claudeBashAsk         []string
-	claudeBareDeny        map[string]bool
 	claudeBareAsk         map[string]bool
 	// sessionID tags this manager's debug-log entries with the owning
 	// agent's session (set via Agent.SetSessionID). Empty means untagged
 	// (process-global) — see emitDebug.
 	sessionID string
+	// tempAllows tracks the in-flight RunWithTemporaryUserAllow calls per tool,
+	// guarded by tempAllowMu. See temporaryAllow.
+	tempAllowMu sync.Mutex
+	tempAllows  map[string]*temporaryAllow
+}
+
+// temporaryAllow is the saved pre-allow state for one tool plus the number of
+// RunWithTemporaryUserAllow calls currently relying on it. Only the first
+// holder snapshots and only the last one restores: a per-call snapshot let an
+// overlapping call record the OTHER call's temporary allow as "previous" and
+// restore it for good.
+type temporaryAllow struct {
+	holders       int
+	prevLevel     PermissionLevel
+	hadLevel      bool
+	prevConfirmed bool
+	hadConfirmed  bool
 }
 
 // emitDebug appends a debug-log entry tagged with the owning agent's
@@ -1676,7 +1700,8 @@ func NewPermissionManager() *PermissionManager {
 	// No bash prefixes are banned by default — bans are opt-in via
 	// `/ban add <prefix>`. The `sed` special-casing below (compound-command
 	// parsing) applies to any sed rule a user configures.
-	// Adhere to Claude Code's .claude/settings.json permissions: load global
+	// Adhere to Claude Code's .claude/settings.json allow/ask permissions (its
+	// deny list is deliberately not honoured; bans are ocode's own): load global
 	// user rules now; project-specific rules are added when workDir is set via
 	// SetWorkDir (covers /cd, desktop project switches, and per-session roots).
 	pm.LoadClaudePermissions(pm.workDir)
@@ -1795,21 +1820,6 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			pm.emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "hard-blocked shell command"}
 		}
-		// Claude Code settings: a matching deny is a hard block even before
-		// the dangerous-rm ask (deny > ask). Check each subcommand so
-		// compound lines like "echo hi; rm -rf /" are still caught.
-		if parsed, err := parseShellCommandLine(command); err == nil {
-			for _, cmd := range parsed {
-				sub := rebuildCommandLine(cmd.cmdWords)
-				if sub == "" {
-					continue
-				}
-				if pat, denied := pm.claudeDenyRule(sub); denied {
-					pm.emitDebug("perm", fmt.Sprintf("Decide DENY (claude deny): tool=bash command=%q", command))
-					return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: formatClaudeDenyReason(pat)}
-				}
-			}
-		}
 		if parsed, err := parseShellCommandLine(command); err == nil {
 			for _, cmd := range parsed {
 				if reason := dangerousRmReason(pm, cmd.cmdWords); reason != "" {
@@ -1856,7 +1866,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			// ("cd repo && git stash") slips through. Parse here and apply the
 			// hard policy gates per fragment, so neither a destructive git form
 			// nor an explicit user ban can ride the sandbox auto-allow.
-			parsed, perr := parseShellCommandLine(command)
+			// A quoted heredoc feeding a non-shell consumer is inert stdin:
+			// its body is dropped so markdown backticks or `$x` in a Python
+			// body are not read as commands (see sandboxGateParseTarget).
+			parsed, perr := parseShellCommandLine(sandboxGateParseTarget(command))
 			if perr == nil {
 				// Integer assignments from every fragment, PLUS a scan of the raw
 				// line: parseShellCommandLine discards the `for p in 8080 4096`
@@ -4521,13 +4534,12 @@ func (pm *PermissionManager) mutateBashPrefixes(fn func(rules map[string]Permiss
 // lifted (out-of-scope paths, sensitive paths).
 //
 // Each transition is a single atomic mutate, so a reader never observes a
-// half-applied state — the previous code read one map, mutated it in place and
-// restored it from a deferred closure, which is a data race against both Decide
-// on a turn goroutine and any settings/TUI write. The save and the restore are
-// still two separate writes, so a concurrent writer on the SAME tool key inside
-// the window is overwritten by the restore (last write wins). That is the
-// pre-existing behaviour, the window is one tool call, and the alternative —
-// holding a lock across the call — would freeze every other permission decision.
+// half-applied state. Overlapping calls for the SAME tool (parallel tool calls
+// the judge approved) share one saved state: the first installs the allow, the
+// last restores it. tempAllowMu covers only that bookkeeping, never fn, so no
+// permission decision waits on a tool call. A settings/TUI write to the same
+// tool key inside the window is still overwritten by the restore (last write
+// wins); the window is the tool calls themselves.
 func (pm *PermissionManager) RunWithTemporaryUserAllow(tool string, fn func() error) error {
 	if pm == nil || tool == "" || fn == nil {
 		if fn != nil {
@@ -4535,21 +4547,39 @@ func (pm *PermissionManager) RunWithTemporaryUserAllow(tool string, fn func() er
 		}
 		return nil
 	}
-	prevLevel, hadLevel := pm.rules.get(tool)
-	prevConfirmed, hadConfirmed := pm.userConfirmedRules.get(tool)
+	pm.tempAllowMu.Lock()
+	ta := pm.tempAllows[tool]
+	if ta == nil {
+		ta = &temporaryAllow{}
+		ta.prevLevel, ta.hadLevel = pm.rules.get(tool)
+		ta.prevConfirmed, ta.hadConfirmed = pm.userConfirmedRules.get(tool)
+		if pm.tempAllows == nil {
+			pm.tempAllows = make(map[string]*temporaryAllow)
+		}
+		pm.tempAllows[tool] = ta
+		pm.SetUserConfirmedRule(tool, PermissionAllow)
+	}
+	ta.holders++
+	pm.tempAllowMu.Unlock()
 
-	pm.SetUserConfirmedRule(tool, PermissionAllow)
 	defer func() {
+		pm.tempAllowMu.Lock()
+		defer pm.tempAllowMu.Unlock()
+		ta.holders--
+		if ta.holders > 0 {
+			return
+		}
+		delete(pm.tempAllows, tool)
 		pm.rules.mutate(func(m map[string]PermissionLevel) {
-			if hadLevel {
-				m[tool] = prevLevel
+			if ta.hadLevel {
+				m[tool] = ta.prevLevel
 			} else {
 				delete(m, tool)
 			}
 		})
 		pm.userConfirmedRules.mutate(func(m map[string]bool) {
-			if hadConfirmed {
-				m[tool] = prevConfirmed
+			if ta.hadConfirmed {
+				m[tool] = ta.prevConfirmed
 			} else {
 				delete(m, tool)
 			}
@@ -4883,7 +4913,6 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 		mode:            pm.Mode(),
 		workDir:         pm.workDir,
 		claudeBashAllow: append([]string(nil), pm.claudeBashAllow...),
-		claudeBashDeny:  append([]string(nil), pm.claudeBashDeny...),
 		claudeBashAsk:   append([]string(nil), pm.claudeBashAsk...),
 	}
 	clone.autoPermissionEnabled.Store(pm.autoPermissionEnabled.Load())
@@ -4922,12 +4951,6 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 		clonePathPatterns[toolName] = append([]pathPatternEntry(nil), entries...)
 	}
 	clone.pathPatterns.set(clonePathPatterns)
-	if pm.claudeBareDeny != nil {
-		clone.claudeBareDeny = make(map[string]bool, len(pm.claudeBareDeny))
-		for k, v := range pm.claudeBareDeny {
-			clone.claudeBareDeny[k] = v
-		}
-	}
 	if pm.claudeBareAsk != nil {
 		clone.claudeBareAsk = make(map[string]bool, len(pm.claudeBareAsk))
 		for k, v := range pm.claudeBareAsk {
@@ -6586,15 +6609,6 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("user-defined bash ban %q", deniedPrefix)}
 	}
 
-	// Claude Code settings: deny takes precedence over everything (mirrors
-	// Claude's deny > ask > allow evaluation order). A matching deny in
-	// .claude/settings.json or .claude/settings.local.json is a hard block
-	// that no allow rule or auto-allow can bypass.
-	if pat, denied := pm.claudeDenyRule(command); denied {
-		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (claude deny): command=%q", command))
-		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: formatClaudeDenyReason(pat)}
-	}
-
 	// Harmful operations (git revert/stash/reset/clean/checkout/restore/switch,
 	// git push/pull --force, exfiltration) always require explicit human
 	// approval and must never auto-allow — even when a broader prefix rule or a
@@ -6776,7 +6790,7 @@ func envVarPermissionRequest(args json.RawMessage, command, resolved string, isS
 // the interpreter-effects verifier (permission_interpreter.go), and the
 // auto-continue triage (autocontinue_typesafe.go). A configured
 // permissions.auto.min_confidence overrides it.
-const autoJudgeMinConfidenceDefault = 0.85
+const autoJudgeMinConfidenceDefault = 0.80
 
 // configuredAutoJudgeMinConfidence returns the explicit permissions.auto
 // min_confidence and whether it was set (a positive value). Both the normal

@@ -38,6 +38,20 @@
 
 
 
+
+
+## 2026-10-04
+
+* **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Update**: 'TUI User Interaction: Slash Command Queuing' ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+## 2026-10-03
+
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Shared HTR daemon (htrcli serve) ([concepts/htr-shared-daemon.md](/concepts/htr-shared-daemon.md))
+* **Update**: Pending ask recovery from live session state (sentinel-less transcript) ([gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))
+* **Update**: Advisor checkpoints must wait for a pending permission/question ask ([gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md](/gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md))
 ## 2026-10-02
 
 * **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))

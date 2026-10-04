@@ -194,13 +194,13 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	// path-scoped permission checks agree with the active /cd target. Direct
 	// field assignment (not SetWorkDir) so the SHARED snapshot store's base
 	// dir is not re-pointed.
-	if a.workDir != "" {
-		child.workDir = a.workDir
+	if wd := a.WorkDir(); wd != "" {
+		child.workDir = wd
 	}
 	// Match the parent's project host too, so a remote project's side query
 	// renders the same "this project lives on <host>" note rather than
 	// presenting the local machine's paths as the project's.
-	child.projectHost = a.projectHost
+	child.projectHost = a.ProjectHost()
 	if a.sessionID != "" {
 		child.SetSessionID(a.sessionID)
 	} else if sessionID := a.OpenCodeSessionID(); sessionID != "" {

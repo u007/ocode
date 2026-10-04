@@ -1,5 +1,154 @@
 # Changelog
 
+## 2026-10-04 — A parked sub-agent ask is now visible and answerable, and the bash gates stop trusting the first word
+
+- **A sub-agent that needed permission produced no dialog and no error.** The
+  child goroutine parked on a channel in its own session registry, but
+  `livePendingAsks` / `RunStates` only read `PERMISSION_ASK:` sentinels from the
+  parent transcript — and a child ask has none. So the sub-agent aborted
+  mid-work and its run was recorded **done**: no dialog, no error, no recovery.
+  Both surfaces now read a second source, `as.childAsks`
+  (`internal/server/child_perm_asks.go`), which has **its own mutex and never
+  takes `as.mu`**. That is load-bearing, not tidiness: `runTurn` holds `as.mu`
+  for the whole turn and a synchronous dispatch parks *inside* that turn, so a
+  locked read — or a fall-through into `findPendingSession`, which takes a
+  blocking `as.mu` — pins the HTTP connection behind the parked child for the
+  whole park. `HandleResolvePermission` therefore tries the child branch
+  **first**, and a short-lived resolved-id TTL answers 404 for an id the browser
+  still holds rather than falling through.
+- **The dialog now names WHICH sub-agent is blocked.** `PermissionRequest` /
+  `PermissionEvent` gained `agent_name` (`omitempty`, so every main-agent frame
+  is byte-identical) and `attributePermAsker` stamps it at each dispatch. The
+  callback is installed once on the parent and shared by every child, so it
+  cannot know who is asking; each level stamps its own name first and the
+  intermediates no-op, which is what makes a grandchild name *itself* rather
+  than its parent. `advisor` gets a synthetic name for the same reason — it has
+  no registry `AgentDefinition`.
+- **A parked ask can no longer pin a turn forever.** Parent cancellation does not
+  reliably reach a mid-`Step` child (the child snapshots its own stop channel), so
+  the bound is a 10-minute `childPermAskTimeout` that auto-denies — generous
+  because the park is only time spent *waiting on a human*.
+  `Agent.Shutdown` denies every parked child ask before closing the stop channel
+  the asker also selects on.
+- **Claude Code's `permissions.deny` is no longer honoured.** ocode's banned
+  commands come only from its own config (`/ban`); a deny inherited from another
+  tool's settings file was a hard block that ocode's UI never showed and ocode's
+  own rules could not explain. Removed `claudeBashDeny` / `claudeBareDeny`,
+  `claudeDenyRule`, `formatClaudeDenyReason` and the `Decide` gate that consulted
+  them. `allow`/`ask` still merge.
+- **The bash gates unwrap launcher wrappers before judging.**
+  (`internal/agent/permissions_wrappers.go`) `IsHarmfulBashCommand` and the
+  user-ban matcher keyed off the *first word*, so a destructive form hid behind
+  `env`/`timeout`/`xargs`/`sudo`/`nohup`, behind a path (`/usr/bin/git stash`),
+  or behind a shell re-exec (`bash -c`, `eval`). `effectiveCommandWords` peels
+  those layers (flag-consuming flags per wrapper, `wrapperPositionals` for
+  `timeout D`, depth-capped at 6) and returns every command the fragment will
+  really run. It never auto-allows on its own — callers only use it to *find*
+  harmful and banned forms.
+- **A quoted heredoc feeding a non-shell program is inert stdin.**
+  `sandboxGateParseTarget` drops the body before the sandbox gate parses, so
+  markdown backticks, `$x` and the words "git reset" inside a Python heredoc are
+  data rather than commands that ask.
+- **Overlapping temporary allows no longer capture each other's state.**
+  `RunWithTemporaryUserAllow` snapshot-and-restore was per call, so two
+  concurrent calls on one tool let the second record the first's temporary allow
+  as "previous" and restore it permanently. Now reference-counted per tool
+  (`temporaryAllow`): first holder installs, last restores. `tempAllowMu` covers
+  only that bookkeeping, never `fn`, so no decision waits on a tool call.
+- **Auto-permission rubric: three adopted rules plus a new verified fact.**
+  (`internal/agent/permission_typesafe.go`,
+  `internal/agent/permission_overwrites.go`) The rubric now states that ordinary
+  in-scope version-control writes are allowed while the destructive forms stay
+  denied; that a compound command is allowed when every command in it is; and
+  that temp-root scratch work is in scope even under `allow_destructive=false`.
+  It also consumes a fact ocode verifies rather than lets the model guess:
+  `replaced_files_backup` records which project files a command copied or moved
+  to a temp root *before* replacing, because measured live a rule that allowed
+  "overwrite a file the command first saved" equally allowed a command that saved
+  a **different** file. New `docs/concepts/auto-permission-judge-eval.md` plus
+  committed `must_ask.yaml` / `should_allow.yaml` fixtures and a rewritten eval
+  README record the findings behind each rule.
+- **Decision backends are reached through one seam.** `resolveDecider(slot)` +
+  `deciderLabel` replace `*TypesafeClient` parameters in the auto-continue,
+  content-guard and network-guard judges, which now also `RecordSideUsage` their
+  own spend. Removed `contentGuardStepCtxCtx`, whose dropped `cancel` leaked one
+  parked goroutine and one live context per DAG batch for the life of the
+  session's `stopCh`; every caller must now invoke the returned cancel.
+- **`/btw` is instant on the web/desktop app** (`web/src/lib/instantCommands.ts`).
+  The TUI has had this since 0.8.55; the web queued *every* slash command while
+  busy, so an aside typed during a long turn sat invisible until it ended.
+  Membership is a persistence-safety decision, not a convenience one — the
+  comment spells out the trap: a command may only be instant once its handler
+  has a mid-turn path that keeps the message inside `as.messages`, or the stored
+  transcript stops being a prefix of the in-memory snapshot and every later live
+  snapshot is silently dropped. `HandleBtw` takes that path, and `ChatInput`
+  reads the compaction state directly.
+- **An approved call that returns flagged content raises a NEW ask instead of
+  feeding the model.** The guardrail vets the *result*; the user approved the
+  *call*. The TUI already stopped on the sentinel prefix — the server now does
+  too, via `parsePermissionAsk` (not the bare prefix: content merely starting
+  with `PERMISSION_ASK:` is ordinary remote text, and treating it as an ask would
+  park the session on a dialog nothing can answer). Approval results are
+  truncated like any other tool result, so a >192KB fetched page cannot enter
+  the context whole on one click.
+- **HTR: the daemon is probed, stopped and listed on the port it actually runs
+  on.** `startManagedHTR` overwrites the configured `browser.htr_port` with the
+  resolved value (3845 in shared mode), but status, stop and "List tabs" all
+  used the configured one — so Settings showed **Stopped** against a live shared
+  daemon, a daemon survived its own Stop, and List tabs always errored.
+  `HTRDaemonStatus` is a read-only snapshot (no lease, never starts anything)
+  that also recognises an *adopted* shared daemon via its shared token, which
+  adoption never writes a marker for; `ListHTRTabs` uses the same bearer.
+  `resetHTRVerifyOutcome` forgets the last verification result when the daemon
+  dies, because the dedupe is keyed on `(port, ready)` and would otherwise let a
+  dead daemon's complaint silence its replacement's.
+- **Connect: cancelling a flow no longer persists its credential.**
+  `claimCancel` collapses what were four separate acquisitions
+  (`isTerminal` → state check → `takeCancel` → `setState`) into one locked step.
+  Nothing tied them together, so `beginCommit` could win the gap and write the
+  credential to disk while the handler — which had already passed its check —
+  replied `state:cancelled`: the lie this endpoint's own comment promises never
+  to tell.
+- **Smaller fixes.** `*net.DNSError` is retryable in the LLM client (a resolver
+  that has not finished coming up reports neither `Timeout()` nor
+  `Temporary()`, so a momentary NXDOMAIN hard-failed a turn while
+  `connection refused` got the full retry budget — it cost one session eight
+  minutes of sub-agent work). Inline compaction now validates its summary and
+  falls back to the batched loop instead of replacing the history with the main
+  model carrying on with the task. Compaction persists *through*
+  `ErrTranscriptConflict`, since it shrinks the transcript by design. The DAG
+  scheduler releases its guard context per batch, and vets failed node results.
+  `<tool> --version` probes are memoised per resolved path, so every sub-agent
+  dispatch stopped paying ~1s for them. The SSE event bus detects a reopened
+  stream and resyncs. The bash-rules settings form flags duplicate prefixes
+  (last one wins) before you save them.
+- **Tests.** New: `internal/server/child_perm_asks_test.go`,
+  `subagent_perm_attribution_test.go`, `permissions_sandbox_heredoc_test.go`,
+  `permission_overwrites_test.go`, `compact_persist_test.go`,
+  `handler_content_guard_reask_test.go`, `handler_connect_cancel_atomic_test.go`,
+  `handler_config_htr_port_test.go`, `htr_verify_outcome_test.go`,
+  `exec_workdir_test.go`, `web/src/lib/instantCommands.test.ts`,
+  `ChatInput.instantCommands.test.tsx`, `PermissionDialog.agentName.test.tsx`.
+  Extended: the permission-judge eval (`+250`), `PermissionsForm.bashRules`,
+  `eventBus`, `ConnectFlowPanel`, `handler_btw`.
+- **Docs.** `docs/concepts/auto-permission-judge-eval.md` (new);
+  `auto-permission-enforced-categories`, `inbound-content-guardrail`,
+  `sandbox-permission-mode`, `tui-slash-command-queuing`, `compaction-config`,
+  `compaction-cancellation`, `htr-shared-daemon`, `pending-ask-recovery-live-session-state`,
+  `code-search-relevance-judge`, `auto-continue-turn-transcript-rebase`,
+  `git-ext-transport-auto-allow-bypass`, `bash-control-flow-loops-are-not-commands`
+  and 45 other bundle pages re-anchored; `skills/ocode-permissions`, `ocode-web`,
+  `ocode-tools`, `ocode-remote-ssh` updated. Design/plan records added for the
+  CLEF decision-backend seam (`docs/superpowers/plans/2026-10-03-clef-judge-backend/`),
+  the `compaction-config` `runSummaryCall` rename, and agent `activeCwd` +
+  worktree support.
+- **`TODO.md`** carries the two resolved documentation blocks (both were stuck
+  behind a `429` weekly quota on the `context` sub-agent), plus two overclaimed
+  "production race" claims corrected — the `/context` path turns out to be
+  guarded on **both** surfaces, so the race is not user-reachable as recorded.
+- **Version Bump** — 0.8.121 → 0.8.123
+
+## 2026-10-04 — The `question` prompt queues too, and both ask kinds now share one screen slot
 ## 2026-10-04 — The `question` prompt queues too, and both ask kinds now share one screen slot
 
 - **The question prompt had the same defect as the permission dialog, and it was
@@ -8616,7 +8765,7 @@ Two follow-ups to the session-switch work.
 - **Server: transcript load failure no longer bootstraps an empty agent (2026-09-30)** — `bootstrapEntryAgent` (`internal/server/agent_session.go`) swallowed any `session.LoadForDir` error and built the agent on an empty history (e.g. SQLITE_BUSY under machine load). The agent then diverged from the stored rows, so every live snapshot was dropped ("stored rows are not a prefix of the snapshot"), every turn-end save conflicted, and the session reverted to its last stored input row. A non-`ErrNotExist` load error now fails the bootstrap loudly (`turn_error` stage `history`, message stays pending) and is logged; regression `TestBootstrapEntryAgentFailsOnUnreadableTranscript`.
 - **Remote web session routing (2026-09-17)** — open tabs register their remote hosts with the event bus; session model selection, command context, and agent-run seed requests follow the session host. Agent-run caches are host-scoped, unresolved project snapshots defer seed requests, and clearing the active project clears the event bus's active host. Regression coverage includes host inventory, model-dialog routing, command context, project-store state, and agent-run loading.
 - **Version workflow** — added `make up-patch` and `make up-minor` to update the canonical version and changelog entry, then install the CLI and build the macOS desktop app with the new version.
-- **Version Bump** — 0.8.112 → 0.8.116
+- **Version Bump** — 0.8.121 → 0.8.123
 - **Web/Desktop: Computer Use settings group** (`web/src/components/Settings/`) — new `ComputerUseForm.tsx` (enable checkbox + Save, loads `GET /api/config/computer-use`, saves `PUT /api/config/computer-use`) registered as its own `computer-use` nav entry in `SettingsPanel.tsx` (`OCODE_GROUPS` after OCR + `renderGroup` case). Renders the shared `computer.StatusLines` block, so the panel shows the platform backend and the macOS permission reminder without probing the desktop. Regression suite: `ComputerUseForm.test.tsx` (nav registration verified to fail without the `OCODE_GROUPS` entry). `docs/computer-use.md` updated to document the panel as the third toggle surface.
 - **Agent: remove state reflection feature** (`internal/agent/`) — deleted `state_reflect.go`, `state_reflect_test.go`, `agent_state_reflect_methods.go` and the `reflectState` field / `reflectTail` call from `agent.go`; the reflection hook that appended user messages on preview/browser snapshot changes is removed entirely
 - **LSP diagnostics: fingerprint only emitted diagnostics** (`internal/agent/lsp_inject.go`) — `injectLSPDelta` now records `a.lspSeen[uri]` after the line-cap check and rendering, so diagnostics that were skipped or never delivered are not permanently marked as reported

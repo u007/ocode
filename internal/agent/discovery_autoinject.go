@@ -44,7 +44,7 @@ const (
 	//     answers "should this name be shown?", and the product rule for that is
 	//     "even slight relevancy should be presented". Inlining a body is a much
 	//     bigger commitment than printing a name.
-	//   - permissions.auto.min_confidence (0.85) governs whether a tool call is
+	//   - permissions.auto.min_confidence (default 0.80) governs whether a tool call is
 	//     ALLOWED. Reusing it here would couple a prompt-spend decision to a
 	//     permission tuning, so a stricter auto-permission setting would silently
 	//     disable auto-injection.
@@ -139,7 +139,7 @@ func truncateSkillBody(content string) (string, bool) {
 // root from os.Getwd(), which is the server process's cwd and therefore the wrong
 // root for any session not rooted at the process cwd.
 func (a *Agent) loadAutoInjectBody(name string) *autoInjectSkill {
-	s, err := skill.LoadSkillForRoot(name, a.workDir)
+	s, err := skill.LoadSkillForRoot(name, a.WorkDir())
 	if err != nil || s == nil {
 		return nil
 	}

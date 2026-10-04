@@ -226,6 +226,36 @@ func StartExpose(target, id string) (url string, proc *exec.Cmd, setupHint strin
 	return URLWithPathPrefix(DNSName(tailscalePath), pathPrefix), nil, ""
 }
 
+// StartServeExpose starts a TAILNET-ONLY `tailscale serve` mount for target
+// at the sanitized id path, and is the exposure used by auto-share-on-start.
+//
+// It deliberately does NOT try `funnel`, unlike StartExpose. Funnel publishes
+// the instance on the public internet; auto-share fires at boot with nobody
+// watching, so an unattended exposure must stay inside the tailnet. The
+// manual Share dialog keeps StartExpose's funnel-first behaviour because that
+// click is an explicit, informed request to share.
+//
+// Unlike StartExpose it returns "" when serve exposes nothing, rather than
+// falling back to a bare DNSName() guess: with no dialog to render a setup
+// hint next to it, an unproven URL is worse than an honest "unavailable" — the
+// caller logs the hint instead.
+//
+// Returns the URL including the path prefix, the background process for
+// cleanup, and a one-time setup hint when serve is not enabled on the tailnet.
+func StartServeExpose(target, id string) (url string, proc *exec.Cmd, setupHint string) {
+	tailscalePath, ok := Running()
+	if !ok {
+		return "", nil, ""
+	}
+	pathPrefix := SanitizePath(id)
+	wait := func(cmd *exec.Cmd) error { return cmd.Wait() }
+
+	if u, p, hint := Expose(tailscalePath, "serve", target, pathPrefix, wait); u != "" {
+		return URLWithPathPrefix(u, pathPrefix), p, hint
+	}
+	return "", nil, ""
+}
+
 // RemoveSetPath removes a single --set-path mount (best-effort). Both funnel
 // and serve are tried because the caller doesn't track which one succeeded.
 func RemoveSetPath(pathPrefix string) {

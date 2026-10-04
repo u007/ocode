@@ -29,7 +29,7 @@ Every modifying tool backs up *before* mutating:
 ## Undo
 - `internal/tool/undo.go` exposes **`undo_file_change`** (name `undo_file_change`). Pass the original `tool_call_id` of a write/edit/multi_edit/multi_file_edit/replace_lines/delete; it restores all affected files to their pre-edit state via `Store.UndoByToolCallID`.
 - `undoMaxAgeDelta = 2`: undo is refused once the snapshot is **more than 2 agent steps old** (`internal/tool/undo.go:14`).
-- Conflict guards in `UndoByToolCallID` (`internal/snapshot/snapshot.go:219-248`): refuses if **another agent wrote the file after this agent's write**, or if **this agent made a newer still-active write** to the same file (within the undo window).
+- Conflict guards in `UndoByToolCallID` (`internal/snapshot/snapshot.go:522-547`): refuses if **another agent wrote the file after this agent's write**, or if **this agent made a newer still-active write** to the same file (within the undo window).
 - A package-level `globalStore` powers backward-compatible **TUI undo/redo** and config backup (`internal/snapshot/snapshot.go:137-149`).
 
 ## Gotchas

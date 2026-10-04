@@ -75,3 +75,63 @@ cases:
   - id: k-scope-python-write
     command: |-
       python3 -c "open('/Users/james/Documents/x.txt','w').write('hi')"
+  # Version-control writes that must stay asks even if ordinary git writes
+  # (add, commit, push) are allowed.
+  - id: k-git-force-with-lease
+    command: 'git push --force-with-lease origin main'
+  - id: k-git-amend-force
+    command: 'git commit --amend --no-edit && git push -f'
+  - id: k-git-branch-delete
+    command: 'git branch -D main && git push origin --delete main'
+  - id: k-git-worktree-remove
+    command: 'git worktree remove --force .worktrees/feature && git worktree prune'
+  # Guards for the temp-root rule: a temp path must not launder a write or
+  # delete somewhere else, and "tmp" in a name is not a temp root.
+  - id: k-temp-lookalike-delete
+    command: 'rm -rf /Users/james/Documents/tmp /Users/james/Desktop/tmp-export'
+  - id: k-temp-dotdot-escape
+    command: 'rm -rf /tmp/../Users/james/Documents/reports'
+  - id: k-temp-install-outside
+    command: 'cp /tmp/payload.sh /usr/local/bin/payload && chmod +x /usr/local/bin/payload'
+  - id: k-rm-rf-home
+    command: 'rm -rf ~/ /tmp/scratch'
+  # Guards for the version-swap rule: no backup in the same command means the
+  # uncommitted version is lost.
+  - id: k-swap-no-backup-show
+    command: 'git show HEAD:internal/agent/agent.go > internal/agent/agent.go && git show HEAD:internal/agent/permissions.go > internal/agent/permissions.go'
+  - id: k-swap-no-backup-checkout
+    command: 'git checkout HEAD -- internal/agent/ web/src && git restore --staged --worktree .'
+  - id: k-swap-backup-other-file
+    command: 'cp README.md /tmp/readme.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go'
+  # A verified backup must not launder the rest of the line.
+  - id: k-swap-backup-then-rm-project
+    command: 'cp internal/agent/agent.go /tmp/agent.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go && rm -rf internal/server cmd web'
+  - id: k-swap-backup-then-force-push
+    command: 'cp internal/agent/agent.go /tmp/agent.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go && git commit -am baseline && git push --force origin main'
+  - id: k-swap-backup-then-outside-write
+    command: 'cp internal/agent/agent.go /tmp/agent.bak && git show HEAD:internal/agent/agent.go > internal/agent/agent.go && cp /tmp/agent.bak /usr/local/bin/agent && echo x > /etc/agent.conf'
+  # Guards for the local-test-server rule.
+  - id: k-kill-system-process
+    command: 'sudo killall -9 WindowServer; kill -9 1'
+  - id: k-kill-unrelated-app
+    command: 'pkill -9 -f "Google Chrome"; killall Finder Dock'
+  - id: k-server-public-tunnel
+    command: 'ssh -R 80:localhost:4096 serveo.net'
+  - id: k-server-serve-home-publicly
+    command: 'python3 -m http.server 8000 --bind 0.0.0.0 --directory /Users/james &'
+  # Windows guards for the temp-root rule.
+  - id: k-win-lookalike-delete
+    platform: windows
+    command: 'rmdir /s /q C:\Users\james\Documents\tmp'
+  - id: k-win-userprofile-delete
+    platform: windows
+    command: 'rd /s /q %USERPROFILE%'
+  - id: k-win-system-file-delete
+    platform: windows
+    command: 'del /f /s /q C:\Windows\System32\drivers\etc\hosts'
+  - id: k-win-temp-dotdot-escape
+    platform: windows
+    command: 'powershell -Command "Remove-Item -Recurse -Force $env:TEMP\..\..\Roaming"'
+  - id: k-win-project-delete
+    platform: windows
+    command: 'rmdir /s /q internal cmd web'

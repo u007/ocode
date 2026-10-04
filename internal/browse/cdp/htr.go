@@ -421,10 +421,13 @@ type HTRTab struct {
 	Browser string `json:"browser,omitempty"`
 }
 
-// HTRDaemonInfo is a read-only snapshot of the managed daemon for the settings
-// UI. Unlike EnsureHTRServe it takes no lease and never starts anything, and it
-// only ever describes the daemon named by ocode's owner marker — a standalone
-// htrcli daemon (port 3845, no marker) is never reported.
+// HTRDaemonInfo is a read-only snapshot of the daemon for the settings UI.
+// Unlike EnsureHTRServe it takes no lease and never starts anything. It
+// describes the daemon named by ocode's owner marker (Managed) or, in shared
+// mode, a daemon the user started that answers with the shared token (Running
+// but not Managed) — the one EnsureHTRServe adopts without writing a marker. A
+// standalone htrcli daemon in private mode (no marker, no shared token) is
+// never reported.
 type HTRDaemonInfo struct {
 	Running bool   `json:"running"`
 	Managed bool   `json:"managed"`
@@ -441,28 +444,38 @@ type htrTabsResponse struct {
 	Data []HTRTab `json:"data"`
 }
 
-// HTRDaemonStatus reports whether the ocode-managed daemon is running. port is
-// the configured HTR port (0 = managed default, honoring HTR_PORT); socketPath
-// is the configured socket override ("" = managed default).
-func HTRDaemonStatus(port int, socketPath string) HTRDaemonInfo {
+// HTRDaemonStatus reports whether the daemon ocode would use is running. port
+// is the configured HTR port (0 = managed default, honoring HTR_PORT);
+// socketPath is the configured socket override ("" = managed default);
+// sharedToken is the shared-mode bearer ("" in private mode). The token is what
+// lets an adopted daemon be seen at all: adoption writes no owner marker, so a
+// marker-only check reported a daemon ocode was actively using as stopped.
+func HTRDaemonStatus(port int, socketPath, sharedToken string) HTRDaemonInfo {
 	p := htrPortEnv(port)
 	info := HTRDaemonInfo{Addr: htrAddr(p), Port: p}
+	resolvedSocket := ""
 	if resolved, err := ResolveHTRSocketPath(socketPath); err == nil {
+		resolvedSocket = resolved
 		info.Socket = resolved
 	}
-	owner, err := readHTROwner()
-	if err != nil || owner.Port != p || owner.Identity == "" {
-		return info
+	if owner, err := readHTROwner(); err == nil && owner.Port == p && owner.Identity != "" {
+		info.Binary = owner.Executable
+		if owner.Socket != "" {
+			info.Socket = owner.Socket
+		}
+		if pidAlive(owner.PID) && htrHealthyForInstanceFn(owner.Port, owner.Socket, owner.Identity) {
+			info.Running = true
+			info.Managed = true
+			return info
+		}
 	}
-	info.Binary = owner.Executable
-	if owner.Socket != "" {
-		info.Socket = owner.Socket
+	if htrHealthyForeignFn(p, resolvedSocket, sharedToken) {
+		// Not ocode's: no marker names it, so the marker's binary and socket (if
+		// a stale one is on disk) do not describe it.
+		info.Running = true
+		info.Binary = ""
+		info.Socket = resolvedSocket
 	}
-	if !pidAlive(owner.PID) || !htrHealthyForInstance(owner.Port, owner.Socket, owner.Identity) {
-		return info
-	}
-	info.Running = true
-	info.Managed = true
 	return info
 }
 
@@ -530,20 +543,24 @@ func StopHTRServe(sup *tool.ProcessSupervisor, port int, lg *log.Logger) (HTRSta
 	return HTRStatus{Running: false, Addr: addr, Socket: owner.Socket}, nil
 }
 
-// ListHTRTabs returns the browser tabs connected to the managed daemon via its
-// bearer-protected GET /api/tabs. It fails when no managed daemon is recorded
-// in ocode's owner marker (a standalone daemon is never queried).
-func ListHTRTabs(port int) ([]HTRTab, error) {
+// ListHTRTabs returns the browser tabs connected to the daemon via its
+// bearer-protected GET /api/tabs. The bearer is the identity in ocode's owner
+// marker, or — for an adopted shared daemon, which has no marker — sharedToken.
+// With neither (a standalone daemon in private mode) nothing is queried.
+func ListHTRTabs(port int, sharedToken string) ([]HTRTab, error) {
 	p := htrPortEnv(port)
-	owner, err := readHTROwner()
-	if err != nil || owner.Port != p || owner.Identity == "" {
+	bearer := strings.TrimSpace(sharedToken)
+	if owner, err := readHTROwner(); err == nil && owner.Port == p && owner.Identity != "" {
+		bearer = owner.Identity
+	}
+	if bearer == "" {
 		return nil, fmt.Errorf("managed htr daemon is not running on %s", htrAddr(p))
 	}
 	req, err := http.NewRequest(http.MethodGet, "http://"+htrAddr(p)+"/api/tabs", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+owner.Identity)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1233,6 +1250,21 @@ func noteHTRVerifyOutcome(out htrVerifyOutcome) bool {
 	}
 }
 
+// resetHTRVerifyOutcome forgets the last published verification result, so the
+// next one for the same port is reported again.
+//
+// Called when the daemon DIES, because the dedupe in noteHTRVerifyOutcome is
+// keyed on (port, ready) and knows nothing about which process answered. The
+// death report tells the operator to ensure the daemon again; if the replacement
+// then failed verification on the same port, noteHTRVerifyOutcome would compare
+// against the dead daemon's (port, false) and stay silent — leaving the operator
+// with a daemon that is up, silent, and not answering, and no new complaint about
+// why. A new process deserves a new complaint.
+//
+// Bounded by construction: there is no auto-restart, so one reset buys exactly
+// one additional report per ensure, and an ensure is a user action.
+func resetHTRVerifyOutcome() { lastHTRVerifyOutcome.Store(nil) }
+
 // launchSharedVerifyFn starts background verification. Production goes through
 // crashguard.Go: a panic in a raw goroutine kills the process before the TUI can
 // restore the terminal, and the verifier probes the network from a goroutine
@@ -1467,8 +1499,7 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 	// foreign daemon is reusable with no supervisor, because ocode does not own
 	// its lifetime.
 	foreignAlive := func() bool {
-		return opts.sharedMode() && !opts.Shared.AdoptOnly &&
-			htrHealthyForeignFn(port, socketPath, opts.Shared.Token)
+		return opts.sharedMode() && htrHealthyForeignFn(port, socketPath, opts.Shared.Token)
 	}
 
 	// The four states, in resolution order: own-alive, foreign-alive, adopt-only
@@ -1609,6 +1640,21 @@ func EnsureHTRServe(sup *tool.ProcessSupervisor, opts HTROptions, lg *log.Logger
 	if err := htrWriteOwner(identity, port, rec.PID, socketPath, bin, rec.StartedAt, os.Getpid()); err != nil {
 		return fail(fmt.Errorf("record managed HTR owner: %w", err))
 	}
+	// The daemon may have died between the confirm above and this write — the
+	// watcher retracts whatever marker it can SEE, and at that instant there was
+	// none. Recording one now for a pid that has exited would have StopHTRServe
+	// and the next ensure both believe in a daemon that is not running. Fail
+	// instead, and take the marker back out.
+	select {
+	case <-died:
+		if path, pathErr := htrOwnerPath(); pathErr == nil {
+			if cur, curErr := readHTROwner(); curErr == nil && cur.PID == rec.PID {
+				_ = os.Remove(path)
+			}
+		}
+		return fail(fmt.Errorf("htr daemon pid %d exited during start on %s%s", rec.PID, addr, htrDaemonOutputTail(cmd)))
+	default:
+	}
 	// Release the cross-process lease before the supervisor shuts down. The HTR
 	// child is retained by the supervisor while another ocode process owns a
 	// lease; the final release terminates only the managed daemon.
@@ -1700,5 +1746,19 @@ func watchHTRExitNotify(cmd *exec.Cmd, sup *tool.ProcessSupervisor, rec tool.Pro
 	publishHTRStatus("")
 	if died != nil {
 		close(died)
+	}
+	// A SECOND marker sweep, after the death signal. The one above runs before
+	// the signal, so a boot path that is mid-ensure can still write a marker for
+	// this dead pid in the gap between them: confirmSharedSpawnAlive saw the
+	// process alive, then it died, then htrWriteOwner recorded it. That leaves a
+	// marker naming a pid nothing is running, which StopHTRServe and the next
+	// ensure both believe. Re-reading here makes this path the authoritative
+	// cleanup regardless of interleaving; the boot path's own post-write check
+	// (EnsureHTRServe) covers the symmetric ordering.
+	resetHTRVerifyOutcome()
+	if path, pathErr := htrOwnerPath(); pathErr == nil {
+		if cur, curErr := readHTROwner(); curErr == nil && cur.PID == rec.PID {
+			_ = os.Remove(path)
+		}
 	}
 }

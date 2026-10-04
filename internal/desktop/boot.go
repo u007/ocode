@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
@@ -157,6 +159,34 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 		log.Printf("desktop: durable share token enabled (%s)", store.Path())
 	}
 
+	// Auto-share: warm the tailscale exposure at boot when the user has opted
+	// in (ocodeconfig auto_share_on_start, default OFF). The exposure itself is
+	// the SAME cached one GET /api/tailscale-url serves, so the Share dialog
+	// later reuses this URL instead of starting a second, conflicting mount.
+	//
+	// Runs in its own goroutine because tailscale.StartServeExpose waits on the
+	// `serve --bg` child for up to 2s; blocking StartServer would delay the
+	// window appearing. crashguard.Go (not a bare `go`) so a panic here cannot
+	// kill the process before the TUI resets the terminal.
+	//
+	// Config is read here rather than passed in: StartServer has no config
+	// parameter and auto-share is the only boot-time consumer, so threading one
+	// would touch every caller for no other benefit. A read failure is logged
+	// and treated as OFF — auto-share must never block boot.
+	if autoShareEnabledAtBoot() {
+		crashguard.Go(func() {
+			url, hint := srv.StartAutoShare()
+			switch {
+			case url != "":
+				log.Printf("desktop: auto-share active at %s", url)
+			case hint != "":
+				log.Printf("desktop: auto-share unavailable: %s", hint)
+			default:
+				log.Printf("desktop: auto-share requested but tailscale is not available")
+			}
+		})
+	}
+
 	// Browse origin: a second loopback listener, isolated from the SPA
 	// origin, backing the embedded browser panel. Failing to bind it means
 	// the panel cannot work at all, so boot fails loudly rather than
@@ -183,6 +213,22 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 		Srv:            srv,
 		MigrateStorage: migration != nil,
 	}, nil
+}
+
+// autoShareEnabledAtBoot reports whether auto-share-on-start is configured.
+//
+// Fail-safe by construction: any error reading the config (missing file, corrupt
+// JSON, unwritable dir) returns false, so a broken config can never be the
+// reason an instance gets published to the tailnet. Reads a COPY — the live
+// config is shared with the running TUI/server, and LoadOcodeConfigCopy is the
+// non-mutating accessor for it.
+func autoShareEnabledAtBoot() bool {
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		log.Printf("desktop: auto-share: could not read config, leaving disabled: %v", err)
+		return false
+	}
+	return cfg.AutoShareOnStart
 }
 
 // portFilePath is the file the desktop shell remembers its listen port in.

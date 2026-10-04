@@ -88,7 +88,10 @@ func (a *Agent) PrepareMessages(messages []Message, selectionContext string) []M
 	}
 	// Strip stale env block before marker-dedup so the refreshed date is
 	// re-inserted. environmentPrompt() has already updated a.envPromptDate.
-	if today := time.Now().Format("Mon Jan 2 2006"); a.envPromptDate != "" && a.envPromptDate != today {
+	a.projectCtxMu.Lock()
+	cachedEnvPromptDate := a.envPromptDate
+	a.projectCtxMu.Unlock()
+	if today := time.Now().Format("Mon Jan 2 2006"); cachedEnvPromptDate != "" && cachedEnvPromptDate != today {
 		messages = stripMarker(messages, promptEnvMarker)
 	}
 	// The selection is per-turn UI state (sidebar file picks). It rides the
@@ -196,7 +199,7 @@ func (a *Agent) BasePromptMessages() []Message {
 		if a.client != nil {
 			activeModel = a.client.GetModel()
 		}
-		root := a.workDir
+		root := a.WorkDir()
 		if root == "" {
 			if cwd, err := os.Getwd(); err == nil {
 				root = cwd
@@ -276,13 +279,27 @@ func envHash(cwd, root, projectHost string) string {
 func (a *Agent) environmentPrompt() string {
 	today := time.Now().Format("Mon Jan 2 2006")
 	cwd, _ := os.Getwd()
+	// Snapshot the guarded inputs under projectCtxMu, then compute unlocked —
+	// see the projectCtxMu comment on Agent. Reading these raw (as this function
+	// used to) is the data race between the turn goroutine and the async
+	// compaction goroutine, both of which reach here via PrepareMessages.
+	a.projectCtxMu.Lock()
 	// Use the workDir override if set (e.g., via /cd command)
 	if a.workDir != "" {
 		cwd = a.workDir
 	}
+	host := a.projectHost
+	cachedDate, cachedStr := a.envPromptDate, a.envPromptStr
+	cachedCwd, cachedRoot := a.envPromptCwd, a.envPromptRoot
+	cachedEnvHash, cachedHarness := a.envPromptEnvHash, a.envPromptHarness
+	a.projectCtxMu.Unlock()
+
 	root := findWorkspaceRoot(cwd)
-	if a.envPromptDate == today && a.envPromptStr != "" && a.envPromptCwd == cwd && a.envPromptRoot == root && a.envPromptEnvHash == envHash(cwd, root, a.projectHost) && a.envPromptHarness == ActiveHarness() {
-		return a.envPromptStr
+	harness := ActiveHarness()
+	if cachedDate == today && cachedStr != "" && cachedCwd == cwd &&
+		cachedRoot == root && cachedEnvHash == envHash(cwd, root, host) &&
+		cachedHarness == harness {
+		return cachedStr
 	}
 	provider, model := "", ""
 	if a.client != nil {
@@ -332,10 +349,10 @@ func (a *Agent) environmentPrompt() string {
 	// next to the local machine's config/session/skill/runtime paths with no
 	// indication they belong to different machines. Say it explicitly.
 	// Empty for local projects → byte-identical prompt (cache-stable).
-	if a.projectHost != "" {
+	if host != "" {
 		lines = append(lines, fmt.Sprintf(
 			"  Project host: %s (remote project — this agent runs on that host, so the project files, shell, home, and the config/session/runtime paths below all live on it)",
-			a.projectHost,
+			host,
 		))
 	}
 	lines = append(lines,
@@ -364,12 +381,17 @@ func (a *Agent) environmentPrompt() string {
 	}
 	lines = append(lines, "</env>")
 	result := strings.Join(lines, "\n")
+	// Store under the lock. Another goroutine may have filled the cache while we
+	// computed; for the same (cwd, root, host, date) inputs the bytes are
+	// identical, so last-writer-wins is harmless and keeps <env> byte-stable.
+	a.projectCtxMu.Lock()
 	a.envPromptDate = today
 	a.envPromptStr = result
 	a.envPromptCwd = cwd
 	a.envPromptRoot = root
-	a.envPromptEnvHash = envHash(cwd, root, a.projectHost)
-	a.envPromptHarness = ActiveHarness()
+	a.envPromptEnvHash = envHash(cwd, root, host)
+	a.envPromptHarness = harness
+	a.projectCtxMu.Unlock()
 	return result
 }
 

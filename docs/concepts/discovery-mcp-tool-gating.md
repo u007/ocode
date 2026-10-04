@@ -16,16 +16,16 @@ timestamp: 2026-10-01T17:11:59Z
 
 ## Overview
 
-When discovery is on, `discoveryAllows` (`internal/agent/discovery_glue.go:630`) decides which MCP tool definitions reach the model. Built-ins are never gated; MCP tools are gated to the sticky attached set (`session.IsAttached("mcp:" + name)`). The filter runs in `GetToolDefinitions` (`internal/agent/agent.go:5039`), so every turn's tool list is shaped before the provider sees it.
+When discovery is on, `discoveryAllows` (`internal/agent/discovery_glue.go:630`) decides which MCP tool definitions reach the model. Built-ins are never gated; MCP tools are gated to the sticky attached set (`session.IsAttached("mcp:" + name)`). The filter runs in `GetToolDefinitions` (`internal/agent/agent.go:5375`), so every turn's tool list is shaped before the provider sees it.
 
-The gate exists to **shrink the tool list, and fail-open defeats it.** One real session logged `exposing 322 tools` (`internal/agent/agent.go:5069`), 274 of them `zoho-books_*`. The judge that decides *what* attaches is documented in [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md); this page is about the gate itself — when it holds, the one escape that survives, and the attach paths that must stay behind the judge.
+The gate exists to **shrink the tool list, and fail-open defeats it.** One real session logged `exposing 322 tools` (`internal/agent/agent.go:5078`), 274 of them `zoho-books_*`. The judge that decides *what* attaches is documented in [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md); this page is about the gate itself — when it holds, the one escape that survives, and the attach paths that must stay behind the judge.
 
 ## Names-only index vs. callable definitions
 
 Every connected MCP tool exists in the prompt in one of two representations:
 
 1. **Names-only index** — one short line per tool in the system-role block headed `Available MCP tools (names only — not all loaded)` (`discovery_glue.go:820`), introduced by the `discoveryPromptContract` (`discovery_glue.go:721`) which tells the model to call `discover_more` with a natural-language need BEFORE claiming it cannot do something. Rendered by `renderDiscoveryContext` (`discovery_glue.go:815`) as a function of the doc **set** only — never of which ids are attached — so attaching mid-session leaves the hoisted, cached system prompt byte-identical. Injection is split by volatility in `injectDiscoveryContext` (`discovery_glue.go:754`, called from `internal/agent/agent.go:1370`): index = system-role (cached), attached-skill descriptions = user-role tail (uncached).
-2. **Full callable tool definitions** — complete JSON schemas, only for tools that pass the gate, assembled in `GetToolDefinitions` (`internal/agent/agent.go:5036`) and recomputed **every Step loop iteration** (`internal/agent/agent.go:1428-1430`), so a mid-turn `discover_more` attach becomes visible to the LLM on the next iteration.
+2. **Full callable tool definitions** — complete JSON schemas, only for tools that pass the gate, assembled in `GetToolDefinitions` (`internal/agent/agent.go:5375`) and recomputed **every Step loop iteration** (`internal/agent/agent.go:1428-1430`), so a mid-turn `discover_more` attach becomes visible to the LLM on the next iteration.
 
 **Why the split: schema cost vs. index cost.** Full MCP schemas run hundreds of tokens each (the 322-tool session above); an index line costs a few. The token-accounting helper `DiscoveryGatedTokens` (`discovery_glue.go:570`) reports `attached, total, gatedToks, indexToks`: gated tokens ≈ `len(json.Marshal(Definition()))/4` per unattached tool (`:583-585`), index tokens ≈ `len(name)+1` chars / 4 over all tools (`:573-578`, `:587`) — bytes/4 is a deliberate approximation for `/context`, not exact tokenization.
 
@@ -40,7 +40,7 @@ runDiscovery → Session.Select → judge → Seed → discoveryAllows → GetTo
 3. **Judge** (`discovery_glue.go:433-448`, call at `:437`) — `judgeDiscoveryCandidates` when TypeSafe resolves; otherwise (or on judge error) every candidate is kept (fail-open). Vetoes increment `discoveryState.judgeVetoed` (`:445`).
 4. **`Session.Seed`** (`discovery_glue.go:459`; `internal/discovery/engine.go:149`) — marks survivors attached; sticky for the session.
 5. **`discoveryAllows(name)`** (`discovery_glue.go:630`) — per-tool gate, consulted at render time (next section).
-6. **`GetToolDefinitions`** (`internal/agent/agent.go:5036`) — filters `discoveryAllows` AND `isToolAllowed`, sorts names for a stable provider tool-cache prefix (`:5046`), emits the `TOOLS` debug line (`:5047`).
+6. **`GetToolDefinitions`** (`internal/agent/agent.go:5375`) — filters `discoveryAllows` AND `isToolAllowed`, sorts names for a stable provider tool-cache prefix (`:5046`), emits the `TOOLS` debug line (`:5047`).
 
 ## The gate consults no warm/corpus state
 
@@ -94,7 +94,7 @@ Note the direction: this gate's fail-open is forbidden, while the judge's is req
 
 `TOOLS` (kind `TOOLS`, emitted from `GetToolDefinitions`):
 
-- `exposing <N> tools: <sorted names>` — `internal/agent/agent.go:5069`. The definitive answer to "how many full tool definitions did this turn send"; the leak symptom was `exposing 322 tools: advisor, ...`.
+- `exposing <N> tools: <sorted names>` — `internal/agent/agent.go:5078`. The definitive answer to "how many full tool definitions did this turn send"; the leak symptom was `exposing 322 tools: advisor, ...`.
 
 `DISCOVERY` (kind `DISCOVERY`):
 

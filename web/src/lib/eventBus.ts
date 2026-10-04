@@ -28,7 +28,8 @@ import { onWake } from "./wakeSignal";
  *   transcript refetch — never event replay). A remote host's upstream is
  *   reconnected by the server, which announces each (re)open with a
  *   `host_stream` envelope: the second one for a host fires the same
- *   reconcile handlers.
+ *   reconcile handlers, and so does the first one on a reopened stream (the
+ *   host is subscribed only after the stream's own reconcile ran).
  * - `seq` is a monotonic counter per server process used for gap detection
  *   only, so the watermark is kept per origin (local, and each remote host):
  *   a gap logs a warning and fires the same reconcile handlers.
@@ -264,7 +265,11 @@ class EventBus {
         // The server sends every envelope as `event: envelope\ndata: <json>`.
         conn.reconnectDelay = RECONNECT_BASE_MS;
         conn.lastSeq.clear(); // fresh stream — no gap warnings for the first frames
-        if (conn.hasOpenedOnce) {
+        // A reopened stream reconciles now for the local origin, but each
+        // remote host's upstream is re-subscribed by the server afterwards
+        // (seconds, or a backoff), so that host reconciles again on its marker.
+        const streamReopened = conn.hasOpenedOnce;
+        if (streamReopened) {
           this.fireReconnect("reconnect");
         }
         conn.hasOpenedOnce = true;
@@ -282,9 +287,11 @@ class EventBus {
             env.host = host;
             if (env.event === HOST_STREAM_EVENT) {
               // The host's upstream (re)opened: fresh seq watermark, and a
-              // reconcile unless this is its first open on this stream (a
-              // stream reopen has already reconciled everything).
-              const reopened = conn.lastSeq.has(host);
+              // reconcile unless this is the host's first open on the app's
+              // first stream. On a reopened stream the first marker reconciles
+              // too: the reconcile fired at stream open ran before this host
+              // was subscribed, so anything it emitted in between was lost.
+              const reopened = streamReopened || conn.lastSeq.has(host);
               conn.lastSeq.set(host, 0);
               if (reopened) this.fireReconnect("reconnect");
               return;

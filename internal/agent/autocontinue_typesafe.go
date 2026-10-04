@@ -16,7 +16,7 @@ const (
 
 // autoContinueMinConfidenceDefault is the TypeSafe confidence floor for
 // auto-continue triage. It is deliberately LOWER than the shared permission
-// floor (autoJudgeMinConfidenceDefault = 0.85): auto-continue is low-stakes and
+// floor (autoJudgeMinConfidenceDefault = 0.80): auto-continue is low-stakes and
 // reversible (the chain is bounded at AutoContinueChainCap and one extra LLM
 // round is cheap), whereas an auto-granted tool call is not. TypeSafe's own
 // guidance is explicit that "a confidence threshold is not one number" and that
@@ -101,7 +101,7 @@ Choose "continue" only when the evidence is unambiguous; otherwise choose "end" 
 // guard would otherwise be handed a resume=true it might mistake for a judge
 // verdict (and fire the wrong resume prompt). Instead the state reports the
 // real end reason (buildTypesafeAutoContinueState) and Jev decides.
-func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []Message, stepErr error) (bool, string, error) {
+func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message, stepErr error) (bool, string, error) {
 	state := a.buildTypesafeAutoContinueState(messages, stepErr)
 	reasonCriteria := make(map[string]string, len(typesafeAutoContinueReasons))
 	for _, r := range typesafeAutoContinueReasons {
@@ -125,14 +125,14 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 
 	resp, err := client.Decide(state, questions)
 	if err != nil {
-		detail := "typesafe/" + client.Model + " triage failed: " + err.Error()
+		detail := deciderLabel(client) + " triage failed: " + err.Error()
 		return false, detail, err
 	}
-	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)
+	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, deciderLabel(client))
 
 	ans, ok := resp.Answers[typesafeAutoContinueVerdictKey]
 	if !ok || ans.Type != "choice" {
-		detail := fmt.Sprintf("typesafe/%s triage returned no verdict (answers=%d)", client.Model, len(resp.Answers))
+		detail := fmt.Sprintf("typesafe/%s triage returned no verdict (answers=%d)", deciderLabel(client), len(resp.Answers))
 		return false, detail, nil
 	}
 
@@ -145,7 +145,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client *TypesafeClient, messages []
 	if reasonKey != "" {
 		reason = "; reason: " + typesafeAutoContinueReasonLabel(reasonKey)
 	}
-	model := "typesafe/" + client.Model
+	model := deciderLabel(client)
 	a.emitDebug("AGENT", fmt.Sprintf("autocontinue_typesafe verdict=%s confidence=%.3f min=%.2f reason=%s", ans.Choice, ans.Confidence, minConfidence, reasonKey))
 
 	switch ans.Choice {
@@ -238,7 +238,11 @@ func (a *Agent) AutoContinueJudgeSync(messages []Message, stepErr error) (bool, 
 		return false, "", nil
 	}
 	if isTypesafe {
-		return a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), messages, stepErr)
+		d, ok := client.(Decider)
+		if !ok {
+			return false, "auto-continue judge client is not a decision backend", nil
+		}
+		return a.runAutoContinueJudgeTypesafe(d, messages, stepErr)
 	}
 	resume, err := a.runAutoContinueJudge(client, messages)
 	detail := "continuous judge " + client.GetProvider() + "/" + client.GetModel()

@@ -108,7 +108,7 @@ Git panel go stale while every starved poll burns its own 30s bound.
 
 **A remote project's path must never enter a path-only local allowlist.**
 
-- `allowedProjectRoots` (`internal/server/handler.go:626`) contains only the
+- `allowedProjectRoots` (`internal/server/handler.go:662`) contains only the
   workdir plus projects with `Host == ""`. Project identity is
   `(host, path)` (+ port).
 - `resolveRegisteredProjectRoot` (`handler_git.go:136`) matches **verbatim

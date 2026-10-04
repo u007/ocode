@@ -130,7 +130,7 @@ success while changing nothing (or clobbering it, as `AddRemote` would).
 for every saved project with no `Host != ""` filter, which was exactly the
 invariant violation documented in
 `gotchas/remote-project-path-trust-boundary.md`. That gotcha now carries a
-"Status: fixed 2026-09-28" note: `allowedProjectRoots` (`handler.go:632`)
+"Status: fixed 2026-09-28" note: `allowedProjectRoots` (`handler.go:662`)
 skips remote records, and the second path-only allowlist
 `isRegisteredProjectRoot` (`handler_git.go:156`) was fixed at the same time.
 `AddRemote` already accepts an arbitrary caller-supplied host+path, so this

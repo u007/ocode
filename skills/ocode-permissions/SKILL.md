@@ -48,7 +48,7 @@ Every tool/prefix rule resolves to one of:
 
 ## 4. Default tool rules
 
-Hardcoded in `NewPermissionManager()` (`permissions.go:1281`):
+Hardcoded in `NewPermissionManager()` (`permissions.go:1299`):
 
 ```
 Always allow (no prompt):  read, glob, grep, rgrep, list, lsp, lsp_diagnostics,
@@ -94,7 +94,7 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 
 ### 5a. Hard blocks (always deny)
 
-`IsHarmfulBashCommand()` (`permissions.go:1175`) — these can never be auto-allowed or persisted as "always allow":
+`IsHarmfulBashCommand()` (`permissions.go:1193`) — these can never be auto-allowed or persisted as "always allow":
 
 **Git destructive prefixes** (any args):
 - `git revert`, `git stash`, `git reset`, `git clean`, `git checkout`, `git restore`, `git switch`
@@ -115,7 +115,7 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 
 **Loopback carve-out requires that nothing redirects the request.** A
 curl/wget/httpie command counts as local-only (`isLoopbackNetworkCommand`
-auto-allows it and the exfiltration check exempts it, `permissions.go:1218` /
+auto-allows it and the exfiltration check exempts it, `permissions.go:1236` /
 `:1232`) only when every visible token is a loopback target **and** no
 connection-redirecting flag is present. `--connect-to`, `--resolve`,
 proxy/socks/unix-socket flags, `--config`/`-K`, `--doh-url`, and wget
@@ -172,11 +172,11 @@ Configured in `permissions.bash.prefix_modes`:
 
 ### 5h. Claude Code settings (`.claude/settings.json`)
 
-`LoadClaudePermissions` (`claude_settings.go`) merges global `~/.claude/settings.json` with project `.claude/settings.json` + `.claude/settings.local.json`; only `permissions.allow/deny/ask` entries for `Bash(...)` are honored. **Deny wins over ask over allow**, and a deny is a `HardDeny`: it is checked per sub-command at the top of `Decide` (before dangerous-rm/harmful, YOLO, and sandbox short-circuits), so no allow rule, auto-allow, or auto-permission judge can override it.
+`LoadClaudePermissions` (`claude_settings.go`) merges global `~/.claude/settings.json` with project `.claude/settings.json` + `.claude/settings.local.json`; only `permissions.allow/ask` entries for `Bash(...)` are honored, and **ask wins over allow**. **`permissions.deny` is deliberately not read** (since 2026-10-03): ocode's banned commands come only from its own config (`/ban`, `permissions.bash` deny prefixes), so a Claude Code deny such as `Bash(rm -rf /*)` or `Bash(git stash *)` has no effect in ocode. Claude ask/allow are evaluated in `decideSingleCommand` after the user ban and harmful-command checks.
 
-Pattern semantics: `*` matches any character sequence (including empty), so `Bash(git stash *)` matches **every** `git stash …` form — including the read-only `git stash list`/`show` that ocode's own `/ban add git stash` and `IsHarmfulBashCommand` deliberately carve out. A bare `Bash` (no pattern) denies every bash command. To ban only the mutating stash family the way ocode's carve-out does, use granular patterns (`Bash(git stash)`, `Bash(git stash -*)`, `Bash(git stash pop*)`, …) plus `allow` for `Bash(git stash list*)` / `Bash(git stash show*)`.
+Pattern semantics: `*` matches any character sequence (including empty), so an ask of `Bash(git stash *)` matches **every** `git stash …` form, including the read-only `git stash list`/`show`. A bare `Bash` ask (no pattern) asks for every bash command; a bare `Bash` allow is a wildcard allow.
 
-`PermissionDecision.DenyReason` is populated by `Decide` on every static-deny path (Claude deny pattern, user bash ban prefix, locked mode, tool/path/webfetch rules, hard blocks) and rendered into the tool-error text by `denyToolMessage` (`agent.go`), so a blocked call names the offending rule instead of a generic "permission rules" message. Remote SSH projects run the agent on the host, so **the host's** `.claude/settings.json` is the one that applies — a host carrying an over-broad `Bash(git stash *)` deny blocks read-only stash inspection even when the local machine's file allows it.
+`PermissionDecision.DenyReason` is populated by `Decide` on every static-deny path (user bash ban prefix, locked mode, tool/path/webfetch rules, hard blocks) and rendered into the tool-error text by `denyToolMessage` (`agent.go`), so a blocked call names the offending rule instead of a generic "permission rules" message. Remote SSH projects run the agent on the host, so **the host's** `.claude/settings.json` allow/ask rules are the ones that apply.
 
 ### 5i. Every rule table is copy-on-write, and every write path validates first
 
@@ -229,10 +229,13 @@ mechanism; `TestPermissionTablesConcurrentWriteDuringDecide` and `TestCow*` guar
 tool temporarily user-confirmed (the auto-permission judge uses it to execute an
 approved call with the gates a human "always allow" would lift). It existed as a raw
 read-mutate-deferred-restore over two plain maps in `agent.go`; both transitions are now
-single atomic mutates. The save and the restore are still two writes, so a concurrent
-writer on the **same** tool key inside the window is overwritten by the restore (last
-write wins) — that is pre-existing, the window is one tool call, and holding a lock
-across the call would freeze every other permission decision.
+single atomic mutates. Overlapping calls for the **same** tool (parallel judge-approved
+calls) share one saved state, counted in `tempAllows`: the first installs the allow and
+the last restores it. A per-call snapshot let the second call save the first's temporary
+allow as "previous" and restore it for good, leaving the tool user-confirmed for the
+session. `tempAllowMu` covers only that bookkeeping, never `fn`. A settings/TUI write to
+the same tool key inside the window is still overwritten by the restore (last write
+wins); holding a lock across the call would freeze every other permission decision.
 
 **`SetBashPrefixRule` silently discards an invalid rule** (no return value), so a write
 that skipped validation reports success and stores nothing — that is how `git: allow`
@@ -271,7 +274,7 @@ bypass this gate.
 
 ### 6b. Sensitive paths
 
-`isSensitivePath()` (`permissions.go:2789`) flags these for `ask`, and is the
+`isSensitivePath()` (`permissions.go:2807`) flags these for `ask`, and is the
 OR of two narrower predicates used to split read from write in sandbox:
 - **`isSecretMaterialPath()`** — secret on READ or write:
   - Exact filenames: `.env`, `.netrc`, `.npmrc`, `.pypirc`
@@ -306,7 +309,7 @@ First webfetch to a domain prompts `ask`. Once approved/denied, the decision is 
 ### 6e. Read-target existence gate (Unicode-space recovery)
 
 Before locked-mode/YOLO/path-rule evaluation, `Decide` checks whether a `read`
-target exists on disk (`targetExists`, `permissions.go:1501`); a genuinely
+target exists on disk (`targetExists`, `permissions.go:1519`); a genuinely
 missing target is an immediate `HardDeny` (this is the only filesystem
 existence check permitted in the permission system). Two refinements:
 
@@ -399,11 +402,27 @@ Two distinct code paths implement the auto-permission judge, and they do **not**
 
 `consultPermissionModel` routes on `isTypesafeModel(modelName)`. Jev is decision-only (no chat loop, no `read_file`): the request travels as structured `state` (tool, arguments, allowed roots, banned prefixes, interpreter source) and the verdict is a typed `choice` with a confidence floor (`permissions.auto.min_confidence`, default 0.85). Consequences:
 - Editing the bundled prompt body does **not** change Jev's behaviour — update `typesafeJudgeInstructions` (and the `concern` labels) instead, and vice versa.
-- The confidence floor means Jev must reach ≥ `min_confidence` on the `allow` choice to auto-grant; a request it merely leans-allowed on falls through to the human. Rules that remove hesitation (explicit "this is ordinary and allowed") raise that confidence. An **opaque** request — one whose effects Jev could not establish, so its `concern` answer is `truncated_or_unknown` (an undefined-variable command head like `$g --version`, an unreadable script, a flag whose effect is unknown) — clears a lower floor instead: `autoJudgeOpaqueMinConfidenceDefault` (0.75). That 0.75 is only a DEFAULT: an explicitly configured `min_confidence` (higher or lower) governs opaque requests too, so the relaxation never tightens or loosens the user's own bar. Every other concern (`none`, `secrets`, `network`, …) keeps the normal floor.
+- **Verified backup fact.** `analyzeFileBackups` (`permission_overwrites.go`) works out which project files a bash command replaces and whether the same command first saved each to a temp root; `buildTypesafePermissionState` sends `replaced_files_backup` (`all_saved_first` / `not_saved`) plus `file_backups`. It fails closed (`allSavedFirst`): any write it cannot vouch for withholds the fact. Details and measurements: `docs/concepts/auto-permission-judge-eval.md`.
+- The confidence floor (default 0.80 since 2026-10-03, was 0.85) means Jev must reach ≥ `min_confidence` on the `allow` choice to auto-grant; a request it merely leans-allowed on falls through to the human. Rules that remove hesitation (explicit "this is ordinary and allowed") raise that confidence. An **opaque** request — one whose effects Jev could not establish, so its `concern` answer is `truncated_or_unknown` (an undefined-variable command head like `$g --version`, an unreadable script, a flag whose effect is unknown) — clears a lower floor instead: `autoJudgeOpaqueMinConfidenceDefault` (0.75). That 0.75 is only a DEFAULT: an explicitly configured `min_confidence` (higher or lower) governs opaque requests too, so the relaxation never tightens or loosens the user's own bar. Every other concern (`none`, `secrets`, `network`, …) keeps the normal floor.
 - **Reading a credential file is not, by itself, a deny reason.** The `secrets` concern is about *exposure* — the value printed to the command's output, written/redirected to a file, or sent off-host in a URL/header/body/upload. A local read whose value is consumed as an argument (`DBURL=$(grep '^DATABASE_URL=' .env | cut -d= -f2-) && psql "$DBURL" -c "\dt"`) stays on-host and must ALLOW. Without this carve-out Jev leaned allow at ~0.5 on that shape, fell below the 0.85 floor, and ordinary DB tooling surfaced as a spurious "Auto-denied by LLM permission model" banner (the human was still prompted). Pinned by `internal/agent/permission_typesafe_rubric_test.go`; the static sandbox gate still Asks on a `.env` read, so the carve-out changes only whether the judge auto-approves it.
 - **Enumerating the environment is subject to the same rule, not a stricter one.** What makes it a concern is a secret's VALUE reaching the output, a file, or another process — never the existence of a variable. Listing variable NAMES, or redacting values per line, is ordinary debugging and must ALLOW even when a later filter would match a credential-bearing key: `env | cut -d= -f1`, `compgen -v`, `env | sed 's/=.*/=<set>/'`, and `env | grep -i TOKEN | sed 's/=.*/=/'` are all allowed, because `sed` rewrites every line before anything is displayed and `grep` only narrows which keys are shown. Judge the pipeline in order; do not deny a command merely because it contains the word `env`. A bare `env`, `printenv` or `set` with no filter that prints every value at once IS the concern. Pinned by `TestTypesafeJudgeInstructionsCarveOutEnvironmentNameListing` and `TestTypesafeEnvironmentCarveOutIsInVerdictRubric`.
 - **Credential material is withheld from Jev's context.** `buildPermissionContext` never embeds sensitive file contents — a sensitive target file gets a `(contents withheld: sensitive file)` marker, while executed custom scripts and referenced files matching the sensitive predicate are skipped entirely. See `docs/gotchas/auto-permission-judge-withholds-credentials.md`.
 - **The judge reasons about an expanded command, and the expansion is fail-closed.** `expandBashForJudge` (`internal/agent/permission_shellvars.go`) resolves in-command `NAME=value` assignments, environment references, and a fixed read-only `$(...)` allowlist (`pwd`, `git rev-parse --show-toplevel`, `npm root`/`prefix`, `go env <VAR>`, a few `python -c` path snippets). Three rules matter when editing it: a variable rebound in a form it does not model (`export`/`declare`/`local`, `NAME+=`, `for`/`read`/`unset`, an assignment buried in a `{ … }` group) is marked **opaque**, so `$NAME` reaches the judge unresolved rather than as the stale value the shell will not use; the allowlisted Python snippets run with `-I`, so a repo-local `sysconfig.py` cannot execute at judge-prep time; and a substitution that names a secret (`go env GITHUB_TOKEN`) or returns a URL userinfo (`GOPROXY=https://user:pass@…`) is withheld as `<redacted>` exactly like a secret-looking environment value. Pinned by `TestExpandBashForJudgeRebindingsAreOpaque` and `TestExpandBashForJudgeWithholdsSecretSubstitution`.
+
+- **Change Jev's rubric or state only with a scorecard.** `TestPermissionJudgeEval`
+  (`internal/agent/permission_judge_eval_test.go`, `OCODE_JEV_EVAL=1`) replays commands mined
+  from `permission-judge.log` plus the committed `must_ask.yaml` / `should_allow.yaml` fixtures
+  against the live judge; how-to in `internal/agent/testdata/permission_judge_eval/README.md`,
+  findings in `docs/concepts/auto-permission-judge-eval.md`. Three things it established:
+  the "Command analysis" line must never call a command head "unknown" (`explainBashCommand`
+  is silent for an unlisted head — that text alone held auto-allows at ~16%); `project_context`
+  and `temp_root_aliases` carry the scope signal and must stay; and a rule that names a pattern
+  as ordinary raises confidence (the compound-command, ordinary-git-writes, temp-root-scratch,
+  temp-roots-as-scratch-space and local-test-server lines in `typesafeJudgeInstructions`). A new
+  rule must not contradict an existing one — the temp-root rule only cleared the floor once the
+  `allow_destructive` line itself exempted temp roots — and should name what it does NOT cover. A candidate is accepted only with zero must-ask leaks
+  and a gain on the held-out half. The dialog shows the fragment that matched the rule; the
+  judge scores the whole line, so take the command from the log.
 
 - **Every Jev verdict is recorded durably at `<logsDir>/permission-judge.log`.** The
   `emitDebug("PERMISSION", …)` verdict line reaches only the TUI or stderr, and the in-memory
@@ -453,13 +472,13 @@ Implementation: `internal/config/auto_permission_prompt.go` (versioned body, sta
 
 ## 8. Permission evaluation entry point
 
-`PermissionManager.Decide(toolName, args)` (`permissions.go:1399`):
+`PermissionManager.Decide(toolName, args)` (`permissions.go:1417`):
 
 ```
 1. If locked mode → read-only tools allow, everything else deny
 2. If bash tool:
    a. Hard-blocked (pipe-to-shell, rm -rf /, sudo chains)? → deny
-   b. Claude Code settings deny matches any sub-command? → deny (hard)
+   b. (removed 2026-10-03: Claude Code settings deny rules are no longer consulted)
    c. YOLO mode? → allow
    d. Sandbox mode → harmful force/git forms + sensitive paths ask; else allow
       (only when the OS backend is present; otherwise falls through to ask)
@@ -534,19 +553,18 @@ Unknown groups produce a diagnostic warning. Non-shorthand (object-valued) permi
 
 | Function | File:Line | Purpose |
 |---|---|---|
-| `NewPermissionManager()` | `permissions.go:1281` | Creates PM with defaults |
-| `Decide()` | `permissions.go:1399` | Main entry point for permission checks |
-| `Check()` | `permissions.go:1322` | Tool-level rule lookup |
+| `NewPermissionManager()` | `permissions.go:1299` | Creates PM with defaults |
+| `Decide()` | `permissions.go:1417` | Main entry point for permission checks |
+| `Check()` | `permissions.go:1340` | Tool-level rule lookup |
 | `CheckPathPatterns()` | (via patterns) | Path-glob pattern matching |
-| `IsHarmfulBashCommand()` | `permissions.go:1175` | Hard-block detection |
-| `IsHarmfulRequest()` | `permissions.go:1235` | Wraps bash check for PermissionRequest |
-| `isExfiltrationRiskCommand()` | `permissions.go:1128` | curl/wget/httpie/nc exfil detection |
-| `isSensitivePath()` | `permissions.go:2677` | Sensitive file/dir detection |
-| `isWithinWorkDir()` | `permissions.go:1783` | Workdir containment check |
-| `matchSubcommandAllow()` | `permissions.go:3095` | Safe subcommand matching |
+| `IsHarmfulBashCommand()` | `permissions.go:1193` | Hard-block detection |
+| `IsHarmfulRequest()` | `permissions.go:1253` | Wraps bash check for PermissionRequest |
+| `isExfiltrationRiskCommand()` | `permissions.go:1146` | curl/wget/httpie/nc exfil detection |
+| `isSensitivePath()` | `permissions.go:2695` | Sensitive file/dir detection |
+| `isWithinWorkDir()` | `permissions.go:1801` | Workdir containment check |
+| `matchSubcommandAllow()` | `permissions.go:3113` | Safe subcommand matching |
 | `buildPermissionManagerFromAgent()` | `agent_permissions.go:3` | Agent-definition PM builder |
-| `LoadFromOcode()` | `permissions.go:1357` | Load rules from config |
-| `LoadFromConfig()` | `permissions.go:1336` | Load rules from opencode.json format |
-| `claudeDenyRule()` | `claude_settings.go` | Matched Claude `.claude/settings.json` deny pattern for a command |
-| `formatClaudeDenyReason()` | `claude_settings.go` | Renders that pattern for `PermissionDecision.DenyReason` |
+| `LoadFromOcode()` | `permissions.go:1375` | Load rules from config |
+| `LoadFromConfig()` | `permissions.go:1354` | Load rules from opencode.json format |
+| `claudeIsAsk()` / `claudeIsAllowed()` | `claude_settings.go` | Match a command against Claude `.claude/settings.json` ask/allow patterns (deny is not read) |
 | `denyToolMessage()` | `agent.go` | Renders a static Deny into the tool error, including `DenyReason` |

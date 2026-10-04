@@ -2058,6 +2058,7 @@ function HomeApp() {
           untrustedSummary={pendingPermission.untrusted_summary}
           untrustedScores={pendingPermission.untrusted_scores}
           untrustedFailure={pendingPermission.untrusted_failure}
+          agentName={pendingPermission.agent_name}
           context={askContext}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}

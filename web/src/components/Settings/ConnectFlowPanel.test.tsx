@@ -289,6 +289,29 @@ describe("ConnectFlowPanel", () => {
     expect(screen.getByRole("button", { name: /sign in with chatgpt subscription/i })).toBeEnabled();
   });
 
+  it("cancels the live flow before Start over starts a new one", async () => {
+    // The auto flow holds the loopback callback port until it ends: a second
+    // start without a cancel fails to bind, and the orphan can still finish.
+    const order: string[] = [];
+    api.startConnectFlow = vi.fn(async () => {
+      order.push("start");
+      return { flowId: "f1", kind: "local-callback", state: "waiting_input" };
+    }) as never;
+    api.cancelConnectFlow = vi.fn(async () => {
+      order.push("cancel");
+      return { flowId: "f1", kind: "local-callback", state: "cancelled" };
+    }) as never;
+    render(<ConnectFlowPanel provider={PROVIDER} method={METHOD} onDone={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /sign in with chatgpt subscription/i }));
+    await screen.findByRole("textbox", { name: /redirect/i });
+    fireEvent.click(screen.getByRole("button", { name: /start over/i }));
+
+    await waitFor(() => expect(api.startConnectFlow).toHaveBeenCalledTimes(2));
+    expect(api.cancelConnectFlow).toHaveBeenCalledWith("f1", undefined);
+    expect(order).toEqual(["start", "cancel", "start"]);
+  });
+
   it("never renders a flow field the server did not send", async () => {
     const gate = deferred<{ flowId: string; kind: string; state: string }>();
     api.startConnectFlow = vi.fn(() => gate.promise) as never;

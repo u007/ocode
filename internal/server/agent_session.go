@@ -598,7 +598,18 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// leak into another chat, and a resume/restart re-seeds from metadata.
 	ag.SetAdvisorEnabled(h.advisorSeed(sessionID, h.advisorFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion()}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks()}
+	// Give this session's sub-agents a working permission-ask callback. Without
+	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
+	// server never wires OnSubAgentMessage and a child's messages never reach
+	// the parent's OnMessage mirror, nothing reported it: the child aborted
+	// mid-work and its run was recorded as done (see
+	// docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md).
+	// Installed here and nowhere else, so ACP, runcli and the TUI keep their own
+	// asker (or their sentinel path) untouched. An RC-bridged session does reach
+	// buildAgentSession for status/state reads, but its AGENT is owned and
+	// stepped by the TUI, so this asker is never invoked on it.
+	ag.SetSubAgentPermAsker(h.newServerSubAgentAsker(sessionID, as))
 	// Restore this session's spend and token history before anything reads the
 	// gauge. The totals live in transcript metadata (the same keys the TUI
 	// writes) and a freshly built agent starts at zero, so without this seed the
@@ -706,9 +717,22 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 // The old agent is shut down only when no turn is active for id: this is
 // enforced here, not just by callers, so a future or racing caller can't
 // tear down an agent mid-turn by skipping the IsTurnActive check.
+//
+// A turn that survives the swap can have a sub-agent parked on a permission ask
+// in the OLD session's registry, while every lookup (resolve, pending_asks)
+// goes through h.agents[id] — now the replacement. The replacement therefore
+// always inherits the old registry, or the ask became unanswerable and the turn
+// hung until the park timed out. It is unconditional rather than gated on
+// IsTurnActive: that read cannot be made under h.mu (SessionManager.mu is never
+// taken under it), so a gate would leave a window where a turn starting between
+// the read and the swap still stranded its asks. With no turn active the
+// registry is empty after the denyAll below, so sharing it costs nothing.
 func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 	h.mu.Lock()
 	old, ok := h.agents[id]
+	if ok && old != as && old.childAsks != nil {
+		as.childAsks = old.childAsks
+	}
 	h.agents[id] = as
 	h.mu.Unlock()
 	if ok && old != as {
@@ -719,6 +743,10 @@ func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 		in, out, cached, total := old.usageSnapshot()
 		as.seedUsage(in, out, cached, total)
 		if old.agent != nil && !h.sessions.IsTurnActive(id) {
+			// Same reason as the idle-eviction hook: a child parked on a
+			// permission ask must be denied before its agent goes away, so the
+			// rebuild cannot strand a goroutine waiting on a dead session.
+			old.childAsks.denyAll()
 			old.agent.Shutdown()
 		}
 	}

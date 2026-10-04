@@ -1665,11 +1665,11 @@ git commit -m "feat(server): add /api/config/ocode/plugins-enabled and /local-mo
 ### Task 13: Extend the Advisor endpoint to cover Provider/ClaudeCode/Checkpoints
 
 **Files:**
-- Modify: `internal/server/handler_config.go` (extend `HandleGetAdvisor` / `HandleSetAdvisor`, `handler_config.go:160-197`)
+- Modify: `internal/server/handler_config.go` (extend `HandleGetAdvisor` / `HandleSetAdvisor`, `handler_config.go:515-552`)
 - Test: `internal/server/handler_config_test.go`
 
 **Interfaces:**
-- Consumes: existing `HandleGetAdvisor`/`HandleSetAdvisor` at `internal/server/handler_config.go:160,170` — read the current implementation in full before editing (it currently reads/writes `Advisor.Model` only).
+- Consumes: existing `HandleGetAdvisor`/`HandleSetAdvisor` at `internal/server/handler_config.go:515,170` — read the current implementation in full before editing (it currently reads/writes `Advisor.Model` only).
 - Produces: same routes `GET/PUT /api/config/advisor`, response/request body grows to include `provider`, `claude_code`, `checkpoints` alongside the existing `model` field. Partial-update-safe: a PUT that omits `provider`/`claude_code`/`checkpoints` must not clear them (existing callers may still send `{"model": "..."}` only).
 
 - [x] **Step 1: Read the current implementation before editing**
@@ -1829,7 +1829,7 @@ git commit -m "feat(server): extend /api/config/advisor to cover provider, claud
 - Test: `internal/server/handler_config_test.go`
 
 **Interfaces:**
-- Consumes: existing `HandleGetMaskConfig` (`handler_config.go:423`), `HandleSetMaskEnabled`/`HandleSetMaskMode`/`HandleSetMaskModel` (`handler_config.go:442,462,482`).
+- Consumes: existing `HandleGetMaskConfig` (`handler_config.go:953`), `HandleSetMaskEnabled`/`HandleSetMaskMode`/`HandleSetMaskModel` (`handler_config.go:991,1014,1037`).
 - Produces: `GET /api/config/mask` grows to include `base_url`, `fail_mode`, `allow_remote_tier2`, `skip_llm_if_clean`, `custom_words`; a new `PUT /api/config/mask/advanced` covers those five fields (added rather than overloading the three existing narrow PUT routes, which stay as-is for backward compatibility).
 
 - [x] **Step 1: Read the current implementation before editing**

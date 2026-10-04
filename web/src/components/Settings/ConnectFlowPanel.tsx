@@ -74,6 +74,12 @@ export default function ConnectFlowPanel({
     setPasted("");
     reportedRef.current = false;
     try {
+      // "Start over" on a live flow: cancel it first. The auto flow holds the
+      // loopback callback port until it ends, so a second start would fail to
+      // bind, and an orphaned flow could still finish and save a credential.
+      if (flow && !isTerminal(flow.state)) {
+        await api.cancelConnectFlow(flow.flowId, host);
+      }
       // A method with one shape sends no mode at all: an absent field is the
       // server's "pick the default" signal, and sending a value the handler
       // ignores would make a request look like it asked for something it did not.
@@ -83,7 +89,7 @@ export default function ConnectFlowPanel({
     } finally {
       setStarting(false);
     }
-  }, [provider.id, method.id, host, mode, choosesMode]);
+  }, [provider.id, method.id, host, mode, choosesMode, flow]);
 
   const cancel = useCallback(async () => {
     if (!flow) return;

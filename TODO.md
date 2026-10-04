@@ -1,14 +1,26 @@
 # TODO
 
-## BLOCKED: `docs/concepts/tui-slash-command-queuing.md` is stale — the bundle's sole writer is rate-limited (2026-10-04)
+## DONE: `docs/concepts/tui-slash-command-queuing.md` — web instant-command path documented (2026-10-04)
 
-`/btw` is now instant on the web/desktop app as well as the TUI, but that page
-still describes only the TUI's `isInstantCmd` chain. It could not be amended:
-`docs/` is an active OKF bundle (`docs/index.md` carries `okf_version: "0.1"`)
-and `CLAUDE.md`'s sole-automated-writer invariant bars any path outside the
-`context` sub-agent. The context agent was dispatched twice and both attempts
-failed with `429 GoUsageLimitError` (`limitName: weekly`) — a hard weekly cap,
-not transient. Retry via `doc_write` on path **`concepts/tui-slash-command-queuing.md`**
+**RESOLVED** — amended via the `context` sub-agent's `doc_write` once the weekly
+quota freed. It was blocked for hours first: `docs/` is an active OKF bundle
+(`docs/index.md` carries `okf_version: "0.1"`) and `CLAUDE.md`'s
+sole-automated-writer invariant bars any path outside the `context` sub-agent.
+Two early dispatches failed with `429 GoUsageLimitError` (`limitName: weekly`) —
+a hard weekly cap, not transient.
+
+**Correction worth keeping (my error, not the page's).** The first amendment
+instructed the sub-agent that "compaction still queues every command, instant
+ones included" was FALSE. That was wrong — it is TRUE for the web SPA. I had
+inferred it from the TUI gate alone (`model.go:9055`'s `!isInstantCmd` guard)
+without reading the web's own condition, where `compactionActive || (...)` puts
+compaction FIRST and unconditional in `handleSend`
+(`web/src/components/Chat/ChatInput.tsx:893`). A second amendment corrected it.
+**The real fact is a platform difference:** the web queues everything during
+compaction; the TUI does not. The source comment at `ChatInput.tsx:889-891` was
+right all along and needs no change. Lesson: I over-corrected a recorded fact on
+the strength of one code path when the claim under test was about a second one —
+verify the path the claim is actually about before overturning it. Retry via `doc_write` on path **`concepts/tui-slash-command-queuing.md`**
 (doc_write prepends `docs/` itself; passing `docs/concepts/…` creates
 `docs/docs/concepts/…`). Do not hand-edit `docs/index.md` / `docs/log.md` — they
 are auto-managed.
@@ -53,13 +65,22 @@ The invariant is already captured for agents in `skills/ocode-web/SKILL.md`
 (gotcha 62 + file-map entry), so the knowledge gap is documentation-only until
 the cap resets.
 
-## BLOCKED: `docs/concepts/compaction-config.md` mis-attributes the retry logic to `runSummary` (2026-10-04)
+## DONE: `docs/concepts/compaction-config.md` re-attributes the retry logic to `runSummaryCall` (2026-10-04)
 
-Pure prose-attribution fix; **no code change**. Could not be applied for the same
-reason as the entry above: `docs/` is an active OKF bundle, the sole-automated-writer
-invariant bars any path outside the `context` sub-agent, and **five** dispatches all
-failed with `429 GoUsageLimitError` (`limitName: weekly`, `workspace wrk_01KT4GWHKSJRS52H5VQPW5NN8R`).
-Verified identical cause, so this is one quota problem with two victims, not two bugs.
+Pure prose-attribution fix; **no code change**. **RESOLVED** — applied via the `context`
+sub-agent's `doc_write` on the 7th dispatch, once the weekly quota freed. It was blocked
+for hours first: `docs/` is an active OKF bundle, the sole-automated-writer invariant bars
+any path outside `context`, and six dispatches all failed with `429 GoUsageLimitError`
+(`limitName: weekly`, `workspace wrk_01KT4GWHKSJRS52H5VQPW5NN8R`) — the same cap already
+logged in the entry above, so one quota problem had two victims, not two bugs.
+
+Verified after the fact rather than trusting the sub-agent's report: **exactly 9 lines
+changed** against the pre-dispatch copy (the 6 target passages + `doc_write`'s own
+`timestamp` bump) — no structural churn, and the `summary_max_retries` table row plus the
+historical `runSummary` amendment notes were left alone as instructed. All **124**
+line-anchor endpoints on the page re-resolve to real source lines, `compact.go:888` now
+backs the "Semantics live entirely in…" claim, and `docs/index.md` + `docs/log.md` carry
+the write. The rest of this entry is kept as the record of the anchor trap below.
 
 **The full patch is staged and ready to apply verbatim** at
 `.opencode/plans/2026-10-04-compaction-config-runsummarycall-rename.md` — it carries the
@@ -4576,9 +4597,33 @@ identified and deliberately left out of that change.
       Interim mitigation ALREADY SHIPPED: both `using-git-worktrees` skill copies corrected so
       the manual fallback at least works (see next-but-one entry).
 
-- [ ] **Fix the CONFIRMED data race in `Agent.SetWorkDir`** (2026-10-04). RACE IS REAL — proven,
-      not latent. A throwaway probe (`&Agent{}`, 4 goroutines looping `a.WorkDir()` against one
-      goroutine looping `SetWorkDir`) run with `-race` reports:
+- [ ] **Fix the CONFIRMED data race in `Agent.SetWorkDir` / the env-prompt cache** (2026-10-04).
+      FIX IMPLEMENTED AND VERIFIED IN A WORKTREE; NOT YET IN THE MAIN TREE — see the blocker below.
+      Approach: one dedicated `Agent.projectCtxMu sync.Mutex` guarding `workDir`, `projectHost` and
+      the six `envPrompt*` fields (NOT `compactMu` — wrong scope). Guarded sites: the read at
+      prompt.go:92 (`PrepareMessages`), the read+write in `environmentPrompt` (snapshots its inputs
+      under the lock, computes UNLOCKED, stores under the lock — deliberately not holding it across
+      the prompt build), the write in `clearEnvironmentPromptCache` (split into a locking wrapper
+      plus `clearEnvironmentPromptCacheLocked` so `SetWorkDir` can hold the lock once without
+      self-deadlocking), and the accessors `WorkDir`/`effectiveWorkDir`/`ProjectHost`/`SetProjectHost`.
+      Verification (in `.worktrees/race-fix`, pristine HEAD 9a22eb37 + the fix + the new regression
+      test `internal/agent/envprompt_race_test.go`): build clean, `gofmt` clean, `go vet` clean.
+      The test asserts nothing — `-race` is the assertion — giving a clean RED/GREEN pair in the
+      SAME tree: pristine HEAD = **23 DATA RACE reports**; with the fix = `ok`. So it is a real
+      regression guard, not a probe that must be deleted.
+      BLOCKER to landing it in the main tree: `internal/agent` currently DOES NOT COMPILE because of
+      a peer session's in-flight `Decider` refactor — 11 errors, all in peer-modified
+      `*_typesafe.go` files (`autocontinue_typesafe.go`, `content_guard_typesafe.go`,
+      `discovery_typesafe.go`, `network_guard_typesafe.go`) plus `discovery_glue.go`; none in the
+      files this fix touches. The fix therefore cannot be compile-verified in the main tree until
+      the peer's refactor lands. My main-tree working copy carries the fix in `agent.go`/`prompt.go`/
+      `md_discovery.go` uncommitted.
+      SIBLING FINDING, same class, NOT covered by this fix: `a.client` is READ in
+      `environmentPrompt` (prompt.go ~305-307, for provider/model) and WRITTEN unlocked at
+      agent.go:5740 just before `clearEnvironmentPromptCache()`. Not reproduced (the test does not
+      swap the client), and it is a different subsystem, so it was deliberately left out rather than
+      bundled in. Verify and guard it the same way before calling the env-prompt path fully race-free.
+      SHOULD RUN the full `go test -race ./internal/agent/` once the package compiles again.
       ```
       WARNING: DATA RACE
       Write at 0xc0003a80d0 by goroutine 24:
@@ -4618,19 +4663,31 @@ identified and deliberately left out of that change.
       `envPromptStr`, `envPromptCwd`, `envPromptRoot`, `envPromptEnvHash`, `envPromptHarness`
       (agent.go:777-782) are six adjacent strings, so the detector reports one race per distinct
       memory location. All six share one cause: no lock on the cluster.
-      PRODUCTION CONCURRENT PAIR — found by READING the call paths, NOT observed in production.
-      The probe above called the two methods directly from synthetic goroutines; it did not drive
-      the real handler path, so treat this pair as a plausible vector, not a captured event:
-        - A: TURN goroutine -> `PrepareMessages` (reads `envPromptDate`, prompt.go:91) and
-          `BasePromptMessages` -> `environmentPrompt()` (reads+writes, prompt.go:284/367-372).
-        - B: HANDLER goroutine -> `contextbudget.Build` (contextbudget.go:128) calls
-          `ag.BasePromptMessages()` -> `environmentPrompt()` on the SAME Agent. Reached from the
-          TUI `/context` command (tui/model.go:14186) and the HTTP `/context` endpoint
-          (server/handler.go:2301) — which the web context gauge POLLS while a turn runs.
-      What IS proven is the primitive-level race (the six `-race` reports above). What is NOT
-      proven is that a user hitting `/context` during a live turn actually lands two goroutines in
-      those functions on one Agent; confirm that with a test at the handler level before treating
-      the production path as demonstrated. If it holds, this is reachable without `/cd` at all.
+      PRODUCTION REACHABILITY — CONFIRMED BY READING (concrete two-goroutine chain, not a guess),
+      but still not reproduced end-to-end. The vector is ASYNC COMPACTION, not `/context` (both
+      `/context` paths turned out to be guarded — see the corrections below):
+        - Goroutine A (turn): `(*Agent).Step` -> `PrepareMessages` -> `environmentPrompt()`, which
+          WRITES the six fields (prompt.go:367-372) and READS them for validity (prompt.go:284).
+        - Goroutine B (compaction): `MaybeCompactAsync` (agent.go:2214) -> `startCompactAsync`
+          (agent.go:2289) takes `a.compactMu.TryLock()` then spawns `crashguard.Go`
+          (agent.go:2315-2316) -> `runInlineSummary` -> `a.PrepareMessages(messages, "")`
+          (compact.go:1298) which READS `a.envPromptDate` (prompt.go:91).
+        - Nothing serializes them: `compactMu` is documented as serialising "async compaction
+          passes" against EACH OTHER (agent.go:726), and neither `PrepareMessages` nor
+          `environmentPrompt()` takes it. `MaybeCompactAsync` returns immediately after spawning,
+          so the caller proceeds while compaction runs in the background.
+      So the race surface is three call sites over one unguarded cluster: the read at prompt.go:91,
+      the read+write in `environmentPrompt` (284, 367-372), and the write in
+      `clearEnvironmentPromptCache` (agent.go:5728-5733). A fix must cover ALL THREE, not just
+      `environmentPrompt`, or the `PrepareMessages` read stays racy.
+      An earlier draft of this entry claimed two OTHER vectors, both now DISPROVEN (kept so nobody
+      re-derives them): (1) "the web context gauge hits it during normal operation" — the server
+      `/context` endpoint is guarded by `contextReportSource`'s `IsTurnActive` (handler.go:2324)
+      and `as.mu.TryLock()` (2338) plus `runTurn` holding `as.mu` for the whole turn
+      (agent_session.go:1077-1079); (2) "the TUI has no equivalent lock" — `/context` is not in the
+      instant-command list (tui/model.go ~8993-9053) so the gate at tui/model.go:9055 QUEUES it
+      during streaming. Residual un-audited: the server's narrow TOCTOU gap where
+      `contextbudget.Build` runs at handler.go:2301 after `contextReportSource` released `as.mu`.
       ALL SIX `envPrompt*` FIELDS ARE IN THE CACHED SYSTEM PREFIX (`BasePromptMessages` emits the
       env block as system-role). Any fix MUST keep the emitted `<env>` text byte-stable for an
       unchanged workdir/date, or it busts the prompt cache every turn —
@@ -4730,3 +4787,231 @@ Tests for the TUI half: `internal/tui/question_ask_queue_test.go` (10 cases, 10/
 mutants caught), including lifecycle coverage: cancelling the turn drops both
 queues and both dialogs; `/reset-id` refuses while any ask is pending; and
 `handleCompactCmd` refuses too (it previously had no ask guard at all).
+
+## PART-DONE: `internal/tui/model.go` anchors — 55 fixed, 6 left, prose not written (2026-10-04)
+
+Four commits grew `internal/tui/model.go` by ~200 lines (permission-ask queue,
+question-ask queue, lifecycle hardening), moving every `model.go:NNN` anchor in the
+bundle. Base commit for all arithmetic: **`1e4b1dd1`** (= `c026089b^`); range
+`1e4b1dd1..9a22eb37`.
+
+**Done (55), applied by the `context` sub-agent and independently verified:**
+45 mechanical renumberings across 15 pages, plus 10 symbol-anchored corrections
+(the mechanical table could not verify those because their `was:` text was a bare
+`}`). Both passes were checked by a script that confirms the doc cites the new
+number AND that the named symbol is actually at that line — 10/10 on the second
+pass. Two hazards were caught and handled:
+
+- **`git_model.go` false positives.** The mechanical table matched anchors as the
+  substring `model.go:NNN`, which also matches the tail of **`git_model.go:NNN`** —
+  a different file the queue commits never touched. Six rows in
+  `docs/gotchas/git-action-errors-disappear.md` were this class; the first apply
+  corrupted them and was reverted, then redone with a boundary-aware match. That
+  file is now byte-identical to how it was found.
+- **Range anchors.** Six citations of the form `model.go:START-END` had only START
+  in the table; shifting one end alone yields nonsense (`186-139`). Both endpoints
+  were verified independently against `1e4b1dd1`.
+
+**Left (6), all on `concepts/compaction-config.md`.** Disambiguated and verified,
+but not applied — the sub-agent hit a 4-launch feedback-loop guard. Targets, all
+inside `case streamDoneMsg:`; note three of these source lines are NOT unique in
+the file, so the line number below is only correct together with its context:
+
+| Doc line | From | To | Context that disambiguates it |
+|---|---|---|---|
+| 141 | `model.go:5222` | `model.go:5294` | unique: `// chain settles (the branch at the top of this case).` |
+| 147 | `model.go:5224` | `model.go:5296` | 2 lines under 5294. There are THREE `fireAutoContinue(true)` lines (5225, 5296, 5442); 5296 is correct, 5225 is a different branch |
+| 147 | `model.go:5349-5375` | `model.go:5421-5447` | both ends +72. A second copy of the `background job(s) completed` hint exists at 5592 in `case compactFinishedMsg:` — wrong one |
+| 147 | `model.go:5434` | `model.go:5506` | unique: `case compactFinishedMsg:` |
+| 161 | `model.go:5361` | `model.go:5433` | unique: `// continuation path above has declined. Not scoped to /goal or` |
+| 161 | `model.go:5363` | `model.go:5435` | 2 lines under 5433, same comment block |
+
+Leave alone (already correct): line 141's `model.go:15814`, line 155's
+`model.go:9184` and `model.go:9210`.
+
+**Also still unwritten — the prose side of the ask-queue documentation.** These
+were specified but never applied:
+
+1. `concepts/inbound-content-guardrail.md` — the TUI allow/deny routing bullets.
+   `handlePermissionChoice` is now a wrapper over `answerPermAsk`, which returns
+   `(tea.Cmd, bool)` where the bool reports whether the outcome was terminal; every
+   content ask flows through the queue before reaching `contentAskResolved`; the
+   single promotion site is `promoteNextQueuedAsk`.
+2. `concepts/tui-slash-command-queuing.md` — state that `permAskQueue` /
+   `questionAskQueue` are a SEPARATE mechanism from `queuedItems`: they drain when
+   the user ANSWERS an ask, whereas `queuedItems` drains at a turn boundary. Say
+   it explicitly so nobody later "unifies" them.
+3. A new `docs/gotchas/` page for the bug class — *one dialog slot plus N
+   simultaneous asks equals silent replacement*. Content: `appendAgentMessage`
+   assigned one dialog slot unconditionally for both `PERMISSION_ASK:` and
+   `QUESTION_PROMPT:`; `Agent.Step` hands every result of a round to `OnMessage`
+   in order, so N asks arrive back-to-back in one frame; for `question` no parallel
+   batch is needed because it is `Parallel() == false`; the amplifier is
+   `buildAgentMessagesSnapshot` stripping the sentinels so a dropped ask's
+   `tool_call` orphans and `recoverOrphanedToolCalls` re-runs its tool; the fix is
+   two FIFOs sharing ONE screen slot, promotion from exactly one call site,
+   `anyAskPending()` guarding `/reset-id` / `handleCompactCmd` / job-resume /
+   turn-cancel; and the ordering trap that `executeApprovedTool` is a VALUE
+   receiver reading `pendingToolCallID` when called, so the queue may only advance
+   after the replacement command is built. Note `webfetch` (`web.go:38`) and
+   `websearch` (`:132`) are `Parallel() == true` AND default-ask, and that
+   `skills/ocode-tools/SKILL.md` previously claimed otherwise. Tests:
+   `internal/tui/perm_ask_queue_test.go` (11), `internal/tui/question_ask_queue_test.go`
+   (10), `internal/agent/perm_ask_fanout_test.go` (1). Note the WEB still drops the
+   first `question` (`QUESTION_REQUEST` keeps one `pendingQuestion`) — it needs its
+   own change because of the reopenable-dialog contract (`QUESTION_HIDE` /
+   `QUESTION_SHOW`, `hiddenQuestionRequestId`).
+
+**Note on the write mechanism:** the sub-agent used byte-exact in-place edits rather
+than `doc_write`, because these pages carry other sessions' uncommitted edits that
+a full-body rewrite (273KB across 16 files) would risk corrupting, and because
+`doc_write` injects frontmatter into 3 pages that deliberately have none. A side
+effect is that `docs/index.md` and `docs/log.md` were NOT updated, since those are
+normally maintained as a `doc_write` side effect. Re-run the amendments through
+`doc_write` if the index/log must reflect them.
+
+## shift +50
+
+- `docs/gotchas/git-action-errors-disappear.md:59` — `model.go:660` -> `model.go:710`  (was: `event server.SSEEvent`)
+- `docs/gotchas/git-action-errors-disappear.md:61` — `model.go:690` -> `model.go:740`  (was: `// autoRefreshTickMsg fires periodically to quietly refresh the git tab and`)
+- `docs/gotchas/git-action-errors-disappear.md:62` — `model.go:731` -> `model.go:781`  (was: `// at startup, so the sidebar can re-render and show the resolved context window`)
+- `docs/gotchas/git-action-errors-disappear.md:63` — `model.go:674` -> `model.go:724`  (was: `bridge       *server.RCBridge`)
+- `docs/gotchas/git-action-errors-disappear.md:65` — `model.go:136` -> `model.go:186`  (was: `if !m.lastTurnWasAutoContinue {`)
+- `docs/gotchas/git-action-errors-disappear.md:80` — `model.go:625` -> `model.go:675`  (was: `}`)
+- `docs/gotchas/git-action-errors-disappear.md:89` — `model.go:648` -> `model.go:698`  (was: `req server.RCRequest`)
+
+## shift +52
+
+- `docs/concepts/inbound-content-guardrail.md:236` — `model.go:3979` -> `model.go:4031`  (was: `if am.Role == "tool" && strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {`)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:19` — `model.go:1936` -> `model.go:1988`  (was: `marker, _, ok := splitTodoMarker(trimmed)`)
+- `docs/superpowers/specs/2026-09-22-laya-local-judge-evaluation.md:254` — `model.go:2757` -> `model.go:2809`  (was: `m.files.SetEditor(editor)`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:14` — `model.go:3235` -> `model.go:3287`  (was: `if mouseOverTree {`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:26` — `model.go:3235` -> `model.go:3287`  (was: `if mouseOverTree {`)
+- `docs/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md:41` — `model.go:2244` -> `model.go:2296`  (was: `}`)
+- `skills/ocode-tools/SKILL.md:54` — `model.go:2270` -> `model.go:2322`  (was: `m.lspEventCh = make(chan lsp.ServerStartedEvent, 16)`)
+
+## shift +68
+
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:45` — `model.go:4767` -> `model.go:4835`  (was: `}`)
+- `docs/superpowers/specs/2026-09-25-deferred-session-rewind-design.md:30` — `model.go:4746` -> `model.go:4814`  (was: `if m.agent != nil {`)
+
+## shift +70
+
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md:7` — `model.go:6034` -> `model.go:6104`  (was: `case "ctrl+a":`)
+
+## shift +72
+
+- `docs/concepts/compaction-config.md:141` — `model.go:5222` -> `model.go:5294`  (was: `// chain settles (the branch at the top of this case).`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5224` -> `model.go:5296`  (was: `return m, m.fireAutoContinue(true)`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5349` -> `model.go:5421`  (was: `text:      hintStyle.Render("↩ background job(s) completed — resuming"),`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5434` -> `model.go:5506`  (was: `case compactFinishedMsg:`)
+- `docs/concepts/compaction-config.md:161` — `model.go:5361` -> `model.go:5433`  (was: `// continuation path above has declined. Not scoped to /goal or`)
+- `docs/concepts/compaction-config.md:161` — `model.go:5363` -> `model.go:5435`  (was: `// StepLimitHit signal (free, no extra LLM call) fires`)
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:46` — `model.go:5143` -> `model.go:5215`  (was: `// Handled as its own self-contained branch, deliberately NOT falling`)
+
+## shift +75
+
+- `docs/concepts/compaction-config.md:155` — `model.go:9072` -> `model.go:9147`  (was: `}`)
+- `docs/concepts/compaction-config.md:155` — `model.go:9109` -> `model.go:9184`  (was: `func mergeQueuedIntoDraft(queued []string, draft string) (string, int) {`)
+- `docs/concepts/compaction-config.md:155` — `model.go:9135` -> `model.go:9210`  (was: `func (m *model) restoreQueuedMessagesToComposer() bool {`)
+- `docs/concepts/compaction-config.md:157` — `model.go:9173` -> `model.go:9248`  (was: `func (m *model) discardPickedUpInjections(parts []string) {`)
+- `docs/concepts/compaction-config.md:157` — `model.go:9196` -> `model.go:9271`  (was: `func (m *model) drainQueuedItems() (tea.Cmd, bool) {`)
+- `docs/gotchas/main-model-pick-also-sets-global-default.md:19` — `model.go:9765` -> `model.go:9840`  (was: `func (m *model) finishModelSwitch(modelID string) tea.Cmd {`)
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:47` — `model.go:8651` -> `model.go:8726`  (was: `m.gitSel.endLine = contentLine`)
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md:17` — `model.go:8103` -> `model.go:8178`  (was: `}{`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:14` — `model.go:8835` -> `model.go:8910`  (was: `func (m model) mouseOverChatWheelRegion(mouse tea.Mouse) bool {`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:32` — `model.go:8611` -> `model.go:8686`  (was: `topY := m.inputAreaTopY()`)
+
+## shift +89
+
+- `docs/scheduled-jobs.md:62` — `model.go:11611` -> `model.go:11700`  (was: `m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error ex`)
+
+## shift +95
+
+- `docs/concepts/sandbox-permission-mode.md:35` — `model.go:14755` -> `model.go:14850`  (was: `}`)
+
+## shift +229
+
+- `docs/concepts/inbound-content-guardrail.md:205` — `model.go:15006` -> `model.go:15235`  (was: `func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14937` -> `model.go:15166`  (was: `if req.Scope == agent.PermissionScopeContent {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14942` -> `model.go:15171`  (was: `lines = append(lines, "🛡 Content guardrail — this tool's result was flagged:")`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14960` -> `model.go:15189`  (was: `lines = append(lines, req.UntrustedContent)`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:15006` -> `model.go:15235`  (was: `func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {`)
+
+## shift +257
+
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15206` -> `model.go:15463`  (was: `return m.executeApprovedTool(toolName, args, pathRoot)`)
+
+## shift +260
+
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15270` -> `model.go:15530`  (was: `m.updatePermButtonRegions()`)
+
+## shift +270
+
+- `docs/concepts/compaction-config.md:141` — `model.go:15398` -> `model.go:15668`  (was: `if bashPrefixModeDirty && len(m.permDirty.bashPrefixMode) == 0 {`)
+- `docs/concepts/sandbox-permission-mode.md:33` — `model.go:15346` -> `model.go:15616`  (was: `// previously clamped sandbox to normal here so it could never become`)
+- `docs/concepts/sandbox-permission-mode.md:112` — `model.go:15346` -> `model.go:15616`  (was: `// previously clamped sandbox to normal here so it could never become`)
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md:18` — `model.go:15346` -> `model.go:15616`  (was: `// previously clamped sandbox to normal here so it could never become`)
+
+## shift +279
+
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15535` -> `model.go:15814`  (was: `func (m *model) askAgent() tea.Cmd {`)
+- `docs/concepts/inbound-content-guardrail.md:232` — `model.go:15537` -> `model.go:15816`  (was: `// short-circuited by a stopCh that was closed by a previous Escape/Cancel.`)
+- `docs/gotchas/session-snapshot-stale-derived-fields.md:29` — `model.go:15714` -> `model.go:15993`  (was: `// Stream shared-notes bus entries to the delta channel so the`)
+
+## shift +281
+
+- `docs/superpowers/specs/2026-09-25-deferred-session-rewind-design.md:30` — `model.go:16029` -> `model.go:16310`  (was: `}`)
+
+## shift +285
+
+- `docs/architecture/sidebar-tui-parity-gaps.md:29` — `model.go:20890` -> `model.go:21175`  (was: `if i < len(filePaths) {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:17048` -> `model.go:17333`  (was: `if m.syncClient == nil || m.syncDeviceCode == "" {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:17123` -> `model.go:17408`  (was: `}`)
+- `docs/concepts/inbound-content-guardrail.md:253` — `model.go:16972` -> `model.go:17257`  (was: `defs = append(defs, b)`)
+- `docs/concepts/inbound-content-guardrail.md:253` — `model.go:16980` -> `model.go:17265`  (was: `func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string) string `)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:15` — `model.go:20957` -> `model.go:21242`  (was: `if m.agent != nil {`)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:15` — `model.go:21356` -> `model.go:21641`  (was: `}`)
+- `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md:58` — `model.go:18557` -> `model.go:18842`  (was: `m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse `)
+- `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md:64` — `model.go:18557` -> `model.go:18842`  (was: `m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse `)
+
+## Clef judge backend — open deferrals (2026-10-03)
+
+Plan: `docs/superpowers/plans/2026-10-03-clef-judge-backend/`. Spec:
+`docs/superpowers/specs/2026-10-03-clef-judge-backend-design.md`. Nothing implemented yet.
+
+- [ ] **Run the Jev-vs-clef agreement eval against live credentials** and paste the
+      results into the spec. Until it exists, sharing the `0.85` / `0.5` confidence
+      floors across backends rests on Cloudflare's own benchmark of its own model,
+      and the Jev latency figure comes from a competitor's measurement. The gate is
+      **directional**, not an agreement percentage: any case where clef allows and
+      Jev denies vetoes adoption for the permission slot. See `07-agreement-eval.md`.
+- [ ] **Determine whether the incumbent truncates an oversized `state` or rejects it
+      with 400.** Unverified; needs a live probe. Characterised from the code: there
+      is **no** state-size guard in `internal/agent/typesafe.go` today, and a
+      non-2xx becomes `newProviderStatusError` (line 130), which the permission judge
+      already reports as "model unavailable" and defers to the human. So a 400 is
+      already a deferral with a confusing message; silent truncation would instead
+      grade an invisible command tail, which is a safety issue rather than a UX one.
+      Either way the human is asked, which is why the guard is correct — but the
+      severity differs and should be recorded once known.
+- [ ] **Decide whether the state budget should project rather than refuse.** Asking
+      on every large `write` defeats auto-permission on its most common input. The
+      plan requires keeping security-relevant fields in full and projecting bulky
+      content fields, with rejection as the fallback; confirm that is acceptable
+      before shipping `05-state-budget.md`.
+- [ ] **Write Plan 2 — the UI.** Seven per-judge model pickers (TUI and web/desktop),
+      one per slot. Depends only on the config keys from `02-per-judge-config.md`, not
+      on `ClefClient`. The contract it consumes is written out in `INDEX.md`.
+- [ ] **Confirm the Workers AI rate limit for `clef-flash`.** The 300 req/min default
+      is *inferred* from the absence of a "Paid access required" notice on the model
+      page, not stated. Confirm against a live account before relying on it for
+      throughput planning.
+- [ ] **Re-derive every `file.go:NNN` anchor** on `CLAUDE.md` and the four judge
+      concept pages after parts 01/02/05/08 land. Those pages cite judge functions
+      whose line numbers will move, and the pages sit in a dirty shared tree.
+- [ ] **Verify the two documented Jev failure modes are actually mitigated** once the
+      seam exists: adversarial content in judge `state` (ocode puts raw tool arguments
+      there), and choice option-order bias (the permission judge's criteria are exactly
+      a two-option choice). Both are documented by the vendor and both are cheap to
+      measure with the eval above.

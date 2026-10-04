@@ -243,3 +243,117 @@ describe("PermissionsForm bash rule prefix editing keeps focus", () => {
     );
   });
 });
+
+describe("PermissionsForm bash rule prefix typing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // The input is edited with fireEvent.change per keystroke, so a per-keystroke
+  // trim() means the trailing space is gone by the time the next character is
+  // appended. "git push" became "gitpush": a rule that matches nothing.
+  it("keeps the space typed inside a prefix", async () => {
+    seed([{ tool: "npm", level: "ask" }]);
+    render(<PermissionsForm />);
+    const field = (await screen.findByLabelText("Rule prefix npm")) as HTMLInputElement;
+
+    for (const value of ["g", "gi", "git", "git ", "git p", "git pu", "git push"]) {
+      fireEvent.change(field, { target: { value } });
+    }
+
+    expect(field).toHaveValue("git push");
+    save();
+
+    // The set key carries the space. With a per-keystroke trim this was
+    // "gitpush", a prefix that matches no command at all.
+    await waitFor(() =>
+      expect(mockSetBashRules).toHaveBeenCalledWith({
+        set: { "git push": "ask" },
+        remove: ["npm"],
+      }),
+    );
+  });
+
+  // Typing a trailing space is only legal because the raw value is kept; the
+  // normalized key is still what reaches the API.
+  it("normalizes the key it sends while keeping what the user typed", async () => {
+    seed([{ tool: "npm", level: "ask" }]);
+    render(<PermissionsForm />);
+    const field = (await screen.findByLabelText("Rule prefix npm")) as HTMLInputElement;
+
+    fireEvent.change(field, { target: { value: "  git   push  " } });
+
+    expect(field).toHaveValue("  git   push  ");
+    save();
+
+    await waitFor(() =>
+      expect(mockSetBashRules).toHaveBeenCalledWith({
+        set: { "git push": "ask" },
+        remove: ["npm"],
+      }),
+    );
+  });
+
+  // Backspacing "git push" down to "git" walks through a prefix another row
+  // already holds. Collapsing them mid-typing dropped the untouched row from the
+  // staged list, and Save then emitted remove:["git"] — deleting a saved rule
+  // the user never edited.
+  it("never deletes a colliding row while a rename passes through its prefix", async () => {
+    seed([
+      { tool: "git", level: "deny" },
+      { tool: "git push", level: "allow" },
+    ]);
+    render(<PermissionsForm />);
+    const field = await screen.findByLabelText("Rule prefix git push");
+
+    for (const value of ["git pus", "git pu", "git p", "git ", "git"]) {
+      fireEvent.change(field, { target: { value } });
+    }
+
+    // Both rows are still on screen — the untouched "git" row with its level.
+    // Both now share the prefix, so the labels match two elements.
+    expect(screen.getAllByLabelText("Rule prefix git")).toHaveLength(2);
+    // The row that was never touched kept its level. Under the old per-keystroke
+    // dedupe this row was replaced by the edited one and vanished from the list.
+    expect(screen.getAllByLabelText("Level for git").map((el) => (el as HTMLSelectElement).value)).toEqual([
+      "deny",
+      "allow",
+    ]);
+
+    // ...and the collision is reported rather than resolved behind the user's back.
+    await waitFor(() =>
+      expect(screen.getAllByText(/another row has this prefix/i).length).toBeGreaterThan(0),
+    );
+
+    save();
+
+    await waitFor(() =>
+      expect(mockSetBashRules).toHaveBeenCalledWith({
+        set: { "git": "allow" },
+        remove: ["git push"],
+      }),
+    );
+    // The load-bearing assertion: the unrelated "git" rule is never removed.
+    const delta = mockSetBashRules.mock.calls[0][0];
+    expect(delta.remove).not.toContain("git");
+  });
+
+  it("clears the duplicate warning once the collision is resolved", async () => {
+    seed([
+      { tool: "git", level: "deny" },
+      { tool: "git push", level: "allow" },
+    ]);
+    render(<PermissionsForm />);
+    const field = await screen.findByLabelText("Rule prefix git push");
+
+    fireEvent.change(field, { target: { value: "git" } });
+    await waitFor(() =>
+      expect(screen.getAllByText(/another row has this prefix/i).length).toBeGreaterThan(0),
+    );
+
+    fireEvent.change(field, { target: { value: "git pusher" } });
+    await waitFor(() =>
+      expect(screen.queryByText(/another row has this prefix/i)).toBeNull(),
+    );
+  });
+});

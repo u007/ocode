@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -193,10 +194,16 @@ func TestEnsureHTRServe_VerifiesReadinessInBackground(t *testing.T) {
 	// purpose: isolateHTROwnerState nests a long t.TempDir(), and a sockaddr_un
 	// path over ~104 bytes fails to bind with EINVAL, which would kill the
 	// spawned daemon before this test's branch is ever reached.
-	sock := filepath.Join(os.TempDir(), fmt.Sprintf("htrverify%d.sock", os.Getpid()))
+	// Unique per invocation too: under -count the previous iteration's daemon
+	// can still be accepting on a pid-only name when this one starts.
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("htrverify%d-%d.sock", os.Getpid(), time.Now().UnixNano()%1_000_000))
 	t.Cleanup(func() { _ = os.Remove(sock) })
+	// The verifier stays held open until the assertions below have run. Releasing
+	// it straight after EnsureHTRServe returned let it finish before the
+	// finished.Load() check about one run in five, failing a correct build.
+	releaseVerifier := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseVerifier)
 	st, err := EnsureHTRServe(sup, HTROptions{Enabled: true, Port: freePort(t), SocketPath: sock}, log.Default())
-	close(release)
 
 	if err != nil {
 		t.Fatalf("EnsureHTRServe must not fail here: %v", err)
@@ -213,6 +220,7 @@ func TestEnsureHTRServe_VerifiesReadinessInBackground(t *testing.T) {
 	if finished.Load() {
 		t.Fatal("the verifier completed before EnsureHTRServe returned; readiness is meant to be waited on only AFTER the boot path moves on")
 	}
+	releaseVerifier()
 
 	// Let the background goroutine finish so it cannot race a later test's stubs.
 	waitForVerify(t, &finished)
@@ -409,7 +417,7 @@ func TestHTRDaemonStatus(t *testing.T) {
 	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
 
 	// No owner marker: reported stopped but still labeled with addr/port.
-	info := HTRDaemonStatus(port, socket)
+	info := HTRDaemonStatus(port, socket, "")
 	if info.Running || info.Managed {
 		t.Fatalf("no marker must report stopped: %+v", info)
 	}
@@ -421,7 +429,7 @@ func TestHTRDaemonStatus(t *testing.T) {
 	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
-	info = HTRDaemonStatus(port, socket)
+	info = HTRDaemonStatus(port, socket, "")
 	if !info.Running || !info.Managed {
 		t.Fatalf("healthy marker must report running: %+v", info)
 	}
@@ -550,13 +558,13 @@ func TestListHTRTabs(t *testing.T) {
 	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
 
 	// No marker: a standalone/absent daemon is never queried.
-	if _, err := ListHTRTabs(port); err == nil {
+	if _, err := ListHTRTabs(port, ""); err == nil {
 		t.Fatal("listing without an owner marker must error")
 	}
 	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
-	tabs, err := ListHTRTabs(port)
+	tabs, err := ListHTRTabs(port, "")
 	if err != nil {
 		t.Fatalf("list tabs → %v", err)
 	}

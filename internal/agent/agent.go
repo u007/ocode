@@ -760,8 +760,20 @@ type Agent struct {
 	subagentDispatchMu    sync.Mutex
 	subagentDispatchLast  string
 	subagentDispatchCount int
-	preloadedContextMu    sync.RWMutex
-	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
+	// projectCtxMu guards workDir, projectHost and the envPrompt* cache cluster
+	// (envPromptDate/Str/Cwd/Root/EnvHash/Harness). These are touched from more
+	// than one goroutine: the turn goroutine (Step -> PrepareMessages ->
+	// environmentPrompt) runs concurrently with the async compaction goroutine
+	// (MaybeCompactAsync -> startCompactAsync -> runInlineSummary ->
+	// PrepareMessages, compact.go), and SetWorkDir/SetProjectHost can invalidate
+	// from a handler goroutine. compactMu does NOT cover this — it only
+	// serializes compaction passes against EACH OTHER (see its comment above).
+	// Never hold it across the prompt-building computation or across a call into
+	// another component: environmentPrompt snapshots its inputs, computes
+	// unlocked, then stores under the lock.
+	projectCtxMu       sync.Mutex
+	preloadedContextMu sync.RWMutex
+	preloadedContext   string // set by askAgent to avoid duplicate LoadContext calls
 	// orphanRecoveryWG tracks background goroutines spawned by
 	// recoverOneOrphanedToolCall that are abandoned on timeout/cancel.
 	// Shutdown waits on it before resetting shared state (snapshotStore,
@@ -1262,7 +1274,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 			ToolCallID: r.ToolCallID,
 		})
 	})
-	workDir := a.workDir
+	workDir := a.WorkDir()
 	if workDir == "" {
 		workDir, _ = os.Getwd()
 	}
@@ -1854,7 +1866,16 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					}
 					return result, images, err
 				}
-				dagMsgs, dagErr := runDAGFromValidated(parallelCalls, stopCh, isCancelled, groupBus, groupAgentIDs, groupTracker, dispatch, a.scanToolResult, a.guardToolResult)
+				// The scheduler vets only successful results, so a node that ran
+				// and failed would leave its executed mark behind; drop it here.
+				dagDispatch := func(tc ToolCall, binding *taskBinding, toolCallID string, predecessorContext string) (string, []Image, error) {
+					result, images, err := dispatch(tc, binding, toolCallID, predecessorContext)
+					if err != nil {
+						a.guardExecuted.Delete(toolCallID)
+					}
+					return result, images, err
+				}
+				dagMsgs, dagErr := runDAGFromValidated(parallelCalls, stopCh, isCancelled, groupBus, groupAgentIDs, groupTracker, dagDispatch, a.scanToolResult, a.guardExecutedToolResult)
 				if dagErr != nil {
 					// Validation failed. Scope the error to the
 					// subagent dispatches that own the id
@@ -2602,16 +2623,20 @@ func (a *Agent) autoContinueJudgeClient() LLMClient {
 }
 
 // autoContinueJudgeClientTyped resolves the judge client and reports whether
-// it is the TypeSafe decision-only route. A typesafe AutoContinueModel builds
-// a TypesafeClient (triage via Decide), any other model builds a chat client
-// (prose YES/NO via Chat).
+// it is a decision-only backend. A decision model builds a Decider (triage via
+// Decide), any other model builds a chat client (prose YES/NO via Chat).
+//
+// The check is a type assertion to Decider rather than to *TypesafeClient, so
+// every decision backend takes this route. Asserting the concrete TypeSafe type
+// would send a second backend down the chat path, where its Chat method is
+// defined to fail.
 func (a *Agent) autoContinueJudgeClientTyped() (LLMClient, bool) {
 	client := a.autoContinueJudgeClient()
 	if client == nil {
 		return nil, false
 	}
-	_, isTS := client.(*TypesafeClient)
-	return client, isTS
+	_, isDecision := client.(Decider)
+	return client, isDecision
 }
 
 // AutoContinueJudgeAsync asks the configured auto-continue judge model
@@ -2626,7 +2651,7 @@ func (a *Agent) autoContinueJudgeClientTyped() (LLMClient, bool) {
 // closed — never auto-resume on an ambiguous/failed judge call) with Detail
 // describing the failure.
 func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
-	client, isTypesafe := a.autoContinueJudgeClientTyped()
+	client, isDecision := a.autoContinueJudgeClientTyped()
 	if client == nil {
 		return false
 	}
@@ -2640,11 +2665,15 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 		var resume bool
 		var err error
 		var detail string
-		if isTypesafe {
+		if isDecision {
 			// The async caller only dispatches after a turn that ended cleanly
 			// (the TUI guards on msg.err == nil), so there is no step error to
 			// report to the judge.
-			resume, detail, err = a.runAutoContinueJudgeTypesafe(client.(*TypesafeClient), snapshot, nil)
+			d, ok := client.(Decider)
+			if !ok {
+				return
+			}
+			resume, detail, err = a.runAutoContinueJudgeTypesafe(d, snapshot, nil)
 		} else {
 			resume, err = a.runAutoContinueJudge(client, snapshot)
 			detail = "continuous judge " + client.GetProvider() + "/" + client.GetModel()
@@ -3123,7 +3152,11 @@ func (a *Agent) SetMode(m Mode) {
 }
 
 // WorkDir returns the project root the agent is bound to ("" = process cwd).
-func (a *Agent) WorkDir() string { return a.workDir }
+func (a *Agent) WorkDir() string {
+	a.projectCtxMu.Lock()
+	defer a.projectCtxMu.Unlock()
+	return a.workDir
+}
 
 // SetProjectHost records the remote host of the project this agent is bound to
 // (empty for a local project). The environment prompt uses it to state that the
@@ -3132,21 +3165,30 @@ func (a *Agent) WorkDir() string { return a.workDir }
 // Invalidate the cached environment prompt, or a project switch would keep
 // serving the previous host's block.
 func (a *Agent) SetProjectHost(host string) {
+	a.projectCtxMu.Lock()
 	if a.projectHost == host {
+		a.projectCtxMu.Unlock()
 		return
 	}
 	a.projectHost = host
-	a.clearEnvironmentPromptCache()
+	a.clearEnvironmentPromptCacheLocked()
+	a.projectCtxMu.Unlock()
 }
 
 // ProjectHost returns the remote host recorded by SetProjectHost ("" = local).
-func (a *Agent) ProjectHost() string { return a.projectHost }
+func (a *Agent) ProjectHost() string {
+	a.projectCtxMu.Lock()
+	defer a.projectCtxMu.Unlock()
+	return a.projectHost
+}
 
 // SetWorkDir sets the working directory override for the environment prompt.
 // When set, this directory is used instead of os.Getwd() in the <env> block.
 func (a *Agent) SetWorkDir(dir string) {
+	a.projectCtxMu.Lock()
 	a.workDir = dir
-	a.clearEnvironmentPromptCache()
+	a.clearEnvironmentPromptCacheLocked()
+	a.projectCtxMu.Unlock()
 	// The preloaded model-context (model-specific {model}.OCODE.md) is keyed on
 	// the project: changing projects must re-resolve it, or the UI banner and
 	// the injected [ocode:model_context] would keep showing the previous
@@ -3196,7 +3238,7 @@ func (a *Agent) projectSnapshotsDir() string {
 	if err != nil {
 		return ""
 	}
-	wd := a.workDir
+	wd := a.WorkDir()
 	if wd == "" {
 		wd, _ = os.Getwd()
 	}
@@ -3392,7 +3434,7 @@ func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *t
 	if !ok {
 		return text, nil, nil
 	}
-	raw, mime, ierr := executeImageWithContext(tool.WithWorkDir(context.Background(), a.workDir), irt, args)
+	raw, mime, ierr := executeImageWithContext(tool.WithWorkDir(context.Background(), a.WorkDir()), irt, args)
 	if ierr != nil {
 		// The pixels are a best-effort enrichment; the textual stub in `text`
 		// still describes the image, so degrade to it rather than failing the
@@ -3706,7 +3748,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 
 // denyToolMessage renders the tool-result text for a static policy Deny.
 // decision.DenyReason, when set by Decide, names the rule or gate that blocked
-// the call (e.g. a Claude Code deny rule, a user bash ban, locked mode) so the
+// the call (e.g. a user bash ban, locked mode) so the
 // user can fix the policy instead of guessing why the call failed. Without a
 // reason the message stays generic.
 func denyToolMessage(name string, decision PermissionDecision) string {
@@ -3816,15 +3858,16 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 		a.OnPermissionCheck(name, modelLabel, true)
 		defer a.OnPermissionCheck(name, modelLabel, false)
 	}
-	// TypeSafe (Jev) is a decision-only model: no chat loop, no read_file,
-	// no JSON effect report. It takes the whole request — interpreter
-	// source included — as structured state and answers one allow/deny
-	// choice, so it replaces BOTH chat paths below.
-	if modelName := a.autoPermissionModelName(); isTypesafeModel(modelName) {
-		client, ok := newClientFn(a.config, modelName).(*TypesafeClient)
+	// Decision backends (TypeSafe/Jev, Cloudflare clef) answer typed questions
+	// only: no chat loop, no read_file, no JSON effect report. They take the
+	// whole request — interpreter source included — as structured state and
+	// answer one allow/deny choice, so they replace BOTH chat paths below.
+	// isDecisionModel is the single place that decides which models these are.
+	if modelName := a.autoPermissionModelName(); isDecisionModel(modelName) {
+		client, ok := newClientFn(a.config, modelName).(Decider)
 		if !ok {
 			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_fail tool=%s model=%s error=client_creation_failed", name, modelName))
-			return false, "could not create TypeSafe client (missing TYPESAFE_API_KEY?)", "", false
+			return false, "could not create the decision judge client (missing credential for " + modelName + "?)", "", false
 		}
 		allowed, reason, consulted = a.askPermissionModelTypesafe(client, name, args, req)
 		return allowed, reason, "", consulted
@@ -5270,7 +5313,7 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	// rejected whenever the process cwd differs from the project root, and so
 	// never reach the changes tab. An empty workDir is harmless: confinedPath
 	// falls back to os.Getwd().
-	toolCtx = tool.WithWorkDir(toolCtx, a.workDir)
+	toolCtx = tool.WithWorkDir(toolCtx, a.WorkDir())
 	// Declare whether this agent's UI keeps the streamed text as the transcript.
 	// Tools that would otherwise return an unbounded result (bash) cap their
 	// output unless this is set. See Agent.RetainFullToolOutput.
@@ -5716,6 +5759,15 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 // clearEnvironmentPromptCache invalidates the cached <env> prompt so changes to
 // workDir or model/client are reflected on the next prompt build.
 func (a *Agent) clearEnvironmentPromptCache() {
+	a.projectCtxMu.Lock()
+	a.clearEnvironmentPromptCacheLocked()
+	a.projectCtxMu.Unlock()
+}
+
+// clearEnvironmentPromptCacheLocked is the caller-must-hold-projectCtxMu form.
+// Callers that already hold the lock (SetWorkDir) use this to avoid
+// self-deadlock on the non-reentrant mutex.
+func (a *Agent) clearEnvironmentPromptCacheLocked() {
 	a.envPromptDate = ""
 	a.envPromptStr = ""
 	a.envPromptCwd = ""
@@ -5728,8 +5780,8 @@ func (a *Agent) clearEnvironmentPromptCache() {
 // at: the agent's workDir, falling back to the process cwd (the TUI chdirs to
 // workDir; desktop/web set it without chdir, so both cases resolve here).
 func (a *Agent) modelContextRoot() string {
-	if a.workDir != "" {
-		return a.workDir
+	if wd := a.WorkDir(); wd != "" {
+		return wd
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		return cwd
@@ -6157,6 +6209,35 @@ func (a *Agent) autoPermissionConfig() *config.AutoPermissionConfig {
 // PERMISSION_ASK: sentinel handled by the TUI's message pipeline.
 func (a *Agent) SetSubAgentPermAsker(f func(PermissionRequest) PermissionResponse) {
 	a.subAgentPermAsker = f
+}
+
+// attributePermAsker wraps a sub-agent permission-ask callback so every request
+// it forwards is stamped with the dispatching agent's name (PermissionRequest.
+// AgentName). The callback is installed once on the parent and shared by every
+// child, so it cannot know which child is asking; the name is what lets the
+// prompt (TUI modal or web/desktop dialog) say WHICH sub-agent is blocked.
+//
+// An already-stamped request is left alone. That is what makes the chain work:
+// each dispatch hands its own wrapper down via SetSubAgentPermAsker, so a
+// grandchild stamps its own name first and the intermediate levels no-op rather
+// than overwriting it with their own.
+//
+// Returns nil for a nil callback, so a caller can pass the result straight to
+// OnPermissionAsk: a nil asker keeps Agent.Step on the PERMISSION_ASK sentinel
+// path, which is the behaviour when no host installed one.
+func attributePermAsker(f func(PermissionRequest) PermissionResponse, name string) func(PermissionRequest) PermissionResponse {
+	if f == nil {
+		return nil
+	}
+	if name == "" {
+		return f
+	}
+	return func(req PermissionRequest) PermissionResponse {
+		if req.AgentName == "" {
+			req.AgentName = name
+		}
+		return f(req)
+	}
 }
 
 // DispatchSubagent runs the named subagent synchronously with the given prompt

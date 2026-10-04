@@ -164,9 +164,18 @@ func ResolveSharedDaemon(in HTRSharedInput) SharedDaemon {
 			d.Notice = fmt.Sprintf("Could not read %s (%v). Start `htrcli serve` yourself; ocode stays adopt-only until that file is readable JSON.", cfgPath, err)
 		}
 	case in.Token != "":
-		// The config IS readable but carries no usable token of its own. This
-		// is the override's real purpose: ocode knows where the daemon's token
-		// should come from and substitutes its own.
+		// browser.htr_token WINS over a token the config also carries. This is
+		// the specified precedence (spec: "token | browser.htr_token if set,
+		// else token in htrcli's config"), not a fallback for the tokenless
+		// case, and it is deliberate: ocode spawns a shared daemon with
+		// HTR_MANAGED_ID set to this very token (EnsureHTRServe), so the value
+		// that must match the daemon ocode starts is this one.
+		//
+		// The consequence to be aware of: with a stale browser.htr_token set,
+		// ocode probes an ADOPTED user-run daemon with a bearer it does not
+		// hold, every authenticated probe 401s, and a later ensure can find the
+		// port busy and unable to authenticate. Clearing browser.htr_token is
+		// the fix; do not "fix" it by reversing this precedence.
 		d.Token = in.Token
 		d.TokenSource = "ocode-config"
 	case strings.TrimSpace(cfg.Token) == "":

@@ -88,9 +88,9 @@ func TestAutoInjectFloorIsDeliberatelyDecoupled(t *testing.T) {
 		t.Fatalf("floor %v must stay ABOVE the lenient relevance floor %v, or name-display leniency silently starts inlining bodies",
 			discoveryAutoInjectFloor, relevanceJudgeMinConfidenceDefault)
 	}
-	if discoveryAutoInjectFloor == autoJudgeMinConfidenceDefault {
-		t.Fatal("the floor must be its own constant, not the permission floor")
-	}
+	// The permission floor default is also 0.80 since 2026-10-03, so the two
+	// values coincide; they remain separate constants and a configured
+	// permissions.auto.min_confidence must not move this one.
 }
 
 func TestPickAutoInjectSkillIgnoresNonSkillKinds(t *testing.T) {

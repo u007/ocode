@@ -179,3 +179,37 @@ func TestRunCompactUsesBatchedLoopAfterInlineProviderError(t *testing.T) {
 		t.Fatalf("want an inline attempt then the batched loop, got inline=%d batched=%d", inline, batched)
 	}
 }
+
+// Catches: accepting whatever the inline request returned. A main model that
+// keeps working on the task instead of summarising must not have that prose
+// installed as the compaction summary; the batched loop runs instead.
+func TestRunCompactUsesBatchedLoopAfterMalformedInlineSummary(t *testing.T) {
+	const prose = "Sure, next I will edit the handler and run the tests."
+	a, rt, seen := inlineTestHarness(t, func(req inlineTestRequest) (int, string) {
+		if req.isInline() {
+			return http.StatusOK, inlineTestStream(t, prose)
+		}
+		return http.StatusOK, inlineTestStream(t, inlineTestSummary)
+	})
+	rt.SummaryMaxRetries = 0
+
+	res := a.runCompact(inlineTestMessages(), rt, "", true)
+	if !res.OK {
+		t.Fatalf("compaction failed: %v", res.Err)
+	}
+	batched := 0
+	for _, req := range *seen {
+		if !req.isInline() {
+			batched++
+		}
+	}
+	if batched == 0 {
+		t.Fatal("the batched loop never ran after a template-violating inline summary")
+	}
+	if strings.Contains(res.Summary.Content, prose) {
+		t.Fatalf("task prose was installed as the compaction summary: %q", res.Summary.Content)
+	}
+	if !strings.Contains(res.Summary.Content, "## Critical Context") {
+		t.Fatalf("summary not built from the batched response: %q", res.Summary.Content)
+	}
+}

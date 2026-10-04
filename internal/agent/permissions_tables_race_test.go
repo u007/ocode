@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -122,9 +123,12 @@ func TestPermissionTablesConcurrentWriteDuringDecide(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	// The tables must still answer coherently afterwards.
-	if pm.Check("read") != PermissionAllow {
-		t.Fatalf("read rule = %q, want the default allow to survive", pm.Check("read"))
+	// The tables must still answer coherently afterwards. "grep" is a default
+	// allow that no writer above touches. This used to assert on "read", which
+	// two writers set to different levels (SetRule → ask, SetUserConfirmedRule →
+	// allow), so the result depended on which goroutine wrote last.
+	if pm.Check("grep") != PermissionAllow {
+		t.Fatalf("grep rule = %q, want the untouched default allow to survive", pm.Check("grep"))
 	}
 }
 
@@ -199,6 +203,54 @@ func TestRunWithTemporaryUserAllowRestoresBothTables(t *testing.T) {
 		}
 	})
 
+	// Catches: a per-call snapshot. Two judge-approved calls for one tool
+	// overlap; the second snapshotted the first's temporary allow as its
+	// "previous" state and restored it after the first had already left, so the
+	// tool stayed user-confirmed for the rest of the session.
+	t.Run("overlapping calls do not leak the allow", func(t *testing.T) {
+		pm := NewPermissionManager()
+		pm.SetRule("webfetch", PermissionAsk)
+
+		aInside, bInside := make(chan struct{}), make(chan struct{})
+		releaseA, releaseB := make(chan struct{}), make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = pm.RunWithTemporaryUserAllow("webfetch", func() error {
+				close(aInside)
+				<-releaseA
+				return nil
+			})
+		}()
+		<-aInside
+		go func() {
+			defer wg.Done()
+			_ = pm.RunWithTemporaryUserAllow("webfetch", func() error {
+				close(bInside)
+				<-releaseB
+				return nil
+			})
+		}()
+		<-bInside
+		close(releaseA) // A leaves first, while B still holds the allow
+		for pm.tempAllowHolders("webfetch") != 1 {
+			runtime.Gosched()
+		}
+		if !pm.IsUserConfirmedRule("webfetch") {
+			t.Fatal("the allow was withdrawn while a call still relied on it")
+		}
+		close(releaseB)
+		wg.Wait()
+
+		if got := pm.Check("webfetch"); got != PermissionAsk {
+			t.Fatalf("level after = %q, want the original ask", got)
+		}
+		if pm.IsUserConfirmedRule("webfetch") {
+			t.Fatal("the temporary allow leaked into a permanent user-confirmed rule")
+		}
+	})
+
 	t.Run("propagates the callback error", func(t *testing.T) {
 		pm := NewPermissionManager()
 		want := error(temporaryAllowErr{})
@@ -236,4 +288,15 @@ func TestSetPathRuleDoesNotMutateALiveSnapshot(t *testing.T) {
 	if got := len(pm.pathPatterns.load()["edit"]); got != before+1 {
 		t.Fatalf("current table has %d entries, want %d", got, before+1)
 	}
+}
+
+// tempAllowHolders reports how many RunWithTemporaryUserAllow calls currently
+// hold tool's temporary allow.
+func (pm *PermissionManager) tempAllowHolders(tool string) int {
+	pm.tempAllowMu.Lock()
+	defer pm.tempAllowMu.Unlock()
+	if ta := pm.tempAllows[tool]; ta != nil {
+		return ta.holders
+	}
+	return 0
 }

@@ -13,7 +13,7 @@ import (
 // relevancy should be presented; only a different scope is skipped".
 //
 // It is deliberately far below the high-stakes permission floor
-// (autoJudgeMinConfidenceDefault = 0.85): a relevance veto only hides a
+// (autoJudgeMinConfidenceDefault = 0.80): a relevance veto only hides a
 // retrieval result, it never grants a tool call. 0.5 is TypeSafe's documented
 // "genuinely unsure / do not act" boundary, so anything Jev judges more likely
 // relevant than not is kept.
@@ -54,7 +54,7 @@ func (a *Agent) resolveRelevanceJudgeMinConfidence() float64 {
 // transport/decode error returns (nil, err) so the caller keeps every
 // candidate; a missing or non-noul answer keeps that candidate; only a real
 // below-floor noul vetoes. The judge can therefore only ever veto.
-func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client *TypesafeClient, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, map[string]float64, error) {
+func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client Decider, debugKind, logTag string, candidateIDs []string, state any, questions map[string]TypesafeQuestion) (map[string]bool, map[string]float64, error) {
 	if len(candidateIDs) == 0 {
 		return map[string]bool{}, map[string]float64{}, nil
 	}
@@ -62,10 +62,10 @@ func (a *Agent) judgeRelevanceQuestions(ctx context.Context, client *TypesafeCli
 	if err != nil {
 		return nil, nil, err
 	}
-	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)
+	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, deciderLabel(client))
 
 	min := a.resolveRelevanceJudgeMinConfidence()
-	model := "typesafe/" + client.Model
+	model := deciderLabel(client)
 	keep := make(map[string]bool, len(candidateIDs))
 	scores := make(map[string]float64, len(candidateIDs))
 	for _, id := range candidateIDs {

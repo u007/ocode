@@ -175,3 +175,72 @@ func isOpaqueCommandHead(words []string) bool {
 	h := words[0]
 	return strings.HasPrefix(h, "$") || strings.HasPrefix(h, "`") || strings.HasPrefix(h, "${")
 }
+
+// heredocShellConsumers are command heads that execute a heredoc body as
+// shell code (locally, or on a remote host for ssh), so the body must stay
+// visible to the static gates.
+var heredocShellConsumers = map[string]bool{"source": true, ".": true, "eval": true, "ssh": true}
+
+// sandboxGateParseTarget returns the text the sandbox per-fragment gate should
+// parse. Bodies of quoted, terminated heredocs (<<'EOF', <<"EOF") are removed:
+// the shell never expands them, so they are data for the consuming program,
+// not commands. Lines after the terminator are kept. The raw command is
+// returned unchanged, keeping every body line under the gates, when
+//   - a heredoc is unquoted (the shell expands $(...) and backticks in it),
+//   - a heredoc is unterminated, or its operator may sit inside a quote,
+//     comment or arithmetic expansion (then it is not a heredoc at all),
+//   - any command in the line is a shell or shell-like consumer (bash <<'EOF',
+//     cat <<'EOF' | sh, ssh host <<'EOF'): the body is shell code.
+func sandboxGateParseTarget(command string) string {
+	lines := strings.Split(command, "\n")
+	var kept []string
+	stripped := false
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		locs := heredocOpRe.FindAllStringSubmatchIndex(line, -1)
+		if len(locs) == 0 {
+			kept = append(kept, line)
+			continue
+		}
+		if len(locs) > 1 || strings.ContainsAny(line[:locs[0][0]], "\"'`\\#(") {
+			return command
+		}
+		m := heredocOpRe.FindStringSubmatch(line)
+		if m[1] == "" {
+			return command
+		}
+		stripTabs := strings.HasPrefix(m[0], "<<-")
+		terminated := false
+		for i++; i < len(lines); i++ {
+			cmp := lines[i]
+			if stripTabs {
+				cmp = strings.TrimLeft(cmp, "\t")
+			}
+			if cmp == m[2] {
+				terminated = true
+				break
+			}
+		}
+		if !terminated {
+			return command
+		}
+		kept = append(kept, line)
+		stripped = true
+	}
+	if !stripped {
+		return command
+	}
+	target := strings.Join(kept, "\n")
+	parsed, err := parseShellCommandLine(target)
+	if err != nil {
+		return command
+	}
+	for _, c := range parsed {
+		for _, words := range effectiveCommandWords(c.cmdWords) {
+			if len(words) > 0 && (shellReexecBinaries[words[0]] || heredocShellConsumers[words[0]]) {
+				return command
+			}
+		}
+	}
+	return target
+}

@@ -24,8 +24,9 @@ import (
 const (
 	// hostStreamEvent is the control envelope the relay emits each time a
 	// host's upstream stream opens. The client resets that host's seq
-	// watermark on it and, from the second one on, reconciles — the same
-	// contract a re-established direct stream had.
+	// watermark on it and reconciles — from the second one on, or from the
+	// first when the browser's own stream was a reopen — the same contract a
+	// re-established direct stream had.
 	hostStreamEvent = "host_stream"
 
 	remoteEventsBackoffBase = time.Second

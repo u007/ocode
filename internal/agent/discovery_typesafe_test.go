@@ -242,7 +242,26 @@ func TestDiscoveryJudgeClientNilWhenNotConnected(t *testing.T) {
 	}
 }
 
-func TestDiscoveryJudgeClientResolvedOncePerDiscoveryState(t *testing.T) {
+// TestDiscoveryJudgeClientCachesCredentialedOnly pins the judge's caching
+// contract, which is deliberately asymmetric:
+//
+//   - A RESOLVED client is cached per discovery state, so a credentialed session
+//     does not re-run the client factory on every turn and /discovery status read.
+//   - A NIL client is NOT cached. It used to be pinned by a sync.Once, which meant
+//     a /connect only took effect after a /discovery toggle or a restart — a real
+//     bug the old doc comment acknowledged as a known limitation.
+//
+// The reason the nil case was cached in the first place was log noise: NewClient
+// logs "no API key ... refusing to build client" on every call. That noise is now
+// suppressed at the source (warnedNoAPIKey dedupes per provider+model), so the
+// caller no longer has to pay for a stale nil to keep the log quiet. The log
+// property itself is asserted by TestDiscoveryJudgeClient_KeylessDoesNotSpamDebug,
+// which exercises the real NewClient rather than a stubbed factory.
+//
+// This replaced TestDiscoveryJudgeClientResolvedOncePerDiscoveryState, which
+// asserted the call count directly and so pinned the old mechanism rather than the
+// behaviour that mattered.
+func TestDiscoveryJudgeClientCachesCredentialedOnly(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
@@ -259,18 +278,40 @@ func TestDiscoveryJudgeClientResolvedOncePerDiscoveryState(t *testing.T) {
 			t.Fatalf("keyless typesafe client must not be the judge: %+v", got)
 		}
 	}
-	if calls != 1 {
-		t.Fatalf("factory must run once per discovery state (its no-key refusal is logged every call), got %d", calls)
+	if calls != 3 {
+		t.Errorf("a nil client must NOT be cached (otherwise /connect stays dead until a reset); want a resolve per call, got %d factory calls", calls)
 	}
 
+	// Now a client that DOES resolve: it must be cached, so the factory runs once.
+	calls = 0
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		calls++
+		return newTypesafeClient("k", "jev-latest", "https://api.typesafe.ai/v1")
+	}
+	for i := 0; i < 3; i++ {
+		if got := a.discoveryJudgeClient(); got == nil {
+			t.Fatalf("credentialed client must resolve (call %d)", i)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("a resolved client must be cached per discovery state; got %d factory calls, want 1", calls)
+	}
+
+	// Model-change invalidation is not asserted here: slotModel currently ignores
+	// its argument (part 02 makes it read config), so there is no way to change a
+	// slot's model without a test-only hook. That case becomes testable when the
+	// per-slot config lands.
+
 	// ResetDiscovery drops the state, so the next lookup re-resolves.
+	calls = 0
 	a.ResetDiscovery()
 	a.disco = &discoveryState{enabled: true}
-	if a.discoveryJudgeClient() != nil {
-		t.Fatal("still keyless after reset")
+	a.disco.judge = nil
+	if a.discoveryJudgeClient() == nil {
+		t.Fatal("still nil after reset")
 	}
-	if calls != 2 {
-		t.Fatalf("new discovery state must re-resolve the judge, got %d factory calls", calls)
+	if calls != 1 {
+		t.Errorf("new discovery state must re-resolve the judge, got %d factory calls", calls)
 	}
 }
 

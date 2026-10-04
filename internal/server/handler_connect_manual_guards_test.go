@@ -132,3 +132,38 @@ func TestConnectFlowInputManualIsSingleUse(t *testing.T) {
 	close(release)
 	awaitConnectFlow(t, h, flowID)
 }
+
+// Catches: a cancel that returns before the auto flow has let go of the
+// loopback callback port. The UI's "Start over" cancels and immediately starts
+// again; if the cancel reply can beat the listener release, the new start fails
+// to bind.
+func TestCancelAutoOpenAIFlowWaitsForListenerRelease(t *testing.T) {
+	h := NewHandler()
+	preserveConnectCredential(t, "openai")
+	var released atomic.Bool
+	stubConnectSeam(t, &openaiStartFn, func(ctx context.Context) (string, func() (auth.Credential, error), error) {
+		return "https://auth.openai.com/oauth/authorize?auto=1", func() (auth.Credential, error) {
+			<-ctx.Done()
+			// The real finish shuts its callback server down before returning.
+			time.Sleep(50 * time.Millisecond)
+			released.Store(true)
+			return auth.Credential{}, ctx.Err()
+		}, nil
+	})
+
+	resp, code := connectDo(t, h.handleConnectOAuthStart, "POST", "/api/auth/connect/openai/oauth/start",
+		map[string]string{"provider": "openai"}, map[string]string{"method": "oauth", "mode": "auto"})
+	if code != http.StatusOK {
+		t.Fatalf("start: %d %v", code, resp)
+	}
+	flowID, _ := resp["flowId"].(string)
+
+	resp, code = connectDo(t, h.handleConnectFlowCancel, "POST", "/api/auth/connect/flows/"+flowID+"/cancel",
+		map[string]string{"flowId": flowID}, nil)
+	if code != http.StatusOK {
+		t.Fatalf("cancel: %d %v", code, resp)
+	}
+	if !released.Load() {
+		t.Fatal("cancel replied while the flow still held the callback listener")
+	}
+}

@@ -402,6 +402,25 @@ describe("eventBus", () => {
     warnSpy.mockRestore();
   });
 
+  it("a host's first marker on a REOPENED stream reconciles: the stream's own reconcile ran before the host was subscribed", async () => {
+    const onReconnect = vi.fn();
+    eventBus.on("text", () => {});
+    eventBus.onReconnect(onReconnect);
+    await vi.advanceTimersByTimeAsync(0);
+    await openWithStream(0);
+
+    eventBus.setHosts(["a"]); // a tab on host a opens: the stream restarts
+    await vi.advanceTimersByTimeAsync(0);
+    const stream = await openWithStream(1);
+    expect(onReconnect).toHaveBeenCalledTimes(1); // the stream reopen itself
+
+    // The server subscribes host a's upstream some time later. Whatever a
+    // emitted in between was never relayed, so its marker must reconcile.
+    stream.push(envelopeFrame("host_stream", 0, { host: "a" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onReconnect).toHaveBeenCalledTimes(2);
+  });
+
   it("a host's upstream re-open reconciles and resets that host's seq watermark", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const onReconnect = vi.fn();

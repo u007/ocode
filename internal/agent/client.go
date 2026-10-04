@@ -1108,6 +1108,26 @@ func isRetryableLLMClientError(err error) bool {
 	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
 		return true
 	}
+	// DNS: a name-resolution failure is transient in practice — a resolver that
+	// has not finished coming up, a VPN/Wi-Fi transition — but *net.DNSError for
+	// NXDOMAIN reports neither Timeout() nor Temporary(), and "no such host"
+	// matches none of the substrings below. It therefore classified as
+	// permanent and skipped the retry budget entirely, turning a momentary
+	// lookup failure into a hard-failed turn: agent-run-2 in
+	// ses_2026-10-02-094643-b014b5ba lost eight minutes of sub-agent work to
+	// `dial tcp: lookup opencode.ai: no such host` on a single attempt, while
+	// `connection refused` — the same class of dial blip, caught by the text arm
+	// — was retried llmMaxRetries times.
+	//
+	// Matched on the type, not the text, so an unrelated error that merely
+	// mentions a hostname is unaffected. The cost when a hostname really is
+	// wrong is llmMaxRetries wasted attempts (~1.5s at llmRetryBaseDelay); the
+	// error still surfaces with its original cause. A mistyped host is not worth
+	// optimising for at the price of a lost turn.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
 	lower := strings.ToLower(err.Error())
 	if strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof") || strings.Contains(lower, "goaway") {
 		return true
@@ -4563,6 +4583,17 @@ func modelIDProvider(cfg *config.Config, id string) string {
 	return ""
 }
 
+// warnedNoAPIKey records which (provider, model) pairs have already produced a
+// "no API key ... refusing to build client" debug line, so a client that is
+// re-resolved on every turn does not flood the debug log.
+//
+// It gates LOGGING only — never client construction. That distinction is the
+// whole point: a caller that wanted to avoid the noise used to have to cache a
+// nil client for the life of the session, which also pinned "no credential" after
+// the user ran /connect. With the dedup here, a mid-session /connect takes effect
+// on the very next call.
+var warnedNoAPIKey sync.Map
+
 func NewClient(cfg *config.Config, model string) LLMClient {
 	return NewClientWithProfile(cfg, model, auth.ActiveProfile())
 }
@@ -4856,7 +4887,19 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	// clear failure instead of a deferred 401 on the first request. Providers in
 	// keyOptionalProviders (local servers, free tiers) are allowed through.
 	if apiKey == "" && provider != "" && !keyOptionalProviders[provider] {
-		emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q (useOAuth=%v, model=%q); refusing to build client (would 401)", provider, useOAuth, model))
+		// Emit once per (provider, model) rather than on every call. The judge
+		// slots re-resolve their client on every turn and every status read, so
+		// an unconditional line here produced one debug entry per judge per turn
+		// for every user without that provider's credential — burying the lines
+		// that matter in the log. Deduping at the source means callers no longer
+		// have to cache a nil client just to keep the log quiet: a /connect still
+		// goes live on the next call, because nothing here is cached at all.
+		// Keyed by model as well as provider so two slots pointed at the same
+		// provider but different models each report once.
+		key := provider + "\x00" + model
+		if _, seen := warnedNoAPIKey.LoadOrStore(key, struct{}{}); !seen {
+			emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q (useOAuth=%v, model=%q); refusing to build client (would 401)", provider, useOAuth, model))
+		}
 		return nil
 	}
 

@@ -144,8 +144,33 @@ export default function PermissionsForm() {
   const pendingCount =
     Object.keys(rulesDelta.set ?? {}).length + (rulesDelta.remove ?? []).length;
 
+  // Prefixes held by more than one staged row, normalised the same way
+  // diffBashRules normalises on save — so the warning names the key that will
+  // actually be written, and a row that differs only by surrounding whitespace
+  // is reported as the collision it will become rather than looking distinct.
+  const duplicatePrefixes = useMemo(() => {
+    const seen = new Set<string>();
+    const dupes = new Set<string>();
+    for (const row of bashRules) {
+      const prefix = normalizePrefix(row.prefix);
+      if (!prefix) continue;
+      if (seen.has(prefix)) dupes.add(prefix);
+      seen.add(prefix);
+    }
+    return dupes;
+  }, [bashRules]);
+
+  // Editing must NOT dedupe. dedupeRows is keyed by prefix, so backspacing
+  // "git push" down to "git" — a prefix another row already holds — collapsed the
+  // two into one, keeping the EDITED row's level and dropping the original row
+  // from the staged list. diffBashRules then saw "git" as staged and no longer
+  // loaded, so Save emitted remove:["git"] and deleted an unrelated saved rule
+  // the user never touched. Collisions are surfaced as a per-row warning instead
+  // (duplicatePrefixes below); resolving one is the user's decision, not a
+  // side effect of typing. dedupeRows still guards addRule, where a collision is
+  // an explicit act rather than an intermediate keystroke.
   const updateRule = (index: number, patch: Partial<BashRuleRow>) => {
-    setBashRules((rows) => dedupeRows(rows.map((row, i) => (i === index ? { ...row, ...patch } : row))));
+    setBashRules((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
     setRulesError(null);
   };
   const removeRule = (prefix: string) => {
@@ -268,7 +293,11 @@ export default function PermissionsForm() {
         ) : (
           <div className="space-y-1.5">
             {bashRules.map((row, i) => {
-              const problem = validateRule(normalizePrefix(row.prefix), row.level);
+              // Server-invalid first: a rule the batch save would reject outright
+              // is a harder stop than a duplicate. Duplicates are reported per
+              // row because nothing collapses them any more.
+              const invalid = validateRule(normalizePrefix(row.prefix), row.level);
+              const problem = invalid ?? (duplicatePrefixes.has(normalizePrefix(row.prefix)) ? "another row has this prefix — the last one wins" : null);
               return (
                 // Keyed by INDEX, not by prefix: the prefix is EDITABLE, so a
                 // prefix key changes on the first keystroke, which remounts the
@@ -279,7 +308,7 @@ export default function PermissionsForm() {
                   <Input
                     value={row.prefix}
                     aria-label={`Rule prefix ${row.prefix}`}
-                    onChange={(e) => updateRule(i, { prefix: normalizePrefix(e.target.value) })}
+                    onChange={(e) => updateRule(i, { prefix: e.target.value })}
                     className={`${RULE_INPUT_CLASS} flex-1 min-w-0`}
                   />
                   <select

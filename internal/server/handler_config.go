@@ -2156,9 +2156,17 @@ func (h *Handler) resolveHTRShared() cdp.SharedDaemon {
 // does not resolve a second time and risk reporting a different answer than the
 // one it acted on. The descriptor is the sole source of the provenance fields;
 // the bearer token it may carry is never copied into the response.
+//
+// The probe targets shared.Port/shared.Socket, NOT the configured
+// browser.htr_port. startManagedHTR starts the daemon through resolveManagedHTROptions,
+// which overwrites those two fields with the resolved values (3845 by default in
+// shared mode), so probing the configured port reported a daemon that was never
+// there: Settings showed Stopped against a live shared daemon, and the provenance
+// lookup read the wrong marker. In private mode the resolver echoes the legacy
+// values verbatim, so this is behaviour-preserving there.
 func (h *Handler) htrStatusFor(shared cdp.SharedDaemon, errMsg string) htrStatusResponse {
 	bcfg := h.htrBrowserConfig()
-	info := htrDaemonStatusFn(bcfg.HTRPort, bcfg.HTRSocketPath)
+	info := htrDaemonStatusFn(shared.Port, shared.Socket, shared.Token)
 	// Provenance is only meaningful for a live daemon: a marker whose pid is
 	// gone names a process that no longer exists, and echoing its number would
 	// read as a running daemon. Gating on Running also keeps the settings poll
@@ -2166,7 +2174,7 @@ func (h *Handler) htrStatusFor(shared cdp.SharedDaemon, errMsg string) htrStatus
 	// costs a liveness probe and a bearer-protected health probe.
 	var prov cdp.HTRProvenance
 	if info.Running {
-		prov = htrProvenanceFn(bcfg.HTRPort)
+		prov = htrProvenanceFn(shared.Port)
 	}
 	st := htrStatusResponse{
 		Enabled:        bcfg.HTREnabled,
@@ -2241,16 +2249,22 @@ func (h *Handler) startManagedHTR() htrStatusResponse {
 // refusal is the contract (see cdp.StopHTRServe). The UI gates its Stop button
 // on started_by_ocode so a user rarely gets here, but a direct API caller must
 // still be told the truth instead of inferring success from a 200.
+//
+// The port is the RESOLVED one, not browser.htr_port, for the same reason
+// htrStatusFor probes shared.Port: stop had to target the daemon startManagedHTR
+// actually launched, or a shared daemon survived its own Stop and the caller was
+// told stopped:true. The descriptor is resolved once and reused for the status
+// so the stop and the reported state cannot disagree.
 func (h *Handler) stopManagedHTR() htrStatusResponse {
-	bcfg := h.htrBrowserConfig()
-	res, err := stopHTRServeFn(h.procSup, bcfg.HTRPort, log.Default())
+	shared := h.resolveHTRShared()
+	res, err := stopHTRServeFn(h.procSup, shared.Port, log.Default())
 	if err != nil {
-		return h.htrStatus("failed to stop HTR daemon: " + err.Error())
+		return h.htrStatusFor(shared, "failed to stop HTR daemon: "+err.Error())
 	}
 	// The stop result, not a fresh probe, decides stopped: a refusal is exactly
 	// the case where the daemon is still up but a later probe might race.
 	stopped := !res.Running
-	st := h.htrStatus("")
+	st := h.htrStatusFor(shared, "")
 	st.Stopped = &stopped
 	if !stopped {
 		st.Reason = "left running: ocode only stops a daemon it started itself, so this one " +
@@ -2291,9 +2305,14 @@ func (h *Handler) HandleStopHTR(w http.ResponseWriter, r *http.Request) {
 // HandleListHTRTabs lists the browser tabs connected to the managed daemon.
 // A failure (daemon not running, query error) returns an empty list plus the
 // reason at HTTP 200 so the settings UI renders it inline.
+//
+// The daemon is queried on the RESOLVED port, for the same reason stop and
+// status are: in shared mode the daemon listens on htrcli's port (3845), so
+// querying browser.htr_port asked a port nothing was serving and "List tabs"
+// always reported an error against a perfectly healthy daemon.
 func (h *Handler) HandleListHTRTabs(w http.ResponseWriter, r *http.Request) {
-	bcfg := h.htrBrowserConfig()
-	tabs, err := listHTRTabsFn(bcfg.HTRPort)
+	shared := h.resolveHTRShared()
+	tabs, err := listHTRTabsFn(shared.Port, shared.Token)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"tabs": []cdp.HTRTab{}, "error": err.Error()})
 		return

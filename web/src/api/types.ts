@@ -547,6 +547,8 @@ export interface SSEPermissionEvent {
   prefix?: string;
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
+  /** Name of the sub-agent that raised the ask; absent for a main-agent ask. */
+  agent_name?: string;
 }
 
 /** Decisions accepted by POST /api/permissions/resolve (`decision` field). */

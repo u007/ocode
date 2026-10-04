@@ -16,7 +16,7 @@ Picking a main model in the sidebar model picker (web/desktop `ModelDialog` `han
 
 ## Resolution order (no explicit override → global default)
 
-`effectiveSessionModel` (`internal/server/handler_session_state.go:416`) falls back to `h.cfg.Model` for new sessions with no per-session override. The global write flows through `HandleSetModel` (`internal/server/handler_config.go:39`): sets `cfg.Model` → `SaveLastModel` → `SaveRecentModel` → `pushStatusSnapshot`. Survives restart because `config.Load` prefers `last_model` (`internal/config/config.go:230`). TUI parity: `finishModelSwitch` (`internal/tui/model.go:9450`) already did the same.
+`effectiveSessionModel` (`internal/server/handler_session_state.go:606`) falls back to `h.cfg.Model` for new sessions with no per-session override. The global write flows through `HandleSetModel` (`internal/server/handler_config.go:41`): sets `cfg.Model` → `SaveLastModel` → `SaveRecentModel` → `pushStatusSnapshot`. Survives restart because `config.Load` prefers `last_model` (`internal/config/config.go:230`). TUI parity: `finishModelSwitch` (`internal/tui/model.go:9840`) already did the same.
 
 ## Three dispatch arms (all also fire global `SET_MODEL`)
 

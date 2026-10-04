@@ -40,14 +40,17 @@ type discoveryState struct {
 	// (observability for /discovery status). atomic because the TUI/HTTP status
 	// reader can run while the agent goroutine is mid-turn.
 	judgeVetoed atomic.Int64
-	// judge caches the TypeSafe judge resolution for this state's lifetime
-	// (judgeOnce guards it). Resolving through the shared client factory on
-	// every turn and every /discovery status read would re-emit NewClient's
-	// "no API key ... refusing to build client" debug line for everyone
-	// without a TypeSafe key. A /connect typesafe mid-session therefore takes
-	// effect on the next ResetDiscovery (/discovery toggle) or restart.
-	judgeOnce sync.Once
-	judge     *TypesafeClient
+	// judge caches the discovery relevance judge's decision client for this
+	// state. Keyed on judgeModel rather than a one-shot latch, because a
+	// sync.Once pins whatever resolved FIRST for the whole session and makes a
+	// later /connect or judge_model change look like it did nothing.
+	// judgeMu guards both fields; discoveryJudgeClient builds the client BEFORE
+	// taking it, so no client factory call ever runs under the lock. A nil judge
+	// is deliberately not cached, so connecting mid-session takes effect without
+	// needing a discovery reset.
+	judgeMu    sync.Mutex
+	judgeModel string
+	judge      Decider
 	// tail is a bounded snapshot of the turn's messages, recorded by
 	// runDiscovery so the ON-DEMAND discover_more judge sees the same
 	// conversation the per-turn judge saw. Guarded by tailMu because Step
@@ -280,7 +283,7 @@ func (a *Agent) discoveryModelRoot() (activeModel, root string) {
 	if a.client != nil {
 		activeModel = a.client.GetModel()
 	}
-	root = a.workDir
+	root = a.WorkDir()
 	if root == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			root = cwd
@@ -346,7 +349,7 @@ func (a *Agent) RunDiscovery(query string) {
 // runs discovery with those messages available to the TypeSafe judge. Step uses
 // this so the judge sees the same conversation the embedder ranked against.
 func (a *Agent) RunDiscoveryForMessages(messages []Message) {
-	a.runDiscovery(discoveryQueryFromMessages(messages, a.workDir), messages)
+	a.runDiscovery(discoveryQueryFromMessages(messages, a.WorkDir()), messages)
 }
 
 // runDiscovery is the shared implementation behind both entry points. It ranks
@@ -436,7 +439,7 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	if client := a.discoveryJudgeClient(); client != nil {
 		judged, scores, jerr := a.judgeDiscoveryCandidates(client, tail, query, candidates)
 		if jerr != nil {
-			judgeNote = fmt.Sprintf("judge=%s error (fail-open)", client.Model)
+			judgeNote = fmt.Sprintf("judge=%s error (fail-open)", deciderLabel(client))
 			a.emitDebug("DISCOVERY", fmt.Sprintf("typesafe judge failed (fail-open, all attached): %v", jerr))
 		} else {
 			keep = judged
@@ -444,7 +447,7 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 			if vetoed := len(candidates) - len(keep); vetoed > 0 {
 				a.disco.judgeVetoed.Add(int64(vetoed))
 			}
-			judgeNote = fmt.Sprintf("judge=%s kept %d/%d", client.Model, len(keep), len(candidates))
+			judgeNote = fmt.Sprintf("judge=%s kept %d/%d", deciderLabel(client), len(keep), len(candidates))
 		}
 	}
 	// Auto-inject the single top-scoring SKILL body (see discovery_autoinject.go).

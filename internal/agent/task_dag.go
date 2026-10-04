@@ -371,10 +371,17 @@ type dagScheduler struct {
 	// may emit a control-flow sentinel, and conflating them would make it
 	// ambiguous which one a failure belonged to. Order is load-bearing —
 	// redact, then guard — so what the judge reads is already masked.
-	guard func(ctx context.Context, toolName, toolArgs, content string) string
+	guard func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string
 
-	// ctx bounds the content-guardrail judge round trips for this DAG run.
-	ctx context.Context
+	// ctx bounds the content-guardrail judge round trips for this DAG run, and
+	// cancelGuard releases it. The cancel is owned here rather than dropped
+	// because this ctx lives for the whole run: contentGuardStepCtxCtx parked a
+	// crashguard.Go goroutine on stopCh and never cancelled, so every batch left
+	// that goroutine and its context alive until the turn's stopCh happened to
+	// close — unbounded across the batches of a long session. run() defers
+	// cancelGuard, so the binding ends when the DAG does.
+	ctx         context.Context
+	cancelGuard context.CancelFunc
 
 	// perNode stores the final per-node outcome; the caller reads it
 	// once we return and copies into the `results []Message` slice.
@@ -404,19 +411,24 @@ type dagScheduler struct {
 // newDAGScheduler wires the parsed graph, the stop channel, and the
 // dispatch closure. It does not start any work — the caller invokes
 // `run`.
-func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn, redact func(toolName, toolArgs, content string) string, guard ...func(ctx context.Context, toolName, toolArgs, content string) string) *dagScheduler {
-	var guardFn func(ctx context.Context, toolName, toolArgs, content string) string
+func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func() bool, dispatch dagDispatchFn, redact func(toolName, toolArgs, content string) string, guard ...func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string) *dagScheduler {
+	var guardFn func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string
 	if len(guard) > 0 {
 		guardFn = guard[0]
 	}
+	// The guard ctx is taken here (not inside the literal) so the cancel can be
+	// stored alongside it; contentGuardStepCtxCtx's "never cancel" variant is
+	// gone with it.
+	guardCtx, cancelGuard := contentGuardStepCtx(stopCh)
 	s := &dagScheduler{
 		parsed:      parsed,
+		cancelGuard: cancelGuard,
 		stopCh:      stopCh,
 		isCancelled: isCancelled,
 		dispatch:    dispatch,
 		redact:      redact,
 		guard:       guardFn,
-		ctx:         contentGuardStepCtxCtx(stopCh),
+		ctx:         guardCtx,
 		perNode:     make([]*dagNodeResult, len(parsed.nodes)),
 		doneCh:      make(map[*dagNode]chan struct{}, len(parsed.nodes)),
 		failed:      make(map[*dagNode]bool, len(parsed.nodes)),
@@ -454,6 +466,12 @@ func newDAGScheduler(parsed *dagParsed, stopCh <-chan struct{}, isCancelled func
 // set drains. No goroutine remains parked because the waits are selects
 // on `doneCh` vs `stopCh`, and stopCh always wins.
 func (s *dagScheduler) run(groupBus *notebus.Bus, groupAgentIDs []string, groupTracker *groupTracker) {
+	// Release the guard ctx (and the goroutine its cancellation unparks) as soon
+	// as the DAG is done. Every node has resolved by the time run returns, so
+	// nothing can still be waiting on a judge round trip.
+	if s.cancelGuard != nil {
+		defer s.cancelGuard()
+	}
 	// inDegree tracks how many of a node's predecessors are still
 	// unresolved. A node with in-degree 0 is ready to dispatch as
 	// soon as the scheduler reaches it.
@@ -623,7 +641,7 @@ func (s *dagScheduler) run(groupBus *notebus.Bus, groupAgentIDs []string, groupT
 			// Skipped on error for the same reason redaction is: an error string
 			// is our own text, not remote content.
 			if s.guard != nil && err == nil {
-				result = s.guard(s.ctx, n.toolCall.Function.Name, n.toolCall.Function.Arguments, result)
+				result = s.guard(s.ctx, n.toolCall.ID, n.toolCall.Function.Name, n.toolCall.Function.Arguments, result)
 			}
 
 			// Store the (now-redacted) result and the error; the error-text
@@ -921,7 +939,7 @@ func runDAGFromValidated(
 	groupTracker *groupTracker,
 	dispatch dagDispatchFn,
 	redact func(toolName, toolArgs, content string) string,
-	guard ...func(ctx context.Context, toolName, toolArgs, content string) string,
+	guard ...func(ctx context.Context, toolCallID, toolName, toolArgs, content string) string,
 ) ([]Message, error) {
 	parsed, err := buildDAG(parallelCalls)
 	if err != nil {

@@ -54,6 +54,9 @@ interface Props {
   untrustedScores?: ContentGuardScore[];
   /** Content-guardrail ask: why the guardrail could not clear this result. */
   untrustedFailure?: string;
+  /** Sub-agent that raised the ask; absent for a main-agent ask. Named in the
+   *  dialog so the user can tell WHICH sub-agent is blocked when several run. */
+  agentName?: string;
   /** Assistant message (prose + reasoning) that led to this ask. */
   context?: AskContext | null;
   requestId: string;
@@ -109,6 +112,7 @@ export default function PermissionDialog({
   untrustedSummary,
   untrustedScores,
   untrustedFailure,
+  agentName,
   context,
   requestId,
   onDecide,
@@ -248,7 +252,9 @@ export default function PermissionDialog({
               ? "Confirm always-allow"
               : isContentAsk
                 ? "Content guardrail — review before it reaches the model"
-                : "Permission Required"}
+                : agentName
+                  ? `Permission Required — ${agentName}`
+                  : "Permission Required"}
           </DialogTitle>
         </DialogHeader>
 
@@ -360,6 +366,20 @@ export default function PermissionDialog({
                 <div className="max-w-full rounded-lg border border-border bg-muted/60 p-3 text-sm text-foreground">
                   <div className="font-medium text-foreground">Model summary:</div>
                   <div className="mt-1 break-words [overflow-wrap:anywhere]">{summary}</div>
+                </div>
+              )}
+
+              {agentName && !isContentAsk && (
+                <div
+                  data-testid="permission-asking-agent"
+                  className="max-w-full rounded-lg border border-blue-900/60 bg-blue-950/30 px-3 py-2 text-sm text-blue-200"
+                >
+                  The{" "}
+                  <span className="font-mono break-words [overflow-wrap:anywhere]">
+                    {agentName}
+                  </span>{" "}
+                  sub-agent is blocked on this. Answering resumes its tool call
+                  directly — nothing else needs to run first.
                 </div>
               )}
 

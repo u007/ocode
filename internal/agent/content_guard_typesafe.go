@@ -297,16 +297,13 @@ func contentGuardSourceFor(a *Agent, toolName, toolArgs string) *contentGuardSou
 //
 // Spawned through crashguard.Go: a panic in this goroutine would otherwise kill
 // the process, and this one exists only to cancel a context.
-// contentGuardStepCtxCtx is contentGuardStepCtx for callers that keep the ctx
-// for a struct's lifetime rather than deferring the cancel (the DAG scheduler
-// owns its stopCh already). The cancel is intentionally never invoked: the
+//
+// Every caller MUST invoke the returned cancel. There used to be a
+// contentGuardStepCtxCtx variant that dropped it on the grounds that "the
 // scheduler's own stopCh cancellation ends the binding, and a live ctx there is
-// not a leak.
-func contentGuardStepCtxCtx(stopCh <-chan struct{}) context.Context {
-	ctx, _ := contentGuardStepCtx(stopCh)
-	return ctx
-}
-
+// not a leak" — it was: the cancel is what unparks the goroutine above, so
+// dropping it left one parked goroutine and one live context per DAG batch for
+// as long as the session's stopCh stayed open.
 func contentGuardStepCtx(stopCh <-chan struct{}) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	if stopCh == nil {
@@ -330,16 +327,10 @@ func contentGuardStepCtx(stopCh <-chan struct{}) (context.Context, context.Cance
 // chunk without hard-coding the catalog key.
 const ContentGuardConcernNone = contentGuardConcernNone
 
-// contentGuardClient resolves the judge, or nil when TypeSafe is not connected.
-func (a *Agent) contentGuardClient() *TypesafeClient {
-	if a == nil || a.config == nil {
-		return nil
-	}
-	client, ok := newClientFn(a.config, contentGuardJudgeModel).(*TypesafeClient)
-	if !ok || client == nil || client.APIKey == "" {
-		return nil
-	}
-	return client
+// contentGuardClient resolves the judge, or nil when no decision backend is
+// connected for this slot.
+func (a *Agent) contentGuardClient() Decider {
+	return a.resolveDecider(slotContentGuard)
 }
 
 // chunkContentGuard splits content into judge-sized slices. The second return
@@ -477,7 +468,7 @@ func (a *Agent) scanContentGuard(ctx context.Context, toolName, toolArgs, conten
 
 // judgeContentChunk vets one chunk. Every failure path fails OPEN (clean): a
 // provider outage must not freeze the session on content the user cannot act on.
-func (a *Agent) judgeContentChunk(ctx context.Context, client *TypesafeClient, src *contentGuardSource, chunk string) contentGuardVerdict {
+func (a *Agent) judgeContentChunk(ctx context.Context, client Decider, src *contentGuardSource, chunk string) contentGuardVerdict {
 	jctx, cancel := context.WithTimeout(ctx, contentGuardJudgeTimeout)
 	defer cancel()
 
@@ -490,7 +481,7 @@ func (a *Agent) judgeContentChunk(ctx context.Context, client *TypesafeClient, s
 		// exactly like a clean pass.
 		return contentGuardVerdict{failure: fmt.Sprintf("the guardrail could not reach its judge (%v)", err)}
 	}
-	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)
+	a.RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, deciderLabel(client))
 
 	ans, ok := resp.Answers[contentGuardVerdictKey]
 	if !ok || ans.Type != "choice" {

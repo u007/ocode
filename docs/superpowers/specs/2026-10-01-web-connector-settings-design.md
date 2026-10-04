@@ -101,7 +101,7 @@ extra `cancel` entry locally; the server does not. The TUI keeps its
 
 ## 3. A new key does NOT reach live agents today — this is a bug to fix
 
-`NewClientWithProfile` (`internal/agent/client.go:4570`) resolves the credential
+`NewClientWithProfile` (`internal/agent/client.go:4590`) resolves the credential
 **at client construction**: `auth.Get(provider)` at :4685,
 `auth.ResolveKeyForProfile` at :4808/:4828. An agent constructed before a
 connector write keeps the old key until it is rebuilt.

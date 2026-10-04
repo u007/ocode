@@ -22,6 +22,7 @@ import {
 import { describeActionError, reportActionErrorMessage } from "../../lib/actionErrors";
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
 import { getCompactionState, isCompactCommand, useCompactionState } from "../../lib/compactionState";
+import { isInstantCommand } from "../../lib/instantCommands";
 import CompactionStatus from "./CompactionStatus";
 import CommandActivityBar from "./CommandActivityBar";
 import RecentInputsStrip from "./RecentInputsStrip";
@@ -881,7 +882,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           await flushDelayedMessages();
           return;
         }
-        if (effectiveBusy || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
+        const compactionActive = getCompactionState(sessionTabId)?.status === "active";
+        // Instant commands (see lib/instantCommands) skip the queue so an aside
+        // typed mid-turn lands immediately instead of waiting for the turn to
+        // end — the server has a mid-turn path for them that avoids writing to
+        // the transcript under a live turn. Compaction still queues EVERY
+        // command, instant ones included: it replaces the transcript wholesale
+        // when it lands, so a concurrently recorded aside would be dropped.
+        if (
+          compactionActive ||
+          (!isInstantCommand(trimmed) &&
+            (effectiveBusy || drainingRef.current.has(sessionTabId)))
+        ) {
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
           setQueuedItems([...getQueue(sessionTabId)]);
           return;

@@ -27,6 +27,18 @@ const typesafeRequestTimeout = 30 * time.Second
 // factory, permission-model picker, and config validation can treat
 // "typesafe/<model>" like any other provider/model id, but the only useful
 // call is Decide.
+//
+// It satisfies Decider (see decider.go) with NO changes: Decide, DecideCtx,
+// GetProvider and GetModel already exist, so widening a judge from
+// *TypesafeClient to Decider is a signature change rather than a rewrite. Keep
+// it that way — adding a method to Decider would break the narrowness that stops
+// a decision backend reaching a chat path.
+//
+// On state size: TypeSafe documents Jev's limits as "64k tokens per request; 32k
+// tokens for `state` plus the longest question". That 32k is STRICTER than
+// Cloudflare clef's flat 65,536, so a shared pre-flight state budget must be
+// sized to this number, not clef's. Nothing enforces it here — an oversized
+// `state` is simply sent, and what the API then does with it is unverified.
 type TypesafeClient struct {
 	APIKey  string
 	Model   string

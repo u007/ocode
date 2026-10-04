@@ -38,7 +38,7 @@ Four decisions were taken explicitly, and each constrains the rest of the design
 
 ## 3. Seam: the judge rides the execution context
 
-`internal/tool` cannot import `internal/agent` (the agent imports the tool package), and the built-ins are constructed by the *host*, not by the agent — `internal/server/agent_session.go:525` and `internal/tui/model.go:2244` both call `tool.InitBuiltinTools*` and then hand the resulting slice to `agent.NewAgent`.
+`internal/tool` cannot import `internal/agent` (the agent imports the tool package), and the built-ins are constructed by the *host*, not by the agent — `internal/server/agent_session.go:525` and `internal/tui/model.go:2338` both call `tool.InitBuiltinTools*` and then hand the resulting slice to `agent.NewAgent`.
 
 Two candidate seams were considered.
 
@@ -50,9 +50,9 @@ Two candidate seams were considered.
 
 Each of those then calls `NewAgent`. A `NewAgent` that wrote a judge onto the tool structs would have a child overwrite the parent's judge with one bound to the child — and the advisor child is transient, shut down immediately after a single call (`advisor_tool.go`). The parent's searches would then judge against a dead agent. It is also a data race, because the search tools are `Parallel() == true`.
 
-**Adopted: the judge is carried on the execution context**, exactly as the session's project root is (`tool.WithWorkDir`, `internal/tool/workdir_ctx.go`). `executeToolCallWithContext` builds a `toolCtx` and already attaches three things to it — the snapshot store, the work dir (`internal/agent/agent.go:4933`, the `tool.WithWorkDir` call), and the full-output flag. The judge is attached alongside them. Each agent attaches its own judge for its own call, so there is no shared mutable state, no clobbering, and no race.
+**Adopted: the judge is carried on the execution context**, exactly as the session's project root is (`tool.WithWorkDir`, `internal/tool/workdir_ctx.go`). `executeToolCallWithContext` builds a `toolCtx` and already attaches three things to it — the snapshot store, the work dir (`internal/agent/agent.go:4942`, the `tool.WithWorkDir` call), and the full-output flag. The judge is attached alongside them. Each agent attaches its own judge for its own call, so there is no shared mutable state, no clobbering, and no race.
 
-Coverage is complete for model-initiated searches. Every `grep`/`rgrep`/`glob`/`list` invocation in non-test code goes through the dispatch chain in `internal/agent/agent.go:4973-4985` (the tool-dispatch `if/else if` chain that ends in `t.Execute(args)`; `agent.go` has uncommitted changes in the working tree, so re-derive this range by symbol before relying on it); the other `Execute`/`ExecuteCtx` call sites in the package are the tool's own `Execute` → `ExecuteCtx` delegation, or agent-owned tools (`advisor`, `task`, `doc_*`). A regression test pins that invariant, because a future direct-`Execute` caller would silently lose filtering.
+Coverage is complete for model-initiated searches. Every `grep`/`rgrep`/`glob`/`list` invocation in non-test code goes through the dispatch chain in `internal/agent/agent.go:4982-4994` (the tool-dispatch `if/else if` chain that ends in `t.Execute(args)`; `agent.go` has uncommitted changes in the working tree, so re-derive this range by symbol before relying on it); the other `Execute`/`ExecuteCtx` call sites in the package are the tool's own `Execute` → `ExecuteCtx` delegation, or agent-owned tools (`advisor`, `task`, `doc_*`). A regression test pins that invariant, because a future direct-`Execute` caller would silently lose filtering.
 
 ## 4. Tool-side contract
 

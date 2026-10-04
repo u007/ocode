@@ -278,7 +278,10 @@ func TestExplainBashCommandIsSilentForUnlistedHeads(t *testing.T) {
 func TestPermissionContextOmitsCommandAnalysisForUnlistedHeads(t *testing.T) {
 	a := NewAgent(nil, nil, &config.Config{}, nil)
 	args := json.RawMessage(`{"command":"cd /tmp/x && git log --oneline -1 main"}`)
-	ctx := a.buildPermissionContext("bash", args, 4096, 2, 80)
+	// The byte budget is generous on purpose: the roots list scales with the
+	// length of the home path, and at 4096 a longer home (the package's isolated
+	// test home) pushed the scope section over budget and out of the context.
+	ctx := a.buildPermissionContext("bash", args, 64*1024, 2, 80)
 	if strings.Contains(ctx, "Command analysis") || strings.Contains(ctx, "unknown command") {
 		t.Fatalf("context must not describe an unlisted head:\n%s", ctx)
 	}

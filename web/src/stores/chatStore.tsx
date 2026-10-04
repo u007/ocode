@@ -58,6 +58,7 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
       untrusted_summary: (req["untrusted_summary"] as string) || undefined,
       untrusted_scores: (req["untrusted_scores"] as ContentGuardScore[]) || undefined,
       untrusted_failure: (req["untrusted_failure"] as string) || undefined,
+      agent_name: (req["agent_name"] as string) || undefined,
     };
   } catch {
     return null;
@@ -216,6 +217,10 @@ export interface PermissionRequest {
   untrusted_scores?: ContentGuardScore[];
   /** Content-guardrail ask: why the guardrail could not clear this result. */
   untrusted_failure?: string;
+  /** Name of the sub-agent that raised the ask; absent for a main-agent ask.
+   *  Without it the dialog can only say "a sub-agent asked", which is useless
+   *  when several are parked at once. */
+  agent_name?: string;
 }
 
 /** One chunk's judge output. Both questions are reported separately so the

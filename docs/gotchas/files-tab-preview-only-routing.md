@@ -210,7 +210,7 @@ capability** in `?media_token=`:
   with the server — no on-disk store to leak; a restart drops them by design.
 - **Issue endpoint** — `POST /api/files/media-token` → `Handler.HandleMediaToken`
   (`internal/server/handler_files.go:1105`), registered as
-  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:252`), i.e.
+  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:340`), i.e.
   issuing **requires the normal credential**. Validation: non-empty `path`;
   `host` must be empty (`"media streaming is local-only"` — remote is
   blob-only); the extension must be media (`previewExtIsMedia`); `project_root`,

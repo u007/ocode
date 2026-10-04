@@ -4,7 +4,7 @@
 >
 > **SUPERSEDED (2026-09-18):** the web `livePermissionModeOverride` described in Task 2 was process-global, which made one chat's yolo/sandbox leak into every other chat and project. The web live mode is now **per chat session** (persisted in session metadata, `session_id` required on the PUT/GET endpoints). See `docs/concepts/sandbox-permission-mode.md` § "Per-session live mode". The TUI remains single-session and unaffected.
 
-**Self-contained constraints recap:** `sandbox` is a permission mode toggled via the existing permission-mode surfaces — **not** `shift+tab` (that cycles agent focus/type via `cycleAgentMode`, `model.go:6034` — preserve it). ~~Sandbox must **not** be persisted as the durable default (clamp/skip in the persist path).~~ Interactive PTY and web `!shell` stay out of scope. No code snippets.
+**Self-contained constraints recap:** `sandbox` is a permission mode toggled via the existing permission-mode surfaces — **not** `shift+tab` (that cycles agent focus/type via `cycleAgentMode`, `model.go:6104` — preserve it). ~~Sandbox must **not** be persisted as the durable default (clamp/skip in the persist path).~~ Interactive PTY and web `!shell` stay out of scope. No code snippets.
 
 **Consumes from Parts 01–02:** `PermissionModeSandbox` (validated by `SetMode`); Decide already routes sandbox.
 
@@ -14,7 +14,7 @@
 
 **Files:**
 - Modify: `internal/tui/model.go` — the status-bar/allowed-header permission-mode click cycle (`:7010-7031`, mirrored at `:7174-7198`). Current machine: `normal(auto off) → normal(auto on) → YOLO → Locked → normal`. Insert sandbox so the machine becomes `normal(auto off) → normal(auto on) → YOLO → Locked → Sandbox → normal`. Entering/leaving sandbox does **not** change `AutoPermissionEnabled` (Part 01 Task 1). Extend the mode-indicator label switch to render `SANDBOX`.
-- Modify: `internal/tui/model.go:8103-8111` instant-command allowlist — add `cmd == "/sandbox"` so it applies immediately like `/yolo`.
+- Modify: `internal/tui/model.go:8178-8186` instant-command allowlist — add `cmd == "/sandbox"` so it applies immediately like `/yolo`.
 - Modify: `internal/tui/commands.go` — register `/sandbox` (beside `/yolo` at `:145`) with a `runSandboxCmd` handler (`on|off|status`); `on` sets `PermissionModeSandbox`, `off` sets `normal`.
 - Modify: the persist path (`persistPermissions()` / the config saver it calls) — when the live mode is `sandbox`, persist `normal` for the durable mode field (Decision 2). The live agent stays in sandbox; only the on-disk default is clamped.
 - Test: `internal/tui/model_test.go`, `internal/tui/commands_test.go`

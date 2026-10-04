@@ -94,7 +94,7 @@ so the menu item can never be a silent revocation. The comment above the Share m
 
 ## 3. `HandleAuthedDesktopRoute` vs `HandleDesktopRoute`
 
-- `HandleDesktopRoute` (`internal/server/server.go:1648`) is **deliberately
+- `HandleDesktopRoute` (`internal/server/server.go:1709`) is **deliberately
   unauthenticated** — it exists for the one-time storage-migration call
   (`boot.go:136`, which legitimately carries the launch token in the migration
   payload).

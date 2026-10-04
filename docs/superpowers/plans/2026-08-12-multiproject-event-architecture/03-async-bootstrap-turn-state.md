@@ -12,7 +12,7 @@ wait; turns emit started/heartbeat/done/error; new reconcile and per-session
 status endpoints give the frontend server truth to derive state from.
 
 **Context (self-contained):**
-- Today `HandleChat` (`internal/server/handler.go:374-380`) builds the agent
+- Today `HandleChat` (`internal/server/handler.go:992-998`) builds the agent
   session synchronously via `ensureAgentSession` → `buildAgentSession`
   (`internal/server/agent_session.go:47-66`): spawns plugin processes, may
   auto-start a local model server, and blocks unbounded on

@@ -134,7 +134,7 @@ else, so there is no import cycle. The session-aware loader lives in
 - `sessionSettingsForDir(projectRoot, id) (*config.SessionSettings, error)` in
   `internal/server` — loads and decodes, returning an empty struct (not an
   error) when absent.
-- `buildAgentSession` (`internal/server/agent_session.go:92`), after resolving
+- `buildAgentSession` (`internal/server/agent_session.go:437`), after resolving
   `effCfg` from `h.cfg` or the profile config, calls `effCfg = settings.Apply(effCfg)`.
   The agent therefore receives its own config instance and every existing
   `a.config.Ocode.*` read site sees the session's values with no changes.
@@ -147,7 +147,7 @@ else, so there is no import cycle. The session-aware loader lives in
 
 ### Live application
 
-- `reconcileProfileAgent` (`internal/server/agent_session.go:257`) already
+- `reconcileProfileAgent` (`internal/server/agent_session.go:668`) already
   rebuilds the resident agent at a turn boundary when the model, profile, or
   credential version changed. Add a `settingsRev` comparison to that same
   condition. A sidebar change therefore lands on the **next turn** — identical

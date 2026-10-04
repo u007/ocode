@@ -105,6 +105,12 @@ type AdvisorTool struct {
 	workDir   string
 }
 
+// advisorAgentName is the name stamped on permission asks raised by the
+// advisor's own agent. It is not a registry AgentDefinition name — the advisor
+// has none — so it is declared here, next to the tool whose name is "advisor",
+// and is what the prompt shows for an advisor-raised ask.
+const advisorAgentName = "advisor"
+
 func (t AdvisorTool) Name() string { return "advisor" }
 func (t AdvisorTool) Description() string {
 	return "Consult a strategic advisor (backed by a configurable model) that can proactively explore the codebase with tools and provide a concise plan or course correction."
@@ -355,8 +361,8 @@ func (t AdvisorTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (stri
 	// real prompt to the user instead of returning the inert
 	// SentinelPermissionAsk string, which the advisor model can't act on.
 	if t.mainAgent != nil {
-		advisorAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
-		advisorAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
+		advisorAgent.OnPermissionAsk = attributePermAsker(t.mainAgent.subAgentPermAsker, advisorAgentName)
+		advisorAgent.SetSubAgentPermAsker(advisorAgent.OnPermissionAsk)
 	}
 
 	// Bind the sub-agent's loop to ctx: Agent.Step has no context parameter,

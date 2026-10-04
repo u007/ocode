@@ -124,8 +124,11 @@ type mdRef struct {
 // effectiveWorkDir resolves the agent's working directory (workDir override or
 // the process cwd).
 func (a *Agent) effectiveWorkDir() string {
-	if strings.TrimSpace(a.workDir) != "" {
-		return a.workDir
+	a.projectCtxMu.Lock()
+	wd := a.workDir
+	a.projectCtxMu.Unlock()
+	if strings.TrimSpace(wd) != "" {
+		return wd
 	}
 	if wd, err := os.Getwd(); err == nil {
 		return wd
@@ -175,7 +178,7 @@ func (a *Agent) ensureMDState() {
 	// Markdown discovery is project-scoped. Do not fall back to the process cwd
 	// here: desktop processes launched from Finder/Dock commonly have $HOME as
 	// their cwd, which would make a new unbound session scan the user's files.
-	if strings.TrimSpace(a.workDir) == "" {
+	if strings.TrimSpace(a.WorkDir()) == "" {
 		a.emitDebug("MD-DISCOVERY", "no project workdir bound — markdown discovery disabled")
 		a.mdState = &mdDiscoveryState{}
 		return

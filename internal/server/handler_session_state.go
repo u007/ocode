@@ -118,28 +118,59 @@ type PendingAsks struct {
 	Questions   []QuestionEvent   `json:"questions,omitempty"`
 }
 
-// livePendingAsks returns the unresolved asks held in the session's resident
-// agent transcript, or nil when the session has no live agent, a turn is in
-// flight, or it is not paused on one. A resolved ask has its sentinel replaced
-// in place, so this returns nil again once the user answers.
+// livePendingAsks returns the unresolved asks held by the session's live agent,
+// or nil when the session has no live agent and nothing is paused on an ask. A
+// resolved ask has its sentinel replaced in place / its registry entry removed,
+// so this returns nil again once the user answers.
 //
-// The read is a non-blocking TryLock on purpose: runTurn holds as.mu for the
-// whole turn (minutes), and this runs inside the reconcile HTTP handler the
-// browser and watchdog poll — a blocking lock would pin an HTTP connection
-// behind the turn (the "stuck session" class, see AGENTS). While a turn holds
-// the lock it cannot yet be paused on an ask (the pause and the unlock happen
-// together when the step returns), so reporting nothing is correct; any ask it
-// does raise arrives over SSE.
+// TWO SOURCES, because they are visible under OPPOSITE lock conditions:
+//
+//   - Sub-agent asks come from as.childAsks, which has its own mutex and NEVER
+//     takes as.mu. They must be read unconditionally: runTurn holds as.mu for the
+//     whole turn, and a synchronous sub-agent dispatch parks INSIDE that turn, so
+//     a locked-out read would hide the ask for exactly as long as the ask exists.
+//     That is the bug this path exists to fix — the sub-agent aborted mid-work
+//     and its run was recorded as done, with no dialog and no error (see
+//     docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md).
+//   - Main-agent asks are PERMISSION_ASK sentinels in the resident transcript,
+//     read under a non-blocking TryLock on purpose: this runs inside the
+//     reconcile HTTP handler the browser and watchdog poll, and a blocking lock
+//     would pin an HTTP connection behind the turn (the "stuck session" class,
+//     see CLAUDE.md). While a turn holds the lock it cannot yet be paused on an
+//     ask (the pause and the unlock happen together when the step returns), so
+//     reporting nothing is correct for THIS source; its ask arrives over SSE.
 func (h *Handler) livePendingAsks(id string) *PendingAsks {
 	as := h.lookupAgentSession(id)
 	if as == nil {
 		return nil
 	}
+	// Registry first, and without as.mu — this is the only source that is
+	// readable while the turn lock is held.
+	childEvents := as.childAsks.list()
 	if !as.mu.TryLock() {
-		return nil
+		if len(childEvents) == 0 {
+			return nil
+		}
+		return &PendingAsks{Permissions: childEvents}
 	}
 	defer as.mu.Unlock()
-	return pendingAsksFromMessages(as.messages)
+
+	msgs := pendingAsksFromMessages(as.messages)
+	if msgs == nil && len(childEvents) == 0 {
+		return nil
+	}
+	if msgs == nil {
+		return &PendingAsks{Permissions: childEvents}
+	}
+	if len(childEvents) == 0 {
+		return msgs
+	}
+	// Merge, main agent first: that is the order the transcript scan already
+	// established and the newest ask is what the client shows. Dedup is
+	// unnecessary — a main-agent ask lives in the transcript and a sub-agent ask
+	// only in the registry, never both.
+	msgs.Permissions = append(msgs.Permissions, childEvents...)
+	return msgs
 }
 
 // pendingAsksFromMessages extracts unresolved asks from the trailing tool

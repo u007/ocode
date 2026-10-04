@@ -2,7 +2,6 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -68,18 +67,19 @@ func claudePatternMatches(command, pattern string) bool {
 }
 
 // claudeSettingsFile mirrors the shape of .claude/settings.json relevant to
-// permissions. Only permissions.allow/deny/ask are read; other keys are ignored.
+// permissions. Only permissions.allow/ask are read; other keys are ignored.
+// permissions.deny is deliberately NOT read: ocode's banned commands come only
+// from its own config (/ban), never from Claude Code's.
 type claudeSettingsFile struct {
 	Permissions struct {
 		Allow []string `json:"allow"`
-		Deny  []string `json:"deny"`
 		Ask   []string `json:"ask"`
 	} `json:"permissions"`
 }
 
 // claudeSettingsPaths returns the ordered list of Claude settings files to
 // merge for workDir. Global user settings come first; project files follow so
-// they are additive. Merge is union — a deny at any level is in force.
+// they are additive. Merge is union — an ask at any level is in force.
 func claudeSettingsPaths(workDir string) []string {
 	var paths []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
@@ -93,21 +93,20 @@ func claudeSettingsPaths(workDir string) []string {
 	return paths
 }
 
-func loadClaudeSettingsFile(path string) (allow, deny, ask []string) {
+func loadClaudeSettingsFile(path string) (allow, ask []string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	var f claudeSettingsFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, nil, nil
+		return nil, nil
 	}
-	return f.Permissions.Allow, f.Permissions.Deny, f.Permissions.Ask
+	return f.Permissions.Allow, f.Permissions.Ask
 }
 
 // addClaudeRule classifies a single Claude permission string into the
-// manager's bash-specific allow/deny/ask buckets. Non-Bash tools are ignored
-// for now (the primary request is bash command allow/ban).
+// manager's bash-specific allow/ask buckets. Non-Bash tools are ignored.
 func (pm *PermissionManager) addClaudeRule(raw string, level PermissionLevel) {
 	tool, pattern, ok := parseClaudePermission(raw)
 	if !ok {
@@ -125,15 +124,6 @@ func (pm *PermissionManager) addClaudeRule(raw string, level PermissionLevel) {
 		} else {
 			pm.claudeBashAllow = append(pm.claudeBashAllow, pattern)
 		}
-	case PermissionDeny:
-		if pattern == "" {
-			if pm.claudeBareDeny == nil {
-				pm.claudeBareDeny = make(map[string]bool)
-			}
-			pm.claudeBareDeny["bash"] = true
-		} else {
-			pm.claudeBashDeny = append(pm.claudeBashDeny, pattern)
-		}
 	case PermissionAsk:
 		if pattern == "" {
 			if pm.claudeBareAsk == nil {
@@ -147,62 +137,28 @@ func (pm *PermissionManager) addClaudeRule(raw string, level PermissionLevel) {
 }
 
 // LoadClaudePermissions (re)loads Claude Code's .claude/settings.json allow/
-// deny/ask rules for workDir. It merges global (~/.claude/settings.json) with
+// ask rules for workDir. It merges global (~/.claude/settings.json) with
 // project (.claude/settings.json) and local (.claude/settings.local.json).
-// Deny always wins over ask over allow — matching is enforced at Decide time.
+// Ask wins over allow — matching is enforced at Decide time. Claude's deny
+// rules are not loaded.
 func (pm *PermissionManager) LoadClaudePermissions(workDir string) {
 	if pm == nil {
 		return
 	}
 	// Reset previous Claude rules.
 	pm.claudeBashAllow = nil
-	pm.claudeBashDeny = nil
 	pm.claudeBashAsk = nil
-	pm.claudeBareDeny = nil
 	pm.claudeBareAsk = nil
 
 	for _, p := range claudeSettingsPaths(workDir) {
-		allow, deny, ask := loadClaudeSettingsFile(p)
+		allow, ask := loadClaudeSettingsFile(p)
 		for _, raw := range allow {
 			pm.addClaudeRule(raw, PermissionAllow)
-		}
-		for _, raw := range deny {
-			pm.addClaudeRule(raw, PermissionDeny)
 		}
 		for _, raw := range ask {
 			pm.addClaudeRule(raw, PermissionAsk)
 		}
 	}
-}
-
-// claudeDenyRule returns the first Claude Bash deny pattern that matches
-// command. The pattern is returned (not just a bool) so a Deny decision can
-// name the exact rule the user configured — e.g. "Bash(git stash *)" — instead
-// of a generic "permission rules" message. A bare "Bash" deny (which blocks
-// every command) yields the synthetic pattern "*".
-func (pm *PermissionManager) claudeDenyRule(command string) (string, bool) {
-	if pm == nil {
-		return "", false
-	}
-	if pm.claudeBareDeny != nil && pm.claudeBareDeny["bash"] {
-		return "*", true
-	}
-	cmd := strings.TrimSpace(command)
-	for _, pat := range pm.claudeBashDeny {
-		if claudePatternMatches(cmd, pat) {
-			return pat, true
-		}
-	}
-	return "", false
-}
-
-// formatClaudeDenyReason renders a matched Claude Bash deny pattern for a
-// DenyReason. The "*" pattern is the synthetic form of a bare "Bash" deny.
-func formatClaudeDenyReason(pattern string) string {
-	if pattern == "" || pattern == "*" {
-		return "Claude Code deny rule Bash (all bash commands)"
-	}
-	return fmt.Sprintf("Claude Code deny rule %q in .claude/settings.json", "Bash("+pattern+")")
 }
 
 func (pm *PermissionManager) claudeIsAsk(command string) bool {
