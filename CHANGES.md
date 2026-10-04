@@ -90,6 +90,7 @@
   `discovery-typesafe-judge`, `doc-search-relevance-judge` and
   `auto-permission-enforced-categories` record the per-slot keys, the
   non-cached nil, and the hardened `rm` boundary.
+- **Version Bump** — 0.8.123 → 0.8.125
 
 ## 2026-10-04 — Pulse: each card streams multiple lines instead of one clipped line
 
