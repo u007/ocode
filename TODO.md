@@ -4586,12 +4586,56 @@ identified and deliberately left out of that change.
       Previous read at 0xc0003a80d0 by goroutine 22:
         agent.(*Agent).WorkDir()     internal/agent/agent.go:3135
       ```
-      So `a.workDir = dir` (agent.go:3157) is written without holding `a.mu` (declared at
-      agent.go:59) while `WorkDir()` (agent.go:3135) and `effectiveWorkDir()` read it — 21 read
-      sites across `internal/agent/`. NOTE: those line numbers WILL drift — a peer session is
-      editing `agent.go` right now — so locate the race by FUNCTION NAME (`(*Agent).SetWorkDir`'s
-      `a.workDir = dir` write vs `(*Agent).WorkDir`'s read), not by line, and re-derive the
-      numbers before acting. The probe asserted the race EXISTS, so it fails once the code
+      So `a.workDir = dir` is written while `(*Agent).WorkDir` reads it — 21 read sites across
+      `internal/agent/`. CORRECTION: an earlier revision of this entry said the write was "without
+      holding `a.mu` (declared at agent.go:59)". That was WRONG on both counts — `Agent` has no
+      generic `a.mu` field at all (it has purpose-specific mutexes: `dirMDMu`, `preloadedContextMu`,
+      `compactMu`, `recapMu`, `subagentDispatchMu`, …), and agent.go:59 is `injectionQueue.mu`, a
+      nested struct's field. The accurate statement is simply: **no lock guards `workDir`.**
+      NOTE: line numbers WILL drift — a peer session is editing `agent.go` — so locate the race by
+      FUNCTION NAME (`(*Agent).SetWorkDir`'s `a.workDir = dir` write vs `(*Agent).WorkDir`'s read),
+      not by line, and re-derive the numbers before acting.
+      WIDER FINDING — ALSO PROVEN, and independent of `SetWorkDir`: the env-prompt cache is
+      unsynchronized in BOTH directions. `(*Agent).environmentPrompt` (prompt.go) READS the six
+      `envPrompt*` fields to decide cache validity (~line 284) and WRITES them to store the result
+      (~lines 367-372); `clearEnvironmentPromptCache` (agent.go ~5728-5733) writes the same six.
+      Nothing guards them — `preloadedContextMu` guards `preloadedContext`, a DIFFERENT field (all
+      its sites are agent.go 1140-1188). A second throwaway `-race` probe (4 goroutines looping
+      `environmentPrompt()` + 1 looping `clearEnvironmentPromptCache()`) reports SIX races,
+      including `environmentPrompt` racing WITH ITSELF:
+      ```
+      prompt.go:284 (read) vs agent.go:5728 (clear write)
+      prompt.go:367 (write) vs prompt.go:284 (read)
+      prompt.go:368 (write) vs prompt.go:285 (read)
+      prompt.go:369 (write) vs prompt.go:284 (read)
+      prompt.go:370 (write) vs prompt.go:284 (read)
+      prompt.go:372 (write) vs prompt.go:284 (read)
+      ```
+      Readers are on the system-prompt path: `BasePromptMessages` -> `environmentPrompt()`
+      (prompt.go:153) and `PrepareMessages` reads `envPromptDate` (prompt.go:91). Probe deleted
+      after capturing the report (same reason as above: it asserts races exist).
+      ONE DEFECT, SIX FIELDS — the six reports are not six independent bugs. `envPromptDate`,
+      `envPromptStr`, `envPromptCwd`, `envPromptRoot`, `envPromptEnvHash`, `envPromptHarness`
+      (agent.go:777-782) are six adjacent strings, so the detector reports one race per distinct
+      memory location. All six share one cause: no lock on the cluster.
+      PRODUCTION CONCURRENT PAIR — found by READING the call paths, NOT observed in production.
+      The probe above called the two methods directly from synthetic goroutines; it did not drive
+      the real handler path, so treat this pair as a plausible vector, not a captured event:
+        - A: TURN goroutine -> `PrepareMessages` (reads `envPromptDate`, prompt.go:91) and
+          `BasePromptMessages` -> `environmentPrompt()` (reads+writes, prompt.go:284/367-372).
+        - B: HANDLER goroutine -> `contextbudget.Build` (contextbudget.go:128) calls
+          `ag.BasePromptMessages()` -> `environmentPrompt()` on the SAME Agent. Reached from the
+          TUI `/context` command (tui/model.go:14186) and the HTTP `/context` endpoint
+          (server/handler.go:2301) — which the web context gauge POLLS while a turn runs.
+      What IS proven is the primitive-level race (the six `-race` reports above). What is NOT
+      proven is that a user hitting `/context` during a live turn actually lands two goroutines in
+      those functions on one Agent; confirm that with a test at the handler level before treating
+      the production path as demonstrated. If it holds, this is reachable without `/cd` at all.
+      ALL SIX `envPrompt*` FIELDS ARE IN THE CACHED SYSTEM PREFIX (`BasePromptMessages` emits the
+      env block as system-role). Any fix MUST keep the emitted `<env>` text byte-stable for an
+      unchanged workdir/date, or it busts the prompt cache every turn —
+      see docs/concepts/prompt-cache-stability.md. Do not add per-turn content to make the
+      locking easier. The probe asserted the race EXISTS, so it fails once the code
       is fixed and cannot be merged as-is; it was deleted after capturing the report. Re-create it
       when fixing, or assert the post-fix invariant instead.
       SCOPE — do NOT patch `workDir` alone. `SetWorkDir` mutates a whole cluster unsynchronized:
@@ -4682,5 +4726,7 @@ earlier one is dropped), while `PERMISSION_REQUEST` already queues into
 first prompt on web. It needs its own change because of the reopenable-dialog
 contract (`QUESTION_HIDE` / `QUESTION_SHOW`, `hiddenQuestionRequestId`,
 `QuestionDialog` X/Escape) — a queue must not resurrect a locally hidden prompt.
-Tests for the TUI half: `internal/tui/question_ask_queue_test.go` (7 cases, 10/10
-mutants caught).
+Tests for the TUI half: `internal/tui/question_ask_queue_test.go` (10 cases, 10/10
+mutants caught), including lifecycle coverage: cancelling the turn drops both
+queues and both dialogs; `/reset-id` refuses while any ask is pending; and
+`handleCompactCmd` refuses too (it previously had no ask guard at all).

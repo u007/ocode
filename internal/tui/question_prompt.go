@@ -123,11 +123,20 @@ func (m *model) promoteNextQuestionAsk() bool {
 
 // clearQuestionAskState drops the dialog and every queued prompt. Called wherever
 // the transcript is rebuilt from a different session (session load, /new, an /rc
-// rewind): a prompt names a tool call in the round that produced it, so keeping
-// it would collect an answer against a transcript that no longer holds that call.
+// rewind), and on turn cancel: a prompt names a tool call in the round that
+// produced it, so keeping it would collect an answer against a transcript that no
+// longer holds that call.
+//
+// The teardown is conditional on a prompt actually being open. clearQuestionPrompt
+// reaches into the question textarea, whose viewport bubbles only allocates once
+// startQuestionPrompt has run; tearing down a slot that was never opened nil-derefs
+// on a model that never started one (`/new` on a fresh session).
 func (m *model) clearQuestionAskState() {
 	m.questionAskQueue = nil
-	m.clearQuestionPrompt()
+	m.rcPendingQuestion = nil
+	if m.showQuestionDialog || len(m.questionPrompts) > 0 || m.questionToolCallID != "" {
+		m.clearQuestionPrompt()
+	}
 }
 
 func (m *model) renderQuestionDialog(width int) string {

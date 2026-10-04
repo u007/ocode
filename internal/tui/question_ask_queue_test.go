@@ -313,3 +313,134 @@ func TestQuestionQueue_QuestionFirstThenPermissionQueuesInTheOtherFifo(t *testin
 		t.Error("showQuestionDialog = true as well; only ONE modal dialog may be open at a time")
 	}
 }
+
+// ── lifecycle ────────────────────────────────────────────────────────────────
+//
+// An ask names a tool call in the round that produced it. Once that round is
+// gone — cancelled, compacted away, or rekeyed to a new session — the ask is
+// meaningless, and answering it would act on a transcript that no longer holds
+// the call. These pin the paths that must therefore refuse or drop.
+
+// Cancelling the turn makes the round's asks void. Leaving them queued would let
+// the user answer one and run its tool against a turn they already stopped, with
+// the rest stranded behind a dialog for a round that will never resume.
+func TestQuestionQueue_TurnCancelDropsBothQueues(t *testing.T) {
+	m := newPermQueueTestModel(t)
+	m = deliverAsks(t, m,
+		permAskToolMsg(t, "call_a", "webfetch", "https://a.example"),
+		permAskToolMsg(t, "call_b", "webfetch", "https://b.example"),
+	)
+	if !m.showPermDialog || len(m.permAskQueue) != 1 {
+		t.Fatalf("precondition: dialog=%v queue=%d", m.showPermDialog, len(m.permAskQueue))
+	}
+	m.streaming = true
+
+	upd, _ := m.handleEscKey()
+	after := upd.(model)
+	if after.showPermDialog {
+		t.Error("showPermDialog = true after cancelling the turn; the round's asks are void")
+	}
+	if len(after.permAskQueue) != 0 {
+		t.Errorf("permAskQueue = %+v, want empty after cancel", after.permAskQueue)
+	}
+	if after.pendingToolCallID != "" || after.pendingPermission.ToolName != "" {
+		t.Errorf("stale permission slot survived cancel: callID=%q tool=%q",
+			after.pendingToolCallID, after.pendingPermission.ToolName)
+	}
+	if len(after.questionAskQueue) != 0 || after.showQuestionDialog || after.questionToolCallID != "" {
+		t.Errorf("question state survived cancel: queue=%d dialog=%v callID=%q",
+			len(after.questionAskQueue), after.showQuestionDialog, after.questionToolCallID)
+	}
+}
+
+// /reset-id deletes the old transcript, so it must refuse while any ask is
+// outstanding. Before this, the guard tested only m.showPermDialog, which missed
+// both a queued ask and an open QUESTION dialog entirely.
+func TestQuestionQueue_ResetIDRefusedWhileAnAskIsPending(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(m model) model
+	}{
+		{"permission dialog", func(m model) model {
+			return deliverAsks(t, m, permAskToolMsg(t, "call_a", "webfetch", "https://a.example"))
+		}},
+		{"queued permission ask", func(m model) model {
+			return deliverAsks(t, m,
+				permAskToolMsg(t, "call_a", "webfetch", "https://a.example"),
+				permAskToolMsg(t, "call_b", "webfetch", "https://b.example"))
+		}},
+		{"question dialog", func(m model) model {
+			return deliverAsks(t, m, questionToolMsg(t, "q_a", askOne("Scope", "Which package?")))
+		}},
+		{"queued question prompt", func(m model) model {
+			return deliverAsks(t, m,
+				questionToolMsg(t, "q_a", askOne("Scope", "Which package?")),
+				questionToolMsg(t, "q_b", askOne("Deploy", "Staging or prod?")))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tc.setup(newPermQueueTestModel(t))
+			before := m.sessionID
+			m.handleResetIDCmd(nil)
+			if m.sessionID != before {
+				t.Errorf("sessionID changed %q -> %q; /reset-id must refuse while an ask is pending",
+					before, m.sessionID)
+			}
+			if !m.anyAskPending() {
+				t.Error("anyAskPending() = false after a refused /reset-id; the ask was dropped instead of preserved")
+			}
+		})
+	}
+}
+
+// Manual compaction rewrites the transcript the round's tool_calls live in, so
+// handleCompactCmd must refuse while any ask is outstanding. It had NO guard at
+// all: typing is blocked while a dialog is up, but an instant dispatch or a
+// queued command drained later can still reach it, and compacting under a pending
+// ask turns that ask into an orphan whose tool recoverOrphanedToolCalls re-runs.
+func TestQuestionQueue_ManualCompactRefusedWhileAnAskIsPending(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(m model) model
+	}{
+		{"permission dialog", func(m model) model {
+			return deliverAsks(t, m, permAskToolMsg(t, "call_a", "webfetch", "https://a.example"))
+		}},
+		{"question dialog", func(m model) model {
+			return deliverAsks(t, m, questionToolMsg(t, "q_a", askOne("Scope", "Which package?")))
+		}},
+		{"queued question prompt", func(m model) model {
+			return deliverAsks(t, m,
+				questionToolMsg(t, "q_a", askOne("Scope", "Which package?")),
+				questionToolMsg(t, "q_b", askOne("Deploy", "Staging or prod?")))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tc.setup(newPermQueueTestModel(t))
+			if !m.anyAskPending() {
+				t.Fatal("precondition: no ask pending")
+			}
+			m.handleCompactCmd(nil)
+			if m.pendingCompactUIIdx != nil {
+				t.Error("compaction started while an ask was pending; the ask would be orphaned and its tool re-executed")
+			}
+			if m.pendingCompactManual {
+				t.Error("pendingCompactManual = true after a refused compaction")
+			}
+			// The refusal must be visible, and must not have consumed the ask.
+			refused := false
+			for _, msg := range m.messages {
+				if msg.text == "Cannot compact while a permission or question prompt is pending \u2014 answer it first." {
+					refused = true
+				}
+			}
+			if !refused {
+				t.Error("no refusal message shown; the command failed silently")
+			}
+			if !m.anyAskPending() {
+				t.Error("anyAskPending() = false after a refused compaction; the ask was dropped instead of preserved")
+			}
+		})
+	}
+}

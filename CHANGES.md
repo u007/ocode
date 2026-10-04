@@ -45,6 +45,23 @@
 - Tests: `internal/tui/question_ask_queue_test.go` (7 cases, including both
   cross-kind orderings). Mutation-verified — **10/10** mutants caught, each
   confirmed to compile first.
+- **Lifecycle: an ask must not outlive the round that raised it.** Three paths
+  leaked:
+  - `/reset-id` and the background-job resume path guarded on `showPermDialog`
+    only, so a **queued** ask, an open **question** dialog, or a parked
+    sub-agent `respCh` slipped through. `/reset-id` deletes the old transcript,
+    so answering afterwards targeted a dead session; both now test
+    `anyAskPending()`.
+  - **`handleCompactCmd` had no ask guard at all.** Typing is blocked while a
+    dialog is up, but an instant dispatch or a queued command drained later can
+    still reach it — and compacting under a pending ask turns it into an orphan
+    whose tool `recoverOrphanedToolCalls` re-runs behind the user's back. It now
+    refuses with a visible message.
+  - **Cancelling the turn did not drop the queues.** A cancelled round's asks are
+    void; leaving them let the user answer one and run its tool against a turn
+    they had already stopped, with the rest stranded behind a dialog for a round
+    that would never resume. `handleEscKey` now clears both queues and both
+    dialogs.
 
 ## 2026-10-04 — A second permission ask no longer replaces the first in the TUI
 

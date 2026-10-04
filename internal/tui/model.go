@@ -4840,7 +4840,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// result splice against the wrong (or nil) mapping, silently discarding
 		// it. pendingCompactUIIdx is set synchronously at compaction start, so
 		// it covers the whole window (including before compactStartedMsg lands).
-		if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.showPermDialog {
+		// anyAskPending subsumes showPermDialog and additionally covers a queued
+		// ask and an open QUESTION dialog. Compaction rebuilds the transcript, so
+		// it must not run while a round's decisions are still outstanding.
+		if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.anyAskPending() {
 			m.pendingJobMsgs = append(m.pendingJobMsgs, injected)
 		} else {
 			m.messages = append(m.messages, message{
@@ -7038,6 +7041,11 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		m.lastActivity = agent.ActivitySnapshot{}
 	}
 	if m.streaming {
+		// A cancelled round's asks are void: their tool calls belong to a turn that
+		// will never resume. Drop both queues and the dialogs rather than leaving
+		// the user to answer for dead work.
+		m.clearPermAskState()
+		m.clearQuestionAskState()
 		epoch := m.agentEpoch
 		return m, func() tea.Msg { return streamDoneMsg{err: context.Canceled, epoch: epoch} }
 	}
@@ -11431,6 +11439,18 @@ func (m *model) handleCompactCmd(args []string) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Compaction requires an LLM connection. Run /connect first."})
 		return
 	}
+	// Compaction rewrites the transcript the round's tool_calls live in, so it
+	// must not start while a decision is outstanding: the ask would become an
+	// orphan and recoverOrphanedToolCalls would re-execute its tool behind the
+	// user's back. anyAskPending covers the permission dialog, a queued ask, a
+	// parked sub-agent respCh, the question dialog and a queued question prompt.
+	// Typing is already blocked while a dialog is up, so this is defence for the
+	// other ways in (an instant dispatch, a queued command drained later).
+	if m.anyAskPending() {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot compact while a permission or question prompt is pending — answer it first."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 	if len(agentMsgs) == 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Nothing to compact yet."})
@@ -11926,7 +11946,10 @@ func (m *model) handleResetIDCmd(args []string) {
 		m.rerenderTranscriptAndMaybeScroll()
 		return
 	}
-	if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.showPermDialog {
+	// anyAskPending subsumes showPermDialog and additionally covers a queued ask
+	// and an open QUESTION dialog. /reset-id deletes the old transcript, so
+	// answering a still-pending ask afterwards would target a dead session.
+	if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.anyAskPending() {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot reset the session id while a turn is running."})
 		m.rerenderTranscriptAndMaybeScroll()
 		return
