@@ -30,6 +30,7 @@ import BrowserForm from "./BrowserForm";
 import VaultForm from "./VaultForm";
 import TTSForm from "./TTSForm";
 import ChatDisplayForm from "./ChatDisplayForm";
+import QuickActionsForm from "./QuickActionsForm";
 import ConnectorsForm from "./ConnectorsForm";
 
 export type SettingsGroupId =
@@ -45,6 +46,7 @@ export type SettingsGroupId =
   | "compact"
   | "speech-summary"
   | "chat-display"
+  | "quick-actions"
   | "advisor"
   | "permissions"
   | "system-permissions"
@@ -85,6 +87,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "compact", label: "Compact" },
   { id: "speech-summary", label: "Speech Summary" },
   { id: "chat-display", label: "Chat display" },
+  { id: "quick-actions", label: "Quick actions" },
   { id: "advisor", label: "Advisor" },
   { id: "permissions", label: "Permissions" },
   { id: "system-permissions", label: "System Permissions" },
@@ -144,6 +147,8 @@ function renderGroup(id: SettingsGroupId) {
       return <SpeechSummaryForm />;
     case "chat-display":
       return <ChatDisplayForm />;
+    case "quick-actions":
+      return <QuickActionsForm />;
     case "advisor":
       return <AdvisorForm />;
     case "permissions":

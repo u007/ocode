@@ -91,10 +91,16 @@ re-verify — a bad import is a build error, and `npm run typecheck` is the gate
 
 Compact and Recap survive as pure text: `/compact` and `/recap` are real slash
 commands, and `dispatchCommand` already routes them. **Continue cannot be.** Its
-built-in behaviour is context-aware: when a turn was interrupted the pill
-relabels to "Resume" and calls `handleResume()` instead of sending anything. A
-uniform label+icon+message entry cannot reproduce that — edit it to "keep going"
-and clicking it mid-interruption would start a *new* turn instead of resuming.
+built-in behaviour is context-aware: when a turn was interrupted the pill calls
+`handleResume()` instead of sending anything. A uniform label+icon+message entry
+cannot reproduce that — edit it to "keep going" and clicking it mid-interruption
+would start a *new* turn instead of resuming.
+
+Note what this deliberately gives up: the old hardcoded pill relabelled itself to
+"Resume" while a turn was interrupted. The shipped pill **does not**. The label is
+user-controlled, so it stays whatever the user set; the tooltip gains
+`— resume the interrupted turn` instead. Pinned by a test named "keeps the
+configured label".
 
 So the Continue preset carries `seed: "continue"`, which enables
 resume-if-interrupted. The seed governs **only** that one behaviour. Label,
@@ -227,11 +233,18 @@ being read for the wrapper and is consulted only inside `visibleChips`.
 
 ## Migration
 
-`quick_actions` absent ⇒ GET returns the seeds. **The server does not write a
-default to disk.** Until the user saves from settings, `ocodeconfig.json` is
-byte-unchanged, so a fresh install and every existing install render the same
-three pills in the same order. This is the compatibility guarantee: the feature
-is additive and its out-of-the-box state is today's behaviour.
+`quick_actions` absent ⇒ GET returns the seeds, and **the loader never writes
+anything**. So a fresh install renders the same three pills in the same order: the
+feature is additive and its out-of-the-box state is today's behaviour.
+
+What is *not* true is that the file stays byte-unchanged until you save from
+settings. `writeOcodeConfigFile` rewrites the whole config whenever ANY setting is
+saved, and its payload always includes `quick_actions`, so the first unrelated save
+— a permission toggle, a plugin toggle — materialises the seeded block. That is
+deliberate and load-bearing (without it, chip edits would never persist) and it
+matches the sibling key added one line above, `chat_verbosity`, which is also
+always written and also normalised. The observable behaviour is identical either
+way, because the loader seeds exactly the values the payload would have written.
 
 ## Testing
 

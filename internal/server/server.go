@@ -482,6 +482,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/chat-verbosity", s.authMiddleware(s.handler.HandleGetChatVerbosityConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/chat-verbosity", s.authMiddleware(s.handler.HandleSetChatVerbosityConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/quick-actions", s.authMiddleware(s.handler.HandleGetQuickActionsConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/quick-actions", s.authMiddleware(s.handler.HandleSetQuickActionsConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/profile-debug", s.authMiddleware(s.handleGetProfileDebugConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/profile-debug", s.authMiddleware(s.handleSetProfileDebugConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleGetPluginsEnabledConfig))

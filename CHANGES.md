@@ -879,7 +879,9 @@ that one preset carries a hidden `seed` marker for it. Two more states are
 derived rather than stored, so they cannot drift when a chip's message is edited:
 a chip pointing at a compaction dims while one is running, and seeded chips hide
 on an empty session while custom ones stay. The strip's visibility gate therefore
-moved out of the JSX wrapper and into the chip itself.
+moved out of the JSX wrapper and into the chip itself. The Continue pill no longer
+relabels itself to "Resume" when a turn was interrupted — the label stays what the
+user configured, and the tooltip carries the hint.
 
 **Tests:** `TestSaveAndLoadOcodeQuickActionsPreservesEmptyStrip` (a `nil` versus
 empty-slice distinction, without which deleting every chip resurrects the
