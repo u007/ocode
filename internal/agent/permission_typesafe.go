@@ -529,7 +529,7 @@ func (a *Agent) buildTypesafePermissionState(toolName string, args json.RawMessa
 			// detectExecutedCustomScripts — the same detector the chat judge and
 			// verifyAutoGrant's truncation guard use — so the three paths cannot
 			// disagree about which files run. Additive: it decides nothing.
-			if scripts := a.executedScriptsForJudge(judgeCmd, maxLinesPerSource, maxSources); len(scripts) > 0 {
+			if scripts := a.executedScriptsForJudge(judgeCmd, a.executedScriptLineCap(), maxSources); len(scripts) > 0 {
 				entries := make([]map[string]any, 0, len(scripts))
 				for _, s := range scripts {
 					if interpreterEntrypoint != "" && s.Path == interpreterEntrypoint {

@@ -43,17 +43,17 @@ Two independent timeouts and a retry budget, all in the `compact` section of `oc
 Storage and runtime are deliberately two-stage:
 
 - **Persist (`applyCompactConfig`, `internal/config/ocodeconfig.go:2116`)** — copies an explicitly-present value verbatim, **including `0`**. An explicit `0` round-trips as `0`; it is never silently rewritten on disk.
-- **Resolve (`resolveCompactRuntime`, `internal/agent/agent.go:2141`)** — the only place that normalizes: `summary_first_token_timeout_seconds <= 0` → **300** (`agent.go:2190-2192`), `summary_timeout_seconds <= 0` → **600** (`agent.go:2186-2188`).
+- **Resolve (`resolveCompactRuntime`, `internal/agent/agent.go:2227`)** — the only place that normalizes: `summary_first_token_timeout_seconds <= 0` → **300** (`agent.go:2276-2278`), `summary_timeout_seconds <= 0` → **600** (`agent.go:2272-2274`).
 
 So the semantics of an explicit `0` **for the two timeouts** are *"use the runtime default"* (300 / 600), **not** "disable this timeout". Config cannot turn either timeout off; the `idle <= 0` plain-context branch inside `inactivityContextWithParent` is defense-in-depth unreachable through normal config resolution. Absent key → default 300; no migration.
 
 `summary_max_retries` is the third knob and behaves differently:
 
 - **Default `1`** comes from `defaultCompactConfig` (`internal/config/ocodeconfig.go:1218`); `LoadOcodeConfig` starts from `defaultOcodeConfig()` (`ocodeconfig.go:1373`, `Compact: defaultCompactConfig()` at `:1257`) and overlays the file, so an absent key → `1`.
-- `resolveCompactRuntime` only clamps **negatives** to `0` (`agent.go:2194-2196`) — there is no `<= 0 → default` normalization — so an explicit `0` really means **no retries**.
+- `resolveCompactRuntime` only clamps **negatives** to `0` (`agent.go:2280-2282`) — there is no `<= 0 → default` normalization — so an explicit `0` really means **no retries**.
 - Semantics live entirely in `runSummaryCall` (`internal/agent/compact.go:888`), which the batched (`runSummary`) and inline (`runInlineSummary`) paths both call; `runSummary` (`compact.go:856`) only caps `max_tokens` and delegates to it. `maxAttempts := maxRetries + 1` (`compact.go:891-893`), and **one additional attempt is reserved for a malformed (template-violating) summary** even when `maxRetries` is `0` (`compact.go:896-898` — the extra attempt is only taken when a malformed summary was already recorded). Backoff between attempts is `attempt × 500 ms` (`compact.go:902`).
 - A malformed summary that survives all attempts is returned as a **degraded success** (`compact.go:945-950`) — the batch and the pass succeed and the transcript shrinks, so (relevant to §5) a degraded success does **not** arm the stop-after-failure latch.
-- `runCompact` passes the resolved value through per batch (`agent.go:2858`).
+- `runCompact` passes the resolved value through per batch (`agent.go:2944`).
 
 **API / UI:** `GET|PUT /api/config/ocode/compact` (`internal/server/server.go:412-413`) serve the raw persisted values; the web `CompactForm` (`web/src/components/Settings/CompactForm.tsx:23`, rows "First-token timeout (s)" / "Summary max retries" at `:18-19`) edits them through `api.getCompactConfig`/`setCompactConfig` (`web/src/api/client.ts:1055`, `:1061`).
 
@@ -62,7 +62,7 @@ So the semantics of an explicit `0` **for the two timeouts** are *"use the runti
 ```
 web /compact  →  POST /api/sessions/{id}/compact  (server.go:351)
   → HandleCompactSession (handler.go:1871)
-  → Agent.CompactWithFocus → runCompact (agent.go:2724)
+  → Agent.CompactWithFocus → runCompact (agent.go:2810)
        resolveCompactRuntime → chunkMiddleByBudget (batches)
        operationCtx = newCompactOperationContext()   ← fixed 30-min cap
        for each batch:
@@ -78,7 +78,7 @@ web /compact  →  POST /api/sessions/{id}/compact  (server.go:351)
 
 Key properties (all implemented, tested):
 
-1. **Fresh inactivity context per batch** — `agent.go:2849` constructs the window *inside* the batch loop, so batch N gets a full deadline instead of the residual of batch N-1 (`TestRunCompactGivesEachBatchFreshTimeout`).
+1. **Fresh inactivity context per batch** — `agent.go:2935` constructs the window *inside* the batch loop, so batch N gets a full deadline instead of the residual of batch N-1 (`TestRunCompactGivesEachBatchFreshTimeout`).
 2. **First-token window, then idle window** — `inactivityContextWithParent` (`compact.go:1137`) starts at `initial` (first-token timeout) and, after the first delta-driven `reset()`, switches to `idle` (`summary_timeout_seconds`) for subsequent gaps (`TestInactivityContextGivesFirstTokenItsOwnWindow`). Retries within a single batch share that batch's first-token window; the first successful streamed token switches that batch to the configured idle timeout, and a new batch gets a new first-token window.
 3. **Fixed 30-minute overall cap** — `compactOverallCap = 30 * time.Minute` (`compact.go:217`, a var so tests can shorten it) bound via `context.WithTimeoutCause(..., ErrCompactionTimeout)` (`compact.go:243`). It is an *operation* bound, not an idle bound: per-batch contexts are its children, so a batch that is **still receiving tokens** is aborted at the cap (`TestRunCompactOverallCapStopsAnActiveBatch`).
 4. **No partial mutation** — `runCompact` returns `CompactResult{OK:false, Err}` before any splice; `HandleCompactSession` only rewrites `as.messages` when `result.OK` (the `!result.OK` early return is `handler.go:1921`, the splice `handler.go:1969-1975`). Failed compaction leaves the transcript byte-identical (asserted by `TestCompactSessionTimeoutReturns504AndLeavesTranscriptUnchanged`).
@@ -137,10 +137,10 @@ Because a failed pass leaves the transcript untouched (§2 property 4), the cont
 
 ### Backend latch (`internal/agent`)
 
-- `Agent.compactFailed` (atomic.Bool, `internal/agent/agent.go:741-751`) latches **ON** when a pass returns a non-nil `CompactResult.Err` and **OFF** when a pass returns `OK: true` — both recorded by `recordCompactOutcome` (`agent.go:2265-2275`). A pass with `OK=false, Err=nil` (the "nothing to compact" short-circuit, §4's 422 row) does **not** touch the latch — otherwise a session that briefly had no compactible middle would silently lose auto-compaction forever. A user-initiated cancel (`ErrCompactionCanceled`) also leaves the latch alone — see `concepts/compaction-cancellation.md` §6.
-- While latched, `MaybeCompactAsync` (`agent.go:2214`) declines (returns false) after the enabled gate, logging `skipped: auto-compaction stopped after a failed pass; run /compact to retry` (`agent.go:2225-2228`). That single gate covers **every** auto trigger: the TUI `askAgent` pre-flight (`internal/tui/model.go:15814`), the TUI post-turn stream-done check (`model.go:5222`), the server's post-turn checks (`internal/server/agent_session.go:1305`, `handler_sse.go:294`), and the permission/question continuations (`handler_permissions_resolve.go:368`, `handler_questions.go:333`).
-- `Agent.CompactFailed() bool` (`agent.go:2280-2282`) exposes the latch so a UI can explain why the session stopped compacting instead of leaving the user to guess.
-- **Re-arm:** any successful pass clears the latch (`recordCompactOutcome`, called from the async result path `agent.go:2334`, the panic/abort fallback `agent.go:2328`, and the synchronous manual paths `Compact`/`CompactWithFocus` at `agent.go:2382`/`:2396`). A manual `/compact` additionally re-arms unconditionally: `CompactAsync` → `startCompactAsync(force=true)` stores `false` (`agent.go:2305`) **after** the "no LLM client" and `compactMu.TryLock` guards (`agent.go:2290-2297`) — deliberately after them, so a `/compact` that could not start does not resume the loop it was meant to escape. The panic/abort fallback inside `startCompactAsync` (`agent.go:2322-2331`) latches instead, since that pass did not shrink the context either. The web/desktop HTTP path (`CompactWithFocus`, `agent.go:2389-2399`) records its outcome the same way, so a successful manual pass clears the latch there too.
+- `Agent.compactFailed` (atomic.Bool, `internal/agent/agent.go:741-751`) latches **ON** when a pass returns a non-nil `CompactResult.Err` and **OFF** when a pass returns `OK: true` — both recorded by `recordCompactOutcome` (`agent.go:2351-2361`). A pass with `OK=false, Err=nil` (the "nothing to compact" short-circuit, §4's 422 row) does **not** touch the latch — otherwise a session that briefly had no compactible middle would silently lose auto-compaction forever. A user-initiated cancel (`ErrCompactionCanceled`) also leaves the latch alone — see `concepts/compaction-cancellation.md` §6.
+- While latched, `MaybeCompactAsync` (`agent.go:2300`) declines (returns false) after the enabled gate, logging `skipped: auto-compaction stopped after a failed pass; run /compact to retry` (`agent.go:2311-2314`). That single gate covers **every** auto trigger: the TUI `askAgent` pre-flight (`internal/tui/model.go:15814`), the TUI post-turn stream-done check (`model.go:5222`), the server's post-turn checks (`internal/server/agent_session.go:1305`, `handler_sse.go:294`), and the permission/question continuations (`handler_permissions_resolve.go:368`, `handler_questions.go:333`).
+- `Agent.CompactFailed() bool` (`agent.go:2366-2368`) exposes the latch so a UI can explain why the session stopped compacting instead of leaving the user to guess.
+- **Re-arm:** any successful pass clears the latch (`recordCompactOutcome`, called from the async result path `agent.go:2420`, the panic/abort fallback `agent.go:2414`, and the synchronous manual paths `Compact`/`CompactWithFocus` at `agent.go:2468`/`:2396`). A manual `/compact` additionally re-arms unconditionally: `CompactAsync` → `startCompactAsync(force=true)` stores `false` (`agent.go:2391`) **after** the "no LLM client" and `compactMu.TryLock` guards (`agent.go:2376-2383`) — deliberately after them, so a `/compact` that could not start does not resume the loop it was meant to escape. The panic/abort fallback inside `startCompactAsync` (`agent.go:2408-2417`) latches instead, since that pass did not shrink the context either. The web/desktop HTTP path (`CompactWithFocus`, `agent.go:2475-2485`) records its outcome the same way, so a successful manual pass clears the latch there too.
 
 ### TUI: no auto re-dispatch after a failure
 

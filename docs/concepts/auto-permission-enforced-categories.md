@@ -162,6 +162,8 @@ Shell-variable expansion above resolves *names*. It never resolved a `cd`, and t
 
 **It fails closed, and that is the load-bearing property.** Folding converts an ask into an allow, so it happens only for a literal, in-scope, unconditional top-level target. Everything else returns the command byte-identical, so the judge still sees the `cd` and a human decides. Refused: `cd -`, bare `cd`, `cd $VAR`, `cd ~/x`, globs, `$(…)`/backtick and quoted targets, out-of-scope targets, `..` escapes, multi-line commands, and any `cd` following a pipeline, `||`, or control flow. Control flow is a *freeze*, not a blanket refusal: `cd`s before a `for`/`if` still fold (the reported command's own `for` loop must not defeat it), a `cd` after one does not.
 
+**Quoted parens are data.** `stripSubstitutions` blanks all double-quoted literal text (substitutions inside are blanked separately) so a label like `echo "=== git status (short) ==="` is not mistaken for a bare subshell. Before this, such a label made the fold refuse and the judge saw the raw cross-project `cd` (allow@0.70 < 0.80 floor → `deferred_below_floor`). A real bare `( … )`/`{ … }` outside quotes still refuses.
+
 **Not fixed here.** `OutOfScopePath` is still never populated for compound commands, because `shellCompound` (`internal/agent/permissions.go`) makes `firstOutOfScopePath` bail, so `verifyAutoGrant`'s scope guard remains unreachable for them. Folding improves what the judge sees; it does not add a deterministic scope check. Tracked in `TODO.md`.
 
 ## Durable judge log (PERMJUDGE, 2026-09-30)

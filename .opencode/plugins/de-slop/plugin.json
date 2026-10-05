@@ -1,0 +1,7 @@
+{
+  "name": "de-slop",
+  "description": "Remove LLM-isms and AI writing patterns from text — restore natural human voice. Toggle with /plugin enable|disable de-slop.",
+  "version": "1.0.0",
+  "commands": [],
+  "tools": []
+}

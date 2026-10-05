@@ -170,6 +170,7 @@ func TestEnsureHTRServe_NoSupervisorMissing(t *testing.T) {
 // readiness, which would let this test pass or fail on the wrong cause — it did
 // exactly that in an earlier draft.
 func TestEnsureHTRServe_VerifiesReadinessInBackground(t *testing.T) {
+	requireEmbeddedHTRAssets(t)
 	isolateHTROwnerState(t)
 	withStubbedProbes(t, false, false)
 

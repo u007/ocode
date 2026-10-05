@@ -1,0 +1,150 @@
+# Contributor CI. Runs on every pull request and push to main.
+#
+# Scope note: this workflow builds WITHOUT the `htr` build tag on purpose. The
+# HTR bundle is produced from out-of-tree sources (see `make prepare-htr-assets`)
+# and is never committed, so a tagged build cannot work here. The HTR asset
+# tests detect the absent archive and skip with a reason rather than failing.
+# Release builds (`make install`, `make desktop-app`) add `-tags htr`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never let two runs on the same PR fight over CPU; cancel the older one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go build, vet, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A clean checkout has no web build and no HTR bundle. The committed
+      # web/dist/.gitkeep and cmd/ocode-desktop/embedded-assets/.gitkeep let
+      # //go:embed compile, so `go build ./...` works straight away; `web-build`
+      # is only needed to exercise the real SPA in the web job below.
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Guard, not a measured fix: no CI run of this workflow exists yet, so the
+      # real per-package runtime is unmeasured. `internal/server` holds 1200+
+      # test functions in ONE package, and Go's default per-package timeout is
+      # 10m, so a slow runner could panic the package and turn the job red
+      # without pointing at a real defect. Revisit once a run reports timings.
+      - name: Test
+        run: go test -timeout 30m ./...
+
+      # Known-flaky quarantine. These tests are timing- and environment-sensitive
+      # and fail intermittently on unmodified main (verified against pristine HEAD),
+      # so a first failure is retried once before the job fails. If one of these
+      # starts failing consistently, fix it and drop it from this list rather than
+      # leaving it here — a permanently retried test is a silent hole in the gate.
+      #
+      # This retry is a deliberate workaround, kept with EXPLICIT USER APPROVAL
+      # (2026-10-05) — the project rule against retries/fallbacks is overridden
+      # here and nowhere else. It is scoped by `-run` to exactly the two tests
+      # below, so it is never a blanket re-run of the suite. Debt: fix both tests
+      # and delete this step.
+      - name: Retry known-flaky tests (user-approved, scoped)
+        run: |
+          set -uo pipefail
+          for t in \
+            'TestNetworkRowMarksProxyBlockedResponses' \
+            'TestReadinessFailsLoudlyWhenDaemonDiesDuringExec' \
+          ; do
+            echo "retrying $t"
+            go test -timeout 5m ./internal/browse/cdp/ -run "$t" -count=1 || {
+              echo "::error::$t failed on retry — remove it from the quarantine once fixed"
+              exit 1
+            }
+          done
+        if: failure()
+
+      # Prove the tagged build paths still compile. Both tagged inputs are
+      # generated and gitignored — the HTR archive by `make prepare-htr-assets`
+      # (out-of-tree sources) and the models.dev snapshot by `make
+      # models-snapshot` (network) — so CI cannot have either. Build stand-ins
+      # to exercise the //go:embed directives themselves, which fail loudly when
+      # the file is absent and would otherwise never be compiled at all here.
+      - name: Vet with htr and models tags (synthetic inputs)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/htr-stub/extension /tmp/htr-stub/htrcli
+          printf '{"manifest_version":3}' > /tmp/htr-stub/extension/manifest.json
+          printf '#!/bin/sh\nexit 0\n' > /tmp/htr-stub/htrcli/htrcli
+          (cd /tmp/htr-stub && zip -qr "$GITHUB_WORKSPACE/internal/browse/cdp/htr-assets.zip" extension htrcli)
+          printf '{"generated_at":"1970-01-01T00:00:00Z","model_count":1,"providers":{"stub":{"id":"stub","models":{"stub":{"id":"stub","name":"stub"}}}}}\n' \
+            > "$GITHUB_WORKSPACE/internal/agent/models-snapshot.json"
+          go vet -tags "htr models" ./internal/browse/cdp/... ./internal/agent/...
+        shell: bash
+
+  race:
+    name: Go race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # CLAUDE.md calls `go test -race` a real gate here, not a formality. It is
+      # a separate job so it runs in parallel with the plain test job instead of
+      # doubling one job's wall clock, and so a race report is not buried in a
+      # long log.
+      # The race detector costs 5-10x wall clock, so it is the job most likely
+      # to hit Go's 10m default per-package timeout. Same caveat as the plain
+      # job: unmeasured, so the value is a guard, not a fix.
+      - name: Test with the race detector
+        run: go test -race -timeout 45m ./...
+
+  web:
+    name: Web typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build

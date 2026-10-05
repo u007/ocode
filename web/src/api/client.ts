@@ -884,6 +884,44 @@ export interface DBTableResponse {
   result: DBResultSet;
 }
 
+/**
+ * Wire normalization for the /api/db/* payloads.
+ *
+ * Every list field on these responses is an ARRAY by contract — the server
+ * allocates empty slices rather than nil so `encoding/json` cannot emit null
+ * (pinned by internal/dbbrowse's wire_contract_test.go). These normalizers exist
+ * for the one case the server fix cannot cover: `/api/db/*` for a REMOTE
+ * project is proxied to that machine's own `ocode serve --remote` binary, so a
+ * freshly built bundle can be talking to a host still running an older server
+ * that emits `"foreign_keys": null`. The SQLite preview dereferences these
+ * fields unguarded (`schema.foreign_keys.length`), which surfaced to users as
+ * "null is not an object (evaluating 'e.foreign_keys.length')" — a crash of the
+ * whole preview pane, not a degraded section.
+ *
+ * Applied once here at the fetch boundary rather than with `?? []` at each
+ * dereference, so no call site can forget it and no new one has to remember.
+ */
+function normalizeDBInfo(res: DBInfo): DBInfo {
+  return res.tables ? res : { ...res, tables: [] };
+}
+
+function normalizeDBResult(res: DBResultSet): DBResultSet {
+  return { ...res, columns: res.columns ?? [], rows: res.rows ?? [] };
+}
+
+function normalizeDBTableSchema(schema: DBTableSchema): DBTableSchema {
+  return {
+    ...schema,
+    columns: schema.columns ?? [],
+    indexes: (schema.indexes ?? []).map((ix) => (ix.columns ? ix : { ...ix, columns: [] })),
+    foreign_keys: schema.foreign_keys ?? [],
+  };
+}
+
+function normalizeDBTable(res: DBTableResponse): DBTableResponse {
+  return { schema: normalizeDBTableSchema(res.schema), result: normalizeDBResult(res.result) };
+}
+
 /** Result of a confirmed write (row op, SQL write, or DDL). */
 export interface DBExecResult {
   rows_affected: number;
@@ -2811,7 +2849,7 @@ export const api = {
   dbInfo: (path: string, projectRoot?: string, host?: string) => {
     const q = new URLSearchParams({ path });
     if (projectRoot) q.set("project_root", projectRoot);
-    return fetchJSON<DBInfo>(`/api/db/info?${q.toString()}`, undefined, host);
+    return fetchJSON<DBInfo>(`/api/db/info?${q.toString()}`, undefined, host).then(normalizeDBInfo);
   },
 
   dbTable: (
@@ -2823,7 +2861,9 @@ export const api = {
     if (opts.projectRoot) q.set("project_root", opts.projectRoot);
     if (opts.limit != null) q.set("limit", String(opts.limit));
     if (opts.offset != null) q.set("offset", String(opts.offset));
-    return fetchJSON<DBTableResponse>(`/api/db/table?${q.toString()}`, undefined, opts.host);
+    return fetchJSON<DBTableResponse>(`/api/db/table?${q.toString()}`, undefined, opts.host).then(
+      normalizeDBTable,
+    );
   },
 
   dbQuery: (
@@ -2843,7 +2883,7 @@ export const api = {
         }),
       },
       opts.host,
-    ),
+    ).then(normalizeDBResult),
 
   /** Run a SQL statement the user has explicitly confirmed as a write. */
   dbExec: (

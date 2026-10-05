@@ -22,6 +22,24 @@ const (
 // is NOT resumed on dismissal — the user's next message starts a fresh turn.
 const QuestionDismissedResult = "The user dismissed the question prompt without answering."
 
+// ToolCancelledResult is the tool result written for a tool call that the user
+// interrupted (Stop / Escape) before it produced a result of its own.
+//
+// It exists because an assistant tool_call with no matching tool message is an
+// ORPHAN: every surface renders it as still in flight (the web ToolBlock shows
+// a pulsing "running…" because resultContent is undefined), and
+// Agent.recoverOrphanedToolCalls RE-EXECUTES it on the next turn — so a tool
+// the user deliberately stopped silently ran again. Answering every call keeps
+// the transcript protocol-valid and the round terminal.
+//
+// Like QuestionDismissedResult it carries no sentinel prefix on purpose: a new
+// prefix would have to be threaded through every consumer that pattern-matches
+// tool content (web isSentinelToolContent hides PERMISSION_ASK/QUESTION_PROMPT,
+// tool.UnansweredAsk keys dialogs off them) and a mismatch in any one of them
+// would suppress the block or fake a dialog. Plain prose needs no such
+// coordination — any non-empty content already clears "pending".
+const ToolCancelledResult = "Cancelled by the user before this tool call finished. It did not complete; do not assume any result."
+
 type SkillTool struct{}
 
 func (t SkillTool) Name() string        { return "skill" }

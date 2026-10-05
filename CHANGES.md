@@ -2,7 +2,147 @@
 
 ## [Unreleased]
 
-- **Version Bump** — 0.8.125 → 0.8.126
+- **A `de-slop` plugin ships with the repo** — `.opencode/plugins/de-slop/`
+  (`plugin.json` + the MIT-licensed `de-slop` skill by petekp) strips LLM-isms and
+  AI writing tells from prose. Because it lives in the repo's own
+  `.opencode/plugins/`, it is discovered by `plugins.LoadAllPluginsForProject`
+  and reaches the desktop bundle via `bundle-desktop-assets`'s
+  `cp -R .opencode/plugins/. …`; the skill loads namespaced as
+  `de-slop:de-slop` and toggles with `/plugin enable|disable de-slop`. Pinned by
+  `TestDeSlopEmbeddedPluginDiscoverable`, which fails loudly if the manifest is
+  missing or the skill stops resolving — a bundled plugin that silently stops
+  loading is otherwise invisible.
+- **Quoted parens no longer defeat the cross-project `cd` fold** —
+  `foldTopLevelCds` ran `stripSubstitutions` over the whole line, and parens and
+  braces inside DOUBLE quotes survived, so a harmless label like
+  `echo "=== git status (short) ==="` read as a bare subshell and made the fold
+  refuse. The judge then saw the raw cross-project `cd` and deferred it
+  (`allow@0.70` below the `0.80` floor) — a `truncated_or_unknown` denial caused
+  by a string literal. `stripSubstitutions` now blanks double-quoted literal text
+  (substitutions inside the quotes were already blanked separately), while a real
+  bare `( … )` / `{ … }` outside quotes still refuses. Gotcha:
+  `docs/gotchas/auto-permission-dependency-bin-policy.md`.
+- **The web test suite runs with a capped worker count** — `pnpm run test` is now
+  `vitest run --maxWorkers=4`. Vitest's default is roughly one worker per core
+  (9 concurrent jsdom environments on a 10-core machine), which starves the
+  editor; measured 356 files green at both 4 workers (93.98s) and the default
+  (72.41s). This is a WEB-suite setting only: capping Go with `-p 4` did not fix
+  the Go suite, it MOVED the failures (5 → 7, all in `server`), because the cause
+  there is fixed wall-clock deadlines inside tests that await async events, not
+  package oversubscription. Rationale and the measured table are in `TESTING.md` §
+  Testing Notes.
+- **The SQLite preview no longer crashes on a table without a foreign key** —
+  `null is not an object (evaluating 'e.foreign_keys.length')`, i.e. the whole
+  preview pane died instead of just hiding the "Foreign keys" section.
+  `internal/dbbrowse` built its PRAGMA results with `var out []T`, and
+  `encoding/json` renders a nil slice as `null`, so `GET /api/db/table` answered
+  `"indexes": null, "foreign_keys": null` for any table without an index or a
+  foreign key, and `"rows": null` for a query or page that matched nothing — all
+  dereferenced unguarded by the viewer (`schema.foreign_keys.length`,
+  `result.rows.map`). Every list is now allocated where it is built
+  (`out := []ForeignKey{}`, `out.Rows = [][]any{}`, …), pinned by
+  `internal/dbbrowse/wire_contract_test.go` and, at the HTTP boundary,
+  `TestHandleDBTableEmptyListsAreArrays`; both mutation-verified.
+  - The web client also normalises null lists ONCE at the fetch boundary
+    (`normalizeDBInfo` / `normalizeDBTable` / `normalizeDBResult` in
+    `api/client.ts`) rather than with `?? []` at each dereference: a REMOTE
+    project proxies `/api/db/*` to that machine's own `serve --remote` binary, so
+    a fresh bundle can still talk to a host running the old server — the one
+    case this build cannot fix server-side. Pinned by
+    `web/src/api/client.dbArrays.test.ts`.
+- **Version Bump** — 0.8.126 → 0.8.127
+- **Stop no longer leaves tasks and tool calls stuck on "running"** — Two
+  independent bugs, both reported as "when the loop stops on main chat, the task
+  is still shown as running, also for any tool calling".
+  - *Tool calls.* `Agent.Step` appends the assistant message (with its
+    `ToolCalls`) to the transcript **before** any tool runs, but the per-call
+    results were only published much later — so every cancellation exit in
+    between (`return newMsgs, nil`) dropped them and left the assistant's calls
+    **unanswered**. That is worse than a stuck spinner: an unanswered
+    `tool_call` renders as a pulsing "running…" forever (the web `ToolBlock`
+    derives `pending` from an undefined result), *and*
+    `recoverOrphanedToolCalls` **re-executes** it on the next turn, so a tool
+    the user had just stopped silently ran again. A new
+    `finishCancelledRound` now closes the round on every cancel exit: results
+    that already completed are published with their real outcome, and each
+    remaining call is answered with the new `tool.ToolCancelledResult`.
+  - *Tasks.* `AgentRunRegistry.CancelAll` only walked its own registry. Every
+    dispatched sub-agent is a full `*Agent` with its **own** registry, and all
+    three surfaces render those nested runs verbatim, so a nested run that
+    `CancelAll` never reached stayed `RunRunning` forever — Stop left a child
+    task displayed as running. `CancelAll` now recurses through
+    `run.Sub.Runs()` with a `visited` guard (`run.Sub` is a live pointer, so a
+    registry cycle is representable).
+
+## 2026-10-05 — A fresh clone builds, and contributor CI + contribution templates land
+
+The single biggest barrier for a new contributor is gone: `git clone` followed
+by the documented `go build -o ocode .` now **works**. It previously failed with
+three `pattern …: no matching files found` errors, because every `//go:embed`
+target was either gitignored or had been left untracked.
+
+- **HTR moved behind the `htr` build tag** (`internal/browse/cdp`). The archive
+  is generated from out-of-tree sources by `make prepare-htr-assets` and is
+  deliberately never committed, so its `//go:embed` now lives in
+  `htr_assets_embed.go` (`//go:build htr`), opposed by `htr_assets_stub.go`
+  (`//go:build !htr`) which leaves `embeddedHTRArchive` nil. A plain source
+  build no longer needs the zip at all; `go build -tags htr` still fails loudly
+  with `pattern htr-assets.zip: no matching files found` when it is absent, so a
+  release can never ship a silently bundle-less binary. The Makefile passes
+  `HTRTAGS := -tags htr` from `install`, `desktop`, and
+  `desktop-remote-binaries` (the targets that already depend on
+  `prepare-htr-assets`); every other target, and both Dockerfiles, build
+  untagged because they have no bundle to embed.
+- **An absent HTR bundle is no longer silent.** Previously
+  `ResolveHTRAssetsForHost` returned empty asset paths with a nil error when the
+  archive could not be opened, so `internal/server/htr.go` reported HTR
+  *enabled* with an empty notice while bundling nothing. It now returns an
+  explicit error naming the missing bundle and the rebuild command whenever no
+  archive and no development override are present, which the server surfaces as
+  its existing "HTR automation is unavailable … Browsing continues without the
+  HTR extension" notice. Development overrides still work unchanged.
+- **Embed placeholders are committed.** `web/dist/.gitkeep` and
+  `cmd/ocode-desktop/embedded-assets/.gitkeep` (the latter recreated by
+  `bundle-desktop-assets`, which `rm -rf`s its own directory) satisfy their
+  `//go:embed` directives so a bare `go build ./...` compiles without a web
+  build.
+- **The models.dev snapshot moved behind a `models` build tag**
+  (`internal/agent/models_snapshot_embed.go`, opposed by
+  `models_snapshot_stub.go`), joining HTR. The ~3 MB JSON is a regenerable build
+  input from `make models-snapshot`, so it is gitignored rather than tracked —
+  committing it bloated every clone with data that is stale within days (the copy
+  in use was generated 2026-09-17). An untagged build embeds nothing and the
+  registry resolves from `~/.config/opencode/models.json` plus a live models.dev
+  fetch, which is the path `loadRegistry` already takes whenever the embedded
+  snapshot is older than `modelsCacheTTL`. `install`, `desktop`, and
+  `desktop-remote-binaries` now pass `-tags "htr models"` and depend on both
+  generators, so a shipped binary keeps its offline model metadata; a tagged
+  build with the file absent still fails loudly. `TestLoadFromSnapshotPopulated`
+  now skips with a reason instead of failing when no snapshot is embedded.
+- **Three HTR asset tests became archive-aware** via a new
+  `requireEmbeddedHTRAssets` helper. `TestResolveHTRAssetsConcurrentInstallIsAtomic`,
+  `TestResolveHTRAssetsRepairsCorruptExtension` and
+  `TestEnsureHTRServe_VerifiesReadinessInBackground` previously asserted a
+  populated archive, which a source checkout and CI can never have; they skip
+  with a reason and run for real under `-tags htr`. The skip also fixes a source
+  tree side effect: with no bundle, the repair test resolved an empty
+  `ExtensionDir` and wrote `manifest.json` into the package directory.
+- **CI** (`.github/workflows/ci.yml`): `go build`/`go vet`/`go test ./...`, a
+  `go vet -tags htr` step against a synthetic archive so the tagged path stays
+  compiled, and a web job running `typecheck`, `test` and `build`. Builds
+  untagged by design.
+- **Contribution surface**: bug and feature request forms, a pull request
+  template, `.github/CODE_OF_CONDUCT.md`, `.github/SECURITY.md` (scope and
+  private reporting), and a Discussions link in the issue chooser.
+- **Docs**: README Quick Start now shows the clone and states what a plain
+  `go build` does and does not include; SETUP.md's placeholder
+  `github.com/your-org/ocode.git` URL is corrected to the real repository and a
+  build-variant table documents the HTR tag; CLAUDE.md's worktree section
+  describes the new split.
+
+## 2026-10-05 — Auto-permission judge: executed scripts longer than 40 lines are no longer unconditionally denied
+
+`./scripts/check-docs-sync.sh` (84 lines) and `./scripts/fetch-dataset.sh` (156 lines) were auto-denied with `truncated_or_unknown`: the judge's `executed_scripts` view and `verifyAutoGrant`'s truncation guard both reused the 40-line chat-snippet cap, so any real script arrived `truncated:true` and could never be approved. Both now share `executedScriptLineCap()` (default `defaultExecutedScriptLines` = 1000; an explicit `max_context_lines_per_source` still wins). The 16 KiB byte ceiling stays the binding bound, so a script over it is still truncated and refused. Also: DB-browser endpoints (`handler_db.go`) now judge containment on the symlink-resolved path.
 
 ## 2026-10-05 — Desktop share-token test: fix a shutdown/Serve race
 

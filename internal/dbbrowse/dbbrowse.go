@@ -74,6 +74,11 @@ type ForeignKey struct {
 }
 
 // TableSchema is the full description of a table or view.
+//
+// Every list field is allocated even when empty, so it marshals as `[]` and
+// never as null: a client that does `schema.foreign_keys.length` on a table
+// with no foreign keys would otherwise crash on null. See
+// wire_contract_test.go.
 type TableSchema struct {
 	Name        string       `json:"name"`
 	Type        string       `json:"type"`
@@ -101,6 +106,10 @@ type Blob struct {
 }
 
 // ResultSet is the JSON-safe result of a read query.
+//
+// Columns and Rows are always non-nil: a statement that matched no rows still
+// has columns, and `rows` reaches the wire as `[]` rather than null (a client
+// iterating `result.rows` cannot distinguish null from empty).
 type ResultSet struct {
 	Columns   []ResultColumn `json:"columns"`
 	Rows      [][]any        `json:"rows"`
@@ -373,7 +382,7 @@ func withReadOnly(ctx context.Context, path string, fn func(*sql.DB) error) erro
 // ListTables returns every user table and view, sorted by name, with an
 // ANALYZE row estimate where sqlite_stat1 provides one (-1 otherwise).
 func ListTables(ctx context.Context, path string) ([]Table, error) {
-	var out []Table
+	out := []Table{}
 	err := withReadOnly(ctx, path, func(db *sql.DB) error {
 		rows, err := db.QueryContext(ctx,
 			`SELECT name, type FROM sqlite_master
@@ -495,7 +504,7 @@ func tableColumns(ctx context.Context, db *sql.DB, table string) ([]Column, erro
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Column
+	out := []Column{}
 	for rows.Next() {
 		var (
 			c       Column
@@ -525,7 +534,7 @@ func tableIndexes(ctx context.Context, db *sql.DB, table string) ([]Index, error
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Index
+	out := []Index{}
 	for rows.Next() {
 		var (
 			idx    Index
@@ -551,7 +560,7 @@ func indexColumns(ctx context.Context, db *sql.DB, index string) ([]string, erro
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	out := []string{}
 	for rows.Next() {
 		var name sql.NullString
 		if err := rows.Scan(&name); err != nil {
@@ -569,7 +578,7 @@ func tableForeignKeys(ctx context.Context, db *sql.DB, table string) ([]ForeignK
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ForeignKey
+	out := []ForeignKey{}
 	for rows.Next() {
 		var (
 			fk ForeignKey
@@ -649,6 +658,7 @@ func queryWithArgs(ctx context.Context, path, query string, args []any, cap int)
 			return err
 		}
 		out.Columns = make([]ResultColumn, len(names))
+		out.Rows = [][]any{}
 		for i := range names {
 			rc := ResultColumn{Name: names[i]}
 			if i < len(types) {

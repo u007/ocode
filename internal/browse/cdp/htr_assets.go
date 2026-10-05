@@ -7,7 +7,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
-	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -21,14 +20,6 @@ import (
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/version"
 )
-
-// The Makefile replaces this archive with the unpacked extension and the
-// platform-matched htrcli binaries before install/desktop builds. A small
-// placeholder is committed so ordinary source builds remain valid and simply
-// report that the optional HTR bundle is unavailable.
-//
-//go:embed htr-assets.zip
-var embeddedHTRArchive []byte
 
 const (
 	htrExtensionArchivePath = "extension/"
@@ -278,9 +269,18 @@ func ResolveHTRAssetsForHost(extensionOverride, cliOverride, hostName string) (H
 
 	reader, archiveErr := openEmbeddedHTRArchive()
 	if archiveErr != nil {
-		// A source checkout without prepared assets is supported when both
-		// development overrides are supplied. Otherwise the daemon cannot be
-		// launched from this build and the caller will show the fallback notice.
+		// A build made without the `htr` tag embeds no archive, so HTR cannot be
+		// launched from it. A development extension override is still honoured: a
+		// source checkout that points at an out-of-tree extension works. An htrcli
+		// override alone is not enough — the native host manifest needs the
+		// extension's key (or OCODE_HTR_EXTENSION_ORIGIN), so without either the
+		// daemon start would fail later on a missing manifest.json. Say so now:
+		// returning paths with no error would leave the caller reporting HTR as
+		// enabled while bundling no extension.
+		if pathsOut.ExtensionDir == "" && strings.TrimSpace(os.Getenv("OCODE_HTR_EXTENSION_ORIGIN")) == "" {
+			return HTRAssetPaths{}, fmt.Errorf(
+				"this ocode binary has no HTR bundle: it was built without the htr tag, so the optional automation extension was never embedded (rebuild with `make prepare-htr-assets && make install`, or set the HTR extension development override)")
+		}
 		return pathsOut, nil
 	}
 

@@ -15,7 +15,7 @@ The bundled gatekeeper prose (`internal/config/auto_permission_prompt.go:69`) di
 
 ## 2. THREAT MODEL / RESIDUAL RISK (accepted)
 
-(a) The executed file is a tiny shim/console-script wrapper — the deterministic backstop (`Agent.detectExecutedCustomScripts` in `internal/agent/script_detection.go:237` + the truncation guard in `Agent.verifyAutoGrant`, `internal/agent/agent.go:4214`) inspects only the wrapper; the imported payload module or compiled binary is opaque to the judge.
+(a) The executed file is a tiny shim/console-script wrapper — the deterministic backstop (`Agent.detectExecutedCustomScripts` in `internal/agent/script_detection.go:237` + the truncation guard in `Agent.verifyAutoGrant`, `internal/agent/agent.go:4300`) inspects only the wrapper; the imported payload module or compiled binary is opaque to the judge.
 
 (b) Judge-ALLOW removes the human prompt but adds **no confinement** — the write-wall exists only in sandbox mode; network egress is always open (sandbox is write-integrity only — cite `architecture/shell-sandbox-integrity-only-mode.md`), so a judged-allowed binary can read global files and POST anywhere.
 

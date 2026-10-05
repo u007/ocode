@@ -91,6 +91,23 @@ type executedScriptContext struct {
 	Truncated  bool
 }
 
+// defaultExecutedScriptLines is the line ceiling for an executed script shown to
+// the judge. It is deliberately NOT the 40-line chat-snippet cap: a real script
+// is routinely longer than that, and a partial view can never be approved, so
+// the small cap made every such script an unconditional deny. The 16 KiB byte
+// ceiling (maxInterpreterSourceBytes) is the binding bound.
+const defaultExecutedScriptLines = 1000
+
+// executedScriptLineCap is the one line cap shared by the judge's view and
+// verifyAutoGrant's truncation guard, so the two can never diverge. An explicit
+// permissions.auto.max_context_lines_per_source still wins.
+func (a *Agent) executedScriptLineCap() int {
+	if auto := a.autoPermissionConfig(); auto != nil && auto.MaxContextLinesPerSource > 0 {
+		return auto.MaxContextLinesPerSource
+	}
+	return defaultExecutedScriptLines
+}
+
 // executedScriptsForJudge returns structured source for the scripts a command
 // actually EXECUTES, reusing detectExecutedCustomScripts so this path and the
 // chat judge's prose context can never disagree about WHICH files run.

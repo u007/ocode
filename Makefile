@@ -19,6 +19,21 @@ HTR_GOARCH        ?= $(shell go env GOARCH)
 HTRCLI_BIN        ?=
 HTR_BUNDLE        := internal/browse/cdp/htr-assets.zip
 
+# The HTR bundle is produced from out-of-tree sources and is never committed,
+# so it is embedded only when the `htr` build tag is set. Targets that depend on
+# prepare-htr-assets therefore pass HTRTAGS; every other target builds without
+# the tag and reports the optional bundle as unavailable at runtime.
+HTRTAGS := -tags htr
+
+# Same pattern for the models.dev snapshot: a regenerable ~3 MB build input that
+# is not committed. `models-snapshot` generates it, MODELS_TAGS embeds it, and the
+# targets below pass both so a shipped binary keeps offline model metadata. A
+# build without the tag has no embedded snapshot and resolves the registry from
+# the runtime cache plus a live models.dev fetch, which is the same path a stale
+# snapshot already took.
+MODELS_TAGS := -tags models
+RELEASE_TAGS := -tags "htr models"
+
 # ── Default: build for current platform ──────────────────────────────────────
 
 build: web-build
@@ -26,9 +41,9 @@ build: web-build
 
 # ── Install ──────────────────────────────────────────────────────────────────
 
-install: web-build prepare-htr-assets
-	go build $(LDFLAGS) -o bin/$(APP) .
-	go install $(LDFLAGS) .
+install: web-build prepare-htr-assets models-snapshot
+	go build $(RELEASE_TAGS) $(LDFLAGS) -o bin/$(APP) .
+	go install $(RELEASE_TAGS) $(LDFLAGS) .
 
 # ── Version bumps ────────────────────────────────────────────────────────────
 # Update the canonical Go version and [Unreleased] changelog entry, then install
@@ -52,8 +67,8 @@ up-minor:
 #   Windows: WebView2 runtime
 # See https://wails.io/docs/guides/platform-installation
 
-DESKTOP_BUILD := go build $(LDFLAGS) -o bin/ocode-desktop ./cmd/ocode-desktop
-DESKTOP_INSTALL := go install $(LDFLAGS) ./cmd/ocode-desktop
+DESKTOP_BUILD := go build $(RELEASE_TAGS) $(LDFLAGS) -o bin/ocode-desktop ./cmd/ocode-desktop
+DESKTOP_INSTALL := go install $(RELEASE_TAGS) $(LDFLAGS) ./cmd/ocode-desktop
 
 # macOS: Wails CGo objects may be compiled with a newer SDK; silence the
 # version-mismatch linker warnings by matching the min version.
@@ -70,6 +85,9 @@ bundle-desktop-assets:
 	rm -rf cmd/ocode-desktop/embedded-assets
 	mkdir -p cmd/ocode-desktop/embedded-assets/skills
 	mkdir -p cmd/ocode-desktop/embedded-assets/.opencode/plugins
+	# The directory's .gitkeep is committed so a bare `go build ./cmd/ocode-desktop`
+	# compiles; recreate it after the rm -rf so this target never leaves it deleted.
+	touch cmd/ocode-desktop/embedded-assets/.gitkeep
 	cp -R skills/. cmd/ocode-desktop/embedded-assets/skills
 	cp -R .opencode/plugins/. cmd/ocode-desktop/embedded-assets/.opencode/plugins
 	# Copy every concrete (non-wildcard) model prompt. Files whose names
@@ -78,7 +96,7 @@ bundle-desktop-assets:
 	# the exact-name bundled fallback.
 	find . -maxdepth 1 -name '*.OCODE.md' ! -name '*[*]*' -exec cp -f {} cmd/ocode-desktop/embedded-assets/ \;
 
-desktop: web-build bundle-desktop-assets prepare-htr-assets
+desktop: web-build bundle-desktop-assets prepare-htr-assets models-snapshot
 	$(DESKTOP_BUILD)
 
 install-desktop: web-build desktop desktop-app
@@ -86,12 +104,12 @@ install-desktop: web-build desktop desktop-app
 
 # Shared prerequisites run once, even under make -j with desktop. Crossbuilds
 # are sequential so any failed target stops packaging (no unchecked wait).
-desktop-remote-binaries: web-build prepare-htr-assets
+desktop-remote-binaries: web-build prepare-htr-assets models-snapshot
 	mkdir -p "$(DESKTOP_REMOTE_DIR)"
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-linux-amd64" .
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-linux-arm64" .
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-amd64" .
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-arm64" .
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(RELEASE_TAGS) $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-linux-amd64" .
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(RELEASE_TAGS) $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-linux-arm64" .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(RELEASE_TAGS) $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-amd64" .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(RELEASE_TAGS) $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-arm64" .
 
 ## desktop-app: build and bundle ocode.app with remote CLIs (macOS only)
 desktop-app: desktop desktop-remote-binaries

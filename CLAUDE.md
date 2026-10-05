@@ -108,16 +108,32 @@ developer-local state and must never be committed.
 git worktree add .worktrees/feature-branch feature-branch
 ```
 
-A fresh worktree will not build until you copy the two **gitignored embed
-inputs** out of the main checkout. `internal/agent/models-snapshot.json` and
-`internal/browse/cdp/htr-assets.zip` are `//go:embed` targets that are
-deliberately untracked, so the worktree has no copy at all and the build
-fails with `pattern models-snapshot.json: no matching files found` — which names
-the file but not the reason (it is a build input, not a source file):
+A fresh worktree builds a plain `go build ./...` with **no copying**: the only
+embed inputs a source build needs are the committed `.gitkeep` placeholders for
+`web/dist/` and `cmd/ocode-desktop/embedded-assets/` (a `//go:embed` pattern
+matches a directory holding only `.gitkeep`, so the directive compiles while
+serving no assets).
+
+The other two embed inputs are **generated, gitignored, and gated behind build
+tags**, so a plain build never needs them:
+
+- `internal/browse/cdp/htr-assets.zip` — the `htr` build tag. Produced by
+  `make prepare-htr-assets` from out-of-tree HTR sources
+  (`htr_assets_embed.go` / `htr_assets_stub.go`).
+- `internal/agent/models-snapshot.json` — the `models` build tag. Produced by
+  `make models-snapshot`, which fetches models.dev
+  (`models_snapshot_embed.go` / `models_snapshot_stub.go`). Without the tag the
+  registry resolves from the runtime cache plus a live models.dev fetch, which is
+  the same path a stale snapshot already took (`loadRegistry` skips any snapshot
+  older than `modelsCacheTTL`).
+
+So a **tagged** build fails loudly with `pattern <file>: no matching files found`
+when its input is missing. `make install`, `make desktop`, and
+`make desktop-remote-binaries` pass `-tags "htr models"` and depend on both
+generators; copy the HTR archive into a worktree before running them:
 
 ```bash
 git worktree add .worktrees/feature-branch feature-branch
-cp internal/agent/models-snapshot.json .worktrees/feature-branch/internal/agent/
 cp internal/browse/cdp/htr-assets.zip .worktrees/feature-branch/internal/browse/cdp/
 ```
 
@@ -375,6 +391,34 @@ routes them to `run.appendTranscript`, `Agent.OnSubAgentMessage` and
 `TaskTool.persistChild` (child session `<parent>_child_<agent>_<ts>`). The persister
 from `Agent.SetChildSessionPersistence` MUST be a live async save. Details:
 `docs/concepts/subagent-transcripts-child-sessions.md`.
+
+## Cancelling a turn: answer every tool call, cancel every nested run
+Pressing Stop (TUI `Esc`, web/desktop Stop) must leave NO trace of in-flight work.
+Two invariants, both load-bearing:
+
+- **Every `tool_call` in a cancelled round MUST get a tool message.** `Step` appends
+  the assistant message (with its `ToolCalls`) to `newMsgs` BEFORE any tool runs, but
+  the results are published much later. Every cancellation exit in between must route
+  through `finishCancelledRound`, never a bare `return newMsgs, nil` — a bare return
+  leaves an **orphan**, and an orphan is worse than cosmetic: the web `ToolBlock`
+  sets `resultContent: undefined` so `pending` lights a pulsing "running…" forever,
+  AND `recoverOrphanedToolCalls` **re-executes** it on the next turn (a tool the user
+  just stopped silently runs again). Publish results that DID complete, and fill the
+  rest with `tool.ToolCancelledResult`. It is plain prose with **no sentinel prefix**
+  on purpose — a new prefix would need threading through every consumer that
+  pattern-matches tool content (`isSentinelToolContent`, `tool.UnansweredAsk`), and a
+  miss in one would suppress the block or fake a dialog.
+  `finishCancelledRound`'s `published` count exists because the publish-loop exit has
+  already emitted a prefix of `results`; re-emitting it puts two tool messages with one
+  `tool_call_id` in the transcript.
+- **`AgentRunRegistry.CancelAll` MUST recurse into `run.Sub.Runs()`.** Each dispatched
+  sub-agent is a full `*Agent` with its own registry, and every surface renders nested
+  runs verbatim (`buildRunDTO` → `dto.Children`, `agentRunChildren` → `run.Sub.Runs()`,
+  web `AgentPreview` counting `status === "running"`). Without the recursion a nested
+  run stays `RunRunning` forever, so Stop leaves a child task displayed as running.
+  `run.Cancel` only closes the sub-agent's stop channel, so it does not reach the
+  child's own children either. A `visited map[*AgentRunRegistry]bool` guard is
+  mandatory: `run.Sub` is a live pointer, so a registry cycle is representable.
 
 ## In-batch task DAG (`id` / `depends_on`)
 Parallel `task` batches may declare `id`/`depends_on`; omitting both preserves the

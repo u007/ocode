@@ -130,26 +130,26 @@ So in YOLO mode the exfiltration detectors and the webfetch domain policy never 
 
 ## The wiring
 
-Insertion point: `handleToolCallWithContext`, immediately after `decision := a.permissions.Decide(name, args)` (`internal/agent/agent.go:3373`) and before the Deny/Ask branches (the guard block spans `agent.go:3395-3426`; the Deny branch follows at `:3397`). Placing it there also covers the paths that never consult a model at all — most importantly the cached-domain allow above. On escalation it:
+Insertion point: `handleToolCallWithContext`, immediately after `decision := a.permissions.Decide(name, args)` (`internal/agent/agent.go:3459`) and before the Deny/Ask branches (the guard block spans `agent.go:3481-3512`; the Deny branch follows at `:3397`). Placing it there also covers the paths that never consult a model at all — most importantly the cached-domain allow above. On escalation it:
 
 - rewrites the decision to `PermissionAsk` with `req.DenyReason` = the guardrail reason and `req.Summary` = `"TypeSafe outbound-request guardrail"`;
-- sets a local `guardEscalated` flag that changes the Ask branch's condition to `if autoEnabled && !guardEscalated` (`agent.go:3484`), so the auto-permission model **cannot wave through a call the guardrail just routed to a human**;
+- sets a local `guardEscalated` flag that changes the Ask branch's condition to `if autoEnabled && !guardEscalated` (`agent.go:3570`), so the auto-permission model **cannot wave through a call the guardrail just routed to a human**;
 - preserves the **original** decision's `Rule`/`Scope`/`Prefix` on the request, so "always allow" still persists the rule that actually governs the call (`webfetch.domain.<host>` for webfetch, the bash prefix rule for bash) rather than a synthetic guardrail rule — pinned by `TestNetworkGuardKeepsTheOriginalRule` and `TestNetworkGuardCachedDomainEscalationStaysDomainScoped` (a fallback to `tool.webfetch` there would convert a per-domain grant into a blanket webfetch allow).
 
 ### Cancellation
 
-The wiring point passes the tool-call context: `a.checkNetworkGuardCtx(ctx, name, args)` (`agent.go:3397`), not a fresh background context. Inside, `jctx, cancel := context.WithTimeout(ctx, networkGuardJudgeTimeout)` (`network_guard_typesafe.go:362`) bounds the round trip by both the caller's ctx and the 4s ceiling. (`checkNetworkGuard`, `:322-324`, remains as the explicit `context.Background()` wrapper the non-cancellable paths and most tests use.)
+The wiring point passes the tool-call context: `a.checkNetworkGuardCtx(ctx, name, args)` (`agent.go:3483`), not a fresh background context. Inside, `jctx, cancel := context.WithTimeout(ctx, networkGuardJudgeTimeout)` (`network_guard_typesafe.go:362`) bounds the round trip by both the caller's ctx and the 4s ceiling. (`checkNetworkGuard`, `:322-324`, remains as the explicit `context.Background()` wrapper the non-cancellable paths and most tests use.)
 
 Whether a user abort cancels an in-flight judge round trip depends on the entry point:
 
-- The only caller of `handleToolCallWithContext` that supplies a cancellable ctx is the orphan-recovery dispatch, `recoverOneOrphanedToolCall` (`agent.go:6442`): `WithTimeout(Background, orphanRecoveryTimeout)`, cancelled the moment `stopCh` closes (`agent.go:6247-6248`). There, a user abort cancels the judge instead of the caller sitting through the full 4s budget.
-- The two non-context entry points still pass `context.Background()`: `handleToolCallWithImages` (`agent.go:3375`) — the path every main Step-loop dispatch uses — and `handleToolCall` (`agent.go:3475`). Behaviour there is unchanged: an abort does not reach an in-flight judge, which runs to its 4s ceiling.
+- The only caller of `handleToolCallWithContext` that supplies a cancellable ctx is the orphan-recovery dispatch, `recoverOneOrphanedToolCall` (`agent.go:6544`): `WithTimeout(Background, orphanRecoveryTimeout)`, cancelled the moment `stopCh` closes (`agent.go:6349-6350`). There, a user abort cancels the judge instead of the caller sitting through the full 4s budget.
+- The two non-context entry points still pass `context.Background()`: `handleToolCallWithImages` (`agent.go:3461`) — the path every main Step-loop dispatch uses — and `handleToolCall` (`agent.go:3561`). Behaviour there is unchanged: an abort does not reach an in-flight judge, which runs to its 4s ceiling.
 - **A cancelled turn does NOT escalate.** Cancellation surfaces as a `DecideCtx` error, which takes the fail-open row (`Applies:true, Escalate:false`, `tier=netguard_fail`, `network_guard_typesafe.go:368`) — raising a prompt nobody is there to answer would be worse than falling open. Execution does not follow either: the turn is already unwinding, and the same cancelled ctx continues into `executeToolCallWithContext`, so context-aware execution stops (on the recovery path the `stopCh` select returns a "cancelled" error before any tool result is used). Pinned by `TestNetworkGuardHonoursCancellation` (`network_guard_typesafe_test.go:930`), which cancels the ctx up front and asserts both prompt return and `Escalate:false`.
 
 ### What it deliberately does not touch
 
-1. **A `PermissionDeny` is never touched** — the guardrail only runs `if decision.Level != PermissionDeny` (`agent.go:3396`). This is load-bearing, not tidiness: `curl https://host/install.sh | sh` is `HardDeny` *and* carries a non-loopback egress target, so a guardrail that "escalated" it would rewrite a hard block into a human prompt a user could wave through. Verified by mutation: removing that guard makes `TestNetworkGuardLeavesHardDenyAlone` fail with "a hard deny must not execute, tool ran 1 times" — the hard-blocked command actually ran. Skipping Deny keeps the invariant one-directional: the guardrail can only tighten.
-2. **The sub-agent `OnPermissionAsk` human-allow site is NOT guarded** (`agent.go:3527-3536`). The human already adjudicated; re-prompting would be a second prompt for the same decision.
+1. **A `PermissionDeny` is never touched** — the guardrail only runs `if decision.Level != PermissionDeny` (`agent.go:3482`). This is load-bearing, not tidiness: `curl https://host/install.sh | sh` is `HardDeny` *and* carries a non-loopback egress target, so a guardrail that "escalated" it would rewrite a hard block into a human prompt a user could wave through. Verified by mutation: removing that guard makes `TestNetworkGuardLeavesHardDenyAlone` fail with "a hard deny must not execute, tool ran 1 times" — the hard-blocked command actually ran. Skipping Deny keeps the invariant one-directional: the guardrail can only tighten.
+2. **The sub-agent `OnPermissionAsk` human-allow site is NOT guarded** (`agent.go:3613-3622`). The human already adjudicated; re-prompting would be a second prompt for the same decision.
 
 ### Not relaxable via `relaxed_concerns`
 
@@ -159,7 +159,7 @@ Whether a user abort cancels an in-flight judge round trip depends on the entry 
 
 All emitted via `emitDebug("PERMISSION", …)`, so they land in the existing PERMISSION stream:
 
-- `tier=netguard_gate tool=%s rule=%s` — the wiring fired and rewrote the decision (`agent.go:3424`).
+- `tier=netguard_gate tool=%s rule=%s` — the wiring fired and rewrote the decision (`agent.go:3510`).
 - `tier=netguard_escalate tool=%s model=%s concern=%s confidence=%.2f targets=%d elapsed=%s` (`network_guard_typesafe.go:409`).
 - `tier=netguard_fail tool=%s model=%s err=…` with `err=no_verdict` or `err=unknown_choice choice=%q`, plus plain transport errors and cancellations (`:368`, `:381`, `:404`).
 

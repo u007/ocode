@@ -63,13 +63,13 @@ The guard runs at **all five `scanToolResult` call sites**, immediately after se
 
 | # | call site | what follows |
 |---|---|---|
-| 1 | `agent.go:1903` → `agent.go:1904` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
-| 2 | `agent.go:1970` → `agent.go:1971` | `shapeToolResult` |
-| 3 | `agent.go:2031` → `agent.go:2032` | `TruncateToolResult` directly (`agent.go:2034`) |
-| 4 | `agent.go:5178` → `agent.go:5181` (`HandleApprovedToolCall`, `agent.go:5173`) | returned to the approved-call path |
+| 1 | `agent.go:1905` → `agent.go:1906` | `shapeToolResult` (which truncates, `task_dag.go:329`) |
+| 2 | `agent.go:1972` → `agent.go:1973` | `shapeToolResult` |
+| 3 | `agent.go:2035` → `agent.go:2036` | `TruncateToolResult` directly (`agent.go:2038`) |
+| 4 | `agent.go:5280` → `agent.go:5283` (`HandleApprovedToolCall`, `agent.go:5275`) | returned to the approved-call path |
 | 5 | DAG scheduler: `task_dag.go:637` (redact) → `task_dag.go:644` (guard) | `shapeToolResult` in `buildResults` (`task_dag.go:870`) |
 
-The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1465`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()` (`agent.go:5179`). `contentGuardStepCtx` (`content_guard_typesafe.go:307`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
+The guard context for the Step-loop sites is `guardCtx, guardCancel := contentGuardStepCtx(stopCh)` (`agent.go:1465`); `HandleApprovedToolCall` uses the non-turn-bound `contextGuardBackground()` (`agent.go:5281`). `contentGuardStepCtx` (`content_guard_typesafe.go:307`) binds to the turn's `stopCh` through a `crashguard.Go` watcher, so an aborted turn stops paying for judge round trips.
 
 The DAG scheduler's guard ctx used to be built by `contentGuardStepCtxCtx`, which deliberately dropped the cancel on the stated grounds that "a live ctx there is not a leak" — it was: the cancel is what unparks the `crashguard.Go` goroutine `contentGuardStepCtx` starts on `stopCh`, so each batch parked one goroutine and kept one context alive for the rest of the session. `newDAGScheduler` now stores the cancel (`task_dag.go:425`) and `run` releases it via `defer` (`task_dag.go:473`); `contentGuardStepCtxCtx` is deleted. Pinned by `TestDAGSchedulerReleasesItsGuardContext` (`task_dag_test.go`).
 

@@ -55,13 +55,27 @@ A clean Go package architecture makes it trivial to add providers, tools, plugin
 
 ```bash
 # Build and run — that's it
+git clone https://github.com/u007/ocode.git
+cd ocode
 go build -o ocode .
 ./ocode                 # TUI (default)
+
+# Other entry points, once built:
 ./ocode serve           # HTTP server + web UI
 ./ocode serve --open    # server + open browser
 ./ocode run "fix tests" # headless / CI
 ./ocode acp             # Zed editor integration
 ```
+
+A fresh clone builds with **no extra setup**: the only embed inputs a plain build
+needs are the committed `.gitkeep` placeholders for `web/dist/` and
+`cmd/ocode-desktop/embedded-assets/`, so `go build` works without Node, a
+network fetch, or any out-of-tree checkout. The two bulky generated inputs — the
+HTR browser bundle and the models.dev registry snapshot — are gitignored and
+behind `htr` / `models` build tags that only `make install` and the desktop
+targets pass. The web UI is the one exception a plain `go build` skips: it embeds
+an empty `dist`, so run `make build` (or `make web-build`) if you want the
+served SPA.
 
 | Entry point | What it does |
 |-------------|--------------|

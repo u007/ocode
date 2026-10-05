@@ -155,6 +155,46 @@ func TestHandleDBTablePaged(t *testing.T) {
 	}
 }
 
+// TestHandleDBTableEmptyListsAreArrays pins the /api/db/table wire contract at
+// the HTTP boundary, where the browser actually sees it: an empty list is `[]`,
+// never `null`. The SQLite preview dereferences these fields unguarded
+// (`schema.foreign_keys.length`), so a null crashed the whole preview pane with
+// WebKit's "null is not an object" instead of just hiding a section.
+func TestHandleDBTableEmptyListsAreArrays(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	// An INTEGER PRIMARY KEY is the rowid alias, so SQLite creates no index for
+	// it and there is no foreign key: every list here is legitimately empty.
+	seedDB(t, filepath.Join(tmpDir, "bare.db"), `CREATE TABLE t(a INTEGER PRIMARY KEY);`)
+
+	rec := httptest.NewRecorder()
+	h.HandleDBTable(rec, httptest.NewRequest(http.MethodGet, "/api/db/table?path=bare.db&table=t", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	// RawMessage keeps the [] vs null distinction visible: unmarshalling into
+	// []json.RawMessage would hide it, and a []struct would just be empty.
+	var got struct {
+		Schema map[string]json.RawMessage `json:"schema"`
+		Result map[string]json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, key := range []string{"indexes", "foreign_keys"} {
+		if string(got.Schema[key]) != "[]" {
+			t.Errorf("schema.%s = %s, want []", key, got.Schema[key])
+		}
+	}
+	// columns is NOT empty here — the table has one — so it only has to be an
+	// array rather than a null.
+	if string(got.Schema["columns"]) == "null" {
+		t.Errorf("schema.columns is null")
+	}
+	if string(got.Result["rows"]) != "[]" {
+		t.Errorf("result.rows = %s, want []", got.Result["rows"])
+	}
+}
+
 func TestHandleDBTableMissing(t *testing.T) {
 	h, tmpDir := newFilesHandler(t)
 	seedDB(t, filepath.Join(tmpDir, "m.db"), `CREATE TABLE t(a)`)

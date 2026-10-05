@@ -3,7 +3,6 @@ package agent
 import (
 	"bufio"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,8 +24,10 @@ import (
 	"github.com/u007/ocode/internal/pricing"
 )
 
-//go:embed models-snapshot.json
-var modelsSnapshotData []byte
+// modelsSnapshotData is the optional embedded registry. Its declaration lives in
+// models_snapshot_embed.go (//go:build models) and models_snapshot_stub.go
+// (//go:build !models), because the JSON is a regenerable build input that is
+// not committed.
 
 const (
 	modelsDevURL        = "https://models.dev/api.json"

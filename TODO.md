@@ -1,5 +1,76 @@
 # TODO
 
+## Contributor on-ramp: deferred items (2026-10-05)
+
+The clean-clone build, CI, and contribution templates landed (see CHANGES.md
+2026-10-05). These are the deliberate follow-ups.
+
+- **Three pre-existing `internal/agent` permission tests fail in a tree outside the
+  repo, and will make CI red.** `TestAllowedRootsIncludesGlobalConfigDir`,
+  `TestVerifyAutoGrantAcceptsGlobalConfigDir` and
+  `TestAllowedRootsIncludesGitIgnoreFiles` all fail identically at **pristine
+  HEAD** (verified in a `git archive HEAD` export), so they are not caused by the
+  build-tag work. The assertion is that an isolated home at
+  `<checkout>/internal/agent/.isolated-home-*` must stay OUTSIDE the allowed
+  roots, but the test's own temp home is nested inside the checkout, so it reads
+  as in-scope. Fix by pointing the isolated home at `t.TempDir()` (outside the
+  repo) rather than a directory under the package, or by resolving the checkout
+  root before comparing. This will be the first red thing CI reports.
+- **CI has never run — no CI failure has ever been observed, and nothing in
+  `.github/workflows/ci.yml` is verified against a real runner.** The repository
+  has zero workflows (`gh api repos/u007/ocode/actions/workflows` →
+  `{"total_count":0}`, authenticated `u007` with `repo` + `workflow` scopes, so
+  it is not an auth or visibility artifact); the workflow is staged locally only.
+  Push it, then treat the first run as the diagnosis. Known first-run risks:
+  (a) `go test ./...` on `ubuntu-latest` may hit platform-only failures, and
+  CLAUDE.md records that every pty-dependent test (`TestTerminalWS*`) fails
+  wherever `/dev/ptmx` is unavailable; (b) the 45/60 minute job timeouts are
+  guesses. Fix what goes red rather than widening timeouts. `ci.yml` has been
+  YAML-parse-checked and passes `actionlint` v1.7.12 clean, which does not prove
+  the commands succeed.
+- **`internal/server` per-package runtime is unmeasured.** 1200+ test functions
+  in one package against Go's 10m default per-package timeout. The `-timeout 30m`
+  (plain), `45m` (race) and `5m` (retry) values are **guards approved by the user,
+  not measured fixes** — they can only prevent a spurious panic, never reveal a
+  real one, and the race value in particular could mask a genuine hang (the job
+  `timeout-minutes` still bounds that). Replace with measured numbers once a run
+  reports timings.
+- **The remote SSH tests are verified hermetic, but have no skip guards.**
+  `TestRemoteShellCommandRunsOnHost` and the rest of
+  `internal/server/handler_remote_*_test.go` need no real `sshd`, no `htrcli`,
+  and no pty: they run against an `ssh` shim prepended to `PATH`, contain zero
+  `t.Skip` calls, and pass (not skip) under a stripped environment
+  (`env -i` with only PATH/HOME/TMPDIR/GOCACHE and a cold module cache) in
+  ~0.5s per test while asserting `200`, `exitCode 0` and the `remote-ok` output.
+  Worth adding explicit environment probes anyway, so a future runner
+  requirement hard-fails loudly instead of by timeout.
+- **Flaky-retry step is APPROVED (user sign-off, 2026-10-05) but is debt.**
+  `.github/workflows/ci.yml` retries `TestNetworkRowMarksProxyBlockedResponses`
+  and `TestReadinessFailsLoudlyWhenDaemonDiesDuringExec` once before failing;
+  both were confirmed flaky on unmodified HEAD, so the quarantine is not hiding
+  a regression. **Still fix the two tests and delete the retry** — a
+  permanently retried test is a silent hole in the gate, and the step comment
+  says as much.
+- **`internal/agent/models-snapshot.json` is now committed (3.3 MB) — needs an
+  explicit decision.** The `.gitignore` entry was removed because
+  `TestLoadFromSnapshotPopulated` requires a populated embedded copy, so a
+  generated-only file cannot pass tests on a fresh clone. It is public
+  models.dev data and refreshes with `make models-snapshot`. If the repo should
+  stay lean instead, revert the `.gitignore` hunk and add a `make bootstrap`
+  target that fetches it, accepting that `go test ./...` then needs bootstrap
+  first.
+- **Repository front door is still unaddressed.** Deliberately held pending
+  approval: tracked scratch files at the repo root (`compare_chat_input.py`,
+  `edit_chat_input*.py` ×5, `restore_chat.py`, `restore_isactive_ue.py`,
+  `fix_isactive.py`, `receipt_temp.jpg`, `ocode-telegram.exe`,
+  `gen-models-snapshot.exe`), plus the GitHub repo `description`, `topics`, and
+  social preview, which are still unset. `.git` is ~349 MB locally / ~221 MB on
+  GitHub, with 32 historical `bin/ocode` blobs; shrinking it means rewriting
+  history, which needs explicit approval.
+- **No `good-first-issue` backlog exists yet.** The issue template links
+  Discussions, but the repository has no labelled starter tasks, so a new
+  contributor who wants to help has nothing to pick up.
+
 ## SQLite browser: remaining work (2026-10-05)
 
 Phases 1–4 shipped — browse, row CRUD, confirmed SQL writes and guided DDL. See
