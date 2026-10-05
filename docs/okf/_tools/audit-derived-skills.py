@@ -80,14 +80,14 @@ def name_of(p: pathlib.Path) -> str:
 
 
 def threshold_for(stack: str, fm: dict) -> float:
-    """Scorecard frontmatter wins (it is per-model), then meta.yaml, then 0.75."""
+    """Scorecard frontmatter wins (it is per-model), then meta.yaml, then 0.85."""
     for v in (fm.get("threshold"), frontmatter(OKF / stack / "meta.yaml").get("threshold")):
         if v:
             try:
                 return float(v)
             except ValueError:
                 pass
-    return 0.75
+    return 0.85
 
 
 def weak_tags(p: pathlib.Path) -> dict:

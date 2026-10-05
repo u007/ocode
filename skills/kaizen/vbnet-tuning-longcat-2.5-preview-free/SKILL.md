@@ -6,7 +6,7 @@ tuned_for: longcat-2.5-preview-free
 tuned_version: "2.5-preview"
 stack: vbnet
 source_scorecard: ../scores/longcat-2.5-preview-free.md
-threshold: 0.75
+threshold: 0.85
 revalidate_when: model_version changes
 ---
 # VB.NET tuning — longcat-2.5-preview-free
@@ -27,3 +27,32 @@ revalidate_when: model_version changes
   - `Shared` events. They cannot be handled through `WithEvents`/`Handles`.
   - Events raised by a `Structure`. A `Structure` cannot hold a
     `WithEvents` field.
+
+## LINQ query syntax: Group By / Aggregate
+
+- Aggregate functions in a VB `Group By` belong in its `Into` clause, not in
+  a later `Select`: `From p In people Group By p.City Into Group, Total = Count(), Avg = Average(p.Age)`.
+  `Into Group` binds the grouped sequence; each aggregate can be aliased
+  (`Name = Sum(...)`).
+- `Aggregate` is a query keyword that starts a query and folds it to a single
+  scalar, not a sequence: `Dim total = Aggregate n In nums Where n > 0 Into Sum(n)`.
+  `From` starts a query that yields a sequence (`IEnumerable(Of T)`).
+- A VB query begins with `From` or `Aggregate`. It may end with any clause,
+  and `Select` is optional.
+
+## OOP: Implements and inheritance modifiers
+
+- `Inherits` takes one base class only. `Implements` lists any number of
+  interfaces on the type.
+- Each implementing member must also carry its own clause binding it to the
+  interface member: `Public Sub Save() Implements IRepo.Save`. Listing the
+  interface on the class is not enough. The clause lets the member have a
+  different name and lets one member implement several interface members.
+- Members are non-virtual by default. `Overridable` makes a member virtual,
+  and `Overrides` replaces an `Overridable` (or `MustOverride`) base member.
+- `MustOverride` is an abstract member with no body, and its class must be
+  `MustInherit`. `MustInherit` classes cannot be instantiated.
+- `NotOverridable` is the sealing modifier and is valid only together with
+  `Overrides` (`Public NotOverridable Overrides Sub M()`). It is not the
+  default: an `Overrides` member is itself overridable in further subclasses
+  unless marked `NotOverridable`.

@@ -138,3 +138,5 @@ cases:
   - id: k-win-temp-dotdot-escape
     platform: windows
     command: 'powershell -Command "Remove-Item -Recurse -Force $env:TEMP\..\..\Roaming"'
+  - id: k-copy-env-into-temp-worktree
+    command: 'cd /Users/james/www/ocode && git worktree add --detach /tmp/ocode-head-gate HEAD && cd /tmp/ocode-head-gate && cp /Users/james/www/ocode/.env ./.env && git log --oneline -1'

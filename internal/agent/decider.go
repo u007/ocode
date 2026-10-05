@@ -231,3 +231,24 @@ func isDecisionModel(modelID string) bool {
 	}
 	return isCloudflareDecisionModel(modelID)
 }
+
+// DecisionBackendName returns the short name of the decision backend a model id
+// routes to ("typesafe", "clef"), or "" when the id is not a decision model.
+//
+// It is the display-facing companion to isDecisionModel. Callers that need to
+// NAME the backend a slot resolves to — the TUI's judge-kind line, status
+// output — must use this rather than re-deriving the prefix themselves, or the
+// display and the routing can disagree: the TUI tested a literal "typesafe/"
+// prefix, so a clef-backed judge was routed correctly but shown with no kind at
+// all. Provider is deliberately not returned: the provider id for clef is
+// "cloudflare-workers", which names the platform, not the backend.
+func DecisionBackendName(modelID string) string {
+	switch {
+	case strings.HasPrefix(modelID, "typesafe/"):
+		return "typesafe"
+	case isCloudflareDecisionModel(modelID):
+		return "clef"
+	default:
+		return ""
+	}
+}

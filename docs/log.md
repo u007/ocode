@@ -40,6 +40,11 @@
 
 
 
+
+## 2026-10-05
+
+* **Update**: Clef decision-judge backend + per-judge model selection — design ([superpowers/specs/2026-10-03-clef-judge-backend-design.md](/superpowers/specs/2026-10-03-clef-judge-backend-design.md))
+* **Update**: Code-Search Relevance Judge ([concepts/code-search-relevance-judge.md](/concepts/code-search-relevance-judge.md))
 ## 2026-10-04
 
 * **Update**: Pulse — cross-project live-sessions dashboard ([concepts/pulse-dashboard.md](/concepts/pulse-dashboard.md))

@@ -7,7 +7,7 @@ tuned_for: longcat-2.5-preview-free
 tuned_version: "2.5-preview"
 stack: conduct
 source_scorecard: ../scores/longcat-2.5-preview-free.md
-threshold: 0.75
+threshold: 0.85
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
 ---
 # Engineering-conduct tuning — longcat-2.5-preview-free
@@ -107,6 +107,22 @@ mode — always carry the second half through to the action.
 - A missing fixture or dependency must make the test fail loudly. Skipping —
   even "with a clear reason" — is not acceptable: a skip yields a green suite
   that never exercised the code.
+
+## Testing — behavior-preserving refactors, deleting tests, test code fails loud
+
+- Behavior-preserving refactor: run the relevant tests BEFORE starting and
+  again AFTER. Green-before plus green-after is the evidence that observable
+  behavior did not change. Running tests only afterwards proves nothing.
+- If the code being refactored has no test covering its behavior, add one
+  first (characterization test), confirm it passes, then refactor.
+- A test blocking your change is never deleted because it is failing,
+  inconvenient, redundant-looking or "wrong". Delete it only when (1) the test
+  itself is being refactored, (2) the behavior it covers genuinely changed, or
+  (3) the feature no longer exists. Otherwise work out what it guards; if
+  still unsure, stop and ask the user, giving your reasoning, before removing it.
+- Test code fails fast and loudly: no try-catch around assertions or setup to
+  keep a test going or to produce a nicer message. Swallowing the failure
+  defeats the purpose of the test.
 
 ## Surgical-changes — style, dead code, shared helpers, naming
 

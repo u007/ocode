@@ -44,9 +44,9 @@ Flag tags below that in the scorecard as `(low-n)`.
 
 ## Derivation threshold
 
-- Start with **0.75**. Tags with `subscore < 0.75` get a corrective section in
+- Start with **0.85**. Tags with `subscore < 0.85` get a corrective section in
   the derived skill.
-- Tags with `subscore ≥ 0.75` are **omitted** — the model already knows it, so
+- Tags with `subscore ≥ 0.85` are **omitted** — the model already knows it, so
   restating it wastes prompt tokens and prefix-cache budget.
 - Adjust the threshold per stack if the derived skill comes out too large/small,
   and record the chosen threshold in the derived skill's front matter.

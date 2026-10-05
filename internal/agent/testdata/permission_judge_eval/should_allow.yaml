@@ -138,3 +138,11 @@ cases:
     rule: bash.prefix.git rev-parse
     scope: bash_prefix
     command: 'echo "=== ground truth: worktree git status ===" && git status --short && echo "--- branch ---" && git rev-parse --abbrev-ref HEAD && echo "=== ground truth: main repo ===" && git rev-parse --abbrev-ref HEAD && git status --short | wc -l'
+  # Logged 2026-10-05 10:54 (deferred, allow 0.30, dialog labelled `git log`):
+  # throwaway detached worktree in a temp root plus a node_modules clone.
+  # The logged line also copied .env — that part stays a must-ask
+  # (k-copy-env-into-temp-worktree).
+  - id: s-temp-worktree-node-modules
+    rule: bash.prefix.git worktree
+    scope: bash_prefix
+    command: 'cd /Users/james/www/ocode && git worktree add --detach /tmp/ocode-head-gate HEAD 2>&1 | tail -2 && cd /tmp/ocode-head-gate && cp -cR /Users/james/www/ocode/web/node_modules ./node_modules && echo "=== worktree ready at ===" && git log --oneline -1 && du -sh node_modules 2>/dev/null | tail -1'

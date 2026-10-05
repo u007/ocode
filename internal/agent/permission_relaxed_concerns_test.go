@@ -121,6 +121,32 @@ func TestRelaxedConcernDenyIsHonoured(t *testing.T) {
 	}
 }
 
+// A low-confidence allow is the same opt-out: when the judge's named concern is
+// a switched-off category its hesitation does not defer the call. Any other
+// concern, no concern, or nothing relaxed still defers below the floor.
+func TestRelaxedConcernLowConfidenceAllow(t *testing.T) {
+	cases := []struct {
+		name    string
+		concern string
+		relaxed []string
+		want    bool
+	}{
+		{"concern switched off", "secrets", []string{"secrets"}, true},
+		{"concern still enforced", "secrets", []string{"network"}, false},
+		{"concern none", "none", []string{"secrets"}, false},
+		{"nothing relaxed", "secrets", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := relaxedJudgeAgent(t, typesafeReplyWithConcern("allow", 0.30, tc.concern), tc.relaxed...)
+			allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"cp .env /tmp/x/.env"}`), nil)
+			if !consulted || allowed != tc.want {
+				t.Fatalf("allowed=%v consulted=%v want allowed=%v reason=%q", allowed, consulted, tc.want, reason)
+			}
+		})
+	}
+}
+
 // Fail closed when the deny cannot be ATTRIBUTED to an opted-out category.
 func TestRelaxedConcernDenyStandsWhenNotAttributable(t *testing.T) {
 	cases := []struct {

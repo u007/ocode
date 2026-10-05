@@ -1112,6 +1112,16 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 			ids = append(ids, id)
 		}
 	}
+	// Clef is absent from models.dev too. Enumerated under cloudflareWorkersProvider
+	// because that is the provider id the credential is stored under AND the prefix
+	// isDecisionModel routes on; the models.dev id for this platform
+	// ("cloudflare-workers-ai") is a different namespace and would not route, so a
+	// judge configured with it would silently not be a decision backend.
+	for _, m := range clefModels {
+		if id := cloudflareWorkersProvider + "/" + m; !containsString(ids, id) {
+			ids = append(ids, id)
+		}
+	}
 	// AIHubMix live models — supplement the snapshot so models the models.dev
 	// catalog omits (e.g. "ox-alpha") appear in the picker. Guarded by refresh (or
 	// a still-fresh cache) to avoid blocking the main loop on a network fetch.
@@ -1167,9 +1177,26 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 // this static list. Jev is decision-only — see TypesafeClient.
 var typesafeModels = []string{"jev-latest"}
 
+// clefModels is the Cloudflare Workers AI decision-model catalog. Like TypeSafe
+// it is absent from models.dev, so the picker gets this static list for the same
+// reason. The ids carry the Workers AI "@cf/" spelling because that is the URL
+// segment the endpoint needs; the request BODY takes a shorter selector (see
+// clefBodySelectors) and the two are not interchangeable.
+var clefModels = []string{"@cf/cloudflare/clef", "@cf/cloudflare/clef-flash"}
+
 func providerModelsFromRegistry(provider string, refresh bool) []string {
 	if provider == "typesafe" {
 		return slices.Clone(typesafeModels)
+	}
+	if provider == cloudflareWorkersProvider {
+		// Workers AI serves chat models from this provider as well, and clef is
+		// absent from models.dev, so MERGE the static decision catalog with whatever
+		// the snapshot has rather than replacing it — a future snapshot entry for
+		// this provider must not be hidden. Sorted because the picker expects a
+		// deterministic order (and the list feeds a tool description).
+		ids := mergeModelIDs(providerModelsFromSnapshot(provider), clefModels)
+		sort.Strings(ids)
+		return ids
 	}
 	if provider == "lmstudio" {
 		return fetchLMStudioModels()

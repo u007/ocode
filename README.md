@@ -14,6 +14,24 @@
 
 ---
 
+## Highlights
+
+The flagship capabilities that set ocode apart — all in one static Go binary that
+powers a terminal TUI, a React web UI, and a native desktop app.
+
+| Area | What you get |
+|------|--------------|
+| 🌍 **Remote projects** | SSH **and** WSL projects with one-click connect, automatic provisioning, and **self-updating remote binaries** — the agent runs on the host while files, git, terminals, and the web UI proxy over the wire. |
+| 🌐 **Embedded browser** | A real browser panel (isolated local iframe **or** your Chrome over CDP) with tabs, address bar, dev console, a **password vault**, and **HTR** browser automation. |
+| 🔊 **Text-to-speech** | Speak assistant replies with a browser-native or local engine (Kokoro / Piper / Melo), with an optional **speech-summary** model that rewrites replies to be listened to, not read. |
+| 🧠 **Project context** | Auto-loads `CLAUDE.md` / `AGENTS.md` / `OCODE.md` / `.cursorrules` / `.opencode/rules`, layered **memory**, and the **OKF knowledge bundle** with a dedicated context model. |
+| 🧩 **Superpowers plugin** | A built-in, customized [Superpowers](https://github.com/u007/superpowers) workflow — brainstorm → plan → TDD → verify — plus 70+ bundled skills. |
+| ⚙️ **Beautiful settings** | A 30+ section settings overlay (backend, browser, passwords, speech, connectors, profiles, compact, permissions, security, themes, MCP, …) shared by web and desktop. |
+| 🔌 **opencode interop** | Reads your existing `opencode.json` — providers, models, MCP servers, permissions, plugins — so you can drop ocode into an opencode setup with no migration. |
+| 🛡️ **Permissions & sandbox** | Four modes, per-tool and per-bash-prefix rules, custom banned commands, and an OS-level write-wall sandbox. |
+
+---
+
 ## Why ocode?
 
 ### 🚀 50× lighter than the alternatives
@@ -187,6 +205,17 @@ Web parity: **Files** top tab (`GET /api/files/tree`, Monaco editor via `GET /ap
 - **Theme sync endpoint** — Web UI maps theme colors to CSS variables (`GET /api/themes`, `GET /api/theme`)
 - **`/theme`** / **`/themes`** command to switch instantly; `web/src` respects the same tokens
 
+### ⚙️ Settings
+
+The web/desktop **Settings** overlay is a single surface for nearly everything,
+organized into 30+ groups: Backend, Browser, Passwords, Speech playback,
+Connectors, Profiles, Profile Debug, Model Defaults & Recap, Commit Message,
+Compact, Speech Summary, Chat display, Quick actions, Advisor, Permissions,
+System Permissions, Security & Redaction, Terminal, Logs, OCR, Computer Use,
+Discovery, TUI, Editor Mode, Image Generation, Paths & Uploads, Limits, Features,
+Auto Share, Plugins & Local Models, Theme, MCP Servers, and Model Selection State.
+Changes persist to `ocodeconfig.json` and apply live.
+
 ### 🧩 MCP Client
 
 - **Local + Remote MCP servers** with full lifecycle management
@@ -272,7 +301,7 @@ A React + shadcn/ui + Tailwind SPA that mirrors the TUI experience, served by th
 | **Assets / Uploads** | Drag-and-drop uploads, upload dir, image preview | `AssetsPanel`; `POST /api/uploads`, `/api/files/open` |
 | **Agents** | Parallel agent monitoring, runs stream | `AgentsPanel`; `GET /api/agents/runs/stream` |
 | **Logs** | SSE-backed live log streaming with reconnection, retention cap, background buffering toggle | `LogPanel`, `LogsForm`; `GET /api/logs/stream`, `GET /api/logs` |
-| **Settings** | 20-section settings overlay (profiles, models, compact, permissions, security, terminal, logs, OCR, discovery, TUI, editor, paths, features, limits, imagegen, plugins, themes, MCP) | `SettingsPanel`; `GET/PUT /api/config/ocode/*`, `/api/config/*` |
+| **Settings** | 30+ section settings overlay (backend, browser, passwords, speech, connectors, profiles, compact, permissions, security, terminal, logs, OCR, discovery, TUI, editor, paths, features, limits, imagegen, plugins, themes, MCP, …) | `SettingsPanel`; `GET/PUT /api/config/ocode/*`, `/api/config/*` |
 | **Model Selection** | Model dialog with main/small/advisor tabs, display names | `ModelDialog`; `GET /api/models` |
 | **Permissions / Questions** | Interactive allow/deny + question prompts, server-bridged | `PermissionDialog`, `QuestionDialog`; `POST /api/permissions`, `/api/questions` |
 | **Remote Control** | `/rc` mirrors a TUI session to the browser in real time (multiproject event bus) | `POST /api/rc/*`, `GET /api/events` |
@@ -286,6 +315,117 @@ A React + shadcn/ui + Tailwind SPA that mirrors the TUI experience, served by th
 | **Project list** | Per-project git changed-file count badge plus attention counts (streaming / stalled) | `ProjectSidebar` |
 | **Cross-process sync** | Transcripts converge across ocode processes (desktop + dev server + TUI) via a 15s revision poll | `useSessionRevisionSync`; `GET /api/sessions/{id}/state` |
 | **Mobile / Responsive** | Below `lg` (<1024px — phones *and* tablets) the tab bar collapses to a dropdown showing the active session; overlay sidebar with backdrop below 768px; narrow project rows wrap their status badges; action buttons stay right-aligned | `UnifiedTabBar`, `App.tsx` |
+
+### 🌍 Remote Projects (SSH & WSL)
+
+Work on a machine you're not sitting at. Add a remote host from the project
+sidebar (or `ocode remote add …`) and the agent runs **on the host** — not in a
+container, not on your laptop — while every surface you already use proxies over
+the wire.
+
+- **One-click connect, automatic provisioning.** The first connection uploads a
+  version-matched CLI to `~/.ocode/bin/<version>/ocode`, activates it, and
+  verifies `--version` before launch. No Go toolchain, no source checkout, no
+  manual download on the host.
+- **Self-updating remote binaries.** Remote installs are version-scoped: when
+  you upgrade the desktop app, the next connect automatically uploads the new
+  version and activates it. Stale version directories are garbage-collected (the
+  two newest are kept), so the host never accumulates binaries.
+- **WSL.** On Windows, a target can be a WSL distro (default or named) and runs
+  through `wsl.exe` over the same provisioning path — the Linux CLI variant is
+  uploaded automatically.
+- **Full parity over the wire.** Chat, files, git, terminals, cron, and the web
+  UI all work on a remote project. The remote auth token never reaches the
+  browser; the proxy re-mints it per request.
+- **Security by construction.** `BatchMode=yes` fail-fast ssh (no invisible
+  password/passphrase prompts), a `--` separator plus leading-`-` rejection
+  against option injection, a per-connection exec-slot pool, and a project trust
+  boundary that keeps a remote path out of any local allowlist.
+- **Profile & credential routing.** The desktop's active profile is honored on
+  the host, so a remote project uses the same provider credentials as local.
+
+### 🌐 Embedded Browser
+
+A real browser surface inside the web/desktop UI — not a link that opens your
+external browser.
+
+- **Two modes.** **Local** serves pages in an isolated browse-origin iframe (the
+  right target for private/loopback hosts); **chrome** drives your real Chrome
+  over CDP, with a `capture.js` hook that rewrites asset URLs so SPAs and
+  lazy-loaded chunks load correctly.
+- **Full chrome.** Tabs, an address bar, a dev console, a screencast viewport,
+  and new-tab events for `Cmd/Ctrl+click` / `window.open`. Navigation and title
+  events are server-authoritative (a page can't spoof its own URL).
+- **Password vault.** An `internal/vault` credential store with per-surface
+  unlock grants and autofill in both local and Chrome modes, managed from
+  Settings → Passwords.
+- **HTR automation.** Drive Chrome/Firefox tabs — click, fill, type, select,
+  extract text, screenshot, accessibility snapshots — through the shared HTR
+  daemon and the bundled `htrcli` skill.
+
+### 🔊 Text-to-Speech & Speech Summary
+
+Hear assistant replies instead of reading them. A **Speech** toolbar speaks the
+current message with a client-side FIFO queue and a now-playing
+`project · session` label.
+
+- **Engines.** **Browser Native** (default — no install, uses the OS voice) plus
+  local engines: **Kokoro**, **Piper**, and **Melo**, with per-model voice
+  overrides.
+- **Speech summary.** An optional small model rewrites a reply into 2–5 plain
+  spoken sentences — no code, diffs, stack traces, paths, or URLs — before
+  synthesis. Short plain-prose replies skip the model entirely, and a summariser
+  failure is fail-open (the original text is spoken).
+- **Settings.** Settings → **Speech playback** picks engine and voice;
+  Settings → **Speech Summary** configures the summariser model.
+
+### 🧩 Superpowers Plugin (built in)
+
+ocode ships a customized [Superpowers](https://github.com/u007/superpowers)
+plugin that gives agent work a disciplined shape: **brainstorm → write a plan →
+execute with TDD → verify before completion → review the change set**. It
+composes with the plugin registry and the bundled skill library, and every skill
+is also available as a slash command.
+
+### 🧠 Project Context & Memory
+
+- **Automatic context loading.** At session start ocode loads `CLAUDE.md`
+  (priority) or `AGENTS.md`, plus `OCODE.md`, `.cursorrules`, and
+  `.opencode/rules/*.md` from the project root — no setup, no `/init` required.
+  Subdirectory `CLAUDE.md` / `AGENTS.md` files are lazy-loaded per directory as
+  the agent touches them.
+- **Model-specific instructions.** `{MODEL}.OCODE.md` files (e.g.
+  `deepseek-v4-flash.OCODE.md`) are loaded for the active model, with bundled
+  fallbacks baked into the binary so every build ships its own model guidance.
+- **Layered memory** (`/mem`). User / project / global scopes with an injection
+  toggle; the most specific scope wins.
+- **OKF knowledge bundle** (`/docs`). A curated `docs/` bundle with a
+  `knowledge_lookup` tool backed by the `context` subagent — the bundle is never
+  injected into the system prompt. Assign a dedicated **context model**
+  (`/context-model`) to the context/doc-sync agent.
+
+### 📊 Pulse Dashboard & Auto-Share
+
+- **Pulse** (`Cmd+J`) — a cross-project dashboard of live activity. Click a card
+  to jump straight into that session; toggling back restores what you were on.
+- **Auto-share** — publish the instance over your Tailnet (tailscale funnel) at
+  boot or on demand, so you can open the UI from a phone or another machine.
+  Exposure is tailnet-only; reading the setting never publishes anything.
+
+### ✨ Also worth knowing
+
+- **Quick actions** — configurable composer chips (compact / continue / recap /
+  custom) persisted in the `quick_actions` config.
+- **Connectors** — manage the base provider credential store from Settings →
+  Connectors; per-profile overlays stay a separate file.
+- **Chat display verbosity** — Full / Balanced / Quiet presets with per-category
+  overrides; presentation-only and never touches the transcript.
+- **Session re-keying** (`/reset-id`) — a fresh session id for the same
+  transcript, defeating provider session-id cache/routing grouping.
+- **Cross-process sync** — transcripts converge across ocode processes (desktop
+  + dev server + TUI) via a revision poll.
+- **Mobile / responsive** — the tab bar collapses to a dropdown below `lg`
+  (phones and tablets); the sidebar becomes an overlay below 768px.
 
 ### 📚 Knowledge Bundle (`/docs` — OKF v0.1)
 
@@ -528,6 +668,12 @@ Configuration lives in two files, loaded from `~/.config/opencode/` and the near
 |------|------|
 | **`opencode.json`** | Upstream-compatible settings (provider creds, model prefs, `mcp` servers). **Read-only** — ocode never writes to it. Can be checked into git. |
 | **`ocodeconfig.json`** | ocode-only state (permissions, editor, compaction, model history, profiles, discovery, limits, features). **Written by ocode** to persist runtime state. `.gitignore`-friendly. |
+
+**Full opencode.json interop.** ocode reads your existing `opencode.json` —
+provider credentials, model preferences, `mcp` servers, `permissions`, and the
+`plugin` array — and never writes to it, so it can stay checked into git. Drop
+ocode into an opencode setup and it just works; `ocodeconfig.json` is the
+ocode-only writable store for runtime state.
 
 Additional stores:
 

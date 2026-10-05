@@ -132,7 +132,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 
 	ans, ok := resp.Answers[typesafeAutoContinueVerdictKey]
 	if !ok || ans.Type != "choice" {
-		detail := fmt.Sprintf("typesafe/%s triage returned no verdict (answers=%d)", deciderLabel(client), len(resp.Answers))
+		detail := fmt.Sprintf("%s triage returned no verdict (answers=%d)", deciderLabel(client), len(resp.Answers))
 		return false, detail, nil
 	}
 

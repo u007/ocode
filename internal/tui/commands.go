@@ -1886,8 +1886,8 @@ func autoContinueStatusText(m *model) string {
 		judgeModel = m.config.Ocode.AutoContinueModel
 	}
 	judgeKind := ""
-	if strings.HasPrefix(judgeModel, "typesafe/") {
-		judgeKind = "\nJudge kind: typesafe (decision-only triage — the transcript tail travels as structured state and Jev answers a typed continue/end choice; no chat call is made)"
+	if backend := agent.DecisionBackendName(judgeModel); backend != "" {
+		judgeKind = fmt.Sprintf("\nJudge kind: %s (decision-only triage — the transcript tail travels as structured state and the model answers a typed continue/end choice; no chat call is made)", backend)
 	}
 	return fmt.Sprintf("Auto-continue: %s (chain so far this session: %d/%d)\nJudge model: %s%s\n\n"+
 		"When enabled, any turn cut off by the /max-step cap — not just /goal — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web and headless server turns). "+

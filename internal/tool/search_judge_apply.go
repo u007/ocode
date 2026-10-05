@@ -6,12 +6,12 @@ import (
 	"strings"
 )
 
-// searchJudgeMaxCandidates is the cost cap on one judge request. Results past
+// SearchJudgeMaxCandidates is the cost cap on one judge request. Results past
 // the cap are kept unjudged, never dropped: the cap is a cost control and must
 // not decide relevance. The pre-judge order is each tool's own output order (for
 // glob that is modification time), and the footer discloses the unjudged count
 // whenever a footer is rendered.
-const searchJudgeMaxCandidates = 40
+const SearchJudgeMaxCandidates = 40
 
 // searchJudgeSampleLines bounds how many matching lines per file are put into a
 // candidate's summary for the judge.
@@ -82,9 +82,9 @@ func runSearchJudge(ctx context.Context, toolName, intent string, query map[stri
 	}
 	send := results
 	unjudged := 0
-	if len(send) > searchJudgeMaxCandidates {
-		unjudged = len(send) - searchJudgeMaxCandidates
-		send = send[:searchJudgeMaxCandidates]
+	if len(send) > SearchJudgeMaxCandidates {
+		unjudged = len(send) - SearchJudgeMaxCandidates
+		send = send[:SearchJudgeMaxCandidates]
 	}
 	kept, vetoed, err := judge(SearchJudgeRequest{
 		Tool:    toolName,

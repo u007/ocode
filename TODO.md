@@ -5287,3 +5287,69 @@ Plan: `docs/superpowers/plans/2026-10-03-clef-judge-backend/`. Spec:
       - Plus the anchor/fact sweep already recorded above (0.85 vs 0.80 floors,
         `typesafe.go` anchors, six `decider.go` citations, two never-amended
         pages).
+- [ ] **Part 06 DONE — the spec's measurement table is now reproducible, and the
+      logged numbers differ from the spec's.** `TestJudgePayloadBudgets`
+      (`internal/agent/clef_budget_test.go`) rebuilds each worst case through the
+      REAL builders at the REAL caps and prints:
+      discovery 30q/32,801B/10,933tok/34.2% · code-search 40q/25,787B/8,595tok/26.9%
+      · doc-search 40q/46,189B/15,396tok/48.1% · permission-oversized-write
+      2q/206,401B (projected to fit) · content-guard 2q/6,077B/6.3% ·
+      network-guard 2q/2,106B/2.2%. `TestJudgePayloadBudgets_RefusalIsReachable`
+      proves refusal fires (249,313B unprojectable bash command).
+      The spec's older table (discovery 83,387B/20,846tok etc.) came from a deleted
+      throwaway harness with a different fixture, so the numbers legitimately
+      differ. **Step 3 of Part 06 says to copy the logged numbers back into the
+      spec so document and test agree — that edit is still outstanding** and must
+      go through the `context` agent (bundle-owned).
+- [ ] **EXPORTED `searchJudgeMaxCandidates` -> `SearchJudgeMaxCandidates`**
+      (`internal/tool/search_judge_apply.go`, +18 references across
+      search_judge_apply.go, search_judge_grep_test.go, search_judge_glob_test.go,
+      search_judge_rgrep_test.go). It was unexported, so the agent-package budget
+      test could not reference the real ceiling BY NAME — and Part 06 explicitly
+      forbids hardcoding the literal, since a hardcoded 40 silently stops
+      protecting the real ceiling when the constant changes. Exporting is the
+      minimal change that satisfies that rule. `go test ./internal/tool/` passes.
+- [ ] **TEST-QUALITY FINDING (third instance of the same class): a tripwire with no
+      over-ceiling fixture cannot fire.** Part 06's first version asserted the
+      question-count and byte-budget ceilings inline, but every real judge request
+      sits far inside both (largest is 40 questions against a 64 ceiling; 46 KB
+      against a 96 KB budget). **All five mutants SURVIVED** — the test was green
+      while protecting nothing. FIX: extracted `checkJudgeBudget` to RETURN
+      violations instead of calling t.Errorf, and added
+      `TestJudgePayloadBudgets_TripwireFires` which drives it with synthetic
+      over-ceiling inputs (one over, exactly at, and a choice judge that must NOT
+      be held to the relevance budget). Re-run: 5/6 CAUGHT.
+      The surviving M8 (hardcoded `64` instead of `clefMaxQuestions`) is an
+      **EQUIVALENT MUTANT** — the constant IS 64, so no test can distinguish them.
+      Label it equivalent; do not chase it.
+      **This is now the third time this session** (Part 04 determinism fixture with
+      no collisions, Part 05 global-substring instruction test, Part 06 tripwire
+      with no over-ceiling case) that a test passed while its assertions were
+      unreachable. The general rule: **a regression test needs a fixture that
+      actually crosses the boundary it exists to protect**, and when the check is
+      extracted, unit-test the checker directly rather than only feeding it
+      in-bounds production data.
+- [ ] **Part 06 step 3 is still outstanding: copy the logged numbers back into the
+      spec's table.** The spec's figures (discovery 83,387B/20,846tok, etc.) came
+      from a deleted throwaway harness with a different fixture; the reproducible
+      ones are discovery 30q/32,801B/10,933tok/34.2%, code-search
+      40q/25,787B/8,595tok/26.9%, doc-search 40q/46,189B/15,396tok/48.1%,
+      permission-oversized-write 2q/206,401B (projected to fit), content-guard
+      2q/6,077B/6.3%, network-guard 2q/2,106B/2.2%. Must go through the `context`
+      agent (bundle-owned), and the spec's code anchors need re-deriving after.
+
+- [ ] **`ui/scoped-dialog.tsx` is built and tested but has NO consumer — pick the surface and wire it up.**
+      The component confines a shadcn-shaped dialog (dimmed `bg-black/50` backdrop,
+      centered panel, Escape + scrim-click to close) to ONE target element instead of
+      the viewport, so a confirm inside a panel leaves the rest of the app visible and
+      usable. Landing a request for "a dialog alike shadcn dialog, but wrapped within a
+      targeted component so it does not cover everything" plus a "yes" to both the
+      backdrop and centering questions named NO target surface, so the choice of where
+      it goes is still open — do not treat this entry as "shipped".
+      Pass `container` as an element held in STATE (`ref={setTarget}`); a `useRef` is
+      null on first render and leaves the dialog unrendered (it warns once). Prefer a
+      `<div>` over `<section>`: React 19 types `section`'s ref as `Ref<HTMLElement>`,
+      which a `useState<HTMLDivElement | null>` setter does not satisfy.
+      Design notes, the non-modal consequences and the regression list are
+      `skills/ocode-web/SKILL.md` #63. Not in `CHANGES.md` because nothing renders it
+      yet. Needs a desktop rebuild to be visible (`web/dist` is embedded).

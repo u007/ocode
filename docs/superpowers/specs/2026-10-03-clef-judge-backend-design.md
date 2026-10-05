@@ -1,3 +1,18 @@
+---
+type: Design
+title: Clef decision-judge backend + per-judge model selection — design
+description: Design spec for adding Cloudflare Clef/Clef-Flash as a second decision-judge backend behind a Decider seam, with per-judge model selection. Measurement table (2026-10-05) rebuilt from the permanent TestJudgePayloadBudgets regression test against the 96 KB decisionStateBudgetBytes budget; the oversized permission write is projected to fit.
+tags:
+  - clef
+  - cloudflare
+  - typesafe
+  - jev
+  - judge
+  - decider
+  - state-budget
+  - design-spec
+timestamp: 2026-10-05T00:47:05Z
+---
 # Clef decision-judge backend + per-judge model selection — design
 
 Date: 2026-10-03
@@ -127,26 +142,41 @@ question ids may use only `letters, digits, '_', '.', '-'` up to 100 chars; and
 Each judge request was built at its documented worst case through the real
 builders and marshalled. Question counts come from the production caps
 `SelectCap           = 30` at `internal/discovery/index.go:75` and
-`const searchJudgeMaxCandidates = 40` at
+`const SearchJudgeMaxCandidates = 40` at
 `internal/tool/search_judge_apply.go:14`.
 
-> **Reproducibility.** These numbers came from a throwaway harness built in
-> `internal/agent` that constructed each worst-case request through the real
-> builders (`buildDiscoveryJudgeState`, `buildSearchJudgeState`,
-> `buildDocSearchJudgeState`, `buildTypesafePermissionState`,
-> `buildContentGuardState`) and marshalled `{state, questions}`. The harness was
-> deleted after reading the figures, so the numbers are **not currently
-> reproducible from the tree**. §5 turns it into a permanent assertion-based
-> regression test — see the last bullet there.
+> **Reproducibility.** The original figures came from a throwaway harness that
+> was deleted after the numbers were read, so they were not reproducible from the
+> tree. They are now: `go test ./internal/agent/ -run TestJudgePayloadBudgets -v`
+> rebuilds each worst case through the same real builders at the same real caps
+> and prints the table below. The figures differ from the original ones because
+> the fixtures differ — the original harness sized its payloads differently — not
+> because the judges changed.
 
-| Judge | Questions | Bytes | ~tokens | vs 65,536 ctx |
+| Judge | Questions | State bytes | ~tokens | % of 96 KB state budget |
 | --- | --- | --- | --- | --- |
-| discovery relevance | 30 | 83,387 | 20,846 | 32% |
-| code search relevance | 40 | 51,200 | 12,800 | 20% |
-| doc_search relevance | 40 | 74,883 | 18,720 | 29% |
-| permission (200 KB `write` payload) | 2 | 219,820 | **54,955** | **84%** |
-| content guard (6 KB chunk) | 2 | 10,575 | 2,643 | 4% |
-| network guard | 2 | 8,515 | 2,128 | 3% |
+| discovery relevance | 30 | 32,801 | 10,933 | 34.2% |
+| code search relevance | 40 | 25,787 | 8,595 | 26.9% |
+| doc_search relevance | 40 | 46,189 | 15,396 | 48.1% |
+| permission (200 KB `write` payload) | 2 | 206,401 | 68,800 | 215.0% -> projected to fit |
+| content guard (6 KB chunk) | 2 | 6,077 | 2,025 | 6.3% |
+| network guard | 2 | 2,106 | 702 | 2.2% |
+
+The budget column is `decisionStateBudgetBytes` = 96,000 bytes, derived from
+Jev's stricter 32k `state` limit at ~3 bytes/token (not clef's flatter 65,536
+context window, and not the usual 4 bytes/token — a chars/4 estimate
+*under*-estimates tokens for source code and JSON). The state is measured
+**alone**, because that is what `prepareDecisionState` budgets; the question
+count is checked separately against clef's `maxProperties: 64`.
+
+The permission row is the one that needs reading carefully. 206,401 bytes is
+**215% of the budget**, and it is *not* sent that way: `arguments.content` is a
+key in the projection allowlist, so `prepareDecisionState` replaces it with a
+bounded preview and the result fits. A state that projection cannot rescue —
+one that is over budget for reasons other than bulky content — is refused
+outright, which surfaces as a deferral to the human. See
+`TestJudgePayloadBudgets_RefusalIsReachable` for the case that proves refusal
+is reachable rather than dead code.
 
 Three conclusions:
 
