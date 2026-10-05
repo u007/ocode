@@ -79,7 +79,11 @@ ocodeconfig.json
 # Terminal-Bench build and run artifacts
 bench/terminal_bench/dist/
 bench/terminal_bench/runs/
-bench/**/__pycache__/
+
+# Python bytecode caches — the OKF audit tools under docs/okf/_tools/ are
+# run in place, so importing them drops __pycache__ next to the sources.
+__pycache__/
+*.py[cod]
 
 # Desktop embedded assets — generated at build time by `make desktop`.
 # The embedded-assets/ dir itself (with .gitkeep) is committed so a bare
