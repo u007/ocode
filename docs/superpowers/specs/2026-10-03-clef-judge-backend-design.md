@@ -199,7 +199,7 @@ Three conclusions:
    `write` — ~55K tokens of arguments — already exceeds Jev's documented 32k
    state allowance in production today. ocode puts the raw arguments into the
    judge state uncapped (`"arguments":         arguments,` at
-   `internal/agent/permission_typesafe.go:411`); `maxCtxBytes` (default 2048)
+   `internal/agent/permission_typesafe.go:430`); `maxCtxBytes` (default 2048)
    bounds only `project_context`. TypeSafe's own guidance for this case is
    *"retrieve and filter in code first, and send only the fields the question
    needs"*, and their jaggedness page lists "Large state full of irrelevant

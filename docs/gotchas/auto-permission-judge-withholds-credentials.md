@@ -24,7 +24,7 @@ content never reaches the judge at all.
 `buildPermissionContext(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource)`
 returns a newline-joined list of sections. The same value is used by the generic
 chat judge (`askPermissionModel`) and by the TypeSafe judge state at
-`internal/agent/permission_typesafe.go:402` (`"project_context"`).
+`internal/agent/permission_typesafe.go:435` (`"project_context"`).
 
 Metadata sections (only the byte budget applies, so file/script sources are not
 starved):
@@ -45,7 +45,7 @@ Source sections (counted against `maxSources`):
 Defaults: `MaxContextBytes` 4096 / `MaxContextSources` 2 /
 `MaxContextLinesPerSource` 80 (`internal/config/ocodeconfig.go:1352-1354`);
 the TypeSafe state builder uses 2048/3/40 unless overridden
-(`internal/agent/permission_typesafe.go:362`). When nothing is collected the
+(`internal/agent/permission_typesafe.go:395`). When nothing is collected the
 function returns `"(no context available)"`.
 
 ## The withholding rule
