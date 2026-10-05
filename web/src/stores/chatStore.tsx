@@ -498,6 +498,7 @@ export type ChatAction =
   /** A transient informational line appended to the live buffer (discovery
    *  notices mirrored from the TUI). Append-only: unlike a permission/advisor
    *  status part it is never removed on completion. */
+  | { type: "LIVE_USER"; sessionId: string; content: string; user_seq?: number }
   | { type: "LIVE_NOTICE"; sessionId: string; text: string }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
@@ -829,6 +830,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           hasMore: capped.hasMore || s.hasMore,
         };
       });
+    case "LIVE_USER":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        live: [...s.live, { kind: "user", content: action.content, user_seq: action.user_seq }],
+      }));
     case "LIVE_DELTA":
       return updateSession(state, action.sessionId, (s) => {
         const live = [...s.live];

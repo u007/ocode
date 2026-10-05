@@ -66,6 +66,13 @@ func typesafeReplyWithConcern(choice string, confidence float64, concern string)
 	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":10,"output_tokens":2}}`
 }
 
+// typesafeReplyWithConcernConf is typesafeReplyWithConcern with an explicit
+// confidence on the CONCERN answer, so a test can make the judge unsure about
+// the very category that unlocks a relaxed grant.
+func typesafeReplyWithConcernConf(choice string, confidence float64, concern string, concernConf float64) string {
+	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":` + jsonFloat(concernConf) + `}},"usage":{"input_tokens":10,"output_tokens":2}}`
+}
+
 func jsonFloat(f float64) string {
 	b, _ := json.Marshal(f)
 	return string(b)

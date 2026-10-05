@@ -18,6 +18,7 @@ import {
   Zap,
   Target,
   GitBranch,
+  FolderTree,
   Puzzle,
   Radio,
   Loader2,
@@ -47,6 +48,10 @@ interface ConfigState {
   recapModel?: string;
   recapModelEnabled?: boolean;
   contextMaxTokens?: number;
+  // Pre-session fallback for the Extra Dirs list. A live session's TUI status
+  // snapshot carries extra_allowed_paths; a brand-new/draft tab has no snapshot
+  // yet, so seed from the host's persisted config until one exists.
+  extraDirs?: string[];
   advisorModel?: string;
   advisorEnabled?: boolean;
   smallModel?: string;
@@ -80,6 +85,7 @@ const DEFAULT_SECTIONS: Record<string, boolean> = {
   git: true,
   permissions: true,
   mcp: false,
+  extra_dirs: false,
 };
 
 function loadExpandedSections(): Record<string, boolean> {
@@ -334,8 +340,11 @@ export default function CoworkSidebar({
       // sidebar row seeds itself from the persisted config endpoint (same one
       // the Settings → Discovery tab and /discover write).
       api.getDiscoveryConfig(sessionHost).catch(() => null),
+      // Extra allowed paths for the Extra Dirs section. Session-scoped on the
+      // wire: a remote project's extra roots live on the host that runs it.
+      api.getPathsConfig(sessionHost).catch(() => null),
     ])
-      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes, speechRes, discoveryRes]) => {
+      .then(([modelRes, thinkingRes, permRes, yoloRes, recapRes, advisorRes, advisorEnabledRes, smallRes, explorerRes, contextRes, autoContinueRes, speechRes, discoveryRes, pathsRes]) => {
         setConfig({
           model: modelRes?.model || "",
           thinkingBudget: thinkingRes?.budget,
@@ -359,6 +368,7 @@ export default function CoworkSidebar({
           // never renders a bogus ●on for a block the server never returned.
           speechSummaryModel: speechRes?.model || "",
           speechSummaryEnabled: typeof speechRes?.enabled === "boolean" ? speechRes.enabled : undefined,
+          extraDirs: pathsRes?.extra_allowed_paths,
         });
         // Guard against partially-mocked / malformed responses (the boolean
         // check requires a real payload) so the row never renders a bogus
@@ -426,6 +436,17 @@ export default function CoworkSidebar({
   const cachePct =
     cacheDenom > 0 ? Math.round((cachedTokens / cacheDenom) * 100) : 0;
   const activeRoot = tuiStatus?.cwd ?? "";
+  // Extra allowed paths shown in the Extra Dirs section. A live session's
+  // status snapshot is authoritative — INCLUDING when its list is empty, which
+  // the server omits (json `omitempty`). So an empty snapshot must NOT fall
+  // through to the mount-time config, or a dir removed mid-session would
+  // reappear from the stale config. The config branch is the restored original
+  // behavior (the pre-removal section read `tuiStatus?.extra_allowed_paths ??
+  // config.extraDirs ?? []`): it seeds the list for a tab that has no status
+  // snapshot yet, and yields to the snapshot the moment one arrives.
+  const extraDirs: string[] = tuiStatus
+    ? tuiStatus.extra_allowed_paths ?? []
+    : config.extraDirs ?? [];
   const lspServers: LSPStatus[] = (tuiStatus?.lsp_servers ?? []).filter(
     (s) => activeRoot === "" || s.root === activeRoot || (s.root === "" && activeRoot === ".")
   );
@@ -1507,6 +1528,48 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
             <Puzzle className="w-4 h-4 text-fuchsia-400" />
             Plugins
           </button>
+        </div>
+
+        {/* Extra Dirs Section — collapsed by default. Lists the pre-authorized
+            extra_allowed_paths so the user can see which additional roots the
+            agent may access without re-prompting. */}
+        <div className="border-b border-border">
+          <button
+            onClick={() => toggleSection("extra_dirs")}
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
+          >
+            {expandedSections.extra_dirs ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+            <FolderTree className="w-4 h-4 text-teal-400" />
+            Extra Dirs
+            {extraDirs.length > 0 && (
+              <span className="ml-auto text-xs font-mono text-muted-foreground">
+                {extraDirs.length}
+              </span>
+            )}
+          </button>
+          {expandedSections.extra_dirs && (
+            <div className="px-4 pb-3">
+              {extraDirs.length > 0 ? (
+                <ul className="space-y-1">
+                  {extraDirs.map((p) => (
+                    <li
+                      key={p}
+                      className="text-xs font-mono text-muted-foreground break-all"
+                      title={p}
+                    >
+                      {p}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-xs text-muted-foreground">No extra dirs</div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

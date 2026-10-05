@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import QuestionDialog from "./QuestionDialog";
@@ -6,6 +7,21 @@ import type {
   QuestionPrompt,
 } from "@/api/types";
 import type { AskContext } from "@/stores/chatStore";
+
+/**
+ * Mirrors production: the prompt is confined to the session's chat surface, so
+ * the dialog portals INTO this wrapper. The sibling button stands in for the
+ * composer, which lives inside the same container.
+ */
+function Scoped(props: Omit<Parameters<typeof QuestionDialog>[0], "container">) {
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  return (
+    <div ref={setContainer} data-testid="chat-surface">
+      <button type="button">composer</button>
+      <QuestionDialog {...props} container={container} />
+    </div>
+  );
+}
 
 function renderDialog(
   overrides: Partial<{
@@ -34,7 +50,7 @@ function renderDialog(
   const onCancel = vi.fn(async () => true);
   const requestId = "req-1";
   const view = render(
-    <QuestionDialog
+    <Scoped
       open={true}
       requestId={requestId}
       questions={overrides.questions ?? questions}
@@ -187,9 +203,11 @@ describe("QuestionDialog", () => {
 
   it("keeps overlay interaction prevented", async () => {
     const { onHide, onCancel } = renderDialog();
-    const overlay = Array.from(document.querySelectorAll<HTMLElement>('[data-state="open"]')).find(
-      (element) => element.className.includes("bg-black/80"),
-    );
+    // Select the component's own backdrop hook rather than a Tailwind colour
+    // class: the scoped dialog renders its own scrim (bg-black/50) inside the
+    // container, and a colour match would break the moment the shade changes.
+    const surface = screen.getByTestId("chat-surface");
+    const overlay = surface.querySelector<HTMLElement>("[data-scoped-dialog-overlay]");
     expect(overlay).toBeTruthy();
 
     fireEvent.pointerDown(overlay!);
@@ -260,10 +278,10 @@ describe("QuestionDialog viewport bounding", () => {
       .closest('[role="dialog"]') as HTMLElement | null;
     expect(content).toBeTruthy();
 
-    // Height is capped by the shared dvh-aware utility (no fixed height, no
-    // unbounded growth) and the content is a flex column so one child can
-    // scroll while the header/footer stay put.
-    expect(content!.className).toContain("dialog-viewport-max");
+    // Height is capped against the CONTAINER (a viewport cap would be wrong now
+    // the panel is confined and can be shorter than the window), and the content
+    // is a flex column so one child can scroll while the header/footer stay put.
+    expect(content!.className).not.toContain("dialog-viewport-max");
     expect(content!.className).toContain("flex-col");
     expect(content!.className).toContain("overflow-hidden");
 

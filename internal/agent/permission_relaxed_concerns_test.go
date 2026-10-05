@@ -147,6 +147,31 @@ func TestRelaxedConcernLowConfidenceAllow(t *testing.T) {
 	}
 }
 
+// The opt-out is the USER's decision, so it needs the judge to actually be
+// confident that the concern IS the switched-off category. A judge that names
+// it while being maximally unsure is not evidence of anything, and granting on
+// that reading is the opposite of an opt-out — it was the gap this gate closes.
+func TestRelaxedConcernLowConfidenceAllowNeedsConcernConfidence(t *testing.T) {
+	cases := []struct {
+		name        string
+		concernConf float64
+		want        bool
+	}{
+		{"concern confidence clears the floor", 0.85, true},
+		{"concern confidence below the floor", 0.05, false},
+		{"concern confidence zero", 0.0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := relaxedJudgeAgent(t, typesafeReplyWithConcernConf("allow", 0.30, "secrets", tc.concernConf), "secrets")
+			allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"cp .env /tmp/x/.env"}`), nil)
+			if !consulted || allowed != tc.want {
+				t.Fatalf("allowed=%v consulted=%v want allowed=%v reason=%q", allowed, consulted, tc.want, reason)
+			}
+		})
+	}
+}
+
 // Fail closed when the deny cannot be ATTRIBUTED to an opted-out category.
 func TestRelaxedConcernDenyStandsWhenNotAttributable(t *testing.T) {
 	cases := []struct {

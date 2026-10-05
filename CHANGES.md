@@ -1,5 +1,118 @@
 # Changelog
 
+## [Unreleased]
+
+- **Version Bump** — 0.8.125 → 0.8.126
+
+## 2026-10-05 — Desktop share-token test: fix a shutdown/Serve race
+
+- **`TestStartServerWiresDurableShareToken` shut a server down and then asserted
+  on it.** `shutdownHandle` ran immediately after each `StartServer`, before that
+  server's own `GET` assertions. `StartServer` returns after `go srv.Serve(ln)`,
+  and `Server.Shutdown` reads the listener/`http.Server` that `Serve` records
+  *inside* that goroutine — so `shutdownHandle` was a no-op when it won the race
+  (the first launch survived, masking the bug) and a real shutdown when it lost
+  (the relaunch was closed before its assertions → `connection refused`). The
+  test's saved-port reuse was only ever exercised by accident.
+- **Fix.** Each `shutdownHandle` now runs after its server's assertions, the
+  relaunch's handle is a `t.Cleanup`, and the first launch is still shut down
+  explicitly *before* the relaunch so the sticky port is genuinely reused. The
+  test now logs zero `port … in use, trying …` walk-forwards instead of one per
+  run. Both handles are registered with `t.Cleanup` so an early `t.Fatal` cannot
+  leak a listener.
+- **Tests.** `go test -race -count=5 ./internal/desktop -run
+  TestStartServerWiresDurableShareToken` and `go test -race ./internal/desktop`
+  pass.
+
+## 2026-10-05 — SQLite browser: row CRUD, confirmed SQL writes, guided DDL (phases 2–4)
+
+- **The SQLite preview now writes.** `POST /api/db/row` (parameterized
+  insert/update/delete) and `POST /api/db/schema` (guided add-column / create or
+  drop table / create or drop index), and `POST /api/db/query` gains
+  `confirm:true` to run a write the read path refused with 409. All sit behind
+  `authMiddleware` alongside the read endpoints. The `SQLiteViewer` Data tab gains
+  Add/Edit/Delete row (delete behind a confirm dialog), the Query tab escalates a
+  409 to a confirm dialog and retries via `dbExec`, and the Schema tab gains the
+  DDL actions (drop behind a confirm).
+- **Row identity is the declared primary key, else the true `rowid`.** A table
+  with no PK gets the rowid exposed as a leading `_rowid_` column (aliased so a
+  literal `rowid` column cannot shadow it); a view or a `WITHOUT ROWID` table with
+  no PK stays read-only. UPDATE/DELETE use the ORIGINAL key values and require
+  exactly one row to match.
+- **Exactly-one-row semantics are enforced INSIDE a transaction** (`execExact`).
+  In autocommit the rows would already be changed before `RowsAffected` could be
+  checked, so a multi-row key could not be rolled back — pinned by a mutation that
+  commits before returning the count (`TestRowUpdateMultiRowKeyRollsBack`).
+- **Write safety.** `Exec` refuses `ATTACH`/`DETACH`/`VACUUM INTO` outright
+  (`BlockedWriteStatement`; there is no authorizer hook), refuses any file under
+  `paths.GlobalDataDir()` (resolved containment, so a symlink cannot dodge it),
+  refuses a non-SQLite or missing file (which also stops a write from CREATING a
+  stray DB), and runs every confirmed batch in one transaction under
+  `dbQueryTimeout`. `PRAGMA journal_mode`/`writable_schema` assignments require
+  confirmation even though some succeed on a read-only connection.
+- **DDL is built server-side from validated parts**, never raw text: quoted
+  identifiers, a single-word type pattern (so `INTEGER PRIMARY KEY` cannot smuggle
+  in a constraint), and a default that is only an allowlisted keyword, a strict
+  numeric literal, or a quoted string literal.
+- Regression: `internal/dbbrowse/write_test.go`, `internal/server/handler_db_test.go`
+  (`TestHandleDBRow*`, `TestHandleDBQueryConfirm*`, `TestHandleDBSchemaLifecycle`,
+  `TestHandleDBRowDoesNotCreateMissingFile`, extended `TestDBRoutesRegistered`),
+  `web/src/components/Preview/SQLiteViewer.test.tsx`,
+  `web/src/components/Preview/SQLiteDialogs.test.ts`. Every security-sensitive
+  branch is mutation-verified (compiling mutants).
+
+## 2026-10-05 — SQLite browser in the file preview (read-only phase 1)
+
+- **A Prisma-Studio-style SQLite browser** for `.sqlite`/`.sqlite3`/`.db`/`.db3`
+  files in the preview pane. New pure package `internal/dbbrowse` (header
+  `Probe`, sorted `ListTables` with ANALYZE estimates, `DescribeTable`,
+  `TablePage`, read-only `Query`) over `modernc.org/sqlite`, plus endpoints
+  `GET /api/db/info`, `GET /api/db/table`, `POST /api/db/query` registered behind
+  `authMiddleware` — user-initiated like file save, not the agent permission
+  gate. Path containment is the SAME boundary as file content, extracted into
+  `Handler.resolveProjectFilePath` and additionally required to be inside an
+  allowed project root even for absolute paths (this surface gains write
+  capability later). New lazy `SQLiteViewer` with Data / Query / Schema tabs;
+  `previewKind` gains a `"sqlite"` kind. The server sniffs `SQLite format 3\0`,
+  so a `.db` that is not actually SQLite renders a fallback pane. **Phase 1 is
+  read-only**: a mutating statement returns 409. Row CRUD, write escalation and
+  guided DDL are deferred (see `TODO.md`).
+- **Read-only is enforced by two independent guards, not by `mode=ro`.** `mode=ro`
+  applies to the MAIN database only, so `ATTACH DATABASE 'file:/elsewhere.db'`
+  used to bring up a fully read-write sibling on the same connection — verified
+  against the pinned `modernc.org/sqlite v1.57.0`: an `INSERT` through an attached
+  database landed on disk, `ATTACH`+`CREATE TABLE` created a file at an arbitrary
+  absolute path, and `ATTACH`+`SELECT` read any SQLite file the process could open
+  (ocode's own session transcripts included) even though path containment only
+  ever validated `?path`. Connections now also carry `_pragma=query_only(1)`,
+  which covers EVERY attached database and is the authoritative write guard, plus
+  a statement allowlist (`validateReadOnlyStatement`) that rejects `ATTACH`,
+  `DETACH`, multi-statement input and anything whose leading keyword is not a
+  read — that allowlist is what closes the read side, since `query_only` does
+  nothing for reads. Neither guard is sufficient alone and each has its own
+  regression test, including one that calls the connection layer directly so
+  removing the allowlist cannot silently remove write protection too. Regression:
+  `internal/dbbrowse/dbbrowse_test.go` (`TestQueryRejectsAttach*`,
+  `TestOpenReadOnlyIsWriteProofOnEveryAttachedDatabase`),
+  `internal/server/handler_db_test.go` (`TestHandleDBQueryRejectsAttachEscape`).
+
+## 2026-10-05 — Restore the "Extra Dirs" section in the chat sidebar
+
+- **The `CoworkSidebar` "Extra Dirs" list is back.** It was added 2026-08-25
+  (`d8e75804`) and dropped two days later by an unrelated commit
+  (`cbe28b6c`, 0.8.75) whose message never mentioned it. The section is
+  collapsed by default and carries a count badge; expanded, it lists the
+  session's pre-authorized `extra_allowed_paths` — the additional roots the
+  agent may read/write without re-prompting. Source is the live session's
+  `tuiStatus.extra_allowed_paths`, with the host's persisted config
+  (`api.getPathsConfig`) as a pre-session fallback. `getPathsConfig` is now
+  host-aware (`?host=`) so a remote SSH project reads the remote's paths, not
+  the local server's. The config fallback is used ONLY when there is no status
+  snapshot at all: `extra_allowed_paths` is `omitempty`, so an empty snapshot
+  omits the key, and falling through to the mount-time config would resurrect a
+  dir the user just removed. Config reads use the same `.catch(() => null)` as
+  the neighbouring sidebar fetches. Regression: `CoworkSidebar.extraDirs.test.tsx`.
+
 ## 2026-10-05 — README overhaul, exported search judge cap, scoped dialog
 
 - **README rewritten with a Highlights grid and dedicated feature sections.**
@@ -20,11 +133,42 @@
   Clef is absent from models.dev, so the picker gets the static list
   (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`) merged with the
   cloudflare-workers snapshot.
-- **`ScopedDialog` component added** (`web/src/components/ui/scoped-dialog.tsx`).
-  A dialog confined to ONE target element instead of the viewport, so a confirm
-  inside a panel leaves the rest of the app visible and usable. Non-modal by
-  design (`modal={false}`), with the shared focus policy extracted to
-  `ui/dialog-focus.ts` and imported by both dialog flavours.
+## 2026-10-05 — Permission and question prompts are scoped to their own chat session
+
+- **An ask no longer blacks out the whole app.** The permission dialog and the
+  `question` tool prompt now render inside the session's own chat pane instead of
+  over the viewport, so the project list, the session sub-tab bar, the composer
+  chrome and every other session stay visible and usable while a tool is blocked.
+  They were already gated to mount only on their session's Chat sub-tab, but they
+  still drew a full-window `fixed inset-0` backdrop plus a focus trap, which walled
+  in a view the user still needed. A new `web/src/components/ui/scoped-dialog.tsx`
+  provides the shadcn-shaped, container-confined dialog: a viewport dialog
+  confined to ONE target element, so a confirm inside a panel leaves the rest of
+  the app visible and usable. Non-modal by design (`modal={false}`, plus an
+  explicit `aria-modal={false}`); the panel is positioned against the target
+  (`absolute`, never `fixed`); and the shared initial-focus policy was extracted
+  to `ui/dialog-focus.ts` so both dialog flavours focus the same element instead
+  of drifting apart. Its scrim and panel sit at `z-[70]`/`z-[80]`, above the
+  app's whole chrome tier: the container is `position: relative` with
+  `z-index: auto` and so creates NO stacking context, so at `z-50` the panel lost
+  the tie to a root-mounted `ActionErrorToast` rendered later in tree order —
+  putting a toast over the Allow/Deny row.
+- **Caught before this shipped, not fixed in the wild: a permission ask could
+  have denied itself.** Moving the composer inside the dialog's own surface — the
+  very change above — puts its programmatic textarea focus (draft restore,
+  session switch) inside the container. A scoped, non-modal Radix dialog treats
+  any interaction outside its panel as a dismissal, so that focus would have been
+  read as "dismissed" and submitted a `deny` with no user action at all. Nothing
+  that had shipped could hit it: `ScopedDialog` was still consumerless and the ask
+  was a focus-trapping modal. Focus-based dismissal is suppressed for scoped
+  dialogs — dismissal intent stays with the scrim click and Escape, exactly as
+  before. Regression:
+  `PermissionDialog.test.tsx` "does NOT deny when the composer inside the surface
+  takes focus".
+- The may-mount gate (`lib/dialogScope.ts`) is deliberately **kept**: off-surface
+  the chat panel is `display:none`, so confining alone would render an ask
+  invisibly — worse than blocking, since the sidebar Bell badge and attention
+  chime are the only remaining signal.
 
 ## 2026-10-04 — Clef as a second decision backend, a per-judge model key, and one shared state budget for every judge request
 

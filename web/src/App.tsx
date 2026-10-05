@@ -1320,6 +1320,14 @@ function HomeApp() {
     focusedKind,
     activeSubTab: activeSessionTab?.activeSubTab,
   });
+
+  // The active session's chat surface — the element the ask dialogs are confined
+  // to, so a permission/question prompt covers THIS session's chat pane and
+  // nothing else: the project list, the sub-tab bar and every other session stay
+  // visible and clickable. Captured with a callback ref (not useRef) because
+  // `.current` is null during the first render, so a ref would leave the portal
+  // unresolvable until something else re-rendered this component.
+  const [chatSurfaceEl, setChatSurfaceEl] = useState<HTMLDivElement | null>(null);
   // Lazy display:none: keep visited tabs mounted (hidden) so scroll/virtualizer
   // state survives switches (instant CSS toggle), but avoid mounting all 40
   // panels eagerly on first load. Only tabs that have been visited once are
@@ -1737,34 +1745,52 @@ function HomeApp() {
                           className={isActive ? "absolute inset-0 flex flex-col" : "absolute inset-0 hidden"}
                         >
                           {/* Remote (SSH/WSL) server version mismatch for the
-                              active chat tab's project. One instance only. */}
+                              active chat tab's project. One instance only.
+                              Deliberately a SIBLING of the ask's container, not
+                              a child of it: this banner is interactive (expand,
+                              Update -> confirm), and covering it would make the
+                              one piece of session chrome a pending ask can act
+                              on unreachable. Same flex column as before — the
+                              wrapper's children are the banner (auto) plus this
+                              `flex-1 min-h-0` column, whose own children keep
+                              their original `flex-1` / auto sizing. */}
                           {isActive && <RemoteVersionBanner host={projectState.activeProject?.host} />}
-                          <div className="relative flex-1 min-h-0 overflow-hidden">
-                            <ChatPanel
-                              sessionId={tab.id}
-                              host={resolveSessionHost(projectState, tab.id)}
-                              onContinueInterrupted={stableHandleContinueInterrupted}
+                          {/* Only the ACTIVE chat tab is a container: the others
+                              are `hidden`, so portalling into one would render an
+                              invisible dialog. React detaches this ref with null
+                              when the active tab changes. */}
+                          <div
+                            ref={isActive ? setChatSurfaceEl : undefined}
+                            data-testid="chat-ask-surface"
+                            className="relative flex min-h-0 flex-1 flex-col"
+                          >
+                            <div className="relative flex-1 min-h-0 overflow-hidden">
+                              <ChatPanel
+                                sessionId={tab.id}
+                                host={resolveSessionHost(projectState, tab.id)}
+                                onContinueInterrupted={stableHandleContinueInterrupted}
+                              />
+                            </div>
+                            <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
+                            <ChatInput
+                              ref={(handle) => {
+                                if (handle) chatInputRefs.current.set(tab.id, handle);
+                                else chatInputRefs.current.delete(tab.id);
+                              }}
+                              projectPath={tab.projectPath}
+                              onSlashCommand={stableHandleCommand}
+                              activeEditorContext={
+                                effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
+                              }
+                              contextFilePaths={contextFilePathsByProject[tab.projectPath ?? ""] ?? EMPTY_STRING_ARRAY}
+                              previewContext={
+                                previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
+                              }
+                              onClearPreviewContext={handleClearPreviewContext}
+                              sessionTabId={tab.id}
+                              onSessionCreated={stableHandleSessionCreated}
                             />
                           </div>
-                          <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
-                          <ChatInput
-                            ref={(handle) => {
-                              if (handle) chatInputRefs.current.set(tab.id, handle);
-                              else chatInputRefs.current.delete(tab.id);
-                            }}
-                            projectPath={tab.projectPath}
-                            onSlashCommand={stableHandleCommand}
-                            activeEditorContext={
-                              effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
-                            }
-                            contextFilePaths={contextFilePathsByProject[tab.projectPath ?? ""] ?? EMPTY_STRING_ARRAY}
-                            previewContext={
-                              previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
-                            }
-                            onClearPreviewContext={handleClearPreviewContext}
-                            sessionTabId={tab.id}
-                            onSessionCreated={stableHandleSessionCreated}
-                          />
                         </div>
                       );
                     })}
@@ -2039,10 +2065,14 @@ function HomeApp() {
       />
 
       {/* Permission Dialog — only while this session's Chat sub-tab is on
-          screen, so an ask never blocks a view the user is not working in. */}
-      {pendingPermission && sessionAskVisible && (
+          screen, so an ask never blocks a view the user is not working in. The
+          surface gate AND the container are both required: off-view this panel
+          is `display:none` (ui/tabs.tsx `data-[state=inactive]:hidden`), so
+          confining alone would render an invisible dialog with no signal. */}
+      {pendingPermission && sessionAskVisible && chatSurfaceEl && (
         <PermissionDialog
           open={true}
+          container={chatSurfaceEl}
           tool={pendingPermission.tool}
           command={pendingPermission.command}
           args={pendingPermission.args}
@@ -2069,10 +2099,12 @@ function HomeApp() {
           the permission dialog above, plus the request-scoped local hide. */}
       {pendingQuestion &&
         hiddenQuestionRequestId !== pendingQuestion.request_id &&
-        sessionAskVisible && (
+        sessionAskVisible &&
+        chatSurfaceEl && (
         <QuestionDialog
           key={pendingQuestion.request_id}
           open={true}
+          container={chatSurfaceEl}
           requestId={pendingQuestion.request_id}
           questions={pendingQuestion.questions}
           onSubmit={submitQuestionAnswers}

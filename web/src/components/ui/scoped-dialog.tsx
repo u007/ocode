@@ -123,7 +123,12 @@ function ScopedDialog({ container, children, ...props }: ScopedDialogProps) {
       );
     }
     return () => {
-      target.style.position = previous;
+      // Only restore if it is still OUR value. Unconditional restoration would
+      // clobber a position the owner (or a sibling effect) legitimately changed
+      // while the dialog was open.
+      if (target.style.position === "relative") {
+        target.style.position = previous;
+      }
     };
   }, [target]);
 
@@ -135,7 +140,7 @@ function ScopedDialog({ container, children, ...props }: ScopedDialogProps) {
   // this effect's cleanup as soon as `target` arrives.
   const warned = React.useRef(false);
   React.useEffect(() => {
-    if (target || warned.current || !props.open) return;
+    if (target || warned.current || !props.open || typeof window === "undefined") return;
     const id = window.setTimeout(() => {
       if (warned.current) return;
       warned.current = true;
@@ -172,8 +177,16 @@ const ScopedDialogOverlay = React.forwardRef<
     ref={ref}
     data-scoped-dialog-overlay=""
     aria-hidden="true"
+    // z-[70]/z-[80], above the app's whole chrome tier (max z-50: the
+    // ActionErrorToast and SpeechToolbar both sit at z-40/z-50 mounted at the
+    // document root). The container is `position: relative` with
+    // `z-index: auto`, which does NOT create a stacking context, so this panel
+    // competes in the ROOT one and loses to any root sibling rendered later at
+    // an equal z — which put an error toast over the Allow/Deny row, in exactly
+    // the bottom band the action row occupies. Going strictly above the global
+    // tier fixes it without lifting the container out of the chat pane.
     className={cn(
-      "absolute inset-0 z-40 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      "absolute inset-0 z-[70] bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
       className,
     )}
     {...props}
@@ -231,6 +244,22 @@ const ScopedDialogContent = React.forwardRef<
         if (!target || !container?.contains(target)) event.preventDefault();
       };
 
+    /**
+     * Focus moving inside the container is NOT a dismissal, ever — the
+     * surrounding app is live and interactive, which is the whole point of a
+     * scoped dialog. Suppressing it is also a correctness fix, not just
+     * politeness: Radix routes BOTH pointer and focus escapes through
+     * `onInteractOutside`, so a composer that programmatically focuses its
+     * textarea (draft restore, session switch) while inside the container
+     * would otherwise DISMISS the dialog. For a permission ask that is an
+     * auto-deny with no user action at all. Dismissal intent stays with the
+     * scrim click and Escape.
+     */
+    const guardFocusOutside = (event: Parameters<FocusOutsideHandler>[0]) => {
+      onFocusOutside?.(event);
+      event.preventDefault();
+    };
+
     return (
       <>
         {/* No container yet means nothing to confine to; rendering here would
@@ -241,6 +270,10 @@ const ScopedDialogContent = React.forwardRef<
             <DialogPrimitive.Content
               ref={setRef}
               tabIndex={tabIndex}
+              // Radix sets no aria-modal. This dialog is explicitly NOT modal
+              // (the content behind stays reachable), so declare it rather than
+              // letting AT assume a full-screen blocker.
+              aria-modal={false}
               onOpenAutoFocus={(event) => {
                 // Same shared policy as every other dialog: first text entry,
                 // else the annotated default action, else Radix's first
@@ -249,10 +282,10 @@ const ScopedDialogContent = React.forwardRef<
                 onOpenAutoFocus?.(event);
               }}
               onPointerDownOutside={guard<Parameters<PointerDownOutsideHandler>[0]>(onPointerDownOutside)}
-              onFocusOutside={guard<Parameters<FocusOutsideHandler>[0]>(onFocusOutside)}
+              onFocusOutside={guardFocusOutside}
               onInteractOutside={guard<Parameters<InteractOutsideHandler>[0]>(onInteractOutside)}
               className={cn(
-                "absolute left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto border bg-background p-6 shadow-lg duration-200 max-h-[calc(100%-2rem)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 sm:rounded-lg",
+                "absolute left-[50%] top-[50%] z-[80] grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto border bg-background p-6 shadow-lg duration-200 max-h-[calc(100%-2rem)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 sm:rounded-lg",
                 className,
               )}
               {...props}

@@ -1,12 +1,26 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import PermissionDialog from "./PermissionDialog";
 import type { PermissionDecision } from "@/api/types";
 import type { PermissionDecideResult } from "./PermissionDialog";
 
+/**
+ * Mirrors production: the ask is confined to the session's chat surface, so the
+ * dialog portals INTO this wrapper.
+ */
+function Scoped(props: Omit<Parameters<typeof PermissionDialog>[0], "container">) {
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  return (
+    <div ref={setContainer} data-testid="chat-surface">
+      <PermissionDialog {...props} container={container} />
+    </div>
+  );
+}
+
 function renderDialog(overrides: Partial<Parameters<typeof PermissionDialog>[0]> = {}) {
   const onDecide = vi.fn(async (_id: string, _d: PermissionDecision): Promise<PermissionDecideResult> => ({ ok: true }));
-  const props: Parameters<typeof PermissionDialog>[0] = {
+  const props: Omit<Parameters<typeof PermissionDialog>[0], "container"> = {
     open: true,
     tool: "bash",
     command: "rm -rf build",
@@ -14,7 +28,7 @@ function renderDialog(overrides: Partial<Parameters<typeof PermissionDialog>[0]>
     onDecide,
     ...overrides,
   };
-  const view = render(<PermissionDialog {...props} />);
+  const view = render(<Scoped {...props} />);
   return { onDecide, unmount: () => view.unmount() };
 }
 

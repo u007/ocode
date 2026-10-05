@@ -174,7 +174,7 @@ func getExtraAllowedRoots() []string {
 }
 
 func normalizeRootPath(p string) (string, bool) {
-	abs, err := filepath.Abs(p)
+	abs, err := filepath.Abs(expandTilde(p))
 	if err != nil {
 		return "", false
 	}

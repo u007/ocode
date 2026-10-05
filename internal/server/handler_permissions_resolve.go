@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
@@ -289,7 +290,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 				"cannot always allow this operation — it is considered harmful and always requires human approval")
 			return
 		}
-		persistAlwaysAllow(decision, permReq, as.agent.Permissions())
+		h.persistAlwaysAllow(decision, permReq, as.agent.Permissions())
 	}
 
 	working := append([]agent.Message(nil), as.messages...)
@@ -551,7 +552,7 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 	}
 	as.childAsks.markResolved(requestID)
 	if decision == PermDecisionAlwaysRule || decision == PermDecisionAlwaysTool {
-		persistAlwaysAllow(decision, ask.req, as.agent.Permissions())
+		h.persistAlwaysAllow(decision, ask.req, as.agent.Permissions())
 	}
 
 	// Dismiss every watcher's dialog NOW, before the child's tool call runs —
@@ -604,7 +605,7 @@ func (h *Handler) sessionIDForChildPerm(requestID string) string {
 //
 // Config write failures are logged and do not fail the resolution: the
 // in-memory rule already governs this session, matching TUI behaviour.
-func persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *agent.PermissionManager) {
+func (h *Handler) persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *agent.PermissionManager) {
 	if pm == nil {
 		return
 	}
@@ -621,6 +622,23 @@ func persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *ag
 		if err := config.SaveExtraAllowedPath(cleaned); err != nil {
 			log.Printf("serve: failed to save extra_allowed_paths %q: %v", cleaned, err)
 		}
+		// initBuiltinTools resets the process-global allowlist from the config
+		// snapshot on every session build, so the grant must live in h.cfg too or
+		// the next new session/sub-agent silently drops it and re-asks.
+		//
+		// NOTE the coupling this creates, because it is not obvious from either
+		// end: h.cfg.Ocode.ExtraAllowedPaths is ALSO the root list the SQLite
+		// browser's path boundary reads (Handler.pathWithinAllowedRoots, via
+		// handler_db.go), so clicking "always allow" on an extra dir permanently
+		// widens what GET/POST /api/db/* may open. That surface is read-only
+		// (see internal/dbbrowse), and the sidebar's "Extra Dirs" section
+		// discloses the live list, but the widening is real — a reader of this
+		// function should not have to know it to reason about the grant.
+		h.mu.Lock()
+		if h.cfg != nil && !slices.ContainsFunc(h.cfg.Ocode.ExtraAllowedPaths, func(p string) bool { return filepath.Clean(p) == cleaned }) {
+			h.cfg.Ocode.ExtraAllowedPaths = append(h.cfg.Ocode.ExtraAllowedPaths, cleaned)
+		}
+		h.mu.Unlock()
 		return
 	}
 

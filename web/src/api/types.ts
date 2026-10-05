@@ -55,6 +55,10 @@ export type LivePart =
       output?: string;
     }
   | { kind: "status"; text: string }
+  /** A user message injected mid-turn (queued input). It sits in the live
+   *  buffer, not `messages`, so it renders AFTER the assistant parts that
+   *  were produced before it; the turn-end snapshot supersedes it. */
+  | { kind: "user"; content: string; user_seq?: number }
   /** A transient, informational notice (e.g. "Discovered: …" / "Indexing: …"
    *  mirrored from the TUI's discovery notices). Not LLM output and not
    *  persisted — cleared with the rest of the live buffer at the turn

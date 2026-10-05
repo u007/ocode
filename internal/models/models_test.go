@@ -13,10 +13,10 @@ func TestRequestyModelName(t *testing.T) {
 		{"anthropic/claude-3-opus", "claude-3-opus"},
 		{"google/gemini-pro", "gemini-pro"},
 		{"model-without-slash", "model-without-slash"},
-		{"provider/", "provider/"},          // edge case: trailing slash
-		{"/model", "/model"},                // edge case: leading slash only
-		{"", ""},                            // edge case: empty string
-		{"a/b/c", "b/c"},                   // multiple slashes: returns after first
+		{"provider/", "provider/"}, // edge case: trailing slash
+		{"/model", "/model"},       // edge case: leading slash only
+		{"", ""},                   // edge case: empty string
+		{"a/b/c", "b/c"},           // multiple slashes: returns after first
 	}
 
 	for _, tt := range tests {

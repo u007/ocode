@@ -808,6 +808,98 @@ export interface ConnectFlowInput {
 }
 
 
+// ── SQLite browser types (GET /api/db/info, /api/db/table, POST /api/db/query).
+
+export interface DBTableInfo {
+  name: string;
+  type: "table" | "view";
+  /** ANALYZE row estimate, or -1 when unknown. */
+  rows: number;
+}
+
+export interface DBInfo {
+  is_sqlite: boolean;
+  path: string;
+  tables?: DBTableInfo[];
+}
+
+export interface DBColumn {
+  name: string;
+  decl_type: string;
+  not_null: boolean;
+  default?: string;
+  /** 1-based position in the primary key; 0 when not part of it. */
+  pk: number;
+  generated: boolean;
+}
+
+export interface DBIndex {
+  name: string;
+  unique: boolean;
+  columns: string[];
+  origin: string;
+}
+
+export interface DBForeignKey {
+  from: string;
+  table: string;
+  to: string;
+}
+
+export interface DBTableSchema {
+  name: string;
+  type: string;
+  columns: DBColumn[];
+  indexes: DBIndex[];
+  foreign_keys: DBForeignKey[];
+  ddl: string;
+  rowid: boolean;
+}
+
+export interface DBResultColumn {
+  name: string;
+  decl_type: string;
+}
+
+export interface DBBlob {
+  $blob: true;
+  bytes: number;
+  preview: string;
+  data?: string;
+  truncated?: boolean;
+}
+
+export type DBCell = null | number | string | boolean | DBBlob;
+
+export interface DBResultSet {
+  columns: DBResultColumn[];
+  rows: DBCell[][];
+  row_count: number;
+  truncated: boolean;
+  elapsed_ms: number;
+}
+
+export interface DBTableResponse {
+  schema: DBTableSchema;
+  result: DBResultSet;
+}
+
+/** Result of a confirmed write (row op, SQL write, or DDL). */
+export interface DBExecResult {
+  rows_affected: number;
+  last_insert_id?: number;
+  elapsed_ms: number;
+}
+
+/** One column in a guided CREATE TABLE / ADD COLUMN. */
+export interface DBColumnDef {
+  name: string;
+  type?: string;
+  not_null?: boolean;
+  pk?: boolean;
+  default?: string | null;
+}
+
 export const api = {
   listSessions: (opts?: { limit?: number; offset?: number }, host?: string) => {
     const params = new URLSearchParams();
@@ -1410,12 +1502,12 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
 
-  getPathsConfig: () =>
+  getPathsConfig: (host?: string) =>
     fetchJSON<{
       extra_allowed_paths: string[];
       upload_dir: string;
       platform?: string;
-    }>("/api/config/ocode/paths"),
+    }>("/api/config/ocode/paths", undefined, host),
   setPathsConfig: (extra_allowed_paths: string[], upload_dir: string) =>
     fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>(
       "/api/config/ocode/paths",
@@ -2712,6 +2804,125 @@ export const api = {
     }
     return res.arrayBuffer();
   },
+
+  // ── SQLite browser (read-only in this phase). host routes to a registered
+  // remote project's server through the /api/remote/{host} proxy (the remote
+  // server reads its own filesystem); projectRoot scopes path containment.
+  dbInfo: (path: string, projectRoot?: string, host?: string) => {
+    const q = new URLSearchParams({ path });
+    if (projectRoot) q.set("project_root", projectRoot);
+    return fetchJSON<DBInfo>(`/api/db/info?${q.toString()}`, undefined, host);
+  },
+
+  dbTable: (
+    path: string,
+    table: string,
+    opts: { projectRoot?: string; limit?: number; offset?: number; host?: string } = {},
+  ) => {
+    const q = new URLSearchParams({ path, table });
+    if (opts.projectRoot) q.set("project_root", opts.projectRoot);
+    if (opts.limit != null) q.set("limit", String(opts.limit));
+    if (opts.offset != null) q.set("offset", String(opts.offset));
+    return fetchJSON<DBTableResponse>(`/api/db/table?${q.toString()}`, undefined, opts.host);
+  },
+
+  dbQuery: (
+    path: string,
+    sql: string,
+    opts: { projectRoot?: string; limit?: number; host?: string } = {},
+  ) =>
+    fetchJSON<DBResultSet>(
+      "/api/db/query",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          path,
+          sql,
+          project_root: opts.projectRoot,
+          limit: opts.limit,
+        }),
+      },
+      opts.host,
+    ),
+
+  /** Run a SQL statement the user has explicitly confirmed as a write. */
+  dbExec: (
+    path: string,
+    sql: string,
+    opts: { projectRoot?: string; host?: string } = {},
+  ) =>
+    fetchJSON<DBExecResult>(
+      "/api/db/query",
+      {
+        method: "POST",
+        body: JSON.stringify({ path, sql, project_root: opts.projectRoot, confirm: true }),
+      },
+      opts.host,
+    ),
+
+  /** Insert, update or delete one row. `key` identifies the row; `values` is the
+   * new/inserted data. A key matching zero or many rows throws ApiError 409. */
+  dbRow: (
+    path: string,
+    op: "insert" | "update" | "delete",
+    table: string,
+    opts: {
+      projectRoot?: string;
+      host?: string;
+      key?: Record<string, DBCell>;
+      values?: Record<string, DBCell>;
+    } = {},
+  ) =>
+    fetchJSON<DBExecResult>(
+      "/api/db/row",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          path,
+          op,
+          table,
+          key: opts.key,
+          values: opts.values,
+          project_root: opts.projectRoot,
+        }),
+      },
+      opts.host,
+    ),
+
+  /** One guided DDL operation (add column / create or drop table / create or
+   * drop index). The server builds the SQL from validated parts. */
+  dbSchema: (
+    path: string,
+    op: "add_column" | "create_table" | "drop_table" | "create_index" | "drop_index",
+    opts: {
+      projectRoot?: string;
+      host?: string;
+      table?: string;
+      index?: string;
+      column?: DBColumnDef;
+      columns?: DBColumnDef[];
+      indexColumns?: string[];
+      unique?: boolean;
+    } = {},
+  ) =>
+    fetchJSON<DBExecResult>(
+      "/api/db/schema",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          path,
+          op,
+          table: opts.table,
+          index: opts.index,
+          column: opts.column,
+          columns: opts.columns,
+          index_columns: opts.indexColumns,
+          unique: opts.unique,
+          project_root: opts.projectRoot,
+        }),
+      },
+      opts.host,
+    ),
 
   // ── Sidebar preview (audio/video): exchange the bearer for a short-lived,
   // single-file capability the browser's media element can carry in the URL.

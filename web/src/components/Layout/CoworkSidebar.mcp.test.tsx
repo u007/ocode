@@ -46,6 +46,7 @@ vi.mock("../../api/client", () => ({
     getAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
     setAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
     getDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
+    getPathsConfig: vi.fn(() => Promise.resolve({ extra_allowed_paths: [], upload_dir: "" })),
     setDiscoveryConfig: vi.fn(),
     // The compaction summary row (CoworkSidebar's "Summary" pair) reads/writes
     // this block; without it the mount Promise.all throws on the missing method.

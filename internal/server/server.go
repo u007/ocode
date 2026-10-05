@@ -341,6 +341,15 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/raw", s.mediaAuthMiddleware(s.handleFileRaw))
 	s.mux.HandleFunc("POST /api/files/media-token", s.authMiddleware(s.handleMediaToken))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
+	// SQLite browser: browse, row CRUD, confirmed SQL writes and guided DDL.
+	// User-initiated like file save, so authMiddleware — not the agent
+	// permission gate. Remote projects reach these through the
+	// /api/remote/{host}/ catch-all proxy.
+	s.mux.HandleFunc("GET /api/db/info", s.authMiddleware(s.handler.HandleDBInfo))
+	s.mux.HandleFunc("GET /api/db/table", s.authMiddleware(s.handler.HandleDBTable))
+	s.mux.HandleFunc("POST /api/db/query", s.authMiddleware(s.handler.HandleDBQuery))
+	s.mux.HandleFunc("POST /api/db/row", s.authMiddleware(s.handler.HandleDBRow))
+	s.mux.HandleFunc("POST /api/db/schema", s.authMiddleware(s.handler.HandleDBSchema))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 	s.mux.HandleFunc("POST /api/fs/copy", s.authMiddleware(s.handler.HandleFSCopy))
 	s.mux.HandleFunc("POST /api/fs/move", s.authMiddleware(s.handler.HandleFSMove))

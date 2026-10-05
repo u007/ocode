@@ -91,25 +91,19 @@ html.light {
   }
 
   /*
-   * Cap a fixed, vertically-centred dialog (ask/permission prompts) to the
-   * visible viewport so tall content scrolls internally instead of painting
-   * off the top and bottom edges.
+   * `.dialog-viewport-max` (a viewport-capped `max-height` for the ask/
+   * permission prompts) was REMOVED, and must not come back.
    *
-   * `100vh` is the LARGE viewport on mobile browsers — it ignores the dynamic
-   * URL bar / home indicator, so a `calc(100vh - 2rem)` dialog still overshoots
-   * while that chrome is shown. `dvh` tracks the actual visible area. The
-   * fallback and the upgrade MUST live in separate rules: CSS minifiers drop
-   * the earlier of two same-property declarations in one rule, which would
-   * leave old browsers (no `dvh`) with no cap at all.
+   * Those dialogs are now confined to their session's chat surface
+   * (`ui/scoped-dialog.tsx`), so a WINDOW cap is the wrong bound: the chat pane
+   * is routinely shorter than the viewport, and a viewport cap lets the panel
+   * paint past the bottom of its own container. `ScopedDialogContent` supplies
+   * the container-relative `max-h-[calc(100%-2rem)]` instead.
+   *
+   * Two `max-height` declarations do NOT take the smaller value — the last one
+   * in the cascade wins — so adding a viewport cap next to the container cap
+   * silently disables one of them. That is the trap this comment replaces.
    */
-  .dialog-viewport-max {
-    max-height: calc(100vh - 2rem);
-  }
-  @supports (height: 100dvh) {
-    .dialog-viewport-max {
-      max-height: calc(100dvh - 2rem);
-    }
-  }
 
   /*
    * Shared height for every control in the chat composer's input row — the

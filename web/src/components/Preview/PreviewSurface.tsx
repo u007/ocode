@@ -21,6 +21,7 @@ const MarkdownViewer = lazy(() => import("./MarkdownViewer"));
 const HtmlViewer = lazy(() => import("./HtmlViewer"));
 const JsonViewer = lazy(() => import("./JsonViewer"));
 const TextViewer = lazy(() => import("./TextViewer"));
+const SQLiteViewer = lazy(() => import("./SQLiteViewer"));
 
 /** Minimal placeholder while a heavy viewer's chunk downloads. Intentionally
  *  chrome-free so it does not flash a layout the viewer then replaces. */
@@ -100,6 +101,7 @@ export default function PreviewSurface({
         {kind === "html" && <HtmlViewer content={content ?? ""} />}
         {kind === "json" && <JsonViewer content={content ?? ""} />}
         {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
+        {kind === "sqlite" && <SQLiteViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
         {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} />}
         {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" active={active} />}
         {kind === "video" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="video" active={active} />}

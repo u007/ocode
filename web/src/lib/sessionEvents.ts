@@ -624,13 +624,22 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         const already =
           !!user_seq &&
           slice !== undefined &&
-          slice.messages.some((m) => m.role === "user" && m.user_seq === user_seq);
+          (slice.messages.some((m) => m.role === "user" && m.user_seq === user_seq) ||
+            slice.live.some((p) => p.kind === "user" && p.user_seq === user_seq));
         if (!already) {
-          r.dispatch({
-            type: "ADD_MESSAGE",
-            sessionId,
-            message: { role: "user", content, user_seq },
-          });
+          if (slice !== undefined && slice.live.length > 0) {
+            // Mid-turn injection: assistant output already streamed into the
+            // live buffer precedes this message, and live renders after
+            // `messages`. Appending to `messages` would hoist the user line
+            // above that output; keep it in the live buffer in order.
+            r.dispatch({ type: "LIVE_USER", sessionId, content, user_seq });
+          } else {
+            r.dispatch({
+              type: "ADD_MESSAGE",
+              sessionId,
+              message: { role: "user", content, user_seq },
+            });
+          }
         }
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         // Mid-turn injection pickup: a message typed while the turn was

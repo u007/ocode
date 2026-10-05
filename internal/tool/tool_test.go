@@ -925,3 +925,24 @@ func TestNormalizeLazyDirResolvesMissingCacheDir(t *testing.T) {
 		t.Fatalf("existing dir: normalizeRootPath=%q ok=%v, normalizeLazyDir=%q", strict, ok, got)
 	}
 }
+
+func TestSetExtraAllowedPaths_ExpandsLeadingTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := filepath.Join(home, "www", "proj")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	setExtraAllowedPaths([]string{"~/www/proj"})
+	t.Cleanup(func() { setExtraAllowedPaths(nil) })
+
+	want, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := getExtraAllowedRoots()
+	if len(roots) != 1 || roots[0] != want {
+		t.Fatalf("extra roots = %v, want [%s]", roots, want)
+	}
+}

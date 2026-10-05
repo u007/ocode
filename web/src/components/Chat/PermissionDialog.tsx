@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  ScopedDialog,
+  ScopedDialogContent,
+  ScopedDialogHeader,
+  ScopedDialogTitle,
+  type ScopedDialogContainer,
+} from "@/components/ui/scoped-dialog";
 import {
   AlertTriangle,
   Terminal,
@@ -30,6 +31,12 @@ const SHELL_CONTROL_KEYWORDS = new Set([
 
 interface Props {
   open: boolean;
+  /**
+   * Element the dialog is confined to — the session's chat surface, so an ask
+   * never covers the project list, the tab bar or another session. Required
+   * (not optional) so a call site cannot silently render an invisible dialog.
+   */
+  container: ScopedDialogContainer;
   tool: string;
   command?: string;
   /** Complete JSON execution parameters; absent on legacy requests. */
@@ -96,6 +103,7 @@ function alwaysToolAvailable(tool: string, scope?: string): boolean {
 }
 
 export default function PermissionDialog({
+  container,
   open,
   tool,
   command,
@@ -231,7 +239,8 @@ export default function PermissionDialog({
   })();
 
   return (
-    <Dialog
+    <ScopedDialog
+      container={container}
       open={open}
       onOpenChange={(isOpen) => {
         if (!isOpen && !loading) {
@@ -240,9 +249,14 @@ export default function PermissionDialog({
         }
       }}
     >
-      <DialogContent className="dialog-viewport-max w-[calc(100%-2rem)] overflow-x-clip overflow-y-auto sm:max-w-2xl bg-card border-border">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-foreground">
+      {/* `dialog-viewport-max` is deliberately gone: it capped the panel to the
+          WINDOW, which is wrong once the dialog is confined to a panel that can
+          be shorter than the viewport. ScopedDialogContent supplies the
+          container-relative `max-h-[calc(100%-2rem)]` instead, and two
+          `max-height` declarations do NOT take the min — last one wins. */}
+      <ScopedDialogContent className="w-[calc(100%-2rem)] overflow-x-clip overflow-y-auto sm:max-w-2xl bg-card border-border">
+        <ScopedDialogHeader>
+          <ScopedDialogTitle className="flex items-center gap-2 text-foreground">
             {confirming ? (
               <ShieldCheck className="w-5 h-5 text-yellow-400" />
             ) : (
@@ -255,8 +269,8 @@ export default function PermissionDialog({
                 : agentName
                   ? `Permission Required — ${agentName}`
                   : "Permission Required"}
-          </DialogTitle>
-        </DialogHeader>
+          </ScopedDialogTitle>
+        </ScopedDialogHeader>
 
         <div className="space-y-4">
           {!confirming && (
@@ -499,7 +513,7 @@ export default function PermissionDialog({
             </div>
           )}
         </div>
-      </DialogContent>
-    </Dialog>
+      </ScopedDialogContent>
+    </ScopedDialog>
   );
 }

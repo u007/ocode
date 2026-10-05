@@ -214,6 +214,25 @@ describe("ScopedDialog dismissal boundary", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
+  it("does NOT close when focus moves inside the target but outside the dialog", async () => {
+    // The composer lives inside the chat tab wrapper and focuses its textarea
+    // programmatically (ChatInput draft restore / session switch), so focus
+    // landing in-container-but-outside-the-dialog is ordinary app use, not a
+    // dismissal. A permission dialog that DENIES on this would auto-deny itself
+    // the moment the composer regained focus.
+    const onOpenChange = vi.fn();
+    render(<Harness defaultOpen onOpenChange={onOpenChange} />);
+    await screen.findByRole("dialog");
+    await settle();
+
+    await act(async () => {
+      screen.getByTestId("inside-panel").focus();
+    });
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
   it("still honours an onOpenChange-driven close from outside the target", async () => {
     // The guard must block Radix's implicit dismissal only, never an explicit
     // close the caller asks for.
@@ -306,5 +325,33 @@ describe("ScopedDialog focus behaviour", () => {
 
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(trigger).toHaveFocus();
+  });
+
+  // The component's doc comment tells callers a useRef is accepted (and warns
+  // that it resolves one render late). Both consumers now type `container` as
+  // the exported ScopedDialogContainer union rather than HTMLElement | null, so
+  // the ref form is part of the contract and needs a test of its own — it is
+  // the branch where the portal target has to be re-resolved after mount.
+  it("accepts a ref object as the container and portals into it once it fills", async () => {
+    function RefHarness() {
+      const panel = React.useRef<HTMLDivElement | null>(null);
+      return (
+        <div>
+          <div ref={panel} data-testid="ref-panel">
+            <ScopedDialog container={panel} defaultOpen>
+              <ScopedDialogContent>
+                <ScopedDialogTitle>Scoped via ref</ScopedDialogTitle>
+              </ScopedDialogContent>
+            </ScopedDialog>
+          </div>
+        </div>
+      );
+    }
+    render(<RefHarness />);
+    const dialog = await screen.findByRole("dialog");
+    const panel = screen.getByTestId("ref-panel");
+    // The portal must land INSIDE the ref'd panel, not at document.body.
+    expect(panel.contains(dialog)).toBe(true);
+    expect(document.body.querySelector(":scope > [data-radix-portal]")).toBeNull();
   });
 });

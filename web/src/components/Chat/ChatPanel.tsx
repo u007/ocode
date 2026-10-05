@@ -1880,6 +1880,15 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                 ) : null;
               if (part.kind === "status")
                 return <StatusBlock key={`live-${i}`} text={part.text} />;
+              if (part.kind === "user")
+                return (
+                  <MessageBubble
+                    key={`live-${i}`}
+                    message={{ role: "user", content: part.content, user_seq: part.user_seq }}
+                    sessionId={sessionId}
+                    entryKey={`live:${i}:user`}
+                  />
+                );
               return (
                 <ToolBlock
                   key={liveKey}

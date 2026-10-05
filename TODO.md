@@ -1,5 +1,26 @@
 # TODO
 
+## SQLite browser: remaining work (2026-10-05)
+
+Phases 1–4 shipped — browse, row CRUD, confirmed SQL writes and guided DDL. See
+CHANGES.md and `skills/ocode-web/SKILL.md` #64. Remaining:
+
+- **Remote live validation.** The endpoints are proxy-able via the
+  `/api/remote/{host}/api/{rest...}` catch-all, but a real SSH-host DB browse and
+  write has not been exercised end-to-end.
+- **Bundle doc page.** `docs/concepts/sqlite-browser.md` was not written (the
+  bundle is context-agent-owned); the design spec lives at
+  `.opencode/plans/2026-10-05-sqlite-browser-spec.md`.
+- **Foreign keys are not enforced on write.** The write connection does not set
+  `_pragma=foreign_keys(1)`, matching the sqlite3 CLI default, so a delete that
+  orphans child rows succeeds. Revisit if users expect FK enforcement.
+- **BLOB cells are read-only in the UI.** A BLOB renders as a marker and cannot
+  be edited from the row dialog (text/number/NULL only). The API already accepts
+  `{"$blob":true,"data":<base64>}` for a future BLOB editor.
+- **Optimistic concurrency is key-based, not version-based.** An update requires
+  the original key to still match exactly one row; it does not compare the whole
+  original row, so a concurrent edit to a non-key column is overwritten.
+
 ## Auto-share-on-start: deferred items (2026-10-04)
 
 - **Turning the toggle OFF does not un-share the running instance.** `PUT
@@ -5338,18 +5359,48 @@ Plan: `docs/superpowers/plans/2026-10-03-clef-judge-backend/`. Spec:
       2q/6,077B/6.3%, network-guard 2q/2,106B/2.2%. Must go through the `context`
       agent (bundle-owned), and the spec's code anchors need re-deriving after.
 
-- [ ] **`ui/scoped-dialog.tsx` is built and tested but has NO consumer — pick the surface and wire it up.**
+- [x] **`ui/scoped-dialog.tsx` — built, then wired to the permission/question asks.**
       The component confines a shadcn-shaped dialog (dimmed `bg-black/50` backdrop,
       centered panel, Escape + scrim-click to close) to ONE target element instead of
-      the viewport, so a confirm inside a panel leaves the rest of the app visible and
-      usable. Landing a request for "a dialog alike shadcn dialog, but wrapped within a
-      targeted component so it does not cover everything" plus a "yes" to both the
-      backdrop and centering questions named NO target surface, so the choice of where
-      it goes is still open — do not treat this entry as "shipped".
-      Pass `container` as an element held in STATE (`ref={setTarget}`); a `useRef` is
-      null on first render and leaves the dialog unrendered (it warns once). Prefer a
-      `<div>` over `<section>`: React 19 types `section`'s ref as `Ref<HTMLElement>`,
-      which a `useState<HTMLDivElement | null>` setter does not satisfy.
-      Design notes, the non-modal consequences and the regression list are
-      `skills/ocode-web/SKILL.md` #63. Not in `CHANGES.md` because nothing renders it
-      yet. Needs a desktop rebuild to be visible (`web/dist` is embedded).
+      the viewport. It now has real consumers: `PermissionDialog` and `QuestionDialog`
+      pass the ACTIVE chat tab's wrapper, so an ask covers that one session's chat pane
+      and leaves the project list, the sub-tab bar and every other session usable.
+      App captures the element with a callback ref into `useState`
+      (`ref={isActive ? setChatSurfaceEl : undefined}`) — a `useRef` is null on the
+      first render and leaves the dialog unrendered. Prefer a `<div>` over `<section>`:
+      React 19 types `section`'s ref as `Ref<HTMLElement>`, which a
+      `useState<HTMLDivElement | null>` setter does not satisfy.
+      Three things found on the way and worth not re-deriving: (1) Radix passes
+      `loop: true` unconditionally, so Tab already wraps in-panel — do NOT hand-roll a
+      second trap; (2) `trapped: false` means focus is deliberately NOT re-claimed, and
+      suppressing focus-based dismissal is a CORRECTNESS fix, because `ChatInput`
+      focuses its textarea programmatically inside the container and the ask would
+      otherwise DENY ITSELF; (3) the may-mount gate `lib/dialogScope.ts` must stay —
+      off-surface the panel is `display:none`, so confining alone renders the ask
+      INVISIBLY. `.dialog-viewport-max` was removed from `index.css` (zero consumers,
+      and a viewport cap is the wrong bound for a container-confined panel); its
+      comment records the two-`max-height`-declarations trap. Design notes and the
+      regression list: `skills/ocode-web/SKILL.md` #63; user-visible entry in
+      `CHANGES.md`. Needs a desktop rebuild to be visible (`web/dist` is embedded).
+
+## Desktop share-token test shutdown/Serve race (2026-10-05)
+
+- [x] **`TestStartServerWiresDurableShareToken` — fixed.** `shutdownHandle` was
+      called right after each `StartServer`, before that server's own `GET`
+      assertions. `StartServer` returns after `go srv.Serve(ln)`, and
+      `Server.Shutdown` reads the listener/`http.Server` that `Serve` records
+      inside that goroutine, so the shutdown raced `Serve`: a no-op when it won
+      (the first launch survived, hiding the bug) and a real teardown when it
+      lost (the relaunch closed before its assertions → `connection refused`).
+      Each shutdown now runs after its server's assertions, the relaunch's
+      handle is a `t.Cleanup`, and the first launch is still shut down
+      explicitly before the relaunch so the sticky port is actually reused
+      (zero `port … in use, trying …` walk-forwards now, vs one per run before).
+      Verified with `go test -race -count=5 -run
+      TestStartServerWiresDurableShareToken ./internal/desktop` and the full
+      `-race` package run.
+- Latent, not fixed: `StartServer` returns before `go srv.Serve(ln)` records
+  `s.ln`/`s.httpServer`, so a `Shutdown` called in that window closes nothing
+  and leaks the listener. Only reachable from a caller that shuts down
+  immediately after boot (the test's old pattern); the desktop app shuts down on
+  quit, long after `Serve` has started, so it is not a user-facing bug.

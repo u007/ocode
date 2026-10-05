@@ -61,9 +61,17 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("archive.tar.gz")).toBeNull();
     expect(previewKindForPath("old.doc")).toBeNull();
     expect(previewKindForPath("font.ttf")).toBeNull();
-    expect(previewKindForPath("db.sqlite")).toBeNull();
     // Mixed-case extensions are lowercased before the denylist lookup.
     expect(previewKindForPath("debug.dSYM")).toBeNull();
+  });
+
+  it("routes SQLite files to the sqlite viewer", () => {
+    expect(previewKindForPath("db.sqlite")).toBe("sqlite");
+    expect(previewKindForPath("db.sqlite3")).toBe("sqlite");
+    expect(previewKindForPath("app.db")).toBe("sqlite");
+    expect(previewKindForPath("cache.db3")).toBe("sqlite");
+    // Access databases are not SQLite and stay OS-open.
+    expect(previewKindForPath("legacy.mdb")).toBeNull();
   });
 });
 

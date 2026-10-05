@@ -294,7 +294,9 @@ func TestStartServerWiresDurableShareToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartServer (first launch): %v", err)
 	}
-	shutdownHandle(t, h1)
+	// Registered immediately so an early t.Fatal below cannot leak the listener;
+	// the explicit shutdown before the relaunch is what actually frees the port.
+	t.Cleanup(func() { shutdownHandle(t, h1) })
 
 	code, body := shareTokenGET(t, h1.HTTPURL, h1.Token)
 	if code != http.StatusOK {
@@ -315,12 +317,22 @@ func TestStartServerWiresDurableShareToken(t *testing.T) {
 		t.Fatalf("API call with the share token = %d, want 200", code)
 	}
 
+	// Stop the first launch so the relaunch reuses the sticky port instead of
+	// walking forward through the range — the whole reason shutdownHandle
+	// exists. It must come AFTER the assertions above: shutdownHandle races the
+	// `go srv.Serve(ln)` goroutine that records the listener, so a server shut
+	// down here can no longer be asserted on.
+	shutdownHandle(t, h1)
+
 	// Relaunch over the same config dir: the link must survive.
 	h2, err := StartServer(nil, t.TempDir(), nil, testCert(t))
 	if err != nil {
 		t.Fatalf("StartServer (second launch): %v", err)
 	}
-	shutdownHandle(t, h2)
+	// h2 is asserted on below, so it must outlive the test body: clean it up
+	// rather than shutting it down here.
+	t.Cleanup(func() { shutdownHandle(t, h2) })
+
 	code, body = shareTokenGET(t, h2.HTTPURL, h2.Token)
 	if code != http.StatusOK {
 		t.Fatalf("GET share-token after relaunch = %d body=%s, want 200", code, body)

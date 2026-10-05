@@ -21,7 +21,7 @@ type ListBox struct {
 	height int // total visible height in rows
 
 	// Data source — caller owns the data
-	count     int                                          // number of items
+	count     int                                        // number of items
 	renderRow func(idx, width int, selected bool) string // render one item row
 
 	// Optional fixed header rows (rendered above scrollable items)
@@ -176,13 +176,13 @@ func (lb *ListBox) Layout() {
 	if lb.filterRow != "" {
 		chromeHeight++
 	}
-	
+
 	// Calculate content height
 	lb.contentHeight = lb.height - chromeHeight
 	if lb.contentHeight < 1 {
 		lb.contentHeight = 1
 	}
-	
+
 	// Content starts after chrome
 	lb.contentTopY = chromeHeight
 
@@ -228,19 +228,19 @@ func (lb *ListBox) buildLineMap() {
 // Render renders the list box with headers, filter bar, items, and scrollbar.
 func (lb *ListBox) Render() string {
 	lb.Layout()
-	
+
 	var lines []string
-	
+
 	// Render filter bar if present
 	if lb.filterRow != "" {
 		lines = append(lines, truncateToWidth(lb.filterRow, lb.width))
 	}
-	
+
 	// Render header rows
 	for _, row := range lb.headerRows {
 		lines = append(lines, truncateToWidth(row, lb.width))
 	}
-	
+
 	// Render items
 	if lb.count == 0 || lb.renderRow == nil {
 		// Empty state
@@ -272,24 +272,24 @@ func (lb *ListBox) Render() string {
 			lines = append(lines, line)
 		}
 	}
-	
+
 	// Pad to total height if short
 	for len(lines) < lb.height {
 		lines = append(lines, strings.Repeat(" ", lb.width))
 	}
-	
+
 	// Append scrollbar alongside items if needed
 	if lb.count > lb.contentHeight {
 		sb := NewScrollbar()
 		sbStr := sb.RenderList(lb.contentHeight, lb.count, lb.scrollOffset, lb.contentHeight)
 		sbLines := strings.Split(sbStr, "\n")
-		
+
 		// Scrollbar only appears alongside item rows, not chrome
 		itemStart := len(lb.headerRows)
 		if lb.filterRow != "" {
 			itemStart++
 		}
-		
+
 		for i := itemStart; i < itemStart+lb.contentHeight && i < len(lines); i++ {
 			sbIdx := i - itemStart
 			if sbIdx < len(sbLines) {
@@ -299,7 +299,7 @@ func (lb *ListBox) Render() string {
 			}
 		}
 	}
-	
+
 	return strings.Join(lines, "\n")
 }
 
@@ -336,7 +336,7 @@ func (lb *ListBox) EnsureVisible(idx int) {
 	if lb.contentHeight == 0 {
 		lb.Layout()
 	}
-	
+
 	if idx < lb.scrollOffset {
 		lb.scrollOffset = idx
 	}
