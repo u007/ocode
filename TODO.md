@@ -16,18 +16,56 @@ The clean-clone build, CI, and contribution templates landed (see CHANGES.md
   as in-scope. Fix by pointing the isolated home at `t.TempDir()` (outside the
   repo) rather than a directory under the package, or by resolving the checkout
   root before comparing. This will be the first red thing CI reports.
-- **CI has never run — no CI failure has ever been observed, and nothing in
-  `.github/workflows/ci.yml` is verified against a real runner.** The repository
-  has zero workflows (`gh api repos/u007/ocode/actions/workflows` →
-  `{"total_count":0}`, authenticated `u007` with `repo` + `workflow` scopes, so
-  it is not an auth or visibility artifact); the workflow is staged locally only.
-  Push it, then treat the first run as the diagnosis. Known first-run risks:
-  (a) `go test ./...` on `ubuntu-latest` may hit platform-only failures, and
-  CLAUDE.md records that every pty-dependent test (`TestTerminalWS*`) fails
-  wherever `/dev/ptmx` is unavailable; (b) the 45/60 minute job timeouts are
-  guesses. Fix what goes red rather than widening timeouts. `ci.yml` has been
-  YAML-parse-checked and passes `actionlint` v1.7.12 clean, which does not prove
-  the commands succeed.
+- **CI ran for the first time (run 37344285998, all 3 jobs red) — three fixes
+  shipped, one large problem found.** Diagnosis is in CHANGES.md. Two were
+  workflow bugs, both fixed and locally verified: `cmd/ocode-desktop` (wails v3)
+  cannot compile on `ubuntu-latest` without GTK/WebKit dev headers, and
+  `pnpm/action-setup` had no version and died before any real step. The third is
+  the real one:
+
+- **~40 `internal/config` and `internal/agent` tests assume ocode ignores
+  `XDG_CONFIG_HOME`, which is true ONLY on darwin. They have never run on
+  Linux.** `paths.GlobalConfigDir()` (`internal/paths/paths.go:163-181`)
+  deliberately ignores `XDG_CONFIG_HOME` on darwin but honours it everywhere
+  else. Both packages' `TestMain` sets `XDG_CONFIG_HOME` (and `XDG_DATA_HOME`)
+  to one package-wide temp dir, and individual tests then do
+  `t.Setenv("HOME", ownTmp)` and assert the file landed at
+  `ownTmp/.config/opencode/…`. On macOS that is correct — `HOME` is the only
+  input. On Linux the XDG var wins, so the file lands in the package temp dir
+  and the assertion fails. Two distinct symptoms from one cause:
+  - *Missing file.* `TestLoadCreatesOcodeConfigFiles`,
+    `TestChatVerbosityConfigFile*`, `TestSaveOcodeChatVerbosity*`,
+    `TestComputerUseConfig_RoundTrip`, `TestSaveTUITheme*`, `TestBrowserConfigHTR*`,
+    `TestEditorModeLoadSave`, `TestIDEModeLoadSave`, `TestSaveAutoGrantRoundTrip`,
+    `TestSaveAndGetLastThinkingBudget`, `TestExtraAllowedPaths*`,
+    `TestLoadAutoPermissionPromptBody*` — all fail with
+    `open …/.config/opencode/ocodeconfig.json: no such file or directory`.
+  - *Cross-test leakage.* Every such test shares ONE config dir on Linux, so a
+    write in one test is visible to the next:
+    `TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant` sees a
+    grant belonging to a different test. On macOS each `t.Setenv("HOME", …)`
+    gave a private dir, which is why it never surfaced.
+  The fix is NOT to stop `TestMain` setting the XDG vars — that would stop these
+  tests proving the Linux XDG path works at all. Make the tests portable: derive
+  the expected path from `paths.GlobalConfigDir()` instead of re-implementing
+  platform logic, and give tests that need isolation their own `XDG_*` too, not
+  just `HOME`. Note `internal/agent` also puts its home at
+  `os.MkdirTemp(realHome, ".ocode-agent-test-home-")`, i.e. under the runner's
+  real `/home/runner`.
+- **`cmd/ocode-desktop`'s four tests no longer run in CI** (the wails exclusion
+  above). `TestDesktopCodexPluginRegistered` guards a real regression — the
+  desktop blank-importing the codex provider plugin — and `TestSessionIDFromArgs`
+  covers `-session` parsing. Install the headers rather than leave this open.
+- **The `-timeout 45m` race guard fired on its first outing:**
+  `FAIL internal/agent 2700.114s` with `panic: test timed out after 45m0s`, so
+  the race suite never got to report real races in that package. The 45/60
+  minute values remain unmeasured guards; measure per-package timings (Go emits
+  them) instead of widening the number blind.
+- **`internal/browse/cdp` also failed under `-race`**:
+  `TestWatchHTRExitReportsDeathWithoutRestarting` (120.21s) and
+  `TestNetworkRowMarksProxyBlockedResponses` — the latter IS in the workflow's
+  flaky quarantine, and the quarantine step never runs for the `race` job, so a
+  quarantined flake fails the job there with no retry.
 - **`internal/server` per-package runtime is unmeasured.** 1200+ test functions
   in one package against Go's 10m default per-package timeout. The `-timeout 30m`
   (plain), `45m` (race) and `5m` (retry) values are **guards approved by the user,

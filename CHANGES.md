@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+- **CI's first run was red in all three jobs; two were workflow bugs, now fixed
+  and locally verified.** Run `37344285998`.
+  - *`cmd/ocode-desktop` does not compile on `ubuntu-latest`.* It imports wails
+    v3, whose Linux build needs the GTK3 + WebKitGTK development headers the
+    runner does not have, so the plain job's `Build` step failed in 60s and the
+    race job failed the same package. The workflow now resolves the package list
+    once into `GOPKGS` (`go list ./... | grep -v '/cmd/ocode-desktop$'`) and
+    builds, vets and tests everything else — all 83 remaining packages, every
+    `internal/` one included. This is a CI-**environment** gap, not a platform
+    decision: the package ships its own Linux build files
+    (`localcert_linux_gtk3.go`), so install the headers rather than leave the gap
+    permanent. The `<<GOPKGS_EOF` heredoc form is required, not stylistic —
+    `go list` emits one package per line, so a plain
+    `echo "GOPKGS=$(go list …)"` writes a MULTI-LINE value to `GITHUB_ENV` and
+    every line after the first is parsed as its own malformed env entry.
+  - *The web job died in 10s before running anything.* `pnpm/action-setup` exits
+    1 with "No pnpm version is specified" when given no `version` and
+    `web/package.json` carries no `packageManager` field. Pinned to `10.14.0`.
+    With that fixed the web job is green end to end: `pnpm install
+    --frozen-lockfile`, `pnpm run typecheck`, `pnpm run test` (358 files / 3260
+    tests) and `pnpm run build` all pass locally.
+  - **The third failure is real and much bigger: ~40 `internal/config` and
+    `internal/agent` tests have never run on Linux.**
+    `paths.GlobalConfigDir()` (`internal/paths/paths.go:163-181`) deliberately
+    ignores `XDG_CONFIG_HOME` on darwin but honours it everywhere else. Both
+    packages' `TestMain` sets `XDG_CONFIG_HOME`/`XDG_DATA_HOME` to one
+    package-wide temp dir, while individual tests `t.Setenv("HOME", ownTmp)` and
+    assert the file landed at `ownTmp/.config/opencode/…`. On macOS `HOME` is
+    the only input and the assertion holds; on Linux the XDG var wins, so the
+    file lands in the package temp dir instead. One cause, two symptoms: a
+    missing file (`TestLoadCreatesOcodeConfigFiles`, the `TestChatVerbosity*`,
+    `TestSaveTUITheme*`, `TestBrowserConfigHTR*`, `TestEditorMode*`,
+    `TestIDEMode*`, `TestExtraAllowedPaths*` and ~10 more groups) and cross-test
+    leakage (`TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant`
+    sees a grant another test wrote, because every such test shares one config
+    dir on Linux but each had a private one on macOS). Also: `-timeout 45m`
+    fired on its first outing (`internal/agent` panicked at 2700s, so real races
+    there went unreported), and `internal/browse/cdp` failed under `-race` —
+    including `TestNetworkRowMarksProxyBlockedResponses`, which IS in the
+    workflow's flaky quarantine, yet the quarantine step runs only in the plain
+    job. Full diagnosis and the fix direction (make the tests portable, NOT stop
+    `TestMain` setting the XDG vars) are in TODO.md.
 - **A `de-slop` plugin ships with the repo** — `.opencode/plugins/de-slop/`
   (`plugin.json` + the MIT-licensed `de-slop` skill by petekp) strips LLM-isms and
   AI writing tells from prose. Because it lives in the repo's own
