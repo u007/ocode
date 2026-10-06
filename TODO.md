@@ -23,56 +23,65 @@ The clean-clone build, CI, and contribution templates landed (see CHANGES.md
   `pnpm/action-setup` had no version and died before any real step. The third is
   the real one:
 
-- **~40 `internal/config` and `internal/agent` tests assume ocode ignores
-  `XDG_CONFIG_HOME`, which is true ONLY on darwin. They have never run on
-  Linux.** `paths.GlobalConfigDir()` (`internal/paths/paths.go:163-181`)
-  deliberately ignores `XDG_CONFIG_HOME` on darwin but honours it everywhere
-  else. Both packages' `TestMain` sets `XDG_CONFIG_HOME` (and `XDG_DATA_HOME`)
-  to one package-wide temp dir, and individual tests then do
-  `t.Setenv("HOME", ownTmp)` and assert the file landed at
-  `ownTmp/.config/opencode/…`. On macOS that is correct — `HOME` is the only
-  input. On Linux the XDG var wins, so the file lands in the package temp dir
-  and the assertion fails. Two distinct symptoms from one cause:
+- **FIXED (2026-10-06): ~50 `internal/config` and `internal/agent` tests assumed
+  ocode ignores `XDG_CONFIG_HOME`, which is true ONLY on darwin — they had never
+  run on Linux.** Every `t.Setenv("HOME", …)` site in both packages now goes
+  through a `setHomeTree` helper that points `HOME`, `USERPROFILE`, the XDG
+  variables and the Windows `APPDATA`/`LOCALAPPDATA` at the matching
+  subdirectory of one temp home, and both `TestMain`s stop pointing
+  `XDG_CONFIG_HOME` and `XDG_DATA_HOME` at the same directory (on Linux that
+  collapse put `GlobalConfigDir` and `GlobalDataDir` on one path, so the sandbox
+  self-escalation guard covered the whole data dir). Verified in a linux/arm64
+  `golang:1.26` container: `internal/config` 44 failures → **0**, no macOS
+  regression. The rule is now in CLAUDE.md § Coding Standards. Original
+  diagnosis kept below for the record.
   - *Missing file.* `TestLoadCreatesOcodeConfigFiles`,
     `TestChatVerbosityConfigFile*`, `TestSaveOcodeChatVerbosity*`,
     `TestComputerUseConfig_RoundTrip`, `TestSaveTUITheme*`, `TestBrowserConfigHTR*`,
     `TestEditorModeLoadSave`, `TestIDEModeLoadSave`, `TestSaveAutoGrantRoundTrip`,
     `TestSaveAndGetLastThinkingBudget`, `TestExtraAllowedPaths*`,
-    `TestLoadAutoPermissionPromptBody*` — all fail with
+    `TestLoadAutoPermissionPromptBody*` — all failed with
     `open …/.config/opencode/ocodeconfig.json: no such file or directory`.
-  - *Cross-test leakage.* Every such test shares ONE config dir on Linux, so a
-    write in one test is visible to the next:
-    `TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant` sees a
+  - *Cross-test leakage.* Every such test shared ONE config dir on Linux, so a
+    write in one test was visible to the next:
+    `TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant` saw a
     grant belonging to a different test. On macOS each `t.Setenv("HOME", …)`
     gave a private dir, which is why it never surfaced.
-  The fix is NOT to stop `TestMain` setting the XDG vars — that would stop these
-  tests proving the Linux XDG path works at all. Make the tests portable: derive
-  the expected path from `paths.GlobalConfigDir()` instead of re-implementing
-  platform logic, and give tests that need isolation their own `XDG_*` too, not
-  just `HOME`. Note `internal/agent` also puts its home at
-  `os.MkdirTemp(realHome, ".ocode-agent-test-home-")`, i.e. under the runner's
-  real `/home/runner`.
 - **`cmd/ocode-desktop`'s four tests no longer run in CI** (the wails exclusion
-  above). `TestDesktopCodexPluginRegistered` guards a real regression — the
-  desktop blank-importing the codex provider plugin — and `TestSessionIDFromArgs`
-  covers `-session` parsing. Install the headers rather than leave this open.
-- **The `-timeout 45m` race guard fired on its first outing:**
-  `FAIL internal/agent 2700.114s` with `panic: test timed out after 45m0s`, so
-  the race suite never got to report real races in that package. The 45/60
-  minute values remain unmeasured guards; measure per-package timings (Go emits
-  them) instead of widening the number blind.
-- **`internal/browse/cdp` also failed under `-race`**:
-  `TestWatchHTRExitReportsDeathWithoutRestarting` (120.21s) and
-  `TestNetworkRowMarksProxyBlockedResponses` — the latter IS in the workflow's
-  flaky quarantine, and the quarantine step never runs for the `race` job, so a
-  quarantined flake fails the job there with no retry.
+  in `.github/workflows/ci.yml`). `TestDesktopCodexPluginRegistered` guards a real
+  regression — the desktop blank-importing the codex provider plugin — and
+  `TestSessionIDFromArgs` covers `-session` parsing. Install the GTK/WebKit dev
+  headers in CI, or move those tests to a package that builds without them.
+- **FIXED (2026-10-06): `internal/agent` never finished on Linux.**
+  `TestSandboxOSBoundaryGrantsSharedProjectWrites` blocked forever in
+  `cmd.CombinedOutput()` because the Linux sandbox confines by re-executing
+  `os.Executable()` with the hidden `sandbox-confine` subcommand — and inside a
+  library package's test binary `os.Executable()` IS the test binary, which had
+  no dispatch for it, so the re-exec fell through to Go's testing main and
+  re-ran the whole suite in a child process, recursively. `TestMain` now
+  dispatches it first. Package goes from never-returning to **102s, zero
+  failures** on Linux (macOS 328s), and the boundary test itself to PASS in
+  0.10s — so it now genuinely verifies the Landlock boundary.
+  **Consequence for the timeouts:** `-timeout 45m` was firing on this hang while
+  the job reported ZERO test failures, so the number was never the problem and
+  is deliberately unchanged. Raising it would have hidden the hang.
+  `TestReexecBinariesDispatchConfiner` still checks only MAIN packages, so any
+  future test binary that runs the Linux sandbox has the same trap.
+- **`internal/browse/cdp` fails under `-race` on Linux, pre-existing and
+  unrelated to the above.** `TestWatchHTRExitReportsDeathWithoutRestarting`
+  takes 120.20s and fails on the duplicate status publish
+  (`got ["" ""]`, wants exactly one empty publish), and
+  `TestNetworkRowMarksProxyBlockedResponses` fails too — the latter IS in the
+  workflow's flaky quarantine, but that quarantine step runs only in the plain
+  job, so a quarantined flake still fails the `race` job with no retry.
+  The 120s is the stub daemon's own `sleep 120`: `cmd.Wait()` did not return
+  until it expired, whereas on macOS the same test passes in 0.4s (3 runs in
+  1.36s). Suspect the supervisor's kill/reap path, not the test.
 - **`internal/server` per-package runtime is unmeasured.** 1200+ test functions
   in one package against Go's 10m default per-package timeout. The `-timeout 30m`
-  (plain), `45m` (race) and `5m` (retry) values are **guards approved by the user,
-  not measured fixes** — they can only prevent a spurious panic, never reveal a
-  real one, and the race value in particular could mask a genuine hang (the job
-  `timeout-minutes` still bounds that). Replace with measured numbers once a run
-  reports timings.
+  (plain) and `5m` (retry) values are **guards approved by the user, not measured
+  fixes** — they can only prevent a spurious panic, never reveal a real one.
+  Replace with measured numbers once a run reports timings.
 - **The remote SSH tests are verified hermetic, but have no skip guards.**
   `TestRemoteShellCommandRunsOnHost` and the rest of
   `internal/server/handler_remote_*_test.go` need no real `sshd`, no `htrcli`,
