@@ -362,14 +362,24 @@ func confinedPath(ctx context.Context, p string) (string, error) {
 	if pathscope.IsTempDir(resolved) {
 		return resolved, nil
 	}
-	// Also allow access to the tool-results state directory.
-	cacheDir := toolResultCacheDir()
-	if cacheResolved, ok := normalizeRootPath(cacheDir); ok && pathWithinRoot(resolved, cacheResolved) {
-		return resolved, nil
-	}
-	// Also allow reads from the managed repository cache.
-	if repoCache, err := repoCacheDir(); err == nil {
-		if repoResolved, ok := normalizeRootPath(repoCache); ok && pathWithinRoot(resolved, repoResolved) {
+	// Managed caches: the tool-results state dir and the cloned-repo cache.
+	// These are created lazily on first use, so they must be normalized with
+	// normalizeLazyDir (via CacheRoots) rather than the eager
+	// normalizeRootPath. normalizeRootPath gives up when neither the path nor
+	// its parent exists yet, which on a fresh machine left the cache dir OUT
+	// of the allowed set even though the permission layer's AllowedRoots had
+	// already auto-authorized it — an auto-grant then hard-errored here with
+	// "outside the working directory". CacheRoots() is the single root set
+	// shared with the permission scope model, so confinement and
+	// authorization agree by construction.
+	for _, root := range CacheRoots() {
+		// CacheRoots only returns resolved absolute paths, but an empty root
+		// would make pathWithinRoot("", …) match every absolute path, so the
+		// fail-open is excluded here rather than trusted upstream.
+		if root == "" {
+			continue
+		}
+		if pathWithinRoot(resolved, root) {
 			return resolved, nil
 		}
 	}

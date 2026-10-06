@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **Linux CI: `confinedPath` now honors lazily-created cache roots.**
+  - `normalizeRootPath` gives up when neither a path nor its parent exists yet, so
+    on a fresh machine `confinedPath` rejected the managed cache dirs
+    (`tool-results`, cloned-repo) even though the permission layer's
+    `AllowedRoots` — populated from `CacheRoots()`, which normalizes *lazily* — had
+    already auto-authorized them. An auto-grant then hard-errored with `path … is
+    outside the working directory`. macOS passed only because a developer's
+    `~/.local/state/…` already existed; a fresh Linux runner has no such dir, which
+    is exactly why `TestConfinedPathExpandsTildeToToolResults` was a darwin-only pass.
+  - Fix: route both managed caches through `CacheRoots()`, the same root set the
+    permission scope model consumes, so confinement and authorization agree by
+    construction. An empty root is skipped defensively, because
+    `pathWithinRoot("", p)` matches every absolute path.
+  - Adds `internal/tool/confined_cache_root_test.go` and the `setHomeTree` helper
+    the package lacked (a bare `t.Setenv("HOME", …)` shares the process-wide XDG
+    variables on Linux). The fake home is deliberately outside every temp root and
+    the context workdir deliberately unrelated — `confinedPath`'s temp and workdir
+    early-returns would otherwise make the assertions pass with the bug present.
+    Mutation-verified: reverting the fix fails the test, and the mutant compiles.
 - **CI's first run was red in all three jobs; two were workflow bugs, now fixed
   and locally verified.** Run `37344285998`.
   - *`cmd/ocode-desktop` does not compile on `ubuntu-latest`.* It imports wails
