@@ -917,7 +917,7 @@ func TestResolveCompactRuntimeDefaultsKeepRecentTokens(t *testing.T) {
 	// Sandbox the models cache and swap in a fresh synthetic snapshot so this
 	// test never depends on the developer's real cache or network access.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home)
 	t.Setenv(envModelsPath, "")

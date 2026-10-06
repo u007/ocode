@@ -17,7 +17,7 @@ import (
 func isolateConfigEnv(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, ".config"))
 	dir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

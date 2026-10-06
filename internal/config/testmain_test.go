@@ -54,11 +54,32 @@ func TestMain(m *testing.M) {
 	os.Setenv("USERPROFILE", tmp)
 	os.Setenv("HOMEDRIVE", tmp)
 	os.Setenv("HOMEPATH", tmp)
-	os.Setenv("XDG_CONFIG_HOME", tmp)
-	os.Setenv("XDG_DATA_HOME", tmp)
-	os.Setenv("XDG_STATE_HOME", tmp)
-	os.Setenv("APPDATA", tmp)
-	os.Setenv("LOCALAPPDATA", tmp)
+	// XDG_CONFIG_HOME and XDG_DATA_HOME must point at DIFFERENT subtrees, never
+	// the same directory. On Linux GlobalConfigDir resolves
+	// $XDG_CONFIG_HOME/opencode and GlobalDataDir resolves
+	// $XDG_DATA_HOME/opencode; pointing both at `tmp` collapsed them onto one
+	// path, which in turn made the sandbox's self-escalation guard (a write
+	// under the global CONFIG dir Asks) cover the whole data dir. No test in
+	// THIS package exercises that guard, so it never failed here — but it is
+	// the same trap that cost internal/agent a real failure, and a future test
+	// added to this package would inherit it. Pointing each at its real
+	// per-platform default makes the baseline honest and the two dirs can no
+	// longer collide.
+	tmpConfig := filepath.Join(tmp, ".config")
+	tmpData := filepath.Join(tmp, ".local", "share")
+	tmpState := filepath.Join(tmp, ".local", "state")
+	tmpAppData := filepath.Join(tmp, "AppData", "Roaming")
+	tmpLocalAppData := filepath.Join(tmp, "AppData", "Local")
+	for _, d := range []string{tmpConfig, tmpData, tmpState, tmpAppData, tmpLocalAppData} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			panic(err)
+		}
+	}
+	os.Setenv("XDG_CONFIG_HOME", tmpConfig)
+	os.Setenv("XDG_DATA_HOME", tmpData)
+	os.Setenv("XDG_STATE_HOME", tmpState)
+	os.Setenv("APPDATA", tmpAppData)
+	os.Setenv("LOCALAPPDATA", tmpLocalAppData)
 
 	// Re-point the snapshot store now that HOME is isolated.
 	if p, err := getGlobalOcodeConfigPath(); err == nil {
@@ -96,6 +117,35 @@ func underDir(p, base string) bool {
 		return false
 	}
 	return rel == "." || !strings.HasPrefix(rel, "..")
+}
+
+// setHomeTree points every global-config root at one directory tree, so a test
+// that overrides HOME gets the isolation it asks for on macOS and Linux alike.
+// It replaces a bare t.Setenv("HOME", …) — never add that back. Rationale and
+// the 44 failures this fixed are in CLAUDE.md § Coding Standards.
+//
+// A test that sets only HOME gets a private config dir on macOS but shares the
+// package-wide one on Linux, because paths.GlobalConfigDir honours
+// XDG_CONFIG_HOME everywhere except darwin. Pointing each variable at its real
+// per-platform default keeps the two platforms in agreement:
+//
+//	XDG_CONFIG_HOME=<home>/.config       → <home>/.config/opencode
+//	XDG_DATA_HOME=<home>/.local/share    → <home>/.local/share/opencode
+//	XDG_STATE_HOME=<home>/.local/state   → <home>/.local/state
+//
+// Do NOT instead clear the XDG variables in TestMain: that would stop the suite
+// exercising the Linux resolution path, which is the path CI runs on.
+func setHomeTree(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	// Windows resolves from these two instead of the XDG variables, and the
+	// same "must not be the same directory" rule applies.
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 }
 
 // TestGlobalConfigNeverTouchesRealHome proves that, while running under

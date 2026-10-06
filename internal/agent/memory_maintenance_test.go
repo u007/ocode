@@ -48,7 +48,7 @@ func (c *memoryMaintenanceStubClient) GetModel() string    { return "stub" }
 // to doc_maintenance.go (C4: OCSEC:31f59a:2).
 func TestQueueMemoryMaintenanceRaceWithShutdown(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	workDir := t.TempDir()
 
 	a := NewAgent(nil, nil, &config.Config{}, nil)
@@ -69,7 +69,7 @@ func TestQueueMemoryMaintenanceRaceWithShutdown(t *testing.T) {
 
 func TestRunMemoryMaintenanceAppliesProjectUpdate(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 
 	workDir := t.TempDir()
 	paths, err := memory.ResolvePaths(workDir)
@@ -151,7 +151,7 @@ func TestRunMemoryMaintenanceAppliesProjectUpdate(t *testing.T) {
 
 func TestRunMemoryMaintenanceCompressesOversizedScope(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 
 	workDir := t.TempDir()
 	paths, err := memory.ResolvePaths(workDir)

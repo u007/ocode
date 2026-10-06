@@ -46,7 +46,7 @@ func TestIsImmutableReadRoot_GOMODCACHE_overrides(t *testing.T) {
 // HOME (or USERPROFILE on Windows) so the results are deterministic.
 func setHomeForTest(t *testing.T, home string) {
 	t.Helper()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	if platform := os.Getenv("GOOS"); platform == "windows" || platform == "" {
 		t.Setenv("USERPROFILE", home)
 	}

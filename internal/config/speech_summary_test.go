@@ -24,7 +24,7 @@ func writeOcodeConfigFileForTest(t *testing.T, body string) {
 // *_enabled gate defaults false, so a copy-paste of their handling would ship
 // this feature silently OFF for everyone.
 func TestSpeechSummaryEnabledDefaultsOn(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	cfg := defaultOcodeConfig()
 	if !cfg.SpeechSummaryEnabled {
 		t.Fatal("defaultOcodeConfig must enable speech summaries")
@@ -40,7 +40,7 @@ func TestSpeechSummaryEnabledDefaultsOn(t *testing.T) {
 // happened to contain a context_model key. A file that mentions neither must
 // still keep the default.
 func TestLoadOcodeConfigReferencingAbsentSpeechSummaryKeepsDefaultOn(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	writeOcodeConfigFileForTest(t, `{"model":"openai/gpt-5"}`)
 
 	cfg := Config{}
@@ -59,7 +59,7 @@ func TestLoadOcodeConfigReferencingAbsentSpeechSummaryKeepsDefaultOn(t *testing.
 // file that DOES set them wins, including the explicit false that must be able
 // to turn the default off.
 func TestLoadOcodeConfigHonoursExplicitSpeechSummaryValues(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	writeOcodeConfigFileForTest(t,
 		`{"speech_summary_model":"anthropic/claude-haiku-4-5","speech_summary_enabled":false}`)
 
@@ -79,7 +79,7 @@ func TestLoadOcodeConfigHonoursExplicitSpeechSummaryValues(t *testing.T) {
 // write path end to end: what SaveOcodeSpeechSummary writes must survive a
 // reload, so the control and the runtime agree.
 func TestSaveOcodeSpeechSummaryPersistsBothFields(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	model := "openai/gpt-4o-mini"
 	enabled := false
 	if _, _, err := SaveOcodeSpeechSummary(&model, &enabled); err != nil {
@@ -115,7 +115,7 @@ func TestSaveOcodeSpeechSummaryPersistsBothFields(t *testing.T) {
 // carries one key. The merge is against the on-disk config, so it also survives
 // a value changed out of band between the two writes.
 func TestSaveOcodeSpeechSummaryMergesAPartialWrite(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	model := "anthropic/claude-haiku-4-5"
 	on := true
@@ -158,7 +158,7 @@ func TestSaveOcodeSpeechSummaryMergesAPartialWrite(t *testing.T) {
 // set them. The apply half goes through EffectiveOcodeConfig, which is what the
 // runtime actually consults.
 func TestSpeechSummaryDeltaIsNotEmptyAndApplies(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	model := "anthropic/claude-haiku-4-5"
 	enabled := false

@@ -1051,7 +1051,7 @@ func TestPermissions_FindUnsafeFlagsAsk(t *testing.T) {
 // subcommands are no longer auto-allowed (previously the generic `git `
 // prefix in isSafeBashCommand allowed them all).
 func TestPermissions_GitMutatingSubcommandsAsk(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetWorkDir("/Users/test/project")
 
@@ -1339,7 +1339,7 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 
 	// Set temporary HOME to a temp directory outside of workdir
 	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	setHomeTree(t, tempHome)
 
 	t.Run("tokenizer_and_compound_splitting", func(t *testing.T) {
 		cmds, err := parseShellCommandLine(`cd ` + resolvedWorkDir + ` && grep -rn "pattern" .`)
@@ -2016,7 +2016,7 @@ func TestPermissions_ReadToolOnExtraAllowedPath(t *testing.T) {
 func TestPermissions_ReadMissingTargetDenied(t *testing.T) {
 	workDir := t.TempDir()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 
 	cases := []struct {
 		name  string
@@ -2283,7 +2283,7 @@ func isolateConfigHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(home) })
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 }
@@ -2694,7 +2694,7 @@ func TestDecideSandboxConfigWriteAsks(t *testing.T) {
 // TestDecideSandboxSshReadAsks: reading a private key is Ask in sandbox.
 func TestDecideSandboxSshReadAsks(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 	ssh := filepath.Join(home, ".ssh")
 	key := filepath.Join(ssh, "id_ed25519")
@@ -2723,7 +2723,7 @@ func TestDecideSandboxGitPush(t *testing.T) {
 	// real "Bash(git push --force*)" deny) leak in — the force assertions
 	// below must exercise the isHarmfulForceCommand gate, not local env.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	pm := NewPermissionManager()
@@ -2765,7 +2765,7 @@ func TestDecideSandboxHarmfulGitRequiresAsk(t *testing.T) {
 	t.Cleanup(func() { sandboxSupported = orig })
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	pm := NewPermissionManager()
@@ -3220,7 +3220,7 @@ func TestWriteToProjectSettingsAsks(t *testing.T) {
 // Ask (a matching deny there would otherwise be editable away).
 func TestWriteToClaudeSettingsAsks(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	work := t.TempDir()
 	claude := filepath.Join(home, ".claude", "settings.json")
 	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
@@ -3286,7 +3286,7 @@ func TestGitStashReadOnlyFormsReachAutoAllow(t *testing.T) {
 	// user deny like "Bash(git stash *)" (a deliberate user choice that wins
 	// over everything), which would leak into the test via claudeSettingsPaths
 	// and mask the code-level behavior under test.
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetWorkDir(t.TempDir())
 
@@ -3336,7 +3336,7 @@ func TestGitStashReadOnlyFormsReachAutoAllow(t *testing.T) {
 // every form that creates, deletes, renames, copies, or re-points a branch
 // stays off it.
 func TestGitBranchListingFormsAutoAllow(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetWorkDir(t.TempDir())
 
@@ -3411,7 +3411,7 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("HOME", home)
+		setHomeTree(t, home)
 
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
@@ -3428,7 +3428,7 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 
 	// Case 2: a user-defined bash ban names the banned prefix.
 	t.Run("user bash ban", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir()) // no Claude settings
+		setHomeTree(t, t.TempDir()) // no Claude settings
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
 		pm.SetBashPrefixRule("git stash", PermissionDeny)
@@ -3443,7 +3443,7 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 
 	// Case 3: locked mode says so instead of implying a missing rule.
 	t.Run("locked mode", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		setHomeTree(t, t.TempDir())
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
 		pm.SetMode(PermissionModeLocked)
@@ -3460,7 +3460,7 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 	// that does not hit an earlier auto-allow/always-allow rule, so the
 	// decision reaches the tool-rule fall-through in decideSingleCommand.
 	t.Run("tool rule", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		setHomeTree(t, t.TempDir())
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
 		pm.SetRule("bash", PermissionDeny)
@@ -3535,7 +3535,7 @@ func TestBannedGitStashPrefixSkipsReadOnlyForms(t *testing.T) {
 	sandboxSupported = func() bool { return true }
 	t.Cleanup(func() { sandboxSupported = orig })
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	for _, mode := range []PermissionMode{PermissionModeNormal, PermissionModeSandbox} {
@@ -3598,7 +3598,7 @@ func TestIsHarmfulRequestUsesFullCommandFromArgs(t *testing.T) {
 // arbitrary */vp elsewhere, and never without the rule.
 func TestAllowRuleMatchesPathQualifiedTrustedTool(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	work := t.TempDir()
 	for _, p := range []string{
 		filepath.Join(work, "node_modules", ".bin", "vp"),

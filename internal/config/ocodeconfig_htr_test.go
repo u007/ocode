@@ -9,7 +9,7 @@ import (
 func TestBrowserConfigHTRFields(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestBrowserConfigHTRFields(t *testing.T) {
 func TestBrowserConfigHTRPortRejected(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func TestBrowserConfigHTRPortRejected(t *testing.T) {
 func TestBrowserConfigRejectsStandaloneNativeHostName(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestBrowserConfigRejectsStandaloneNativeHostName(t *testing.T) {
 func TestBrowserConfigHTRDefaultsAbsent(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestBrowserConfigHTRDefaultsAbsent(t *testing.T) {
 func TestBrowserConfigHTRSharedExplicitFalseBeatsDefault(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)

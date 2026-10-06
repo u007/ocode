@@ -99,7 +99,7 @@ func TestReadContextFile_TrackedCleanReturnsWorkingTree(t *testing.T) {
 func isolateHome(t *testing.T) string {
 	t.Helper()
 	h := t.TempDir()
-	t.Setenv("HOME", h)
+	setHomeTree(t, h)
 	if runtime.GOOS == "windows" {
 		t.Setenv("APPDATA", h)
 	}

@@ -95,7 +95,7 @@ func TestAgentRegistryGetAll(t *testing.T) {
 
 func TestLoadMarkdownAgentsGlobal(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -143,7 +143,7 @@ You are a git commit and push agent.
 
 func TestLoadMarkdownAgentsProjectOverrideGlobal(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	globalDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -183,7 +183,7 @@ project prompt
 
 func TestReloadMarkdownAgentsHonorsEnabledPluginsAndProjectRoot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	projectRoot := t.TempDir()
@@ -237,7 +237,7 @@ project plugin prompt
 
 func TestLoadMarkdownAgentsCustomOverrideBuiltin(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	globalDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -263,7 +263,7 @@ custom general prompt
 
 func TestAgentLoaderDiagnosticsMissingBody(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -302,7 +302,7 @@ has content
 
 func TestAgentLoaderDiagnosticsUnsupportedFields(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -363,7 +363,7 @@ prompt
 
 func TestAgentLoaderDiagnosticsInvalidMode(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -392,7 +392,7 @@ prompt
 
 func TestLoadMarkdownAgentsDefaultModeAll(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -417,7 +417,7 @@ helper prompt
 
 func TestTaskToolSchemaListsRegistrySubAgents(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -608,7 +608,7 @@ func TestChildAgentSession(t *testing.T) {
 // meant the model could still call task(agent="secret") via the enum.
 func TestHiddenAgentNotInDescriptionOrEnum(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
@@ -656,7 +656,7 @@ func contains(s, sub string) bool {
 
 func TestTaskToolContractResolutionPrecedence(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")

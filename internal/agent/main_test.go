@@ -3,9 +3,43 @@ package agent
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/u007/ocode/internal/shell/sandbox"
 )
+
+// setHomeTree points every global-config root at one directory tree, so a test
+// that overrides HOME gets the isolation it asks for on macOS and Linux alike.
+// It replaces a bare t.Setenv("HOME", …) — never add that back. Rationale and
+// the failures this fixed are in CLAUDE.md § Coding Standards.
+//
+// A test that sets only HOME gets a private data/config dir on macOS but shares
+// the package-wide one on Linux, because paths.GlobalConfigDir and
+// paths.OcodeGlobalDataDir honour the XDG variables everywhere except darwin.
+// That let persistent grants written by one test be read back by another.
+// Pointing each variable at its real per-platform default keeps the platforms in
+// agreement:
+//
+//	XDG_CONFIG_HOME=<home>/.config      → <home>/.config/opencode
+//	XDG_DATA_HOME=<home>/.local/share   → <home>/.local/share/opencode
+//
+// XDG_STATE_HOME is deliberately NOT set here: TestMain owns it and pins it to a
+// directory beside the REAL home, because the permission tests treat the OS temp
+// dir as a writable root — a state dir under temp would make `rm -rf ~` an
+// in-scope delete and collapse the cache-root cases those tests exist to pin.
+func setHomeTree(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	// Windows resolves from these two instead of the XDG variables, and the
+	// same "must not be the same directory" rule applies.
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+}
 
 // TestMain redirects the managed state dir (truncated tool-results cache,
 // cloned-repo cache) for the whole package. Agent-loop tests execute real tool
@@ -15,6 +49,29 @@ import (
 // (XDG_STATE_HOME is honored before any OS-specific branch). Tests that need
 // a specific resolver branch override it with t.Setenv.
 func TestMain(m *testing.M) {
+	// The hidden `sandbox-confine` re-exec MUST be dispatched here, before
+	// anything else. internal/shell/sandbox's Linux backend confines by
+	// re-executing os.Executable() with this subcommand — and inside a library
+	// package's test binary, os.Executable() is THIS test binary, not a main
+	// package. Without this dispatch the re-exec fell through to Go's testing
+	// main and re-ran the ENTIRE suite in a child process, recursively, so
+	// TestSandboxOSBoundaryGrantsSharedProjectWrites blocked forever in
+	// cmd.CombinedOutput(): 31m46s when the CI race job's -timeout killed it,
+	// 49m19s in a local linux/arm64 container with no -race at all. That is why
+	// internal/agent never completed on Linux and why the race job's timeout was
+	// firing while the suite reported ZERO test failures — nothing was wrong
+	// except that the run never ended.
+	//
+	// main.go does this for the real CLI; TestReexecBinariesDispatchConfiner
+	// only checks main packages, so nothing covered this binary.
+	//
+	// ConfineEntrypoint returns 0 for a non-confiner invocation (its own argv[1]
+	// guard), and on success it execve's and never returns — so an unconditional
+	// call is correct here and needs no exported subcommand constant.
+	if code := sandbox.ConfineEntrypoint(os.Args); code != 0 {
+		os.Exit(code)
+	}
+
 	dir, err := os.MkdirTemp("", "ocode-agent-test-state-")
 	if err != nil {
 		panic(err)
@@ -48,10 +105,34 @@ func TestMain(m *testing.M) {
 		if err != nil {
 			panic(err)
 		}
-		for _, key := range []string{homeMarker, "HOME", "USERPROFILE", "XDG_DATA_HOME", "XDG_CONFIG_HOME"} {
-			if err := os.Setenv(key, home); err != nil {
+		// XDG_CONFIG_HOME and XDG_DATA_HOME MUST point at DIFFERENT
+		// subtrees of the test home, never the same directory as each other.
+		//
+		// On Linux paths.GlobalConfigDir() resolves $XDG_CONFIG_HOME/opencode
+		// and paths.GlobalDataDir() resolves $XDG_DATA_HOME/opencode. Pointing
+		// both variables at `home` collapsed those onto ONE directory, and
+		// sandboxSensitivePath's self-escalation guard ("a write under the
+		// global CONFIG dir Asks") then covered the whole data dir too — so
+		// TestDecideSandboxSharedProjectWritesAllow, which asserts ordinary
+		// writes under GlobalDataDir/project/** auto-allow in sandbox mode,
+		// got Ask instead of Allow. darwin never saw it, because there
+		// GlobalConfigDir is $HOME/.config/opencode and GlobalDataDir is
+		// $HOME/.local/share/opencode and the two cannot collide.
+		//
+		// These are also the real per-platform defaults, so the baseline
+		// environment now matches a genuine home rather than a synthetic one.
+		for key, value := range map[string]string{
+			"USERPROFILE":     home,
+			"HOME":            home,
+			"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+			"XDG_DATA_HOME":   filepath.Join(home, ".local", "share"),
+		} {
+			if err := os.Setenv(key, value); err != nil {
 				panic(err)
 			}
+		}
+		if err := os.Setenv(homeMarker, home); err != nil {
+			panic(err)
 		}
 	}
 	code := m.Run()

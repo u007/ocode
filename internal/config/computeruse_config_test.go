@@ -18,7 +18,7 @@ func TestComputerUseConfig_RoundTrip(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	// Seed the config with an unrelated enabled field so we can verify
 	// it survives the targeted save.

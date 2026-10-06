@@ -328,7 +328,7 @@ func TestQuickActionsConfigToleratesNullChipsField(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSaveAndLoadOcodeQuickActionsRoundTrips(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	saved := QuickActionsConfig{Chips: []QuickActionChip{
 		{ID: "tests", Label: "Run tests", Icon: "flask-conical", Message: "run the test suite", Mode: QuickActionModeFill},
@@ -356,7 +356,7 @@ func TestSaveAndLoadOcodeQuickActionsRoundTrips(t *testing.T) {
 func TestSaveOcodeQuickActionsDoesNotDisturbSiblingKeys(t *testing.T) {
 	// A one-key save must not read-modify-write its way through unrelated
 	// config, or saving a chip list would clobber chat_verbosity.
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	if err := SaveOcodeChatVerbosity(ChatVerbosityConfig{Preset: ChatVerbosityBalanced}); err != nil {
 		t.Fatalf("SaveOcodeChatVerbosity: %v", err)
@@ -375,7 +375,7 @@ func TestSaveOcodeQuickActionsDoesNotDisturbSiblingKeys(t *testing.T) {
 }
 
 func TestSaveOcodeQuickActionsRejectsInvalidWithoutWriting(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	bad := QuickActionsConfig{Chips: []QuickActionChip{{ID: "a", Label: "A", Icon: "zap", Message: "m", Mode: "sideways"}}}
 	if err := SaveOcodeQuickActions(bad); err == nil {
@@ -397,7 +397,7 @@ func TestLoadOcodeConfigSeedsQuickActionsWhenAbsent(t *testing.T) {
 	// still renders the three starter pills. HOME is a fresh temp dir, so there
 	// is no ocodeconfig.json at all — the no-file path, not just "file without
 	// the key".
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	cfg := Config{}
 	if err := LoadOcodeConfig(&cfg); err != nil {
@@ -421,7 +421,7 @@ func TestSaveAndLoadOcodeQuickActionsPreservesEmptyStrip(t *testing.T) {
 	// looks like the app ignoring them. This is the one test that separates
 	// "absent" from "deliberately emptied", so it must assert on the non-nil
 	// marker, not just the length.
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	emptied := QuickActionsConfig{Chips: []QuickActionChip{}}
 	if err := SaveOcodeQuickActions(emptied); err != nil {
@@ -443,7 +443,7 @@ func TestLoadOcodeConfigSeedsWhenFileExistsWithoutQuickActionsKey(t *testing.T) 
 	// The other absent-key shape: a real config file that predates the feature
 	// and has every other key. It must seed too, and — the spec's Migration
 	// guarantee — loading must not require the key to be present.
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	if err := SaveOcodeChatVerbosity(ChatVerbosityConfig{Preset: ChatVerbosityQuiet}); err != nil {
 		t.Fatalf("SaveOcodeChatVerbosity: %v", err)
@@ -477,7 +477,7 @@ func TestLoadOcodeConfigSeedsQuickActionsWhenChipsIsJSONNull(t *testing.T) {
 	// chat_verbosity in the same file is the guard: the loader read THIS file or
 	// that preset is not quiet.
 	home, xdg, appdata := t.TempDir(), t.TempDir(), t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("APPDATA", appdata)
 
@@ -516,7 +516,7 @@ func TestLoadOcodeConfigRejectsHandEditedOverCapQuickActions(t *testing.T) {
 	// (the strict per-chip UnmarshalJSON is a different failure with a different
 	// message).
 	home, xdg, appdata := t.TempDir(), t.TempDir(), t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("APPDATA", appdata)
 

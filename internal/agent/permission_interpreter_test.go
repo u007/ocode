@@ -653,7 +653,7 @@ func mockModelJSON(t *testing.T, body string) func() {
 
 func newConsultAgent(t *testing.T) (*Agent, string) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	dir := t.TempDir()
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {

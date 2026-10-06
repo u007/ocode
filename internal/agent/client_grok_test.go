@@ -43,7 +43,7 @@ func TestNewClientGrokSubscription(t *testing.T) {
 	// temp dir so the test never touches (or needs write access to) the real
 	// user store — under ocode's own sandbox that write is denied, and even
 	// unsandboxed it would mutate the developer's credentials.
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 

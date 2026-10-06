@@ -15,7 +15,7 @@ import (
 func TestDeleteBashPrefixRuleRemovesOnlyTheNamedEntry(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	if err := SaveSingleBashPrefixRule("git push", "deny"); err != nil {
 		t.Fatalf("SaveSingleBashPrefixRule(git push) error = %v", err)
@@ -52,7 +52,7 @@ func TestDeleteBashPrefixRuleRemovesOnlyTheNamedEntry(t *testing.T) {
 func TestDeleteBashPrefixRuleMissingKeyIsNoOp(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	if err := DeleteBashPrefixRule("never-existed"); err != nil {
 		t.Fatalf("deleting an absent prefix = %v, want no error", err)
@@ -71,7 +71,7 @@ func TestDeleteBashPrefixRuleMissingKeyIsNoOp(t *testing.T) {
 func TestDeleteBashPrefixRuleConcurrentWritersAllLand(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -124,7 +124,7 @@ func TestDeleteBashPrefixRuleConcurrentWritersAllLand(t *testing.T) {
 func TestSaveSingleBashPrefixRuleRoundTripsThroughDisk(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	if err := SaveSingleBashPrefixRule("sed", "deny"); err != nil {
 		t.Fatalf("SaveSingleBashPrefixRule error = %v", err)

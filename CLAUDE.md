@@ -151,6 +151,21 @@ diff.
 - Use modular packages in `internal/`.
 - Respect `.gitignore` and `watcher.ignore`.
 - Follow Go best practices and standard formatting (`gofmt`, `go vet`).
+- **A test that overrides `HOME` must use the package's `setHomeTree(t, home)`
+  helper, never a bare `t.Setenv("HOME", …)`.** ocode's path resolution is
+  deliberately platform-split: `paths.GlobalConfigDir()` ignores
+  `XDG_CONFIG_HOME` on darwin but honours it elsewhere, and
+  `paths.OcodeGlobalDataDir()` does the mirror image for `XDG_DATA_HOME`. Both
+  packages' `TestMain` therefore points the XDG variables at ONE package-wide
+  temp dir, so a test that sets only `HOME` gets a private config dir on macOS
+  but **shares the package-wide one on Linux** — the file lands where the test
+  never looks, and one test observes another test's writes. `setHomeTree` sets
+  each XDG variable to the matching XDG-default subdirectory of the same temp
+  home, so every platform resolves identically. This cost 44 `internal/config`
+  and several `internal/agent` failures that were invisible for as long as the
+  suite only ever ran on darwin; CI (ubuntu) is where they surfaced. Never "fix"
+  it by clearing the XDG variables in `TestMain` instead — that stops the suite
+  exercising the Linux resolution path, which is the path CI runs on.
 - **Avoid `git stash` / `git reset --hard` / `git checkout -- <file>` /
   `git clean -fd` as a default coping strategy.** They destroy user state
   the user may not be unable to recover.
