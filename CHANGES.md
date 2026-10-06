@@ -116,6 +116,51 @@
     `run.Sub.Runs()` with a `visited` guard (`run.Sub` is a live pointer, so a
     registry cycle is representable).
 
+- **The Linux test suites now actually run: 44 `internal/config` failures and a
+  hang that stopped `internal/agent` from ever finishing are fixed.** Both had
+  been invisible for as long as the suites only ran on macOS.
+
+  - *~50 tests assumed ocode ignores `XDG_CONFIG_HOME`, which is only true on
+    darwin.* `paths.GlobalConfigDir()` honours `XDG_CONFIG_HOME` everywhere
+    except darwin, and `paths.OcodeGlobalDataDir()` does the mirror image for
+    `XDG_DATA_HOME`. Both packages' `TestMain` points those at ONE package-wide
+    temp dir, while individual tests did `t.Setenv("HOME", ownTmp)` and asserted
+    the file landed under `ownTmp/.config/…`. On macOS `HOME` is the only input
+    and the assertion holds; on Linux the XDG variable won, so the file landed in
+    the package temp dir and the assertion failed — 44 tests in `internal/config`
+    alone (`TestLoadCreatesOcodeConfigFiles`, `TestChatVerbosity*`,
+    `TestSaveOcodeChatVerbosity*`, `TestSaveTUITheme*`, `TestBrowserConfigHTR*`,
+    `TestEditorMode*`, `TestIDEMode*`, `TestExtraAllowedPaths*`, …) plus
+    cross-test leakage in `internal/agent`, where
+    `TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant` read back
+    a grant a different test had written. Every `t.Setenv("HOME", …)` site in
+    both packages now goes through a `setHomeTree` helper that points `HOME`,
+    `USERPROFILE`, the three XDG variables and the Windows `APPDATA`/
+    `LOCALAPPDATA` at the matching subdirectory of one temp home, so every
+    platform resolves identically. A new CLAUDE.md rule keeps a bare
+    `t.Setenv("HOME", …)` from coming back. Verified in a linux/arm64
+    `golang:1.26` container: `internal/config` 44 failures → 0, and no macOS
+    regression.
+  - *`internal/agent` never finished on Linux — not a slow suite, a hang.*
+    `TestSandboxOSBoundaryGrantsSharedProjectWrites` blocked forever in
+    `cmd.CombinedOutput()`: `internal/shell/sandbox`'s Linux backend confines by
+    re-executing `os.Executable()` with the hidden `sandbox-confine` subcommand,
+    and inside a library package's test binary `os.Executable()` is the TEST
+    binary — which had no dispatch for that subcommand, so the re-exec fell
+    through to Go's testing main and re-ran the entire suite in a child process,
+    recursively. `main.go` dispatches it for the real CLI and
+    `TestReexecBinariesDispatchConfiner` checks the two MAIN packages, so nothing
+    covered a test binary. `TestMain` now dispatches it as its first statement.
+    The all three jobs red first CI run failed on exactly this test
+    (`TestSandboxOSBoundaryGrantsSharedProjectWrites (31m46s)` in the race job),
+    and the local Linux run reproduced it at 49m19s with no `-race` at all.
+    With the dispatch in place the test PASSES in 0.10s and the whole package
+    completes in 102s (macOS 328s) with zero failures.
+  - *So the race job's `-timeout 45m` was never a mis-set number.* It was firing
+    because one test never returned, which is also why the job reported zero test
+    failures while timing out. Raising the number would have hidden that, not
+    fixed it. That is why the value is unchanged in this pass.
+
 ## 2026-10-05 — A fresh clone builds, and contributor CI + contribution templates land
 
 The single biggest barrier for a new contributor is gone: `git clone` followed
