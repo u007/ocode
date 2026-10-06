@@ -22,12 +22,7 @@ func installCountingFakeSSH(t *testing.T) string {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "ssh-invocations")
 	bin := filepath.Join(dir, "ssh")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> " + logPath + "\n" +
-		"args=()\n" +
-		"for a in \"$@\"; do args+=(\"$a\"); done\n" +
-		"cmd=\"${args[${#args[@]}-1]}\"\n" +
-		"exec /bin/sh -c \"$cmd\"\n"
+	script := fakeSSHScript(logPath)
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake ssh: %v", err)
 	}

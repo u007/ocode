@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **Linux CI: the fake-`ssh` test shims no longer use bash-only syntax.**
+  - `installFakeSSH` / `installCountingFakeSSH` wrote a `#!/bin/sh` script that
+    built its argument list with bash arrays (`args+=("$a")`, `${#args[@]}`).
+    Ubuntu's `/bin/sh` is dash and rejects that with `Syntax error: "("
+    unexpected`, while macOS's `/bin/sh` is bash — so ~25 remote git/file/shell
+    tests passed on darwin and failed on Linux, most of them surfacing only as
+    `{"error":"not a git repository"}`.
+  - Fix: both helpers render one POSIX `fakeSSHScript(logPath)`. A
+    `for a in "$@"; do :; done` loop leaves `$a` holding the last argument, which
+    is exactly what the array subscript produced.
+  - Adds `TestFakeSSHScriptIsDashCompatible`, which renders the shim and runs it
+    under a genuine non-bash POSIX shell (`dash`, or `/bin/sh` when it reports no
+    `$BASH_VERSION`), asserting both `-n` parsing and last-argument forwarding.
+    Mutation-verified: restoring the bash-array form fails it with CI's exact
+    error, and the mutant compiles.
 - **Linux CI: `confinedPath` now honors lazily-created cache roots.**
   - `normalizeRootPath` gives up when neither a path nor its parent exists yet, so
     on a fresh machine `confinedPath` rejected the managed cache dirs
