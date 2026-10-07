@@ -32,3 +32,19 @@ func TestAgentHidesComputerToolUntilSupervisorAttached(t *testing.T) {
 		t.Fatal("computer tool must be advertised once the driver is attached")
 	}
 }
+
+func TestAgentAttachesWindowToolWithComputerDriver(t *testing.T) {
+	cfg := &config.Config{Ocode: config.OcodeConfig{
+		ComputerUse: config.ComputerUseConfig{Enabled: true},
+	}}
+	ag := NewAgent(nil, []tool.Tool{&tool.ComputerTool{Config: cfg}, &tool.WindowTool{Config: cfg}}, cfg, nil)
+	defer ag.Shutdown()
+
+	if ag.isToolAllowed("window") {
+		t.Fatal("window tool must not be advertised before a driver is attached")
+	}
+	ag.SetSupervisor(tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{}))
+	if !ag.isToolAllowed("window") {
+		t.Fatal("window tool must be advertised once the computer driver is attached")
+	}
+}

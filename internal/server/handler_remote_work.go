@@ -628,6 +628,9 @@ func remoteReadFile(ctx context.Context, rw remoteWork, path string) ([]byte, bo
 	if trimmed == "DIR" {
 		return nil, false, fmt.Errorf("path is a directory")
 	}
+	if trimmed == "MISSING" {
+		return nil, false, nil
+	}
 	idx := strings.LastIndex(trimmed, "\n"+marker)
 	if idx < 0 {
 		if trimmed == marker {

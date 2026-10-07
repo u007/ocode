@@ -6,6 +6,8 @@ import MermaidViewer from "./MermaidViewer";
 import { SelectionToolbar, usePreviewSelection } from "./SelectionToolbar";
 import FileEditor from "../Files/FileEditor";
 import MarkdownLink from "../common/MarkdownLink";
+import { cn } from "../../lib/utils";
+import type { EditorAppearance } from "../../lib/editorAppearance";
 
 function extractMermaid(md: string): string | null {
   const m = md.match(/```mermaid\s+([\s\S]*?)```/);
@@ -25,6 +27,7 @@ export default function MarkdownViewer({
   content,
   revision,
   followTail,
+  appearance,
 }: {
   path: string;
   projectRoot?: string;
@@ -44,6 +47,9 @@ export default function MarkdownViewer({
    *  revision just landed) the viewer follows the document tail when the
    *  reader is pinned to the bottom — the sidebar preview's "auto scroll". */
   followTail?: boolean;
+  /** Light/dark override forwarded from PreviewSurface (Files-tab preview
+   *  toggle). `"light"` drops `prose-invert`; unset keeps the dark default. */
+  appearance?: EditorAppearance;
 }) {
   // `content !== undefined` selects controlled mode. It is stable per mounted
   // viewer instance (the Files tab mounts a separate viewer per mode), so the
@@ -203,10 +209,10 @@ export default function MarkdownViewer({
     <div className="flex h-full min-h-0 flex-col">
       {diagram && (
         <div className="min-h-[220px] shrink-0 border-b border-border">
-          <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} />
+          <MermaidViewer path={path} code={diagram} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} appearance={appearance} />
         </div>
       )}
-      <div ref={ref} onScroll={handleScroll} className="prose prose-sm prose-invert max-w-none min-h-0 flex-1 overflow-auto p-3 select-text">
+      <div ref={ref} onScroll={handleScroll} className={cn("prose prose-sm max-w-none min-h-0 flex-1 overflow-auto p-3 select-text", appearance !== "light" && "prose-invert")}>
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>{md}</ReactMarkdown>
       </div>
       {sel && <SelectionToolbar sel={sel} path={path} label="doc" projectRoot={projectRoot} projectHost={projectHost} onDone={clear} />}

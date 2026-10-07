@@ -12,7 +12,7 @@ tags:
   - compact
   - web
   - desktop
-timestamp: 2026-09-20T17:57:24Z
+timestamp: 2026-10-06T15:13:33Z
 ---
 ## The problem
 
@@ -104,6 +104,8 @@ state-only paths can establish the baseline and compare:
   server's buffered `live_frames` then. Rationale: a desktop restart with a
   dozen restored tabs used to parse, merge and render a dozen transcript pages
   before the first click — the boot stall reported as a "hang" on WKWebView.
+  Both the persisted title and this read are bounded by
+  `session.TruncateTitle`; see `../gotchas/derived-title-label-must-be-bounded.md`.
 
 - `web/src/hooks/useSessionRevisionSync.ts`: mounted in `web/src/App.tsx`
   next to `useTurnWatchdogAll`; polls every open tab (any project, active or

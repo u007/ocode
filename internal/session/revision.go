@@ -133,7 +133,11 @@ func storedTitleForDir(dir, id string) (string, error) {
 			// reader — the client falls back to the tab's persisted label.
 			return "", nil
 		}
-		return title, nil
+		// Cap defensively on read so a session whose title was stored verbatim
+		// before the write-path cap (multi-megabyte) does not ride every
+		// /state poll and /api/tabs fetch. This bounds the label without
+		// rewriting the stored row.
+		return TruncateTitle(title, MaxStoredTitleRunes), nil
 	}
 	return "", nil
 }

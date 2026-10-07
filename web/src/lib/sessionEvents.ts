@@ -11,6 +11,7 @@ import { rekeySidePaneState } from "./sidePaneState";
 import { clearPendingRewind, rekeyPendingRewind } from "./pendingRewindStore";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
 import { sessionRevisionMoved, clearSessionRevision, noteSessionRevision } from "./sessionRevision";
+import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "./title";
 import {
   clearCompaction,
   getCompactionEventVersion,
@@ -402,7 +403,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         r.projectDispatch({
           type: "UPDATE_TAB_TITLE",
           id: eventSessionId,
-          title: status.session_title,
+          title: truncateTitle(status.session_title, MAX_TITLE_TOOLTIP_CHARS),
         });
       }
     }
@@ -879,7 +880,9 @@ function applySessionTabTitle(
 ): void {
   const t = (title || "").trim();
   if (!t || t === sessionId || t === "New session") return;
-  r.projectDispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: t });
+  // Bound the label: an auto-title can mirror a multi-megabyte first user
+  // message, and the tab strip lays out the whole string on every reflow.
+  r.projectDispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: truncateTitle(t, MAX_TITLE_TOOLTIP_CHARS) });
 }
 
 /**

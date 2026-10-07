@@ -185,7 +185,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.remoteHosts = newRemoteHostRegistry(s.procSup)
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	// Let the config handlers report exposure state without starting one.
-	h.tailscaleShareSnapshot = s.tsShare.peek
+	h.tailscaleShareSnapshot = s.tsShare.status
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
 	return s
@@ -315,6 +315,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/stage", s.authMiddleware(s.handler.HandleGitStage))
 	s.mux.HandleFunc("POST /api/git/unstage", s.authMiddleware(s.handler.HandleGitUnstage))
 	s.mux.HandleFunc("POST /api/git/discard", s.authMiddleware(s.handler.HandleGitDiscard))
+	s.mux.HandleFunc("POST /api/git/ignore", s.authMiddleware(s.handler.HandleGitIgnore))
 	s.mux.HandleFunc("POST /api/git/conflict/resolve", s.authMiddleware(s.handler.HandleGitResolveConflict))
 	s.mux.HandleFunc("POST /api/git/operation", s.authMiddleware(s.handler.HandleGitOperation))
 	s.mux.HandleFunc("POST /api/git/stash", s.authMiddleware(s.handler.HandleGitStash))
@@ -350,6 +351,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/db/query", s.authMiddleware(s.handler.HandleDBQuery))
 	s.mux.HandleFunc("POST /api/db/row", s.authMiddleware(s.handler.HandleDBRow))
 	s.mux.HandleFunc("POST /api/db/schema", s.authMiddleware(s.handler.HandleDBSchema))
+	s.mux.HandleFunc("POST /api/db/maintenance", s.authMiddleware(s.handler.HandleDBMaintenance))
+	// BLOB cell upload/download. GET streams a value the grid only previews;
+	// POST replaces one cell from a raw body. Same auth wrapper as the rest of
+	// the user-initiated DB surface.
+	s.mux.HandleFunc("GET /api/db/blob", s.authMiddleware(s.handler.HandleDBBlob))
+	s.mux.HandleFunc("POST /api/db/blob", s.authMiddleware(s.handler.HandleDBBlob))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 	s.mux.HandleFunc("POST /api/fs/copy", s.authMiddleware(s.handler.HandleFSCopy))
 	s.mux.HandleFunc("POST /api/fs/move", s.authMiddleware(s.handler.HandleFSMove))
@@ -389,6 +396,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/export-claude", s.authMiddleware(s.handleExportClaudeSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/share", s.authMiddleware(s.handleShareSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/btw", s.authMiddleware(s.handleBtw))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}/btw", s.authMiddleware(s.handleBtwCancel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/speech-summary", s.authMiddleware(s.handleSessionSpeechSummary))
@@ -422,7 +430,9 @@ func (s *Server) registerRoutes() {
 
 	// Config
 	s.mux.HandleFunc("GET /api/network-ip", s.authMiddleware(s.handleGetNetworkIP))
-	s.mux.HandleFunc("GET /api/tailscale-url", s.authMiddleware(s.handleGetTailscaleURL))
+	s.mux.HandleFunc("GET /api/tailscale-share", s.authMiddleware(s.handleGetTailscaleShare))
+	s.mux.HandleFunc("POST /api/tailscale-share/start", s.authMiddleware(s.handleStartTailscaleShare))
+	s.mux.HandleFunc("POST /api/tailscale-share/stop", s.authMiddleware(s.handleStopTailscaleShare))
 	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
 	s.mux.HandleFunc("GET /api/config/thinking-budget", s.authMiddleware(s.handleGetThinkingBudget))
@@ -2085,6 +2095,9 @@ func (s *Server) handleShareSession(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleBtw(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleBtw(w, r, r.PathValue("id"))
+}
+func (s *Server) handleBtwCancel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleBtwCancel(w, r, r.PathValue("id"))
 }
 func (s *Server) handleSetSessionTitle(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSessionTitle(w, r, r.PathValue("id"))

@@ -11867,6 +11867,10 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 					ct.Driver = nil
 					ct.DriverErr = fmt.Errorf("process supervisor not attached")
 				}
+				if wt, ok := t.(*tool.WindowTool); ok {
+					wt.Driver = nil
+					wt.DriverErr = fmt.Errorf("process supervisor not attached")
+				}
 			}
 		} else {
 			// No tools to reuse — start fresh but keep LSP dropped for /new.
@@ -12669,7 +12673,7 @@ func (m *model) handleBtwCmd(args []string) {
 	ch := m.btwCh
 	m.btwCancel = m.agent.AskLoopAsync(agentMsgs, agent.AskLoopOptions{
 		Tools:         m.btwTools(),
-		ExcludedTools: btwExcludedTools,
+		ExcludedTools: agent.BtwExcludedTools,
 		MaxSteps:      btwMaxSteps,
 		// Stream tool activity into the popup as it happens.
 		OnMessage: func(am agent.Message) {
@@ -12709,38 +12713,15 @@ func (m *model) handleBtwCmd(args []string) {
 // burn tokens forever in the popup.
 const btwMaxSteps = 8
 
-// btwExcludedTools lists tools the /btw side-query loop must not expose.
-// It is used BOTH to filter the builtin slice (question, todo/plan tools)
-// and as AskLoopOptions.ExcludedTools, which deletes NewAgent-registered
-// tools (task family, wait, knowledge_lookup, advisor) from the child's
-// final tool map — the slice filter alone cannot remove those, since
-// NewAgent registers them unconditionally. The result stays non-interactive:
-// any permission ASK is denied non-blockingly by AskLoopAsync.
-var btwExcludedTools = []string{
-	"question",
-	"task",
-	"task_status",
-	"agent_status",
-	"task_cancel",
-	"wait",
-	"todo_write",
-	"todo_update",
-	"plan_enter",
-	"plan_exit",
-	"discover_more",
-	"knowledge_lookup",
-	"advisor",
-}
-
 // btwTools returns the tool set exposed to the /btw side-query loop: the
-// builtin set minus btwExcludedTools. The exclusion list is applied to the
+// builtin set minus agent.BtwExcludedTools. The exclusion list is applied to the
 // slice HERE and (as AskLoopOptions.ExcludedTools) to the child's final tool
 // map, because NewAgent unconditionally registers the dispatch family even
 // when the slice omits it. The result stays non-interactive: any permission
 // ASK is denied non-blockingly by AskLoopAsync.
 func (m *model) btwTools() []tool.Tool {
-	excluded := make(map[string]bool, len(btwExcludedTools))
-	for _, name := range btwExcludedTools {
+	excluded := make(map[string]bool, len(agent.BtwExcludedTools))
+	for _, name := range agent.BtwExcludedTools {
 		excluded[name] = true
 	}
 	tools, _ := m.getInitialTools()
@@ -12754,26 +12735,11 @@ func (m *model) btwTools() []tool.Tool {
 	return out
 }
 
-// formatBtwActivity renders a compact activity line for a /btw loop message:
-// "→ name: args" for an assistant tool call (the tool-result message carries
-// only the call id, so it adds no signal). Returns "" when the message has
-// nothing worth surfacing.
+// formatBtwActivity renders a compact activity line for a /btw loop message.
+// Delegates to agent.FormatSideQueryActivity so the TUI popup and the
+// web/desktop panel render identical activity text.
 func formatBtwActivity(am agent.Message) string {
-	if am.Role == "assistant" && len(am.ToolCalls) > 0 {
-		var b strings.Builder
-		for _, tc := range am.ToolCalls {
-			if b.Len() > 0 {
-				b.WriteString("\n")
-			}
-			args := strings.TrimSpace(tc.Function.Arguments)
-			if len(args) > 60 {
-				args = args[:57] + "..."
-			}
-			b.WriteString("→ " + tc.Function.Name + " " + args)
-		}
-		return b.String()
-	}
-	return ""
+	return agent.FormatSideQueryActivity(am)
 }
 
 func (m *model) handleInitCmd(args []string) tea.Cmd {

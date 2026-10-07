@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   gitDiscard: vi.fn(),
   gitStage: vi.fn(),
   gitUnstage: vi.fn(),
+  gitIgnore: vi.fn(),
   gitCommit: vi.fn(),
   gitPush: vi.fn(),
   gitFetch: vi.fn(),
@@ -146,6 +147,7 @@ describe("GitPanel", () => {
     mocks.gitDiscard.mockResolvedValue(workspace.status);
     mocks.gitStage.mockResolvedValue(workspace.status);
     mocks.gitUnstage.mockResolvedValue(workspace.status);
+    mocks.gitIgnore.mockResolvedValue(workspace.status);
     mocks.gitCommit.mockResolvedValue(workspace.status);
     mocks.gitPush.mockResolvedValue(workspace.status);
     mocks.gitFetch.mockResolvedValue(workspace.status);
@@ -325,6 +327,63 @@ describe("GitPanel", () => {
     await waitFor(() =>
       expect(mocks.gitUnstage).toHaveBeenCalledWith(["src/staged.ts"], "/proj", undefined),
     );
+  });
+
+  it("adds an untracked file to .gitignore via the right-click context menu", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/untracked.txt");
+    const menu = await openContextMenuRow("src/untracked.txt");
+
+    fireEvent.click(within(menu).getByRole("button", { name: "Add to .gitignore" }));
+    await waitFor(() =>
+      expect(mocks.gitIgnore).toHaveBeenCalledWith(["src/untracked.txt"], "/proj", undefined),
+    );
+    // All-untracked selection: the notice carries no "skipped" suffix.
+    await waitFor(() =>
+      expect(screen.getByTestId("git-notice").textContent).toBe("added src/untracked.txt to .gitignore"),
+    );
+  });
+
+  it("adds only the untracked members of a mixed selection and reports the skipped tracked ones", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+
+    // Mixed selection: a modified/tracked row + an untracked row.
+    fireEvent.click(screen.getByText("src/unstaged.ts"), { metaKey: true });
+    fireEvent.click(screen.getByText("src/untracked.txt"), { metaKey: true });
+    expect(await screen.findByText("2 selected ✕")).toBeTruthy();
+
+    const menu = await openContextMenuRow("src/unstaged.ts");
+    // One untracked member → the singular label.
+    fireEvent.click(within(menu).getByRole("button", { name: "Add to .gitignore" }));
+
+    await waitFor(() =>
+      expect(mocks.gitIgnore).toHaveBeenCalledWith(["src/untracked.txt"], "/proj", undefined),
+    );
+    // The tracked member is skipped, and the notice names it.
+    await waitFor(() =>
+      expect(screen.getByTestId("git-notice").textContent).toBe(
+        "added src/untracked.txt to .gitignore (skipped 1 tracked)",
+      ),
+    );
+  });
+
+  it("hides Add to .gitignore for a tracked file row", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/unstaged.ts");
+    const menu = await openContextMenuRow("src/unstaged.ts");
+
+    // A gitignore entry does not untrack an already-tracked file, so the
+    // action must not be offered for a modified (non-untracked) row.
+    expect(within(menu).queryByRole("button", { name: "Add to .gitignore" })).toBeNull();
+  });
+
+  it("hides Add to .gitignore on the staged pane", async () => {
+    render(<GitPanel projectPath="/proj" />);
+    await screen.findByText("src/staged.ts");
+    const menu = await openContextMenuRow("src/staged.ts");
+
+    expect(within(menu).queryByRole("button", { name: "Add to .gitignore" })).toBeNull();
   });
 
   it("deletes an untracked file via the right-click context menu", async () => {

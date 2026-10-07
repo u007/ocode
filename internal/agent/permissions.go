@@ -1694,7 +1694,7 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {
 		pm.SetRule(name, PermissionAllow)
 	}
-	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer"} {
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	// No bash prefixes are banned by default — bans are opt-in via
@@ -1821,8 +1821,8 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "hard-blocked shell command"}
 		}
 		if parsed, err := parseShellCommandLine(command); err == nil {
-			for _, cmd := range parsed {
-				if reason := dangerousRmReason(pm, cmd.cmdWords); reason != "" {
+			for i := range parsed {
+				if reason := dangerousRmReasonIn(pm, parsed, i); reason != "" {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (dangerous rm): tool=bash command=%q reason=%s", command, reason))
 					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "rm")}
 				}
@@ -2170,6 +2170,41 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			}
 			return PermissionDecision{Level: level}
 		}
+	}
+
+	// Window tool: listing is observational; every other action changes
+	// desktop state (close can discard unsaved work) and follows the rule.
+	if toolName == "window" {
+		var params struct {
+			Action string `json:"action"`
+			ID     string `json:"id"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			params.Action = ""
+		}
+		level := pm.Check(toolName)
+		if params.Action == "list" {
+			if level == PermissionDeny {
+				pm.emitDebug("perm", "Decide DENY (window observe): action=list")
+				return PermissionDecision{Level: level, DenyReason: "permissions.tools.window = deny"}
+			}
+			pm.emitDebug("perm", "Decide ALLOW (window observe): action=list")
+			return PermissionDecision{Level: PermissionAllow}
+		}
+		pm.emitDebug("perm", fmt.Sprintf("Decide %s (window action): action=%s", level, params.Action))
+		if level == PermissionAsk {
+			cmd := "window"
+			if params.Action != "" {
+				cmd = params.Action + " " + params.ID
+			}
+			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool.window", Command: cmd,
+			}}
+		}
+		if level == PermissionDeny {
+			return PermissionDecision{Level: level, DenyReason: "permissions.tools.window = deny"}
+		}
+		return PermissionDecision{Level: level}
 	}
 
 	level := pm.Check(toolName)
@@ -5506,6 +5541,118 @@ func isLikelyPathArg(arg string) bool {
 // ALLOW with no scope check at all. Returns "" when the command isn't a
 // scope-violating rm.
 func dangerousRmReason(pm *PermissionManager, fields []string) string {
+	return dangerousRmReasonWith(pm, fields, nil)
+}
+
+// dangerousRmReasonIn is dangerousRmReason for the idx-th fragment of a parsed
+// line: a target that is a variable the SAME line earlier bound to a fresh
+// `mktemp -d` is scope-checkable (see mktempVarsBefore).
+func dangerousRmReasonIn(pm *PermissionManager, parsed []parsedShellCommand, idx int) string {
+	return dangerousRmReasonWith(pm, parsed[idx].cmdWords, mktempVarsBefore(parsed, idx))
+}
+
+// mktempVarsBefore returns the shell variables that fragments [0,idx) bind to a
+// fresh scratch directory, i.e. a lone `NAME=$(mktemp -d)` (or backticks). Such
+// a variable names a directory that did not exist before the command ran, so
+// removing it (or a path below it) can never reach project files, whatever
+// TMPDIR points at. A name assigned more than once, or touched by any other
+// fragment (`export NAME=…`, a second assignment), is excluded: its value at
+// the rm is then unknown.
+func mktempVarsBefore(parsed []parsedShellCommand, idx int) map[string]bool {
+	assigns := map[string]int{}
+	for _, c := range parsed {
+		for _, e := range c.envVars {
+			if name, _, ok := strings.Cut(e, "="); ok {
+				assigns[name]++
+			}
+		}
+		for _, w := range c.cmdWords {
+			if name, _, ok := strings.Cut(w, "="); ok && isShellVarName(name) {
+				assigns[name]++
+			}
+		}
+		for _, v := range c.loopVars {
+			assigns[v] += 2
+		}
+		if len(c.cmdWords) > 0 && shellRebindingBuiltins[filepath.Base(c.cmdWords[0])] {
+			// `read t`, `printf -v t`, `for t in`, `unset t` … rebind a name
+			// without a NAME= word. Any bare identifier argument may be the
+			// target, so count each one twice to exclude it.
+			for _, w := range c.cmdWords[1:] {
+				if isShellVarName(w) {
+					assigns[w] += 2
+				}
+			}
+		}
+	}
+	vars := map[string]bool{}
+	for _, c := range parsed[:idx] {
+		if len(c.cmdWords) != 0 || len(c.envVars) != 1 {
+			continue
+		}
+		name, val, ok := strings.Cut(c.envVars[0], "=")
+		if !ok || assigns[name] != 1 || !isShellVarName(name) {
+			continue
+		}
+		if val == "$(mktemp -d)" || val == "`mktemp -d`" {
+			vars[name] = true
+		}
+	}
+	return vars
+}
+
+// shellRebindingBuiltins are builtins/keywords that change a variable's value
+// (or remove it) through a bare name argument rather than a NAME=value word.
+var shellRebindingBuiltins = map[string]bool{
+	"read": true, "printf": true, "mapfile": true, "readarray": true,
+	"getopts": true, "unset": true, "for": true, "select": true,
+	"declare": true, "typeset": true, "local": true, "export": true,
+	"readonly": true, "let": true, "eval": true,
+}
+
+func isShellVarName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || unicode.IsLetter(r) || (i > 0 && unicode.IsDigit(r)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// mktempVarTarget reports whether t is exactly `$NAME` or `${NAME}` for a NAME
+// in vars. A subpath (`$NAME/x`) is deliberately NOT covered: if mktemp failed,
+// NAME is empty and `rm -rf "$NAME/etc"` would become `rm -rf /etc`, whereas a
+// bare empty `$NAME` is just `rm -rf ""`, which removes nothing.
+func mktempVarTarget(t string, vars map[string]bool) bool {
+	if len(vars) == 0 || !strings.HasPrefix(t, "$") {
+		return false
+	}
+	rest := t[1:]
+	var name string
+	if strings.HasPrefix(rest, "{") {
+		end := strings.IndexByte(rest, '}')
+		if end < 0 {
+			return false
+		}
+		name, rest = rest[1:end], rest[end+1:]
+	} else {
+		end := 0
+		for end < len(rest) && (rest[end] == '_' || rest[end] >= '0' && rest[end] <= '9' || rest[end] >= 'a' && rest[end] <= 'z' || rest[end] >= 'A' && rest[end] <= 'Z') {
+			end++
+		}
+		name, rest = rest[:end], rest[end:]
+	}
+	if !vars[name] {
+		return false
+	}
+	return rest == ""
+}
+
+func dangerousRmReasonWith(pm *PermissionManager, fields []string, tempVars map[string]bool) string {
 	if len(fields) == 0 || filepath.Base(fields[0]) != "rm" {
 		return ""
 	}
@@ -5545,6 +5692,9 @@ func dangerousRmReason(pm *PermissionManager, fields []string) string {
 		return ""
 	}
 	for _, t := range targets {
+		if mktempVarTarget(t, tempVars) {
+			continue
+		}
 		// A glob, variable or substitution has no single path to scope-check:
 		// the shell decides the real targets, so the judge's "inside the roots"
 		// reading cannot be verified. Refuse rather than guess.
@@ -5861,6 +6011,7 @@ type parsedShellCommand struct {
 	cmdWords          []string // command and its arguments (e.g. ["go", "test", "./..."])
 	redirections      []string // target paths
 	stdinRedirections []string // target paths feeding stdin (e.g. "< file", "0< file")
+	loopVars          []string // for/select loop variables bound by a header dropped just before this fragment
 }
 
 func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
@@ -5871,11 +6022,18 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 
 	var commands []parsedShellCommand
 	var currentTokens []shellToken
+	// Loop variables of for/select headers, which the state machine drops. They
+	// are re-attached to the next emitted fragment so mktempVarsBefore sees the
+	// rebinding.
+	var pendingLoopVars []string
+	forVarSeen := false
 
 	emitCommand := func() {
 		if len(currentTokens) > 0 {
 			cmd := parseSingleCommandTokens(currentTokens)
 			if cmd != nil {
+				cmd.loopVars = pendingLoopVars
+				pendingLoopVars = nil
 				commands = append(commands, *cmd)
 			}
 			currentTokens = nil
@@ -5957,6 +6115,9 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 			// (`for f; do ...`) or a malformed one.
 			if tok.typ == tokOp || (tok.typ == tokWord && tok.value == "do") {
 				state = stNormal
+			} else if !forVarSeen && tok.typ == tokWord {
+				pendingLoopVars = append(pendingLoopVars, tok.value)
+				forVarSeen = true
 			}
 			continue
 		case stCaseHeader:
@@ -6011,6 +6172,7 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 			switch tok.value {
 			case "for", "select":
 				state = stForHeader
+				forVarSeen = false
 				continue
 			case "case":
 				caseDepth++

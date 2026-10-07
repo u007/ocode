@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { Columns2, Eye, Pencil } from "lucide-react";
+import { Columns2, Eye, Moon, Pencil, Sun } from "lucide-react";
 import type { FileEditorProps } from "./FileEditor";
 import PreviewSurface from "../Preview/PreviewSurface";
 import LegacyOfficePane from "../Preview/LegacyOfficePane";
@@ -7,6 +7,7 @@ import { isLegacyOfficePath, previewOnlyKindForPath, splitPreviewKindForPath } f
 import { useResizableSplit } from "../../hooks/useResizableSplit";
 import { loadPreviewViewState, previewViewKey, savePreviewViewState } from "../../lib/previewViewState";
 import { cn } from "../../lib/utils";
+import { toggleEditorAppearance, useEditorAppearance } from "../../lib/editorAppearance";
 
 // Monaco (and its workers) is the single largest dependency in the app. It is
 // only ever needed once a text/code tab actually renders, so load it on demand
@@ -90,6 +91,10 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
   const [mode, setMode] = useState<SplitMode>("edit");
   const split = useResizableSplit();
   const previewContent = useDebouncedValue(props.content, PREVIEW_DEBOUNCE_MS);
+  // Shared light/dark override for the editor and its rendered preview (see
+  // editorAppearance.ts). Global + persisted, so it follows the user across
+  // files and reloads.
+  const appearance = useEditorAppearance();
 
   // Persist the paginated viewer's position for this file. Only one of the two
   // viewers is ever mounted for a given file, so pick the index that belongs to
@@ -138,6 +143,21 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
               </button>
             ))}
           </div>
+
+          {/* Light/dark override for the Monaco pane AND the rendered preview.
+              Lives here (not in FileEditor's header) because the editor pane is
+              hidden in Preview mode; this toolbar is visible in all three. */}
+          <button
+            type="button"
+            onClick={() => toggleEditorAppearance()}
+            aria-pressed={appearance === "light"}
+            aria-label="Toggle light or dark theme"
+            title={appearance === "light" ? "Switch to dark theme" : "Switch to light theme"}
+            className="ml-auto flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {appearance === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
+            <span className="hidden sm:inline">{appearance === "light" ? "Dark" : "Light"}</span>
+          </button>
         </div>
 
         <div ref={split.containerRef} className="relative flex min-h-0 flex-1 overflow-hidden">
@@ -151,7 +171,7 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
             style={mode === "split" ? { width: `${split.ratio * 100}%` } : undefined}
           >
             <Suspense fallback={<EditorLoading />}>
-              <FileEditor {...props} />
+              <FileEditor {...props} hideAppearanceToggle />
             </Suspense>
           </div>
 
@@ -181,6 +201,7 @@ export default function FileTabContent(props: FileEditorProps & { active?: boole
                 projectHost={props.projectHost}
                 content={previewContent}
                 onOpenFile={handleOpenFile}
+                appearance={appearance}
               />
             </div>
           )}

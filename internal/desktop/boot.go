@@ -161,7 +161,7 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 
 	// Auto-share: warm the tailscale exposure at boot when the user has opted
 	// in (ocodeconfig auto_share_on_start, default OFF). The exposure itself is
-	// the SAME cached one GET /api/tailscale-url serves, so the Share dialog
+	// the SAME cached one the Share dialog's status/start read, so the dialog
 	// later reuses this URL instead of starting a second, conflicting mount.
 	//
 	// Runs in its own goroutine because tailscale.StartServeExpose waits on the

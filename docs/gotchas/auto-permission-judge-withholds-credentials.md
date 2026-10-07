@@ -2,10 +2,18 @@
 type: Gotcha
 title: Auto-Permission Judge — Credential Material Is Withheld from the Judge Context
 description: |-
-  buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).</description>
-  <parameter name="tags">["security", "permissions", "auto-permission", "secrets", "judge", "gotcha", "redaction", "side-task"]
-resource: internal/agent/agent.go:4589
-timestamp: 2026-09-29T04:31:04Z
+  buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).
+resource: internal/agent/agent.go:4867; internal/agent/agent.go:4119
+timestamp: 2026-10-07T04:23:15Z
+tags:
+  - security
+  - permissions
+  - auto-permission
+  - secrets
+  - judge
+  - gotcha
+  - redaction
+  - side-task
 ---
 # Auto-Permission Judge — Credential Material Is Withheld from the Judge Context
 

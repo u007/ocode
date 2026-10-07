@@ -48,14 +48,16 @@ Absent, not disabled: with no TypeSafe key, `scanContentGuard` returns `contentG
 | `webfetch` | tool name | `webfetch <url>` (`content_guard_typesafe.go:265`) |
 | `websearch` | tool name | `websearch <query>` (`content_guard_typesafe.go:271`) |
 | MCP | membership in the **`a.mcpTools` map** — the same map `discoveryAllows` reads (`content_guard_typesafe.go:282`) | `MCP <name>` |
-| `bash` | `bashHasNetworkSubcommand` (`content_guard_typesafe.go:286`) | `bash: <command>` |
+| `bash` | `bashHasNetworkSubcommand` (`content_guard_typesafe.go:284`) | `bash: <command>` |
 | everything else | — | **nil, never scanned** |
 
 The source has two forms: `Label` (bash command clipped to 120 runes, websearch query to 80) goes to the judge and the debug lines; `Full` (unclipped) goes to the ask as `UntrustedSource`, so the dialog shows the whole command. The TUI prints it inside the scrolling `permViewport`; the web renders it in a `<pre data-testid="content-guard-source">` that keeps line breaks and scrolls (`max-h-40 overflow-y-auto`).
 
 `read`, `grep`, `glob`, `list`, `git log`, `npm test` and every other local tool return `nil`. Two reasons, both load-bearing: a poisoned file in the user's own project is a **different threat with a different blast radius**, and scanning every `read` would put a network round trip in front of ordinary file work.
 
-The bash branch **delegates to `isNetworkSubprocessBinary`** — the egress guard's own predicate (`permission_interpreter.go:789`; curl, wget, nc, ncat, http, https, ftp, sftp) — through `bashHasNetworkSubcommand` (`content_guard_typesafe.go:792`). Delegating rather than copying is deliberate: *whatever the egress guard considers egress, this one considers remote content*, so the two cannot drift. `effectiveCommandWords` peels wrappers per layer (`content_guard_typesafe.go:801`), so `sudo curl …` is remote content even though the outermost word is `sudo`. An unparseable line returns `false` (`content_guard_typesafe.go:798`) — it fails toward **not scanning**, not toward a spurious dialog on every command.
+The bash branch **delegates to `isNetworkSubprocessBinary`** — the egress guard's own predicate (`permission_interpreter.go:789`; curl, wget, nc, ncat, http, https, ftp, sftp) — through `bashHasNetworkSubcommand` (`content_guard_typesafe.go:794`). Delegating rather than copying is deliberate: *whatever the egress guard considers egress, this one considers remote content*, so the two cannot drift. `effectiveCommandWords` peels wrappers per layer (`content_guard_typesafe.go:803`), so `sudo curl …` is remote content even though the outermost word is `sudo`. An unparseable line returns `false` (`content_guard_typesafe.go:800`) — it fails toward **not scanning**, not toward a spurious dialog on every command.
+
+**Loopback-only fetches are skipped.** `contentGuardSourceFor` also requires `!bashTargetsOnlyLoopback(cmd)`, which reuses the egress guard's proof (`bashEgressTargets` + `hasNonLoopbackEgressTarget`): `curl http://127.0.0.1:PORT/api/tabs` is this machine talking to itself, not remote content. A line that also reaches a remote host, a `127.0.0.1.evil.com` lookalike, or a proxied/`--resolve`d `localhost` stays non-loopback and is scanned. Loopback is a transport boundary, not a trust boundary: ocode's own API echoes strings outsiders influenced (session titles come from first messages), so those bytes now reach the model unscanned. Decided 2026-10-06 after a `/api/tabs` result was flagged at confidence 0.20 because one tab title was a pasted prompt. A hesitant `flagged` is still escalated on purpose (hesitation is a veto in both directions).
 
 ## Placement is load-bearing: redact → vet → truncate
 

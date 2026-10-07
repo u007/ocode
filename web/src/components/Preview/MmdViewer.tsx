@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import MermaidViewer from "./MermaidViewer";
+import type { EditorAppearance } from "../../lib/editorAppearance";
 
 /** Plain .mmd file → interactive diagram (same viewer as mermaid fences). */
 export default function MmdViewer({
@@ -10,6 +11,7 @@ export default function MmdViewer({
   onOpenFile,
   revision,
   content,
+  appearance,
 }: {
   path: string;
   projectRoot?: string;
@@ -21,6 +23,8 @@ export default function MmdViewer({
   /** Controlled mode (Files-tab split preview): when provided, the diagram
    *  renders from this live editor content instead of fetching from disk. */
   content?: string;
+  /** Light/dark override forwarded from PreviewSurface. */
+  appearance?: EditorAppearance;
 }) {
   const [code, setCode] = useState<string | null>(content ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -68,5 +72,5 @@ export default function MmdViewer({
 
   if (error) return <div className="p-4 text-xs text-red-400">Diagram failed: {error}</div>;
   if (code === null) return <div className="p-4 text-xs text-muted-foreground">Loading diagram…</div>;
-  return <MermaidViewer path={path} code={code} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} />;
+  return <MermaidViewer path={path} code={code} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={onOpenFile} appearance={appearance} />;
 }

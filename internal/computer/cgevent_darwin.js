@@ -89,6 +89,107 @@ function typeText(text) {
   delay(0.2);
 }
 
+// ---- window management (System Events / Accessibility) ----
+// Window ids are "<pid>:<1-based index in System Events' window list>"; they
+// are only valid until a window opens or closes.
+
+function clean(s) { return String(s).replace(/[\t\r\n]/g, " "); }
+
+function flag(v) { return v ? "1" : "0"; }
+
+function appProcesses() {
+  var se = Application("System Events");
+  return se.processes.whose({ backgroundOnly: false })();
+}
+
+function resolveWindow(id) {
+  var m = /^(\d+):(\d+)$/.exec(id);
+  if (!m) fail("invalid window id " + id);
+  var se = Application("System Events");
+  var procs = se.processes.whose({ unixId: parseInt(m[1], 10) })();
+  if (procs.length === 0) fail("window " + id + ": process is gone, list windows again");
+  var wins = procs[0].windows();
+  var idx = parseInt(m[2], 10);
+  if (idx < 1 || idx > wins.length) fail("window " + id + ": no longer exists, list windows again");
+  return { proc: procs[0], win: wins[idx - 1] };
+}
+
+// A process or window whose accessibility attributes cannot be read (it quit
+// mid-listing, or exposes no AXMain) is skipped and reported as a "#skipped"
+// line that parseWindowList logs, so one bad window never fails the listing.
+function listWindows() {
+  var lines = [];
+  var procs = appProcesses();
+  for (var i = 0; i < procs.length; i++) {
+    var proc = procs[i];
+    var app = "?";
+    try {
+      var pid = proc.unixId();
+      app = proc.name();
+      var front = proc.frontmost();
+      var wins = proc.windows();
+    } catch (e) {
+      lines.push("#skipped\t" + clean(app) + "\t" + clean(String(e)));
+      continue;
+    }
+    for (var j = 0; j < wins.length; j++) {
+      try {
+        var w = wins[j];
+        var pos = w.position(), size = w.size();
+        var min = w.attributes.byName("AXMinimized").value();
+        var main = w.attributes.byName("AXMain").value();
+        lines.push([pid + ":" + (j + 1), clean(app), clean(w.name() || ""),
+          Math.round(pos[0]), Math.round(pos[1]), Math.round(size[0]), Math.round(size[1]),
+          flag(min), flag(front && main)].join("\t"));
+      } catch (e) {
+        lines.push("#skipped\t" + clean(app) + " window " + (j + 1) + "\t" + clean(String(e)));
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+function focusWindow(id) {
+  var r = resolveWindow(id);
+  r.win.attributes.byName("AXMinimized").value = false;
+  r.proc.frontmost = true;
+  r.win.actions.byName("AXRaise").perform();
+  return "";
+}
+
+function setBounds(id, x, y, w, h) {
+  var r = resolveWindow(id);
+  r.win.attributes.byName("AXMinimized").value = false;
+  r.win.position = [x, y];
+  r.win.size = [w, h];
+  return "";
+}
+
+function windowState(id, state) {
+  var r = resolveWindow(id);
+  if (state === "minimize") {
+    r.win.attributes.byName("AXMinimized").value = true;
+  } else if (state === "restore") {
+    r.win.attributes.byName("AXMinimized").value = false;
+  } else if (state === "maximize") {
+    // The green zoom button enters native full screen on current macOS, so
+    // fill the primary screen's visible frame (below menu bar, beside Dock).
+    var screen = $.NSScreen.mainScreen;
+    var vf = screen.visibleFrame, full = screen.frame;
+    var top = full.size.height - (vf.origin.y + vf.size.height);
+    r.win.attributes.byName("AXMinimized").value = false;
+    r.win.position = [Math.round(vf.origin.x), Math.round(top)];
+    r.win.size = [Math.round(vf.size.width), Math.round(vf.size.height)];
+  } else if (state === "close") {
+    var btns = r.win.buttons.whose({ subrole: "AXCloseButton" })();
+    if (btns.length === 0) fail("window " + id + " has no close button");
+    btns[0].click();
+  } else {
+    fail("unknown window state " + state);
+  }
+  return "";
+}
+
 function run(argv) {
   var op = argv[0];
   var p = argv.slice(1);
@@ -170,6 +271,18 @@ function run(argv) {
       for (var i = codes.length - 2; i >= 0; i--) post($.CGEventCreateKeyboardEvent(null, codes[i], false));
       return "";
     }
+    case "windows":
+      requireAccessibility();
+      return listWindows();
+    case "window-focus":
+      requireAccessibility();
+      return focusWindow(p[0]);
+    case "window-bounds":
+      requireAccessibility();
+      return setBounds(p[0], num(p[1], "x"), num(p[2], "y"), num(p[3], "w"), num(p[4], "h"));
+    case "window-state":
+      requireAccessibility();
+      return windowState(p[0], p[1]);
     default:
       fail("unknown op " + op);
   }

@@ -24,6 +24,18 @@ import (
 // inline while the user waits.
 const exposeTimeout = 2 * time.Second
 
+// FunnelHTTPSPort is the public HTTPS port every funnel mount is created on.
+//
+// Funnel is only permitted on 443, 8443 and 10000, and 443 is routinely already
+// occupied by tailnet-only `serve` routes (the TUI /rc `/ses_...` mounts, for
+// instance). Tailscale cannot expose one port as BOTH serve and funnel — "if
+// the most recent command to configure the port was serve, then the port will
+// be completely private" — so a funnel attempt that defaults to 443 silently
+// degrades to a tailnet-only mount, which is exactly how a "public" share ended
+// up reachable only over the VPN. Mounting funnel on 8443 keeps the public and
+// tailnet listeners on separate ports; 8443 is always funnel-eligible.
+const FunnelHTTPSPort = 8443
+
 // knownCandidates lists common installation paths for the tailscale
 // CLI, in priority order. The desktop shell launches with a minimal
 // PATH that does not include /usr/local/bin, where tailscale is
@@ -69,6 +81,16 @@ func findCLIImpl(candidates []string, lookPath func(string) (string, error)) str
 func findCLI() string {
 	return findCLIImpl(knownCandidates, exec.LookPath)
 }
+
+// CLIPath resolves the tailscale CLI for every helper in this package, and is
+// the injection seam that keeps test binaries away from the developer's live
+// node. `tailscale funnel --https=8443 --set-path /desktop off` edits the real
+// node-wide serve config, and a full `go test ./...` once silently deleted a
+// running share. A test binary that can reach an exposure helper (a server that
+// is built and shut down, the TUI /rc path) must therefore replace this in its
+// TestMain with a resolver returning "" (or a fake binary). Production never
+// reassigns it.
+var CLIPath = findCLI
 
 // SanitizePath returns a tailscale-safe --set-path component derived from an
 // id (session ID, or "desktop" for the server share). It strips characters
@@ -149,13 +171,13 @@ func DNSName(tailscalePath string) string {
 // Installed reports whether a tailscale CLI exists, without asking the daemon
 // anything. It is the cheap "could this machine serve at all" check.
 func Installed() bool {
-	return findCLI() != ""
+	return CLIPath() != ""
 }
 
 // Running reports whether the tailscale CLI exists and the daemon answers
 // `tailscale status`.
 func Running() (string, bool) {
-	p := findCLI()
+	p := CLIPath()
 	if p == "" {
 		return "", false
 	}
@@ -175,6 +197,14 @@ func Running() (string, bool) {
 // long-lived child, and a caller passing cmd.Wait() cannot block forever.
 func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.Cmd) error) (string, *exec.Cmd, string) {
 	args := []string{cmd, "--bg"}
+	if cmd == "funnel" {
+		// Funnel must NOT share 443 with the tailnet-only serve routes: the same
+		// port cannot be both, so a default-443 funnel silently stays private.
+		// 8443 is funnel-eligible and keeps the two listeners separate. The CLI
+		// echoes the full URL (including ":" + port) that Expose scrapes below,
+		// so the caller gets the :8443 URL rather than the private 443 one.
+		args = append(args, fmt.Sprintf("--https=%d", FunnelHTTPSPort))
+	}
 	if pathPrefix != "" {
 		args = append(args, "--set-path", pathPrefix)
 	}
@@ -232,20 +262,34 @@ func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.C
 // background process for cleanup, and a one-time setup hint when the tailnet
 // needs enabling.
 func StartExpose(target, id string) (url string, proc *exec.Cmd, setupHint string) {
+	u, p, h, _ := StartExposeWithKind(target, id)
+	return u, p, h
+}
+
+// StartExposeWithKind is StartExpose plus the subcommand that produced the URL:
+// "funnel" means the instance is reachable on the PUBLIC internet, "serve"
+// means tailnet-only. A caller that surfaces the exposure to the user must use
+// this variant, because otherwise it cannot honestly say which of the two is
+// live — and reporting a public share as tailnet-only (or vice versa) is a
+// security-relevant misstatement.
+//
+// The kind is empty when the URL came from the DNSName fallback (no process was
+// started, so nothing is provably exposed) or when tailscale is unavailable.
+func StartExposeWithKind(target, id string) (url string, proc *exec.Cmd, setupHint, kind string) {
 	tailscalePath, ok := Running()
 	if !ok {
-		return "", nil, ""
+		return "", nil, "", ""
 	}
 	pathPrefix := SanitizePath(id)
 	wait := func(cmd *exec.Cmd) error { return cmd.Wait() }
 
 	if u, p, hint := Expose(tailscalePath, "funnel", target, pathPrefix, wait); u != "" {
-		return URLWithPathPrefix(u, pathPrefix), p, hint
+		return URLWithPathPrefix(u, pathPrefix), p, hint, "funnel"
 	}
 	if u, p, hint := Expose(tailscalePath, "serve", target, pathPrefix, wait); u != "" {
-		return URLWithPathPrefix(u, pathPrefix), p, hint
+		return URLWithPathPrefix(u, pathPrefix), p, hint, "serve"
 	}
-	return URLWithPathPrefix(DNSName(tailscalePath), pathPrefix), nil, ""
+	return URLWithPathPrefix(DNSName(tailscalePath), pathPrefix), nil, "", ""
 }
 
 // StartServeExpose starts a TAILNET-ONLY `tailscale serve` mount for target
@@ -284,17 +328,28 @@ func RemoveSetPath(pathPrefix string) {
 	if pathPrefix == "" {
 		return
 	}
-	tailscalePath := findCLI()
+	tailscalePath := CLIPath()
 	if tailscalePath == "" {
 		return
 	}
-	for _, cmd := range []string{"funnel", "serve"} {
-		c := exec.Command(tailscalePath, cmd, "--set-path", pathPrefix, "off")
+	// Each listener needs its own --https: funnel lives on FunnelHTTPSPort while
+	// serve uses the 443 default, so one shared argv would target only one of
+	// them and orphan the other's mount — leaving a PUBLIC funnel live after the
+	// user pressed Stop.
+	attempts := [][]string{
+		{"funnel", fmt.Sprintf("--https=%d", FunnelHTTPSPort), "--set-path", pathPrefix, "off"},
+		{"serve", "--set-path", pathPrefix, "off"},
+	}
+	for _, args := range attempts {
+		ctx, cancel := context.WithTimeout(context.Background(), exposeTimeout)
+		c := exec.CommandContext(ctx, tailscalePath, args...)
 		var out bytes.Buffer
 		c.Stdout = &out
 		c.Stderr = &out
-		if err := c.Run(); err != nil {
-			log.Printf("tailscale %s --set-path %s off: %v\n  output: %s", cmd, pathPrefix, err, strings.TrimRight(out.String(), "\n"))
+		err := c.Run()
+		cancel()
+		if err != nil {
+			log.Printf("tailscale %s: %v\n  output: %s", strings.Join(args, " "), err, strings.TrimRight(out.String(), "\n"))
 		}
 	}
 }

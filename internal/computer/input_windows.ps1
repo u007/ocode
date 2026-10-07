@@ -10,6 +10,11 @@
 #   scroll <x> <y> <dir> <amount>    dir: up|down|left|right
 #   type <base64-utf8-text>
 #   key <vk> [<vk> ...]              modifiers first, main key last
+#   windows                          -> one line per top-level window:
+#                                       hwnd, app, title, x, y, w, h, minimized, focused (tab-separated)
+#   window-focus <hwnd>
+#   window-bounds <hwnd> <x> <y> <w> <h>
+#   window-state <hwnd> <minimize|restore|maximize|close>
 #
 # Every op prints only its documented output. Any failure writes a message to
 # stderr and exits 1.
@@ -161,6 +166,136 @@ public class OcodeInput {
 }
 "@
 
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class OcodeWin {
+    public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int max);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT p);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int cx, uint flags);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr h, int idx);
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT {
+        public int length, flags, showCmd;
+        public POINT ptMinPosition, ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
+    const int GWL_EXSTYLE = -20;
+    const long WS_EX_TOOLWINDOW = 0x80;
+    const int DWMWA_CLOAKED = 14;
+    const int SW_MINIMIZE = 6, SW_MAXIMIZE = 3, SW_RESTORE = 9;
+    const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10;
+    const uint WM_CLOSE = 0x10;
+
+    public class Info {
+        public long Hwnd; public uint Pid; public string Title;
+        public int X, Y, W, H; public bool Minimized, Focused;
+    }
+
+    static IntPtr H(long v) {
+        IntPtr h = new IntPtr(v);
+        if (!IsWindow(h)) throw new Exception("window " + v + " no longer exists, list windows again");
+        return h;
+    }
+
+    // Top-level windows a user would call a window: visible, titled, not a
+    // tool window, not cloaked (other virtual desktop / suspended UWP shell).
+    public static List<Info> List() {
+        var res = new List<Info>();
+        IntPtr fg = GetForegroundWindow();
+        EnumWindows(delegate (IntPtr h, IntPtr l) {
+            if (!IsWindowVisible(h)) return true;
+            int len = GetWindowTextLength(h);
+            if (len == 0) return true;
+            if ((GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() & WS_EX_TOOLWINDOW) != 0) return true;
+            int cloaked;
+            if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out cloaked, 4) == 0 && cloaked != 0) return true;
+            var sb = new StringBuilder(len + 1);
+            GetWindowText(h, sb, sb.Capacity);
+            var i = new Info();
+            i.Hwnd = h.ToInt64();
+            i.Title = sb.ToString();
+            uint pid; GetWindowThreadProcessId(h, out pid); i.Pid = pid;
+            i.Minimized = IsIconic(h);
+            RECT r;
+            if (i.Minimized) {
+                // GetWindowRect reports -32000 for a minimized window; the
+                // restored bounds live in the placement.
+                var p = new WINDOWPLACEMENT(); p.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+                GetWindowPlacement(h, ref p);
+                r = p.rcNormalPosition;
+            } else {
+                GetWindowRect(h, out r);
+            }
+            i.X = r.Left; i.Y = r.Top; i.W = r.Right - r.Left; i.H = r.Bottom - r.Top;
+            i.Focused = (h == fg);
+            res.Add(i);
+            return true;
+        }, IntPtr.Zero);
+        return res;
+    }
+
+    public static void Focus(long v) {
+        IntPtr h = H(v);
+        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+        // Windows refuses SetForegroundWindow from a process that did not
+        // receive the last input; a synthetic Alt press lifts that lock.
+        keybd_event(0x12, 0, 0, UIntPtr.Zero);
+        keybd_event(0x12, 0, 2, UIntPtr.Zero);
+        SetForegroundWindow(h);
+        if (GetForegroundWindow() != h) throw new Exception("could not bring window " + v + " to the foreground");
+    }
+
+    public static void Bounds(long v, int x, int y, int w, int h2) {
+        IntPtr h = H(v);
+        if (IsIconic(h) || IsZoomed(h)) ShowWindow(h, SW_RESTORE);
+        if (!SetWindowPos(h, IntPtr.Zero, x, y, w, h2, SWP_NOZORDER | SWP_NOACTIVATE))
+            throw new Exception("SetWindowPos failed, last error " + Marshal.GetLastWin32Error());
+    }
+
+    public static void State(long v, string state) {
+        IntPtr h = H(v);
+        switch (state) {
+            case "minimize": ShowWindow(h, SW_MINIMIZE); break;
+            case "restore": ShowWindow(h, SW_RESTORE); break;
+            case "maximize": ShowWindow(h, SW_MAXIMIZE); break;
+            case "close":
+                if (!PostMessage(h, WM_CLOSE, IntPtr.Zero, IntPtr.Zero))
+                    throw new Exception("PostMessage WM_CLOSE failed, last error " + Marshal.GetLastWin32Error());
+                break;
+            default: throw new Exception("unknown window state '" + state + "'");
+        }
+    }
+}
+"@
+
 # Must run before any screen bounds, capture or coordinate call so every op
 # works in physical pixels. It returns false when the process is already
 # DPI-aware through its manifest, which is not a failure, so the result is
@@ -297,6 +432,35 @@ try {
             [OcodeInput]::KeyEvent($codes[$main], $false)
             [OcodeInput]::KeyEvent($codes[$main], $true)
             for ($i = $main - 1; $i -ge 0; $i--) { [OcodeInput]::KeyEvent($codes[$i], $true) }
+            break
+        }
+        "windows" {
+            foreach ($w in [OcodeWin]::List()) {
+                # The process can exit between enumeration and lookup; a blank app
+                # name is the correct report for a window that is already gone.
+                $name = ""
+                $proc = Get-Process -Id $w.Pid -ErrorAction SilentlyContinue
+                if ($null -ne $proc) { $name = $proc.ProcessName }
+                $title = $w.Title -replace "[\t\r\n]", " "
+                $min = if ($w.Minimized) { 1 } else { 0 }
+                $foc = if ($w.Focused) { 1 } else { 0 }
+                "$($w.Hwnd)`t$name`t$title`t$($w.X)`t$($w.Y)`t$($w.W)`t$($w.H)`t$min`t$foc"
+            }
+            break
+        }
+        "window-focus" {
+            Confirm-ArgCount 1
+            [OcodeWin]::Focus([long]$Rest[0])
+            break
+        }
+        "window-bounds" {
+            Confirm-ArgCount 5
+            [OcodeWin]::Bounds([long]$Rest[0], [int]$Rest[1], [int]$Rest[2], [int]$Rest[3], [int]$Rest[4])
+            break
+        }
+        "window-state" {
+            Confirm-ArgCount 2
+            [OcodeWin]::State([long]$Rest[0], [string]$Rest[1])
             break
         }
         default {

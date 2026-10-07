@@ -156,16 +156,16 @@ func TestBuildPermissionContextTruncationLabel(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	// Create a file where first 40 lines already exceed maxInterpreterSourceBytes (16384).
-	// Each line ~500 bytes, 40 lines ~20000 bytes.
+	// Create a file that exceeds maxInterpreterSourceBytes.
+	// Each line ~500 bytes, 120 lines ~60000 bytes.
 	longLine := "echo " + strings.Repeat("x", 500) + "\n"
-	bigContent := strings.Repeat(longLine, 50)
+	bigContent := strings.Repeat(longLine, 120)
 	os.WriteFile(filepath.Join(tmp, "big.sh"), []byte(bigContent), 0o644)
 
 	a := NewAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./big.sh"})
-	// Use small maxLines but large byte truncation should trigger
+	// Byte truncation must trigger regardless of the generic maxLines argument
 	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
 	if !strings.Contains(ctx, "TRUNCATED") {
 		t.Fatalf("expected TRUNCATED label for big file, got: %q", ctx[:1000])
@@ -214,9 +214,9 @@ func TestVerifyAutoGrantDeniesTruncatedScript(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	// Big script: 50 lines, each 500 chars -> truncated by both lines and bytes
+	// Big script: 120 lines, each 500 chars (~60 KB) -> over the byte ceiling
 	longLine := "echo " + strings.Repeat("x", 500) + "\n"
-	bigContent := strings.Repeat(longLine, 50)
+	bigContent := strings.Repeat(longLine, 120)
 	os.WriteFile(filepath.Join(tmp, "big.sh"), []byte(bigContent), 0o644)
 	// Small script: not truncated
 	os.WriteFile(filepath.Join(tmp, "small.sh"), []byte("echo hi\n"), 0o644)
@@ -241,7 +241,7 @@ func TestVerifyAutoGrantDeniesTruncatedInterpreterScript(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	bigContent := strings.Repeat("print('"+strings.Repeat("x", 500)+"')\n", 50)
+	bigContent := strings.Repeat("print('"+strings.Repeat("x", 500)+"')\n", 120)
 	os.WriteFile(filepath.Join(tmp, "big.py"), []byte(bigContent), 0o644)
 	os.WriteFile(filepath.Join(tmp, "small.js"), []byte("console.log(1)\n"), 0o644)
 
@@ -281,24 +281,24 @@ func TestVerifyAutoGrantAllowsNonScriptCommand(t *testing.T) {
 	}
 }
 
-func TestBuildPermissionContextLineTruncation(t *testing.T) {
+func TestBuildPermissionContextManyLinesNotTruncated(t *testing.T) {
 	tmp := t.TempDir()
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	// Exceeds the executed-script line cap but not the byte limit.
-	content := strings.Repeat("e\n", defaultExecutedScriptLines+50)
+	// Executed scripts are not line-limited: thousands of lines under the byte
+	// ceiling reach the judge whole and pass the guard.
+	content := strings.Repeat("e\n", 5000)
 	os.WriteFile(filepath.Join(tmp, "manylines.sh"), []byte(content), 0o644)
 	a := NewAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./manylines.sh"})
-	ctx := a.buildPermissionContext("bash", args, 50000, 3, defaultExecutedScriptLines)
-	if !strings.Contains(ctx, "TRUNCATED") {
-		t.Fatalf("expected TRUNCATED for line-exceeded script, got: %q", ctx[:500])
+	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
+	if strings.Contains(ctx, "TRUNCATED") {
+		t.Fatalf("5000-line script under the byte ceiling must not be truncated, got: %q", ctx[:500])
 	}
-	// Also verify guard denies
-	if ok, _ := a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: "./manylines.sh"}); ok {
-		t.Fatal("expected line-truncated script to be denied by verifyAutoGrant")
+	if ok, why := a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: "./manylines.sh"}); !ok {
+		t.Fatalf("many-line script under the byte ceiling refused by guard: %s", why)
 	}
 }
 
@@ -334,7 +334,7 @@ func TestExecutedScriptLongerThanChatCapIsNotTruncated(t *testing.T) {
 	tmp := t.TempDir()
 	long := strings.Repeat("echo hi\n", 84)
 	os.WriteFile(filepath.Join(tmp, "long.sh"), []byte(long), 0o755)
-	huge := strings.Repeat("echo "+strings.Repeat("x", 90)+"\n", 200)
+	huge := strings.Repeat("echo "+strings.Repeat("x", 90)+"\n", 600)
 	os.WriteFile(filepath.Join(tmp, "huge.sh"), []byte(huge), 0o755)
 	a := NewAgent(nil, nil, nil, nil)
 	a.SetWorkDir(tmp)

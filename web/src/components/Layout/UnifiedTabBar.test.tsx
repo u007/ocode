@@ -113,6 +113,19 @@ describe("UnifiedTabBar", () => {
     expect(within(screen.getByRole("tab", { name: /chat one/i })).getByText("Chat One")).toBeTruthy();
   });
 
+  it("bounds an oversized tab title so the nowrap label cannot jank the strip", () => {
+    // A tab title can mirror a session title derived from a multi-megabyte
+    // first user message. Rendering it raw into the nowrap/ellipsis pill forces
+    // the browser to lay out the whole string on every reflow (~300ms for
+    // 1.4MB). The label must be bounded before it reaches the DOM.
+    const huge = "standup review of recent commits ".repeat(50000);
+    projectFake.tabs = [{ id: "s1", projectPath: "/proj", title: huge, activeSubTab: "chat" }];
+    renderBar();
+    const pill = screen.getByRole("tab", { name: /standup review of recent commits/i });
+    expect((pill.textContent ?? "").length).toBeLessThanOrEqual(100);
+    expect((pill.getAttribute("title") ?? "").length).toBeLessThanOrEqual(100);
+  });
+
   it("renders a Browser add button and opens a browser pill", () => {
     const { onFocusKindChange } = renderBar();
     const addBrowser = screen.getByRole("button", { name: /new browser tab/i });

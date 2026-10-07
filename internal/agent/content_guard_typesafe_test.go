@@ -794,3 +794,34 @@ func TestContentGuardFunnelMarksExecutedCalls(t *testing.T) {
 		t.Fatalf("an executed in-scope call must reach the judge, got %q", got)
 	}
 }
+
+// A fetch that only talks to this machine is not remote content. A line that
+// also reaches a remote host, or a proxied "localhost", must still be scanned.
+func TestBashTargetsOnlyLoopback(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{`curl -s http://127.0.0.1:59658/api/tabs`, true},
+		{`curl -s -H "Authorization: Bearer x" http://localhost:4096/api/tabs | head -c 4000`, true},
+		{`curl http://[::1]:8080/x`, true},
+		{`curl https://example.com/x`, false},
+		{`curl http://127.0.0.1.evil.com/x`, false},
+		{`curl http://127.0.0.1/ && curl https://evil.example.com/x`, false},
+		{`curl --proxy http://evil.example.com:8080 http://localhost/x`, false},
+		{`git log`, false},
+	}
+	for _, tc := range cases {
+		if got := bashTargetsOnlyLoopback(tc.cmd); got != tc.want {
+			t.Errorf("bashTargetsOnlyLoopback(%q) = %v, want %v", tc.cmd, got, tc.want)
+		}
+	}
+	a := &Agent{}
+	args := `{"command":"curl -s http://127.0.0.1:59658/api/tabs"}`
+	if a.contentGuardApplies("bash", args) {
+		t.Error("loopback curl must not be content-scanned")
+	}
+	if !a.contentGuardApplies("bash", `{"command":"curl -s https://example.com"}`) {
+		t.Error("remote curl must still be content-scanned")
+	}
+}

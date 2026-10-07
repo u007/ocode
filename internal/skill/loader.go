@@ -296,6 +296,7 @@ var universalStacks = map[string]bool{
 	"conduct":       true,
 	"hallucination": true,
 	"pdf":           true,
+	"webforms":      true,
 }
 
 // kaizenAdmitted reports whether a Kaizen skill is admitted for the session:

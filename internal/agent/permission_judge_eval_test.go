@@ -352,7 +352,7 @@ func permissionJudgeEvalWindowsState(state map[string]any) {
 	state["working_directory"] = wd
 	state["allowed_roots"] = roots
 	state["project_context"] = "Working directory:\n" + wd + "\n\nPre-authorized paths (read/write/delete ALLOWED inside these roots; anything outside is OUT OF SCOPE):\n" + strings.Join(roots, "\n")
-	for _, key := range []string{"temp_root_aliases", "expanded_command", "resolved_variables", "resolved_cd", "interpreter", "executed_scripts"} {
+	for _, key := range []string{"temp_root_aliases", "expanded_command", "resolved_variables", "resolved_cd", "interpreter", "executed_scripts", "scratch_dir_vars", "scratch_dir_note"} {
 		delete(state, key)
 	}
 }

@@ -155,24 +155,53 @@ func TestTypesafeJudgeShipsEachScriptInCompound(t *testing.T) {
 	}
 }
 
+// Two realistic large scripts (~46 KB + ~9 KB) must reach the decision backend
+// whole: under the per-script ceiling, untruncated, and shipped ONCE (not again
+// inside project_context), so the state stays inside the shared 96 KB budget.
+func TestTypesafeJudgeShipsLargeScriptsOnceWithinBudget(t *testing.T) {
+	dir := t.TempDir()
+	big := writeTestScript(t, filepath.Join(dir, "big.sh"),
+		"#!/bin/sh\n"+strings.Repeat("echo 0123456789012345678901234567890123456789\n", 1000))
+	mid := writeTestScript(t, filepath.Join(dir, "mid.sh"),
+		"#!/bin/sh\n"+strings.Repeat("echo 0123456789012345678901234567890123456789\n", 200))
+
+	a, h := newTypesafeJudge(t, typesafeChoiceReply("allow", 0.95))
+	state := judgeStateForBash(t, a, h, big+" && "+mid)
+
+	scripts := executedScriptsFromState(state)
+	if len(scripts) != 2 {
+		t.Fatalf("executed_scripts = %d entries, want 2", len(scripts))
+	}
+	for _, sc := range scripts {
+		if trunc, _ := sc["truncated"].(bool); trunc {
+			t.Errorf("%v truncated; a script under the byte ceiling must ship whole", sc["path"])
+		}
+	}
+	if ctx, _ := state["project_context"].(string); strings.Contains(ctx, "echo 0123456789") {
+		t.Error("script text duplicated into project_context; it must travel once, in executed_scripts")
+	}
+	if _, projected := state[stateProjectionKey]; projected {
+		t.Error("state was projected to previews; two large scripts must fit the budget whole")
+	}
+}
+
 // An oversized script is marked truncated rather than silently presented whole.
 // This mirrors verifyAutoGrant's refusal to auto-grant a partial view.
 func TestTypesafeJudgeMarksOversizedScriptTruncated(t *testing.T) {
 	script := writeTestScript(t, filepath.Join(t.TempDir(), "big.sh"),
-		"#!/bin/sh\n"+strings.Repeat("echo padding line\n", 200))
+		"#!/bin/sh\n"+strings.Repeat("echo padding line\n", 3000))
 
 	a, h := newTypesafeJudge(t, typesafeChoiceReply("allow", 0.95))
-	setTestAutoPermissionConfig(a, func(c *config.AutoPermissionConfig) { c.MaxContextLinesPerSource = 10 })
 
 	scripts := executedScriptsFromState(judgeStateForBash(t, a, h, script))
 	if len(scripts) != 1 {
 		t.Fatalf("executed_scripts = %d entries, want 1", len(scripts))
 	}
 	if trunc, _ := scripts[0]["truncated"].(bool); !trunc {
-		t.Error("truncated = false for a script far longer than max_context_lines_per_source")
+		t.Error("truncated = false for a script over the per-script byte ceiling")
 	}
-	if n, _ := scripts[0]["total_lines"].(float64); n != 202 {
-		t.Errorf("total_lines = %v, want 202 so the judge can see the view is partial", scripts[0]["total_lines"])
+	if n, _ := scripts[0]["total_lines"].(float64); n != 3002 {
+		t.Errorf("total_lines = %v, want 3002 so the judge can see the view is partial", scripts[0]["total_lines"])
 	}
 }
 
@@ -233,10 +262,9 @@ func TestTypesafeJudgeDoesNotDoubleShipInterpreterSource(t *testing.T) {
 // said. This is the guarantee that makes shipping bounded source safe.
 func TestTypesafeJudgeSourceDoesNotBypassTruncationGuard(t *testing.T) {
 	script := writeTestScript(t, filepath.Join(t.TempDir(), "big.sh"),
-		"#!/bin/sh\n"+strings.Repeat("echo padding line\n", 200))
+		"#!/bin/sh\n"+strings.Repeat("echo padding line\n", 3000))
 
 	a, _ := newTypesafeJudge(t, typesafeChoiceReply("allow", 0.99))
-	setTestAutoPermissionConfig(a, func(c *config.AutoPermissionConfig) { c.MaxContextLinesPerSource = 10 })
 	req := &PermissionRequest{ToolName: "bash", Scope: PermissionScopeBashPrefix, Rule: "bash.prefix." + script}
 
 	if ok, why := a.verifyAutoGrant("bash", mustJSON(t, map[string]string{"command": script}), req); ok {
@@ -253,4 +281,36 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// scratch_dir_vars is an ocode-verified fact: only variables bound once, before
+// use, from a bare `mktemp -d` are listed.
+func TestTypesafeJudgeStateListsScratchDirVars(t *testing.T) {
+	a, h := newTypesafeJudge(t, typesafeChoiceReply("allow", 0.95))
+	cases := []struct {
+		cmd  string
+		want []string
+	}{
+		{`tmp=$(mktemp -d) && echo hi > "$tmp/a"; rm -rf "$tmp"`, []string{"tmp"}},
+		{`a=$(mktemp -d) && b=$(mktemp -d) && ls "$a" "$b"`, []string{"a", "b"}},
+		{`tmp=$(mktemp -d) && tmp=/ && rm -rf "$tmp"`, nil},
+		{`tmp=$HOME && rm -rf "$tmp"`, nil},
+		{`tmp=$(mktemp -d -p /) && ls "$tmp"`, nil},
+		{`ls`, nil},
+	}
+	for _, tc := range cases {
+		state := judgeStateForBash(t, a, h, tc.cmd)
+		got, _ := state["scratch_dir_vars"].([]any)
+		var names []string
+		for _, v := range got {
+			names = append(names, v.(string))
+		}
+		if strings.Join(names, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%q: scratch_dir_vars = %v, want %v", tc.cmd, names, tc.want)
+		}
+		// The instruction rides along only when a variable was detected.
+		if _, has := state["scratch_dir_note"]; has != (len(tc.want) > 0) {
+			t.Errorf("%q: scratch_dir_note present = %v, want %v", tc.cmd, has, len(tc.want) > 0)
+		}
+	}
 }

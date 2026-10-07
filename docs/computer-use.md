@@ -2,7 +2,7 @@
 type: Guide
 title: Computer use
 description: User-facing guide to enabling and using the opt-in computer desktop-control tool, including actions, coordinate mapping, permissions, platform setup, limitations, and privacy.
-resource: internal/tool/computer.go; internal/computer/; internal/config/computeruse_config.go; internal/agent/permissions.go; internal/tui/model.go; internal/server/handler_config.go; web/src/components/Settings/ComputerUseForm.tsx; web/src/components/Settings/SettingsPanel.tsx; internal/computer/permissions.go; internal/computer/permissions_darwin.go; internal/computer/permissions_other.go; web/src/api/client.ts; web/src/api/types.ts
+resource: internal/tool/computer.go; internal/tool/window.go; internal/tool/window_driver.go; internal/computer/window_shared.go; internal/computer/window_darwin.go; internal/computer/window_windows.go; internal/computer/window_linux_driver.go; internal/computer/; internal/config/computeruse_config.go; internal/agent/permissions.go; internal/tui/model.go; internal/server/handler_config.go; web/src/components/Settings/ComputerUseForm.tsx; web/src/components/Settings/SettingsPanel.tsx; internal/computer/permissions.go; internal/computer/permissions_darwin.go; internal/computer/permissions_other.go; web/src/api/client.ts; web/src/api/types.ts
 tags:
   - computer-use
   - desktop
@@ -14,7 +14,7 @@ timestamp: 2026-09-17T12:13:30Z
 
 # Computer use
 
-Computer use adds an opt-in `computer` tool that lets the agent see and operate the desktop running ocode. It is disabled by default. When disabled, the tool is not advertised to the model.
+Computer use adds an opt-in `computer` tool that lets the agent see and operate the desktop running ocode, plus a companion `window` tool that lists and manipulates windows. Both are disabled by default and share one setting and one platform driver. When disabled, neither is advertised to the model.
 
 ## Supported sessions
 
@@ -89,6 +89,17 @@ The `computer` tool accepts one `action` per call:
 | `key` | Press a key or key combination, such as `ctrl+s`, supplied as the action text. |
 | `cursor_position` | Return the current cursor location. |
 | `wait` | Wait for the requested duration, from 0 to 10 seconds. This does not take a new screenshot. |
+
+## Window tool
+
+The `window` tool manages top-level windows across all apps. Actions: `list` (optional `query` substring filter, sorted by app/title/id, paginated with `limit` default 50 / max 200 and `offset`), `focus` (un-minimizes, raises, focuses), `move_resize` (`x`, `y`, `width`, `height`; omitted values keep the current one), `minimize`, `restore`, `maximize`, `close`.
+
+- **Always `list` first.** Ids are opaque and platform-specific (macOS `pid:index`, Windows HWND, X11 `0x…`) and go stale when windows open or close. `move_resize` re-lists and refuses an id that is no longer present.
+- **Bounds are OS screen coordinates** (macOS points, Windows physical pixels, X11 pixels), not screenshot-image pixels. Divide by the scale reported by `computer screenshot` to map them onto an image.
+- **Permissions:** `list` is allowed without a prompt; every other action asks under the `tool.window` rule (`close` can discard unsaved work). A `window = deny` rule (or locked mode) blocks every action, `list` included.
+- **macOS:** System Events via the JXA helper; needs Accessibility and Automation → System Events (same grants as `computer`). `maximize` fills the primary screen's visible frame rather than pressing the green button (which enters native full screen).
+- **Windows:** PowerShell + user32. `focus` sends a synthetic Alt press to get past the foreground lock and fails if the window still did not take the foreground. Cloaked (other virtual desktop) and tool windows are not listed. `close` posts `WM_CLOSE`, so the app may prompt.
+- **Linux:** X11 only, via `wmctrl`, `xdotool` and `xprop` (`apt install wmctrl xdotool x11-utils`). Wayland compositors do not let clients manage other windows, so every action fails with an explicit X11-only error. `wmctrl` may report positions without window-manager decorations.
 
 ## Screenshot coordinates
 

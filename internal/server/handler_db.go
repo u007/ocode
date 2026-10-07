@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -237,6 +238,26 @@ func (h *Handler) HandleDBTable(w http.ResponseWriter, r *http.Request) {
 	limit := dbIntParam(r.URL.Query().Get("limit"), 0)
 	offset := dbIntParam(r.URL.Query().Get("offset"), 0)
 
+	// IDE paging: a user filter expression, a sort column and the total row
+	// count. All three are optional, and with none of them the response is
+	// exactly what this handler produced before they existed.
+	opts := dbbrowse.PageOptions{
+		Limit:  limit,
+		Offset: offset,
+		Filter: r.URL.Query().Get("filter"),
+		SortBy: r.URL.Query().Get("sort"),
+	}
+	dir := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("dir")))
+	switch dir {
+	case "", "asc":
+	case "desc":
+		opts.SortDesc = true
+	default:
+		writeError(w, http.StatusBadRequest, "dir must be asc or desc")
+		return
+	}
+	withCount := dbBoolParam(r.URL.Query().Get("count"))
+
 	ctx, cancel := context.WithTimeout(r.Context(), dbQueryTimeout)
 	defer cancel()
 
@@ -254,14 +275,124 @@ func (h *Handler) HandleDBTable(w http.ResponseWriter, r *http.Request) {
 	// rowid, which is not part of `SELECT *`; expose it as the leading _rowid_
 	// column so the grid can build a key for row edits.
 	keyCols, _ := schema.KeyColumns()
-	includeRowID := len(keyCols) == 1 && keyCols[0] == dbbrowse.RowIDColumn
-	page, err := dbbrowse.TablePageKeyed(ctx, path, table, limit, offset, includeRowID)
+	opts.IncludeRowID = len(keyCols) == 1 && keyCols[0] == dbbrowse.RowIDColumn
+
+	// Both paths must honour IncludeRowID: the unfiltered fast path is a
+	// different function from the filtered one, and a rowid table reached
+	// without filter/sort/count would lose the column its row edits are keyed
+	// on. TablePage is the rowid-free projection, so it is only safe when no
+	// rowid column was requested.
+	var page dbbrowse.ResultSet
+	var total int64
+	if withCount || opts.Filter != "" || opts.SortBy != "" || opts.IncludeRowID {
+		opts.WithCount = withCount || opts.Filter != "" || opts.SortBy != ""
+		page, total, err = dbbrowse.TablePageFiltered(ctx, path, table, opts)
+	} else {
+		page, err = dbbrowse.TablePage(ctx, path, table, limit, offset)
+	}
 	if err != nil {
-		logDBError("table page", path, err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, dbbrowse.ErrNoSuchTable) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, dbbrowse.ErrStatementNotReadOnly) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// A bad filter expression (unknown column, type mismatch) is the
+		// caller's input too — surface it as 400 so the grid can show it.
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"schema": schema, "result": page})
+	resp := map[string]any{"schema": schema, "result": page}
+	if withCount || opts.Filter != "" || opts.SortBy != "" {
+		resp["total"] = total
+	}
+	// Exact row keys, index-aligned with result.rows. They are strings because a
+	// browser parses JSON integers into float64 and two adjacent ids past 2^53
+	// collapse into one, so a key rebuilt from the grid's cells can address the
+	// NEIGHBOURING row. Omitted entirely when the table has no addressable key
+	// (a view), in which case the client keeps its previous behaviour.
+	if keys := dbbrowse.RowKeys(schema, page); len(keys) > 0 {
+		resp["row_keys"] = keys
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// dbBoolParam reads a truthy query parameter. Only an explicit true accepts it,
+// so a stray `count=0` or `count=false` means "no count" rather than flipping the
+// meaning of the request.
+func dbBoolParam(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// HandleDBMaintenance runs one database-level maintenance operation: ANALYZE
+// (populates sqlite_stat1 so the table list shows real counts), VACUUM (rewrites
+// the file to reclaim free pages) or integrity_check (reports damage).
+//
+// The op is mapped to a fixed SQL string in dbbrowse, never to user text, so an
+// unrecognised op is refused outright rather than falling through to something
+// executable. ANALYZE and VACUUM mutate the file and so pass the write guard;
+// integrity_check only reads.
+func (h *Handler) HandleDBMaintenance(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path        string `json:"path"`
+		ProjectRoot string `json:"project_root"`
+		Op          string `json:"op"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Path == "" || strings.TrimSpace(req.Op) == "" {
+		writeError(w, http.StatusBadRequest, "path and op are required")
+		return
+	}
+	resolved, errMsg := h.resolveDBPath(req.ProjectRoot, req.Path)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	if status, msg := h.dbWriteGuard(resolved); msg != "" {
+		writeError(w, status, msg)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), dbQueryTimeout)
+	defer cancel()
+
+	switch req.Op {
+	case "analyze":
+		res, err := dbbrowse.Analyze(ctx, resolved)
+		if err != nil {
+			logDBError("analyze", resolved, err)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case "vacuum":
+		res, err := dbbrowse.Vacuum(ctx, resolved)
+		if err != nil {
+			logDBError("vacuum", resolved, err)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case "integrity_check":
+		rows, err := dbbrowse.IntegrityCheck(ctx, resolved)
+		if err != nil {
+			logDBError("integrity check", resolved, err)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
+	default:
+		writeError(w, http.StatusBadRequest, "op must be analyze, vacuum or integrity_check")
+	}
 }
 
 // HandleDBQuery runs a SQL statement from the query editor. In this phase the
@@ -325,12 +456,22 @@ func (h *Handler) HandleDBQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rs)
 }
 
+// dbRowMaxBodyBytes bounds a row save. A BLOB may travel base64-encoded in
+// `values` (the row dialog's file picker), so the limit is the 64 MB blob cap
+// grossed up for base64's 4/3 inflation, plus headroom for the other columns.
+const dbRowMaxBodyBytes = 96 << 20
+
 // HandleDBRow performs one parameterized row insert, update or delete. The row
 // is identified by its primary key, or by the synthetic _rowid_ column for a
 // table with no declared primary key. UPDATE/DELETE require exactly one row to
 // match; a key that matches none or many is a 409 so the caller never silently
 // changes rows it did not intend to.
 func (h *Handler) HandleDBRow(w http.ResponseWriter, r *http.Request) {
+	// A row save can now carry a BLOB as base64 in `values`, so the body needs a
+	// bound: 64 MB of blob inflates to ~85 MB, plus room for the rest of the row.
+	// Without this the endpoint buffers whatever it is sent, which is
+	// indistinguishable from a memory leak triggered by a stranger's curl.
+	r.Body = http.MaxBytesReader(w, r.Body, dbRowMaxBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.UseNumber() // preserve int64 ids that a float64 would round
 	var req struct {
@@ -342,6 +483,14 @@ func (h *Handler) HandleDBRow(w http.ResponseWriter, r *http.Request) {
 		Values      map[string]any `json:"values"`
 	}
 	if err := dec.Decode(&req); err != nil {
+		// An over-cap body must say so: without this it is indistinguishable from
+		// malformed JSON, and the user is told their request was invalid when the
+		// real problem is the size of the blob they attached.
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("Row save is larger than the %d MB limit.", dbRowMaxBodyBytes>>20))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -371,6 +520,22 @@ func (h *Handler) HandleDBRow(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), dbQueryTimeout)
 	defer cancel()
+
+	// Take a snapshot BEFORE the mutation. Every statement runs inside a
+	// transaction that commits only on success (dbbrowse.execExact), so a failed
+	// attempt leaves the file unchanged and a snapshot taken here is always the
+	// state the user could return to — including after a 409, where the snapshot
+	// is simply a copy of what is already there.
+	//
+	// It must happen before Exec, not after: a snapshot taken afterwards would
+	// record the change it was supposed to protect against. It is taken before the
+	// mutation rather than inside dbbrowse so the copy is the browser's
+	// recoverability contract, not something each row operation must remember.
+	if _, err := dbbrowse.Backup(ctx, resolved); err != nil {
+		logDBError("backup before "+req.Op, resolved, err)
+		writeError(w, http.StatusInternalServerError, "could not back up the database before writing: "+err.Error())
+		return
+	}
 
 	var res dbbrowse.ExecResult
 	switch req.Op {

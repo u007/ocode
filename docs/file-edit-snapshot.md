@@ -8,7 +8,7 @@ tags:
   - undo
   - file-edit
   - safety
-timestamp: 2026-07-08T02:40:36Z
+timestamp: 2026-10-06T17:02:14Z
 ---
 # File-Edit Snapshot & Undo Mechanism
 
@@ -35,7 +35,7 @@ Every modifying tool backs up *before* mutating:
 ## Gotchas
 - Snapshots are per-agent and expire by agent-step count, not wall-clock time. After 2 steps the backup is still on disk but can no longer be undone via the tool.
 - Cross-agent writes to the same path block undo for the earlier agent (prevents clobbering another agent's work).
-- Backups accumulate under `<GlobalDataDir>/project/{slug}/snapshots/`; there is no documented automatic GC beyond agent unregister (`UnregisterAgent`). Because the store lives outside the project working directory, it never enters the project's git tree.
+- Backups accumulate under `<GlobalDataDir>/project/{slug>/snapshots/`; there is no documented automatic GC beyond agent unregister (`UnregisterAgent`). Because the store lives outside the project working directory, it never enters the project's git tree.
 
 ## See also
 - `CLAUDE.md` — forbids `git stash`/`git reset --hard`/`git checkout -- <file>`/`git clean -fd` as a default coping strategy (the snapshot store is the supported alternative).

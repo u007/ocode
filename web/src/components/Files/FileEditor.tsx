@@ -1,10 +1,11 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import { Loader2, Settings2, HelpCircle, Save } from "lucide-react";
+import { Loader2, Settings2, HelpCircle, Save, Sun, Moon } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
+import { toggleEditorAppearance, useEditorAppearance } from "../../lib/editorAppearance";
 import {
   Dialog,
   DialogContent,
@@ -69,6 +70,11 @@ export interface FileEditorProps {
    *  Markdown preview pane (internal links in a rendered `.md`); the Monaco
    *  editor itself ignores it. */
   onOpenFile?: (path: string, projectRoot?: string) => void;
+  /** Hide the header's light/dark toggle. `FileTabContent` sets this in its
+   *  split-view branch, where the same toggle lives in the mode toolbar (and
+   *  the editor header is visible at the same time) — without it a split tab
+   *  would show two identical toggles. */
+  hideAppearanceToggle?: boolean;
 }
 
 import { memo } from "react";
@@ -160,6 +166,7 @@ function FileEditorImpl({
   onSave,
   dirty = false,
   initialHighlight,
+  hideAppearanceToggle = false,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   // Store the Monaco API object so it's available in effects that can't reach
@@ -167,6 +174,31 @@ function FileEditorImpl({
   const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<editor.IStandaloneEditorConstructionOptions | null>(null);
   const [persistedTheme, setPersistedTheme] = useState<string>("ocode-dark");
+  // Light/dark override shared with the preview pane. Subscribed (not a prop)
+  // so the editor theme follows one global preference from every host,
+  // including the embedded editors in TextViewer / MarkdownViewer.
+  const appearance = useEditorAppearance();
+  // Which Monaco theme to paint. The quick toggle OWNS the polarity; the
+  // Settings theme picker still chooses among dark themes. A settings theme
+  // that is itself light (VS Light) would otherwise fight a "dark" toggle, so
+  // it is coerced to the custom dark theme instead.
+  const monacoTheme = useMemo(() => {
+    if (appearance === "light") return "ocode-light";
+    return persistedTheme === "vs" || persistedTheme === "ocode-light" ? "ocode-dark" : persistedTheme;
+  }, [appearance, persistedTheme]);
+  // onMount runs once; read the latest theme through a ref so the mount
+  // callback's identity (and therefore the editor instance) never changes when
+  // the theme does.
+  const monacoThemeRef = useRef(monacoTheme);
+  useEffect(() => {
+    monacoThemeRef.current = monacoTheme;
+  }, [monacoTheme]);
+  // Re-apply after mount when the toggle (or the Settings theme) changes. The
+  // @monaco-editor/react wrapper also re-applies its `theme` prop, but keeping
+  // this explicit covers a change that races the async mount.
+  useEffect(() => {
+    monacoRef.current?.editor.setTheme(monacoTheme);
+  }, [monacoTheme]);
   // When the parent doesn't provide onOpenSettings (the current default), the
   // Settings button opens the Monaco settings/extensions panel in a dialog.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -474,7 +506,46 @@ function FileEditorImpl({
       },
     });
 
-    monaco.editor.setTheme("ocode-dark");
+    // Light counterpart of the custom dark theme; matches the neutral light
+    // preview palette (index.css .editor-appearance-light).
+    monaco.editor.defineTheme("ocode-light", {
+      base: "vs",
+      inherit: true,
+      rules: [],
+      colors: {
+        "editor.background": "#ffffff",
+        "editor.foreground": "#18181b",
+        "editorCursor.foreground": "#18181b",
+        "editor.lineHighlightBackground": "#f4f4f5",
+        "editorLineNumber.foreground": "#a1a1aa",
+        "editorLineNumber.activeForeground": "#52525b",
+        "editor.selectionBackground": "#bfdbfe",
+        "editor.inactiveSelectionBackground": "#bfdbfe80",
+        "editor.selectionHighlightBackground": "#d4d4d80a",
+        "editorBracketMatch.background": "#d4d4d850",
+        "editorBracketMatch.border": "#a1a1aa",
+        "editorGutter.background": "#ffffff",
+        "editorWidget.background": "#fafafa",
+        "editorWidget.border": "#e4e4e7",
+        "input.background": "#ffffff",
+        "input.border": "#e4e4e7",
+        "input.foreground": "#18181b",
+        "list.activeSelectionBackground": "#e4e4e7",
+        "list.hoverBackground": "#f4f4f5",
+        "editorSuggestWidget.background": "#ffffff",
+        "editorSuggestWidget.border": "#e4e4e7",
+        "editorSuggestWidget.selectedBackground": "#e4e4e7",
+        "editorHoverWidget.background": "#ffffff",
+        "editorHoverWidget.border": "#e4e4e7",
+        "scrollbar.shadow": "#00000000",
+        "scrollbarSlider.background": "#a1a1aa60",
+        "scrollbarSlider.hoverBackground": "#a1a1aa90",
+        "scrollbarSlider.activeBackground": "#a1a1aa",
+        "minimap.background": "#ffffff",
+      },
+    });
+
+    monaco.editor.setTheme(monacoThemeRef.current);
     // Inject search highlight style once
     if (!document.getElementById("ocode-search-highlight-style")) {
       const style = document.createElement("style");
@@ -876,6 +947,19 @@ function FileEditorImpl({
               <span className="text-xs">Save</span>
             </Button>
           )}
+          {!hideAppearanceToggle && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground hover:text-foreground"
+              onClick={() => toggleEditorAppearance()}
+              aria-pressed={appearance === "light"}
+              aria-label="Toggle light or dark theme"
+              title={appearance === "light" ? "Switch to dark theme" : "Switch to light theme"}
+            >
+              {appearance === "light" ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -980,7 +1064,7 @@ function FileEditorImpl({
               </div>
             }
             options={editorOptions}
-            theme={persistedTheme}
+            theme={monacoTheme}
           />
         </div>
       )}
@@ -1005,6 +1089,9 @@ function arePropsEqual(prev: FileEditorProps, next: FileEditorProps): boolean {
     prev.diffVersion === next.diffVersion &&
     prev.persistKey === next.persistKey &&
     prev.externalChange === next.externalChange &&
+    // Static per host, but compare it so a host that flips it re-renders the
+    // header toggle visibility without a remount.
+    prev.hideAppearanceToggle === next.hideAppearanceToggle &&
     // `dirty` drives the header Save button's enabled state; `onSave` identity
     // is deliberately ignored (forwarded through onSaveRef, like onChange).
     prev.dirty === next.dirty &&

@@ -5,6 +5,7 @@ import { useProjectState } from "../../stores/projectStore";
 import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { eventBus } from "../../lib/eventBus";
 import { reportActionError } from "../../lib/actionErrors";
+import { truncateTitle } from "../../lib/title";
 import { setSpeechSummaryConfig, speechSummaryDisplay } from "../../lib/speechSummaryConfig";
 import { useSpeechOptional } from "../Speech/SpeechProvider";
 import type { AgentInfo, LSPStatus, MCPStatus } from "../../api/types";
@@ -151,12 +152,6 @@ export default function CoworkSidebar({
   // the sidebar reflects the toggle state for THIS conversation.
   const [mcpServers, setMcpServers] = useState<MCPStatus[]>([]);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
-  function truncateTitle(s: string, maxLen: number): string {
-    s = s.replace(/\n/g, " ").trim();
-    const runes = Array.from(s);
-    if (runes.length <= maxLen) return s;
-    return runes.slice(0, maxLen - 3).join("") + "...";
-  }
 
   const [titleGenerating, setTitleGenerating] = useState(false);
   const dispatch = useChatDispatch();

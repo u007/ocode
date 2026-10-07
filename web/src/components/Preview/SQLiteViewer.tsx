@@ -1,22 +1,31 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronLeft,
   ChevronRight,
   Database,
+  Download,
   ExternalLink,
+  Gauge,
   Loader2,
+  PanelLeft,
+  PanelLeftClose,
   Pencil,
   Play,
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Trash2,
+  Undo2,
 } from "lucide-react";
 import {
   api,
   ApiError,
   type DBCell,
+  type DBCellInput,
   type DBColumnDef,
   type DBInfo,
   type DBResultSet,
@@ -24,7 +33,17 @@ import {
   type DBTableSchema,
 } from "../../api/client";
 import { cn } from "../../lib/utils";
-import { ConfirmDialog, RowEditorDialog, SchemaDialog, type SchemaAction } from "./SQLiteDialogs";
+import {
+  ConfirmDialog,
+  RowEditorDialog,
+  SchemaDialog,
+  cellToInput,
+  inputToCell,
+  type SchemaAction,
+} from "./SQLiteDialogs";
+import BlobDialog from "./BlobDialog";
+import { csvFilename, downloadCsv, resultToCsv } from "./csvExport";
+import { useResizableSidebar } from "../../hooks/useResizableSidebar";
 
 /**
  * Read-only SQLite browser for the preview pane (phase 1 of the SQLite
@@ -54,17 +73,36 @@ const PAGE_SIZE = 100;
 type Tab = "data" | "query" | "schema";
 
 /** One cell, rendered so NULL, numbers and BLOBs are visually distinct. */
-function Cell({ value }: { value: DBCell }) {
+function Cell({ value, onOpenBlob }: { value: DBCell; onOpenBlob?: () => void }) {
   if (value === null) {
     return <span className="italic text-muted-foreground">NULL</span>;
   }
   if (typeof value === "object" && value !== null && "$blob" in value) {
+    // A blob is the one cell whose value the grid cannot show, so the chip is a
+    // button that opens the viewer rather than a dead label.
+    const label = `blob ${value.bytes}B`;
+    if (onOpenBlob) {
+      return (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenBlob();
+          }}
+          data-testid="sqlite-blob-chip"
+          title={value.truncated ? `${value.preview}… (preview only)` : value.preview}
+          className="rounded bg-muted px-1 font-mono text-[10px] underline decoration-dotted hover:bg-muted/70"
+        >
+          {label}
+        </button>
+      );
+    }
     return (
       <span
         className="rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground"
         title={value.preview}
       >
-        blob {value.bytes}B
+        {label}
       </span>
     );
   }
@@ -81,10 +119,40 @@ function ResultGrid({
   result,
   testId,
   renderRowActions,
+  sortable,
+  sortBy,
+  sortDesc,
+  onSort,
+  selectable,
+  selectedRows,
+  onToggleRow,
+  editing,
+  onStartEdit,
+  onCommitEdit,
+  onCancelEdit,
+  inlineBusy,
+  rowLabel,
+  onOpenBlob,
 }: {
   result: DBResultSet;
   testId: string;
   renderRowActions?: (rowIndex: number) => ReactNode;
+  sortable?: boolean;
+  sortBy?: string;
+  sortDesc?: boolean;
+  onSort?: (column: string) => void;
+  selectable?: boolean;
+  selectedRows?: Set<number>;
+  onToggleRow?: (rowIndex: number) => void;
+  editing?: { row: number; col: number } | null;
+  onStartEdit?: (row: number, col: number) => void;
+  onCommitEdit?: (row: number, col: number, text: string) => void;
+  onCancelEdit?: () => void;
+  inlineBusy?: boolean;
+  /** Test/debug label prefix for the row checkboxes, e.g. "Select row". */
+  rowLabel?: string;
+  /** Open the blob viewer for a cell (only meaningful for BLOB values). */
+  onOpenBlob?: (row: number, col: number) => void;
 }) {
   if (result.columns.length === 0) {
     return (
@@ -94,16 +162,37 @@ function ResultGrid({
     );
   }
   return (
-    <div className="min-h-0 flex-1 overflow-auto" data-testid={testId}>
-      <table className="w-full border-collapse text-left">
+    <div className="min-h-0 min-w-0 flex-1 overflow-auto" data-testid={testId}>
+      <table className="w-max min-w-full border-collapse text-left">
         <thead className="sticky top-0 bg-muted/80 backdrop-blur">
           <tr>
+            {selectable ? (
+              <th className="w-8 border-b border-border px-2 py-1" aria-label="Select rows" />
+            ) : null}
             {result.columns.map((c, i) => (
               <th
                 key={`${c.name}-${i}`}
                 className="whitespace-nowrap border-b border-border px-2 py-1 text-[11px] font-semibold"
               >
-                {c.name}
+                {sortable && onSort ? (
+                  <button
+                    type="button"
+                    onClick={() => onSort(c.name)}
+                    aria-label={`Sort by ${c.name}`}
+                    className="inline-flex items-center gap-0.5 hover:underline"
+                  >
+                    {c.name}
+                    {sortBy === c.name ? (
+                      sortDesc ? (
+                        <ArrowDown className="h-3 w-3" />
+                      ) : (
+                        <ArrowUp className="h-3 w-3" />
+                      )
+                    ) : null}
+                  </button>
+                ) : (
+                  c.name
+                )}
                 {c.decl_type ? (
                   <span className="ml-1 font-normal text-muted-foreground">{c.decl_type}</span>
                 ) : null}
@@ -116,13 +205,52 @@ function ResultGrid({
         </thead>
         <tbody>
           {result.rows.map((row, ri) => (
-            <tr key={ri} className="odd:bg-muted/20">
+            <tr key={ri} className={cn("odd:bg-muted/20", selectedRows?.has(ri) && "bg-primary/10")}>
+              {selectable ? (
+                <td className="border-b border-border/50 px-2 py-1 align-top">
+                  <input
+                    type="checkbox"
+                    aria-label={`${rowLabel ?? "Select row"} ${ri + 1}`}
+                    checked={selectedRows?.has(ri) ?? false}
+                    onChange={() => onToggleRow?.(ri)}
+                  />
+                </td>
+              ) : null}
               {row.map((cell, ci) => (
                 <td
                   key={ci}
                   className="max-w-[24rem] truncate border-b border-border/50 px-2 py-1 align-top"
                 >
-                  <Cell value={cell} />
+                  {editing?.row === ri && editing.col === ci ? (
+                    <input
+                      autoFocus
+                      aria-label={`Edit ${result.columns[ci]?.name ?? "cell"}`}
+                      defaultValue={cellToInput(cell)}
+                      disabled={inlineBusy}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          onCommitEdit?.(ri, ci, e.currentTarget.value);
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          onCancelEdit?.();
+                        }
+                      }}
+                      onBlur={(e) => onCommitEdit?.(ri, ci, e.currentTarget.value)}
+                      className="w-full rounded border border-primary bg-transparent px-1 font-mono text-xs outline-none"
+                    />
+                  ) : onStartEdit ? (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onDoubleClick={() => onStartEdit(ri, ci)}
+                      className="block cursor-text"
+                    >
+                      <Cell value={cell} onOpenBlob={() => onOpenBlob?.(ri, ci)} />
+                    </span>
+                  ) : (
+                    <Cell value={cell} onOpenBlob={() => onOpenBlob?.(ri, ci)} />
+                  )}
                 </td>
               ))}
               {renderRowActions ? (
@@ -243,6 +371,19 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
   const [table, setTable] = useState<DBTableResponse | null>(null);
   const [offset, setOffset] = useState(0);
 
+  // ── IDE state (filter / sort / selection / inline edit / maintenance) ─────
+  // `filterDraft` is what the input holds; `filter` is what the request used, so
+  // a half-typed expression never hits the database on every keystroke.
+  const [filterDraft, setFilterDraft] = useState("");
+  const [rowFilter, setRowFilter] = useState("");
+  const [sortBy, setSortBy] = useState("");
+  const [sortDesc, setSortDesc] = useState(false);
+  const [filterError, setFilterError] = useState<string | null>(null);
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
+  const [inlineBusy, setInlineBusy] = useState(false);
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
+
   // ── Write state (P2–P4) ────────────────────────────────────────────────────
   // `bump` forces a refetch after a write; `notice` is the on-screen result.
   const [bump, setBump] = useState(0);
@@ -257,6 +398,7 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
     run: () => Promise<void>;
   } | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  const [blobCell, setBlobCell] = useState<{ row: number; col: number } | null>(null);
   const [schemaAction, setSchemaAction] = useState<SchemaAction | null>(null);
   const [schemaBusy, setSchemaBusy] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
@@ -266,6 +408,17 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
   const [queryResult, setQueryResult] = useState<DBResultSet | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+
+  // Table-list pane width: drag-to-resize + collapse, persisted to localStorage
+  // (same hook as the app sidebar and Git file list). `width` is retained while
+  // collapsed so re-expanding restores the previous size.
+  const tablePane = useResizableSidebar({
+    storageKey: "ocode.ui.sqlite-viewer.width",
+    defaultWidth: 160,
+    minWidth: 120,
+    maxWidth: 480,
+    collapsible: true,
+  });
 
   // Load the database header + table list. Runs on path/host/revision change;
   // never clears the query editor or table selection.
@@ -290,24 +443,47 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
     };
   }, [path, projectRoot, projectHost, revision, bump]);
 
-  // Load a page of the selected table.
+  // Load a page of the selected table. A filter error is rendered next to the
+  // filter box rather than replacing the whole pane: a rejected expression must
+  // not look like "this table has no rows".
   const loadTable = useCallback(
     (name: string, off: number) => {
       let cancelled = false;
       setTable(null);
+      setSelectedRows(new Set());
+      setEditingCell(null);
       api
-        .dbTable(path, name, { projectRoot, host: projectHost, limit: PAGE_SIZE, offset: off })
+        .dbTable(path, name, {
+          projectRoot,
+          host: projectHost,
+          limit: PAGE_SIZE,
+          offset: off,
+          filter: rowFilter || undefined,
+          sort: sortBy || undefined,
+          dir: sortDesc ? "desc" : "asc",
+          // A count is only worth its second COUNT query once the user is
+          // actually narrowing the view or reordering it.
+          count: Boolean(rowFilter || sortBy),
+        })
         .then((res) => {
-          if (!cancelled) setTable(res);
+          if (!cancelled) {
+            setTable(res);
+            setFilterError(null);
+          }
         })
         .catch((e: unknown) => {
-          if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+          if (cancelled) return;
+          const msg = e instanceof Error ? e.message : String(e);
+          // Only a filter/sort rejection is a filter problem; anything else is
+          // the pane's own error state.
+          if (rowFilter || sortBy) setFilterError(msg);
+          else setError(msg);
         });
       return () => {
         cancelled = true;
       };
     },
-    [path, projectRoot, projectHost],
+    [path, projectRoot, projectHost, rowFilter, sortBy, sortDesc],
   );
 
   useEffect(() => {
@@ -315,6 +491,39 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
     setTable(null);
     return undefined;
   }, [selected, offset, loadTable, revision, bump]);
+
+  // Apply the filter after a pause in typing, and always return to the first
+  // page: page 7 of the old result set is meaningless under a new filter.
+  useEffect(() => {
+    const trimmed = filterDraft.trim();
+    if (trimmed === rowFilter) return undefined;
+    const t = setTimeout(() => {
+      setRowFilter(trimmed);
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [filterDraft, rowFilter]);
+
+  // Changing the filter or sort invalidates a row selection: the row indices it
+  // referred to no longer mean the same rows.
+  useEffect(() => {
+    setSelectedRows(new Set());
+  }, [rowFilter, sortBy, sortDesc]);
+
+  // Clicking the active column flips the direction; clicking another column
+  // starts ascending. Derived from the current values rather than an updater so
+  // no state update happens inside another one.
+  const toggleSort = useCallback(
+    (column: string) => {
+      setOffset(0);
+      if (column === sortBy) setSortDesc((d) => !d);
+      else {
+        setSortBy(column);
+        setSortDesc(false);
+      }
+    },
+    [sortBy],
+  );
 
   const runQuery = useCallback(() => {
     const sql = queryText.trim();
@@ -351,8 +560,17 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
   }, [table]);
   const editable = keyColumns.length > 0 && table?.schema.type === "table";
 
+  // Prefer the server's EXACT key for a row. Rebuilding one from the cells is
+  // lossy for an integer id past 2^53 — JSON.parse has already rounded it, so
+  // two adjacent ids become the same number and the mutation would hit the
+  // neighbouring row. `row_keys` carries those values as strings; a null entry
+  // means the server could not express that row's key, so we fall back.
   const rowKey = useCallback(
-    (row: DBCell[]): Record<string, DBCell> => {
+    (row: DBCell[], rowIndex?: number): Record<string, DBCell> => {
+      if (rowIndex != null) {
+        const exact = table?.row_keys?.[rowIndex];
+        if (exact) return exact;
+      }
       const obj: Record<string, DBCell> = {};
       keyColumns.forEach((name) => {
         const idx = table?.result.columns.findIndex((c) => c.name === name) ?? -1;
@@ -361,6 +579,19 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
       return obj;
     },
     [keyColumns, table],
+  );
+
+  // The size/truncation the grid already knows about a blob cell, used by the
+  // dialog for its pre-fetch notice. The value itself is fetched by the dialog.
+  const blobCellInfo = useCallback(
+    (row: DBCell[], col: number): { bytes: number; truncated: boolean } => {
+      const cell = row?.[col];
+      if (cell && typeof cell === "object" && "$blob" in cell) {
+        return { bytes: cell.bytes, truncated: Boolean(cell.truncated) };
+      }
+      return { bytes: 0, truncated: false };
+    },
+    [],
   );
 
   const rowByName = useCallback(
@@ -385,7 +616,7 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
         await api.dbRow(path, "delete", selected, {
           projectRoot,
           host: projectHost,
-          key: rowKey(row),
+          key: rowKey(row, ri),
         });
         setNotice(`Deleted 1 row from ${selected}.`);
         setBump((b) => b + 1);
@@ -393,7 +624,7 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
     });
   };
 
-  const saveRow = async (values: Record<string, DBCell>) => {
+  const saveRow = async (values: Record<string, DBCellInput>) => {
     if (!table || !selected || !rowEdit) return;
     setRowBusy(true);
     setRowError(null);
@@ -406,7 +637,7 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
         await api.dbRow(path, "update", selected, {
           projectRoot,
           host: projectHost,
-          key: rowKey(row),
+          key: rowKey(row, rowEdit.index),
           values,
         });
         setNotice(`Updated 1 row in ${selected}.`);
@@ -418,6 +649,134 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
     } finally {
       setRowBusy(false);
     }
+  };
+
+  // ── Inline cell editing ───────────────────────────────────────────────────
+  // Double-click a cell to edit it in place; Enter commits, Escape abandons. A
+  // commit reuses the row UPDATE endpoint with the row's key, so an inline edit
+  // is the same optimistic-concurrency checked mutation as the dialog — a row
+  // that changed underneath answers 409 instead of overwriting it.
+  const commitCell = useCallback(
+    async (rowIndex: number, colIndex: number, text: string) => {
+      if (!table || !editingCell) return;
+      const name = table.result.columns[colIndex]?.name;
+      if (!name) return;
+      const declType =
+        table.schema.columns.find((c) => c.name === name)?.decl_type ??
+        table.result.columns[colIndex]?.decl_type ??
+        "";
+      const row = table.result.rows[rowIndex];
+      setInlineBusy(true);
+      setRowError(null);
+      try {
+        await api.dbRow(path, "update", selected as string, {
+          projectRoot,
+          host: projectHost,
+          key: rowKey(row, rowIndex),
+          values: { [name]: inputToCell(text, declType) },
+        });
+        setNotice(`Updated ${name}.`);
+        setEditingCell(null);
+        setBump((b) => b + 1);
+      } catch (e) {
+        setRowError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setInlineBusy(false);
+      }
+    },
+    [table, editingCell, selected, path, projectRoot, projectHost, rowKey],
+  );
+
+  // ── Bulk delete ───────────────────────────────────────────────────────────
+  // The confirmation names the row COUNT, not "the selected rows": a bulk delete
+  // is the operation most likely to be applied without counting what it covers.
+  const askDeleteSelected = () => {
+    if (!table || !selected || selectedRows.size === 0) return;
+    const rows = [...selectedRows].sort((a, b) => a - b);
+    setConfirm({
+      title: `Delete ${rows.length} row${rows.length === 1 ? "" : "s"} from ${selected}?`,
+      message:
+        rows.length === 1
+          ? "This permanently deletes the row."
+          : "This permanently deletes every selected row. A backup of the database is taken first.",
+      label: "Delete",
+      run: async () => {
+        let deleted = 0;
+        const failures: string[] = [];
+        // Sequential on purpose: these are writes to one SQLite file, and a
+        // burst of parallel writes is exactly how you get "database is locked".
+        for (const ri of rows) {
+          const row = table.result.rows[ri];
+          if (!row) continue;
+          try {
+            await api.dbRow(path, "delete", selected as string, {
+              projectRoot,
+              host: projectHost,
+              key: rowKey(row, ri),
+            });
+            deleted += 1;
+          } catch (e) {
+            failures.push(e instanceof Error ? e.message : String(e));
+          }
+        }
+        // No explicit clear here: the refetch below rebuilds the page and
+        // loadTable resets the selection, which is where indices stop being
+        // meaningful. Clearing it twice would be a second source of truth.
+        if (failures.length === 0) {
+          setNotice(`Deleted ${deleted} row${deleted === 1 ? "" : "s"} from ${selected}.`);
+        } else {
+          // A partial delete must say so plainly: "Deleted 2 of 5" plus the
+          // reason, never a bare success message over a half-applied change.
+          setNotice(
+            `Deleted ${deleted} of ${rows.length} row${rows.length === 1 ? "" : "s"}. ${failures[0]}`,
+          );
+        }
+        setBump((b) => b + 1);
+      },
+    });
+  };
+
+  // ── Maintenance ───────────────────────────────────────────────────────────
+  const runMaintenance = useCallback(
+    async (op: "analyze" | "vacuum" | "integrity_check") => {
+      setMaintenanceBusy(true);
+      try {
+        const res = await api.dbMaintenance(path, op, { projectRoot, host: projectHost });
+        if (op === "integrity_check") {
+          const rows = res.rows ?? [];
+          const clean = rows.length === 1 && rows[0].toLowerCase() === "ok";
+          setNotice(clean ? "Integrity check: ok." : `Integrity check found problems:\n${rows.join("\n")}`);
+        } else if (op === "analyze") {
+          setNotice("Analyzed — the table list now shows real row counts.");
+          setBump((b) => b + 1);
+        } else {
+          setNotice("Vacuum complete — the file was rewritten to reclaim space.");
+        }
+      } catch (e) {
+        setNotice(e instanceof Error ? e.message : String(e));
+      } finally {
+        setMaintenanceBusy(false);
+      }
+    },
+    [path, projectRoot, projectHost],
+  );
+
+  const askVacuum = () => {
+    // VACUUM rewrites the entire file, so it gets a confirmation like a drop.
+    setConfirm({
+      title: "Vacuum this database?",
+      message: "This rewrites the whole file to reclaim unused space. It can take a while on a large database.",
+      label: "Vacuum",
+      run: async () => {
+        await runMaintenance("vacuum");
+      },
+    });
+  };
+
+  const exportCsv = () => {
+    if (!table || !selected) return;
+    downloadCsv(csvFilename(selected), resultToCsv(table.result));
+    setNotice(`Exported ${table.result.row_count} row(s) to CSV.`);
   };
 
   const runConfirm = async () => {
@@ -584,6 +943,21 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
     <div className="flex h-full min-h-0 flex-col" data-testid="sqlite-viewer">
       {/* Header: table tabs + refresh */}
       <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1">
+        <button
+          type="button"
+          onClick={tablePane.toggleCollapsed}
+          aria-label={tablePane.collapsed ? "Show table list" : "Hide table list"}
+          aria-expanded={!tablePane.collapsed}
+          title={tablePane.collapsed ? "Show table list" : "Hide table list"}
+          data-testid="sqlite-toggle-table-list"
+          className="mr-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+        >
+          {tablePane.collapsed ? (
+            <PanelLeft className="h-3.5 w-3.5" />
+          ) : (
+            <PanelLeftClose className="h-3.5 w-3.5" />
+          )}
+        </button>
         {(["data", "query", "schema"] as Tab[]).map((t) => (
           <button
             key={t}
@@ -603,9 +977,15 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        {/* Table list */}
-        <div className="flex w-40 shrink-0 flex-col border-r border-border">
+      <div className="flex min-h-0 min-w-0 flex-1">
+        {/* Table list: width is drag-resizable and persisted (`tablePane`).
+            The header toggle collapses it to zero; `overflow-hidden` clips the
+            content while the width animates. */}
+        <div
+          data-testid="sqlite-table-pane"
+          className="flex shrink-0 flex-col overflow-hidden border-r border-border transition-[width] duration-100"
+          style={{ width: tablePane.collapsed ? 0 : tablePane.width }}
+        >
           <div className="relative shrink-0 p-1">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
             <input
@@ -632,7 +1012,9 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
                 )}
                 title={t.type}
               >
-                <span className="truncate">{t.name}</span>
+                <span className="truncate" title={t.name}>
+                  {t.name}
+                </span>
                 <span className="shrink-0 text-[10px] text-muted-foreground">
                   {t.type === "view" ? "view" : t.rows >= 0 ? t.rows : ""}
                 </span>
@@ -644,8 +1026,23 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
           </div>
         </div>
 
+        {/* Drag handle between the table list and the main pane. Double-click
+            restores the default width; hidden while collapsed. */}
+        {!tablePane.collapsed && (
+          <div
+            ref={tablePane.handleRef}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize table list"
+            title="Drag to resize · double-click to reset"
+            onPointerDown={tablePane.onPointerDown}
+            onDoubleClick={tablePane.resetToDefault}
+            className="w-1 shrink-0 cursor-col-resize touch-none bg-border hover:bg-accent active:bg-accent"
+          />
+        )}
+
         {/* Main pane */}
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {tab === "data" && (
             <>
               {!selected ? (
@@ -654,14 +1051,45 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
                 </div>
               ) : (
                 <>
-                  <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1 text-xs">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-2 py-1 text-xs">
                     <span className="font-medium">{selected}</span>
                     <span className="text-muted-foreground">
                       rows {table ? offset + 1 : offset}–
                       {table ? offset + table.result.row_count : offset}
                       {table?.result.truncated ? "+" : ""}
+                      {typeof table?.total === "number" ? (
+                        <span data-testid="sqlite-total"> of {table.total}</span>
+                      ) : null}
                     </span>
+                    <input
+                      value={filterDraft}
+                      onChange={(e) => setFilterDraft(e.target.value)}
+                      placeholder="WHERE …"
+                      aria-label="Filter rows"
+                      spellCheck={false}
+                      className="min-w-[8rem] flex-1 rounded border border-border bg-transparent px-1.5 py-0.5 font-mono text-[11px]"
+                    />
                     <div className="ml-auto flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={exportCsv}
+                        disabled={!table}
+                        data-testid="sqlite-export-csv"
+                        title="Export this page as CSV"
+                        className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[11px] hover:bg-muted disabled:opacity-40"
+                      >
+                        <Download className="h-3 w-3" /> CSV
+                      </button>
+                      {editable && selectedRows.size > 0 ? (
+                        <button
+                          type="button"
+                          onClick={askDeleteSelected}
+                          data-testid="sqlite-delete-selected"
+                          className="inline-flex items-center gap-1 rounded border border-destructive px-1.5 py-0.5 text-[11px] text-destructive hover:bg-muted"
+                        >
+                          <Trash2 className="h-3 w-3" /> Delete {selectedRows.size}
+                        </button>
+                      ) : null}
                       {editable ? (
                         <button
                           type="button"
@@ -695,11 +1123,55 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
                       </button>
                     </div>
                   </div>
+                  {filterError ? (
+                    <div
+                      role="alert"
+                      data-testid="sqlite-filter-error"
+                      className="border-b border-border px-2 py-1 text-[11px] text-destructive"
+                    >
+                      {filterError}
+                    </div>
+                  ) : null}
+                  {rowError ? (
+                    <div
+                      role="alert"
+                      data-testid="sqlite-inline-error"
+                      className="border-b border-border px-2 py-1 text-[11px] text-destructive"
+                    >
+                      {rowError}
+                    </div>
+                  ) : null}
                   {table ? (
                     <ResultGrid
                       result={table.result}
                       testId="sqlite-data-grid"
                       renderRowActions={editable ? rowActions : undefined}
+                      sortable
+                      sortBy={sortBy}
+                      sortDesc={sortDesc}
+                      onSort={toggleSort}
+                      selectable={editable}
+                      selectedRows={selectedRows}
+                      onToggleRow={(ri) =>
+                        setSelectedRows((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(ri)) next.delete(ri);
+                          else next.add(ri);
+                          return next;
+                        })
+                      }
+                      editing={editingCell}
+                      inlineBusy={inlineBusy}
+                      onStartEdit={(r, c) => {
+                        setRowError(null);
+                        setEditingCell({ row: r, col: c });
+                      }}
+                      onCommitEdit={commitCell}
+                      onCancelEdit={() => {
+                        setEditingCell(null);
+                        setRowError(null);
+                      }}
+                      onOpenBlob={(r, c) => setBlobCell({ row: r, col: c })}
                     />
                   ) : (
                     <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -819,11 +1291,41 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
       </div>
 
       {/* Refresh is implicit on revision; expose an explicit control too. */}
-      <div className="flex shrink-0 items-center gap-1 border-t border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-border px-2 py-0.5 text-[11px] text-muted-foreground">
         <RefreshCw className="h-3 w-3" />
         {editable ? "writes enabled" : "read-only"}
+        <button
+          type="button"
+          onClick={() => runMaintenance("analyze")}
+          disabled={maintenanceBusy}
+          data-testid="sqlite-analyze"
+          title="Populate sqlite_stat1 so the table list shows real row counts"
+          className="inline-flex items-center gap-0.5 rounded px-1 hover:bg-muted disabled:opacity-40"
+        >
+          <Gauge className="h-3 w-3" /> Analyze
+        </button>
+        <button
+          type="button"
+          onClick={() => runMaintenance("integrity_check")}
+          disabled={maintenanceBusy}
+          data-testid="sqlite-integrity"
+          title="Check the file for corruption"
+          className="inline-flex items-center gap-0.5 rounded px-1 hover:bg-muted disabled:opacity-40"
+        >
+          <ShieldCheck className="h-3 w-3" /> Check
+        </button>
+        <button
+          type="button"
+          onClick={askVacuum}
+          disabled={maintenanceBusy}
+          data-testid="sqlite-vacuum"
+          title="Rewrite the file to reclaim unused space"
+          className="inline-flex items-center gap-0.5 rounded px-1 hover:bg-muted disabled:opacity-40"
+        >
+          <Undo2 className="h-3 w-3" /> Vacuum
+        </button>
         {notice ? (
-          <span className="ml-2 text-foreground" data-testid="sqlite-notice">
+          <span className="ml-2 whitespace-pre-line text-foreground" data-testid="sqlite-notice">
             {notice}
           </span>
         ) : null}
@@ -849,6 +1351,21 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
           error={rowError}
           onCancel={() => setRowEdit(null)}
           onSubmit={saveRow}
+        />
+      ) : null}
+      {blobCell && table ? (
+        <BlobDialog
+          open
+          path={path}
+          table={selected ?? ""}
+          column={table.result.columns[blobCell.col]?.name ?? ""}
+          rowKey={rowKey(table.result.rows[blobCell.row], blobCell.row)}
+          cell={blobCellInfo(table.result.rows[blobCell.row], blobCell.col)}
+          editable={editable}
+          projectRoot={projectRoot}
+          projectHost={projectHost}
+          onClose={() => setBlobCell(null)}
+          onReplaced={() => setBump((b) => b + 1)}
         />
       ) : null}
       {schemaAction && table ? (

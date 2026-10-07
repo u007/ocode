@@ -1,5 +1,6 @@
 import type {
   AutoShareConfig,
+  ShareStatus,
   ChatResponse,
   SessionInfo,
   SessionDetail,
@@ -871,6 +872,21 @@ export interface DBBlob {
 
 export type DBCell = null | number | string | boolean | DBBlob;
 
+/**
+ * A BLOB value being SENT to the server.
+ *
+ * Deliberately narrower than DBBlob: `bytes`, `preview` and `truncated` are
+ * response-only (the server derives them from the stored bytes). A request that
+ * claimed a `preview` would be describing data it does not have.
+ */
+export interface DBBlobInput {
+  $blob: true;
+  data: string;
+}
+
+/** A value as sent in a row insert/update. */
+export type DBCellInput = DBCell | DBBlobInput;
+
 export interface DBResultSet {
   columns: DBResultColumn[];
   rows: DBCell[][];
@@ -882,6 +898,27 @@ export interface DBResultSet {
 export interface DBTableResponse {
   schema: DBTableSchema;
   result: DBResultSet;
+  /**
+   * Total rows matching the current filter, present only when the request asked
+   * for a count (or a filter/sort), so the grid can say "1–100 of 4,231" instead
+   * of guessing from the ANALYZE estimate. Undefined means "not counted".
+   */
+  total?: number;
+  /**
+   * Exact row keys, index-aligned with `result.rows`, for addressing a row in a
+   * mutation.
+   *
+   * The values are STRINGS because `JSON.parse` turns a JSON integer into a
+   * float64, and past 2^53 two adjacent ids collapse into the same number — so a
+   * key rebuilt from the grid's cells can silently address the neighbouring row.
+   * A `null` value is a NULL key component (an `IS NULL` predicate, not an empty
+   * string), and a `null` ENTRY means that row's key could not be expressed
+   * exactly, so the caller must fall back to building one from the cells.
+   *
+   * Absent entirely when the table has no addressable key (a view), or when the
+   * server is older than this field.
+   */
+  row_keys?: (Record<string, string | null> | null)[];
 }
 
 /**
@@ -936,6 +973,20 @@ export interface DBColumnDef {
   not_null?: boolean;
   pk?: boolean;
   default?: string | null;
+}
+
+/** Query string for a BLOB-cell request: the row key travels as JSON, matching
+ *  the shape the grid already builds for row edits. */
+function dbBlobQuery(
+  path: string,
+  table: string,
+  column: string,
+  key: Record<string, DBCell>,
+  projectRoot?: string,
+): string {
+  const q = new URLSearchParams({ path, table, column, key: JSON.stringify(key) });
+  if (projectRoot) q.set("project_root", projectRoot);
+  return q.toString();
 }
 
 export const api = {
@@ -1771,6 +1822,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
+  /** Append repo-relative paths to the repository's root .gitignore. Only
+   *  meaningful for untracked paths (gitignore does not untrack a tracked
+   *  file); the server dedupes and returns the refreshed status. */
+  gitIgnore: (paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/ignore${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
   /** Resolve one conflicted file: resolution is "ours" | "theirs" | "mark".
    *  `mark` stages the file as-is and the server refuses while conflict
    *  markers remain, so the user cannot half-resolve. */
@@ -2362,6 +2421,16 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+
+  // ── Tailscale share (whole desktop) ──
+  // Reading the share status is side-effect free; STARTING and STOPPING are
+  // explicit POSTs so opening the Share dialog / Settings can never publish the
+  // instance by itself.
+  getShareStatus: () => fetchJSON<ShareStatus>("/api/tailscale-share"),
+  startShare: () =>
+    fetchJSON<ShareStatus>("/api/tailscale-share/start", { method: "POST" }),
+  stopShare: () =>
+    fetchJSON<ShareStatus>("/api/tailscale-share/stop", { method: "POST" }),
   getComputerUseConfig: () =>
     fetchJSON<import("../api/types").ComputerUseConfig>(
       "/api/config/computer-use",
@@ -2718,6 +2787,12 @@ export const api = {
       },
       host,
     ),
+  cancelBtw: (id: string, host?: string) =>
+    fetchJSON<{ status: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/btw`,
+      { method: "DELETE" },
+      host,
+    ),
 
   // Mask (secret redaction) config
   getMaskConfig: () =>
@@ -2855,16 +2930,117 @@ export const api = {
   dbTable: (
     path: string,
     table: string,
-    opts: { projectRoot?: string; limit?: number; offset?: number; host?: string } = {},
+    opts: {
+      projectRoot?: string;
+      limit?: number;
+      offset?: number;
+      /** SQL boolean expression, without the WHERE keyword. Server-validated. */
+      filter?: string;
+      /** Column to order by; the server refuses a column the table lacks. */
+      sort?: string;
+      dir?: "asc" | "desc";
+      /** Ask for the total row count matching the filter. */
+      count?: boolean;
+      host?: string;
+    } = {},
   ) => {
     const q = new URLSearchParams({ path, table });
     if (opts.projectRoot) q.set("project_root", opts.projectRoot);
     if (opts.limit != null) q.set("limit", String(opts.limit));
     if (opts.offset != null) q.set("offset", String(opts.offset));
+    if (opts.filter) q.set("filter", opts.filter);
+    if (opts.sort) q.set("sort", opts.sort);
+    if (opts.dir) q.set("dir", opts.dir);
+    if (opts.count) q.set("count", "1");
     return fetchJSON<DBTableResponse>(`/api/db/table?${q.toString()}`, undefined, opts.host).then(
       normalizeDBTable,
     );
   },
+
+  /**
+   * Download one BLOB cell's full bytes.
+   *
+   * The grid only ever carries the first 8 KB of a blob (`Blob.data` is a
+   * prefix), so this is the only way to obtain the real value. The response is
+   * raw bytes rather than JSON, and a NULL cell answers 204 — reported as
+   * `isNull` so the caller does not save a zero-byte file for a cell that holds
+   * nothing at all.
+   */
+  dbBlobDownload: async (
+    path: string,
+    table: string,
+    column: string,
+    key: Record<string, DBCell>,
+    opts: { projectRoot?: string; host?: string } = {},
+  ): Promise<{ data: ArrayBuffer | null; mediaType: string; byteLength: number; isNull: boolean }> => {
+    const q = dbBlobQuery(path, table, column, key, opts.projectRoot);
+    // Mirrors fetchJSON's host handling: a remote host is reached through the
+    // /api/remote/{host} proxy, where the host's own server reads its own disk.
+    const res = await fetch(apiPath(`${remoteApiBase(opts.host)}/api/db/blob?${q}`), {
+      headers: authHeaders(),
+    });
+    if (res.status === 204) {
+      return { data: null, mediaType: "", byteLength: 0, isNull: true };
+    }
+    if (!res.ok) {
+      reportAuthFailure(res.status);
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new ApiError(err.message || err.error || res.statusText, res.status);
+    }
+    const data = await res.arrayBuffer();
+    return {
+      data,
+      mediaType: (res.headers.get("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase(),
+      byteLength: data.byteLength,
+      isNull: false,
+    };
+  },
+
+  /**
+   * Replace one BLOB cell from raw bytes.
+   *
+   * The bytes are the request body (not base64 in JSON), so the stored value is
+   * exactly what the user picked and a 64 MB file does not inflate to 85 MB on
+   * the wire.
+   */
+  dbBlobUpload: (
+    path: string,
+    table: string,
+    column: string,
+    key: Record<string, DBCell>,
+    bytes: Uint8Array,
+    opts: { projectRoot?: string; host?: string } = {},
+  ) => {
+    const q = dbBlobQuery(path, table, column, key, opts.projectRoot);
+    // The bytes ARE the body (a BufferSource), not a Blob wrapping them: one
+    // less copy for a 64 MB upload, and the caller's Uint8Array goes out
+    // verbatim. The explicit Content-Type stops fetchJSON defaulting a binary
+    // body to application/json.
+    return fetchJSON<DBExecResult>(
+      `/api/db/blob?${q}`,
+      {
+        method: "POST",
+        body: bytes as unknown as BodyInit,
+        headers: { "Content-Type": "application/octet-stream" },
+      },
+      opts.host,
+    );
+  },
+
+  /** Run a maintenance operation: "analyze", "vacuum" or "integrity_check". */
+  dbMaintenance: (
+    path: string,
+    op: "analyze" | "vacuum" | "integrity_check",
+    opts: { projectRoot?: string; host?: string } = {},
+  ) =>
+    fetchJSON<{ rows?: string[]; rows_affected?: number; elapsed_ms?: number }>(
+      "/api/db/maintenance",
+      {
+        method: "POST",
+        body: JSON.stringify({ path, op, project_root: opts.projectRoot }),
+      },
+      opts.host,
+    ),
 
   dbQuery: (
     path: string,
@@ -2910,7 +3086,7 @@ export const api = {
       projectRoot?: string;
       host?: string;
       key?: Record<string, DBCell>;
-      values?: Record<string, DBCell>;
+      values?: Record<string, DBCellInput>;
     } = {},
   ) =>
     fetchJSON<DBExecResult>(

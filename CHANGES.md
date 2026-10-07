@@ -2,6 +2,140 @@
 
 ## [Unreleased]
 
+- **Auto-permission judge: executed scripts are no longer line-limited, and the
+  per-source byte ceiling rose from 16 KiB to 48 KiB.** `executedScriptLineCap()`
+  returned a 1000-line default (or `permissions.auto.max_context_lines_per_source`),
+  so a real script arrived `truncated:true` and could never be approved. Executed
+  scripts are now unbounded by lines — the binding bound is
+  `maxInterpreterSourceBytes`, raised to 48 KiB so a ~1000-line script ships whole
+  while two such sources still sit near the shared 96 KB decision-state budget —
+  and `max_context_lines_per_source` now governs only generic referenced-file
+  snippets. Docs: `docs/concepts/auto-permission-enforced-categories.md`.
+
+- **Chat: a fenced code block with no language renders as a block again, and
+  text selection inside the transcript no longer collapses mid-drag.**
+  `AssistantText` classified a fence as inline whenever `react-markdown` gave it
+  no `language-xxx` className, so a language-less block (e.g. an ASCII tree) was
+  wrapped in the inline code chip — its border painted on every line fragment
+  (reading as an underline per line), plus inline padding and no syntax
+  highlighting — and inline chips also showed
+  `@tailwindcss/typography`'s default literal backticks. Block detection now
+  comes from a context provided by the `pre` override (read by the `code`
+  renderer), and the chip cancels the backticks. Separately, the markdown
+  `components`/`remarkPlugins`/`rehypePlugins` were rebuilt inline on every
+  render; React compares element types by identity, so each re-render unmounted
+  and remounted the whole rendered markdown, destroying an in-progress selection
+  (the "selection flickers to other places" report) — they are now module-scope
+  constants, so React reconciles the DOM in place. Regression:
+  `web/src/components/Chat/MessageBubble.markdown.test.tsx`.
+
+- **The SQLite / DB IDE preview pane got a resizable, collapsible table list and
+  two-axis scrolling.** The table list is now a drag-resizable pane (120–480px;
+  double-click resets) with an always-visible header toggle that collapses it to
+  zero; width and collapsed state persist per browser under
+  `ocode.ui.sqlite-viewer.width` via the same `useResizableSidebar` hook as the
+  app sidebar and the Git file list. The result grid (Data and Query tabs) now
+  scrolls horizontally as well as vertically: its table is `w-max min-w-full`
+  inside a `min-w-0 overflow-auto` container, and the missing `min-width: 0` on
+  the flex chain was what previously let a wide table stretch the pane instead of
+  scrolling. Regression:
+  `web/src/components/Preview/SQLiteViewer.ide.test.tsx` (`resizable and
+  collapsible table list`).
+
+- **Tailscale share can now actually go public.** `tailscale funnel` was invoked
+  without an HTTPS port, so it always targeted 443 — a port routinely already
+  held by tailnet-only `serve` routes (the TUI `/rc` `/ses_...` mounts).
+  Tailscale cannot expose one port as both serve and funnel, so the funnel
+  attempt silently degraded to a private mount and a "public" share was
+  reachable only over the VPN. Funnel now mounts on a dedicated public port
+  (`tailscale.FunnelHTTPSPort` = 8443) while serve keeps its 443 default, and
+  `RemoveSetPath` clears BOTH listeners so Stop no longer orphans the public
+  mount. A second fix: `tailscaleShare.start` used to early-return whenever any
+  exposure was live, so once auto-share warmed a tailnet-only `serve` at boot the
+  Share dialog could never deliver the public URL its Start button advertises. An
+  explicit Start now UPGRADES a warm serve mount to funnel (tearing it down
+  first; the existing serve fallback remounts if funnel fails), while auto-share
+  itself stays tailnet-only and never downgrades a warm funnel. Found and fixed a
+  test-hygiene bug while here: the Share server tests stubbed only the expose
+  seam, so driving Stop shelled out to the REAL tailscale CLI and deleted the
+  developer's live `--set-path /desktop` mount. The root fix is
+  `tailscale.cliMutationsAllowed()` — a `testing.Testing()` guard on the two
+  MUTATING helpers (`Expose`, `RemoveSetPath`) with an explicit opt-in for the
+  fake-CLI tests — so no test binary in any package can edit the developer's live
+  tailscale node config. Tests:
+  `internal/tailscale/serve_expose_test.go` (funnel port argv, serve stays
+  https-less, both-listener removal, the under-test guard itself) and
+  `internal/server/tailscale_auto_share_test.go` (serve -> funnel upgrade,
+  failed-upgrade keeps serve, no funnel -> serve downgrade); all mutation-verified.
+
+- **The Git tab's row context menu can add untracked files to `.gitignore`.** A
+  right-click on an untracked row (staged or unstaged pane) now offers "Add to
+  .gitignore" (multi-select: "Add N to .gitignore"). It calls the new
+  `POST /api/git/ignore` (`internal/server/handler_git_ignore.go`), which appends
+  the paths to the repository **toplevel** `.gitignore` and answers the refreshed
+  `GitStatus`; the panel reloads through the existing `runMutation` path.
+  Entries are toplevel-anchored literal patterns (`/sub/file.txt`) with glob
+  metacharacters (`\ * ? [ ]`) and spaces backslash-escaped, and a trailing `/`
+  kept for a collapsed untracked directory; `git status --porcelain`'s C-quoted
+  names (`"sp ace.txt"`) are decoded first. The write dedupes against existing
+  lines and appends (LF/CRLF preserved) rather than rewriting, so a concurrent
+  editor save is not clobbered. `?host=` routes the whole operation to a remote
+  SSH/WSL project's host (`remoteReadFile`/`remoteWriteFile`). The action is
+  offered only for untracked rows — a `.gitignore` entry does not untrack a file
+  git already tracks — and a mixed selection reports how many tracked paths were
+  skipped. Remote projects ride the same endpoint. Also fixed a latent bug found
+  here: `remoteReadFile` did not handle the `MISSING` sentinel its own command
+  emits, so a missing remote file returned an "unexpected output" error instead
+  of `found=false` (which `remoteFileContent` maps to 404). Tests:
+  `internal/server/handler_git_ignore_test.go` (local + remote via fake SSH +
+  escaping/dedupe/nested-toplevel + a real-mux route test),
+  `web/src/components/Git/GitPanel.test.tsx`.
+
+- **The Files-tab file editor can now switch its light/dark appearance, and the
+  choice persists.** The Edit / Preview / Split toolbar gained a Sun/Moon toggle
+  (lucide, `aria-pressed`) that flips BOTH the Monaco editor theme and the
+  rendered preview (Markdown/HTML/SVG/CSV/JSON/Mermaid). The preference is a
+  global, persisted override (`ocode.ui.editorAppearance.v1`,
+  `web/src/lib/editorAppearance.ts`) — it never re-themes the app, which keeps
+  following the terminal theme. Implementation: `PreviewSurface` gains an
+  optional `appearance` prop that scopes a neutral light/dark palette via
+  `.editor-appearance-light`/`.editor-appearance-dark` CSS variables
+  (`web/src/index.css`); `MarkdownViewer` swaps `prose-invert`, `MermaidViewer`
+  re-initializes mermaid's theme; `FileEditor` defines a matching `ocode-light`
+  Monaco theme and shows a header toggle for non-split files (the split toolbar
+  owns the toggle, so `FileEditor` accepts `hideAppearanceToggle`). Default when
+  unset follows the app's own polarity. Sandboxed `HtmlViewer` iframes and the
+  native PDF/DOCX/PPTX/image viewers keep their own colors. Tests:
+  `web/src/lib/editorAppearance.test.ts`,
+  `Files/FileTabContent.appearance.test.tsx`,
+  `Files/FileEditor.appearance.test.tsx`,
+  `Preview/PreviewSurface.appearance.test.tsx`,
+  `Preview/MarkdownViewer.appearance.test.tsx`.
+
+- **Row keys now travel as exact strings, fixing a silent wrong-row mutation for
+  integer ids past 2^53.** `JSON.parse` turns a JSON integer into a float64, so
+  two adjacent ids beyond 2^53 collapse into the same number — a key rebuilt from
+  the grid's cells would address the NEIGHBOURING row. With that neighbour
+  present an edit or delete silently hit it; without it the user got a confusing
+  409 for a row they could see. Snowflake-style and other user-assigned 64-bit
+  ids exceed 2^53 routinely.
+  - `internal/dbbrowse/rowkeys.go`: `ExactValue` renders a driver value as an
+    exact decimal string (nil for SQL NULL — never `""`, since that is an
+    equality rather than `IS NULL`), and `RowKeys` returns one key per row,
+    index-aligned with `rows`, with a nil entry — never a partial key — when a
+    row's key cannot be expressed exactly.
+  - `GET /api/db/table` gained `row_keys`, omitted entirely for a table with no
+    addressable key. The client's `rowKey(row, rowIndex?)` prefers it and falls
+    back to the cell-derived key, so an older remote server still works. All five
+    mutation paths (single delete, bulk delete, row-dialog update, inline edit,
+    BLOB dialog) pass their row index.
+  - No server-side coercion is needed and none was added: SQLite's type affinity
+    converts a numeric TEXT parameter back to INTEGER. Verified against a live
+    binary with adjacent ids 2^53 and 2^53+1 — the exact key changed the right
+    row and left its neighbour untouched.
+  - Residual, recorded in TODO.md: the grid still DISPLAYS the rounded value,
+    because the cell itself arrives as a JSON number.
+
 - **Linux CI: the fake-`ssh` test shims no longer use bash-only syntax.**
   - `installFakeSSH` / `installCountingFakeSSH` wrote a `#!/bin/sh` script that
     built its argument list with bash arrays (`args+=("$a")`, `${#args[@]}`).
@@ -36,6 +170,141 @@
     the context workdir deliberately unrelated — `confinedPath`'s temp and workdir
     early-returns would otherwise make the assertions pass with the bug present.
     Mutation-verified: reverting the fix fails the test, and the mutant compiles.
+- **Session titles are now bounded, fixing UI-wide lag caused by one oversized paste.**
+  - A first user message can be multi-megabyte (e.g. a standup prompt pasted with
+    full commit diffs). The sqlite auto-title path stored it verbatim as the
+    session title, so `GET /api/sessions/:id/state` (polled every 15 s per open
+    tab), `GET /api/tabs` and the shared `tabs.json` each carried ~1.4 MB for
+    that one session, and the tab strip rendered the raw string into a
+    `white-space:nowrap` + `text-overflow:ellipsis` span — forcing the browser to
+    lay out the whole string (~300 ms) on every reflow. A single session made the
+    whole web/desktop UI janky.
+  - Fix: `session.TruncateTitle` / `session.MaxStoredTitleRunes` (80) cap the
+    title at every PERSISTENCE point — both sqlite row-builders
+    (`writeSqliteSessionFull` INSERT and `appendSqliteSessionOnce` UPDATE), so
+    the stored value itself is bounded and a row poisoned by an older binary is
+    re-bounded on its next save — and on the READ path (`StoredTitleForDir`, so
+    un-re-saved rows still render bounded). `internal/tabs` caps titles on load
+    and on write. The client bounds every title before it reaches React
+    (`web/src/lib/title.ts`), with the visible label capped at 80 and the hover
+    tooltip at 300.
+  - Oversized USER message bodies are also folded: `MessageBubble` renders the
+    first 20 000 chars by default with a "Show full message (N KB)" expander, so
+    a pasted megabyte prompt no longer forces a ~390 ms layout in the chat
+    either. Copy/restore/search still use the full content.
+  - The stored transcript is never modified — the title cap is a label bound and
+    the message fold is render-only (resume, context gauge and compaction are
+    unaffected).
+  - Tests: `internal/session/session_test.go` (auto-title cap, transcript
+    untouched, read cap), `internal/tabs/tabs_test.go` (write + load caps),
+    `web/src/lib/title.test.ts`, a `UnifiedTabBar` render regression, and
+    `MessageBubble.test.tsx` (oversized fold).
+
+- **New `window` tool: list and manipulate desktop windows (macOS, Windows, Linux/X11).**
+  - Actions `list`/`focus`/`move_resize`/`minimize`/`restore`/`maximize`/`close`,
+    opt-in with the `computer` tool and sharing its platform driver
+    (`tool.WindowDriver`, implemented by each platform `ComputerDriver`).
+    `list` is auto-allowed; every other action asks under `tool.window`.
+  - Motivated by a session where the agent could not un-hide a minimized Chrome
+    window via ad-hoc `osascript`. Docs: `docs/computer-use.md` § Window tool.
+  - Tests: `internal/tool/window_test.go`, `internal/computer/window_test.go`
+    (Linux argv/parse, id validation, Wayland refusal), permission and driver
+    attach tests in `internal/agent`. macOS and Windows helpers were NOT
+    exercised live (see TODO.md).
+
+- **The Share dialog now shows the live share status and can start/stop it.**
+  - New side-effect-free `GET /api/tailscale-share` plus `POST
+    /api/tailscale-share/start` and `POST /api/tailscale-share/stop`. The old
+    `GET /api/tailscale-url` is removed: it STARTED the funnel/serve exposure on
+    read, so merely opening the dialog (or any speculative GET) published the
+    instance. A status read can no longer start anything.
+  - Status carries `running` + `kind` (`funnel` = public on the internet,
+    `serve` = tailnet-only). `tailscale.StartExposeWithKind` reports which
+    subcommand actually succeeded, so the UI can warn when a share is public; a
+    bare DNS-name fallback (no proven mount) reports **not running** with no URL
+    rather than handing out a dead link.
+  - `ShareDialog` and Settings → Auto Share show a Running/Not-sharing badge,
+    the exposure kind, and Start/Stop. Stop (with an inline confirm) kills the
+    background process AND removes the `--set-path /desktop` mount — killing the
+    process alone would leave a public funnel live. Stop never changes the
+    persisted `auto_share_on_start`; the UI warns that an enabled auto-share
+    will start again on the next launch.
+  - Manual Start keeps funnel-first (public-when-allowed) semantics; the boot
+    auto-share path stays tailnet-only `serve`. Both share the one cached
+    exposure slot, and a dedicated op mutex serializes start/stop so a Stop can
+    never be resurrected by an in-flight start.
+  - Tests: new `internal/server/tailscale_share_test.go`, updated
+    `tailscale_auto_share_test.go` / `handler_auto_share_test.go` /
+    `handler_auto_share_routes_test.go`; new `ShareDialog.test.tsx` cases and
+    `AutoShareForm.test.tsx` status/start/stop cases. Mutation-verified: a
+    status read that starts, dropping the mount removal, and a non-idempotent
+    start each fail a test.
+
+- **The SQLite browser became a working DB IDE: server-side filter/sort/count,
+  inline cell edit, counted bulk delete, CSV export, maintenance ops and a
+  snapshot before every write.**
+  - `GET /api/db/table` gained optional `filter` / `sort` / `dir` / `count`.
+    The filter is user SQL, so it is validated by wrapping it in
+    `SELECT 1 WHERE (<filter>)` and running the SAME read-only allowlist as any
+    other statement — a `;`-separated statement, an `ATTACH` (including one
+    hidden in a comment, which `stripSQLNoise` neutralises) or a write is
+    refused. A read-only subquery stays legal. The sort column is admitted only
+    when the table really has it, then quoted. Both refusals are 400, not 500,
+    and surface in the grid rather than as an empty pane.
+  - `total` comes from a real `COUNT(*)` matching the filter, present only when
+    `count`/`filter`/`sort` was requested, so an unfiltered page request is
+    byte-identical to the previous response.
+  - Inline cell editing double-clicks a cell and reuses the row UPDATE endpoint,
+    so it inherits the exactly-one-row transaction and the 409 optimistic-
+    concurrency signal; a failed save keeps the editor open with the error.
+  - Bulk delete confirms with the row count, deletes sequentially, and reports
+    `Deleted N of M` plus the reason when one fails.
+  - CSV export (RFC 4180 quoting; NULL is the empty field, not the text `null`;
+    BLOBs become a marker) of the fetched page.
+  - `POST /api/db/maintenance` runs `analyze` / `vacuum` / `integrity_check`
+    from a package constant, never from user text, and passes the write guard
+    for the two that mutate.
+  - Every row mutation is preceded by `dbbrowse.Backup`, a `VACUUM INTO`
+    sibling snapshot (`<file>.db.bak`) taken before `Exec` so it always records
+    the state the user could return to. `Backup` probes first, because
+    `sql.Open` is lazy and `VACUUM INTO` would otherwise snapshot an empty
+    database it just created for a typo'd path.
+- **BLOB cells can now be viewed, downloaded and replaced from the SQLite
+  browser.** The grid only ever carries the first 8 KB of a blob, so until now
+  a BLOB was visible as a size and nothing more.
+  - `GET /api/db/blob` streams the full value as raw bytes with an `attachment`
+    disposition and a sanitized filename; a SQL NULL cell answers 204 so the
+    client does not save a zero-byte file for a cell that holds nothing.
+  - `POST /api/db/blob` sets one cell from a raw octet-stream body (64 MB cap,
+    413 on overflow). It snapshots the database first and delegates to
+    `dbbrowse.WriteBlob` → `RowUpdate`, so it keeps the exactly-one-row
+    transaction and the refusal to write a view. A failed write answers 409 (the
+    same optimistic-concurrency signal the row endpoints use).
+  - Rendering is a magic-byte allowlist: raster images inline, everything else
+    as a hex dump. SVG and HTML are deliberately NOT treated as images — they
+    execute script, so "the browser can display it" is not the test.
+  - TEXT stored in a BLOB column is refused rather than saved as bytes, and an
+    ambiguous key is reported as ambiguous rather than as a column-type problem
+    (the latter was found by live-testing a built binary).
+  - The row dialog's BLOB columns gained a file picker; its draft is tri-state
+    on presence, so "cleared" (NULL) and "untouched" (leave the value alone)
+    are no longer the same thing. `/api/db/row` gained a 96 MB body cap for the
+    base64 path and reports 413 distinctly.
+  - Tests: `internal/dbbrowse/blob_test.go`,
+    `internal/server/handler_db_blob_test.go`,
+    `web/src/components/Preview/BlobDialog.test.tsx`,
+    `web/src/components/Preview/blobPreview.test.ts`,
+    `web/src/components/Preview/SQLiteDialogs.blob.test.tsx`,
+    `web/src/api/client.dbBlob.test.ts`. The sniffing allowlist, the NULL
+    signal, the size caps, the key decoding, the filename sanitization and the
+    backup-before-write are all mutation-verified.
+  - Tests: `internal/dbbrowse/page_test.go`,
+    `internal/server/handler_db_ide_test.go`,
+    `web/src/components/Preview/SQLiteViewer.ide.test.tsx`,
+    `web/src/components/Preview/csvExport.test.ts`. The security- and
+    correctness-sensitive branches (filter gate, sort allowlist, backup probe,
+    selection clearing, CSV rules) are mutation-verified.
+
 - **CI's first run was red in all three jobs; two were workflow bugs, now fixed
   and locally verified.** Run `37344285998`.
   - *`cmd/ocode-desktop` does not compile on `ubuntu-latest`.* It imports wails
@@ -194,6 +463,14 @@
     because one test never returned, which is also why the job reported zero test
     failures while timing out. Raising the number would have hidden that, not
     fixed it. That is why the value is unchanged in this pass.
+
+## 2026-10-07 — Auto-permission: `rm -rf "$tmp"` of a same-line `mktemp -d` is no longer refused
+
+The judge allowed `tmp=$(mktemp -d) && … ; rm -rf "$tmp"` (0.83) but `dangerousRmReason` refused any `$`-variable rm target, so the user still got a prompt. A variable the same line earlier bound to a lone `$(mktemp -d)` (assigned once, before the rm) is now treated as a fresh scratch directory, for the bare `$tmp`/`${tmp}` target only; subpaths stay refused because an empty `$tmp` would turn `$tmp/etc` into `/etc`. Reassigned, `export`ed, post-rm, non-mktemp and `..` cases stay refused. The judge state now carries `scratch_dir_vars` plus a `scratch_dir_note` ("assume mktemp succeeds; the guard checks failure") only when such a variable is detected. Docs: `docs/concepts/auto-permission-enforced-categories.md`.
+
+## 2026-10-06 — Content guardrail: loopback-only `curl`/`wget` results are no longer scanned
+
+`bash` results from a network command were scanned even when the command only targeted `127.0.0.1`/`localhost`. A `curl /api/tabs` was flagged (confidence 0.20) because a session title held a pasted prompt. `contentGuardSourceFor` now skips lines whose network targets are all loopback (`bashTargetsOnlyLoopback`, shared proof with the egress guard); mixed, proxied and lookalike-host lines are still scanned. Docs: `docs/concepts/inbound-content-guardrail.md`.
 
 ## 2026-10-05 — A fresh clone builds, and contributor CI + contribution templates land
 

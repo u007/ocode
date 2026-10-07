@@ -132,6 +132,9 @@ function markCopySeen(text: string): void {
 // reads as "paste is broken".
 const DUPLICATE_PASTE_WINDOW_MS = 50;
 
+/** Max base64 chars accepted from an OSC 52 clipboard write (~75 KB of text). */
+const OSC52_MAX_PAYLOAD_CHARS = 100_000;
+
 /**
  * Writes text to the system clipboard, falling back to the deprecated
  * execCommand path when the async Clipboard API is unavailable or denied
@@ -968,6 +971,42 @@ export default function TerminalPanel({
       onAttention();
       return true;
     });
+    // OSC 52 clipboard write. Claude Code (mouse-tracking mode), tmux and vim
+    // handle a drag-selection themselves and "copy" it by emitting
+    // ESC ] 52 ; <targets> ; <base64> BEL — the only copy path that works
+    // through ssh. xterm.js ignores it unless handled. Write-only: a "?" query
+    // would let remote programs read the local clipboard, so it is refused.
+    // Replayed scrollback (readyRef false) must not overwrite the clipboard.
+    // Hijack guard: a program that merely prints (`cat hostile`, a remote host)
+    // has no user gesture behind it, so the write is honoured only inside the
+    // browser's transient user-activation window (a drag-select mouseup or a
+    // keypress that triggered the copy), and oversized payloads are dropped
+    // before they are decoded on the UI thread.
+    const osc52Disp = term.parser.registerOscHandler(52, (data) => {
+      if (!readyRef.current) return true;
+      const sep = data.indexOf(";");
+      if (sep < 0) return true;
+      const payload = data.slice(sep + 1);
+      if (payload === "?" || payload === "") return true;
+      if (payload.length > OSC52_MAX_PAYLOAD_CHARS) {
+        console.warn("Terminal OSC 52 payload exceeds size cap; clipboard write refused");
+        return true;
+      }
+      if (navigator.userActivation?.isActive !== true) {
+        console.warn("Terminal OSC 52 write without user activation refused");
+        return true;
+      }
+      let text: string;
+      try {
+        const bin = atob(payload);
+        text = new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+      } catch (err) {
+        console.warn("Terminal OSC 52 payload was not valid base64:", err);
+        return true;
+      }
+      void writeClipboardText(text);
+      return true;
+    });
 
     // onWriteParsed runs even for hidden keep-alive terminals, unlike render
     // events. Never acknowledge queued bytes before xterm has parsed them.
@@ -1460,6 +1499,7 @@ export default function TerminalPanel({
       osc9Disp.dispose();
       osc777Disp.dispose();
       osc99Disp.dispose();
+      osc52Disp.dispose();
       searchDisp.dispose();
       search.dispose();
       try {

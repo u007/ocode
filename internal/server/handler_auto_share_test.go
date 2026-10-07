@@ -16,7 +16,12 @@ func newAutoShareHandler(enabled bool, url string) *Handler {
 	h := &Handler{}
 	h.cfg = &config.Config{}
 	h.cfg.Ocode.AutoShareOnStart = enabled
-	h.tailscaleShareSnapshot = func() (string, string) { return url, "" }
+	h.tailscaleShareSnapshot = func() tailscaleShareStatus {
+		if url == "" {
+			return tailscaleShareStatus{}
+		}
+		return tailscaleShareStatus{Running: true, Available: true, URL: url, Kind: "serve"}
+	}
 	return h
 }
 

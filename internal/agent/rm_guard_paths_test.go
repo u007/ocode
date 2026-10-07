@@ -55,3 +55,52 @@ func TestDangerousRmReasonSymlinkGlobAndAncestorGit(t *testing.T) {
 		}
 	}
 }
+
+// `tmp=$(mktemp -d) … rm -rf "$tmp"` removes a directory the same line created,
+// so it is scope-checkable. Anything that leaves the variable's value unknown
+// must still be refused.
+func TestDangerousRmReasonMktempVariable(t *testing.T) {
+	root := t.TempDir()
+	pm := NewPermissionManager()
+	pm.SetWorkDir(root)
+	cases := []struct {
+		name    string
+		cmd     string
+		refused bool
+	}{
+		{"mktemp var", `tmp=$(mktemp -d) && echo hi > "$tmp/c.json"; rm -rf "$tmp"`, false},
+		{"braced", `tmp=$(mktemp -d) && rm -rf "${tmp}"`, false},
+		{"backticks", "tmp=`mktemp -d` && rm -rf \"$tmp\"", false},
+		{"subpath (empty if mktemp failed)", `tmp=$(mktemp -d) && rm -rf "$tmp/sub/a.json"`, true},
+		{"dotdot suffix", `tmp=$(mktemp -d) && rm -rf "$tmp/../x"`, true},
+		{"reassigned", `tmp=$(mktemp -d) && tmp=/ && rm -rf "$tmp"`, true},
+		{"read rebinds", `tmp=$(mktemp -d) && read tmp </dev/stdin; rm -rf "$tmp"`, true},
+		{"printf -v rebinds", `tmp=$(mktemp -d) && printf -v tmp /home/x; rm -rf "$tmp"`, true},
+		{"unset", `tmp=$(mktemp -d) && unset tmp; rm -rf "$tmp"`, true},
+		{"for rebinds", `tmp=$(mktemp -d) && for tmp in /home; do rm -rf "$tmp"; done`, true},
+		{"export reassigned", `tmp=$(mktemp -d) && export tmp=/ && rm -rf "$tmp"`, true},
+		{"assigned after rm", `rm -rf "$tmp"; tmp=$(mktemp -d)`, true},
+		{"not mktemp", `tmp=$HOME && rm -rf "$tmp"`, true},
+		{"mktemp -p elsewhere", `tmp=$(mktemp -d -p /) && rm -rf "$tmp"`, true},
+		{"other var", `tmp=$(mktemp -d) && rm -rf "$other"`, true},
+		{"var glued to glob", `tmp=$(mktemp -d) && rm -rf "$tmp"/*`, true},
+		{"var prefix of longer name", `tmp=$(mktemp -d) && rm -rf "$tmpx"`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := parseShellCommandLine(tc.cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refused := false
+			for i := range parsed {
+				if dangerousRmReasonIn(pm, parsed, i) != "" {
+					refused = true
+				}
+			}
+			if refused != tc.refused {
+				t.Fatalf("refused=%v want %v for %q", refused, tc.refused, tc.cmd)
+			}
+		})
+	}
+}

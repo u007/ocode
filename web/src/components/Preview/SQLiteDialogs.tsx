@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, Trash2, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -9,7 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
-import type { DBCell, DBColumnDef, DBTableSchema } from "../../api/client";
+import type { DBCell, DBCellInput, DBColumnDef, DBTableSchema } from "../../api/client";
 
 /**
  * Confirmation and editing dialogs for the SQLite browser (phases P2–P4).
@@ -24,6 +24,31 @@ const BTN_PRIMARY =
 const BTN_DANGER =
   "rounded bg-destructive px-2 py-0.5 text-xs text-destructive-foreground hover:opacity-90 disabled:opacity-50";
 const INPUT = "w-full rounded border border-border bg-transparent px-2 py-1 font-mono text-xs";
+
+/**
+ * A column whose declared type has BLOB affinity.
+ *
+ * SQLite matches the word anywhere in the declaration (BLOB, MEDIUMBLOB,
+ * VARBINARY is NOT a blob though — affinity comes from the substring "BLOB"), so
+ * the check is a substring test rather than an equality.
+ */
+export function isBlobColumn(declType: string): boolean {
+  return (declType || "").toUpperCase().includes("BLOB");
+}
+
+/** Read a File as bare base64 (no data: prefix), which is what `$blob` wants. */
+export function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 /** A grid cell rendered as editable text. NULL and BLOBs become empty. */
 export function cellToInput(v: DBCell): string {
@@ -131,7 +156,7 @@ export function RowEditorDialog({
   busy: boolean;
   error: string | null;
   onCancel: () => void;
-  onSubmit: (values: Record<string, DBCell>) => void;
+  onSubmit: (values: Record<string, DBCellInput>) => void;
 }) {
   const editable = useMemo(
     () => schema.columns.filter((c) => !c.generated && c.name !== "_rowid_"),
@@ -139,17 +164,42 @@ export function RowEditorDialog({
   );
   const isEdit = initial != null;
   const [draft, setDraft] = useState<Record<string, string>>({});
+  // A BLOB cannot be typed into a text field, so it gets its own draft: the
+  // base64 the file picker produced, or "clear" to store NULL.
+  const [blobDraft, setBlobDraft] = useState<
+    Record<string, { name: string; size: number; data: string } | null>
+  >({});
+  const [blobError, setBlobError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     const next: Record<string, string> = {};
     for (const c of editable) next[c.name] = isEdit ? cellToInput(initial?.[c.name] ?? null) : "";
     setDraft(next);
+    setBlobDraft({});
+    setBlobError(null);
   }, [open, isEdit, editable, initial]);
 
   const submit = () => {
-    const values: Record<string, DBCell> = {};
-    for (const c of editable) values[c.name] = inputToCell(draft[c.name] ?? "", c.decl_type);
+    const values: Record<string, DBCellInput> = {};
+    for (const c of editable) {
+      if (isBlobColumn(c.decl_type)) {
+        // Three states, keyed on PRESENCE rather than truthiness, because a
+        // cleared blob (null) and an untouched one (absent) are both falsy but
+        // mean opposite things:
+        //   absent  → leave the stored value alone on an update; NULL on insert
+        //   null    → the user cleared it, so store NULL
+        //   object  → the user picked a file, so store its bytes
+        if (!Object.prototype.hasOwnProperty.call(blobDraft, c.name)) {
+          if (!isEdit) values[c.name] = null;
+          continue;
+        }
+        const picked = blobDraft[c.name];
+        values[c.name] = picked ? { $blob: true, data: picked.data } : null;
+        continue;
+      }
+      values[c.name] = inputToCell(draft[c.name] ?? "", c.decl_type);
+    }
     onSubmit(values);
   };
 
@@ -173,17 +223,62 @@ export function RowEditorDialog({
                 {c.pk ? <span className="text-amber-500">pk</span> : null}
                 {c.not_null ? <span className="text-destructive">not null</span> : null}
               </span>
-              <input
-                value={draft[c.name] ?? ""}
-                onChange={(e) => setDraft((d) => ({ ...d, [c.name]: e.target.value }))}
-                placeholder="NULL"
-                aria-label={c.name}
-                data-testid={`db-field-${c.name}`}
-                className={INPUT}
-              />
+              {isBlobColumn(c.decl_type) ? (
+                <span className="flex items-center gap-1">
+                  <input
+                    type="file"
+                    aria-label={`Choose file for ${c.name}`}
+                    data-testid={`db-blob-${c.name}`}
+                    className="block w-full text-[11px]"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (!f) return;
+                      setBlobError(null);
+                      fileToBase64(f)
+                        .then((data) => setBlobDraft((d) => ({ ...d, [c.name]: { name: f.name, size: f.size, data } })))
+                        .catch((err: unknown) =>
+                          setBlobError(err instanceof Error ? err.message : String(err)),
+                        );
+                    }}
+                  />
+                  {blobDraft[c.name] ? (
+                    <>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {blobDraft[c.name]!.name} · {blobDraft[c.name]!.size} B
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={`Clear ${c.name}`}
+                        onClick={() => setBlobDraft((d) => ({ ...d, [c.name]: null }))}
+                        className="shrink-0 rounded p-0.5 hover:bg-muted"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </>
+                  ) : (
+                    <span className="shrink-0 text-[10px] text-muted-foreground">
+                      {isEdit ? "unchanged" : "NULL"}
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <input
+                  value={draft[c.name] ?? ""}
+                  onChange={(e) => setDraft((d) => ({ ...d, [c.name]: e.target.value }))}
+                  placeholder="NULL"
+                  aria-label={c.name}
+                  data-testid={`db-field-${c.name}`}
+                  className={INPUT}
+                />
+              )}
             </label>
           ))}
         </div>
+        {blobError ? (
+          <p role="alert" className="text-xs text-destructive" data-testid="db-blob-error">
+            {blobError}
+          </p>
+        ) : null}
         {error ? (
           <p role="alert" className="text-xs text-destructive">
             {error}

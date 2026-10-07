@@ -255,4 +255,55 @@ describe("SQLiteViewer writes (P2–P4)", () => {
     expect(screen.queryByTestId("sqlite-add-row")).toBeNull();
     expect(screen.queryByLabelText("Delete row 1")).toBeNull();
   });
+
+  it("renders a table whose index, foreign-key and row lists are all empty", async () => {
+    // The verbatim body `GET /api/db/table` returned for a table with no index
+    // and no foreign key (captured from a live server), which is the response
+    // that used to crash this component: the server emitted
+    // "indexes": null / "foreign_keys": null / "rows": null and the viewer
+    // dereferenced them unguarded.
+    dbInfo.mockResolvedValueOnce({
+      is_sqlite: true,
+      path: "bare.db",
+      tables: [{ name: "notes", type: "table", rows: 0 }],
+    });
+    dbTable.mockResolvedValue({
+      schema: {
+        name: "notes",
+        type: "table",
+        columns: [
+          { name: "id", decl_type: "INTEGER", not_null: false, pk: 1, generated: false },
+          { name: "body", decl_type: "TEXT", not_null: false, pk: 0, generated: false },
+        ],
+        indexes: [],
+        foreign_keys: [],
+        ddl: "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT)",
+        rowid: true,
+      },
+      result: {
+        columns: [
+          { name: "id", decl_type: "INTEGER" },
+          { name: "body", decl_type: "TEXT" },
+        ],
+        rows: [],
+        row_count: 0,
+        truncated: false,
+        elapsed_ms: 0,
+      },
+    });
+    render(<SQLiteViewer path="bare.db" />);
+    fireEvent.click(await screen.findByText("notes"));
+
+    // Data tab: an empty row page is a state, not a crash.
+    expect(await screen.findByText(/no rows/i)).toBeTruthy();
+
+    // Schema tab: the columns and DDL render; the empty Indexes and Foreign
+    // keys sections are omitted rather than throwing.
+    fireEvent.click(screen.getByRole("button", { name: "schema" }));
+    const schema = await screen.findByTestId("sqlite-schema");
+    expect(within(schema).getByText(/CREATE TABLE notes/)).toBeTruthy();
+    expect(within(schema).getByText("id")).toBeTruthy();
+    expect(within(schema).queryByText("Foreign keys")).toBeNull();
+    expect(within(schema).queryByText("Indexes")).toBeNull();
+  });
 });

@@ -503,11 +503,30 @@ export interface OcrConfig {
 
 /** Auto-share-on-start toggle plus the server's current share exposure.
  *  `url` is the cached exposure (empty until auto-share or the Share dialog
- *  starts one); `available` reports whether tailscale could serve at all. */
+ *  starts one); `available` reports whether tailscale could serve at all.
+ *
+ *  `running`/`kind` describe the LIVE exposure: `kind` is "funnel" (public on
+ *  the internet) or "serve" (tailnet-only). An unproven DNS-name URL is
+ *  deliberately reported as not running with no url. */
 export interface AutoShareConfig {
   enabled: boolean;
   available: boolean;
+  running: boolean;
+  kind?: ShareKind;
   url?: string;
+  hint?: string;
+}
+
+/** Which tailscale exposure is live: public funnel or tailnet-only serve. */
+export type ShareKind = "funnel" | "serve";
+
+/** Status of the whole-desktop tailscale share. Reading it is side-effect
+ *  free — STARTING is an explicit POST, never a GET. */
+export interface ShareStatus {
+  running: boolean;
+  available: boolean;
+  url?: string;
+  kind?: ShareKind;
   hint?: string;
 }
 

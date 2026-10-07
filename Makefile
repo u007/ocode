@@ -202,6 +202,12 @@ models-snapshot:
 
 web-build:
 	cd web && pnpm install && pnpm run build
+	# vite's emptyOutDir clears web/dist, including the committed .gitkeep that
+	# `//go:embed web/dist` needs to compile (a 100% .gitignored dist directory
+	# has no other file for the directive to match). Recreate it, the same way
+	# bundle-desktop-assets does for cmd/ocode-desktop/embedded-assets, so this
+	# target never leaves it deleted.
+	touch web/dist/.gitkeep
 
 web-dev:
 	cd web && pnpm run dev

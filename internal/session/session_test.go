@@ -1275,3 +1275,169 @@ func TestDeleteStillRemovesLegacyOjsonlSession(t *testing.T) {
 		t.Fatalf("expected .ojsonl file removed")
 	}
 }
+
+func TestTruncateTitleBoundsSingleLineAndRunes(t *testing.T) {
+	if got := TruncateTitle("hello\nworld", 80); got != "hello world" {
+		t.Fatalf("newline collapse = %q, want %q", got, "hello world")
+	}
+	if got := TruncateTitle("short", 80); got != "short" {
+		t.Fatalf("short title = %q, want passthrough", got)
+	}
+	got := TruncateTitle(strings.Repeat("x", 500), 80)
+	if n := len([]rune(got)); n != 80 {
+		t.Fatalf("long title = %d runes, want 80", n)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("long title = %q, want an ellipsis suffix", got)
+	}
+	// Rune-safe: multibyte characters must not be split, and the cap counts
+	// runes, not bytes.
+	multi := TruncateTitle(strings.Repeat("日", 200), 10)
+	if n := len([]rune(multi)); n != 10 {
+		t.Fatalf("multibyte title = %d runes, want 10", n)
+	}
+	if strings.ContainsRune(multi, '\uFFFD') {
+		t.Fatalf("multibyte title contains a replacement rune: %q", multi)
+	}
+}
+
+// TestSaveCapsOversizedAutoTitleButKeepsTranscript is the regression for the
+// multi-megabyte-title bug: a first user message can be megabytes (a pasted
+// standup prompt with full commit diffs), and storing it verbatim as the title
+// made every endpoint that carries the title — plus the shared tabs.json —
+// megabytes too, janking the web/desktop tab strip.
+func TestSaveCapsOversizedAutoTitleButKeepsTranscript(t *testing.T) {
+	_, dir := isolatedProjectRoot(t)
+	id := "ses_huge-autotitle"
+	huge := strings.Repeat("standup: review the recent commits and pending changes ", 100000)
+	if err := saveToDir(dir, id, "", []agent.Message{{Role: "user", Content: huge}}, nil, false, 0); err != nil {
+		t.Fatalf("saveToDir: %v", err)
+	}
+	sess, err := loadFromDir(dir, id)
+	if err != nil {
+		t.Fatalf("loadFromDir: %v", err)
+	}
+	if n := len([]rune(sess.Title)); n > MaxStoredTitleRunes {
+		t.Fatalf("stored title = %d runes, want <= %d (an oversized first message must not become the title)", n, MaxStoredTitleRunes)
+	}
+	if !strings.HasSuffix(sess.Title, "...") {
+		t.Fatalf("capped title = %q, want an ellipsis suffix", sess.Title)
+	}
+	// The cap is a LABEL bound, not a transcript truncation: resume/compaction
+	// must still see the full message.
+	if len(sess.Messages) != 1 || sess.Messages[0].Content != huge {
+		t.Fatalf("transcript was altered by the title cap")
+	}
+}
+
+// TestStoredTitleForDirCapsOversizedStoredTitle covers the READ-path cap: a
+// session whose title was stored verbatim before the write-path cap existed
+// must not ride every /state poll and /api/tabs fetch at full size. The row is
+// left untouched; only the returned label is bounded.
+func TestStoredTitleForDirCapsOversizedStoredTitle(t *testing.T) {
+	_, dir := isolatedProjectRoot(t)
+	id := "ses_title-huge"
+	// Seed a normal row, then inject an oversized title directly, because the
+	// SAVE path now bounds it — a saveToDir-seeded assertion would be vacuous
+	// for the read cap. This is exactly the "poisoned before the fix" shape.
+	if err := saveToDir(dir, id, "seed", liveMsgs("q0", "a0"), nil, false, 0); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	db, err := openDBRaw(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("openDBRaw: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE meta SET title = ? WHERE id = ?`, strings.Repeat("z", 50000), id); err != nil {
+		db.Close()
+		t.Fatalf("force title: %v", err)
+	}
+	db.Close()
+	title, err := storedTitleForDir(dir, id)
+	if err != nil {
+		t.Fatalf("storedTitleForDir: %v", err)
+	}
+	if n := len([]rune(title)); n > MaxStoredTitleRunes {
+		t.Fatalf("storedTitleForDir = %d runes, want <= %d", n, MaxStoredTitleRunes)
+	}
+}
+
+// readStoredTitleRaw reads a session's title straight from sqlite, bypassing the
+// read-path cap, so a test can assert what was actually PERSISTED.
+func readStoredTitleRaw(t *testing.T, dir, id string) string {
+	t.Helper()
+	db, err := openDBRaw(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("openDBRaw: %v", err)
+	}
+	defer db.Close()
+	var title string
+	if err := db.QueryRow(`SELECT title FROM meta WHERE id = ?`, id).Scan(&title); err != nil {
+		t.Fatalf("select title: %v", err)
+	}
+	return title
+}
+
+// TestSavePersistsBoundedTitle covers the SAVE-path cap: the STORED title (not
+// just the value returned on read) must already be bounded, so the poison never
+// reaches the DB in the first place.
+func TestSavePersistsBoundedTitle(t *testing.T) {
+	_, dir := isolatedProjectRoot(t)
+
+	// Over-limit explicit title on a NEW session is persisted already-bounded.
+	if err := saveToDir(dir, "ses_title-write", strings.Repeat("T", 5000), liveMsgs("q0", "a0"), nil, false, 0); err != nil {
+		t.Fatalf("saveToDir: %v", err)
+	}
+	if got := readStoredTitleRaw(t, dir, "ses_title-write"); len([]rune(got)) > MaxStoredTitleRunes {
+		t.Fatalf("stored title = %d runes, want <= %d (write path must persist bounded)", len([]rune(got)), MaxStoredTitleRunes)
+	}
+
+	// Under-limit title is stored unchanged.
+	if err := saveToDir(dir, "ses_title-short", "Short title", liveMsgs("q0", "a0"), nil, false, 0); err != nil {
+		t.Fatalf("saveToDir: %v", err)
+	}
+	if got := readStoredTitleRaw(t, dir, "ses_title-short"); got != "Short title" {
+		t.Fatalf("under-limit title = %q, want unchanged", got)
+	}
+
+	// Multibyte title at the boundary cuts on a rune boundary (valid UTF-8).
+	if err := saveToDir(dir, "ses_title-multi", strings.Repeat("日", MaxStoredTitleRunes*2), liveMsgs("q0", "a0"), nil, false, 0); err != nil {
+		t.Fatalf("saveToDir: %v", err)
+	}
+	got := readStoredTitleRaw(t, dir, "ses_title-multi")
+	if n := len([]rune(got)); n != MaxStoredTitleRunes {
+		t.Fatalf("multibyte title = %d runes, want %d", n, MaxStoredTitleRunes)
+	}
+	if strings.ContainsRune(got, '\uFFFD') {
+		t.Fatalf("multibyte title contains a replacement rune: %q", got)
+	}
+}
+
+// TestSaveHealsOversizedStoredTitle covers the carried-over case: a row poisoned
+// BEFORE the write-path cap (e.g. by an older binary) is re-bounded on its next
+// save, with no migration step.
+func TestSaveHealsOversizedStoredTitle(t *testing.T) {
+	_, dir := isolatedProjectRoot(t)
+	id := "ses_title-heal"
+	if err := saveToDir(dir, id, "seed", liveMsgs("q0", "a0"), nil, false, 0); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Inject an oversized title directly, as a pre-fix writer would have.
+	db, err := openDBRaw(sqliteSessionPath(dir, id))
+	if err != nil {
+		t.Fatalf("openDBRaw: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE meta SET title = ? WHERE id = ?`, strings.Repeat("H", 30000), id); err != nil {
+		db.Close()
+		t.Fatalf("force title: %v", err)
+	}
+	db.Close()
+
+	// The next save (with new content, so the meta row is rewritten) must bound it.
+	if err := saveToDir(dir, id, "", liveMsgs("q0", "a0", "q1", "a1"), nil, false, 0); err != nil {
+		t.Fatalf("heal save: %v", err)
+	}
+	if got := readStoredTitleRaw(t, dir, id); len([]rune(got)) > MaxStoredTitleRunes {
+		t.Fatalf("healed title = %d runes, want <= %d (a stored oversized title must be re-bounded on the next save)", len([]rune(got)), MaxStoredTitleRunes)
+	}
+}

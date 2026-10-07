@@ -41,6 +41,30 @@
 
 
 
+
+
+## 2026-10-07
+
+* **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
+* **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Creation**: "Add to .gitignore" — toplevel targeting, C-quoting, and append-not-truncate ([gotchas/git-ignore-toplevel-and-quoting.md](/gotchas/git-ignore-toplevel-and-quoting.md))
+* **Update**: Auto-Permission Judge — Credential Material Is Withheld from the Judge Context ([gotchas/auto-permission-judge-withholds-credentials.md](/gotchas/auto-permission-judge-withholds-credentials.md))
+* **Update**: Auto-Permission Judge — Credential Material Is Withheld from the Judge Context ([gotchas/auto-permission-judge-withholds-credentials.md](/gotchas/auto-permission-judge-withholds-credentials.md))
+* **Update**: Desktop subprocess PATH trap — bare CLI names fail under Finder/Dock-launched .app ([gotchas/desktop-subprocess-path-trap.md](/gotchas/desktop-subprocess-path-trap.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: File-Edit Snapshot &amp; Undo Mechanism ([file-edit-snapshot.md](/file-edit-snapshot.md))
+* **Update**: A derived title/label must be bounded before it is persisted or rendered ([gotchas/derived-title-label-must-be-bounded.md](/gotchas/derived-title-label-must-be-bounded.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Creation**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+## 2026-10-06
+
+* **Update**: Cross-process session activity sync (revision revalidation) ([concepts/cross-process-session-sync.md](/concepts/cross-process-session-sync.md))
+* **Creation**: A derived title/label must be bounded before it is persisted or rendered ([gotchas/derived-title-label-must-be-bounded.md](/gotchas/derived-title-label-must-be-bounded.md))
+* **Update**: Desktop durable share token (two-credential model) ([concepts/desktop-share-token.md](/concepts/desktop-share-token.md))
+* **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
 ## 2026-10-05
 
 * **Update**: Clef decision-judge backend + per-judge model selection — design ([superpowers/specs/2026-10-03-clef-judge-backend-design.md](/superpowers/specs/2026-10-03-clef-judge-backend-design.md))

@@ -1,5 +1,112 @@
 # TODO
 
+## OKF bundle: known defects left unfixed (2026-10-07)
+
+Found while fixing the `docs/index.md` corruption. These are recorded rather than
+fixed because each needs a decision or belongs to a file another session owns.
+
+- **Two bundle pages have an EMPTY body** — `gotchas/desktop-subprocess-path-trap.md`
+  (1 byte) and `gotchas/auto-permission-prompt-load-semantics-flip.md`. Their index
+  entries and frontmatter descriptions are fine, but the pages themselves are
+  stubs: opening one from the index shows a title and nothing else. Filling them is
+  content authoring, not repair, so it needs someone who can write the body — the
+  description of the PATH-trap page already contains the full explanation and is
+  the natural source. (The PATH-trap page's frontmatter was repaired mechanically
+  as part of the index fix; its empty body is separate and still empty.)
+- **Nine `docs/okf/*/derived/*.SKILL.md` files are not valid strict YAML**, so their
+  index entries carry no description (bare links), unlike their strict-YAML
+  siblings. This is NOT an accident: `docs/okf/_tools/sync-derived-skills.py`
+  documents that their frontmatter values deliberately carry unquoted colons so it
+  can mirror the Go loader's lenient line-based `parseFrontmatter`
+  (`internal/skill/loader.go`). So the two readers disagree: the skill loader is
+  lenient and reads them, the index builder appears to require strict YAML and can
+  only emit the link. Fixing it means choosing one contract — either quote the
+  values in `gen-prompt-sheets.py` (which authors those files, and which another
+  session was editing at the time) so they are valid as well as lenient-parseable,
+  or make the index builder use the same lenient parse. Do NOT hand-edit the nine
+  files: they are generated and a hand-fix will be reverted on the next sync.
+- **`docs/log.md` has ~44 blank lines between its heading and its first entry.**
+  Cosmetic, pre-existing, emitted by whatever writes the log.
+
+## Oversized-content rendering: remaining gaps (2026-10-06)
+
+Session titles derived from an oversized first user message are now bounded at
+every write/read/render boundary, and oversized USER message bodies fold behind
+a "Show full message" expander (`MessageBubble.OVERSIZED_MESSAGE_CHARS`). Two
+follow-ups remain:
+
+- **Assistant message bodies are NOT folded.** `AssistantText` renders the whole
+  `content` through react-markdown, so a model that emits a multi-megabyte reply
+  still forces a full-document render. Not folded because that component also
+  drives the LIVE stream (capping mid-stream would hide the tail the user is
+  watching) and truncating markdown can split a fenced block. Needs a
+  streaming-aware guard (e.g. fold only committed messages over the threshold).
+- **503 local sessions still have stored titles over 80 chars** (worst 21,201;
+  the 1.4 MB one was remote and has been renamed). The read cap
+  (`session.StoredTitleForDir`) renders them bounded, but the on-disk row is
+  unchanged, and a pre-fix binary (an un-rebuilt desktop app, an old remote
+  `serve --remote`) still transmits the full value. No bulk migration is planned
+  — the cap is a label bound, and rewriting 503 transcripts' meta rows risks
+  more than it fixes. Re-check if a large one appears.
+
+## `window` tool: unverified platforms (2026-10-06)
+
+- macOS JXA ops (`windows`, `window-focus`, `window-bounds`, `window-state` in
+  `internal/computer/cgevent_darwin.js`) were written without a live run: the
+  dev shell lacked Accessibility. Add an `OCODE_COMPUTER_LIVE=1` darwin live
+  test (list, move a scratch window, minimize/restore) and run it.
+- Windows ops in `input_windows.ps1` (`OcodeWin`) were cross-vetted only
+  (`GOOS=windows go vet`); never executed. Needs a live run, including the
+  Alt-press foreground workaround and 32-bit (`GetWindowLongPtrW` is 64-bit only).
+- Linux Wayland is unsupported by design (explicit error); revisit with
+  compositor-specific backends (sway/hyprland IPC, KWin scripting) if wanted.
+- `ListWindows` on Linux spawns one `xprop` per window; batch if it proves slow.
+
+## SQLite browser / DB IDE follow-ups (2026-10-06)
+
+The DB IDE pass is in (`CHANGES.md`). These were deliberately left out.
+
+- **No one-click restore from the snapshot.** Every row mutation now writes a
+  `VACUUM INTO` sibling at `<file>.db.bak`, but the only way back is to copy that
+  file over the database by hand. A restore endpoint is a mutation that
+  OVERWRITES the live file, so it needs its own guard (which file, confirm,
+  re-probe afterwards) — deferred rather than shipped unguarded. The snapshot is
+  still useful as-is: it is plain SQLite sitting next to the database.
+- **The two BLOB upload entry points disagree on the maximum file size, so the
+  advertised 64 MB limit is not uniformly enforced.**
+  - The grid chip's *Replace* posts a raw body to `/api/db/blob`
+    (`blobUploadMaxBytes` = 64 MiB) → **max file 64 MiB**.
+  - The row dialog's file picker posts base64 inside `/api/db/row`'s JSON body
+    (`dbRowMaxBodyBytes` = 96 MiB; base64 inflates 4/3) → **max file ~72 MiB**,
+    i.e. 8 MiB *more* permissive than the raw path.
+  So a 65–72 MiB file is accepted by the row dialog and refused with 413 by the
+  grid chip. Fix by picking one ceiling and enforcing it in both places (or by
+  routing the dialog through the raw endpoint, which also drops the 4/3
+  inflation). Raising either number should come with a decision about streaming
+  to a temp file rather than buffering in memory.
+- **The grid still DISPLAYS a rounded value for an integer id past 2^53**, even
+  though the KEY path is now exact (see `CHANGES.md`). The cell arrives as a JSON
+  number, so `Cell` renders `String(float64)` and shows 9007199254740992 for a
+  row whose real id is 9007199254740993 — the user sees an id that is not the one
+  they are editing. Only the key was fixed; fixing the display means sending
+  integer cell values as strings, which ripples through `Cell`, the row dialog's
+  value codec, CSV export and any client-side ordering, so it is a separate
+  change. Worth doing because "the id I can see" disagreeing with "the id on disk"
+  is the same class of confusion the key fix removed.
+- **A BLOB (or other unexpressible) key component falls back to the lossy path.**
+  `RowKeys` reports a nil entry rather than inventing a representation it cannot
+  guarantee matches the stored value, so such a row keeps the old cell-derived
+  key. A BLOB primary key is exotic, but the fallback is silent: the UI gives no
+  hint that this row's key is approximate.
+- **No query history or saved queries.** The Query tab is a plain textarea with
+  in-memory state; a history would need a per-database key and a place to live,
+  and `localStorage` is wrong for a remote host.
+- **The grid has no keyboard navigation** (arrow keys between cells). Inline edit
+  is double-click + Enter only, which is DB Browser for SQLite's noisiest gap.
+- **`dir` is validated at the HTTP layer, not in `dbbrowse`.** `sortClause`
+  takes a bool, so a caller that builds `PageOptions` directly cannot express an
+  invalid direction — worth keeping in mind if another caller appears.
+
 ## Contributor on-ramp: deferred items (2026-10-05)
 
 The clean-clone build, CI, and contribution templates landed (see CHANGES.md
@@ -78,23 +185,45 @@ The clean-clone build, CI, and contribution templates landed (see CHANGES.md
   until it expired, whereas on macOS the same test passes in 0.4s (3 runs in
   1.36s). Suspect the supervisor's kill/reap path, not the test.
 - **Linux CI: the darwin-only test failures in the remaining packages (2026-10-06).**
-  Two causes are now fixed — the fake-`ssh` shims used bash arrays (dash rejects
-  them) and `confinedPath` used the eager normalizer for the lazily-created
-  managed caches. Still red on a fresh Linux runner:
-  - `internal/tui` and `internal/server`: a large tail of the same XDG/`$HOME`
-    class (`paths.GlobalConfigDir()` ignores `XDG_CONFIG_HOME` on darwin but
-    honours it elsewhere). Neither package has a `setHomeTree` helper yet, which
-    is the prerequisite for fixing them the way `internal/config` and
-    `internal/agent` were fixed.
+  Fixed so far: the fake-`ssh` shims used bash arrays (dash rejects them);
+  `confinedPath` used the eager normalizer for the lazily-created managed caches;
+  and `internal/server` had two isolation bugs — TestMain pointed all three XDG
+  variables at ONE directory (so `GlobalConfigDir() == GlobalDataDir()` on Linux,
+  which the self-escalation guard reads as a data-dir write), and tests isolated
+  with a bare `t.Setenv("HOME", …)` which the XDG variables override on Linux,
+  leaking a persisted `sandbox` mode into every later test in the binary.
+  `internal/server` went from 12 failures to 1 on Linux and is unchanged on
+  darwin (commit 332da63c).
+  Still red on a fresh Linux runner:
+  - `internal/tui`: the same XDG/`$HOME` class; it has no `setHomeTree` helper
+    yet, which is the prerequisite for the fix `internal/config`, `internal/agent`
+    and `internal/server` have now received.
   - `internal/remote`: `serve_test.go` has three `got`/`want` assertions that
     print byte-identically yet compare unequal — consistent with a monotonic
     clock field in the compared struct.
   - `web`: `TestFSContainsIndexHTML` fails in 0.002s because a clean checkout has
     only `web/dist/.gitkeep`. Needs a decision: skip when the SPA is unbuilt, or
     build the web app before the Go job.
+  - `internal/browse/cdp`: two `-race` failures, pre-existing and unrelated.
   Last measured: 67 distinct failures across browse/cdp, remote, server, tool,
-  tui and web; `internal/tool` is fixed, and `internal/config` / `internal/agent`
-  now pass.
+  tui and web. `internal/tool`, `internal/config` and `internal/agent` are fixed.
+- **Two `internal/server` failures are CI-configuration questions, not bugs.** Both
+  are outside the portability class and need a policy decision:
+  - `TestEnsureSharedHTRDaemonReachesTheEnsureWithResolvedOptions` fails on BOTH
+    darwin and Linux because `go test` builds without the `htr` tag, so the binary
+    legitimately has no HTR bundle. Either the Go job builds with
+    `-tags "htr models"` (and generates the assets first) or the test needs a
+    skip guard for the no-bundle case.
+  - `TestRequestSystemPermissionsReconcilesEnabled` asserts macOS permission ids
+    (`macos.files.documents`, `macos.accessibility`) while running on Linux, so it
+    reconciles 3 requests where it expects 2. It needs a GOOS guard or a
+    platform-neutral expectation.
+- **`internal/server` has other bare `t.Setenv("HOME", …)` sites** (e.g.
+  `handler_auto_share_test.go`, `tailscale_auto_share_test.go` — both being edited
+  by another session, so deliberately not touched). They do not currently leak,
+  because the full Linux package run is green apart from the `htr`-tag test, but
+  they carry the same latent trap: a bare HOME is overridden by the XDG variables
+  on Linux. Convert them to `setHomeTree` opportunistically.
 - **`docs/file-edit-snapshot.md` disagrees with the source on the undo age.**
   The page cites `internal/tool/undo.go:14` as `undoMaxAgeDelta = 2`, but the
   source defines `defaultUndoMaxAgeDelta = 10` (line 16; the effective value is
@@ -5546,3 +5675,61 @@ Plan: `docs/superpowers/plans/2026-10-03-clef-judge-backend/`. Spec:
   and leaks the listener. Only reachable from a caller that shuts down
   immediately after boot (the test's old pattern); the desktop app shuts down on
   quit, long after `Serve` has started, so it is not a user-facing bug.
+
+## Desktop share status / start-stop follow-ups (2026-10-06)
+
+Shipped in `CHANGES.md` (GET `/api/tailscale-share` + start/stop, `AutoShareForm`
++ `ShareDialog` status/controls). Deliberately left out:
+
+- **No stale global-mount reconciliation.** `tailscale serve --bg --set-path
+  /desktop` is one GLOBAL mount per node and survives this process. A crash /
+  hard kill (no `Server.Shutdown` → `cleanup()`) leaves the mount pointing at a
+  dead loopback port. `start()` calls `RemoveSetPath` first now, so the next
+  Start replaces it, but nothing proactively detects/reports a stale mount while
+  stopped. A "serve status" probe on Stop/Start could close this; the status
+  read deliberately stays cache-only to avoid a subprocess per poll.
+- **The native Share menu has no dynamic label/state.** It still just opens the
+  dialog (Share Session… / Share Entire Desktop… / Copy Desktop URL / Reset
+  Share Token…); a live "Stop Sharing" item would need Wails menu-item
+  label/enabled updates plus a poll. The user chose dialog + Settings, so this
+  is deferred.
+- **`--set-path /desktop` is shared node-wide**, so Stop removes whatever process
+  put that mount there — including a TUI `/rc` session if it ever used the same
+  path (it uses the session id, so in practice only this server's own mount).
+  Worth revisiting if a second server ever mounts `/desktop`.
+
+## Phone → remote host direct: auth/transport follow-ups (2026-10-06)
+
+Investigated while answering whether the mobile web UI can connect directly to
+a remote SSH host (no desktop in the loop). No behavior changed. Findings, in
+priority order (line anchors verified 2026-10-06; expect drift):
+
+- **A credential-less non-loopback `ocode serve` is unauthenticated.**
+  `authMiddleware` bypasses when `!remoteMode && username=="" && password==""`
+  (`internal/server/server.go:779`), and the default bind is `0.0.0.0`
+  (`server.go:1898`). Only plugin routes are guarded
+  (`pluginAuthMiddleware`, `server.go:866`). Running bare `ocode serve` on a
+  remote host therefore exposes the whole API. Consider REFUSING a
+  non-loopback bind with no credentials (or auto-generating a token).
+- **Non-constant-time credential compare.** `Server.tokenMatches`
+  (`internal/server/share_token.go`) uses plain `==` for the launch token and
+  the share token. Switch to `crypto/subtle.ConstantTimeCompare`.
+- **No phone-reachable URL for a directly-exposed `--remote` host.** The only
+  built-in generator of a `--remote`-compatible link is `ocode remote --web`,
+  which opens `http://localhost:<tunnelPort>/#token=<tok>`
+  (`internal/remote/connect.go`) — a loopback URL on the machine running the
+  CLI, not the host's tailnet name. The desktop Share dialog emits `?token=`
+  links (`internal/tailscale/tailscale.go` `BuildSessionURL`,
+  `web/src/components/Layout/ShareDialog.tsx`), which `--remote` rejects
+  (`server.go:741-745`), and the SPA disables sharing in a remote session. A
+  phone needs the host's `tailscale serve` URL plus the launch token from
+  `~/.ocode/remote/serve.json` pasted as `#token=`; nothing produces that
+  today. (The auth mechanism itself IS phone-compatible: fragment→Bearer
+  (`web/src/api/client.ts`), fetch-based SSE (`web/src/lib/eventBus.ts`), WS
+  subprotocol (`TerminalPanel`).)
+- **Rate limit is per-IP, in-memory, 5 failures/1 min** and resets on restart
+  (`internal/server/server.go` `rateLimiter`); behind a tunnel/edge the visible
+  peer IP may collapse, making it either a global-lockout DoS or weak.
+- **Doc follow-up:** once the `--remote` vs `?token=` share-link conflict is
+  resolved, update `docs/concepts/desktop-share-token.md` (and the sharing
+  docs) to state which link forms a `--remote` server accepts.

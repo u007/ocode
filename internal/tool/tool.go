@@ -200,6 +200,7 @@ func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computer
 	// Computer tool — opt-in via cfg.Ocode.ComputerUse.Enabled.
 	if cfg != nil && cfg.Ocode.ComputerUse.Enabled {
 		builtins = append(builtins, &ComputerTool{Config: cfg, Driver: computerDriver, DriverErr: computerDriverErr})
+		builtins = append(builtins, newWindowTool(cfg, computerDriver, computerDriverErr))
 	}
 	// Scheduled-job management — only included when a scheduler service is
 	// attached. The indirection through any (resolved in cron.go) avoids a

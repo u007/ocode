@@ -8,6 +8,7 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/tailscale"
 )
 
 // setHomeTree points HOME and every XDG/Windows equivalent at ONE temp tree so
@@ -97,6 +98,9 @@ func TestMain(m *testing.M) {
 	if p, err := config.ActiveOcodeConfigPath(); err == nil {
 		snapshot.SetGlobalBaseDir(filepath.Join(filepath.Dir(p), "snapshots"))
 	}
+
+	// Never let a test reach the real tailscale CLI (live node-wide serve config).
+	tailscale.CLIPath = func() string { return "" }
 
 	code := m.Run()
 

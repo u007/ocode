@@ -1,0 +1,7 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Expense report</title></head><body>
+<h1>Expense report</h1>
+<form method="post" action="/submit" enctype="multipart/form-data">
+<p><label>Employee <input name="employee"></label></p>
+<p><label>Amount <input name="amount" type="number" step="0.01"></label></p>
+<p><label>Receipt (PDF or image) <input type="file" name="receipt" accept=".pdf,.png,.jpg"></label></p>
+<button type="submit">Submit report</button></form></body></html>

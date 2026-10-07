@@ -101,7 +101,7 @@ you have the answer key, so any answer you write would be a copy. If the answer
 file is missing, STOP and report it; do not substitute your own answers.
 
 INPUTS (fill these in):
-- STACK: <react | golang | rust | tanstack | nextjs | conduct | hallucination>
+- STACK: <react | golang | rust | tanstack | nextjs | conduct | hallucination | pdf | docx | pptx | webforms>
 - MODEL_ID: <PROVIDER-STRIPPED model id, e.g. claude-opus-4-8 or tencent/hy3>
   # Strip the leading provider segment: `novita/tencent/hy3` -> `tencent/hy3`,
   # `anthropic/claude-opus-4-8` -> `claude-opus-4-8`. NEVER a family name, and

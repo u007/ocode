@@ -281,7 +281,7 @@ func contentGuardSourceFor(a *Agent, toolName, toolArgs string) *contentGuardSou
 			return &contentGuardSource{Tool: toolName, Label: "MCP " + toolName, Full: "MCP " + toolName}
 		}
 	}
-	if cmd := bashCommand(json.RawMessage(toolArgs)); toolName == "bash" && bashHasNetworkSubcommand(cmd) {
+	if cmd := bashCommand(json.RawMessage(toolArgs)); toolName == "bash" && bashHasNetworkSubcommand(cmd) && !bashTargetsOnlyLoopback(cmd) {
 		return &contentGuardSource{Tool: toolName, Label: "bash: " + clipLabel(cmd, 120), Full: "bash: " + cmd}
 	}
 	return nil
@@ -769,6 +769,16 @@ func clipLabel(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// bashTargetsOnlyLoopback reports whether every network command in the line
+// talks only to this machine (`curl http://127.0.0.1:PORT/api/tabs`). That is
+// not remote content, so the guardrail skips it. It reuses the egress guard's
+// proof (bashEgressTargets), which already treats a line mixing a loopback and a
+// remote fetch, or a proxied/--resolve'd "localhost", as non-loopback.
+func bashTargetsOnlyLoopback(cmd string) bool {
+	targets := bashEgressTargets(cmd)
+	return len(targets) > 0 && !hasNonLoopbackEgressTarget(targets)
 }
 
 // bashHasNetworkSubcommand reports whether a bash command line invokes a

@@ -16,9 +16,17 @@ import (
 // that exercises exposure must therefore also neutralize knownCandidates.
 func isolateCLI(t *testing.T) {
 	t.Helper()
-	saved := knownCandidates
+	savedCandidates := knownCandidates
+	savedPath := CLIPath
 	knownCandidates = nil
-	t.Cleanup(func() { knownCandidates = saved })
+	// Opt IN to the real resolver. TestMain blocks it for the whole binary; this
+	// helper is the ONLY place that re-enables it, and it points PATH at a temp
+	// dir, so the real CLI stays unreachable.
+	CLIPath = findCLI
+	t.Cleanup(func() {
+		knownCandidates = savedCandidates
+		CLIPath = savedPath
+	})
 	t.Setenv("PATH", t.TempDir())
 }
 
@@ -136,5 +144,109 @@ func TestStartServeExposeNoCLIWhenTailscaleAbsent(t *testing.T) {
 	url, proc, hint := StartServeExpose("localhost:1234", "desktop")
 	if url != "" || proc != nil || hint != "" {
 		t.Fatalf("absent tailscale must be a silent no-op, got url=%q proc=%v hint=%q", url, proc, hint)
+	}
+}
+
+// TestStartExposeFunnelPinsPublicPort pins the port the funnel path attempts.
+//
+// Funnel is only permitted on 443, 8443 and 10000, and 443 is routinely already
+// a tailnet-only `serve` port (the TUI /rc `/ses_...` mounts). Tailscale cannot
+// expose one port as BOTH serve and funnel — "if the most recent command to
+// configure the port was serve, then the port will be completely private" — so
+// a funnel attempt that defaults to 443 silently stays tailnet-only, which is
+// exactly how a "public" share ended up VPN-only. The funnel attempt must
+// therefore carry --https=FunnelHTTPSPort.
+func TestStartExposeFunnelPinsPublicPort(t *testing.T) {
+	calls := installFakeTailscaleCLI(t, "https://host.ts.net:8443/desktop\n")
+
+	url, _, _, kind := StartExposeWithKind("localhost:1234", "desktop")
+
+	expose := exposeCommands(calls())
+	if len(expose) != 1 {
+		t.Fatalf("want exactly one exposure attempt (funnel succeeded), got %v", expose)
+	}
+	if !strings.HasPrefix(expose[0], "funnel ") {
+		t.Fatalf("want a funnel attempt, got %q", expose[0])
+	}
+	if !strings.Contains(expose[0], "--https=8443") {
+		t.Fatalf("funnel must pin the public port, got %q", expose[0])
+	}
+	if kind != "funnel" {
+		t.Fatalf("kind = %q, want funnel", kind)
+	}
+	if url != "https://host.ts.net:8443/desktop" {
+		t.Fatalf("url = %q, want the public :8443 URL", url)
+	}
+}
+
+// TestStartServeExposeKeeps443Default is the counterpart guard: serve is the
+// tailnet-only path and must stay on its 443 default. A stray --https on it
+// would move the tailnet listener and change every existing tailnet URL.
+func TestStartServeExposeKeeps443Default(t *testing.T) {
+	calls := installFakeTailscaleCLI(t, "https://host.ts.net/desktop\n")
+
+	_, _, _ = StartServeExpose("localhost:1234", "desktop")
+
+	expose := exposeCommands(calls())
+	if len(expose) != 1 {
+		t.Fatalf("want exactly one exposure attempt, got %v", expose)
+	}
+	if strings.Contains(expose[0], "--https") {
+		t.Fatalf("serve must keep the 443 default, got %q", expose[0])
+	}
+}
+
+// TestRemoveSetPathClearsBothListeners pins the revocation path: funnel lives on
+// FunnelHTTPSPort and serve on 443, so a single removal argv would target only
+// one listener and orphan the other's mount — leaving a PUBLIC funnel live after
+// Stop. Both must be attempted, and the funnel one must name its port.
+func TestRemoveSetPathClearsBothListeners(t *testing.T) {
+	calls := installFakeTailscaleCLI(t, "")
+
+	RemoveSetPath("/desktop")
+
+	var sawFunnel, sawServe bool
+	for _, argv := range calls() {
+		if strings.HasPrefix(argv, "funnel ") {
+			sawFunnel = true
+			if !strings.Contains(argv, "--https=8443") {
+				t.Fatalf("funnel removal must name the public port, got %q", argv)
+			}
+			if !strings.Contains(argv, "--set-path /desktop") {
+				t.Fatalf("funnel removal must scope to the mount, got %q", argv)
+			}
+		}
+		if strings.HasPrefix(argv, "serve ") {
+			sawServe = true
+			if strings.Contains(argv, "--https") {
+				t.Fatalf("serve removal must keep the 443 default, got %q", argv)
+			}
+		}
+	}
+	if !sawFunnel || !sawServe {
+		t.Fatalf("RemoveSetPath must clear both listeners, got %v", calls())
+	}
+}
+
+// TestCLIPathSeamBlocksMutations guards the guard.
+//
+// A test binary that reaches an exposure helper must never invoke the real
+// tailscale CLI. The seam is CLIPath: with it returning "", Running() reports
+// tailscale unavailable and RemoveSetPath is a no-op, even though a working
+// fake CLI is on PATH.
+func TestCLIPathSeamBlocksMutations(t *testing.T) {
+	calls := installFakeTailscaleCLI(t, "https://host.ts.net/desktop\n")
+	CLIPath = func() string { return "" }
+
+	if u, p, h, k := StartExposeWithKind("localhost:1", "x"); u != "" || p != nil || h != "" || k != "" {
+		t.Fatalf("exposure ran with the CLI seam blocked: %q/%v/%q/%q", u, p, h, k)
+	}
+	if u, p, h := StartServeExpose("localhost:1", "x"); u != "" || p != nil || h != "" {
+		t.Fatalf("serve exposure ran with the CLI seam blocked: %q/%v/%q", u, p, h)
+	}
+	RemoveSetPath("/x")
+
+	if got := calls(); len(got) != 0 {
+		t.Fatalf("a seam-blocked test binary invoked the tailscale CLI: %v", got)
 	}
 }

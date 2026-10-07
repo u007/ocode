@@ -69,6 +69,7 @@ okf_version: 0.1
 - [Session-bound dialogs scope to their chat session](concepts/session-bound-dialog-scoping.md) - Rule: session-owned ask dialogs only mount when that session's Chat sub-tab is on screen; pending asks persist invisibly via sidebar Bell + attention chime when off-surface.
 - [Settings → Connectors (web/desktop)](concepts/web-connector-settings.md) - The web/desktop Settings → Connectors surface: base auth.json credentials, masked secrets, host threading, OAuth auto/manual completion modes, flow-state invariants, and known gaps.
 - [Shared HTR daemon (htrcli serve)](concepts/htr-shared-daemon.md) - Why one shared htrcli daemon serves both ocode and the user's extension: coordinates from ~/.htrcli/config.json, browser.htr_shared/htr_token config keys (incl. htr_token precedence over htrcli's config), AdoptOnly, the StartedByPID stop rule, Settings endpoints addressing the resolved port, and lifecycle limits.
+- [SQLite Browser / DB IDE (preview pane)](concepts/sqlite-browser.md) - Design decisions and invariants for the web/desktop SQLite browser: server-side modernc.org/sqlite engine, containment and read-only allowlist, rowid row identity, BLOB prefix vs full-byte handling, pre-write snapshots, and grid/IDE behaviors that must not regress. Fuller implementation checklist in skills/ocode-web/SKILL.md item 64.
 - [Sub-agent Transcripts: OnSubAgentMessage and Child Sessions](concepts/subagent-transcripts-child-sessions.md) - Why dispatched child messages never reach the parent's OnMessage/OnDelta and how each run is persisted under its own child session.
 - [Task Output Contracts (expected_output)](concepts/task-output-contracts.md) - How a task dispatch's optional expected_output contract is resolved, verified by a small-model check, and retried once in place; includes the CheckFailed-versus-not-satisfied distinction.
 - [TUI User Interaction: Slash Command Queuing](concepts/tui-slash-command-queuing.md) - How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-04: the web/desktop SPA per-tab queue and its instant-command bypass are now documented; web-vs-TUI compaction queueing is documented as a platform difference — the web queues every command during compaction (compactionActive short-circuits ahead of isInstantCommand), while the TUI's !isInstantCmd guard lets instant commands dispatch immediately.
@@ -85,7 +86,9 @@ okf_version: 0.1
 
 # gotchas
 
+- ["Add to .gitignore" — toplevel targeting, C-quoting, and append-not-truncate](gotchas/git-ignore-toplevel-and-quoting.md) - Gotchas behind the web/desktop Git tab's right-click "Add to .gitignore": entries MUST resolve against the repo toplevel (git status porcelain paths are toplevel-relative, so a nested ?project= subdir double-prefixes), C-quoted porcelain names must be decoded before pattern-building, patterns are anchored/escaped, and the file is appended to (O_APPEND local / read-modify-write remote) rather than rewritten. Also records the latent remoteReadFile MISSING-sentinel bug fixed in the same change.
 - ["git commit failed: exit status 1" with no reason (git explains on stdout, not stderr)](gotchas/git-commit-opaque-exit-status.md) - git commit writes its reason on stdout; capturing only stderr hides the explanation
+- [A derived title/label must be bounded before it is persisted or rendered](gotchas/derived-title-label-must-be-bounded.md) - A session title auto-derived from a multi-megabyte first user message was stored verbatim, poisoning every metadata endpoint and the shared tabs.json, and the raw label forced a full-string browser layout. Rule and fix pattern: cap on write AND on read, and bound the truncation work itself.
 - [A failed git probe is not the same answer as "not a repository" - rev-parse exit 128 hides git-missing and safe.directory faults](gotchas/git-probe-failure-is-not-a-non-repo.md) - Gotcha: git rev-parse exits 128 both for a plain non-repo and for a real fault (git missing from PATH, safe.directory / dubious-ownership refusal, unreadable .git), so gitStatusForDir classified on the exit code alone and a server with no git on PATH reported every project as a plain directory with nothing logged. The decision now rests on stderr text, which forces two things: pin LC_ALL=C, and classify on the RAW cmd.Output() error before runRaw wraps it with fmt.Errorf and discards the *exec.ExitError and with it Stderr.
 - [A module-scope model/corpus fetch turns a "local" Python engine into a networked one](gotchas/python-module-scope-network-fetch.md) - Gotcha: a Python dependency that loads a Hugging Face model or NLTK corpus at module-import time turns a "local" engine into a networked one with silent failure modes — how to detect (blocked network + empty cache, execute don't grep), the classmethod-redirection and bare-id traps, the shared install/runtime offline preamble, and the raise-named-error rule.
 - [Advisor checkpoints must wait for a pending permission/question ask](gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md) - Advisor loop checkpoints must skip (not block or run) while a permission/question ask dialog is pending; root cause, invariants, and scope limits — including that the headless server now installs a real sub-agent/advisor permission asker (bounded, auto-denied park).
@@ -94,8 +97,7 @@ okf_version: 0.1
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
 - [Auto-continue turn transcript rebase: capture base length before the loop](gotchas/auto-continue-turn-transcript-rebase.md) - Gotcha: turn transcript persistence silently fails if turnBaseLen is not captured before the auto-continue loop, because resume prompts grow the messages length and cause hard-diverge on reconcile.
 - [Auto-Permission Dependency Binaries — Policy Decision](gotchas/auto-permission-dependency-bin-policy.md) - Deliberate security-policy expansion in bundled auto-permission gatekeeper prompt v1.9.x that auto-allows direct invocation of project/toolchain dependency binaries, with accepted residual risk and maintainer rules.
-- [Auto-Permission Judge — Credential Material Is Withheld from the Judge Context](gotchas/auto-permission-judge-withholds-credentials.md) - buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).</description>
-<parameter name="tags">["security", "permissions", "auto-permission", "secrets", "judge", "gotcha", "redaction", "side-task"]
+- [Auto-Permission Judge — Credential Material Is Withheld from the Judge Context](gotchas/auto-permission-judge-withholds-credentials.md) - buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).
 - [Auto-Permission Prompt Prose Code Audit Gap](gotchas/auto-permission-prompt-prose-code-audit-gap.md) - The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the –c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together.
 - [Auto-Permission Prompt — Load-Semantics Flip](gotchas/auto-permission-prompt-load-semantics-flip.md) - The load-semantics flip from self-healing to pure-read introduces a silent stale-gatekeeper trap with no proactive surfacing, distinct from the existing TOCTOU race gotcha.
 - [Auto-Permission Prompt — TOCTOU Install Race](gotchas/auto-permission-prompt-atomic-race.md) - TOCTOU race in auto-permission prompt install: concurrent older build can downgrade the bundled gatekeeper prompt.
@@ -119,18 +121,6 @@ okf_version: 0.1
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
 - [Desktop quit guard for unsaved drafts (pending + failed) + sticky-port fallback no longer re-saves](gotchas/desktop-quit-guard-and-sticky-port-fallback.md) - Desktop unsaved-draft quit guard (two-state pending/failed, bounded debounce) and sticky-port drift no longer re-saves — 2026-09-25 fixes, follow-up hardening.
 - [Desktop subprocess PATH trap — bare CLI names fail under Finder/Dock-launched .app](gotchas/desktop-subprocess-path-trap.md) - Desktop .app processes inherit launchd's minimal PATH; bare argv[0] resolves via exec.LookPath against the process PATH before cmd.Env is consulted, so cmd.Env cannot fix it. Absolute path alone is not enough — the child's PATH must resolve its own runtime. A second, complementary trap: interactive rc files (~/.zshrc) are not sourced by login shells, so directories only on ~/.zshrc (e.g. ~/.local/bin) are invisible to every shell ocode spawns.
-tags:
-  - gotcha
-  - desktop
-  - subprocess
-  - PATH
-  - exec.LookPath
-  - cmd.Dir
-  - claude
-  - cli
-  - zshrc
-  - login shell
-resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_build.go; internal/config/user_path.go; main.go; cmd/ocode-desktop/main.go
 - [Desktop webview has no Wails event system — shell→page signals must use ExecJS + DOM CustomEvent](gotchas/desktop-shell-webview-no-wails-events.md) - Desktop webview is served over plain http:// (embed.FS), so Wails window._wails/EmitEvent never exist — shell→page signals must use win.ExecJS + DOM CustomEvent with a React receiver.
 - [Desktop webview uses HTTPS + HTTP/2 to escape the six-connection cap](gotchas/desktop-webview-http2.md) - Gotcha: the desktop webview loads https://127.0.0.1:PORT (per-launch self-signed cert pinned in-app) so it negotiates HTTP/2; plain HTTP stays on the same port via first-byte TLS sniffing; one-time localStorage migration from the old http origin.
 - [Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures)](gotchas/terminal-wheel-scroll-chaining.md) - Wheel gestures over the terminal that xterm.js cannot use (scrollback at an edge, deltaY===0) escape to the browser and scroll the whole app window instead of the terminal. Fixed with a container-level non-passive wheel guard + overscroll-contain on the terminal container and overscroll-behavior:none on html/body.
@@ -228,6 +218,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/conduct/scores/deepseek-v4.1-flash.md](okf/conduct/scores/deepseek-v4.1-flash.md)
 - [okf/conduct/scores/glm-5.3-flash.md](okf/conduct/scores/glm-5.3-flash.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.md](okf/conduct/scores/longcat-2.5-preview-free.md)
+- [okf/conduct/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/conduct/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.rerun.md](okf/conduct/scores/longcat-2.5-preview-free.rerun.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.with-skill.md](okf/conduct/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
@@ -236,12 +227,15 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/conduct/scores/space-bunny-free.with-skill.md](okf/conduct/scores/space-bunny-free.with-skill.md)
 - [okf/conduct/scores/tencent__hy3.md](okf/conduct/scores/tencent__hy3.md)
 - [okf/conduct/scores/tencent__hy3.with-skill.md](okf/conduct/scores/tencent__hy3.with-skill.md)
+- [okf/csharp/derived/csharp.longcat-2.5-preview-free.SKILL.md](okf/csharp/derived/csharp.longcat-2.5-preview-free.SKILL.md) - Corrective C# knowledge for longcat-2.5-preview-free, targeting its nullability/value-vs-reference-type gaps and its async gaps (ValueTask consumption rules, async-all-the-way, CancellationToken and IAsyncEnumerable API names).
+
 - [okf/csharp/derived/csharp.mimo-v2.5.SKILL.md](okf/csharp/derived/csharp.mimo-v2.5.SKILL.md) - Corrective C# knowledge for mimo-v2.5, targeting the nullable-reference/ record-equality and pattern-matching gaps this model showed on the closed-book csharp benchmark (record class mutability, switch expression exhaustiveness, property-pattern syntax, `is` binding scope).
 
 - [okf/csharp/derived/csharp.space-bunny-free.SKILL.md](okf/csharp/derived/csharp.space-bunny-free.SKILL.md) - Corrective C# knowledge for space-bunny-free, targeting the nullable-reference-type / value-vs-reference / record gaps this model showed on the closed-book csharp benchmark (record class positional members are init-only by default, value-type vs reference-type defaults, the `!!` parameter-null-check that never shipped).
 
 - [okf/csharp/scores/glm-5.3-flash.md](okf/csharp/scores/glm-5.3-flash.md)
 - [okf/csharp/scores/longcat-2.5-preview-free.md](okf/csharp/scores/longcat-2.5-preview-free.md)
+- [okf/csharp/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/csharp/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
 - [okf/csharp/scores/muse-spark-1.2.md](okf/csharp/scores/muse-spark-1.2.md)
 - [okf/csharp/scores/space-bunny-free.md](okf/csharp/scores/space-bunny-free.md)
@@ -251,6 +245,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/docx/derived/docx.glm-5.3-flash.SKILL.md](okf/docx/derived/docx.glm-5.3-flash.SKILL.md) - Corrective Word-editing guidance for glm-5.3-flash: cell.text wipes paragraph formatting too, doc.add_table already sets widths, field totals are cached, carrying a vMerge restart down, and removing the old image relationship after a picture swap.
 
+- [okf/docx/derived/docx.longcat-2.5-preview-free.SKILL.md](okf/docx/derived/docx.longcat-2.5-preview-free.SKILL.md) - Corrective Word-editing guidance for longcat-2.5-preview-free: merged-cell indexing, unique row matching, vertical-merge and field-total handling on row delete, run-preserving cell edits, table/column layout, default table width, and replacing one picture without touching shared parts.
+
 - [okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md](okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md) - Corrective Word-editing guidance for mimo-v2.6-flash: field results are cached (Word does not recompute SUM(ABOVE) on open), what row deletion and value changes need afterwards, the real python-docx call for replacing one picture and when its old relationship may go, and shading new column cells like their row.
 
 - [okf/docx/derived/docx.space-bunny-free.SKILL.md](okf/docx/derived/docx.space-bunny-free.SKILL.md) - Corrective Word-editing guidance for space-bunny-free: what doc.add_table, add_row and add_column really set for widths, making a new table match an existing one, inserting a column across merged cells, and replacing one picture without touching others that share its image part.
@@ -258,6 +254,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/docx/scores/deepseek-v4.1-flash.md](okf/docx/scores/deepseek-v4.1-flash.md)
 - [okf/docx/scores/deepseek-v4.1-flash.with-skill.md](okf/docx/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/docx/scores/glm-5.3-flash.md](okf/docx/scores/glm-5.3-flash.md)
+- [okf/docx/scores/longcat-2.5-preview-free.md](okf/docx/scores/longcat-2.5-preview-free.md)
+- [okf/docx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/docx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/docx/scores/mimo-v2.6-flash.md](okf/docx/scores/mimo-v2.6-flash.md)
 - [okf/docx/scores/mimo-v2.6-flash.with-skill.md](okf/docx/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/docx/scores/space-bunny-free.md](okf/docx/scores/space-bunny-free.md)
@@ -266,6 +264,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/dotnet/scores/glm-5.3-flash.md](okf/dotnet/scores/glm-5.3-flash.md)
 - [okf/dotnet/scores/longcat-2.5-preview-free.md](okf/dotnet/scores/longcat-2.5-preview-free.md)
+- [okf/dotnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/dotnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md](okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
 - [okf/dotnet/scores/muse-spark-1.2.md](okf/dotnet/scores/muse-spark-1.2.md)
@@ -279,6 +278,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/elixir/scores/glm-5.3-flash.md](okf/elixir/scores/glm-5.3-flash.md)
 - [okf/elixir/scores/longcat-2.5-preview-free.md](okf/elixir/scores/longcat-2.5-preview-free.md)
+- [okf/elixir/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/elixir/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/elixir/scores/longcat-2.5-preview-free.with-skill.md](okf/elixir/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/elixir/scores/mimo-v2.5.md](okf/elixir/scores/mimo-v2.5.md)
 - [okf/elixir/scores/muse-spark-1.2.md](okf/elixir/scores/muse-spark-1.2.md)
@@ -288,13 +288,19 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
 - [okf/golang/scores/glm-5.3-flash.md](okf/golang/scores/glm-5.3-flash.md)
 - [okf/golang/scores/longcat-2.5-preview-free.md](okf/golang/scores/longcat-2.5-preview-free.md)
+- [okf/golang/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/golang/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/golang/scores/mimo-v2.5.md](okf/golang/scores/mimo-v2.5.md)
 - [okf/golang/scores/muse-spark-1.2.md](okf/golang/scores/muse-spark-1.2.md)
 - [okf/golang/scores/space-bunny-free.md](okf/golang/scores/space-bunny-free.md)
 - [okf/golang/scores/tencent__hy3.md](okf/golang/scores/tencent__hy3.md)
+- [okf/hallucination/scores/longcat-2.5-preview-free.md](okf/hallucination/scores/longcat-2.5-preview-free.md)
+- [okf/nestjs/derived/nestjs.longcat-2.5-preview-free.SKILL.md](okf/nestjs/derived/nestjs.longcat-2.5-preview-free.SKILL.md) - Corrective NestJS knowledge for longcat-2.5-preview-free, targeting its gaps in lifecycle hooks (shutdown order, v11 reverse ordering, what triggers init) and guards/interceptors (guard usage, interceptor Observable mechanics).
+
 - [okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md](okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md) - Corrective NestJS guidance for the exact area mimo-v2.5 tests weak on (shutdown/lifecycle hook order and triggers). Loaded only in NestJS repos when this exact model is active.
 - [okf/nestjs/scores/glm-5.3-flash.md](okf/nestjs/scores/glm-5.3-flash.md)
 - [okf/nestjs/scores/longcat-2.5-preview-free.md](okf/nestjs/scores/longcat-2.5-preview-free.md)
+- [okf/nestjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nestjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [okf/nestjs/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/nestjs/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/nestjs/scores/mimo-v2.5.md](okf/nestjs/scores/mimo-v2.5.md)
 - [okf/nestjs/scores/muse-spark-1.2.md](okf/nestjs/scores/muse-spark-1.2.md)
 - [okf/nestjs/scores/space-bunny-free.md](okf/nestjs/scores/space-bunny-free.md)
@@ -303,6 +309,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md](okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md) - Corrective Next.js App Router guidance for the exact area mimo-v2.5 tests weak on (metadata). Loaded only in Next.js repos when this exact model is active.
 - [okf/nextjs/scores/glm-5.3-flash.md](okf/nextjs/scores/glm-5.3-flash.md)
 - [okf/nextjs/scores/longcat-2.5-preview-free.md](okf/nextjs/scores/longcat-2.5-preview-free.md)
+- [okf/nextjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nextjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md](okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/nextjs/scores/mimo-v2.5.md](okf/nextjs/scores/mimo-v2.5.md)
 - [okf/nextjs/scores/muse-spark-1.2.md](okf/nextjs/scores/muse-spark-1.2.md)
@@ -312,6 +319,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md](okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md) - Corrective PDF-editing guidance for glm-5.3-flash: PyMuPDF's apply_redactions removes covered table rules and shading by default, painting boxes is not removal, redact before you move a region, where insert_text puts the baseline, growing and re-laying tables without broken rules, replace_image is global, and scripts must check return values.
 
+- [okf/pdf/derived/pdf.longcat-2.5-preview-free.SKILL.md](okf/pdf/derived/pdf.longcat-2.5-preview-free.SKILL.md) - Corrective PDF-editing guidance for longcat-2.5-preview-free: move regions with show_pdf_page after redacting, keep grid lines when redacting a cell, insert_textbox writes nothing on overflow, re-laying out columns and rows, replace_image is global, and verify the saved text layer.
+
 - [okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md](okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md) - Corrective PDF-editing guidance for mimo-v2.6-flash: PyMuPDF's real apply_redactions defaults and constants, keeping a cell's rules and shading, moving regions without duplicates, APIs that do not exist, subset fonts, rotated-page coordinates, and image replace/dedup details.
 
 - [okf/pdf/derived/pdf.space-bunny-free.SKILL.md](okf/pdf/derived/pdf.space-bunny-free.SKILL.md) - Corrective PDF-editing guidance for space-bunny-free: move table regions as vectors (show_pdf_page clip), never as rasters; PyMuPDF's real apply_redactions defaults; insert_textbox's negative return; baseline placement; bold flag bits and subset-font glyph coverage; image reuse and overlay; rotated-page coordinates; relayout and make-room procedures.
@@ -320,12 +329,17 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/pdf/scores/deepseek-v4.1-flash.with-skill.md](okf/pdf/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pdf/scores/glm-5.3-flash.md](okf/pdf/scores/glm-5.3-flash.md)
 - [okf/pdf/scores/glm-5.3-flash.with-skill.md](okf/pdf/scores/glm-5.3-flash.with-skill.md)
+- [okf/pdf/scores/longcat-2.5-preview-free.md](okf/pdf/scores/longcat-2.5-preview-free.md)
+- [okf/pdf/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pdf/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/pdf/scores/mimo-v2.6-flash.md](okf/pdf/scores/mimo-v2.6-flash.md)
 - [okf/pdf/scores/mimo-v2.6-flash.with-skill.md](okf/pdf/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/pdf/scores/space-bunny-free.md](okf/pdf/scores/space-bunny-free.md)
 - [okf/pdf/scores/space-bunny-free.with-skill.md](okf/pdf/scores/space-bunny-free.with-skill.md)
+- [okf/php/derived/php.longcat-2.5-preview-free.SKILL.md](okf/php/derived/php.longcat-2.5-preview-free.SKILL.md) - Corrective PHP knowledge for longcat-2.5-preview-free, targeting its gaps in OOP (readonly, late static binding), closures (first-class callable syntax, Closure::bind) and match vs switch control flow.
+
 - [okf/php/scores/glm-5.3-flash.md](okf/php/scores/glm-5.3-flash.md)
 - [okf/php/scores/longcat-2.5-preview-free.md](okf/php/scores/longcat-2.5-preview-free.md)
+- [okf/php/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/php/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/php/scores/mimo-v2.5.md](okf/php/scores/mimo-v2.5.md)
 - [okf/php/scores/muse-spark-1.2.md](okf/php/scores/muse-spark-1.2.md)
 - [okf/php/scores/space-bunny-free.md](okf/php/scores/space-bunny-free.md)
@@ -334,6 +348,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md](okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md) - Corrective pptx-editing guidance for glm-5.3-flash: locate tables by header text (searching groups) with a unique-row assert, drop replaced image rels safely (drop_rel does not see r:embed), sync the graphic frame height after XML row edits, and re-band explicit row fills.
 
+- [okf/pptx/derived/pptx.longcat-2.5-preview-free.SKILL.md](okf/pptx/derived/pptx.longcat-2.5-preview-free.SKILL.md) - Corrective pptx-editing guidance for longcat-2.5-preview-free: finish row deletes/inserts (frame height, totals, banding), pick tables by header text, drop replaced image rels safely, never overwrite the original, and know the OOXML repair causes.
+
 - [okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md](okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md) - Corrective pptx-editing guidance for mimo-v2.6-flash: locate tables by header text and assert a unique matching row, python-pptx has no row/column add or delete API (deepcopy/remove the a:tr), sync the frame and totals, content placeholders lack insert_table, drop_rel ignores r:embed, and verify content rather than structure.
 
 - [okf/pptx/derived/pptx.space-bunny-free.SKILL.md](okf/pptx/derived/pptx.space-bunny-free.SKILL.md) - Corrective pptx-editing guidance for space-bunny-free: locate tables by header text with a unique-row assert, python-pptx merge and placeholder model, widening merged cells when inserting a column, and syncing the frame height.
@@ -341,12 +357,15 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/pptx/scores/deepseek-v4.1-flash.md](okf/pptx/scores/deepseek-v4.1-flash.md)
 - [okf/pptx/scores/deepseek-v4.1-flash.with-skill.md](okf/pptx/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pptx/scores/glm-5.3-flash.md](okf/pptx/scores/glm-5.3-flash.md)
+- [okf/pptx/scores/longcat-2.5-preview-free.md](okf/pptx/scores/longcat-2.5-preview-free.md)
+- [okf/pptx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pptx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/pptx/scores/mimo-v2.6-flash.md](okf/pptx/scores/mimo-v2.6-flash.md)
 - [okf/pptx/scores/mimo-v2.6-flash.with-skill.md](okf/pptx/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/pptx/scores/space-bunny-free.md](okf/pptx/scores/space-bunny-free.md)
 - [okf/pptx/scores/space-bunny-free.with-skill.md](okf/pptx/scores/space-bunny-free.with-skill.md)
 - [okf/python/scores/glm-5.3-flash.md](okf/python/scores/glm-5.3-flash.md)
 - [okf/python/scores/longcat-2.5-preview-free.md](okf/python/scores/longcat-2.5-preview-free.md)
+- [okf/python/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/python/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/python/scores/mimo-v2.5.md](okf/python/scores/mimo-v2.5.md)
 - [okf/python/scores/muse-spark-1.2.md](okf/python/scores/muse-spark-1.2.md)
 - [okf/python/scores/space-bunny-free.md](okf/python/scores/space-bunny-free.md)
@@ -355,6 +374,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/react/scores/claude-opus-4-8.md](okf/react/scores/claude-opus-4-8.md)
 - [okf/react/scores/glm-5.3-flash.md](okf/react/scores/glm-5.3-flash.md)
 - [okf/react/scores/longcat-2.5-preview-free.md](okf/react/scores/longcat-2.5-preview-free.md)
+- [okf/react/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/react/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/react/scores/mimo-v2.5.md](okf/react/scores/mimo-v2.5.md)
 - [okf/react/scores/muse-spark-1.2.md](okf/react/scores/muse-spark-1.2.md)
 - [okf/react/scores/space-bunny-free.md](okf/react/scores/space-bunny-free.md)
@@ -362,12 +382,14 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/ror/derived/ror.mimo-v2.5.SKILL.md](okf/ror/derived/ror.mimo-v2.5.SKILL.md) - Corrective Rails migrations/schema guidance for the exact gaps mimo-v2.5 tests weak on — the purpose of the schema.rb/structure.sql dump, and the two classic dangerous-migration patterns on large production tables (locking column defaults/NOT NULL, and index builds). Loaded only in Rails repos when this exact model is active.
 - [okf/ror/scores/glm-5.3-flash.md](okf/ror/scores/glm-5.3-flash.md)
 - [okf/ror/scores/longcat-2.5-preview-free.md](okf/ror/scores/longcat-2.5-preview-free.md)
+- [okf/ror/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ror/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/ror/scores/mimo-v2.5.md](okf/ror/scores/mimo-v2.5.md)
 - [okf/ror/scores/muse-spark-1.2.md](okf/ror/scores/muse-spark-1.2.md)
 - [okf/ror/scores/space-bunny-free.md](okf/ror/scores/space-bunny-free.md)
 - [okf/ror/scores/tencent__hy3.md](okf/ror/scores/tencent__hy3.md)
 - [okf/ruby/scores/glm-5.3-flash.md](okf/ruby/scores/glm-5.3-flash.md)
 - [okf/ruby/scores/longcat-2.5-preview-free.md](okf/ruby/scores/longcat-2.5-preview-free.md)
+- [okf/ruby/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ruby/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/ruby/scores/mimo-v2.5.md](okf/ruby/scores/mimo-v2.5.md)
 - [okf/ruby/scores/muse-spark-1.2.md](okf/ruby/scores/muse-spark-1.2.md)
 - [okf/ruby/scores/space-bunny-free.md](okf/ruby/scores/space-bunny-free.md)
@@ -380,6 +402,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/rust/scores/glm-5.3-flash.md](okf/rust/scores/glm-5.3-flash.md)
 - [okf/rust/scores/longcat-2.5-preview-free.md](okf/rust/scores/longcat-2.5-preview-free.md)
+- [okf/rust/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/rust/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/rust/scores/longcat-2.5-preview-free.with-skill.md](okf/rust/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
 - [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
@@ -392,6 +415,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/tanstack/scores/glm-5.3-flash.md](okf/tanstack/scores/glm-5.3-flash.md)
 - [okf/tanstack/scores/longcat-2.5-preview-free.md](okf/tanstack/scores/longcat-2.5-preview-free.md)
+- [okf/tanstack/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/tanstack/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md](okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/tanstack/scores/mimo-v2.5.md](okf/tanstack/scores/mimo-v2.5.md)
 - [okf/tanstack/scores/muse-spark-1.2.md](okf/tanstack/scores/muse-spark-1.2.md)
@@ -402,12 +426,14 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md](okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md) - Corrective VB.NET guidance for the exact area muse-spark-1.2 tests weak on (WithEvents/Handles and AddHandler/RemoveHandler event-wiring edge cases). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/scores/glm-5.3-flash.md](okf/vbnet/scores/glm-5.3-flash.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.md](okf/vbnet/scores/longcat-2.5-preview-free.md)
+- [okf/vbnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/vbnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.rerun.md](okf/vbnet/scores/longcat-2.5-preview-free.rerun.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md](okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/vbnet/scores/mimo-v2.5.md](okf/vbnet/scores/mimo-v2.5.md)
 - [okf/vbnet/scores/muse-spark-1.2.md](okf/vbnet/scores/muse-spark-1.2.md)
 - [okf/vbnet/scores/space-bunny-free.md](okf/vbnet/scores/space-bunny-free.md)
 - [okf/vbnet/scores/tencent__hy3.md](okf/vbnet/scores/tencent__hy3.md)
+- [okf/webforms/scores/deepseek-v4.1-flash.md](okf/webforms/scores/deepseek-v4.1-flash.md)
 - [OKF Naming Convention Enforcement](okf/_schema/naming-convention-enforcement.md) - OKF naming conventions for question IDs, bundle entries, and index format to maintain bundle integrity.
 - [Stack Detection](okf/_schema/stack-detection.md) - How ocode detects repo stacks from meta.yaml markers, and how derived Kaizen skills are gated — marker types, universal corpora (conduct/hallucination/pdf), canonical model ids, and delivery/admission rules.
 
@@ -499,6 +525,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [rust.md](okf/_prompts/rust.md)
 - [tanstack.md](okf/_prompts/tanstack.md)
 - [vbnet.md](okf/_prompts/vbnet.md)
+- [webforms.md](okf/_prompts/webforms.md)
 - [question-format.md](okf/_schema/question-format.md)
 - [rubric-guide.md](okf/_schema/rubric-guide.md)
 - [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
@@ -506,6 +533,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.md](okf/conduct/answers/deepseek-v4.1-flash.md)
 - [glm-5.3-flash.md](okf/conduct/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/conduct/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/conduct/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.rerun.md](okf/conduct/answers/longcat-2.5-preview-free.rerun.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/conduct/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
@@ -526,6 +554,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/conduct/questions.md)
 - [glm-5.3-flash.md](okf/csharp/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/csharp/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/csharp/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/csharp/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/csharp/answers/space-bunny-free.md)
@@ -535,6 +564,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.md](okf/docx/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/docx/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/docx/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/docx/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/docx/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/docx/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/docx/answers/mimo-v2.6-flash.with-skill.md)
 - [space-bunny-free.md](okf/docx/answers/space-bunny-free.md)
@@ -543,6 +574,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/docx/questions.md)
 - [glm-5.3-flash.md](okf/dotnet/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/dotnet/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/dotnet/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/dotnet/answers/longcat-2.5-preview-free.with-skill.md)
 - [longcat-2.5-preview-free.with-skill.run2.md](okf/dotnet/answers/longcat-2.5-preview-free.with-skill.run2.md)
 - [mimo-v2.5.md](okf/dotnet/answers/mimo-v2.5.md)
@@ -552,6 +584,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/dotnet/questions.md)
 - [glm-5.3-flash.md](okf/elixir/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/elixir/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/elixir/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/elixir/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/elixir/answers/muse-spark-1.2.md)
@@ -562,14 +595,19 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/elixir/questions.md)
 - [glm-5.3-flash.md](okf/golang/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/golang/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/golang/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/golang/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/golang/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/golang/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/golang/answers/tencent__hy3.md)
 - [questions.md](okf/golang/questions.md)
+- [longcat-2.5-preview-free.md](okf/hallucination/answers/longcat-2.5-preview-free.md)
+- [hallucination.longcat-2.5-preview-free.SKILL.md](okf/hallucination/derived/hallucination.longcat-2.5-preview-free.SKILL.md)
 - [questions.md](okf/hallucination/questions.md)
 - [glm-5.3-flash.md](okf/nestjs/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/nestjs/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nestjs/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/nestjs/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.5.md](okf/nestjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nestjs/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/nestjs/answers/space-bunny-free.md)
@@ -577,6 +615,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/nestjs/questions.md)
 - [glm-5.3-flash.md](okf/nextjs/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/nextjs/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nextjs/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/nextjs/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/nextjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nextjs/answers/muse-spark-1.2.md)
@@ -587,6 +626,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.with-skill.md](okf/pdf/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pdf/answers/glm-5.3-flash.md)
 - [glm-5.3-flash.with-skill.md](okf/pdf/answers/glm-5.3-flash.with-skill.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/pdf/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pdf/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/pdf/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/pdf/answers/mimo-v2.6-flash.with-skill.md)
 - [space-bunny-free.md](okf/pdf/answers/space-bunny-free.md)
@@ -595,6 +636,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/pdf/questions.md)
 - [glm-5.3-flash.md](okf/php/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/php/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/php/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/php/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/php/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/php/answers/space-bunny-free.md)
@@ -603,6 +645,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.md](okf/pptx/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/pptx/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pptx/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/pptx/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pptx/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/pptx/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/pptx/answers/mimo-v2.6-flash.with-skill.md)
 - [space-bunny-free.md](okf/pptx/answers/space-bunny-free.md)
@@ -611,6 +655,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/pptx/questions.md)
 - [glm-5.3-flash.md](okf/python/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/python/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/python/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/python/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/python/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/python/answers/space-bunny-free.md)
@@ -618,6 +663,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/python/questions.md)
 - [glm-5.3-flash.md](okf/react/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/react/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/react/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/react/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/react/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/react/answers/space-bunny-free.md)
@@ -626,6 +672,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [README.md](okf/react/scores/README.md)
 - [glm-5.3-flash.md](okf/ror/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/ror/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ror/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/ror/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ror/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/ror/answers/space-bunny-free.md)
@@ -633,6 +680,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/ror/questions.md)
 - [glm-5.3-flash.md](okf/ruby/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/ruby/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ruby/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/ruby/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ruby/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/ruby/answers/space-bunny-free.md)
@@ -640,6 +688,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/ruby/questions.md)
 - [glm-5.3-flash.md](okf/rust/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/rust/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/rust/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/rust/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/rust/answers/muse-spark-1.2.md)
@@ -649,6 +698,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/rust/questions.md)
 - [glm-5.3-flash.md](okf/tanstack/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/tanstack/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/tanstack/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/tanstack/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/tanstack/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/tanstack/answers/muse-spark-1.2.md)
@@ -657,6 +707,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/tanstack/questions.md)
 - [glm-5.3-flash.md](okf/vbnet/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/vbnet/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/vbnet/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.rerun.md](okf/vbnet/answers/longcat-2.5-preview-free.rerun.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/vbnet/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/vbnet/answers/mimo-v2.5.md)
@@ -664,6 +715,9 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [space-bunny-free.md](okf/vbnet/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/vbnet/answers/tencent__hy3.md)
 - [questions.md](okf/vbnet/questions.md)
+- [deepseek-v4.1-flash.md](okf/webforms/answers/deepseek-v4.1-flash.md)
+- [README.md](okf/webforms/probe/README.md)
+- [questions.md](okf/webforms/questions.md)
 - [2026-07-21-session-storage-ojsonl.md](superpowers/plans/2026-07-21-session-storage-ojsonl.md)
 - [2026-07-24-web-changes-parity.md](superpowers/plans/2026-07-24-web-changes-parity.md)
 - [2026-07-24-web-cron-parity.md](superpowers/plans/2026-07-24-web-cron-parity.md)
@@ -768,6 +822,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [08-model-attribution.md](superpowers/plans/2026-10-03-clef-judge-backend/08-model-attribution.md)
 - [09-docs.md](superpowers/plans/2026-10-03-clef-judge-backend/09-docs.md)
 - [INDEX.md](superpowers/plans/2026-10-03-clef-judge-backend/INDEX.md)
+- [2026-10-07-web-btw-side-query.md](superpowers/plans/2026-10-07-web-btw-side-query.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
@@ -789,5 +844,6 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [2026-09-25-desktop-quit-guard-design.md](superpowers/specs/2026-09-25-desktop-quit-guard-design.md)
 - [2026-10-01-quick-actions-config-design.md](superpowers/specs/2026-10-01-quick-actions-config-design.md)
 - [2026-10-02-subagent-permission-ask-design.md](superpowers/specs/2026-10-02-subagent-permission-ask-design.md)
+- [2026-10-07-web-btw-side-query-design.md](superpowers/specs/2026-10-07-web-btw-side-query-design.md)
 - [telegram-bot.md](telegram-bot.md)
 

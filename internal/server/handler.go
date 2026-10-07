@@ -48,12 +48,12 @@ type Handler struct {
 	// consent dialog; nil falls back to computer.RequestPermissions.
 	requestComputerPermissions func(context.Context) computer.PermissionReport
 	// tailscaleShareSnapshot reports the server's CURRENTLY cached tailscale
-	// exposure as (url, hint) without starting one. Injected rather than held as
-	// a *Server reference so the Handler stays decoupled, and so the config
-	// handlers can read exposure state without taking h.mu across any tailscale
-	// work (Handler.mu is a map lock, never a work lock). nil = no exposure
+	// exposure without starting one. Injected rather than held as a *Server
+	// reference so the Handler stays decoupled, and so the config handlers can
+	// read exposure state without taking h.mu across any tailscale work
+	// (Handler.mu is a map lock, never a work lock). nil = no exposure
 	// subsystem, which the handlers treat as "nothing shared".
-	tailscaleShareSnapshot func() (url, hint string)
+	tailscaleShareSnapshot func() tailscaleShareStatus
 	// sysPermMu serializes read-modify-write of the system-permissions
 	// sub-tree (persisted + the in-memory h.cfg copy).
 	sysPermMu sync.Mutex
@@ -104,6 +104,15 @@ type Handler struct {
 	// `/mcp-auth` command (see handler_mcp_auth.go). The flow blocks up to 2
 	// minutes waiting for the browser callback, so it is job-id + poll.
 	mcpAuthJobs *mcpAuthJobManager
+
+	// btwMu guards btwRuns. Held only for map reads/writes, never across the
+	// side-query loop (which runs on its own goroutine).
+	btwMu sync.Mutex
+	// btwRuns holds the in-flight /btw side query per session id. A second
+	// /btw replaces (cancels) the first; DELETE cancels by id. The entry is
+	// RETAINED after a run completes (cancel cleared) so the generation stays
+	// monotonic for the client's staleness guard; /reset-id deletes it.
+	btwRuns map[string]*btwRun
 
 	// bus is the unified tagged event bus (Part 02). Every emitters publishes
 	// envelopes here; /api/events streams them to web clients.
@@ -2134,57 +2143,6 @@ func (h *Handler) HandleShareSession(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"markdown": b.String()})
-}
-
-// HandleBtw records a "By the way" aside for a session. While a turn is
-// running it is INJECTED into that turn (the same path a message sent mid-turn
-// takes, handler.go's tryEnqueueInjection call site) rather than appended to
-// the transcript; with no turn live it takes the concurrent-safe append path.
-func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
-	var req struct {
-		Content string `json:"content"`
-	}
-	if err := readBodyJSON(r, &req); err != nil || req.Content == "" {
-		writeError(w, http.StatusBadRequest, "content is required")
-		return
-	}
-
-	content := "By the way: " + req.Content
-
-	// A live turn takes the aside INSTEAD of an on-disk append. Appending to
-	// the transcript underneath a running turn is what previously forced the
-	// web client to queue /btw until the turn ended, and it is not merely
-	// racy: every later live snapshot fails its prefix check (stored is no
-	// longer a prefix of the snapshot, since liveAppendStart → samePrefix
-	// bails on len(b) < n) and is dropped, and the turn-end sync save then
-	// reports ErrTranscriptConflict (a shorter non-replace snapshot than
-	// stored). Both failures are only logged, so the remainder of the turn
-	// would be missing from disk on reload. Injection keeps the message inside
-	// as.messages — Step returns it in resp and fires OnMessage — so the live
-	// snapshots and the turn-end save both stay consistent. If the turn ends
-	// before the injection is spliced in, flushStrandedInjections dispatches
-	// it as an ordinary follow-up turn; nothing is silently dropped.
-	if h.tryEnqueueInjection(id, content) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "noted"})
-		return
-	}
-
-	// Resolve the project root so we can use the concurrent-safe append path.
-	// A load→append→save here races any concurrent writer (another ocode process,
-	// a live turn's sync save): the overlap check finds the stored transcript
-	// has diverged from our stale snapshot and returns ErrTranscriptConflict.
-	// AppendUserMessageForDir does a tail-insert with bounded retry instead.
-	entry, err := h.sessions.Resolve(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	if err := session.AppendUserMessageForDir(entry.ProjectRoot, id, content); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "noted"})
 }
 
 func (h *Handler) HandleSetSessionTitle(w http.ResponseWriter, r *http.Request, id string) {

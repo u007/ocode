@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/paths"
@@ -697,7 +698,12 @@ func persistToDir(dir, id string, title string, messages []agent.Message, metada
 		for _, m := range messages {
 			t := strings.TrimSpace(m.Content)
 			if m.Role == "user" && t != "" && LooksLikeAutoTitleCandidate(t) {
-				resolvedTitle = t
+				// The first user message can be multi-megabyte (a pasted prompt
+				// carrying full commit diffs). Storing it verbatim as the title
+				// makes every endpoint that carries the title — and the shared
+				// tabs.json — multi-megabyte too. Bound it like every other
+				// title surface.
+				resolvedTitle = TruncateTitle(t, MaxStoredTitleRunes)
 				break
 			}
 		}
@@ -867,6 +873,63 @@ func LooksLikeAutoTitleCandidate(t string) bool {
 		return false
 	}
 	return !strings.HasPrefix(t, "{") && !strings.HasPrefix(t, "[")
+}
+
+// MaxStoredTitleRunes bounds a session title that ocode persists. Titles are
+// labels, not transcripts: the fallback auto-title is derived from the first
+// user message, which can be multi-megabyte (e.g. a pasted standup prompt
+// carrying full commit diffs). An unbounded title then rides every endpoint
+// that carries it — GET /api/sessions/:id/state (polled every 15s per open
+// tab), GET /api/tabs, and the shared tabs.json — and is rendered into the
+// tab strip, turning one oversized paste into UI-wide lag. 300 matches the web
+// client's MAX_TITLE_TOOLTIP_CHARS so a user-renamed title survives a reload;
+// the visible label is clamped shorter per surface (web 80, TUI
+// maxExplicitTitleLen, server maxGeneratedTitleLen).
+//
+// Only the title is capped; the transcript is never touched.
+const MaxStoredTitleRunes = 300
+
+// TruncateTitle normalizes a session title into a single-line label no longer
+// than maxRunes runes, appending an ellipsis when it had to cut. Newlines are
+// collapsed so the label stays on one line. maxRunes <= 0 yields "".
+//
+// The input may be multi-megabyte (see MaxStoredTitleRunes), so the rune walk
+// stops after maxRunes runes rather than converting the whole string.
+func TruncateTitle(title string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := make([]rune, 0, maxRunes+1)
+	prevNewline := false
+	for _, r := range title {
+		// Mirror the web truncateTitle: a run of CR/LF becomes ONE space, and
+		// leading whitespace is dropped BEFORE counting so the ellipsis
+		// decision is made on the trimmed text.
+		if r == '\r' || r == '\n' {
+			if prevNewline {
+				continue
+			}
+			prevNewline = true
+			r = ' '
+		} else {
+			prevNewline = false
+		}
+		if len(runes) == 0 && unicode.IsSpace(r) {
+			continue
+		}
+		runes = append(runes, r)
+		if len(runes) > maxRunes+1 {
+			break
+		}
+	}
+	out := []rune(strings.TrimRightFunc(string(runes), unicode.IsSpace))
+	if len(out) <= maxRunes {
+		return string(out)
+	}
+	if maxRunes <= 3 {
+		return string(out[:maxRunes])
+	}
+	return string(out[:maxRunes-3]) + "..."
 }
 
 // autoTitleFromMessages derives a fallback session title from the first user

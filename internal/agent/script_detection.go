@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,21 +92,15 @@ type executedScriptContext struct {
 	Truncated  bool
 }
 
-// defaultExecutedScriptLines is the line ceiling for an executed script shown to
-// the judge. It is deliberately NOT the 40-line chat-snippet cap: a real script
-// is routinely longer than that, and a partial view can never be approved, so
-// the small cap made every such script an unconditional deny. The 16 KiB byte
-// ceiling (maxInterpreterSourceBytes) is the binding bound.
-const defaultExecutedScriptLines = 1000
-
 // executedScriptLineCap is the one line cap shared by the judge's view and
-// verifyAutoGrant's truncation guard, so the two can never diverge. An explicit
-// permissions.auto.max_context_lines_per_source still wins.
+// verifyAutoGrant's truncation guard, so the two can never diverge. Executed
+// scripts are deliberately NOT line-limited: a partial view can never be
+// approved, so any line cap just turned a long script into an unconditional
+// deny, and the byte ceiling (maxInterpreterSourceBytes) is the binding bound.
+// permissions.auto.max_context_lines_per_source still governs the generic
+// referenced-file snippets, never executed scripts.
 func (a *Agent) executedScriptLineCap() int {
-	if auto := a.autoPermissionConfig(); auto != nil && auto.MaxContextLinesPerSource > 0 {
-		return auto.MaxContextLinesPerSource
-	}
-	return defaultExecutedScriptLines
+	return math.MaxInt
 }
 
 // executedScriptsForJudge returns structured source for the scripts a command

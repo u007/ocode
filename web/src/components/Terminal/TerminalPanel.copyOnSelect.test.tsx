@@ -964,3 +964,65 @@ describe("writeClipboardText fallback", () => {
     }
   });
 });
+
+// Claude Code (mouse-tracking), tmux and vim copy their own selections by
+// emitting OSC 52; over ssh it is the only copy path. xterm ignores it unless
+// a handler is registered.
+describe("terminal OSC 52 clipboard write", () => {
+  type OscMock = { mock: { calls: Array<[number, (data: string) => boolean]> } };
+  function osc52Handler() {
+    const reg = (h.terminals[0] as unknown as { parser: { registerOscHandler: OscMock } }).parser.registerOscHandler;
+    const call = reg.mock.calls.find(([ident]) => ident === 52);
+    expect(call).toBeTruthy();
+    return call![1];
+  }
+
+  function setUserActivation(isActive: boolean | undefined) {
+    Object.defineProperty(navigator, "userActivation", {
+      configurable: true,
+      value: isActive === undefined ? undefined : { isActive, hasBeenActive: isActive },
+    });
+  }
+  beforeEach(() => setUserActivation(true));
+  afterEach(() => setUserActivation(undefined));
+
+  it("refuses a write with no user activation or an oversized payload", async () => {
+    render(<Panel />);
+    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
+    await act(async () => {
+      h.sockets[0].onopen?.();
+    });
+    const handler = osc52Handler();
+    setUserActivation(false);
+    expect(handler(`c;${btoa("hijack")}`)).toBe(true);
+    setUserActivation(true);
+    expect(handler(`c;${"A".repeat(100_004)}`)).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("writes the decoded payload to the system clipboard once the socket is live", async () => {
+    render(<Panel />);
+    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
+    await act(async () => {
+      h.sockets[0].onopen?.();
+    });
+    const handler = osc52Handler();
+    const b64 = btoa(String.fromCharCode(...new TextEncoder().encode("héllo from ssh")));
+    expect(handler(`c;${b64}`)).toBe(true);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("héllo from ssh"));
+  });
+
+  it("ignores clipboard read queries and replayed scrollback", async () => {
+    render(<Panel />);
+    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
+    const handler = osc52Handler();
+    // Before the socket opens the terminal is replaying history.
+    expect(handler(`c;${btoa("old")}`)).toBe(true);
+    await act(async () => {
+      h.sockets[0].onopen?.();
+    });
+    expect(handler("c;?")).toBe(true);
+    expect(handler("c;!!not-base64!!")).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+});

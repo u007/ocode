@@ -20,7 +20,12 @@ import (
 // no subprocess/network, destructive gating, hard-blocks) before auto-granting.
 // The trust boundary stays in Go — confidence alone never auto-approves.
 
-const maxInterpreterSourceBytes = 16384
+// maxInterpreterSourceBytes is the per-source byte ceiling for any source shown
+// to a judge (interpreter body or executed script). 48 KiB lets a ~1000-line
+// script through whole while two such sources still sit near the 96 KB shared
+// decision-state budget (decisionStateBudgetBytes); a state over that budget is
+// projected to previews and flagged, never sent over budget.
+const maxInterpreterSourceBytes = 49152
 
 type interpreterEffects struct {
 	Reads        []string `json:"reads"`

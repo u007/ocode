@@ -3,6 +3,7 @@ import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo, ServerProjectTabs } from "../api/types";
 import { eventBus } from "../lib/eventBus";
+import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "../lib/title";
 
 export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview";
 export type ProjectMetadataStatus = "loading" | "ready" | "error";
@@ -497,7 +498,7 @@ function fromServerTabs(projects: Record<string, ServerProjectTabs> | null | und
       .map((t) => ({
         id: t.id,
         projectPath: path,
-        title: typeof t.title === "string" ? t.title : t.id,
+        title: typeof t.title === "string" ? truncateTitle(t.title, MAX_TITLE_TOOLTIP_CHARS) : t.id,
         activeSubTab: toSubTab(t.sub_tab),
       }));
     if (tabs.length === 0) continue;

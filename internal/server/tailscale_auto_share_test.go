@@ -18,15 +18,19 @@ type tsStub struct {
 	fullN  int
 }
 
-func (s *tsStub) record(kind string) {
+// record is the exposeFn seam. It returns a URL and the PROVEN kind ("serve"
+// for tailnet-only, "funnel" for public) so callers see a live exposure; a test
+// that needs a failure installs its own func.
+func (s *tsStub) record(kind string) (string, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, kind)
 	if kind == "serve" {
 		s.serveN++
-	} else {
-		s.fullN++
+		return "https://host.ts.net/desktop", "serve"
 	}
+	s.fullN++
+	return "https://host.ts.net/desktop", "funnel"
 }
 
 func (s *tsStub) count(kind string) int {
@@ -49,25 +53,84 @@ func (s *tsStub) snapshot() []string {
 // `tailscale serve --bg --set-path /desktop` is a single GLOBAL mount per node.
 // If auto-share at boot used a slot separate from the Share dialog's, opening
 // the dialog would start a second process that silently OVERWRITES the mount's
-// target. Asserting the exposure is requested exactly once across an auto-share
-// followed by a dialog read is what pins "one slot, one process".
+// target. Asserting the boot exposure is requested exactly once pins "one slot,
+// one process".
+//
+// The dialog's later Start is the ONE deliberate exception: it upgrades the
+// warm tailnet-only mount to a public funnel, so a node whose auto-share warmed
+// `serve` can still deliver the public URL the Share button advertises. The
+// upgrade mounts funnel on its own port and leaves the warm serve mount in place
+// (Stop clears both), so a failed funnel attempt never destroys a working share.
 func TestAutoShareWarmsTheSameExposureSlot(t *testing.T) {
 	stub := &tsStub{}
 	share := &tailscaleShare{}
 	share.exposeFn = stub.record
+	var removed []string
+	share.removeFn = func(path string) { removed = append(removed, path) }
 
 	if _, _ = share.ensureServe(1234); stub.count("serve") != 1 {
 		t.Fatalf("serve exposure calls = %d, want 1", stub.count("serve"))
 	}
-	// The dialog's read must reuse the warmed slot, not start a new exposure.
-	share.exposeFn = func(kind string) { t.Errorf("dialog must not re-expose, got %q", kind) }
 
-	if _, _ = share.ensure(1234); stub.count("full") != 0 {
-		t.Fatalf("funnel-first exposure ran %d times; auto-share must own the slot", stub.count("full"))
+	url, _ := share.ensure(1234)
+	if stub.count("full") != 1 {
+		t.Fatalf("funnel-first exposure ran %d times, want 1 (the serve -> funnel upgrade)", stub.count("full"))
+	}
+	if st := share.status(); !st.Running || st.Kind != "funnel" {
+		t.Fatalf("after the upgrade = %+v, want running/funnel", st)
+	}
+	if st := share.status(); st.URL != url {
+		t.Fatalf("status url %q != ensure url %q", st.URL, url)
+	}
+	// The upgrade must NOT tear the warm serve mount down first: funnel mounts
+	// on its own port, and removing before the funnel is proven would destroy a
+	// working share if the funnel attempt fails.
+	if len(removed) != 0 {
+		t.Fatalf("upgrade remove calls = %v, want none (the warm mount survives until Stop)", removed)
+	}
+}
+
+// TestManualUpgradeKeepsServeWhenFunnelFails pins the no-downtime half of the
+// upgrade: when the funnel re-expose proves nothing (funnel not enabled on the
+// node, or the attempt fails), the share must fall back to a serve mount rather
+// than be left torn down. StartExposeWithKind's internal serve fallback is what
+// provides this, so the seam reports it as kind "serve".
+func TestManualUpgradeKeepsServeWhenFunnelFails(t *testing.T) {
+	share := &tailscaleShare{}
+	share.removeFn = func(string) {}
+	// Warm with serve; the upgrade's funnel attempt then falls back to serve, as
+	// StartExposeWithKind does when funnel is not enabled on the node.
+	share.exposeFn = func(string) (string, string) {
+		return "https://host.ts.net/desktop", "serve"
 	}
 
-	if got := stub.snapshot(); len(got) != 1 {
-		t.Fatalf("exposure calls = %v, want exactly one", got)
+	if st := share.start("serve", 1234); st.Kind != "serve" {
+		t.Fatalf("precondition kind = %q, want serve", st.Kind)
+	}
+	st := share.start("full", 1234)
+	if !st.Running || st.Kind != "serve" {
+		t.Fatalf("failed upgrade must leave a running serve mount, got %+v", st)
+	}
+}
+
+// TestAutoShareNeverDowngradesWarmedFunnel pins the other direction: once an
+// explicit share has gone public, a later auto-share call must not withdraw it
+// by replacing the funnel with a tailnet-only mount.
+func TestAutoShareNeverDowngradesWarmedFunnel(t *testing.T) {
+	stub := &tsStub{}
+	share := &tailscaleShare{}
+	share.exposeFn = stub.record
+	share.removeFn = func(string) {}
+
+	if st := share.start("full", 1234); st.Kind != "funnel" {
+		t.Fatalf("precondition kind = %q, want funnel", st.Kind)
+	}
+	st := share.start("serve", 1234)
+	if st.Kind != "funnel" {
+		t.Fatalf("auto-share downgraded a public share to %q; it must reuse the warm funnel", st.Kind)
+	}
+	if stub.count("serve") != 0 {
+		t.Fatalf("auto-share re-exposed serve %d times over a warm funnel", stub.count("serve"))
 	}
 }
 
@@ -136,33 +199,35 @@ func TestStartAutoShareUnconfiguredServerIsNoOp(t *testing.T) {
 	}
 }
 
-// TestAutoShareURLIsReusedByTheDialogEndpoint is the end-to-end shape: after
-// auto-share warms the cache, GET /api/tailscale-url returns the cached URL and
-// reports it available, so the dialog shows the tailnet link immediately.
-func TestAutoShareURLIsReusedByTheDialogEndpoint(t *testing.T) {
+// TestAutoShareStatusEndpointReusesTheWarmedExposure is the end-to-end shape:
+// after auto-share warms the cache, GET /api/tailscale-share reports the cached
+// URL as running, and reading it never starts a second exposure.
+func TestAutoShareStatusEndpointReusesTheWarmedExposure(t *testing.T) {
 	stub := &tsStub{}
 	share := &tailscaleShare{}
-	// The seam reports success, so url != "" and the handler reports available.
 	share.exposeFn = stub.record
 
 	srv := &Server{tsShare: share, password: "tok"}
-	share.url = ""
-	share.hint = ""
-	share.started = false
 
-	// Warm via auto-share, then confirm the handler path would reuse it.
 	if _, _ = share.ensureServe(1234); stub.count("serve") != 1 {
 		t.Fatalf("serve exposure calls = %d, want 1", stub.count("serve"))
 	}
 
+	srv.tsShare.exposeFn = func(kind string) (string, string) {
+		t.Errorf("status read must not re-expose, got %q", kind)
+		return "", ""
+	}
 	rec := httptest.NewRecorder()
-	srv.tsShare.exposeFn = func(kind string) { t.Errorf("endpoint must reuse cached exposure, re-exposing with %q", kind) }
-	srv.handleGetTailscaleURL(rec, httptest.NewRequest("GET", "/api/tailscale-url", nil))
+	srv.handleGetTailscaleShare(rec, httptest.NewRequest("GET", "/api/tailscale-share", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (availability belongs in the body)", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), `"available"`) {
-		t.Fatalf("body missing availability: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, `"running":true`) {
+		t.Fatalf("body should report the warmed exposure as running: %s", body)
+	}
+	if !strings.Contains(body, `"kind":"serve"`) {
+		t.Fatalf("body should report the tailnet-only kind: %s", body)
 	}
 }

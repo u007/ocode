@@ -146,3 +146,11 @@ cases:
     rule: bash.prefix.git worktree
     scope: bash_prefix
     command: 'cd /Users/james/www/ocode && git worktree add --detach /tmp/ocode-head-gate HEAD 2>&1 | tail -2 && cd /tmp/ocode-head-gate && cp -cR /Users/james/www/ocode/web/node_modules ./node_modules && echo "=== worktree ready at ===" && git log --oneline -1 && du -sh node_modules 2>/dev/null | tail -1'
+
+  # Logged 2026-10-07: judge allowed (0.83) but the rm guard refused a variable
+  # target. The variable is bound to a same-line mktemp -d and the rm runs after
+  # a ';' (so it runs even if the && chain was cut short).
+  - id: s-temp-mktemp-var-cleanup-after-semicolon
+    rule: bash.prefix.rm
+    scope: bash_prefix
+    command: 'cd /Users/james/www/ocode && tmp=$(mktemp -d) && printf ''%s'' ''{"users":{"admins":["admin-1"]}}'' > "$tmp/config.json" && echo "--- is_admin admin-1 ---" && go version; cat "$tmp/config.json"; rm -rf "$tmp"'

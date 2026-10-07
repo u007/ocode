@@ -21,7 +21,6 @@ import (
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/remote"
-	"github.com/u007/ocode/internal/tailscale"
 )
 
 func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {
@@ -2841,8 +2840,25 @@ func (h *Handler) HandleGetNetworkIP(w http.ResponseWriter, r *http.Request) {
 type autoShareResponse struct {
 	Enabled   bool   `json:"enabled"`
 	Available bool   `json:"available"`
+	Running   bool   `json:"running"`
+	Kind      string `json:"kind,omitempty"`
 	URL       string `json:"url,omitempty"`
 	Hint      string `json:"hint,omitempty"`
+}
+
+// applyShareStatus copies the live exposure state into the response. The
+// snapshot accessor is injected (never a *Server) and is side-effect free:
+// reading config must never START an exposure.
+func (h *Handler) applyShareStatus(resp *autoShareResponse) {
+	if h.tailscaleShareSnapshot == nil {
+		return
+	}
+	st := h.tailscaleShareSnapshot()
+	resp.Available = st.Available
+	resp.Running = st.Running
+	resp.Kind = st.Kind
+	resp.URL = st.URL
+	resp.Hint = st.Hint
 }
 
 // HandleGetAutoShareConfig reports the auto-share toggle and the current
@@ -2861,12 +2877,7 @@ func (h *Handler) HandleGetAutoShareConfig(w http.ResponseWriter, r *http.Reques
 	// Read the exposure without holding h.mu across any tailscale work (the
 	// Handler mutex is a map lock, per the web-server locking rules). Access
 	// goes through the injected accessor so this handler needs no Server ref.
-	if h.tailscaleShareSnapshot != nil {
-		url, hint := h.tailscaleShareSnapshot()
-		resp.URL = url
-		resp.Hint = hint
-		resp.Available = url != "" || tailscale.Installed()
-	}
+	h.applyShareStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -2895,11 +2906,6 @@ func (h *Handler) HandleSetAutoShareConfig(w http.ResponseWriter, r *http.Reques
 	h.mu.Unlock()
 
 	resp := autoShareResponse{Enabled: req.Enabled}
-	if h.tailscaleShareSnapshot != nil {
-		url, hint := h.tailscaleShareSnapshot()
-		resp.URL = url
-		resp.Hint = hint
-		resp.Available = url != "" || tailscale.Installed()
-	}
+	h.applyShareStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
