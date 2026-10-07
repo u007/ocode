@@ -363,9 +363,12 @@ What the page needs to say:
 - Membership in the web instant list (`web/src/lib/instantCommands.ts`) is a
   persistence-safety predicate: add a command only once its handler has a
   mid-turn path keeping the message inside `as.messages`.
-- Web and TUI `/btw` differ in MECHANISM on purpose — TUI runs an independent
-  side-query child agent that never touches the main turn or transcript; the
-  web's records the aside into the conversation. Do not call them identical.
+- **Superseded 2026-10-07:** web `/btw` no longer records the aside into the
+  conversation. It runs the SAME independent side query as the TUI
+  (`internal/server/handler_btw.go` → `agent.AskLoopAsync`), streams progress
+  over the session-scoped `btw` bus event, and renders a docked `BtwPanel`
+  (`lib/btwStore.ts`); `DELETE /api/sessions/{id}/btw` cancels. The "differ in
+  MECHANISM on purpose" bullet this replaces is now FALSE.
 - Tests: `internal/server/handler_btw_test.go`,
   `web/src/lib/instantCommands.test.ts`,
   `web/src/components/Chat/ChatInput.instantCommands.test.tsx`.

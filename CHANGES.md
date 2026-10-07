@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **`/btw` on web/desktop now runs a real side query, matching the TUI.**
+  The command used to record the aside into the conversation (injecting into a
+  live turn, else appending to the transcript) and show a `Noted:` line. It now
+  starts an INDEPENDENT side query — `agent.AskLoopAsync` on the session's live
+  agent, a child with its own client, tool-capable and non-interactive — and
+  streams progress over a new session-scoped `btw` bus event
+  (`started`/`activity`/`delta`/`done`/`error`). Nothing the aside, its tool
+  activity or its answer produces is persisted. `POST /api/sessions/{id}/btw`
+  replies `202`; a new `DELETE /api/sessions/{id}/btw` cancels, a second `/btw`
+  replaces the first, and `/reset-id` cancels + clears the run. The web renders
+  a docked, non-blocking `BtwPanel` above the composer (state in
+  `lib/btwStore.ts`); closing it (X, or Esc with focus inside) cancels. `/btw`
+  stays in the instant list — the handler writes nothing to the transcript at
+  any time. Regression: `internal/server/handler_btw_test.go` (9),
+  `internal/agent/ask_test.go`, `web/src/lib/btwStore.test.ts`,
+  `web/src/components/Chat/BtwPanel.test.tsx`,
+  `web/src/components/Chat/commands.btw.test.tsx`,
+  `web/src/api/client.btw.test.ts`, `web/src/App.btw.test.tsx`.
+
 - **Auto-permission judge: executed scripts are no longer line-limited, and the
   per-source byte ceiling rose from 16 KiB to 48 KiB.** `executedScriptLineCap()`
   returned a 1000-line default (or `permissions.auto.max_context_lines_per_source`),
