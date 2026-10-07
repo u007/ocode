@@ -75,6 +75,7 @@ var sessionScopedEvents = map[string]bool{
 	"advisor_checkpoint":  true,
 	"discovery":           true,
 	"md_indexing":         true,
+	"btw":                 true,
 	"error":               true,
 	"runs":                true,
 	// Live agent-loop activity (llm_running / active_tools / active_agents) for
