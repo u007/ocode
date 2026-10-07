@@ -27,6 +27,7 @@ import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
 import RemoteVersionBanner from "./components/Chat/RemoteVersionBanner";
 import AgentPreview from "./components/Chat/AgentPreview";
+import { BtwPanel } from "./components/Chat/BtwPanel";
 import AgentsPanel from "./components/Agents/AgentsPanel";
 import ChatInput, { type SlashCommandResult } from "./components/Chat/ChatInput";
 import StatusBar from "./components/common/StatusBar";
@@ -84,6 +85,7 @@ import {
   rekeySessionActivity,
   setCommandActivity,
 } from "./lib/commandActivity";
+import { rekeyBtw, startBtw } from "./lib/btwStore";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
 import { eventBus } from "./lib/eventBus";
@@ -945,6 +947,10 @@ function HomeApp() {
     // stranded under the deleted id. This one holds the in-flight
     // command/skill bar.
     rekeySessionActivity(tempTabId, sessionId);
+    // ...and the /btw panel (CLAUDE.md: every session-keyed map moves with the
+    // rekey). The server cancels the old run, so the moved panel simply stops
+    // receiving frames.
+    rekeyBtw(tempTabId, sessionId);
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
@@ -1062,6 +1068,7 @@ function HomeApp() {
         recapSession: (id, host?) => api.recapSession(id, host),
         shareSession: (id, host?) => api.shareSession(id, host),
         btwSession: (id, content, host?) => api.btwSession(id, content, host),
+        cancelBtw: (id, host?) => api.cancelBtw(id, host),
         getMaskConfig: () => api.getMaskConfig(),
         setMaskEnabled: (enabled) => api.setMaskEnabled(enabled),
         setMaskMode: (mode) => api.setMaskMode(mode),
@@ -1204,6 +1211,12 @@ function HomeApp() {
     }
     if (result.download) {
       triggerDownload(result.download.filename, result.download.content, result.download.mimeType);
+    }
+    if (result.btw) {
+      // /btw: the server started an independent side query. Open the docked
+      // panel for it; the answer streams over the `btw` bus event and nothing
+      // is written to the transcript.
+      startBtw(result.btw.sessionId, result.btw.host, result.btw.question);
     }
     return { handled: true, accepted: true };
   };
@@ -1772,6 +1785,12 @@ function HomeApp() {
                               />
                             </div>
                             <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
+                            {isActive && (
+                              <BtwPanel
+                                sessionId={tab.id}
+                                host={resolveSessionHost(projectState, tab.id)}
+                              />
+                            )}
                             <ChatInput
                               ref={(handle) => {
                                 if (handle) chatInputRefs.current.set(tab.id, handle);

@@ -159,6 +159,9 @@ describe("ctx.host threading", () => {
       api: { btwSession: mockBtw } as never,
     } as never);
     expect(mockBtw).toHaveBeenCalledWith(REAL_ID, "quick note", HOST);
-    expect(result.messages?.[0]?.content).toContain("quick note");
+    // /btw starts an independent side query and returns a `btw` effect for the
+    // docked panel; it no longer records a "Noted:" message in the transcript.
+    expect(result.btw).toEqual({ sessionId: REAL_ID, question: "quick note", host: HOST });
+    expect(result.messages ?? []).toHaveLength(0);
   });
 });
