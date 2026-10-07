@@ -21,10 +21,10 @@ ocode takes a **snapshot/backup of a file immediately before any modifying tool 
 
 ## What triggers a snapshot
 Every modifying tool backs up *before* mutating:
-- Write/edit/multi_edit/multi_file_edit/replace_lines/delete — `internal/tool/file.go` reads `prev` then calls `store.Backup(safe, tcID)` before `os.WriteFile`, and `store.RegisterWrite` after success (see `file.go:512-520`, `:538-547`; RegisterWrite call sites at lines 546, 661, 725, 811, 940, 1082).
-- Patch tool — `internal/tool/patch.go:435` calls `snapshot.Backup` before applying.
-- Formatter — `internal/tool/formatter.go:117` backs up before formatting.
-- Config write-back — `internal/config/ocodeconfig.go:1071`.
+- Write/edit/multi_edit/multi_file_edit/replace_lines/delete — `internal/tool/file.go` reads `prev` then calls `store.Backup(safe, tcID)` before `os.WriteFile`, and `store.RegisterWrite` after success (see `file.go:996-1030`, `:1135-1145`; RegisterWrite call sites at lines 1030, 1145, 1209, 1295, 1424, 1580).
+- Patch tool — `internal/tool/patch.go:464` calls `snapshot.Backup` before applying.
+- Formatter — `internal/tool/formatter.go:149` backs up before formatting.
+- Config write-back — `internal/config/ocodeconfig.go:2680`.
 
 ## Undo
 - `internal/tool/undo.go` exposes **`undo_file_change`** (name `undo_file_change`). Pass the original `tool_call_id` of a write/edit/multi_edit/multi_file_edit/replace_lines/delete; it restores all affected files to their pre-edit state via `Store.UndoByToolCallID`.
