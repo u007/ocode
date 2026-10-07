@@ -19,8 +19,11 @@ export function BtwPanel({ sessionId, host }: { sessionId: string; host?: string
   const dismiss = useCallback(() => {
     // Cancel the server-side side query (independent of the main turn), then
     // drop the local panel. A failed cancel still closes the panel — the run's
-    // frames are ignored once its state is gone.
-    void api.cancelBtw(sessionId, host).catch(() => {});
+    // frames are ignored once its state is gone — but log it so a broken
+    // cancel is diagnosable.
+    api.cancelBtw(sessionId, host).catch((err) => {
+      console.warn("btw: cancel side query failed", err);
+    });
     closeBtw(sessionId, host);
   }, [sessionId, host]);
 

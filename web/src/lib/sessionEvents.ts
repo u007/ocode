@@ -23,6 +23,7 @@ import {
   setCompactionState,
 } from "./compactionState";
 import { clearSessionActivity, setSkillActivity } from "./commandActivity";
+import { closeBtw, rekeyBtw } from "./btwStore";
 import { skillNameFromArgs } from "../components/Chat/toolHint";
 
 /**
@@ -133,6 +134,10 @@ export function closeSessionBackend(sessionId: string, host?: string): void {
   // The tab is gone: drop its cross-process revision baseline so the map does
   // not retain every session ever viewed over a long-lived desktop session.
   clearSessionRevision(sessionId, host);
+  // A closed tab's /btw panel must not linger: its server-side run is cancelled
+  // by HandleCloseSession, and a retained store entry would render a dead panel
+  // if the id were ever reused.
+  closeBtw(sessionId, host);
   // A closed tab's pending rewind must not linger: reopening the session should
   // start from the persisted transcript, not a stale draft/capability pair.
   clearPendingRewind(host, sessionId);
@@ -385,6 +390,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeyQueue(oldId, newId);
       rekeyInputHistory(oldId, newId);
       rekeySidePaneState(oldId, newId);
+      rekeyBtw(oldId, newId);
       rekeyPendingRewind(r.hostFor?.(oldId), oldId, r.hostFor?.(newId), newId);
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);

@@ -12,6 +12,7 @@ vi.mock("../../api/client", () => ({
     getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
     getSession: (...a: unknown[]) => mockGetSession(...a),
   },
+  apiPath: (p: string) => p,
 }));
 
 // SessionTabSync is the only place live chat events reach the store (see
@@ -34,17 +35,19 @@ vi.mock("../../stores/projectStore", () => ({
   }),
 }));
 
-const subscribed = new Map<string, (env: unknown) => void>();
-let reconnectHandler: (() => void) | undefined;
+const bus = vi.hoisted(() => ({
+  subscribed: new Map<string, (env: unknown) => void>(),
+  reconnectHandler: undefined as (() => void) | undefined,
+}));
 vi.mock("../../lib/eventBus", () => ({
   eventBus: {
     on: (event: string, handler: (env: unknown) => void) => {
-      subscribed.set(event, handler);
-      return () => subscribed.delete(event);
+      bus.subscribed.set(event, handler);
+      return () => bus.subscribed.delete(event);
     },
     onReconnect: (handler: () => void) => {
-      reconnectHandler = handler;
-      return () => { reconnectHandler = undefined; };
+      bus.reconnectHandler = handler;
+      return () => { bus.reconnectHandler = undefined; };
     },
   },
 }));
@@ -69,8 +72,8 @@ function MessagesProbe({ sessionId }: { sessionId: string }) {
 
 describe("SessionTabSync", () => {
   beforeEach(() => {
-    subscribed.clear();
-    reconnectHandler = undefined;
+    bus.subscribed.clear();
+    bus.reconnectHandler = undefined;
     resetCompactionGenerations();
     tabsByProject = {};
     mockGetSessionState.mockReset();
@@ -88,10 +91,10 @@ describe("SessionTabSync", () => {
         <SessionTabSync />
       </ChatProvider>,
     );
-    expect(reconnectHandler).toBeDefined();
-    act(() => { reconnectHandler?.(); });
+    expect(bus.reconnectHandler).toBeDefined();
+    act(() => { bus.reconnectHandler?.(); });
     act(() => {
-      subscribed.get("compaction_started")?.({
+      bus.subscribed.get("compaction_started")?.({
         event: "compaction_started",
         project: "/proj",
         session_id: "s1",
@@ -108,17 +111,17 @@ describe("SessionTabSync", () => {
         <SessionTabSync />
       </ChatProvider>,
     );
-    expect(subscribed.has("envelope")).toBe(false);
+    expect(bus.subscribed.has("envelope")).toBe(false);
     for (const event of ROUTABLE_EVENTS) {
-      expect(subscribed.has(event)).toBe(true);
+      expect(bus.subscribed.has(event)).toBe(true);
     }
-    expect(subscribed.has("text")).toBe(true);
-    expect(subscribed.has("turn_started")).toBe(true);
+    expect(bus.subscribed.has("text")).toBe(true);
+    expect(bus.subscribed.has("turn_started")).toBe(true);
     // Explicit pin (beyond the ROUTABLE_EVENTS loop above, which would silently
     // stop checking it if the event were dropped from the set): the headless
     // agent-loop activity feed only reaches the status bar if the SSE transport
     // actually subscribes to it.
-    expect(subscribed.has("agent_activity")).toBe(true);
+    expect(bus.subscribed.has("agent_activity")).toBe(true);
   });
 
   it("routes a live 'text' envelope into the session's store slice", () => {
@@ -131,7 +134,7 @@ describe("SessionTabSync", () => {
       </ChatProvider>,
     );
     act(() => {
-      subscribed.get("text")?.({
+      bus.subscribed.get("text")?.({
         event: "text",
         session_id: "s1",
         seq: 1,
@@ -167,7 +170,7 @@ describe("SessionTabSync", () => {
 
     vi.useFakeTimers();
     act(() => {
-      subscribed.get("text")?.({
+      bus.subscribed.get("text")?.({
         event: "text",
         session_id: "s2",
         seq: 1,

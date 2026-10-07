@@ -3,9 +3,11 @@ package server
 import (
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // btwMaxSteps caps a /btw side-query loop, mirroring the TUI's btwMaxSteps, so
@@ -103,22 +105,39 @@ func (h *Handler) HandleBtwCancel(w http.ResponseWriter, r *http.Request, id str
 // back to the persisted transcript. A failure to load is logged and yields an
 // empty history (the side query still answers the aside on its own).
 func (h *Handler) btwMessages(id string, as *agentSession) []agent.Message {
+	var src []agent.Message
 	if as.mu.TryLock() {
-		out := append([]agent.Message(nil), as.messages...)
-		as.mu.Unlock()
-		return out
+		src = as.messages
+		defer as.mu.Unlock()
+	} else {
+		entry, err := h.sessions.Resolve(id)
+		if err != nil {
+			log.Printf("btw: resolve %s for transcript snapshot: %v", id, err)
+			return nil
+		}
+		s, err := session.LoadForDir(entry.ProjectRoot, id)
+		if err != nil || s == nil {
+			log.Printf("btw: load %s transcript for snapshot: %v", id, err)
+			return nil
+		}
+		src = s.Messages
 	}
-	entry, err := h.sessions.Resolve(id)
-	if err != nil {
-		log.Printf("btw: resolve %s for transcript snapshot: %v", id, err)
-		return nil
+	// Drop the ask sentinels, exactly as the TUI's snapshot does. `/btw`
+	// mid-turn is precisely when the main turn may be parked on a
+	// permission/question ask, and feeding the raw PERMISSION_ASK:… /
+	// WAITING_FOR_USER_RESPONSE JSON to the side-query model leaks internal
+	// protocol and degrades the answer.
+	out := make([]agent.Message, 0, len(src))
+	for _, m := range src {
+		if strings.HasPrefix(m.Content, tool.SentinelPermissionAsk) {
+			continue
+		}
+		if strings.Contains(m.Content, tool.SentinelWaitingForUser) {
+			continue
+		}
+		out = append(out, m)
 	}
-	s, err := session.LoadForDir(entry.ProjectRoot, id)
-	if err != nil || s == nil {
-		log.Printf("btw: load %s transcript for snapshot: %v", id, err)
-		return nil
-	}
-	return append([]agent.Message(nil), s.Messages...)
+	return out
 }
 
 // startBtwLoop launches the side query and wires its callbacks to bus frames.
@@ -190,8 +209,14 @@ func (h *Handler) recordBtwCancel(id string, gen uint64, cancel func()) {
 		return
 	}
 	if cur.done {
-		// The loop already finished; nothing to store or stop.
+		// The run already finished — possibly cancelled during the child-build
+		// window (cancelBtwRun marks done without a cancel func). Call the
+		// freshly returned cancel anyway: it is idempotent for a finished loop,
+		// and it is the only way to stop a loop the early cancel missed.
 		h.btwMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		return
 	}
 	cur.cancel = cancel

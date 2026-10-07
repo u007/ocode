@@ -133,4 +133,37 @@ describe("btwStore", () => {
     expect(getBtwState("new")?.sessionId).toBe("new");
     expect(getBtwState("new")?.question).toBe("q");
   });
+
+  it("rekeyBtw resets the generation so the new run's frames are not seen as stale", () => {
+    // The server DELETES the run entry on /reset-id, so the new id's first run
+    // starts at generation 1. Carrying the old generation would reject it.
+    frame("old", { generation: 3, phase: "started", question: "q" });
+    rekeyBtw("old", "new");
+    expect(getBtwState("new")?.generation).toBe(0);
+    frame("new", { generation: 1, phase: "started", question: "second" });
+    expect(getBtwState("new")?.question).toBe("second");
+    expect(getBtwState("new")?.generation).toBe(1);
+  });
+
+  it("startBtw does not clobber a terminal frame that arrived first", () => {
+    // The server publishes `started` — and a fast `error` — BEFORE it writes
+    // the 202, and the SSE stream reaches the browser first. startBtw (called
+    // after the POST resolves) must not reset the panel to loading.
+    frame("s1", { generation: 1, phase: "started", question: "q" });
+    frame("s1", { generation: 1, phase: "error", error: "no client" });
+    startBtw("s1", undefined, "q");
+    const st = getBtwState("s1");
+    expect(st?.loading).toBe(false);
+    expect(st?.error).toBe("no client");
+    expect(st?.open).toBe(true);
+  });
+
+  it("startBtw does not clobber a fast done frame that arrived first", () => {
+    frame("s1", { generation: 1, phase: "started", question: "q" });
+    frame("s1", { generation: 1, phase: "done", text: "the answer" });
+    startBtw("s1", undefined, "q");
+    const st = getBtwState("s1");
+    expect(st?.loading).toBe(false);
+    expect(st?.answer).toBe("the answer");
+  });
 });

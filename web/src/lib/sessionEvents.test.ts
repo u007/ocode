@@ -38,6 +38,7 @@ vi.mock("../api/client", () => ({
     getSession: (...a: unknown[]) => mockGetSession(...a),
     closeSession: (...a: unknown[]) => mockCloseSession(...a),
   },
+  apiPath: (p: string) => p,
 }));
 
 function env(event: string, over: Partial<BusEnvelope> = {}): BusEnvelope {

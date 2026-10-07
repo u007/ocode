@@ -112,6 +112,16 @@ eventBus.on("btw", (env) => {
 export function startBtw(sessionId: string, host: string | undefined, question: string) {
   const k = key(host, sessionId);
   const cur = states.get(k);
+  // A TERMINAL frame can arrive before this call: the server publishes
+  // `started` — and a fast `error`/`done` — before it writes the 202, and the
+  // SSE stream is delivered first. Do not clobber that state: resetting to
+  // `loading` would leave the panel spinning on "Thinking…" forever with no
+  // error and no retry (the exact failure this feature set out to avoid).
+  if (cur && !cur.loading) {
+    states.set(k, { ...cur, sessionId, host, question, open: true });
+    emit();
+    return;
+  }
   states.set(k, {
     sessionId,
     host,
@@ -144,7 +154,11 @@ export function rekeyBtw(oldId: string, newId: string) {
   for (const [k, st] of [...states]) {
     if (st.sessionId !== oldId) continue;
     states.delete(k);
-    states.set(key(st.host, newId), { ...st, sessionId: newId });
+    // Reset the generation: the server DELETES the run entry on /reset-id, so
+    // the new id's first run starts at generation 1. Carrying the old
+    // generation would make the new run's frames look stale and the rekeyed
+    // panel would never update.
+    states.set(key(st.host, newId), { ...st, sessionId: newId, generation: 0 });
     changed = true;
   }
   if (changed) emit();

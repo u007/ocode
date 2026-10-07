@@ -511,3 +511,88 @@ func TestHandleBtwResetIdCancelsRun(t *testing.T) {
 		t.Fatal("btwRuns entry stranded under the deleted id")
 	}
 }
+
+// TestHandleBtwSnapshotStripsAskSentinels: the side query must not receive the
+// main turn's ask sentinels, exactly as the TUI's snapshot strips them. `/btw`
+// mid-turn is precisely when the turn may be parked on a permission/question
+// ask, and the raw PERMISSION_ASK / WAITING_FOR_USER_RESPONSE JSON leaks
+// internal protocol to the provider and degrades the answer.
+func TestHandleBtwSnapshotStripsAskSentinels(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	as.mu.Lock()
+	as.messages = []agent.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "tool", Content: tool.SentinelPermissionAsk + `{"tool":"bash"}`},
+		{Role: "tool", Content: `{"status":"` + tool.SentinelWaitingForUser + `"}`},
+		{Role: "assistant", Content: "ok"},
+		{Role: "user", Content: "trailing"},
+	}
+	as.mu.Unlock()
+
+	got := h.btwMessages(id, as)
+	if len(got) != 3 {
+		t.Fatalf("snapshot = %d msgs, want 3 (two sentinels stripped)", len(got))
+	}
+	for _, m := range got {
+		if strings.Contains(m.Content, tool.SentinelPermissionAsk) || strings.Contains(m.Content, tool.SentinelWaitingForUser) {
+			t.Fatalf("sentinel leaked into the side-query snapshot: %q", m.Content)
+		}
+	}
+}
+
+// TestHandleBtwCancelDuringBuildWindowIsNotDropped: a DELETE that lands between
+// registerBtwRun and recordBtwCancel marks the run done before its cancel func
+// is stored. The late-recorded cancel must still be invoked (it is idempotent
+// for a finished loop) — otherwise the loop runs uncancelled.
+func TestHandleBtwCancelDuringBuildWindowIsNotDropped(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+
+	cancelled := 0
+	gen, _ := h.registerBtwRun(id)
+	h.cancelBtwRun(id, false) // DELETE arrives during the child-build window
+	h.recordBtwCancel(id, gen, func() { cancelled++ })
+
+	if cancelled != 1 {
+		t.Fatalf("cancels = %d, want 1 (a cancel during the build window must not be dropped)", cancelled)
+	}
+}
+
+// TestHandleCloseSessionCancelsBtwRun: closing a tab/session must stop the
+// independent side query too. It is not turn work, so interruptSessionWork does
+// not reach it; without this the loop keeps burning spend and holding the
+// child's bash processes past the close, and btwRuns retains the entry.
+func TestHandleCloseSessionCancelsBtwRun(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	gen, _ := h.registerBtwRun(id)
+	cancelled := false
+	h.recordBtwCancel(id, gen, func() { cancelled = true })
+
+	rec := httptest.NewRecorder()
+	h.HandleCloseSession(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/close", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close status %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !cancelled {
+		t.Fatal("close did not cancel the in-flight btw run")
+	}
+	if _, ok := h.btwRuns[id]; ok {
+		t.Fatal("btwRuns entry retained after close")
+	}
+}

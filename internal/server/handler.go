@@ -625,6 +625,12 @@ func NewHandler() *Handler {
 		// Drop any per-session MCP overrides so the map doesn't grow one entry
 		// per session id the process has ever served.
 		h.clearMCPSessionOverrides(sessionID)
+
+		// Stop and forget any in-flight /btw side query. Eviction releases the
+		// session without a close request, so without this the loop would keep
+		// running (spend + child bash processes) and btwRuns would retain one
+		// entry per session id the process has ever served.
+		h.cancelBtwRun(sessionID, true)
 	})
 
 	// Reap persistent `!` shells that have been idle past the session idle
