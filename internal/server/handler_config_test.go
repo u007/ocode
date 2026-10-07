@@ -23,9 +23,15 @@ import (
 // and an isolated HOME, so the Handle*Config setters under test persist to a
 // throwaway ocodeconfig.json instead of the developer's real global config
 // (~/.config/opencode/ocodeconfig.json).
+//
+// The home MUST go through setHomeTree, not a bare t.Setenv("HOME", …): the
+// XDG variables win on Linux, so a bare HOME left these setters writing into
+// the package-wide TestMain config dir — which leaked a persisted
+// `permissions.mode = sandbox` into every later test in the binary (the
+// permissions_mode_test.go assertions run after this file).
 func testConfigHandler(t *testing.T) *Handler {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	h := NewHandler()
 	h.mu.Lock()
 	h.cfg = &config.Config{

@@ -10,6 +10,25 @@ import (
 	"github.com/u007/ocode/internal/snapshot"
 )
 
+// setHomeTree points HOME and every XDG/Windows equivalent at ONE temp tree so
+// path resolution is identical on darwin and Linux.
+//
+// A bare t.Setenv("HOME", …) is not enough: paths.GlobalConfigDir() ignores
+// XDG_CONFIG_HOME on darwin but honours it on Linux, so such a test writes to
+// the package-wide XDG dir seeded by TestMain and then asserts under its own
+// $HOME — passing on macOS and failing on Linux. internal/config and
+// internal/agent carry the identical helper.
+func setHomeTree(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+}
+
 // TestMain isolates every global-config read/write for the whole server test
 // binary by redirecting HOME (and the XDG/APPDATA/LOCALAPPDATA equivalents) to
 // a temp dir. This guarantees tests that persist config — model/reasoning
@@ -41,11 +60,17 @@ func TestMain(m *testing.M) {
 	os.Setenv("USERPROFILE", tmp)
 	os.Setenv("HOMEDRIVE", tmp)
 	os.Setenv("HOMEPATH", tmp)
-	os.Setenv("XDG_CONFIG_HOME", tmp)
-	os.Setenv("XDG_DATA_HOME", tmp)
-	os.Setenv("XDG_STATE_HOME", tmp)
-	os.Setenv("APPDATA", tmp)
-	os.Setenv("LOCALAPPDATA", tmp)
+	// Each XDG variable gets its OWN subtree. Pointing them all at `tmp` made
+	// GlobalConfigDir() and GlobalDataDir() the SAME directory on Linux (both
+	// "<xdg>/opencode"), which the self-escalation guard reads as "writing to
+	// the data dir", and it also disagreed with tests that assert under
+	// $HOME/.config/opencode. On darwin XDG_CONFIG_HOME is ignored, so the
+	// collapse only ever showed up on Linux.
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, ".config"))
+	os.Setenv("XDG_DATA_HOME", filepath.Join(tmp, ".local", "share"))
+	os.Setenv("XDG_STATE_HOME", filepath.Join(tmp, ".local", "state"))
+	os.Setenv("APPDATA", filepath.Join(tmp, "AppData", "Roaming"))
+	os.Setenv("LOCALAPPDATA", filepath.Join(tmp, "AppData", "Local"))
 
 	// Provider API-key env vars are process-global as well, and they WIN over a
 	// stored credential (see auth.Provider.EnvVar). A developer machine that

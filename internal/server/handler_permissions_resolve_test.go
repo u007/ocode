@@ -309,7 +309,7 @@ func TestHandleResolvePermissionAlreadyResolved(t *testing.T) {
 func isolatedConfigHome(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(tmp, "cfgdir"))
 	return tmp
 }

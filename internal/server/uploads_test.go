@@ -38,7 +38,7 @@ func newUploadsTestHandler(t *testing.T, projectDir string) *Handler {
 // matched locally instead, 500 from creating a relative "~/..." directory).
 func TestHandleUploadsAcceptsTildeFormRegisteredProject(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	projectDir := filepath.Join(home, "www", "aimsai2")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project: %v", err)
@@ -71,7 +71,7 @@ func TestHandleUploadsAcceptsTildeFormRegisteredProject(t *testing.T) {
 // not a registered project root stays rejected.
 func TestHandleUploadsRejectsUnregisteredTildeProject(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	h := newUploadsTestHandler(t, t.TempDir())
 
 	w := httptest.NewRecorder()
