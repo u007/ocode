@@ -77,6 +77,24 @@ The clean-clone build, CI, and contribution templates landed (see CHANGES.md
   The 120s is the stub daemon's own `sleep 120`: `cmd.Wait()` did not return
   until it expired, whereas on macOS the same test passes in 0.4s (3 runs in
   1.36s). Suspect the supervisor's kill/reap path, not the test.
+- **Linux CI: the darwin-only test failures in the remaining packages (2026-10-06).**
+  Two causes are now fixed — the fake-`ssh` shims used bash arrays (dash rejects
+  them) and `confinedPath` used the eager normalizer for the lazily-created
+  managed caches. Still red on a fresh Linux runner:
+  - `internal/tui` and `internal/server`: a large tail of the same XDG/`$HOME`
+    class (`paths.GlobalConfigDir()` ignores `XDG_CONFIG_HOME` on darwin but
+    honours it elsewhere). Neither package has a `setHomeTree` helper yet, which
+    is the prerequisite for fixing them the way `internal/config` and
+    `internal/agent` were fixed.
+  - `internal/remote`: `serve_test.go` has three `got`/`want` assertions that
+    print byte-identically yet compare unequal — consistent with a monotonic
+    clock field in the compared struct.
+  - `web`: `TestFSContainsIndexHTML` fails in 0.002s because a clean checkout has
+    only `web/dist/.gitkeep`. Needs a decision: skip when the SPA is unbuilt, or
+    build the web app before the Go job.
+  Last measured: 67 distinct failures across browse/cdp, remote, server, tool,
+  tui and web; `internal/tool` is fixed, and `internal/config` / `internal/agent`
+  now pass.
 - **`internal/server` per-package runtime is unmeasured.** 1200+ test functions
   in one package against Go's 10m default per-package timeout. The `-timeout 30m`
   (plain) and `5m` (retry) values are **guards approved by the user, not measured
