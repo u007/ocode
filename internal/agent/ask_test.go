@@ -333,3 +333,45 @@ func TestAskLoopAsyncFreshClientFailureIsStartupError(t *testing.T) {
 		t.Fatalf("err = %v, want a fresh-client build error", gotErr)
 	}
 }
+
+// TestFormatSideQueryActivity pins the shared side-query activity formatter
+// (the TUI popup and the web/desktop panel must render identical text).
+// NOTE: ToolCall.Function is an anonymous struct (client.go), so it is set
+// field-by-field rather than with a composite literal.
+func TestFormatSideQueryActivity(t *testing.T) {
+	m := Message{Role: "assistant"}
+	m.ToolCalls = []ToolCall{{}}
+	m.ToolCalls[0].Function.Name = "read"
+	m.ToolCalls[0].Function.Arguments = `{"file":"a.go"}`
+	if got := FormatSideQueryActivity(m); !strings.Contains(got, "→ read") {
+		t.Fatalf("got %q", got)
+	}
+	if got := FormatSideQueryActivity(Message{Role: "assistant", Content: "hi"}); got != "" {
+		t.Fatalf("want empty, got %q", got)
+	}
+	long := Message{Role: "assistant"}
+	long.ToolCalls = []ToolCall{{}}
+	long.ToolCalls[0].Function.Name = "bash"
+	long.ToolCalls[0].Function.Arguments = strings.Repeat("x", 100)
+	if got := FormatSideQueryActivity(long); !strings.HasSuffix(got, "...") {
+		t.Fatalf("want truncated args, got %q", got)
+	}
+}
+
+// TestBtwExcludedToolsComplete guards the shared side-query exclusion list
+// against silent drift: every non-interactive tool must be named.
+func TestBtwExcludedToolsComplete(t *testing.T) {
+	want := []string{"question", "task", "task_status", "agent_status", "task_cancel", "wait", "todo_write", "todo_update", "plan_enter", "plan_exit", "discover_more", "knowledge_lookup", "advisor"}
+	if len(BtwExcludedTools) != len(want) {
+		t.Fatalf("len = %d, want %d", len(BtwExcludedTools), len(want))
+	}
+	have := map[string]bool{}
+	for _, n := range BtwExcludedTools {
+		have[n] = true
+	}
+	for _, n := range want {
+		if !have[n] {
+			t.Fatalf("BtwExcludedTools missing %q", n)
+		}
+	}
+}
