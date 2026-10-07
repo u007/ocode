@@ -17,10 +17,12 @@
  * shorter) and the turn-end sync save reports `ErrTranscriptConflict` — and
  * both failures are only logged, silently losing the rest of the turn.
  *
- * So: only add a command here once you have confirmed its server handler has a
- * mid-turn path that keeps the message inside `as.messages` (the shape
- * `Handler.tryEnqueueInjection` provides). A command that starts or mutates a
- * turn must stay queued.
+ * So: only add a command here once you have confirmed its server handler writes
+ * NOTHING to the session transcript while a turn is live. `/btw` qualifies
+ * because `Handler.HandleBtw` (`internal/server/handler_btw.go`) runs an
+ * independent side query (`agent.AskLoopAsync`) that neither injects into the
+ * turn nor appends to the transcript. A command that starts or mutates a turn
+ * must stay queued.
  */
 const INSTANT_COMMANDS = new Set(["/btw", "/by-the-way"]);
 

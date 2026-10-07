@@ -45,6 +45,7 @@
 
 ## 2026-10-07
 
+* **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
 * **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
 * **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
 * **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))

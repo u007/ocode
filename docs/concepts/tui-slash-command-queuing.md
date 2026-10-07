@@ -1,19 +1,19 @@
 ---
 type: Concept
 title: 'TUI User Interaction: Slash Command Queuing'
-description: 'How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-04: the web/desktop SPA per-tab queue and its instant-command bypass are now documented; web-vs-TUI compaction queueing is documented as a platform difference — the web queues every command during compaction (compactionActive short-circuits ahead of isInstantCommand), while the TUI''s !isInstantCmd guard lets instant commands dispatch immediately.'
+description: 'How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-07: web/desktop /btw no longer records the aside into the conversation — both surfaces now run the same independent side query and neither writes the transcript.'
 resource: CLAUDE.md
 tags:
   - tui
   - commands
   - queue
   - web
-timestamp: 2026-10-04T05:53:07Z
+timestamp: 2026-10-07T12:40:26Z
 ---
 # TUI User Interaction: Slash Command Queuing
 
-**Description:** How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-04: the web/desktop SPA's per-tab queue and its instant-command bypass are now documented, and web-vs-TUI compaction queueing is documented as a platform difference — the web queues every command during compaction (`compactionActive` short-circuits ahead of `isInstantCommand`), while the TUI's `!isInstantCmd` guard lets instant commands dispatch immediately.
-- **Status:** Implemented. TUI queue + `isInstantCmd` documented; web/desktop per-tab queue + `isInstantCommand` bypass documented 2026-10-04; web-vs-TUI compaction queueing documented as a platform difference 2026-10-04.
+**Description:** How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-07: web/desktop `/btw` no longer records the aside into the conversation — both surfaces now run the same independent side query and neither writes the transcript.
+- **Status:** Implemented. TUI queue + `isInstantCmd` documented; web/desktop per-tab queue + `isInstantCommand` bypass documented 2026-10-04; web-vs-TUI compaction queueing documented as a platform difference 2026-10-04; web/desktop `/btw` switched to the TUI's independent side query 2026-10-07.
 
 - TUI supports `/commands` and `!shell`.
 - **Slash command queuing.** All slash commands entered while the agent is
@@ -38,7 +38,8 @@ timestamp: 2026-10-04T05:53:07Z
     the main turn's `OnDelta`/`OnUsage` callbacks and runs concurrently with an
     in-flight stream. A mid-stream snapshot may carry an assistant tool_call
     with no result yet; `repairToolCallSequence` synthesises a placeholder
-    before send so the request stays valid.
+    before send so the request stays valid. The web/desktop `/btw` now uses the
+    SAME side-query mechanism (see below).
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/doc-sync`,
     `/agents limit <n>`.
@@ -58,27 +59,34 @@ instant-command list at all, so every `/command` and `!shell` typed while busy
 was queued. `/btw` and `/by-the-way` now bypass it
 (`web/src/lib/instantCommands.ts`), for TUI parity.
 
-- **Membership is a persistence-safety predicate.** `web/src/lib/instantCommands.ts`
-  states this in its own header comment: a command belongs in the instant set
-  only once its server handler has a mid-turn path that keeps the message inside
-  `as.messages` (the shape `Handler.tryEnqueueInjection` provides). A command
-  that starts or mutates a turn must stay queued.
-- **`HandleBtw` injects into a live turn.** It calls `h.tryEnqueueInjection`
-  (`internal/server/handler.go`) — the same path a message sent mid-turn takes —
-  instead of appending to the transcript. With no live turn it falls back to the
-  unchanged `session.AppendUserMessageForDir` tail-insert with bounded retry
-  (`internal/server/handler.go`). This is not an optimisation: a mid-turn
-  transcript append makes the stored transcript stop being a prefix of the
-  in-memory snapshot, so `session.liveAppendStart` → `samePrefix`
-  (`internal/session/sqlitestore.go`, `internal/session/session.go`) drops every
-  later live snapshot, and the turn-end sync save reports
-  `ErrTranscriptConflict`. Both failures are only logged, so the rest of the turn
-  silently vanishes on reload.
+- **Membership is a persistence-safety predicate.** A command belongs in the
+  instant set only once its server handler writes nothing to the session
+  transcript underneath a live turn — writing mid-turn is what breaks
+  persistence: the stored transcript stops being a prefix of the in-memory
+  snapshot, so every later live snapshot is dropped
+  (`session.liveAppendStart` → `samePrefix`, `internal/session/sqlitestore.go`,
+  `internal/session/session.go`) and the turn-end sync save reports
+  `ErrTranscriptConflict`, both only logged. `/btw` qualifies because its
+  handler writes nothing to the transcript while a turn is live: `HandleBtw`
+  runs an independent side query that neither injects into a live turn nor
+  appends to the transcript. A command that starts or mutates a turn must stay
+  queued.
+- **`HandleBtw` runs an independent side query — it never writes the
+  transcript.** `Handler.HandleBtw` (`internal/server/handler_btw.go`) starts
+  `agent.AskLoopAsync` on the session's live agent: a child with its own client,
+  tool-capable but non-interactive (`agent.BtwExcludedTools` removes the
+  interactive/dispatch tools). Nothing the aside, its tool activity or its
+  answer produces is persisted — the aside is not injected and nothing is
+  appended. Progress streams over the session-scoped bus event `btw` with
+  phases `started|activity|delta|done|error`. `POST /api/sessions/{id}/btw`
+  replies `202`; `DELETE /api/sessions/{id}/btw` cancels; a second `/btw`
+  replaces (cancels) the first; `/reset-id` cancels the run and drops its
+  registry entry (`internal/server/handler_reset_id.go`).
 - **Compaction queueing differs by platform.** The web SPA queues EVERY command
   while a compaction is active, instant ones included: in `handleSend`
-  (`web/src/components/Chat/ChatInput.tsx:885`) the queue condition is
+  (`web/src/components/Chat/ChatInput.tsx:860`) the queue condition is
   `compactionActive || (!isInstantCommand(trimmed) && (effectiveBusy || drainingRef.current.has(sessionTabId)))`
-  (`web/src/components/Chat/ChatInput.tsx:893`), and `compactionActive` is the
+  (`web/src/components/Chat/ChatInput.tsx:904`), and `compactionActive` is the
   first, unconditional clause — so `/btw` does NOT bypass compaction on the web.
   The TUI does NOT withhold instant commands while compacting: its gate is
   `(m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0) && !isExitCmd && !isInstantCmd`
@@ -86,12 +94,18 @@ was queued. `/btw` and `/by-the-way` now bypass it
   The web is conservative because compaction persists through `applyCompactResult`
   (`internal/server/agent_session.go`), which calls `h.replaceSession`
   (`internal/server/agent_session.go`): it replaces the stored transcript
-  wholesale, so a concurrently recorded aside would be dropped. The TUI's `/btw`
-  side-query never writes the main turn's transcript, so it is safe there.
-- **Web and TUI `/btw` differ in mechanism on purpose.** The TUI runs an
-  independent side-query child agent (`Agent.AskLoopAsync`) that never touches
-  the main turn or transcript; the web records the aside into the conversation
-  via `tryEnqueueInjection`. They are not identical.
+  wholesale, so anything written mid-compaction can be dropped. `/btw` itself
+  writes nothing, but the web still withholds it — the `compactionActive`
+  clause is unconditional.
+- **Web and TUI `/btw` share one mechanism.** Both run the same independent
+  side query (`agent.AskLoopAsync`, `agent.BtwExcludedTools`) and NEITHER writes
+  the transcript. On the web the progress renders in a docked, non-blocking
+  `BtwPanel` above the composer (state in `web/src/lib/btwStore.ts`, fed by the
+  `btw` bus event); closing it (X, or Esc with focus inside) cancels the run.
 - **Tests:** `internal/server/handler_btw_test.go`,
-  `web/src/lib/instantCommands.test.ts`,
+  `web/src/lib/btwStore.test.ts`,
+  `web/src/components/Chat/BtwPanel.test.tsx`,
+  `web/src/App.btw.test.tsx`,
+  `web/src/components/Chat/commands.btw.test.tsx`. Instant-list membership is
+  covered by `web/src/lib/instantCommands.test.ts` and
   `web/src/components/Chat/ChatInput.instantCommands.test.tsx`.
