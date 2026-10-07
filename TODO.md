@@ -95,6 +95,12 @@ The clean-clone build, CI, and contribution templates landed (see CHANGES.md
   Last measured: 67 distinct failures across browse/cdp, remote, server, tool,
   tui and web; `internal/tool` is fixed, and `internal/config` / `internal/agent`
   now pass.
+- **`docs/file-edit-snapshot.md` disagrees with the source on the undo age.**
+  The page cites `internal/tool/undo.go:14` as `undoMaxAgeDelta = 2`, but the
+  source defines `defaultUndoMaxAgeDelta = 10` (line 16; the effective value is
+  overridden via `ocode.undo_max_age_delta`, which is where a "2" may have come
+  from). Left uncorrected during the 2026-10-06 anchor sweep because the correct
+  wording is a content decision, not a line number.
 - **`internal/server` per-package runtime is unmeasured.** 1200+ test functions
   in one package against Go's 10m default per-package timeout. The `-timeout 30m`
   (plain) and `5m` (retry) values are **guards approved by the user, not measured
