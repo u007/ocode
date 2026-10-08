@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+- **New Kaizen stack `webforms` (filling web forms with `htrcli`) + a live probe.**
+  `docs/okf/webforms/` holds a 27-question closed-book corpus (8 tags: discover,
+  text-input, choice-input, widgets, hard-dom, wait-nav, verify-submit, safety) and
+  `probe/`, a behavioural harness that has a model drive a real browser through
+  `htrcli` and judges the outcome SERVER-SIDE (submission records, live field-state
+  beacon, live DOM for the Greenhouse form), never from the model's own report. Nine
+  forms: two real public ones vendored with pinned hashes (httpbin pizza, Selenium
+  web-form), six authored hard cases (wizard, custom widgets, iframe, validation,
+  payment/honeypot "do not submit", upload) and a LIVE third-party job form (filled
+  with a dummy resume, never submitted). `probe/README.md` lists every URL and how
+  to run another model (`MODELS=… ./sweep.sh <label>`, `HTRCLI_BIN`, `PROBE_PROFILE`);
+  `selftest.sh` proves the checker (9 reference solutions PASS, 10 deliberately wrong
+  ones FAIL). The model gets an ISOLATED htrcli home + headless Chrome, never the
+  user's browser. `webforms` is registered as a universal stack in
+  `internal/skill/loader.go` (`universalStacks`) with `TestWebFormsIsUniversal`, and
+  `skills/kaizen/webforms-tuning-deepseek-v4.1-flash` is the first derived skill
+  (closed-book 92.4%; weak tags safety 0.81, widgets 0.89). `skills/htrcli/SKILL.md`
+  was replaced by the current canonical skill (the old copy documented a renamed
+  `htcli`) with an "Agent quick rules" section that removes the `--help`/`health`
+  probing models were doing. Live result (deepseek-v4.1-flash, 9 forms): all pass
+  with the new htrcli build; the Greenhouse form went from 2743 s / 76 tool calls
+  to 249 s / 27. The htrcli tools behind that (`pick`, `fill-form`, `--frame`,
+  console/network over `--cdp`, auto scroll-into-view, instant scrolling) live in the
+  how-to-recorder repo. Two bugs the probe caught in its own harness: it first drove
+  the user's shared Chrome (an `htrcli` wrapper pointed at a missing home), and the
+  model could read the checker's records from its working dir; both are fixed and
+  documented in `probe/README.md`.
+
 - **`/btw` on web/desktop now runs a real side query, matching the TUI.**
   The command used to record the aside into the conversation (injecting into a
   live turn, else appending to the transcript) and show a `Noted:` line. It now

@@ -1,5 +1,22 @@
 # TODO
 
+## Web/desktop `/btw` side query — live checks partly run (2026-10-07)
+
+Verified live against a REAL provider on the local server (`ocode serve`, session
+`ses_2026-10-07-210953-33e2cb79`): `POST /api/sessions/{id}/btw` → `202`; the bus
+delivered `started` → `delta:"pong"` → `done:"pong"` from the real model; the
+aside did NOT appear in the transcript; and `DELETE .../btw` → `200`
+`{"status":"cancelled"}`. See `CHANGES.md` and `skills/ocode-web` gotcha 62.
+
+Still NOT live-verified (all covered by unit/integration tests):
+- `/btw` while the MAIN turn is streaming (the mid-turn path).
+- Cancelling a run MID-FLIGHT and confirming its frames stop.
+- A remote (SSH/WSL) project.
+- The rendered `BtwPanel` in a real browser (no browser pass was run).
+
+- **Desktop:** the running `.app` must be rebuilt/restarted to pick this up
+  (`web/dist` is embedded in the binary).
+
 ## OKF bundle: known defects left unfixed (2026-10-07)
 
 Found while fixing the `docs/index.md` corruption. These are recorded rather than
@@ -5736,3 +5753,17 @@ priority order (line anchors verified 2026-10-06; expect drift):
 - **Doc follow-up:** once the `--remote` vs `?token=` share-link conflict is
   resolved, update `docs/concepts/desktop-share-token.md` (and the sharing
   docs) to state which link forms a `--remote` server accepts.
+
+## Kaizen `webforms` stack — open items (2026-10-08)
+
+- [ ] Validate `webforms-tuning-deepseek-v4.1-flash` WITH the skill: closed-book re-run on
+  `_prompts/webforms.md` with the skill body prepended (target safety/widgets >= 0.9) and a
+  live probe run; the skill was written from the scorecard but has not been re-measured.
+- [ ] Other models: `mimo-v2.6-flash` is running (`probe/runs/mimo1`); `space-bunny-free` and
+  `glm-5.3-flash` not started. Each needs closed-book -> grade -> derive -> with-skill.
+- [ ] The Greenhouse task depends on a live posting and its `question_*` ids; re-verify the
+  posting before comparing runs made weeks apart (see `probe/README.md`).
+- [ ] Install the new htrcli (`make htrcli-install` in how-to-recorder): `~/go/bin/htrcli` is
+  still the old build; the probe uses `probe/htrhome/htrcli-bin`.
+- [ ] Single run per task is noisy (wall time is dominated by model latency); repeat
+  disagreeing tasks before concluding.

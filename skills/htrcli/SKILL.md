@@ -1,133 +1,219 @@
 ---
-version: 1.0.0
 name: htrcli
-description: How-To Recorder CLI (htcli) usage guide. Read this before running any htcli commands. Covers connecting to the How-To Recorder server, listing and switching tabs, navigating pages, interacting with elements (click, fill, type, select), extracting text and data, taking screenshots (viewport, full page, annotated), getting accessibility tree snapshots with @eN refs, executing JavaScript, managing browser sessions, and running the native messaging daemon. Use when the user asks to control a browser, interact with a website, fill a form, click something, extract data, take a screenshot, or automate any browser task via How-To Recorder.
-allowed-tools: Bash(htcli:*), Bash(go run ./cmd/htcli:*), Bash(make htcli-*)
+description: HTR NControl CLI (htrcli) usage guide. Read this before running any htrcli commands. Covers connecting to the HTR NControl server, listing and switching tabs, navigating pages, interacting with elements (click, fill, type, select, press, keydown/keyup, mousedown/mouseup/mousemove/drag with xy= viewport coordinates and @eN refs), extracting text and data (text/html/attr/value/find), taking screenshots, executing JavaScript in the page's main world, managing browser sessions, recording video, session recordings (start/stop/list/get/export/delete — works on Chrome and Firefox), network capture/mocking, console watching, dialog handling, and more. Includes a form-filling guide (pick/fill-form/--frame, datepickers, react-select, iframes, submit-and-verify) and the list of what works over --cdp. Use when the user asks to control a browser, interact with a website, fill a form, click something, drag, press keys, extract data, take a screenshot, or automate any browser task via HTR NControl.
+allowed-tools: Bash(htrcli:*), Bash(go run ./cmd/htrcli:*), Bash(make htrcli-*)
 ---
 
-# htcli — How-To Recorder CLI
+# htrcli — HTR NControl CLI
 
-Go CLI for controlling browser tabs via the How-To Recorder remote control
-API. Supports Chrome and Firefox.
+Go CLI for controlling browser tabs via the HTR NControl remote control API.
+Supports **two transports** — extension (default) and direct CDP:
 
 ```
-# WebSocket transport (Bun server)
-htcli (Go) ──HTTP──► Bun server (server/, :3845) ──WebSocket──► Extension ──DOM──► Chrome / Firefox
+# Extension transport (default) — drives the browser through the extension
+htrcli (Go) ──HTTP──► htrcli serve (:3845) ──Unix socket──► relay ──stdio──► Extension ──DOM──► Chrome / Firefox
 
-# Native messaging transport (htcli daemon — no Bun server needed)
-htcli (Go) ──HTTP──► htcli serve (:3845) ──Unix socket──► relay ──stdio──► Extension ──DOM──► Chrome / Firefox
+# CDP transport (--cdp) — drives Chrome directly via DevTools Protocol, no extension needed
+htrcli (Go) ──CDP──► Chrome DevTools Protocol (:9222)
 ```
 
-Two interchangeable server transports — pick one:
-- **Bun server** (`bun run server`) — WebSocket-based, requires Node/Bun runtime
-- **htcli daemon** (`htcli serve`) — native messaging, pure Go, no extra runtime
+The extension transport works with both Chrome and Firefox; CDP transport works
+with Chrome only.
 
-Both expose the same HTTP API on port 3845. Only one can hold the port at a time.
+## Agent quick rules (read this first; skip the probing)
+
+Everything you need is in this file. Do **not** run `htrcli --help`, `htrcli <cmd> --help`, `htrcli health`,
+`strings`/`grep` on the binary, or read htrcli's source: the commands, flags and CDP limits are listed here and
+each probe costs a round trip.
+
+1. **Transport.** If the task says a CDP browser is running (or you started one with `htrcli browser start`),
+   put `--cdp` on **every** command. `health` is an extension-daemon command and says nothing about CDP; skip it.
+2. **Tab.** `--cdp` without `--tab` drives the **first page target**, which may be someone else's tab, and
+   `open` replaces its page. If more than one tab exists, run `htrcli --cdp tabs list` once and pass
+   `--tab <id>` on every command. Never navigate a tab you did not open or were not given.
+3. **Look once, then act.** One `htrcli --cdp snapshot` (or one `eval` that lists
+   `tag/type/name/id/label/required` of every `input,select,textarea,button`) tells you the whole form. Do not
+   re-inspect between fields unless the page changed.
+4. **Batch.** Do not issue one tool call per field. Put all steps for a form in **one bash script** (or use
+   `fill-form`, below), finish with a single read-back, and fix only what the read-back shows wrong.
+5. **Scrolling is automatic.** An element that is rendered but below the fold is scrolled into view before
+   `fill`/`click`/`check`/... act. "not visible" now means hidden/collapsed/zero-size (open its step, accordion or
+   menu first), not "off screen". `scroll` itself is not available over `--cdp`.
+6. **Pick the right verb for the widget** (table below), and **verify**: read values back, submit **once**, then
+   confirm from the outcome (confirmation text/URL, or `network wait`, see below).
+7. **Never** fill a field you were not given data for, solve a CAPTCHA, enter card details, or submit when told
+   not to. Hidden/off-screen inputs (honeypots) stay empty.
+
+### Over `--cdp`: what is and is not available
+
+| Works | Not available over `--cdp` (use `eval` or the extension transport) |
+|---|---|
+| open, find/findAll, snapshot, text/value/attr/html, click/dblclick/rightclick, fill, type, select, check/uncheck, clear, press/keydown/keyup, mouse*, drag, upload, eval, screenshot, tabs list, **pick**, **fill-form**, **--frame**, console read/watch, network read/watch/wait | scroll, back/forward/reload, tabs get, dialog handle/list, fetch, printpdf, network mock/block/unmock, trace export, screenshot --annotate |
+
+### Filling forms: verb per widget
+
+| Widget | Use |
+|---|---|
+| text, email, tel, password, textarea, `type=time` (`18:30`), `type=number` | `fill "<sel>" "<value>"` |
+| native `<select>` | `pick "<sel>" "<option text or value>"` (verifies; plain `select` silently selects nothing for a label it can't match) |
+| custom dropdown / react-select / autocomplete (role=combobox) | `pick "<sel>" "<full option text>"`: opens, types, waits for the options, clicks the best match, and checks the widget shows it. Never `fill`/`click` the tiny input. |
+| checkbox / radio | `check "<sel>"` / `uncheck "<sel>"` (idempotent; `click` toggles). Target by `input[value=x]` or `label=...`, not position. |
+| JS datepicker text input | `type "<sel>" "03/14/2026"` (trusted keystrokes; `fill` leaves the widget's own state empty and it reverts), in the widget's format; then click elsewhere and read the value back |
+| calendar popup (grid of day buttons) | click the trigger, click next/prev until the month label matches, click the day |
+| range / colour input | `eval` set `.value` and dispatch `input`+`change` events (bubbles), then read back |
+| file input | `upload "<sel>" /abs/path` (never click it; it opens a native dialog). Only upload files you were told to. |
+| form inside an `<iframe>` (same origin) | add `--frame "<iframe css>"` to find/fill/type/check/select/click/pick/value/text/... or `open` the frame's `src` directly. Cross-origin frames: `open` their `src`. |
+
+**`fill-form`: many fields, one call, with read-back.**
+
+```bash
+htrcli --cdp fill-form '{
+  "#first_name": "Jordan",
+  "#email": "jordan@example.com",
+  "#plan": "Pro",
+  "input[value=pro]": true,
+  "#terms": true,
+  "#resume": "/abs/path/resume.pdf"
+}'            # or: --file fields.json ; add --frame "iframe#contact" for an iframe form
+```
+
+Values: string/number as written (text, date, time), option text/value for `<select>`, `true`/`false` for
+checkboxes (`true` only for radios), a path (or array) for file inputs, `null` skips. Comboboxes behave like `pick`.
+Each selector must match exactly one element. All fields are attempted even after a failure, then a table
+`Selector / Requested / Actual / Status` (`OK|MISMATCH|FAILED|SKIPPED`) is printed; the exit code is non-zero on
+any `FAILED`/`MISMATCH`.
+
+**Submit and verify (do this once).** To confirm a submission, start the wait first, then click:
+
+```bash
+htrcli --cdp network wait --url "*/submit*" --timeout 10000 &
+htrcli --cdp click "button[type=submit]"
+wait
+htrcli --cdp text "body"     # confirmation text; do not re-click Submit "to be sure"
+```
+
+A submit that does nothing is almost always a validation error: read the page for the message (or
+`eval` over `:invalid` fields), fix the data (e.g. match the required `pattern`), then submit again. Do not
+remove the validation attribute.
 
 ## Setup
 
 ### Build
 
 ```bash
-cd /path/to/how-to-recorder/htcli
-make build         # → bin/htcli
+cd /path/to/htrncontrol/htrcli
+make build         # → bin/htrcli
 make install       # go install (global)
 ```
 
 Or from the repo root:
 
 ```bash
-make htcli-build   # builds htcli
-make htcli-install # installs globally
+make htrcli-build   # builds htrcli
+make htrcli-install # installs globally
 ```
 
 ### Configure connection
 
 ```bash
-htcli config set-server http://127.0.0.1:3845
-htcli config set-token <bearer-token>
+htrcli config set-server http://127.0.0.1:3845
+htrcli config set-token <bearer-token>
 
 # Or use environment variables
-export HTCLI_SERVER=http://127.0.0.1:3845
-export HTCLI_TOKEN=<bearer-token>
+export HTRCLI_SERVER=http://127.0.0.1:3845
+export HTRCLI_TOKEN=<bearer-token>
 
 # Verify connection
-htcli health
+htrcli health
 ```
 
-Config file: `~/.htcli/config.json`
-Priority: flags > env vars (`HTCLI_SERVER`, `HTCLI_TOKEN`) > config file > defaults.
+Config file: `~/.htrcli/config.json`
+Priority: flags > env vars (`HTRCLI_SERVER`, `HTRCLI_TOKEN`) > config file > defaults.
 
-If no token is configured, htcli will attempt to auto-read it from the server.
+If no token is configured, htrcli will attempt to auto-read it from the server.
 
 ## Native Messaging Daemon
 
-The daemon (`htcli serve`) is a drop-in replacement for the Bun server — same
-HTTP API on :3845, but the browser connects via native messaging instead of
-WebSocket. Supports Chrome and Firefox connected simultaneously.
+The daemon (`htrcli serve`) is the sole backend. It exposes the HTTP API on
+:3845 and relays commands to the extension via native messaging. Supports
+Chrome and Firefox connected simultaneously.
 
 ```bash
-# 1. Register htcli as the browser's native messaging host
-htcli install --browser chrome  --extension-id <chrome-extension-id>
-htcli install --browser firefox --extension-id how-to-recorder@stevenstaylor.dev
+# 1. Register htrcli as the browser's native messaging host
+htrcli install --browser chrome  --extension-id <chrome-extension-id>
+htrcli install --browser firefox --extension-id htrncontrol@mercstudio.com
 
 # 2. Reload the extension so it re-reads the host registration
 
 # 3. Start the daemon (binds :3845 + Unix socket)
-htcli serve
+htrcli serve
 #    Custom port / token:
-HTR_PORT=48546 HTR_BEARER_TOKEN=secret htcli serve
+HTR_PORT=48546 HTR_BEARER_TOKEN=secret htrcli serve
 ```
-
-Chrome and Firefox may both be registered and connected at once —
-`htcli tabs list` shows tabs from both, and `--tab <id>` routes to whichever
-browser owns that tab.
 
 ### Install flags
 
 ```bash
-htcli install --browser chrome  --extension-id <id>   # register Chrome
-htcli install --browser firefox --extension-id <id>   # register Firefox
-htcli install --browser chrome  --uninstall           # remove manifest
+htrcli install --browser chrome  --extension-id <id>   # register Chrome
+htrcli install --browser firefox --extension-id <id>   # register Firefox
+htrcli install --browser chrome  --uninstall           # remove manifest
 ```
 
-### Why use the daemon?
+Chrome and Firefox may both be registered and connected at once —
+`htrcli tabs list` shows tabs from both, and `--tab <id>` routes to whichever
+browser owns that tab.
 
-- No Bun/Node.js runtime required — pure Go
-- Firefox support via native messaging (Chrome also works)
-- Both browsers can be connected simultaneously
-- Screenshots and large results travel over HTTP (not limited by 1 MB NM frame size)
+### Tray icon
 
-## The core loop
+When you run `htrcli serve` on a desktop (macOS, Windows, Linux with a
+display), a system-tray icon auto-attaches. It exposes live status and
+maintenance actions (reinstall native host, open config folder, copy bearer
+token, show recent log, restart, quit). On headless Linux servers (no
+display, or SSH session), the tray is silently skipped. See
+`htrcli/docs/tray.md` for the full menu and `--no-tray` opt-out.
+
+### CDP transport (direct Chrome DevTools Protocol)
+
+By default `htrcli` drives the browser through the extension. With `--cdp`
+(or `htrcli config set-transport cdp`) it instead talks **directly to Chrome
+over CDP** — no extension and no server required. Use this for:
+
+- **Browser-restricted pages** the extension can't reach (e.g. Chrome Web Store dev console, `chrome://` URLs).
+- **Headless / background automation** — run Chrome with no window and drive it from a cron job or CI.
+
+`--cdp` is only supported by commands that explicitly implement CDP;
+unsupported commands fail with `errUnsupportedCDP(...)`. Commands that support
+CDP use it directly.
 
 ```bash
-htcli open <url>              # 1. Navigate to a page
-htcli snapshot -i             # 2. See what's on it (interactive elements only)
-htcli click @e3               # 3. Act on refs from the snapshot
-htcli snapshot -i             # 4. Re-snapshot after any page change
+# Start a dedicated Chrome controlled by htrcli
+htrcli browser start                 # visible window
+htrcli browser start --headless      # no window
+
+htrcli browser status                # probe the debugging port
+htrcli browser stop                  # kill the managed Chrome
+htrcli browser hide                  # minimize the window
+htrcli browser show                  # restore the window
+
+# Commands that support CDP use it directly
+htrcli --cdp open https://chrome.google.com
+htrcli --cdp screenshot out.png
+htrcli --cdp eval "document.title"
 ```
 
-Refs (`@e1`, `@e2`, ...) are assigned fresh on every snapshot. They become
-**stale the moment the page changes** — after clicks that navigate, form
-submits, dynamic re-renders, dialog opens. Always re-snapshot before your
-next ref interaction.
+**Tab-ID namespaces:**
 
-## Quickstart
+| Transport | `--tab` value | Example |
+|---|---|---|
+| extension (`ext`, default) | numeric tab ID from `htrcli tabs list` | `--tab 43` |
+| CDP (`cdp`) | 32-char hex CDP target ID | `--tab 8E17C9D2...` |
+
+**Configuration:**
 
 ```bash
-# Take a screenshot of a page
-htcli open https://example.com
-htcli screenshot home.png
-htcli health
-
-# Search, click a result, and capture it
-htcli open https://duckduckgo.com
-htcli snapshot -i                        # find the search box ref
-htcli fill @e1 "htcli browser automation"
-htcli press Enter
-htcli snapshot -i                        # refs now reflect results
-htcli click @e5                          # click a result
-htcli screenshot result.png
+htrcli config set-transport cdp        # make --cdp the default
+htrcli config set-cdp-port 9222        # debugging port (default 9222)
+htrcli config set-chrome-path /path/to/chrome   # if not auto-detected
 ```
 
 ## Global flags
@@ -135,62 +221,67 @@ htcli screenshot result.png
 ```bash
 --server <url>      # Server URL (overrides config)
 --token <token>     # Bearer token (overrides config)
---json              # Raw JSON output (for piping to jq)
---tab <id>          # Target a specific tab (applies to all commands)
+--json              # Raw JSON output (for piping)
+--tab <id>          # Target specific tab
 --timeout <ms>      # Command timeout (default: 30000)
+--transport <type>  # Transport: ext (extension, default) or cdp
+--cdp               # Shorthand for --transport cdp
+--context <name>    # Named browser context (isolated profile)
+--frame <css>       # (--cdp) run the command inside a same-origin <iframe>
 ```
 
-## Reading a page
-
-### Accessibility tree (preferred for AI agents)
+## The core loop
 
 ```bash
-htcli snapshot                          # full accessibility tree
-htcli snapshot -i                       # interactive elements only (preferred)
-htcli snapshot -i -u                    # include href URLs on links
-htcli snapshot -i -c                    # compact (no empty structural nodes)
-htcli snapshot -i -d 3                  # cap depth at 3 levels
-htcli snapshot -s "#main"               # scope to a CSS selector
-htcli snapshot --json                   # machine-readable output
+htrcli open <url>              # 1. Navigate to a page (waits for page load)
+htrcli find "input[name=q]"    # 2. Locate the element you want to act on
+htrcli click "input[name=q]"   # 3. Act on it (auto-waits for actionability)
+htrcli find "input[name=q]"    # 4. Re-inspect after any page change
 ```
 
-Snapshot output looks like:
+`open`, `back`, `forward`, and `reload` block until the destination page
+finishes loading (up to 25s). Clicks that *trigger* a navigation also block
+for the destination page to finish loading.
 
-```
-Page: Example - Log in
-URL: https://example.com/login
+Selectors (`"input[name=q]"`, `"#submit"`, `"role=button"`, `"text=Submit"`)
+and **refs** (`@e3`, `@e7`) work directly in all interaction commands. All
+interaction commands auto-wait for their target to become visible and enabled
+(up to 5s by default, override with `--timeout`).
 
-@e1 heading "Log in" [level=1]
-@e2 form
-  @e3 textbox "Email" [required]
-    @e4 placeholder="Enter your email"
-  @e5 textbox "Password" [required]
-    @e6 placeholder="Enter your password"
-  @e7 button "Submit" [enabled]
-  @e8 link "Forgot password?"
-```
-
-### Get text and attributes
+## Quickstart
 
 ```bash
-htcli get text @e1                      # visible text of an element
-htcli get html @e1                      # innerHTML
-htcli get attr @e1 href                 # any attribute value
-htcli get value @e1                     # input value
-htcli find "#login-form"                # find element and return info
+# Take a screenshot of a page
+htrcli open https://example.com
+htrcli screenshot home.png
+htrcli health
+
+# Search, click a result, and capture it
+htrcli open https://duckduckgo.com
+htrcli find "input[name=q]"               # locate the search input
+htrcli fill "input[name=q]" "browser automation"
+htrcli press Enter
+htrcli screenshot result.png
+
+# Use a ref for repeated interaction
+htrcli find "input[name=q]" --ref         # mints a ref like @e3
+htrcli fill @e3 "new search term"
+htrcli press Enter
 ```
 
-### Page info
+## Page info
 
 ```bash
-htcli page                              # URL, title, viewport, scroll position
+htrcli page                    # URL, title, readyState, dimensions, scroll position
+htrcli page --json             # machine-readable output
 ```
 
-Output:
+Example output:
 ```
 URL:      https://example.com/login
 Title:    Example - Login
 Domain:   example.com
+Ready:    complete
 Viewport: 1280x720
 Document: 1280x2400
 Scroll:   0, 350
@@ -198,159 +289,272 @@ Scroll:   0, 350
 
 ## Interacting
 
-### Using refs (fastest)
+### Selectors and refs
+
+Every interaction command accepts CSS selectors, semantic shortcuts, refs, or viewport coordinates:
 
 ```bash
-htcli click @e7                         # click element by ref
-htcli dblclick @e3                      # double-click
-htcli fill @e3 "user@example.com"       # clear and fill input
-htcli type @e3 "more text"              # append text to input
-htcli hover @e5                         # hover element
-htcli select @e9 "option-value"         # select dropdown option
-htcli check @e10                        # check checkbox
-htcli uncheck @e10                      # uncheck checkbox
-htcli clear @e3                         # clear input field
+htrcli click "#submit"                   # CSS selector
+htrcli click "role=button"               # by ARIA role
+htrcli click "text=Submit"               # by visible text
+htrcli click "label=Email"               # by associated label
+htrcli click "name=email"                # by name attribute
+htrcli click "placeholder=Search"        # by placeholder
+htrcli click "xpath=//button[1]"         # by XPath
+htrcli click "id=login"                  # by ID
+htrcli click "xy=100,200"                # viewport CSS pixels (no element lookup)
+
+# Refs — persistent handles minted by `--ref` on find/findAll
+htrcli find "#my-form" --ref             # mint @e3
+htrcli click @e3                         # use the ref
+htrcli fill @e3 "value"                  # fills the form
+htrcli click @e3                         # refs also work for mousedown/drag on CDP
 ```
 
-### Using selectors (when refs don't work)
+`find --ref` saves the ref to `~/.htrcli/refs.json`. Refs survive the CLI
+invocation but not page navigation (the element goes stale). Use `findAll`
+with `--ref` to mint refs for every match.
+
+### Interaction commands
 
 ```bash
-htcli click "#submit"                   # CSS selector
-htcli fill "input[name=email]" "user@test.com"
-htcli click "button.primary"
+htrcli click "#submit"                   # Click element
+htrcli dblclick ".row:first-child"       # Double-click
+htrcli fill  "input[name=email]" "user@test.com"   # Clear and fill
+htrcli type  "input[name=email]" " more text"      # Append, doesn't clear
+htrcli hover ".menu-trigger"
+htrcli select "select#country" "us"
+htrcli check   "#terms"                  # Check a checkbox
+htrcli uncheck "#newsletter"             # Uncheck a checkbox
+htrcli clear   "input[name=email]"       # Clear an input
+htrcli press   Enter                     # Press a key (keyDown + keyUp)
+htrcli scroll  down 300                  # Scroll direction + pixels
 
-# By name, role, text, label, placeholder
-htcli click "role=button"               # by ARIA role
-htcli click "text=Submit"               # by text content
-htcli click "label=Email"               # by label
-htcli click "name=email"                # by name attribute
-htcli click "placeholder=Search"        # by placeholder
-htcli click "xpath=//button[1]"         # by XPath
-htcli click "id=login"                  # by ID
+# Low-level keyboard primitives (stateless — caller tracks hold)
+htrcli keydown Shift                     # Key down only (hold)
+htrcli keyup   Shift                     # Key up to release
+htrcli keydown "Ctrl+a"                  # Modifier + key
+
+# Low-level mouse primitives (selector, @eN ref, or xy= coordinates)
+htrcli mousedown "#handle"               # Press mouse button down
+htrcli mousedown "xy=100,200"            # At viewport coordinates
+htrcli mouseup   "#dropzone"             # Release mouse button
+htrcli mousemove "xy=150,300"            # Move mouse (no button)
+
+# Drag (pointer/mouse events only — not native HTML5 DnD)
+htrcli drag "#handle" "#dropzone"                         # Selector → selector
+htrcli drag "xy=100,200" "xy=300,400"                      # Coords → coords
+htrcli drag "#handle" "xy=500,300" --steps 10 --delay 20  # Mixed + tuning
+htrcli drag @e1 @e2                                         # Ref → ref (CDP resolves via backendNodeId)
 ```
 
-Rule of thumb: snapshot + `@eN` refs are fastest and most reliable. Use
-selectors as a fallback when refs don't work.
+Supported key names: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown,
+ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, F1–F12,
+Control+a–z, Alt+a–z, Shift+a–z, Meta+a–z.
 
-### Keys
+### Viewport coordinates (`xy=`)
+
+Any selector argument can be `xy=X,Y` — viewport CSS pixels (same units as CDP `Input.dispatchMouseEvent`):
 
 ```bash
-htcli press Enter                       # press a key
-htcli press Tab
-htcli press Control+a                   # select all
-htcli press Escape
+htrcli mousedown "xy=100,200"
+htrcli mousemove "xy=300,400"
+htrcli drag "xy=100,200" "xy=300,400"
 ```
 
-Supported keys: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown,
-ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, F1-F12,
-Control+a-z, Alt+a-z, Shift+a-z, Meta+a-z.
+`xy=` bypasses selector lookup and actionable-wait, but the transport still needs a target element to route the event:
 
-### Scrolling
+- **CDP transport** — coordinates are sent directly to `Input.dispatchMouseEvent`.
+- **Extension transport (Firefox)** — synthetic events are hit-tested with `document.elementFromPoint(x, y)` and dispatched on the element under the point. If no element is hit, the command fails explicitly. See `docs/gotchas/firefox-coordinate-input-requires-hit-testing.md`.
+
+Coordinates are always **viewport-relative**, not document-relative. Scroll position matters.
+
+### Low-level mouse primitives
+
+`mousedown` / `mouseup` / `mousemove` are single-event primitives built on the same trusted/synthetic path as `click`/`press`:
+
+- They accept any selector form: CSS, `role=`, `text=`, `label=`, `name=`, `placeholder=`, `xpath=`, `id=`, `@eN` ref, or `xy=X,Y`.
+- Element targets auto-wait for actionability (visible + enabled, up to 5 s) and scroll into view before the event — same as `click`. `xy=` targets skip the wait.
+- On Chrome/CDP they dispatch **trusted** `Input.dispatchMouseEvent` (`mousePressed` / `mouseReleased` / `mouseMoved`); on Firefox/extension they dispatch synthetic pointer + mouse events with hit-testing.
+
+Use `mousemove` to position the cursor without pressing a button; pair `mousedown` → … → `mouseup` to hold and release manually, or use `drag` for an interpolated sequence.
+
+### Drag
+
+`htrcli drag <source> <target> [--steps 5] [--delay 0]` dispatches an interpolated drag: `mousePressed` at source → N `mouseMoved` steps → `mouseReleased` at target.
+
+- Both endpoints accept any selector form (CSS, `@eN`, or `xy=X,Y`) and can be mixed (`"#handle"` → `"xy=500,300"`). On CDP, `@eN` refs are resolved in the command layer via the persistent `RefStore` (`~/.htrcli/refs.json`) → `backendNodeId` → `DOM.getBoxModel` + `Page.getLayoutMetrics` → viewport center. Stale refs fail explicitly. See `docs/gotchas/cdp-drag-element-ref-coordinate-resolution.md`.
+- **Bounds**: `--steps` is clamped to `1..100` (default `5`; values `<1` become `5`); `--delay` is clamped to `0..2000` ms (default `0`). See `docs/gotchas/drag-input-bounds.md`.
+- On the extension transport, Firefox drag dispatches pointer/mouse events with `elementFromPoint` hit-testing at source, intermediate steps, and destination — not on `document.body`.
+- **Known limitation — native HTML5 DnD is NOT synthesized**: `drag` dispatches `pointerdown`/`mousedown` → `pointermove`/`mousemove` → `pointerup`/`mouseup` only. It does **not** fire `dragstart`/`dragover`/`drop` with `DataTransfer`. Most custom sortables/sliders listen to pointer/mouse events and work; native `draggable=true` drop zones and file-drop handlers require `eval` with a manual `DataTransfer`. See `TODO.md` and `src/contentScript/commandExecutor.ts:handleDrag`.
+
+### Low-level keyboard primitives
 
 ```bash
-htcli scroll down                       # scroll down (default 500px)
-htcli scroll up 300                     # scroll up 300px
-htcli scroll left
-htcli scroll right
+htrcli press Enter          # composite: keyDown + keyUp
+htrcli keydown Shift        # hold
+htrcli keydown "Ctrl+a"
+htrcli keyup Shift          # release
 ```
+
+- `press` is the composite trusted key press (dispatches `keyDown` then `keyUp`).
+- `keydown` / `keyup` are **stateless per-command** — there is no daemon-side held-key state. Holding a modifier across several commands is caller-managed (`keydown Shift` → … → `keyup Shift`). Modifiers are parsed per-command (`Ctrl+Shift+a` → bitmask) and empty key specs fail explicitly. See `docs/gotchas/drag-input-bounds.md` and `htrcli/README.md`.
+- Key events target the focused element when no selector is supplied; with a selector they auto-wait and focus that element first. On Chrome/CDP they use `Input.dispatchKeyEvent` with virtual-key/code mapping; on Firefox/extension they dispatch synthetic `KeyboardEvent`s.
+
+### Actionable-wait behavior
+
+Every element-targeted interaction command (`click`, `fill`, `type`, `clear`, `select`, `check`,
+`uncheck`, `press`, `hover`, `keydown`, `keyup`, `mousedown`, `mouseup`, `mousemove`, `drag`) **auto-waits** for its target to exist, be visible,
+and (where relevant) be enabled before acting. Default budget: 5 s; tune per
+command with `--timeout <ms>` (capped at 20 s). If the element never becomes
+actionable the command fails with a descriptive error naming the unmet condition
+(`not found` / `not visible` / `disabled`). `xy=` coordinate targets skip the wait (no element lookup), but on Firefox/extension the command still fails explicitly when `elementFromPoint` hits nothing.
+
+Read-only inspection commands (`find`, `text`, `value`, `attr`, `html`) keep
+instant, probing semantics and do **not** wait.
+
+On the CDP transport, `click`, `dblclick`, `rightclick`, `press`, `keydown`/`keyup`, `mousedown`/`mouseup`/`mousemove`/`drag`, and `type`/`fill` are dispatched as
+**trusted** input via the Chrome DevTools Protocol (`Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`), so the page's default
+actions fire as if a real user interacted: pressing `Enter` in a field submits
+the form, clicks pass `event.isTrusted` checks, and focus/selection behave natively. On the extension transport
+and Firefox (no `chrome.debugger`), the same commands use synthetic events with pointer-event
+support — they drive most automation but do not count as trusted. `drag` pointer/mouse dispatch follows the same split (trusted on CDP, synthetic with hit-testing on Firefox). `drag` never synthesizes native HTML5 `dragstart`/`dragover`/`drop` + `DataTransfer` on either transport — use `eval` with `DataTransfer` for native DnD.
+
+While connected via CDP, Chrome shows the **"HTR NControl is debugging this
+browser" infobar**; this is expected.
 
 ## Waiting
 
-Agents fail more often from bad waits than from bad selectors.
+Agents fail more often from bad waits than from bad selectors. The
+auto-wait covers most cases (every interaction command waits up to 5s for
+its target to become visible and enabled). For page transitions without a
+clear target:
 
 ```bash
-# After navigation or clicks that load new content:
-htcli snapshot -i                       # re-snapshot to check if content loaded
-htcli page                              # check URL changed
+# Check current page state
+htrcli page                              # URL, title, readyState
+htrcli find ".success-message"           # poll for an element
 
-# Wait for specific element (poll with snapshot)
-htcli snapshot -i -s ".success-message" # check if element appeared
+# Block on an element via raw command
+htrcli command '{"action":"wait","target":{"selector":".success-message"},"options":{"timeout":10000}}'
 
-# Wait for URL change (check page)
-htcli page                              # verify URL updated
+# Wait for a network request to complete
+htrcli network wait --since 0 --url "*/api/users*" --status 200 --timeout 10000
 ```
 
-Always re-snapshot after any action that changes the page. The snapshot
-itself serves as a "wait" — if the element you expect isn't there, the
-page hasn't finished loading yet.
+For URL/readyState polling:
+
+```bash
+htrcli page | grep Ready                 # should show "complete"
+htrcli eval 'document.readyState'        # "loading" | "interactive" | "complete"
+```
 
 ## Screenshots
 
 ### Viewport (default)
 
 ```bash
-htcli screenshot                        # save to temp file, print path
-htcli screenshot page.png               # save to specific path
+htrcli screenshot                        # save to temp file, print path
+htrcli screenshot page.png               # save to specific path
 ```
 
 ### Full page
 
 ```bash
-htcli screenshot --full                 # entire scrollable page
-htcli screenshot --full full-page.png
+htrcli screenshot --full-page            # entire scrollable page
+htrcli screenshot --full-page full-page.png
 ```
 
 ### Annotated (with numbered element labels)
 
 ```bash
-htcli screenshot --annotate             # viewport with numbered overlays
-htcli screenshot --annotate --full      # full page + annotated
-htcli screenshot --annotate shot.png    # save annotated screenshot
+htrcli screenshot --annotate "#form,#submit"   # viewport with numbered overlays on selectors
+htrcli screenshot --full-page --annotate "#nav,.content"   # full page + annotations
 ```
+
+`--annotate` takes a comma-separated list of selectors to draw numbered
+overlay boxes on before capture (extension transport only).
 
 ### Format options
 
 ```bash
-htcli screenshot --format jpeg --quality 80   # JPEG instead of PNG
-htcli screenshot --selector "#login-form"     # capture specific element
+htrcli screenshot --format jpeg --quality 80   # JPEG instead of PNG
+htrcli screenshot --selector "#login-form"     # capture specific element
 ```
 
 ### JSON output (for piping)
 
 ```bash
-htcli screenshot --json                 # returns base64 image data
-htcli screenshot --json | jq -r '.data.screenshot' | base64 -d > img.png
+htrcli screenshot --json                 # returns base64 image data
+htrcli screenshot --json | jq -r '.data.screenshot' | base64 -d > img.png
+```
+
+## Element inspection
+
+```bash
+htrcli find <selector>              # Element info (tag, text, selector, xpath, visibility, bounding box)
+htrcli findAll <selector>           # All matching elements
+htrcli find <selector> --ref        # Mint a persistent ref (@eN) for later use
+htrcli findAll <selector> --ref     # Mint refs for every match
+htrcli text <selector>              # Text content
+htrcli value <selector>             # Input value
+htrcli attr <selector> <attr>       # Attribute value (e.g. href, src)
+htrcli html <selector>              # innerHTML
+htrcli snapshot                     # Accessibility snapshot tree with refs
 ```
 
 ## Tab management
 
 ```bash
-htcli tabs list                         # list all connected tabs
-htcli tabs get 123                      # get info for specific tab
+htrcli tabs list                           # list all connected tabs
+htrcli tabs get 123                        # get info for specific tab
 
 # Target a specific tab for commands
-htcli --tab 123 snapshot -i
-htcli --tab 123 click @e5
+htrcli --tab 123 find "input[name=q]"
+htrcli --tab 123 click "input[name=q]"
 ```
 
 ## Navigation
 
 ```bash
-htcli open https://example.com          # navigate to URL
-htcli back                              # browser back
-htcli forward                           # browser forward
-htcli reload                            # reload page
+htrcli open https://example.com          # navigate to URL
+htrcli back [steps]                      # browser back — 1 step, or N steps (e.g. back 3)
+htrcli forward [steps]                   # browser forward — 1 step, or N steps
+htrcli reload                            # reload page
 ```
+
+All navigation commands block until the new page reaches
+`document.readyState === "complete"` (up to 25 s). `back` and `forward` fail with an explicit "No previous/forward page in this tab's history" error when history runs out; `back 3` / `forward 2` loop single-step navigations sequentially and report partial progress (e.g. `back 2/3: No previous page … (went back 1 step(s) before error)`). See `htrcli/README.md` for the full navigation contract.
 
 ## JavaScript execution
 
 ```bash
-htcli eval "document.title"             # run JS and return result
-htcli eval "document.querySelectorAll('a').length"
-htcli eval "window.scrollTo(0, 0)"
+htrcli eval "document.title"             # run JS and return result
+htrcli eval "document.querySelectorAll('a').length"
+htrcli eval "window.scrollTo(0, 0)"
 ```
 
-## Fetching and downloading (no popup)
+`eval` supports single expressions, multi-statement scripts with an explicit
+`return`, and `async/await`:
 
-These commands fetch data or save files **without triggering browser download popups** — everything runs silently via the extension background.
+```bash
+htrcli eval "const n = 2; return n * 2;"
+htrcli eval "return await fetch('/api').then(r => r.json());"
+```
+
+`eval` runs in the **page's main world** on both extension and CDP transports,
+so it can see page-context JavaScript globals, React state, and closures.
+On Firefox (`chrome.debugger` unavailable) `eval` returns an explicit error.
+
+## Fetching and downloading (no popup)
 
 ### Fetch a URL (with cookies)
 
 ```bash
-htcli fetch <url>                       # POST by default
-htcli fetch <url> --method GET          # explicit GET
-htcli fetch <url> --method POST --body '{"key":"value"}'  # POST with JSON body
-htcli fetch <url> --json                # raw JSON output
+htrcli fetch <url>                       # POST by default
+htrcli fetch <url> --method GET          # explicit GET
+htrcli fetch <url> --method POST --body '{"key":"value"}'  # POST with JSON body
+htrcli fetch <url> --json                # raw JSON output
 ```
 
 `fetch` runs through the extension background script, so it:
@@ -358,42 +562,289 @@ htcli fetch <url> --json                # raw JSON output
 - Bypasses page CSP
 - Returns JSON data directly to the CLI (no download dialog)
 
-Use this to download API responses, JSON data, or any URL that returns structured data.
-
 ### Print page to PDF (no save-as prompt)
 
 ```bash
-htcli printpdf output.pdf               # save current page as PDF
+htrcli printpdf output.pdf               # save current page as PDF
 ```
 
-Uses Chrome DevTools Protocol (`Page.printToPDF`) to generate a PDF of the
-current page **without a save-as dialog**. The PDF is saved directly to the
-specified path. Useful for capturing reports, receipts, or any page content.
+Uses the extension path to generate a PDF without a save-as dialog.
+Extension-only; not available in direct `--cdp` mode.
 
-### Download via JavaScript (no popup)
-
-For arbitrary file downloads without popups, use `eval` to fetch the content
-and send it to the CLI:
+### Upload files (no file picker)
 
 ```bash
-# Download a file as base64, decode locally
-htcli eval "fetch('https://example.com/file.pdf').then(r => r.arrayBuffer()).then(b => btoa(String.fromCharCode(...new Uint8Array(b))))" --json | jq -r '.data' | base64 -d > file.pdf
+htrcli upload "input[type=file]" /path/to/file.pdf          # selector
+htrcli upload @e3 /path/to/photo.jpg,/path/to/doc.pdf       # ref, multiple files
 ```
 
-Or use `fetch` + write to a file:
+Sets files on a file input without triggering an OS file-picker dialog.
+Works on both extension and CDP transports. On the **extension transport**
+Chrome uses `chrome.debugger` (`DOM.setFileInputFiles`); **Firefox** (no
+`chrome.debugger`) gets the file bytes embedded as base64 and the content
+script assigns them via `File` + `DataTransfer` — no browser difference from
+the caller's perspective. `@eN` refs are CDP-only.
+
+## Console events
+
+The daemon buffers page console output. Read or watch it with cursor-based
+polling:
 
 ```bash
-htcli fetch https://example.com/api/data --json | jq '.data' > output.json
+htrcli console read --since 0                  # read all buffered entries
+htrcli console watch --since 100 --timeout 10000   # stream new entries
 ```
+
+`console read` warns when the buffer evicted older entries.
+
+## Network capture and mocking
+
+The daemon captures page network activity into the same cursor-based buffer:
+
+```bash
+# Read buffered network entries
+htrcli network read --since 0
+
+# Stream new entries
+htrcli network watch --since 100 --timeout 15000
+
+# Block until a matching request completes
+htrcli network wait --since 0 --url "*/api/users*" --status 200 --timeout 10000
+```
+
+`network wait` accepts a glob `--url` pattern (`path.Match` semantics, `*`
+spans any character including `/`) and an optional `--status` filter.
+
+### Console and network over `--cdp`
+
+There is no buffer over `--cdp` (each invocation is a fresh CDP session), and
+`--since` is rejected:
+
+- `console read` — messages + uncaught exceptions V8 still stores for the
+  current document (cleared on navigation). `console watch` — new ones only.
+- `network read` — completed requests from the page's Performance API: url,
+  status, initiator type, duration. **No method (`—`) and no bodies.**
+- `network watch` / `network wait` — only requests that complete **after** the
+  command attached (method, status, url). To confirm a submission, start the
+  wait first, then click:
+
+```bash
+htrcli --cdp network wait --url "*/api/submit*" --status 200 --timeout 10000 &
+htrcli --cdp click "#submit"
+wait
+# Missed it? `htrcli --cdp network read` still shows its status.
+```
+
+### Mocking and blocking
+
+```bash
+# Mock a GET /api/user response
+htrcli network mock --url-pattern "*/api/user" --method GET --status 200 --body-file ./mock.json
+
+# Block (fail) matching requests
+htrcli network block --url-pattern "*/api/analytics*"
+
+# Remove a rule
+htrcli network unmock --url-pattern "*/api/user"
+
+# Remove all rules
+htrcli network unmock --all
+```
+
+`network mock` flags: `--url-pattern` (required), `--method`, `--status`
+(default 200), `--body-file` (file path for response body).
+
+## Dialog handling
+
+The daemon can auto-handle JavaScript dialogs (alert/confirm/prompt) and
+record their results:
+
+```bash
+# Accept the next dialog (default)
+htrcli dialog handle --action accept
+
+# Dismiss the next dialog
+htrcli dialog handle --action dismiss
+
+# Respond with text to a prompt
+htrcli dialog handle --action respond --text "my answer"
+
+# List handled dialogs since cursor 0
+htrcli dialog list --since 0
+```
+
+## Video recording (Chrome/CDP only)
+
+Record the page to video via CDP screencast:
+
+```bash
+htrcli record start             # start recording
+htrcli record stop              # stop and encode to MP4
+```
+
+Requires ffmpeg ≥ 6 on PATH.
+
+## Session recordings (Chrome AND Firefox)
+
+A **session recording** is a step-by-step log of what happened in the browser
+— clicks, inputs, navigations — with a screenshot per step, plus your
+annotations. It lives in the extension's IndexedDB.
+
+This is **not** the same as `htrcli record` above. Use this section for
+"what did the user do" (reproducible step lists, bug reports, test authoring);
+use `htrcli record` for page **video**/MP4.
+
+Unlike video, session recordings need no CDP and no ffmpeg, so they work on
+**both Chrome and Firefox**. They are handled by the extension's background
+service worker, so there is no `--tab` — they always apply to the whole
+browser profile.
+
+```bash
+# Record a flow from the CLI
+htrcli recordings start --title "Checkout flow"
+htrcli click @e1
+htrcli fill @e2 "hello"
+htrcli recordings stop
+
+htrcli recordings status                  # is anything recording?
+htrcli recordings list                    # newest first, paginated
+htrcli recordings list --limit 20 --offset 20
+htrcli recordings get <id>                # steps + annotations (NO screenshots)
+htrcli recordings get <id> --with-screenshots   # include base64 screenshots
+htrcli recordings delete <id>
+```
+
+`export` always includes screenshots, and picks its format from the output
+file's extension:
+
+```bash
+htrcli recordings export <id> out.json    # raw payload, base64 screenshots inline
+htrcli recordings export <id> out.zip     # bundle: recording.json + README.md + screenshots/ + audio/
+htrcli recordings export <id> out.md      # human-readable timeline
+```
+
+The `.zip` layout is identical to the side panel's "Export ZIP", so bundles are
+interchangeable:
+
+```
+recording.json      manifest — screenshots/audio referenced by PATH, never base64
+README.md           the timeline
+screenshots/step_1.png, screenshots/annotation_1.png
+audio/step_1.webm,      audio/annotation_1.webm
+```
+
+Prefer `.zip` when you want the actual screenshot files on disk. An
+unrecognised extension falls back to JSON.
+
+### Starting a recording manually
+
+The same recorder can be driven from the extension UI, which is the fastest
+way to hand-capture a flow:
+
+- **Toolbar popup** — click the HTR NControl icon: optional title, an
+  "Record audio" checkbox, Start/Stop, and a list of recent recordings.
+- **Side panel** — the full session view (live step list, annotations, export).
+
+A recording started from the popup, the side panel, or the CLI is
+indistinguishable afterwards: all three write to the same IndexedDB store and
+sync the open side panel. So you can start from the UI and finish with
+`htrcli recordings stop`, or vice versa.
+
+### Notes
+
+- **Screenshots are stripped by default** in `get`. Every step carries a
+  full-page PNG data URL, so a session with a few dozen steps runs into the
+  tens of megabytes. `get` reports `mediaStripped: true` when it did so. Use
+  `--with-screenshots`, or `recordings export` (which always includes them),
+  when you actually need images.
+- **There is a hard 64 MiB ceiling on screenshots.** The whole hydrated
+  session has to fit in ONE native-messaging frame, and both ends cap it at
+  64 MiB (`htrcli.MaxMessageSize`). Base64 inflates PNGs by ~4/3, so ~48 MiB
+  of raw screenshot data is already over the line. An over-cap frame is
+  treated as a protocol error and **tears down the connection** — the
+  extension then loses remote control until it reconnects, so every later
+  command fails. `get --with-screenshots` and `export` therefore pre-check the
+  step count from `list` and refuse up front (over ~120 steps) with an
+  actionable message rather than risking the connection. If you hit it, use
+  `get` without screenshots, or record the flow in shorter sessions.
+- **`list` is sorted newest-first and paginated.** `total` is the count
+  *before* the window, so paging is deterministic.
+- **`--audio` is off by default** so a remote caller can never silently open
+  the microphone.
+- `recordingStart` refuses to clobber an in-flight session (it would discard
+  in-memory steps) — `recordings stop` first. The same refusal applies from
+  the popup and side panel, since they all go through the one `startRecording`.
+- `recordingDelete` refuses to delete the session that is currently
+  recording: it is not in the store yet, so deleting it would report success
+  and then have the session reappear on the next `stop`.
+- `--cdp` is rejected with a clear error: these live in the extension.
+- `--browser chrome|firefox` names the browser profile you want. It is a
+  **hint, not a selector**: the daemon prefers a relay that announced that
+  browser and otherwise falls back to the earliest-connected relay, so a hint
+  naming a profile that is not running still returns an answer rather than an
+  error. `recordings list` prints `Answered by: <browser>` so you can always
+  see which profile actually served the request. Omit the flag for plain
+  first-connected-wins.
+- No open page is required. These commands use the tab-less route
+  `POST /api/background/command`, which selects a browser **connection** rather
+  than a tab, so recording works from a `chrome://` page, a settings page, or a
+  browser on the new-tab screen. The only requirement is a connected extension
+  relay, else you get `404 no browser connected`.
+- Sensitive input values are masked by the extension before storage; steps
+  carry `isSensitive: true` so you know the value was redacted.
+
+## Trace export
+
+Export a debug trace bundle (console logs + network entries + screenshot +
+page info) as a zip:
+
+```bash
+htrcli trace export             # bundle everything into a timestamped zip
+```
+
+## Browser contexts
+
+Manage isolated browser contexts (separate cookie jars, storage):
+
+```bash
+htrcli context list             # list named contexts
+```
+
+Use with the `--context` global flag:
+
+```bash
+htrcli --context work open https://example.com
+htrcli --context personal open https://other.com
+```
+
+## Publishing to AMO
+
+```bash
+htrcli publish --build                     # build + sign + submit (public)
+htrcli publish --channel unlisted          # self-distributed
+htrcli publish --dry-run --source-dir firefox/build  # dry-run
+# Submit source code as the AMO source submission (2nd upload). AMO requires
+# human-readable source when the built add-on is bundled/minified:
+htrcli publish --upload-source-code htrncontrol-src-0.4.6.zip
+```
+
+Channels: `listed` (default, public on addons.mozilla.org), `unlisted`
+(self-distributed).
+
+AMO API credentials (key + secret) resolved from:
+1. `--api-key` / `--api-secret` flags
+2. Environment: `AMO_API_KEY` / `AMO_API_SECRET` (or `HTRCLI_AMO_API_KEY` / `HTRCLI_AMO_API_SECRET`)
+3. Config: `htrcli config set-amo-api-key <key>` / `htrcli config set-amo-api-secret <secret>`
 
 ## Raw commands
 
 For advanced use, send raw JSON commands:
 
 ```bash
-htcli command '{"action":"click","target":{"selector":"#btn"}}'
-htcli command '{"action":"fill","target":{"name":"email"},"value":"test@example.com"}'
-htcli command '{"action":"snapshot","interactive":true,"compact":true}'
+htrcli command '{"action":"click","target":{"selector":"#btn"}}'
+htrcli command '{"action":"fill","target":{"name":"email"},"value":"test@example.com"}'
+htrcli command '{"action":"findAll","target":{"selector":"a"}}'
+htrcli command '{"action":"wait","target":{"selector":".loaded"},"options":{"timeout":5000}}'
 ```
 
 ## Common workflows
@@ -401,109 +852,143 @@ htcli command '{"action":"snapshot","interactive":true,"compact":true}'
 ### Log in to a site
 
 ```bash
-htcli open https://example.com/login
-htcli snapshot -i
-htcli fill @e3 "user@example.com"
-htcli fill @e5 "password123"
-htcli click @e7
-htcli snapshot -i                        # verify login succeeded
-htcli page                              # check URL changed to dashboard
+htrcli open https://example.com/login
+htrcli find "input[name=email]"          # verify the form is there
+htrcli fill "input[name=email]" "user@example.com"
+htrcli fill "input[name=password]" "password123"
+htrcli click "button[type=submit]"
+htrcli page                               # verify URL changed to dashboard
 ```
 
 ### Fill a multi-step form
 
 ```bash
-htcli open https://example.com/apply
-htcli snapshot -i
+htrcli open https://example.com/apply
+htrcli find "#personal-info"              # confirm step 1 is loaded
 
 # Step 1: Personal info
-htcli fill @e1 "John"
-htcli fill @e2 "Doe"
-htcli fill @e3 "john@example.com"
-htcli click @e4                          # Next button
+htrcli fill "input[name=firstName]" "John"
+htrcli fill "input[name=lastName]" "Doe"
+htrcli fill "input[name=email]" "john@example.com"
+htrcli click "button.next"
 
-htcli snapshot -i                        # re-snapshot for step 2
-
-# Step 2: Address
-htcli fill @e1 "123 Main St"
-htcli fill @e2 "Springfield"
-htcli click @e3                          # Submit
+# Step 2: Address (page is fully loaded before the next fill runs)
+htrcli find "#address"
+htrcli fill "input[name=street]" "123 Main St"
+htrcli fill "input[name=city]" "Springfield"
+htrcli click "button.submit"
 ```
 
 ### Extract data from a page
 
 ```bash
-htcli open https://example.com/products
-htcli snapshot -i -c -d 2               # compact tree, shallow depth
-htcli snapshot --json | jq '.data.tree' # machine-readable
-```
-
-Or use JS evaluation:
-
-```bash
-htcli eval "JSON.stringify(Array.from(document.querySelectorAll('.product')).map(el => ({name: el.querySelector('.name')?.textContent, price: el.querySelector('.price')?.textContent})))"
+htrcli open https://example.com/products
+# Pull every product card's name + price
+htrcli eval "JSON.stringify(Array.from(document.querySelectorAll('.product')).map(el => ({name: el.querySelector('.name')?.textContent, price: el.querySelector('.price')?.textContent})))"
 ```
 
 ### Take documentation screenshots
 
 ```bash
-htcli open https://example.com/dashboard
-htcli screenshot --annotate --full documentation.png
+htrcli open https://example.com/dashboard
+htrcli screenshot documentation.png       # viewport
+htrcli screenshot --full-page full.png    # full page
+htrcli screenshot --annotate "#header,#sidebar,#main"  # annotated
 ```
 
 ### Debug a failing page
 
 ```bash
-htcli page                              # check current URL and state
-htcli snapshot -i                        # see what elements are present
-htcli eval "document.querySelector('.error')?.textContent"  # check for errors
-htcli screenshot debug.png               # visual state
+htrcli page                              # check current URL, title, readyState
+htrcli eval "document.querySelector('.error')?.textContent"  # check for errors
+htrcli screenshot debug.png               # visual state
+htrcli find "input[name=email]"           # verify the form is in the DOM
+```
+
+### Use refs for repeated interaction
+
+```bash
+htrcli find "#login-form" --ref          # mint @e3
+htrcli find @e3                          # re-inspect
+htrcli fill @e3 "admin"                  # use as a target
 ```
 
 ## Troubleshooting
 
 ### "No tabs connected"
 
-The How-To Recorder extension must be open and connected to the server.
+The HTR NControl extension must be open and connected to the server (or CDP
+transport must be active).
+
 1. Open Chrome/Firefox with the extension installed
 2. Click the extension icon or open the side panel
 3. Ensure remote control is enabled
-4. Check: `htcli health` should show connected tabs > 0
+4. Check: `htrcli health` should show connected tabs > 0
 
 ### "403 Forbidden"
 
 Token mismatch. Check the token matches what the server displayed on startup:
+
 ```bash
-htcli config show                        # show current config
-htcli health                             # test connection
+htrcli config show                        # show current config
+htrcli health                             # test connection
+```
+
+### `browser start` says "Chrome (pid N) did not answer on port"
+
+Usually a leftover from a Chrome that died without cleaning up (crash, reboot).
+htrcli removes a stale `~/.htrcli/chrome-profile/SingletonLock` automatically
+when its owner pid is dead **on this host** — a lock whose `<hostname>` belongs
+to another machine (shared/synced profile dir) is left untouched — and kills
+the unreachable Chrome it just spawned.
+If it still fails, check nothing else holds the profile or the CDP port:
+
+```bash
+htrcli browser status
+readlink ~/.htrcli/chrome-profile/SingletonLock   # hostname-<pid>; is that pid alive?
+lsof -nP -iTCP:9333 -sTCP:LISTEN
+```
+
+If the port answers but `browser.json`'s recorded PID is stale, `browser start`
+adopts the real listener PID (so `browser stop` can still kill it). If it cannot
+identify the listener, it refuses to write a bogus PID and reports the error.
+
+### Self-signed https (`net::ERR_CERT_AUTHORITY_INVALID`)
+
+CDP Chrome uses its own profile with no trusted dev certs. Point htrcli at a
+wrapper that adds `--ignore-certificate-errors`:
+
+```bash
+printf '#!/bin/sh\nexec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --ignore-certificate-errors "$@"\n' > ~/.htrcli/chrome-ignore-certs.sh
+chmod +x ~/.htrcli/chrome-ignore-certs.sh
+htrcli config set-chrome-path ~/.htrcli/chrome-ignore-certs.sh
+htrcli browser stop && htrcli browser start --headless
 ```
 
 ### "Connection refused"
 
-Server not running. Start one of:
-```bash
-# Option A: Bun server (WebSocket transport)
-cd /path/to/how-to-recorder && bun run server
+Server not running. Start the daemon:
 
-# Option B: htcli daemon (native messaging — no Bun needed)
-htcli serve
+```bash
+htrcli serve
 ```
 
-### Element not found
+### Element not found / not actionable
 
-1. Re-snapshot to get fresh refs: `htcli snapshot -i`
-2. Try a different selector strategy: CSS > name > role > text
-3. Use `htcli find <selector>` to verify element exists
-4. Use `htcli screenshot` to see current page state
+An error like `Element "..." was not found (waited 5000ms for it to become
+actionable)` means the selector never resolved, was hidden, or was disabled.
 
-### Refs don't work after navigation
+1. Confirm the element is in the DOM: `htrcli find <selector>`
+2. Take a screenshot: `htrcli screenshot debug.png`
+3. If the element appears after a delay, the auto-wait should handle it;
+   if you need longer than 5s, use `--timeout`
+4. For lazy-loading content, try `htrcli scroll down` first
 
-Refs become stale after page changes. Always re-snapshot:
-```bash
-htcli click @e5                          # this navigates
-htcli snapshot -i                        # fresh refs
-htcli click @e3                          # use new ref
-```
+### Stale ref after page navigation
+
+Refs (`@eN`) are tied to the DOM element at the time they were minted.
+Page transitions invalidate them. Re-mint the ref with `find <selector> --ref`
+after the page loads.
 
 ## Full reference
 
@@ -511,60 +996,82 @@ htcli click @e3                          # use new ref
 
 | Command | Description |
 |---------|-------------|
-| `htcli health` | Check server connection |
-| `htcli config set-server <url>` | Set server URL |
-| `htcli config set-token <token>` | Set bearer token |
-| `htcli config show` | Show current config |
-| `htcli install --browser <b> --extension-id <id>` | Register as native messaging host |
-| `htcli install --browser <b> --uninstall` | Remove native messaging manifest |
-| `htcli serve` | Start native messaging daemon (:3845) |
-| `htcli tabs list` | List connected tabs |
-| `htcli tabs get <id>` | Get tab info |
-| `htcli open <url>` | Navigate to URL |
-| `htcli back` | Browser back |
-| `htcli forward` | Browser forward |
-| `htcli reload` | Reload page |
-| `htcli snapshot` | Accessibility tree with refs |
-| `htcli screenshot [path]` | Take screenshot |
-| `htcli page` | Get page info |
-| `htcli click <sel>` | Click element |
-| `htcli dblclick <sel>` | Double-click element |
-| `htcli fill <sel> <val>` | Clear and fill input |
-| `htcli type <sel> <val>` | Append text to input |
-| `htcli hover <sel>` | Hover element |
-| `htcli press <key>` | Press key |
-| `htcli select <sel> <val>` | Select dropdown option |
-| `htcli check <sel>` | Check checkbox |
-| `htcli uncheck <sel>` | Uncheck checkbox |
-| `htcli scroll <dir> [px]` | Scroll page |
-| `htcli clear <sel>` | Clear input field |
-| `htcli find <sel>` | Find element info |
-| `htcli get text <sel>` | Get text content |
-| `htcli get value <sel>` | Get input value |
-| `htcli get attr <sel> <attr>` | Get attribute |
-| `htcli get html <sel>` | Get innerHTML |
-| `htcli eval <js>` | Execute JavaScript |
-| `htcli command <json>` | Send raw JSON command |
-| `htcli fetch <url>` | Fetch URL via background (no popup, includes cookies) |
-| `htcli printpdf <path>` | Print page to PDF via CDP (no save-as prompt) |
-|------|-------------|
-| `-i`, `--interactive` | Only interactive elements |
-| `-c`, `--compact` | Compact output |
-| `-d`, `--depth <n>` | Max tree depth |
-| `-s`, `--selector <sel>` | Scope to element |
-| `-u`, `--urls` | Show URLs in links |
-| `--json` | JSON output |
-
-### Screenshot flags
-
-| Flag | Description |
-|------|-------------|
-| `--full` | Full page capture |
-| `--annotate` | Numbered element overlays |
-| `--format <fmt>` | png (default) or jpeg |
-| `--quality <n>` | JPEG quality 1-100 |
-| `--selector <sel>` | Capture specific element |
-| `--json` | Base64 JSON output |
+| `htrcli health` | Check server connection |
+| `htrcli config set-server <url>` | Set server URL |
+| `htrcli config set-token <token>` | Set bearer token |
+| `htrcli config set-extension-id <id>` | Set extension ID (for tray reinstall) |
+| `htrcli config set-transport <type>` | Set default transport (ext/cdp) |
+| `htrcli config set-cdp-port <port>` | Set CDP debugging port |
+| `htrcli config set-chrome-path <path>` | Set Chrome binary path |
+| `htrcli config set-amo-api-key <key>` | Set AMO API key |
+| `htrcli config set-amo-api-secret <secret>` | Set AMO API secret |
+| `htrcli config show` | Show current config |
+| `htrcli install` | Register as native messaging host |
+| `htrcli serve` | Start native messaging daemon (:3845) |
+| `htrcli tabs list` | List connected tabs |
+| `htrcli tabs get <id>` | Get tab info |
+| `htrcli open <url>` | Navigate to URL |
+| `htrcli back [steps]` | Browser back — 1 step or N steps (`back 3` loops sequentially, reports partial progress) |
+| `htrcli forward [steps]` | Browser forward — 1 step or N steps |
+| `htrcli reload` | Reload page |
+| `htrcli screenshot [path]` | Take screenshot (viewport, --full-page, --annotate) |
+| `htrcli page` | Get page info |
+| `htrcli click <sel>` | Click element |
+| `htrcli dblclick <sel>` | Double-click element |
+| `htrcli fill <sel> <val>` | Clear and fill input |
+| `htrcli type <sel> <val>` | Append text to input |
+| `htrcli hover <sel>` | Hover element |
+| `htrcli press <key>` | Press key (keyDown + keyUp) |
+| `htrcli keydown <key>` | Key down only (hold; `keyup` to release, stateless, `--cdp` supported) |
+| `htrcli keyup <key>` | Key up only |
+| `htrcli mousedown <sel>` | Press mouse button down (`<sel>` or `xy=X,Y` or `@eN`, `--cdp` supported) |
+| `htrcli mouseup <sel>` | Release mouse button |
+| `htrcli mousemove <sel>` | Move mouse to element/coords (no button) |
+| `htrcli drag <src> <dst>` | Drag source → target (`xy=`/`@eN`/selector, `--steps 1..100` `--delay 0..2000ms`, pointer/mouse only, no native DnD) |
+| `htrcli select <sel> <val>` | Select dropdown option |
+| `htrcli check <sel>` | Check checkbox |
+| `htrcli uncheck <sel>` | Uncheck checkbox |
+| `htrcli scroll <dir> [px]` | Scroll page |
+| `htrcli clear <sel>` | Clear input field |
+| `htrcli find <sel>` | Find element info |
+| `htrcli findAll <sel>` | Find all elements matching selector |
+| `htrcli text <sel>` | Get text content |
+| `htrcli value <sel>` | Get input value |
+| `htrcli attr <sel> <attr>` | Get attribute |
+| `htrcli html <sel>` | Get innerHTML |
+| `htrcli snapshot` | Accessibility snapshot tree with refs |
+| `htrcli eval <js>` | Execute JavaScript (page main world) |
+| `htrcli command <json>` | Send raw JSON command |
+| `htrcli fetch <url>` | Fetch URL via background (includes cookies) |
+| `htrcli printpdf <path>` | Print page to PDF via the extension path (no save-as prompt) |
+| `htrcli upload <sel> <file>` | Set files on a file input (no file picker) |
+| `htrcli console read` | Read buffered console events |
+| `htrcli console watch` | Stream console events until timeout |
+| `htrcli network read` | Read buffered network requests |
+| `htrcli network watch` | Stream network entries until timeout |
+| `htrcli network wait` | Block until a matching request completes |
+| `htrcli network mock` | Mock responses for matching requests |
+| `htrcli network block` | Block (fail) matching requests |
+| `htrcli network unmock` | Remove mock/block rules |
+| `htrcli dialog handle` | Arm dialog handling policy |
+| `htrcli dialog list` | List handled dialogs |
+| `htrcli browser start` | Launch CDP-controlled Chrome |
+| `htrcli browser stop` | Kill managed Chrome |
+| `htrcli browser status` | Probe CDP port |
+| `htrcli browser hide` | Minimize CDP browser window |
+| `htrcli browser show` | Restore CDP browser window |
+| `htrcli context list` | List named browser contexts |
+| `htrcli record start` | Start video recording (CDP only) |
+| `htrcli record stop` | Stop recording and encode to MP4 |
+| `htrcli recordings start` | Start a session recording (Chrome + Firefox) |
+| `htrcli recordings stop` | Stop the current session recording |
+| `htrcli recordings status` | Show whether a session recording is live |
+| `htrcli recordings list` | List session recordings (newest first, paginated) |
+| `htrcli recordings get <id>` | Print a session's steps + annotations as JSON |
+| `htrcli recordings export <id> <file>` | Write a session (with screenshots) as JSON, ZIP bundle, or Markdown |
+| `htrcli recordings delete <id>` | Delete a stored session recording |
+| `htrcli trace export` | Export debug trace bundle (zip) |
+| `htrcli publish` | Build + sign + submit to addons.mozilla.org |
 
 ### Global flags
 
@@ -575,12 +1082,17 @@ htcli click @e3                          # use new ref
 | `--json` | Raw JSON output |
 | `--tab <id>` | Target specific tab |
 | `--timeout <ms>` | Command timeout (default: 30000) |
+| `--transport <type>` | Transport: ext (default) or cdp |
+| `--cdp` | Shorthand for --transport cdp |
+| `--context <name>` | Named browser context |
 
 ### Environment variables
 
 | Variable | Description |
 |----------|-------------|
-| `HTCLI_SERVER` | Server URL |
-| `HTCLI_TOKEN` | Bearer token |
+| `HTRCLI_SERVER` | Server URL |
+| `HTRCLI_TOKEN` | Bearer token |
 | `HTR_PORT` | Daemon port (default: 3845) |
 | `HTR_BEARER_TOKEN` | Daemon bearer token |
+| `AMO_API_KEY` / `HTRCLI_AMO_API_KEY` | AMO API key for publishing |
+| `AMO_API_SECRET` / `HTRCLI_AMO_API_SECRET` | AMO API secret for publishing |

@@ -429,6 +429,15 @@ function FileEditorImpl({
   const handleEditorMount: OnMount = useCallback((ed, monaco) => {
     editorRef.current = ed;
     monacoRef.current = monaco;
+    // Focus only a visible editor, and never while the user is typing
+    // elsewhere: hidden background tabs and preview panes mount too, and
+    // stealing focus from the composer mid-keystroke edits the file.
+    const active = document.activeElement as HTMLElement | null;
+    const typing =
+      !!active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable);
+    if (!typing && ed.getDomNode()?.offsetParent !== null) {
+      ed.focus();
+    }
     // Register clickable import / file-path links inside the editor.
     try {
       ensureEditorLinks(monaco);

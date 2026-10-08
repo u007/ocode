@@ -1,7 +1,7 @@
 import { X } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
 import { api } from "../../api/client";
-import { closeBtw, useBtwState } from "../../lib/btwStore";
+import { closeBtw, setCancelBtwError, useBtwState } from "../../lib/btwStore";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 
@@ -17,14 +17,16 @@ export function BtwPanel({ sessionId, host }: { sessionId: string; host?: string
   const rootRef = useRef<HTMLDivElement>(null);
 
   const dismiss = useCallback(() => {
-    // Cancel the server-side side query (independent of the main turn), then
-    // drop the local panel. A failed cancel still closes the panel — the run's
-    // frames are ignored once its state is gone — but log it so a broken
-    // cancel is diagnosable.
+    // Always close locally: a panel the user cannot dismiss (remote host
+    // down, server restarted, offline) is worse than a run that outlives it.
+    // A failed cancel is surfaced in the panel, not just the console, so the
+    // user knows the server run may still be burning; the next /btw on this
+    // session supersedes it anyway.
+    closeBtw(sessionId, host);
     api.cancelBtw(sessionId, host).catch((err) => {
       console.warn("btw: cancel side query failed", err);
+      setCancelBtwError(sessionId, host, `cancel failed: ${String(err?.message || err)}`);
     });
-    closeBtw(sessionId, host);
   }, [sessionId, host]);
 
   useEffect(() => {

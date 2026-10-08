@@ -107,8 +107,9 @@ func (h *Handler) HandleBtwCancel(w http.ResponseWriter, r *http.Request, id str
 func (h *Handler) btwMessages(id string, as *agentSession) []agent.Message {
 	var src []agent.Message
 	if as.mu.TryLock() {
-		src = as.messages
-		defer as.mu.Unlock()
+		src = make([]agent.Message, len(as.messages))
+		copy(src, as.messages)
+		as.mu.Unlock()
 	} else {
 		entry, err := h.sessions.Resolve(id)
 		if err != nil {
@@ -122,7 +123,7 @@ func (h *Handler) btwMessages(id string, as *agentSession) []agent.Message {
 		}
 		src = s.Messages
 	}
-	// Drop the ask sentinels, exactly as the TUI's snapshot does. `/btw`
+	// Neutralise the ask sentinels, as the TUI's snapshot does. `/btw`
 	// mid-turn is precisely when the main turn may be parked on a
 	// permission/question ask, and feeding the raw PERMISSION_ASK:… /
 	// WAITING_FOR_USER_RESPONSE JSON to the side-query model leaks internal
@@ -130,9 +131,19 @@ func (h *Handler) btwMessages(id string, as *agentSession) []agent.Message {
 	out := make([]agent.Message, 0, len(src))
 	for _, m := range src {
 		if strings.HasPrefix(m.Content, tool.SentinelPermissionAsk) {
+			// Keep the tool message so the child's transcript sees a result
+			// for the parked call (prevents recoverOrphanedToolCalls from
+			// re-executing an unapproved tool), but replace the internal
+			// protocol payload with a neutral placeholder.
+			mc := m
+			mc.Content = "[permission ask]"
+			out = append(out, mc)
 			continue
 		}
-		if strings.Contains(m.Content, tool.SentinelWaitingForUser) {
+		if m.Role == "tool" && strings.Contains(m.Content, tool.SentinelWaitingForUser) {
+			mc := m
+			mc.Content = "[waiting for user]"
+			out = append(out, mc)
 			continue
 		}
 		out = append(out, m)
@@ -185,12 +196,12 @@ func (h *Handler) registerBtwRun(id string) (uint64, func()) {
 	if h.btwRuns == nil {
 		h.btwRuns = make(map[string]*btwRun)
 	}
-	var gen uint64 = 1
 	var prev func()
 	if cur := h.btwRuns[id]; cur != nil {
-		gen = cur.generation + 1
 		prev = cur.cancel
 	}
+	h.btwSeq++
+	gen := h.btwSeq
 	h.btwRuns[id] = &btwRun{generation: gen}
 	return gen, prev
 }

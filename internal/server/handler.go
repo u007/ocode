@@ -110,9 +110,12 @@ type Handler struct {
 	btwMu sync.Mutex
 	// btwRuns holds the in-flight /btw side query per session id. A second
 	// /btw replaces (cancels) the first; DELETE cancels by id. The entry is
-	// RETAINED after a run completes (cancel cleared) so the generation stays
-	// monotonic for the client's staleness guard; /reset-id deletes it.
+	// kept after a run completes (cancel cleared) and dropped on /reset-id or
+	// session close/eviction. btwSeq is process-wide, so a generation is never
+	// reused even after its entry is deleted: the client's staleness guard
+	// (a generation lower than the one it holds is dropped) cannot wedge.
 	btwRuns map[string]*btwRun
+	btwSeq  uint64
 
 	// bus is the unified tagged event bus (Part 02). Every emitters publishes
 	// envelopes here; /api/events streams them to web clients.
@@ -609,6 +612,17 @@ func NewHandler() *Handler {
 		h.turnMu.Lock()
 		delete(h.turnLocks, sessionID)
 		h.turnMu.Unlock()
+		// Stop and forget any in-flight /btw side query before shutting
+		// down the agent (mirrors HandleCloseSession ordering). The entry is
+		// removed so evicted sessions do not accumulate in btwRuns; generations
+		// come from the process-wide btwSeq, so a later run still supersedes
+		// any frame the browser holds from this one.
+		h.cancelBtwRun(sessionID, true)
+
+		// Drop any per-session MCP overrides so the map doesn't grow one entry
+		// per session id the process has ever served.
+		h.clearMCPSessionOverrides(sessionID)
+
 		// Shut down the released agent so plugin/LSP/background workers
 		// don't linger past eviction (mirrors the register-dedup path).
 		if as != nil {
@@ -622,15 +636,6 @@ func NewHandler() *Handler {
 				as.agent.Shutdown()
 			}
 		}
-		// Drop any per-session MCP overrides so the map doesn't grow one entry
-		// per session id the process has ever served.
-		h.clearMCPSessionOverrides(sessionID)
-
-		// Stop and forget any in-flight /btw side query. Eviction releases the
-		// session without a close request, so without this the loop would keep
-		// running (spend + child bash processes) and btwRuns would retain one
-		// entry per session id the process has ever served.
-		h.cancelBtwRun(sessionID, true)
 	})
 
 	// Reap persistent `!` shells that have been idle past the session idle

@@ -914,7 +914,7 @@ function HomeApp() {
         return;
       }
       if (activeView !== "sessions" || focusedKind !== "chat" || !activeTabId) return;
-      closeSessionBackend(activeTabId);
+      closeSessionBackend(activeTabId, activeSessionHost);
       closeSessionTab(activeTabId);
       cancelLiveDeltas(activeTabId);
       clearQueue(activeTabId);

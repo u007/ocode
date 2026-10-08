@@ -112,13 +112,16 @@ eventBus.on("btw", (env) => {
 export function startBtw(sessionId: string, host: string | undefined, question: string) {
   const k = key(host, sessionId);
   const cur = states.get(k);
-  // A TERMINAL frame can arrive before this call: the server publishes
-  // `started` — and a fast `error`/`done` — before it writes the 202, and the
-  // SSE stream is delivered first. Do not clobber that state: resetting to
-  // `loading` would leave the panel spinning on "Thinking…" forever with no
-  // error and no retry (the exact failure this feature set out to avoid).
-  if (cur && !cur.loading) {
-    states.set(k, { ...cur, sessionId, host, question, open: true });
+  // Frames can arrive before this call: the server publishes `started` —
+  // then activity/delta, or even a fast `error`/`done` — before it writes the
+  // 202, and the SSE stream is delivered first. If the panel is already open
+  // for THIS question, that state belongs to the new run: keep it. Resetting
+  // would drop the tool-activity lines, or clobber a terminal frame and leave
+  // the panel spinning on "Thinking…" forever with no error and no retry (the
+  // exact failure this feature set out to avoid). A different question is a
+  // new run and starts clean.
+  if (cur?.open && cur.question === question) {
+    states.set(k, { ...cur, sessionId, host });
     emit();
     return;
   }
@@ -144,9 +147,31 @@ export function closeBtw(sessionId: string, host?: string) {
 }
 
 /**
+ * Reopen a dismissed panel with a cancel failure so the user learns the server
+ * run may still be going. No-op when a run already owns the panel.
+ */
+export function setCancelBtwError(sessionId: string, host: string | undefined, error: string) {
+  const k = key(host, sessionId);
+  if (states.has(k)) return;
+  states.set(k, {
+    sessionId,
+    host,
+    question: "",
+    generation: 0,
+    activity: [],
+    answer: "",
+    loading: false,
+    error,
+    open: true,
+  });
+  emit();
+}
+
+/**
  * Move a session's panel to a new id on `/reset-id`. The server cancels the
- * old run, so the moved panel simply stops receiving frames; the user closes
- * it. Mirrors rekeySessionActivity — a session-keyed map must move with the
+ * old run without publishing a terminal frame, so an in-flight panel is marked
+ * cancelled here; a finished one keeps its answer or real error. Mirrors
+ * rekeySessionActivity — a session-keyed map must move with the
  * chat or it is stranded under the deleted id.
  */
 export function rekeyBtw(oldId: string, newId: string) {
@@ -154,11 +179,14 @@ export function rekeyBtw(oldId: string, newId: string) {
   for (const [k, st] of [...states]) {
     if (st.sessionId !== oldId) continue;
     states.delete(k);
-    // Reset the generation: the server DELETES the run entry on /reset-id, so
-    // the new id's first run starts at generation 1. Carrying the old
-    // generation would make the new run's frames look stale and the rekeyed
-    // panel would never update.
-    states.set(key(st.host, newId), { ...st, sessionId: newId, generation: 0 });
+    // Reset the generation: the server deletes or cancels the run entry
+    // on /reset-id, so the new id's first run starts at generation 1.
+    const moved: BtwState = { ...st, sessionId: newId, generation: 0 };
+    if (st.loading) {
+      moved.loading = false;
+      moved.error = "cancelled by /reset-id";
+    }
+    states.set(key(st.host, newId), moved);
     changed = true;
   }
   if (changed) emit();

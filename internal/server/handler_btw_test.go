@@ -528,7 +528,7 @@ func TestHandleBtwSnapshotStripsAskSentinels(t *testing.T) {
 	as.mu.Lock()
 	as.messages = []agent.Message{
 		{Role: "user", Content: "hello"},
-		{Role: "tool", Content: tool.SentinelPermissionAsk + `{"tool":"bash"}`},
+		{Role: "tool", ToolID: "call_ask", Content: tool.SentinelPermissionAsk + `{"tool":"bash"}`},
 		{Role: "tool", Content: `{"status":"` + tool.SentinelWaitingForUser + `"}`},
 		{Role: "assistant", Content: "ok"},
 		{Role: "user", Content: "trailing"},
@@ -536,12 +536,23 @@ func TestHandleBtwSnapshotStripsAskSentinels(t *testing.T) {
 	as.mu.Unlock()
 
 	got := h.btwMessages(id, as)
-	if len(got) != 3 {
-		t.Fatalf("snapshot = %d msgs, want 3 (two sentinels stripped)", len(got))
+	if len(got) != 5 {
+		t.Fatalf("snapshot = %d msgs, want 5 (sentinels kept with placeholder content)", len(got))
+	}
+	// The permission-ask message must be preserved (not dropped) with its
+	// ToolID intact and a neutral placeholder content.
+	if got[1].Content != "[permission ask]" {
+		t.Errorf("permission-ask msg content = %q, want placeholder", got[1].Content)
+	}
+	if got[1].Role != "tool" || got[1].ToolID == "" {
+		t.Errorf("permission-ask msg lost role/tool-id: role=%q id=%q", got[1].Role, got[1].ToolID)
+	}
+	if got[2].Content != "[waiting for user]" {
+		t.Errorf("waiting msg content = %q, want placeholder", got[2].Content)
 	}
 	for _, m := range got {
 		if strings.Contains(m.Content, tool.SentinelPermissionAsk) || strings.Contains(m.Content, tool.SentinelWaitingForUser) {
-			t.Fatalf("sentinel leaked into the side-query snapshot: %q", m.Content)
+			t.Fatalf("raw sentinel leaked into the side-query snapshot: %q", m.Content)
 		}
 	}
 }
@@ -594,5 +605,24 @@ func TestHandleCloseSessionCancelsBtwRun(t *testing.T) {
 	}
 	if _, ok := h.btwRuns[id]; ok {
 		t.Fatal("btwRuns entry retained after close")
+	}
+}
+
+// Regression: eviction must keep btwRuns entry (monotonic generation).
+func TestEvictionKeepsBtwGeneration(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	gen, _ := h.registerBtwRun(id)
+	h.cancelBtwRun(id, false) // false = keep entry (not delete)
+	if _, ok := h.btwRuns[id]; !ok {
+		t.Fatal("btwRuns entry deleted by eviction; generation lost")
+	}
+	if h.btwRuns[id].generation != gen {
+		t.Errorf("generation changed: %d vs %d", h.btwRuns[id].generation, gen)
+	}
+	if !h.btwRuns[id].done {
+		t.Error("entry not marked done after cancel")
 	}
 }
