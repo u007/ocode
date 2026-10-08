@@ -259,7 +259,7 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 - **`/discover`** — toggle retrieval-based skill/MCP discovery, pick the query-embedding model, manage ignored paths
 - **Discovery corpus** — markdown docs + skills indexed via small-model summaries (cached at `.ocode/md-summaries.json`); names-index is system-cached, full content is volatile tail
 - **Discovery API:** `GET/PUT /api/config/ocode/discovery` + `GET /api/skills` + `GET /api/commands`
-- **Bundled skill library** — ~60+ bundled skills covering Google Workspace (`gws-*`), PDF tooling, context compression (`compress`, `caveman*`), browser automation (`agent-browser`, `htrcli`), web QA/testing (`webapp-qa`, `webapp-testing`), framework migration (`nextjs-to-tanstack`), and skill authoring (`skill-creator`)
+- **Bundled skill library** — ~60+ bundled skills covering Google Workspace (`gws-*`), PDF tooling, context compression (`compress`, `caveman*`), browser automation (`agent-browser`, `htrcli`), web QA/testing (`webapp-qa`, `webapp-testing`), metrics-driven test pruning (`test-suite-cleanup`), framework migration (`nextjs-to-tanstack`), and skill authoring (`skill-creator`)
 - **Skill installer** with status detection (`/plugin`, `skill` tool)
 
 ### 🧠 LSP Integration
@@ -957,3 +957,5 @@ The `/mask model [name]` command sets the local LLM used for tier-2 contextual s
 ## License
 
 MIT
+
+See [NOTICE](NOTICE) — no-responsibility disclosure: AI/LLM outputs may be wrong or fabricated (varies by model/provider); software can have bugs/unintentional results; users must review all actions. MIT (`LICENSE`) covers the legal disclaimer; `NOTICE` explains it in practice. Not legal advice.
