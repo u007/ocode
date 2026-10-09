@@ -47,7 +47,7 @@ func checkpointTestAgent(t *testing.T, checkpoints []string) (*Agent, *checkpoin
 		Model:       "deepseek-v4-pro",
 		Checkpoints: checkpoints,
 	}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	fake := &checkpointFakeAdvisor{advice: "proceed — plan looks correct"}
 	a.tools["advisor"] = fake
 	return a, fake
@@ -437,7 +437,7 @@ func TestRunAdvisorCheckpoint_ReportsProgress(t *testing.T) {
 // block change invalidates the provider prompt-cache prefix). The gate lives
 // at execution time instead.
 func TestAdvisorToggleKeepsToolListStable(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	if !a.AdvisorEnabled() {
 		t.Fatal("expected advisor enabled by default")
 	}

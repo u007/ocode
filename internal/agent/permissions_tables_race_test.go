@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestPermissionTablesConcurrentWriteDuringDecide is the regression guard for the
@@ -115,7 +116,12 @@ func TestPermissionTablesConcurrentWriteDuringDecide(t *testing.T) {
 		}()
 	}
 
-	for i := 0; i < 400; i++ {
+	// Bounded by time, not iterations: eight writers spin on the same mutex,
+	// so a fixed 400 rounds of Decide waited behind them for ~7 minutes here
+	// and once tripped go test's 10-minute package timeout. A short window
+	// gives the race detector the same interleavings in well under a second.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
 		for _, raw := range commands {
 			pm.Decide("bash", json.RawMessage(raw))
 		}

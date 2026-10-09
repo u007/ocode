@@ -20,7 +20,7 @@ A saved remote project has two identity components: `(host, path)`. Its `path` i
 The exploit chain described below **no longer applies**. The fix:
 
 - `allowedProjectRoots` (`internal/server/handler.go:662`) now **skips every saved project with `Host != ""`**, so the local allowlist contains only the server workdir and local (`Host == ""`) project roots.
-- The second path-only allowlist, `isRegisteredProjectRoot` (`internal/server/handler_git.go:156`), had the same bug and was fixed at the same time — it now `continue`s on `proj.Host != ""`, so git/fs-mutation admission (`mutationProjectDir`) ignores remote records too.
+- The second path-only allowlist, `isRegisteredProjectRoot` (`internal/server/handler_git.go:164`), had the same bug and was fixed at the same time — it now `continue`s on `proj.Host != ""`, so git/fs-mutation admission (`mutationProjectDir`) ignores remote records too.
 - Regression coverage: `internal/server/remote_project_trust_boundary_test.go` (6 tests, all mutation-verified to fail against the pre-fix code). See "Regression coverage" below.
 - CHANGES.md: "2026-09-28 — Security: a remote project's path is no longer a local filesystem root".
 

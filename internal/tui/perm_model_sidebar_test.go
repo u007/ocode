@@ -7,7 +7,6 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	fastviewport "github.com/u007/ocode/internal/tui/fastviewport"
 
-	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 )
@@ -21,7 +20,7 @@ func TestSidebarPermModelRowStaysSingleLine(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "lmstudio/ternary-bonsai-8b-mlx"}
 	m := model{
 		config:      &cfg,
-		agent:       agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:       newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:       textarea.New(),
 		ready:       true,
 		width:       140,
@@ -67,7 +66,7 @@ func TestPermissionModelCmdRegisteredLocalModel(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 		// The warm-up decision must not depend on whether a real local-model
 		// server happens to be running on the assigned port (11458) of the
@@ -128,7 +127,7 @@ func TestPermissionModelCmdRejectsDisabledLocalModel(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 

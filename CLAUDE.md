@@ -562,6 +562,34 @@ the fallback, never the reverse. Details: `docs/concepts/web-context-gauge-resol
   both spawn subprocesses and risk busting the prefix. Invalidate on plugin
   install/remove, never per turn.
 
+## Pulse assistant
+The Pulse dashboard's overview chat is one global `pulse_…` session, rooted at
+`<GlobalDataDir>/pulse` (not a project). Concept doc: `docs/concepts/pulse-assistant.md`.
+
+- **It is never on the board.** `buildPulseRows` skips every `pulse_` id; any new
+  surface listing sessions (board text, `agent_runs`, search) must exclude it too.
+- **`allowedProjectRoots()` is a security boundary; the pulse root is not in it.**
+  Only `sessionSearchRoots` (session lookup) adds it. Never widen the boundary for it.
+- **Permission design:** read tools and `memory_write` have explicit allow rules;
+  the write tools (`pulseTool.ask`: `session_send`, `session_command`,
+  `permission_resolve`, `question_answer`) get NO rule so each call is a normal
+  permission ask. A new tool that acts outside the assistant's own files must set
+  `ask`. `memory_write` is allowed only because it touches the assistant's own
+  size-capped notes.
+- **Board and memory are user-role, never system-role.** `[ocode:pulse]` (with the
+  `[ocode:pulse-memory]` section) changes every turn; a system-role copy busts the
+  prompt cache. The system prompt is one stable `SetSystemPromptOverride` message.
+- **`session_command` is a fixed allowlist** (`pulseCommands`); an unsupported
+  command is an error. Never add a "send it as chat text" fallback.
+- **Write tools never queue.** `session_send` refuses a target that is mid-turn,
+  compacting or paused on an ask. Write tools reuse the HTTP handlers through
+  `pulseCall`; do not copy their logic.
+- **No pre-built agent on `GET /api/pulse/assistant`:** the first message builds it,
+  so profile resolution matches the message path (a pre-build forced a rebuild and
+  an illegal bootstrap transition).
+- **Recap runs under `pulseRecapTimeout` (90 s)** via `Agent.RecapCtx`; a timeout is
+  an error, never "Recap timed out." text passed off as a recap.
+
 ## Data Storage
 All persistent state lives under `internal/paths.GlobalDataDir()` (macOS
 `~/.local/share/opencode`, Linux `$XDG_DATA_HOME/opencode`, Windows

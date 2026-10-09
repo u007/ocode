@@ -5,7 +5,7 @@ import type { Project, ProjectGroup, SessionInfo, ServerProjectTabs } from "../a
 import { eventBus } from "../lib/eventBus";
 import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "../lib/title";
 
-export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview";
+export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview" | "db";
 export type ProjectMetadataStatus = "loading" | "ready" | "error";
 
 export interface Tab {
@@ -482,7 +482,7 @@ interface RestoredTabs {
 const EMPTY_RESTORE: RestoredTabs = { tabsByProject: {}, activeTabByProject: {} };
 
 function toSubTab(v: unknown): SessionSubTabId {
-  return (v === "agents" || v === "changes" || v === "logs" || v === "status" || v === "preview" ? v : "chat") as SessionSubTabId;
+  return (v === "agents" || v === "changes" || v === "logs" || v === "status" || v === "preview" || v === "db" ? v : "chat") as SessionSubTabId;
 }
 
 /** Converts the server's `{root: {tabs, active}}` map into store shape,

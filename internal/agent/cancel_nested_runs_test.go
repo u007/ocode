@@ -44,14 +44,14 @@ func TestCancelAllReachesNestedRuns(t *testing.T) {
 
 	// The parent sub-agent: a real Agent, so it owns its own run registry
 	// exactly as TaskTool creates it.
-	sub := NewAgent(nil, nil, nil, nil)
+	sub := newTestAgent(nil, nil, nil, nil)
 	childRuns := sub.Runs()
 	if childRuns == nil {
 		t.Fatal("sub-agent has no run registry")
 	}
 
 	leaf := childRuns.New("leaf")
-	leaf.Sub = NewAgent(nil, nil, nil, nil)
+	leaf.Sub = newTestAgent(nil, nil, nil, nil)
 	leaf.Cancel = func() {}
 	leaf.markQueued() // an active-but-not-yet-running nested run
 
@@ -76,7 +76,7 @@ func TestCancelAllReachesNestedRuns(t *testing.T) {
 // points back at an ancestor registry must not spin forever.
 func TestCancelAllNestedCycleTerminates(t *testing.T) {
 	reg := NewAgentRunRegistry()
-	agent := NewAgent(nil, nil, nil, nil)
+	agent := newTestAgent(nil, nil, nil, nil)
 	run := reg.New("self")
 	run.Sub = agent
 	run.Cancel = func() {}
@@ -105,12 +105,12 @@ func TestCancelAllNestedCycleTerminates(t *testing.T) {
 // TestShutdownCancelsNestedRuns pins the same invariant through the public
 // teardown entry point: Agent.Shutdown() must leave no descendant run active.
 func TestShutdownCancelsNestedRuns(t *testing.T) {
-	sub := NewAgent(nil, nil, nil, nil)
+	sub := newTestAgent(nil, nil, nil, nil)
 	leaf := sub.Runs().New("leaf")
-	leaf.Sub = NewAgent(nil, nil, nil, nil)
+	leaf.Sub = newTestAgent(nil, nil, nil, nil)
 	leaf.Cancel = func() {}
 
-	parent := NewAgent(nil, nil, nil, nil)
+	parent := newTestAgent(nil, nil, nil, nil)
 	run := parent.Runs().New("orchestrator")
 	run.Sub = sub
 	run.Cancel = sub.Cancel

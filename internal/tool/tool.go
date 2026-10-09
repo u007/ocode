@@ -166,6 +166,9 @@ func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computer
 		&GitHubPRTool{},
 		&GitHubIssueTool{},
 		&GitHubWorkflowTool{},
+		&SqliteSchemaTool{},
+		&SqliteQueryTool{},
+		&SqliteExecTool{},
 	}
 	// The "ast" semantic tool (LSP-backed) is registered by default whenever a
 	// language server is available on PATH — no plugin toggle required.

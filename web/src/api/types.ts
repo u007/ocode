@@ -1207,6 +1207,8 @@ export interface PortMapView {
   remote_port: number;
   local_port: number;
   enabled: boolean;
+  /** ssh -R: the remote reaches the desktop's local port. Absent on older servers, which only ran -L. */
+  reverse?: boolean;
   live: boolean;
 }
 
@@ -1366,4 +1368,18 @@ export interface TodoUpdatedEvent {
   total: number;
   current: string;
   items: PulseTodoItem[];
+}
+
+/** GET /api/pulse/assistant: the global Pulse assistant session. `model` is the
+ *  effective model (the pulse-model slot when set, else the server default). */
+export interface PulseAssistantInfo {
+  session_id: string;
+  model: string;
+}
+
+/** GET /api/config/pulse-system-prompt. `prompt` is the override ("" when
+ *  unset); `default` is the built-in prompt text the override replaces. */
+export interface PulseSystemPrompt {
+  prompt: string;
+  default: string;
 }

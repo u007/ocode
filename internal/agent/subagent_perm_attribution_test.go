@@ -37,7 +37,7 @@ func attrRegistry(name string, reg *AgentRegistry) {
 // the shared callback stamped with the DISPATCHING agent's name.
 func TestSubagentPermissionAskCarriesAgentName(t *testing.T) {
 	askTool := attrAskTool()
-	parent := NewAgent(attrSubagentClient(), []tool.Tool{askTool}, nil, nil)
+	parent := newTestAgent(attrSubagentClient(), []tool.Tool{askTool}, nil, nil)
 	parent.Permissions().SetRule("task", PermissionAllow)
 	// ask_tool has no rule, so Decide returns Ask and the callback runs.
 
@@ -122,7 +122,7 @@ func TestAttributePermAskerForwardsTheDecision(t *testing.T) {
 // field is omitempty so every pre-existing frame stays byte-identical.
 func TestSubagentAskStampsAgentNameOnlyWithCallback(t *testing.T) {
 	askTool := attrAskTool()
-	parent := NewAgent(attrSubagentClient(), []tool.Tool{askTool}, nil, nil)
+	parent := newTestAgent(attrSubagentClient(), []tool.Tool{askTool}, nil, nil)
 	parent.Permissions().SetRule("task", PermissionAllow)
 
 	reg := NewAgentRegistry()

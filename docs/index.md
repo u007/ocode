@@ -60,7 +60,8 @@ okf_version: 0.1
 - [Persistent per-session shell for exclamation-mark commands](concepts/persistent-shell-session.md) - How the web/desktop composer's exclamation-mark commands run in a persistent pty-backed interactive shell per chat tab, with prompt-hook marker framing, pty cleanliness, lifecycle, and the one-shot fallback.
 - [Persistent Todo Plan (todowrite / todoread / todo_update)](concepts/persistent-todo-plan.md) - Per-session durable todo plan file format, revision-token concurrency, destructive-replacement guard, cache-safe user-role re-anchor injection, and resume semantics.
 - [Prompt Cache Stability](concepts/prompt-cache-stability.md) - Anthropic prompt-cache prefix order and the rules for any change that touches tools or the base prompt: deterministic tool order, sticky sets, role-determines-caching, tail injection by volatility, breakpoints.
-- [Pulse — cross-project live-sessions dashboard](concepts/pulse-dashboard.md) - Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card streaming block (STREAM_ON_CARD, PulseStream wrap modes, STREAM_MAX_H height budget, PULSE_TAIL_LINES, min-h-0 gotcha), jump sequence, entry points (no client router), desktop wiring, and known limits.
+- [Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)](concepts/pulse-assistant.md) - Server side of the Pulse assistant: one global chat session (pulse_ id, dedicated root, state.json) that reads every local session and terminal and, through permission-gated write tools, sends messages, runs allowlisted slash commands and resolves asks. Endpoints (assistant, pulse-model, pulse-system-prompt), config keys, model slot, system-prompt override and per-turn board plus memory injection (user-role, never system-role), the twelve tools with caps, the permission design, assistant-owned memory files, recap deadline, exclusion from the board, and known limits.
+- [Pulse — cross-project live-sessions dashboard](concepts/pulse-dashboard.md) - Assistant drawer (docked chat, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.
 - [Remote MCP OAuth Compatibility](concepts/remote-mcp-oauth-compat.md) - Implemented remote MCP OAuth compatibility: dual-schema mcp-auth.json reads with merge-safe writes, URL-bound token attachment, RFC 9728/8414 discovery refresh with a single retry, status-before-decode HTTP errors, CLI list status fix; per-chat toggle/cache semantics unchanged.
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, the live (open∪running) sidebar chat inventory and tab reveal, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
@@ -87,6 +88,7 @@ okf_version: 0.1
 # gotchas
 
 - ["Add to .gitignore" — toplevel targeting, C-quoting, and append-not-truncate](gotchas/git-ignore-toplevel-and-quoting.md) - Gotchas behind the web/desktop Git tab's right-click "Add to .gitignore": entries MUST resolve against the repo toplevel (git status porcelain paths are toplevel-relative, so a nested ?project= subdir double-prefixes), C-quoted porcelain names must be decoded before pattern-building, patterns are anchored/escaped, and the file is appended to (O_APPEND local / read-modify-write remote) rather than rewritten. Also records the latent remoteReadFile MISSING-sentinel bug fixed in the same change.
+- [Git tab stage failed on non-ASCII filenames — C-quoted names from non-`-z` listings](gotchas/git-status-c-quoted-paths.md) - The web/desktop Git tab could not stage files with non-ASCII names, locally or over SSH/WSL: listings without `-z` returned git's C-quoted form, and remote command args were joined unquoted so a space split the name. Listings must use `-z` or decode; every spec that becomes a remote argument must be shell-quoted.
 - ["git commit failed: exit status 1" with no reason (git explains on stdout, not stderr)](gotchas/git-commit-opaque-exit-status.md) - git commit writes its reason on stdout; capturing only stderr hides the explanation
 - [A derived title/label must be bounded before it is persisted or rendered](gotchas/derived-title-label-must-be-bounded.md) - A session title auto-derived from a multi-megabyte first user message was stored verbatim, poisoning every metadata endpoint and the shared tabs.json, and the raw label forced a full-string browser layout. Rule and fix pattern: cap on write AND on read, and bound the truncation work itself.
 - [A failed git probe is not the same answer as "not a repository" - rev-parse exit 128 hides git-missing and safe.directory faults](gotchas/git-probe-failure-is-not-a-non-repo.md) - Gotcha: git rev-parse exits 128 both for a plain non-repo and for a real fault (git missing from PATH, safe.directory / dubious-ownership refusal, unreadable .git), so gitStatusForDir classified on the exit code alone and a server with no git on PATH reported every project as a plain directory with nothing logged. The decision now rests on stderr text, which forces two things: pin LC_ALL=C, and classify on the RAW cmd.Output() error before runRaw wraps it with fmt.Errorf and discards the *exec.ExitError and with it Stderr.
@@ -192,6 +194,7 @@ okf_version: 0.1
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
 - [Terminal close semantics and OSC title source](gotchas/terminal-close-and-osc-title.md) - Close-vs-detach-vs-app-exit matrix, ghost-socket disposed flag, OSC title parsing and fallback chain for remote terminal rows.
+- [Terminal Does Not Scroll On Touch Devices (xterm.js 6 Has No Touch Scrolling)](gotchas/terminal-touch-scroll-xterm6.md) - xterm.js 6.0.0 bundles VS Code's touch Gesture class but never registers the viewport as a target, so a one-finger drag does nothing on phones/tablets. Synthetic wheel events do not work around it (xterm ignores untrusted wheels). Fixed with touch listeners that drive term.scrollLines / SGR wheel reports, plus touch-none on the container.
 - [Terminal find bar stuck on "No matches"](gotchas/terminal-find-stuck-no-matches.md) - SearchAddon find() throws because allowProposedApi was unset on the xterm Terminal.
 - [TTS License Acceptance Must Validate the Exact License Text Hash](gotchas/tts-license-acceptance-hash-validation.md) - TTS license acceptance must validate engine and exact license text/hash instead of trusting client-supplied or synthetic metadata.
 - [TUI copy over SSH never reaches the local clipboard — route every copy through OSC 52 (`copyToClipboard`)](gotchas/tui-clipboard-remote-ssh-osc52.md) - A TUI that copies via a local clipboard utility (pbcopy/xclip/xsel/wl-copy) silently fails on a remote SSH host; route every TUI copy through copyToClipboard → tea.SetClipboard (OSC 52) with the local utility as fallback.
@@ -433,7 +436,12 @@ okf_version: 0.1
 - [okf/vbnet/scores/muse-spark-1.2.md](okf/vbnet/scores/muse-spark-1.2.md)
 - [okf/vbnet/scores/space-bunny-free.md](okf/vbnet/scores/space-bunny-free.md)
 - [okf/vbnet/scores/tencent__hy3.md](okf/vbnet/scores/tencent__hy3.md)
+- [okf/webforms/derived/webforms.deepseek-v4.1-flash.SKILL.md](okf/webforms/derived/webforms.deepseek-v4.1-flash.SKILL.md) - Corrective web-form-filling guidance for deepseek-v4.1-flash driving a browser with htrcli: what a live third-party form with test data may and may not receive, CAPTCHA and card-data limits, and the widget recipes (react-select/autocomplete via `pick`, datepickers via `type`, range/colour via eval + events) that cost it the most calls.
+
+- [okf/webforms/derived/webforms.mimo-v2.6-flash.SKILL.md](okf/webforms/derived/webforms.mimo-v2.6-flash.SKILL.md) - Corrective web-form-filling guidance for mimo-v2.6-flash driving a browser with htrcli: what a live third-party form with test data may and may not receive, CAPTCHA and card-data limits, and how to reach form fields inside iframes.
+
 - [okf/webforms/scores/deepseek-v4.1-flash.md](okf/webforms/scores/deepseek-v4.1-flash.md)
+- [okf/webforms/scores/mimo-v2.6-flash.md](okf/webforms/scores/mimo-v2.6-flash.md)
 - [OKF Naming Convention Enforcement](okf/_schema/naming-convention-enforcement.md) - OKF naming conventions for question IDs, bundle entries, and index format to maintain bundle integrity.
 - [Stack Detection](okf/_schema/stack-detection.md) - How ocode detects repo stacks from meta.yaml markers, and how derived Kaizen skills are gated — marker types, universal corpora (conduct/hallucination/pdf), canonical model ids, and delivery/admission rules.
 
@@ -504,6 +512,9 @@ okf_version: 0.1
 # Unclassified
 
 - [desktop-single-instance.md](architecture/desktop-single-instance.md)
+- [cloud-connectors-design.md](cloud-connectors-design.md)
+- [cloud-connectors-encryption.md](cloud-connectors-encryption.md)
+- [db-connector.md](concepts/db-connector.md)
 - [HOW-TO-EVALUATE.md](okf/HOW-TO-EVALUATE.md)
 - [README.md](okf/README.md)
 - [conduct.md](okf/_prompts/conduct.md)
@@ -716,8 +727,10 @@ okf_version: 0.1
 - [tencent__hy3.md](okf/vbnet/answers/tencent__hy3.md)
 - [questions.md](okf/vbnet/questions.md)
 - [deepseek-v4.1-flash.md](okf/webforms/answers/deepseek-v4.1-flash.md)
+- [mimo-v2.6-flash.md](okf/webforms/answers/mimo-v2.6-flash.md)
 - [README.md](okf/webforms/probe/README.md)
 - [questions.md](okf/webforms/questions.md)
+- [2026-10-08-cloud-connectors-phase1.md](plans/2026-10-08-cloud-connectors-phase1.md)
 - [2026-07-21-session-storage-ojsonl.md](superpowers/plans/2026-07-21-session-storage-ojsonl.md)
 - [2026-07-24-web-changes-parity.md](superpowers/plans/2026-07-24-web-changes-parity.md)
 - [2026-07-24-web-cron-parity.md](superpowers/plans/2026-07-24-web-cron-parity.md)

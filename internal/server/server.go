@@ -272,6 +272,13 @@ func (s *Server) registerRoutes() {
 	// session routes because every row is a session; it is a global view
 	// (no project_path filter) by design, which is the whole point.
 	s.mux.HandleFunc("GET /api/pulse", s.authMiddleware(s.handlePulse))
+	// The Pulse assistant: one global chat session bound to the dashboard.
+	// Messages and streaming use the ordinary /api/sessions/{id}/... routes.
+	s.mux.HandleFunc("GET /api/pulse/assistant", s.authMiddleware(s.handlePulseAssistant))
+	s.mux.HandleFunc("GET /api/config/pulse-model", s.authMiddleware(s.handleGetPulseModel))
+	s.mux.HandleFunc("PUT /api/config/pulse-model", s.authMiddleware(s.handleSetPulseModel))
+	s.mux.HandleFunc("GET /api/config/pulse-system-prompt", s.authMiddleware(s.handleGetPulseSystemPrompt))
+	s.mux.HandleFunc("PUT /api/config/pulse-system-prompt", s.authMiddleware(s.handleSetPulseSystemPrompt))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
@@ -357,6 +364,17 @@ func (s *Server) registerRoutes() {
 	// the user-initiated DB surface.
 	s.mux.HandleFunc("GET /api/db/blob", s.authMiddleware(s.handler.HandleDBBlob))
 	s.mux.HandleFunc("POST /api/db/blob", s.authMiddleware(s.handler.HandleDBBlob))
+	// Postgres connector: saved connections (encrypted in ocodeconfig.json),
+	// master-password unlock per surface, then read-only tables and queries.
+	s.mux.HandleFunc("GET /api/dbconnect/connections", s.authMiddleware(s.handler.HandleDBConnectList))
+	s.mux.HandleFunc("POST /api/dbconnect/connections", s.authMiddleware(s.handler.HandleDBConnectAdd))
+	s.mux.HandleFunc("DELETE /api/dbconnect/connections/{name}", s.authMiddleware(s.handler.HandleDBConnectRemove))
+	s.mux.HandleFunc("POST /api/dbconnect/unlock", s.authMiddleware(s.handler.HandleDBConnectUnlock))
+	s.mux.HandleFunc("POST /api/dbconnect/lock", s.authMiddleware(s.handler.HandleDBConnectLock))
+	s.mux.HandleFunc("GET /api/dbconnect/tables", s.authMiddleware(s.handler.HandleDBConnectTables))
+	s.mux.HandleFunc("POST /api/dbconnect/query", s.authMiddleware(s.handler.HandleDBConnectQuery))
+	s.mux.HandleFunc("GET /api/dbconnect/rows", s.authMiddleware(s.handler.HandleDBConnectRows))
+	s.mux.HandleFunc("POST /api/dbconnect/row", s.authMiddleware(s.handler.HandleDBConnectRow))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 	s.mux.HandleFunc("POST /api/fs/copy", s.authMiddleware(s.handler.HandleFSCopy))
 	s.mux.HandleFunc("POST /api/fs/move", s.authMiddleware(s.handler.HandleFSMove))
@@ -1390,6 +1408,26 @@ func (s *Server) handleListSessionUserMessages(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandlePulse(w, r)
+}
+
+func (s *Server) handlePulseAssistant(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandlePulseAssistant(w, r)
+}
+
+func (s *Server) handleGetPulseModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseModel(w, r)
+}
+
+func (s *Server) handleSetPulseModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseModel(w, r)
+}
+
+func (s *Server) handleGetPulseSystemPrompt(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseSystemPrompt(w, r)
+}
+
+func (s *Server) handleSetPulseSystemPrompt(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseSystemPrompt(w, r)
 }
 
 func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {

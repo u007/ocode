@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -158,6 +159,12 @@ type Handler struct {
 	projects         *projects.Store
 	projectGroups    *projects.GroupStore
 	tabsStore        *tabs.Store
+
+	// pulseMu serialises minting/reading the Pulse assistant's state.json so two
+	// concurrent first requests cannot create two assistants. Held only around
+	// that small file read/write, never across agent construction.
+	pulseMu sync.Mutex
+
 	// termTabsStore persists which terminal tabs are open, so a terminal
 	// started in one client is visible in another (the session-tab store above
 	// does the same for session tabs). Nil when the data dir could not be
@@ -172,6 +179,13 @@ type Handler struct {
 	vault       *vault.Vault
 	vaultMu     sync.Mutex
 	vaultGrants map[string]bool
+	// dbGrants holds the plaintext URLs of unlocked DB connections, keyed by
+	// client surface then connection name; guarded by dbMu. Never serialized.
+	// dbPools holds the open handle for each granted connection, opened on
+	// first use and closed when its grant is replaced, locked or removed.
+	dbMu     sync.Mutex
+	dbGrants map[string]dbGrant
+	dbPools  map[string]map[string]*sql.DB
 	// terminalAuthConfigured and terminalLoopback are set by Server.New. A
 	// terminal is only exposed without credentials when the server is bound to
 	// a loopback address.
@@ -601,7 +615,7 @@ func NewHandler() *Handler {
 	// workdir first (backward compat with single-project servers) plus every
 	// saved project root; the onEvict hook keeps the legacy h.agents mirror in
 	// sync when idle agents are released.
-	h.sessions = NewSessionManager(defaultSessionIdleTimeout, h.allowedProjectRoots, func(sessionID string) {
+	h.sessions = NewSessionManager(defaultSessionIdleTimeout, h.sessionSearchRoots, func(sessionID string) {
 		h.mu.Lock()
 		as := h.agents[sessionID]
 		delete(h.agents, sessionID)
@@ -1571,10 +1585,19 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		as = reb
 	}
 
+	// A pulse write never queues: it neither slots into a running turn nor
+	// starts a turn behind one. Its refusal is decided in dispatchTurn, under
+	// the lock that registers the turn.
+	pulse := isPulseOrigin(r)
+	if pulse && !req.Async {
+		writeError(w, http.StatusBadRequest, "pulse writes must be async")
+		return
+	}
+
 	// A turn already running on this session slots the message into the live
 	// Step loop at the next tool-call boundary instead of waiting for the
 	// whole turn to finish and queuing a brand new one behind it.
-	if h.tryEnqueueInjection(id, req.Content) {
+	if !pulse && h.tryEnqueueInjection(id, req.Content) {
 		writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: as.model})
 		return
 	}
@@ -1583,7 +1606,17 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	// returns; bootstrap (if needed) and the turn run on a per-session
 	// goroutine with events streamed over the unified bus.
 	if req.Async {
-		job, err := h.dispatchTurn(id, desiredModel, req.Content, turnOptions{})
+		if pulse && h.sessions.IsTurnActive(id) {
+			// A synchronous turn is not counted in turnInFlight, so dispatch
+			// cannot see it. This read narrows that gap but cannot close it.
+			writeError(w, http.StatusConflict, errTurnInFlight.Error())
+			return
+		}
+		job, err := h.dispatchTurn(id, desiredModel, req.Content, turnOptions{refuseIfBusy: pulse})
+		if errors.Is(err, errTurnInFlight) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -2058,10 +2091,26 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 }
 
 func (h *Handler) HandleRecapSession(w http.ResponseWriter, r *http.Request, id string) {
+	text, err := h.recapSession(id)
+	switch {
+	case errors.Is(err, errRecapEmpty):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case err != nil:
+		writeError(w, http.StatusNotFound, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"recap": text})
+	}
+}
+
+// errRecapEmpty marks a session that exists but has nothing to recap.
+var errRecapEmpty = errors.New("no messages to recap")
+
+// recapInputs snapshots what a recap needs: the session's agent and a copy of
+// its transcript.
+func (h *Handler) recapInputs(id string) (*agent.Agent, []agent.Message, error) {
 	as, err := h.getOrCreateAgentSession(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
+		return nil, nil, err
 	}
 
 	// Snapshot the transcript under the session lock, then release it: Recap is
@@ -2070,17 +2119,35 @@ func (h *Handler) HandleRecapSession(w http.ResponseWriter, r *http.Request, id 
 	as.mu.Lock()
 	if len(as.messages) == 0 {
 		as.mu.Unlock()
-		writeError(w, http.StatusUnprocessableEntity, "no messages to recap")
-		return
+		return nil, nil, errRecapEmpty
 	}
 	msgs := make([]agent.Message, len(as.messages))
 	copy(msgs, as.messages)
 	ag := as.agent
 	as.mu.Unlock()
+	return ag, msgs, nil
+}
 
-	text := ag.Recap(msgs, "")
+// recapSession produces the recap text for a session (GET
+// /api/sessions/{id}/recap). Failures inside the recap model call come back as
+// human-readable text, as they always did.
+func (h *Handler) recapSession(id string) (string, error) {
+	ag, msgs, err := h.recapInputs(id)
+	if err != nil {
+		return "", err
+	}
+	return ag.Recap(msgs, ""), nil
+}
 
-	writeJSON(w, http.StatusOK, map[string]string{"recap": text})
+// recapSessionCtx is recapSession bounded by ctx, reporting failure as an
+// error. Used by the Pulse assistant, which must not mistake "Recap timed out."
+// text for a recap.
+func (h *Handler) recapSessionCtx(ctx context.Context, id string) (string, error) {
+	ag, msgs, err := h.recapInputs(id)
+	if err != nil {
+		return "", err
+	}
+	return ag.RecapCtx(ctx, msgs, "")
 }
 
 func (h *Handler) HandleExportSession(w http.ResponseWriter, r *http.Request, id string) {

@@ -92,6 +92,9 @@ function isModifiedHunk(hunk: Hunk): boolean {
 // mismatch can only ever leave a little background, never paint the deleted
 // text over the line below.
 const DELETED_BLOCK_EXTRA_PX = 6;
+// Background of the ocode-light Monaco theme; the editor wrapper paints the
+// same colour so no dark seam shows around the editor in light mode.
+const LIGHT_EDITOR_BG = "#ffffff";
 
 // Cached 2D context for measuring wrapped deleted-line text. null (canvas
 // unavailable, e.g. jsdom) after the first failed attempt.
@@ -522,7 +525,7 @@ function FileEditorImpl({
       inherit: true,
       rules: [],
       colors: {
-        "editor.background": "#ffffff",
+        "editor.background": LIGHT_EDITOR_BG,
         "editor.foreground": "#18181b",
         "editorCursor.foreground": "#18181b",
         "editor.lineHighlightBackground": "#f4f4f5",
@@ -1059,7 +1062,7 @@ function FileEditorImpl({
         </div>
       )}
       {(forceEdit || !isBinary) && (
-        <div className="flex-1 overflow-hidden">
+        <div className="flex-1 overflow-hidden" style={{ backgroundColor: monacoTheme === "ocode-light" ? LIGHT_EDITOR_BG : undefined }}>
           <Editor
             key={projectRoot ? `${projectRoot}::${path}` : path}
             path={projectRoot ? `${projectRoot}::${path}` : path}

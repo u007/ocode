@@ -208,7 +208,7 @@ func TestForceCompactAsyncIgnoresDisabledAutoCompaction(t *testing.T) {
 	cfg.Ocode.Compact.SummaryMaxRetries = 0
 	cfg.Ocode.Compact.MaxSummaryInputTokens = 1000
 
-	a := NewAgent(fakeCompactClient{}, nil, cfg, nil)
+	a := newTestAgent(fakeCompactClient{}, nil, cfg, nil)
 	results := make(chan CompactResult, 1)
 	a.OnCompact = func(res CompactResult) {
 		results <- res

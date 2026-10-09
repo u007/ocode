@@ -41,7 +41,7 @@ func TestDetectExecutedCustomScripts(t *testing.T) {
 	// We use /etc/hosts which exists on macOS/Linux and is not inside any allowed root (except maybe not, but check)
 	outsideFile := "/etc/hosts"
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	tests := []struct {
@@ -135,7 +135,7 @@ func TestBuildPermissionContextIncludesCustomScriptEvenWhenBudgetExhausted(t *te
 	os.Chdir(tmp)
 	os.WriteFile(filepath.Join(tmp, "my.sh"), []byte("echo my\nrun something\n"), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	args, _ := json.Marshal(map[string]string{"command": "./my.sh --flag"})
@@ -162,7 +162,7 @@ func TestBuildPermissionContextTruncationLabel(t *testing.T) {
 	bigContent := strings.Repeat(longLine, 120)
 	os.WriteFile(filepath.Join(tmp, "big.sh"), []byte(bigContent), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./big.sh"})
 	// Byte truncation must trigger regardless of the generic maxLines argument
@@ -183,7 +183,7 @@ func TestBuildPermissionContextBinaryNotIncluded(t *testing.T) {
 	binaryContent := []byte{0x7f, 'E', 'L', 'F', 0, 1}
 	os.WriteFile(filepath.Join(tmp, "binfile"), binaryContent, 0o644)
 	// also test binary via direct execution with slash
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./binfile"})
 	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
@@ -197,7 +197,7 @@ func TestDetectDoesNotReadPATHExecutables(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	got := a.detectExecutedCustomScripts("git status")
 	if len(got) != 0 {
@@ -221,7 +221,7 @@ func TestVerifyAutoGrantDeniesTruncatedScript(t *testing.T) {
 	// Small script: not truncated
 	os.WriteFile(filepath.Join(tmp, "small.sh"), []byte("echo hi\n"), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	// Truncated should be denied
@@ -245,7 +245,7 @@ func TestVerifyAutoGrantDeniesTruncatedInterpreterScript(t *testing.T) {
 	os.WriteFile(filepath.Join(tmp, "big.py"), []byte(bigContent), 0o644)
 	os.WriteFile(filepath.Join(tmp, "small.js"), []byte("console.log(1)\n"), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	// Compound form bypasses the structured interpreter path (not first command),
@@ -273,7 +273,7 @@ func TestVerifyAutoGrantAllowsNonScriptCommand(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "ls -la"})
 	if ok, _ := a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: "ls -la"}); !ok {
@@ -290,7 +290,7 @@ func TestBuildPermissionContextManyLinesNotTruncated(t *testing.T) {
 	// ceiling reach the judge whole and pass the guard.
 	content := strings.Repeat("e\n", 5000)
 	os.WriteFile(filepath.Join(tmp, "manylines.sh"), []byte(content), 0o644)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./manylines.sh"})
 	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
@@ -313,7 +313,7 @@ func TestBuildPermissionContextUsesAgentWorkDirNotProcessCwd(t *testing.T) {
 	defer os.Chdir(origWd)
 	os.Chdir(elsewhere)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.SetWorkDir(project)
 
 	args, _ := json.Marshal(map[string]string{"command": "cd web && ./node_modules/.bin/tsc --noEmit"})
@@ -336,7 +336,7 @@ func TestExecutedScriptLongerThanChatCapIsNotTruncated(t *testing.T) {
 	os.WriteFile(filepath.Join(tmp, "long.sh"), []byte(long), 0o755)
 	huge := strings.Repeat("echo "+strings.Repeat("x", 90)+"\n", 600)
 	os.WriteFile(filepath.Join(tmp, "huge.sh"), []byte(huge), 0o755)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.SetWorkDir(tmp)
 
 	got := a.executedScriptsForJudge("./long.sh", a.executedScriptLineCap(), 3)
@@ -364,7 +364,7 @@ func TestChatJudgeContextShowsScriptPastSnippetCap(t *testing.T) {
 	tmp := t.TempDir()
 	body := strings.Repeat("echo hi\n", 59) + "echo LINE60_MARKER\n"
 	os.WriteFile(filepath.Join(tmp, "deploy.sh"), []byte(body), 0o755)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.SetWorkDir(tmp)
 
 	args, _ := json.Marshal(map[string]string{"command": "./deploy.sh"})

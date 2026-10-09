@@ -147,6 +147,7 @@ export function RowEditorDialog({
   initial,
   busy,
   error,
+  parseInput,
   onCancel,
   onSubmit,
 }: {
@@ -155,6 +156,10 @@ export function RowEditorDialog({
   initial: Record<string, DBCell> | null;
   busy: boolean;
   error: string | null;
+  /** How a typed value becomes a cell. SQLite passes inputToCell (it coerces by
+   *  declared type); Postgres passes its own text-preserving parser, because
+   *  inputToCell would round a bigint through a JavaScript number. */
+  parseInput: (text: string, declType: string) => DBCell;
   onCancel: () => void;
   onSubmit: (values: Record<string, DBCellInput>) => void;
 }) {
@@ -198,7 +203,7 @@ export function RowEditorDialog({
         values[c.name] = picked ? { $blob: true, data: picked.data } : null;
         continue;
       }
-      values[c.name] = inputToCell(draft[c.name] ?? "", c.decl_type);
+      values[c.name] = parseInput(draft[c.name] ?? "", c.decl_type);
     }
     onSubmit(values);
   };

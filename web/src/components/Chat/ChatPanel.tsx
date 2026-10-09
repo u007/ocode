@@ -382,7 +382,17 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
             // Duplicate id — show the call without a second copy of the same result.
             return { tc, resultContent: undefined, resultIdx: undefined };
           }
-          return { tc, resultContent: undefined, resultIdx: undefined, pendingQuestion: pendingQuestionById.get(tc.id) };
+          // The entry-level parse can miss the ask while the session still
+          // holds it: the persisted sentinel may be absent or unparseable (the
+          // server documents sentinel-less paused saves — sessionEvents.ts
+          // livePendingAsks) even though SSE set pendingQuestion. Once the user
+          // hides the dialog, that session state is the only source left for
+          // the transcript-level "Open question" button, so derive from it.
+          const hiddenId = slice.hiddenQuestionRequestId;
+          const sessionPending = slice.pendingQuestion;
+          const hiddenMatches = hiddenId && sessionPending && hiddenId === sessionPending.request_id && hiddenId === tc.id;
+          const derivedPending = hiddenMatches ? sessionPending : pendingQuestionById.get(tc.id);
+          return { tc, resultContent: undefined, resultIdx: undefined, pendingQuestion: derivedPending };
         });
         entries.push({ kind: "tool-group", assistant: msg, originalIndex: i, calls });
         continue;
@@ -400,7 +410,10 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       entries.push({ kind: "single", msg, originalIndex: i });
     }
     return entries;
-  }, [messages]);
+    // hiddenQuestionRequestId/pendingQuestion participate: derivedPending reads
+    // them, and a recompute must happen when X/Escape flips the hidden state
+    // (messages do not change then — otherwise the button never appears).
+  }, [messages, slice.hiddenQuestionRequestId, slice.pendingQuestion]);
   renderEntriesRef.current = renderEntries;
 
   // The last thinking block in the latest assistant turn is always expanded,
@@ -1896,6 +1909,23 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                   command={part.command}
                   stream={part.stream}
                   output={part.output}
+                  // Mid-turn the ask's tool card lives ONLY in the live buffer
+                  // (the committed snapshot lands at turn end, and an ask pauses
+                  // the turn), so without this an X/Escape hide leaves no reopen
+                  // affordance — the committed path below stays unreachable while
+                  // the ask is pending. Same QUESTION_SHOW dispatch.
+                  onOpenQuestion={
+                    part.tool === "question" &&
+                    slice.pendingQuestion &&
+                    (part.callId == null || part.callId === slice.pendingQuestion.request_id)
+                      ? () =>
+                          dispatch({
+                            type: "QUESTION_SHOW",
+                            sessionId,
+                            requestId: slice.pendingQuestion!.request_id,
+                          })
+                      : undefined
+                  }
                   callKey={`${liveKey}:call:${part.callId ?? "tool"}`}
                   outputKey={`${liveKey}:output:${part.callId ?? "tool"}`}
                 />

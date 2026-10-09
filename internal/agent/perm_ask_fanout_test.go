@@ -80,7 +80,7 @@ func TestStepDeliversEveryAskOfAParallelRoundThroughOnMessage(t *testing.T) {
 
 	var execs int32
 	mu := &sync.Mutex{}
-	a := NewAgent(client,
+	a := newTestAgent(client,
 		[]tool.Tool{askParallelTool{name: "ask_parallel_a", execs: &execs, muSync: mu},
 			askParallelTool{name: "ask_parallel_b", execs: &execs, muSync: mu}},
 		nil, nil)

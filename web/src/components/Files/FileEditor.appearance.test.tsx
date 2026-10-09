@@ -49,6 +49,15 @@ describe("FileEditor appearance toggle", () => {
     );
   });
 
+  it("passes ocode-light theme to Monaco after light toggle", async () => {
+    render(<FileEditor path="src/a.ts" content="x" />);
+    await waitFor(() => expect(screen.getByTestId("monaco-stub")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Toggle light or dark theme" }));
+    const wrapper = screen.getByTestId("monaco-stub").parentElement;
+    expect(wrapper).toBeInTheDocument();
+    expect(wrapper).toHaveStyle({ backgroundColor: "rgb(255, 255, 255)" });
+  });
+
   it("hides the toggle when the split host owns it", () => {
     render(<FileEditor path="src/a.ts" content="x" hideAppearanceToggle />);
     expect(screen.queryByRole("button", { name: "Toggle light or dark theme" })).toBeNull();

@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: 'Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor'
-description: 'Three defects broke the Port forwards panel: a URL helper returned a query-terminated string that callers appended path segments onto (the port landed inside the project param); the process supervisor retained terminal records, blocking stable-ID restart; and — added 2026-09-28 — a dead `ssh -N -L` child stayed reported live forever because nobody performed its Wait, so Disable→Enable could not revive it. Documents the forwardProcess reaper + SetOnExit hook, the portMapWatchdog restart policy (15s→60s exponential backoff, 30s settle window, give-up after 8 failures, event-driven wake + 10s safety tick), and the deliberate limitation that "live" only means the ssh child is running, not that the service behind the forward answers. Includes the test blind spot where widget API mocks can never catch malformed URLs. Added 2026-09-30: the first list request and server/desktop boot no longer block on opening persisted forwards (background, panic-safe `remote.RunAsync`), and the Ports capability probe `isPortMapsAvailable` fails closed — a failed probe hides the button instead of rendering a broken one.'
+description: 'Three defects broke the Port forwards panel: a URL helper returned a query-terminated string that callers appended path segments onto (the port landed inside the project param); the process supervisor retained terminal records, blocking stable-ID restart; and — added 2026-09-28 — a dead `ssh -N -L` child stayed reported live forever because nobody performed its Wait, so Disable→Enable could not revive it. Documents the forwardProcess reaper + SetOnExit hook, the portMapWatchdog restart policy (15s→60s exponential backoff, 30s settle window, give-up after 8 failures, event-driven wake + 10s safety tick), and the deliberate limitation that "live" only means the ssh child is running, not that the service behind the forward answers. Includes the test blind spot where widget API mocks can never catch malformed URLs. Added 2026-09-30: the first list request and server/desktop boot no longer block on opening persisted forwards (background, panic-safe `remote.RunAsync`), and the Ports capability probe `isPortMapsAvailable` fails closed — a failed probe hides the button instead of rendering a broken one. Added 2026-10-09: reverse (`-R`) forwards — the `Reverse` direction field, loopback-pinned argv, readiness as an estimate, a `WaitDelay` on the ssh stderr pipe, and a single exit claim (`forwardProcess.phase`) so the monitor hook fires only for exits after a successful open, and an exit is reported once.'
 resource: "web/src/api/client.ts; internal/tool/process_supervisor.go; internal/remote/portmap.go; internal/server/portmap_watchdog.go; internal/server/handler_portmaps.go; internal/server/server.go; internal/desktop/boot.go; internal/desktop/portmaps.go"
 tags:
   - port-forwards
@@ -14,11 +14,11 @@ tags:
   - capability-probe
   - background-autostart
   - gotcha
-timestamp: 2026-09-30T03:53:25Z
+timestamp: 2026-10-09T06:20:23Z
 ---
 # Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor
 
-Fixed 2026-09-16 (§1–§3), 2026-09-28 (§4), and 2026-09-30 (§5). Symptom of the original pair: toggling a
+Fixed 2026-09-16 (§1–§3), 2026-09-28 (§4), and 2026-09-30 (§5). §6 (2026-10-09) adds reverse `-R` forwards. Symptom of the original pair: toggling a
 forward in the **Port forwards** panel answered
 `host/project_path is not a remote project registered with this server`. The desktop
 remote-workspace family (`/api/desktop/portmaps*`, no query) was unaffected — only the
@@ -116,12 +116,12 @@ line). The five server routes are registered in `internal/server/server.go:548-5
 
 `ForwardManager` in `internal/remote/portmap.go` registers each forward under a stable
 supervisor ID `remote-portmap-<port>` (`forwardRegistrationID`,
-`internal/remote/portmap.go:56`). Ending the forward leaves that record terminal, so the
+`internal/remote/portmap.go:58`). Ending the forward leaves that record terminal, so the
 next `Start` for the same port hits `process "remote-portmap-3510" already registered` —
 surfaced as 502 `enabled, but failed to open now`. (At the time of the original bug,
 `ForwardManager.Stop` marked the record itself. Since 2026-09-28, `Stop`
-(`internal/remote/portmap.go:228-241`) only kills the child and blocks on the reaper's `done`
-channel, and the reaper (`internal/remote/portmap.go:124`) does the marking via
+(`internal/remote/portmap.go:280-293`) only kills the child and blocks on the reaper's `done`
+channel, and the reaper (`internal/remote/portmap.go:156`) does the marking via
 `MarkKilledPID`/`MarkExitedPID` — see §4. Either way the record is terminal before the next
 `Start` runs, so this section's conclusion is unchanged.)
 
@@ -132,7 +132,7 @@ toggled frequently.
 **Fix:** `ProcessRegistration.ReplaceTerminal` (new, opt-in). When set and the existing
 record for the ID is **terminal**, `StartSupervised` replaces it instead of failing; a
 still-running record is never replaced. The forward registration opts in
-(`internal/remote/portmap.go:188-199`):
+(`internal/remote/portmap.go:226-237`):
 
 ```go
 tool.ProcessRegistration{
@@ -181,7 +181,7 @@ nothing ever performed that Wait. So when an `ssh` child died on its own (networ
 laptop sleep/wake, remote host reboot):
 
 - `IsLive` — a bare map lookup — answered `true` forever;
-- `Start` short-circuited on the same stale entry (`internal/remote/portmap.go:177-180`)
+- `Start` short-circuited on the same stale entry (`internal/remote/portmap.go:213-215`)
   and returned nil **without opening anything**;
 - Disable → Enable could not revive it: `Stop` killed nothing (no process), and `Start`
   "succeeded" on the stale entry, so the probe was never even reached.
@@ -190,35 +190,35 @@ Net effect: the panel showed a live forward with nothing listening on the local 
 
 ### Fix A — a reaper owns each child (`internal/remote/portmap.go`)
 
-- `forwardProcess` (`internal/remote/portmap.go:63`) holds the `exec.Cmd`, start time, a
+- `forwardProcess` (`internal/remote/portmap.go:65`) holds the `exec.Cmd`, start time, a
   `done` channel, and a `stopped` flag that distinguishes a requested teardown from an
   unexpected exit.
-- `Start` (`internal/remote/portmap.go:209-211`) registers the live entry and starts the reaper
-  goroutine **before** the bounded readiness probe (`internal/remote/portmap.go:211-213`),
+- `Start` (`internal/remote/portmap.go:247-249`) registers the live entry and starts the reaper
+  goroutine **before** the bounded readiness probe (`internal/remote/portmap.go:251-257`),
   so a child that exits during the probe is never recorded as live; the probe-failure path
   kills and blocks on `done` instead of racing the reaper
-  (`internal/remote/portmap.go:213-222`).
-- `reap` (`internal/remote/portmap.go:124`) performs the `Wait`, marks the supervisor record
+  (`internal/remote/portmap.go:251-272`).
+- `reap` (`internal/remote/portmap.go:156`) performs the `Wait`, marks the supervisor record
   terminal with the PID-qualified `MarkExitedPID`/`MarkKilledPID` — generation-aware, so a
   stale reaper cannot clobber a newer record for the same stable ID — removes the live entry
-  under an identity check `cur == fp` (`internal/remote/portmap.go:139`, so a re-open during
+  under an identity check `cur == fp` (`internal/remote/portmap.go:172`, so a re-open during
   the reap keeps the newer child's entry), closes `done`, and only then fires `SetOnExit`.
-- `Stop` (`internal/remote/portmap.go:228-241`) kills and blocks on the reaper's `done` channel
+- `Stop` (`internal/remote/portmap.go:280-293`) kills and blocks on the reaper's `done` channel
   instead of calling `Wait` itself: two `Wait`s on one process race and the second never
   returns.
-- `SetOnExit` (`internal/remote/portmap.go:103`) is the new exported hook —
+- `SetOnExit` (`internal/remote/portmap.go:135`) is the new exported hook —
   `func(remotePort, exitCode int, uptime time.Duration)` — fired from the reaper after the
   live entry is cleared, so the callback may safely call back into the manager. `uptime` is
   what lets a caller tell a forward that was healthy from one that flapped on start.
 
-`IsLive` (`internal/remote/portmap.go:112`) is now a liveness signal rather than "Start was
+`IsLive` (`internal/remote/portmap.go:144`) is now a liveness signal rather than "Start was
 called and did not error", because the reaper removes the entry the moment the child exits.
 
 ### Fix B — the restart monitor (`internal/server/portmap_watchdog.go`)
 
 Detection alone only clears the lie; something has to re-open the forward. One
 `portMapPolicy` per remote project, held by its `portMapEntry`
-(`internal/server/handler_portmaps.go:54`), decides when that is allowed:
+(`internal/server/handler_portmaps.go:56`), decides when that is allowed:
 
 - **Backoff / give-up** (constants at `internal/server/portmap_watchdog.go:25-43`):
   exponential from `portMapBaseBackoff` 15s doubling to `portMapMaxBackoff` 60s, giving up
@@ -233,9 +233,9 @@ Detection alone only clears the lie; something has to re-open the forward. One
   (`noteHealthy`). Otherwise a forward that opens and dies immediately would look healthy on
   every attempt and be re-opened forever.
 - **Event-driven, ticker as safety net.** The `SetOnExit` hook installed in
-  `portMapRegistry.entry` (`internal/server/handler_portmaps.go:88-91`) records the exit and
-  nudges `wakeMonitor` (`internal/server/portmap_watchdog.go:332`) — a non-blocking send
-  into the buffered-by-one `wake` channel (`internal/server/handler_portmaps.go:41`), since
+  `portMapRegistry.entry` (`internal/server/handler_portmaps.go:90-93`) records the exit and
+  nudges `wakeMonitor` (`internal/server/portmap_watchdog.go:331`) — a non-blocking send
+  into the buffered-by-one `wake` channel (`internal/server/handler_portmaps.go:43`), since
   the sender is a reaper goroutine that must never block. `portMapWatchdogLoop`
   (`internal/server/portmap_watchdog.go:260`) waits on `wake` and on the 10s ticker, then
   runs `portMapWatchdogPass` (`internal/server/portmap_watchdog.go:280`) →
@@ -245,9 +245,9 @@ Detection alone only clears the lie; something has to re-open the forward. One
   give-up are logged (`port forwards: monitor restarted|failed|gave up …`), and a store-read
   failure is logged too rather than swallowed.
 - **The user's own actions are the escape hatch:** Enable and Add clear the give-up
-  (`entry.policy.reset`, `internal/server/handler_portmaps.go:206` and `:269` — the
+  (`entry.policy.reset`, `internal/server/handler_portmaps.go:209` and `:269` — the
   deliberate "try it now"); Disable and Remove forget the port
-  (`entry.policy.forget`, `internal/server/handler_portmaps.go:229` and `:265`) so a
+  (`entry.policy.forget`, `internal/server/handler_portmaps.go:243` and `:265`) so a
   disabled forward is never revived by the watchdog.
 - **Where it runs:** started in `Serve` right beside the idle-agent evictor —
   `internal/server/server.go:1557-1558` (`go s.handler.evictIdleLoop(stop)` /
@@ -271,10 +271,10 @@ verified against the working tree on 2026-09-30.
 
 ### The old flow — an inline open on the latency path
 
-- `HandleListPortMaps` (`internal/server/handler_portmaps.go:173`) doubles as the
+- `HandleListPortMaps` (`internal/server/handler_portmaps.go:175`) doubles as the
   auto-start trigger: the first list for a project ran `autoStartPortMaps`
-  (`internal/server/handler_portmaps.go:147`) inline behind `entry.autoStartOnce`
-  (`internal/server/handler_portmaps.go:59`). Every `fm.Start` runs the bounded readiness
+  (`internal/server/handler_portmaps.go:149`) inline behind `entry.autoStartOnce`
+  (`internal/server/handler_portmaps.go:61`). Every `fm.Start` runs the bounded readiness
   probe `waitForTunnelReady` (`internal/remote/connect.go:380` — `tunnelReadyAttempts` 25 ×
   `tunnelReadyInterval` 200ms, `internal/remote/connect.go:371-374`, ~5s), so a forward
   whose tunnel could not come up held the list response for ~5s.
@@ -287,24 +287,24 @@ verified against the working tree on 2026-09-30.
 ### Fix — answer from persisted state, open in the background via `remote.RunAsync`
 
 - `HandleListPortMaps` still arms `entry.autoStartOnce` on the first list
-  (`internal/server/handler_portmaps.go:179-183`) — `sync.Once.Do` returns as soon as the
+  (`internal/server/handler_portmaps.go:181-185`) — `sync.Once.Do` returns as soon as the
   goroutine is spawned, so only one auto-start ever runs per project per process — but the
   open now goes through `remote.RunAsync`. The list answers immediately from persisted
   state; rows report `live: false` until the open lands, which is exactly how a disabled
   or not-yet-opened forward already rendered.
-- **`remote.RunAsync(what string, fn func())`** (`internal/remote/portmap.go:29`) runs
+- **`remote.RunAsync(what string, fn func())`** (`internal/remote/portmap.go:31`) runs
   `fn` on its own goroutine and recovers+logs any panic with `debug.Stack()`. The recover
   is load-bearing, not padding: an unrecovered panic on ANY goroutine terminates the whole
   process, so a background forward open that panicked would take down the app and every
   session in it. `what` names the operation in the log line.
 - Desktop: the loop was extracted to `(*portMapsHandler).autoStartEnabled()`
-  (`internal/desktop/portmaps.go:62` — its doc comment says it is deliberately NOT fast and
+  (`internal/desktop/portmaps.go:64` — its doc comment says it is deliberately NOT fast and
   that latency-path callers must run it through `RunAsync`) and invoked as
   `remote.RunAsync("desktop port maps auto-start", pmHandler.autoStartEnabled)`
   (`internal/desktop/boot.go:380`), off the critical path before `net.Listen`.
 - **Deliberately still synchronous:** the user-initiated Add and Enable paths. Their 502
   carries `saved, but failed to open now: …` / `enabled, but failed to open now: …`
-  (`internal/server/handler_portmaps.go:220`, `:324`) to the panel, which is worth the
+  (`internal/server/handler_portmaps.go:234`, `:324`) to the panel, which is worth the
   wait.
 
 ### The capability probe fails closed — `isPortMapsAvailable` (`web/src/api/client.ts:3154`)
@@ -332,6 +332,72 @@ switch, and the panel's own list call surfaces failures readably.
   rather than polling forever.
 - A failed probe hides the button rather than showing a broken one whose every click
   errors.
+
+## 6. Reverse (`-R`) forwards: the remote reaches the desktop (2026-10-09)
+
+**Symptom it fixes:** a forward could only expose a remote service on the desktop (`-L`).
+Nothing made a desktop service reachable from the remote host, so server processes there
+could not use the desktop's htrcli relay (`:3845`) or Chrome CDP (`:9222`).
+
+### Shape
+
+- **Direction is a field, not a separate table.** `projects.PortMap.Reverse`
+  (`json:"reverse,omitempty"`) and `remote.ProjectPortMap.Reverse`. The zero value is `-L`,
+  so existing `projects.json` bytes are unchanged and no migration runs.
+- **Argv:** `forwardArgs` (`internal/remote/portmap.go`) emits `-N`, the keepalive block,
+  `-o ExitOnForwardFailure=yes`, and `-R 127.0.0.1:<remote>:127.0.0.1:<local>`. Both ends name
+  loopback explicitly, so the remote listener stays off the network even on a host whose
+  sshd allows `GatewayPorts`. There is no bind-address knob.
+- **Keyed by remote port everywhere.** The remote port is one namespace on the remote host,
+  so a `-R` and an `-L` on the same remote port are refused: `ErrPortMapDirection`, mapped
+  to 409 by both handlers. Re-adding the same direction updates the local port in place.
+- **Readiness is an estimate.** Dialing the local port proves nothing for `-R`, because the
+  desktop service is already listening. A reverse forward is ready when its child is still
+  alive after the same probe budget `waitForTunnelReady` uses. `ExitOnForwardFailure` turns a
+  refused remote bind into an early exit, which fails fast and returns ssh's stderr. A remote
+  listener that never accepts still reads live; `IsLive` and the reaper track later deaths.
+- **SSH only.** `ForwardManager.Start` refuses a reverse forward on a WSL target before any
+  process is spawned. WSL shares the Windows loopback, so there is nothing to reverse to.
+
+### Stderr needs a wait delay, and the monitor hook needs the ready gate
+
+- **The forward's stderr is a pipe, so `cmd.WaitDelay` is mandatory** (`forwardWaitDelay`, 2s).
+  Capturing stderr is what lets a failed open report ssh's reason, but a `ProxyCommand` helper
+  (nc, cloudflared, aws ssm) inherits that pipe and can outlive a killed ssh. Without the bound,
+  `Wait` never returns: the reaper never runs, a dead forward reads live forever (the §4
+  defect), and `Stop` blocks. This applies to `-L` too, because stderr is captured for every
+  forward. The regression tests need a fixture that forks a background `sleep` **before** the
+  kill or exit; otherwise the grandchild does not exist yet and the test passes without holding
+  the pipe.
+- **`onExit` fires only after a successful open, and each exit is claimed once.**
+  `forwardProcess.phase` moves to ready when readiness passes (`markReady`), and the reaper
+  claims the exit with a swap (`markExited`). An exit before readiness wins the claim, so
+  `Start`'s error is its only report, and `tryStart`'s failure count sees it once. An exit
+  after readiness goes only to `onExit`. A refused `-R` bind exits ssh during readiness. Without
+  the claim the same exit also reached `noteExit`, so one failure counted twice. The same
+  compare-and-swap closes the window where an exit lands just before `Start` returns.
+
+### Rules
+
+1. **Every persisted-to-runtime conversion goes through `projects.PortMap.Runtime()`.**
+   Hand-building `remote.ProjectPortMap{...}` from a persisted entry silently restarts a `-R`
+   as an `-L` on reconnect, enable, or a watchdog retry. Six call sites now share the helper.
+2. **Direction is part of a forward's identity.** Any new path that reopens, lists, or
+   removes persisted forwards must carry it.
+
+### Surfaces
+
+- API: `POST /api/portmaps` (project-scoped) and `POST /api/desktop/portmaps` take
+  `"reverse": true`. List responses carry `reverse`.
+- CLI: `/port add -R <remotePort>[:<localPort>]`. Status shows `remote:N <- localhost:M (reverse)`.
+- Web panel: labels reverse rows. **The add form is `-L` only.** Creating a reverse forward
+  from the web panel is deferred (see `TODO.md`).
+
+### Security
+
+A reverse forward makes the desktop's local port reachable by everything on the remote host's
+loopback, including other local users on a shared box. Port `9222` is Chrome CDP, which gives
+full control of the browser. Forward only what is needed, and remove the entry when done.
 
 ## Regression tests
 

@@ -24,12 +24,11 @@ import (
 //
 // This is the same three-step gate the other remote mutations use, in the same
 // order: join onto the remote root, confirm containment with remoteRelCheck,
-// then reject shell metacharacters with remoteSafeSpec. remoteSafeSpec is the
-// strict one — it refuses `:` along with quotes, semicolons, backticks,
-// redirection, glob and control characters — and it is deliberately NOT
-// relaxed here: it is the guard that stops a path from injecting into the
-// remote shell. A filename it refuses (a colon, `[]`, `()`) is reported to
-// the user as an error rather than silently skipped; see TODO.md.
+// then validate with remoteGitSpec. Shell metacharacters pass this check
+// because the spec is shell-quoted where it is used (remoteQuoteSpecPath). It
+// still refuses git glob characters, a leading ":" (pathspec magic) and a
+// drive prefix, which quoting cannot neutralize. A refused name is reported to
+// the user as an error rather than silently skipped.
 func (h *Handler) remoteGitConflictSpec(w http.ResponseWriter, rw remoteWork, p string) (string, bool) {
 	if p == "" {
 		writeError(w, http.StatusBadRequest, "path is required")
@@ -45,7 +44,7 @@ func (h *Handler) remoteGitConflictSpec(w http.ResponseWriter, rw remoteWork, p 
 		writeError(w, http.StatusBadRequest, "path is required")
 		return "", false
 	}
-	spec, err := remoteSafeSpec(rel)
+	spec, err := remoteGitSpec(rel)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", false
@@ -143,11 +142,11 @@ func (h *Handler) remoteGitResolveConflict(w http.ResponseWriter, r *http.Reques
 
 	var args []string
 	if sideExists {
-		args = []string{"checkout", sideFlag, "--", spec}
+		args = []string{"checkout", sideFlag, "--", remoteQuoteSpecPath(spec)}
 	} else {
 		// The chosen side is a deletion: accepting it means removing the path,
 		// which `git checkout --ours/--theirs` cannot do.
-		args = []string{"rm", "-f", "--", spec}
+		args = []string{"rm", "-f", "--", remoteQuoteSpecPath(spec)}
 	}
 	if err := remoteGitMutation(r.Context(), rw, remoteGitMutationCommand(rw, args...)); err != nil {
 		slog.Error("remote git conflict resolve: side checkout failed",
@@ -157,7 +156,7 @@ func (h *Handler) remoteGitResolveConflict(w http.ResponseWriter, r *http.Reques
 	}
 	// `git rm` already stages the removal; checkout needs an explicit add.
 	if sideExists {
-		if err := remoteGitMutation(r.Context(), rw, remoteGitMutationCommand(rw, "add", "--", spec)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitMutationCommand(rw, "add", "--", remoteQuoteSpecPath(spec))); err != nil {
 			slog.Error("remote git conflict resolve: stage resolved side failed",
 				"host", host, "project", rw.Path, "path", spec, "resolution", req.Resolution, "err", err)
 			writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
@@ -179,7 +178,7 @@ func (h *Handler) remoteGitMarkResolved(w http.ResponseWriter, ctx context.Conte
 	switch {
 	case err == nil && !found:
 		// Deleted side: stage the accepted removal.
-		if err := remoteGitMutation(ctx, rw, remoteGitMutationCommand(rw, "add", "--", spec)); err != nil {
+		if err := remoteGitMutation(ctx, rw, remoteGitMutationCommand(rw, "add", "--", remoteQuoteSpecPath(spec))); err != nil {
 			slog.Error("remote git conflict mark: stage accepted deletion failed",
 				"project", rw.Path, "path", spec, "err", err)
 			writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
@@ -205,7 +204,7 @@ func (h *Handler) remoteGitMarkResolved(w http.ResponseWriter, ctx context.Conte
 		writeError(w, http.StatusBadRequest, spec+" still contains conflict markers")
 		return errors.New("conflict markers present")
 	}
-	if err := remoteGitMutation(ctx, rw, remoteGitMutationCommand(rw, "add", "--", spec)); err != nil {
+	if err := remoteGitMutation(ctx, rw, remoteGitMutationCommand(rw, "add", "--", remoteQuoteSpecPath(spec))); err != nil {
 		slog.Error("remote git conflict mark: stage failed", "project", rw.Path, "path", spec, "err", err)
 		writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
 		return err

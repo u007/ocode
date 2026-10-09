@@ -1081,6 +1081,31 @@ func LoadForDir(wd, id string) (*Session, error) {
 	return loadFromDir(dir, id)
 }
 
+// ExistsForDir reports whether a transcript for id exists in the project's
+// storage dir, in any format LoadForDir reads. It stats the candidate files
+// and parses none of them, so it is safe on hot paths.
+func ExistsForDir(wd, id string) (bool, error) {
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		return false, err
+	}
+	candidates := make([]string, 0, 4)
+	for _, candidate := range sessionCandidateIDs(id) {
+		candidates = append(candidates, sqliteSessionPath(dir, candidate), ojsonlSessionPath(dir, candidate))
+	}
+	candidates = append(candidates, sessionLoadPaths(dir, id)...)
+	for _, path := range candidates {
+		_, err := os.Stat(path)
+		if err == nil {
+			return true, nil
+		}
+		if !os.IsNotExist(err) {
+			return false, fmt.Errorf("stat session file %s: %w", path, err)
+		}
+	}
+	return false, nil
+}
+
 // loadFromDir is the shared load core for Load/LoadForDir: try .sqlite
 // first (authoritative once a session has migrated — see saveToDir), then
 // .ojsonl, then fall back to the legacy .json candidates exactly as

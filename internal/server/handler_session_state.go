@@ -620,6 +620,11 @@ func (h *Handler) effectiveSessionModel(id string) string {
 	model := ""
 	if h.cfg != nil {
 		model = h.cfg.Model
+		// The Pulse assistant follows its own slot (ocode.pulse_model) before
+		// the default chat model; a per-session override above still wins.
+		if isPulseSession(id) && h.cfg.Ocode.PulseModel != "" {
+			model = h.cfg.Ocode.PulseModel
+		}
 	}
 	h.mu.Unlock()
 	return model

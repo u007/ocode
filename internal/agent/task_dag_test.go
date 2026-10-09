@@ -797,7 +797,7 @@ func TestDAGStepValidationErrorProducesNoNodesLaunched(t *testing.T) {
 			}{Name: "task", Arguments: `{"prompt":"b","agent":"general","id":"x"}`}},
 		}},
 	}
-	a := NewAgent(client, nil, nil, nil)
+	a := newTestAgent(client, nil, nil, nil)
 	before := len(a.Runs().Snapshot())
 	resp, err := a.Step([]Message{{Role: "user", Content: "go"}})
 	if err != nil {

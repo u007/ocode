@@ -21,6 +21,9 @@ import (
 // must appear. Any addition or removal from InitBuiltinTools must update
 // this list — it is the single source of truth for "what tools exist".
 var expectedBuiltinTools = []string{
+	"sqlite_schema",
+	"sqlite_query",
+	"sqlite_exec",
 	"read",
 	"undo_file_change",
 	"write",

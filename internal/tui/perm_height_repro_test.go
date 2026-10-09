@@ -13,7 +13,7 @@ import (
 // always-allow confirm step) must not drift the chat render height or the
 // transcript viewport height — every close must restore the exact baseline.
 func TestPermDialogRepeatedOpenCloseHeightStable(t *testing.T) {
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = upd.(model)

@@ -647,6 +647,12 @@ func (h *Handler) persistAlwaysAllow(decision string, permReq agent.PermissionRe
 		// Session-scoped by design (same as the TUI): the domain cache is not
 		// written back to config.
 		pm.SetWebfetchDomain(strings.TrimPrefix(permReq.Rule, "webfetch.domain."), agent.PermissionAllow)
+	case decision == PermDecisionAlwaysRule && strings.HasPrefix(permReq.Prefix, "bash.interpreter."):
+		// Exact script grant, never a per-language prefix rule (see
+		// PersistInterpreterScriptGrant). Heredoc/inline source cannot be saved.
+		if err := pm.PersistInterpreterScriptGrant(permReq.Command, config.SaveAutoGrant); err != nil {
+			log.Printf("serve: interpreter always-allow not saved for %q: %v", permReq.Command, err)
+		}
 	case decision == PermDecisionAlwaysRule && permReq.Scope == agent.PermissionScopeBashPrefix && permReq.Prefix != "":
 		pm.SetBashPrefixRule(permReq.Prefix, agent.PermissionAllow)
 		if err := config.SaveSingleBashPrefixRule(permReq.Prefix, string(agent.PermissionAllow)); err != nil {

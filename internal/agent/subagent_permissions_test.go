@@ -55,7 +55,7 @@ func TestTaskSubagentInheritsParentPermissionRules(t *testing.T) {
 		{Role: "assistant", Content: "done"},
 	}}
 	askTool := &countingMockTool{name: "ask_tool", result: "executed"}
-	parent := NewAgent(client, []tool.Tool{askTool}, nil, nil)
+	parent := newTestAgent(client, []tool.Tool{askTool}, nil, nil)
 	parent.Permissions().SetRule("task", PermissionAllow)
 	parent.Permissions().SetRule("ask_tool", PermissionAllow)
 
@@ -95,7 +95,7 @@ func TestTaskSubagentInheritsParentPermissionModeAcrossSpecOverrides(t *testing.
 		{Role: "assistant", Content: "done"},
 	}}
 	askTool := &countingMockTool{name: "ask_tool", result: "executed"}
-	parent := NewAgent(client, []tool.Tool{askTool}, nil, nil)
+	parent := newTestAgent(client, []tool.Tool{askTool}, nil, nil)
 	parent.Permissions().SetRule("task", PermissionAllow)
 	parent.Permissions().SetMode(PermissionModeYOLO)
 
@@ -141,7 +141,7 @@ func TestTaskSubagentSharesParentPermissionManager(t *testing.T) {
 		{Role: "assistant", Content: "done"},
 	}}
 	askTool := &countingMockTool{name: "ask_tool", result: "executed"}
-	parent := NewAgent(client, []tool.Tool{askTool}, nil, nil)
+	parent := newTestAgent(client, []tool.Tool{askTool}, nil, nil)
 	parent.Permissions().SetRule("task", PermissionAllow)
 	parent.Permissions().SetRule("ask_tool", PermissionAllow)
 	parent.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {

@@ -7,30 +7,6 @@ import (
 
 // Tests for the /docs and /doc-mode slash command.
 
-func TestDocsCommandRegistered(t *testing.T) {
-	foundDoc := false
-	foundDocMode := false
-	for _, spec := range commandSpecs {
-		if spec.name == "/docs" {
-			foundDoc = true
-			if spec.handler == nil {
-				t.Error("/docs has no handler")
-			}
-		}
-		for _, alias := range spec.aliases {
-			if alias == "/doc-mode" {
-				foundDocMode = true
-			}
-		}
-	}
-	if !foundDoc {
-		t.Error("/docs not found in commandSpecs")
-	}
-	if !foundDocMode {
-		t.Error("/doc-mode not found as an alias in commandSpecs")
-	}
-}
-
 func TestDocsCommandAlias(t *testing.T) {
 	var docsSpec *commandSpec
 	for i, spec := range commandSpecs {

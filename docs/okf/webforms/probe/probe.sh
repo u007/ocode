@@ -52,6 +52,14 @@ case $TASK in
   *) echo "unknown task"; exit 2 ;;
 esac
 
+# Reset the isolated browser to one blank tab: tabs left by earlier tasks (a /submit page, the live Greenhouse form)
+# are "someone else's" to a model that obeys the skill, and htrcli cannot open a tab, so it burns minutes on that.
+L=$(curl -s http://127.0.0.1:9555/json/list)
+[ -n "$(echo "$L" | python3 -c 'import sys,json;print(*[t["id"] for t in json.load(sys.stdin) if t["type"]=="page" and t["url"]=="about:blank"][:1])')" ] || curl -s -X PUT "http://127.0.0.1:9555/json/new?about:blank" > /dev/null
+for id in $(curl -s http://127.0.0.1:9555/json/list | python3 -c 'import sys,json;[print(t["id"],t["url"]) for t in json.load(sys.stdin) if t["type"]=="page"]' | while read id url; do
+  if [ "$url" = about:blank ] && [ ! -f "$OUT/.kept" ]; then touch "$OUT/.kept"; else echo $id; fi; done); do
+  curl -s "http://127.0.0.1:9555/json/close/$id" > /dev/null
+done
 start=$(date +%s)
 env OCODE_PROFILE=$PROFILE PATH="$W/bin:$PATH" OPENCODE_API_KEY=$KEY "$BIN" run -yolo -m "$MODEL" -effort med -timeout 900 -p "$P" < /dev/null > "$W.out" 2> "$W.err"
 rc=$?

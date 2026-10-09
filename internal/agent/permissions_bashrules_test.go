@@ -2,8 +2,10 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestRemoveBashPrefixRuleDeletesInsteadOfDowngrading pins the semantic the
@@ -171,17 +173,18 @@ func TestBashPrefixRulesConcurrentWriteDuringDecide(t *testing.T) {
 		}()
 	}
 
-	// Let the goroutines interleave, then stop and join.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 300; i++ {
-			for _, raw := range commands {
-				pm.Decide("bash", json.RawMessage(raw))
-			}
+	// Let the goroutines interleave for a bounded window, then stop and join.
+	// A fixed iteration count (300 rounds) took two minutes here: the four
+	// writers spin on the same mutex, so each Decide waits behind them and the
+	// loop's wall time scales with contention, not with coverage. A short
+	// deadline gives the race detector the same interleavings in well under a
+	// second.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, raw := range commands {
+			pm.Decide("bash", json.RawMessage(raw))
 		}
-	}()
-	<-done
+	}
 	close(stop)
 	wg.Wait()
 
@@ -216,5 +219,34 @@ func TestCloneBashPrefixRulesAreIndependent(t *testing.T) {
 	}
 	if _, ok := pm.BashPrefixRules()["sed"]; ok {
 		t.Fatal("original's delete did not apply to the original")
+	}
+}
+
+// TestBashPrefixRulesSeveralDenyPrefixesDenyWithReason is the deterministic
+// counterpart of the race test above: with more than one deny prefix the
+// longest-prefix-first ordering has to be exercised (a single key never calls
+// the comparator), and each banned command must come back as a Deny that names
+// its own prefix. The race test used to reach these lines only by volume.
+func TestBashPrefixRulesSeveralDenyPrefixesDenyWithReason(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir(t.TempDir())
+	pm.SetBashPrefixRule("git push", PermissionDeny)
+	pm.SetBashPrefixRule("sed", PermissionDeny)
+	pm.SetBashPrefixRule("git status", PermissionAllow)
+
+	for _, tc := range []struct{ cmd, prefix string }{
+		{`{"command":"git push origin main"}`, "git push"},
+		{`{"command":"sed -n '1,3p' /etc/hosts"}`, "sed"},
+	} {
+		d := pm.Decide("bash", json.RawMessage(tc.cmd))
+		if d.Level != PermissionDeny {
+			t.Fatalf("Decide(%s) = %s, want deny", tc.cmd, d.Level)
+		}
+		if want := fmt.Sprintf("user-defined bash ban %q", tc.prefix); d.DenyReason != want {
+			t.Fatalf("Decide(%s) reason = %q, want %q", tc.cmd, d.DenyReason, want)
+		}
+	}
+	if d := pm.Decide("bash", json.RawMessage(`{"command":"git status --short"}`)); d.Level != PermissionAllow {
+		t.Fatalf("git status under an allow prefix = %s, want allow", d.Level)
 	}
 }

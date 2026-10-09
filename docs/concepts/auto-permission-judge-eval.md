@@ -16,7 +16,7 @@ timestamp: 2026-10-02T14:00:00Z
 
 ## What it is
 
-`TestPermissionJudgeEval` (`internal/agent/permission_judge_eval_test.go`, gated on `OCODE_JEV_EVAL=1`) replays real past permission decisions against the live TypeSafe judge and writes a scorecard. It builds each request with the production builders — `buildTypesafePermissionState` and `typesafePermissionQuestions` — so `shipped` is what production sends. Corpus, runner notes and the how-to live in `internal/agent/testdata/permission_judge_eval/README.md`.
+`TestPermissionJudgeEval` (`internal/agent/permission_judge_eval_test.go`, gated on `OCODE_JEV_EVAL=1` and the `integration` build tag, so plain `go test` never compiles it) replays real past permission decisions against the live TypeSafe judge and writes a scorecard. It builds each request with the production builders — `buildTypesafePermissionState` and `typesafePermissionQuestions` — so `shipped` is what production sends. Corpus, runner notes and the how-to live in `internal/agent/testdata/permission_judge_eval/README.md`.
 
 - **Mined cases** (`mine.py` → `mined.json`, gitignored: real commands from every project). One per distinct bash command the judge saw in a real session, labelled by what happened next: the judge deferred and the command then ran → should allow; the user denied it → must ask.
 - **`must_ask.yaml`** (committed): destructive commands, out-of-scope writes and deletes, destructive git forms. The hard gate: a variant that lets one through is rejected.

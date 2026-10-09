@@ -98,7 +98,7 @@ func TestEnsureSharedHTRDaemonReachesTheEnsureWithResolvedOptions(t *testing.T) 
 	}
 	opts, notice := resolveManagedHTROptions(browser)
 	if !opts.Enabled {
-		t.Fatalf("resolution failed on this host: %q; the rest of this test is about the enabled path", notice)
+		t.Skipf("HTR not enabled on this build (needs -tags htr): %q", notice)
 	}
 	if !opts.Shared.AdoptOnly {
 		t.Fatalf("expected adopt-only with no htrcli config in the temp HOME, got %+v", opts.Shared)

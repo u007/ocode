@@ -14,7 +14,7 @@ import (
 // distinct within the group.
 func TestGroupAgentIds(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 
 	// Three qualifying subagent calls. The bus should be built
@@ -69,7 +69,7 @@ func TestGroupAgentIds(t *testing.T) {
 // and then constructing child agents with the bus.
 func TestBusHandoff(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 
 	t1 := ToolCall{ID: "t1", Type: "function", Function: struct {
@@ -90,7 +90,7 @@ func TestBusHandoff(t *testing.T) {
 	defer a.teardownGroupBus(bus)
 
 	// Build two child agents and hand the bus to each.
-	c1 := NewAgent(&MockClient{}, nil, nil, nil)
+	c1 := newTestAgent(&MockClient{}, nil, nil, nil)
 	c1.SetNoteBus(bus, ids[0])
 	if c1.NoteBus() == nil {
 		t.Error("c1.NoteBus() = nil after SetNoteBus")
@@ -102,7 +102,7 @@ func TestBusHandoff(t *testing.T) {
 		t.Errorf("c1.NoteAgentID() = %q, want a1", c1.NoteAgentID())
 	}
 
-	c2 := NewAgent(&MockClient{}, nil, nil, nil)
+	c2 := newTestAgent(&MockClient{}, nil, nil, nil)
 	c2.SetNoteBus(bus, ids[1])
 	if c2.NoteBus() != bus {
 		t.Errorf("c2.NoteBus() = %p, want %p", c2.NoteBus(), bus)
@@ -117,7 +117,7 @@ func TestBusHandoff(t *testing.T) {
 // confirms the disabled path is the "do nothing" path — no
 // inherited state, no leftover handle.
 func TestDisabledChildHasNoBus(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	if a.NoteBus() != nil {
 		t.Errorf("a.NoteBus() = %p, want nil for default agent", a.NoteBus())
 	}
@@ -148,7 +148,7 @@ func TestCompletionCallbackFires(t *testing.T) {
 	// field to avoid the full Step() loop (that test is in
 	// Part 05's e2e). The wiring test confirms the callback
 	// is reachable and gets the right agent id.
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusCompletion(cb)
 	if a.noteBusCompletion == nil {
 		t.Fatal("noteBusCompletion not stored")
@@ -181,7 +181,7 @@ var _ = notebus.NewBus
 // bus because the bus spans the whole DAG.
 func TestGroupBusBatchOrderStableWithDAG(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 
 	// Chain: a -> b -> c. The ids in the parallel batch are

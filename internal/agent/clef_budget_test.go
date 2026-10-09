@@ -28,7 +28,7 @@ import (
 // tool.SearchJudgeMaxCandidates silently stops protecting the real ceiling the moment
 // the constant changes, which is exactly the failure this test exists to catch.
 func TestJudgePayloadBudgets(t *testing.T) {
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 
 	// --- discovery relevance: discovery.SelectCap candidates, summary-capped text, a
 	// discoveryJudgeTailN message tail, ids in the "skill:<name>" form.
@@ -238,7 +238,7 @@ func TestJudgePayloadBudgets_TripwireFires(t *testing.T) {
 // state cannot be shrunk and the guard must refuse. Without a case like this,
 // "the guard refuses" would be an untested branch.
 func TestJudgePayloadBudgets_RefusalIsReachable(t *testing.T) {
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	// A 200 KB bash command. "command" is deliberately NOT in the bulky-key
 	// allowlist: the command line is the security-relevant surface, so it is
 	// never silently clipped. The state therefore cannot be projected under

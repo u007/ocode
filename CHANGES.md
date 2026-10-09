@@ -2,6 +2,79 @@
 
 ## [Unreleased]
 
+- **Pulse assistant exclusion.** `buildPulseRows` skips pulse-session inputs and their children; pulse card stream scrolls independently with hover overlay. Tests and docs (`auto-permission-judge-eval`, `inbound-content-guardrail`) updated.
+- **Postgres DB connector (web/desktop).** The DB session sub-tab
+  (`web/src/components/Layout/DBPanel.tsx`) adds, lists and removes saved
+  PostgreSQL connections, unlocks them with a master password, and pages through
+  public tables. A table opens in a data view (`DBTableBrowser.tsx`) with sort,
+  a read-only filter, paging, and insert/update/delete by primary key; a table
+  without a primary key is read-only. A SQL tab runs one statement at a time.
+  Saved URLs live encrypted in `ocodeconfig.json` `db.connections`, sealed per
+  envelope with Argon2id via `internal/encryption`; unlock grants are in-memory
+  per panel surface and drop when the panel closes. Endpoints are
+  `/api/dbconnect/*` (`handler_dbconnect.go`, `handler_dbconnect_rows.go`).
+  Every statement runs in a `READ ONLY` transaction first, and the server's
+  refusal (SQLSTATE 25006) marks a write. A write returns 409 until the user
+  confirms it in a dialog; a confirmed write is committed as a single statement,
+  and `RETURNING` rows are shown. Multi-statement input is refused by the
+  extended protocol, even when confirmed. Key and value binding uses text
+  parameters cast to catalog types, so a bigint key stays exact. A confirmed
+  write that returns columns is labelled "N row(s) returned", because Postgres
+  does not report the rows a data-modifying CTE changed. Narrow panels stack the
+  table list above the data. The Postgres checks are automated: `make test-postgres`
+  (build tag `pgintegration`, a throwaway `postgres:16` container) and a CI
+  `postgres` job. The browser pass was manual.
+  `dbconnect.Open` now registers the `pgx` driver; the previous `postgres` name
+  failed on every connect.
+- **Removed `internal/encrypt`.** It was untracked, had no importers, and its
+  salt was never used for key derivation. Its `Decrypt` panicked on empty input.
+  `internal/encryption` replaces it.
+
+- **Web/desktop `/export` now names the saved file.** The success message read
+  "Exported session as Markdown." and omitted the filename, while the TUI reports
+  "Exported conversation to <file>". `handleExport` (`web/src/components/Chat/commands.ts`)
+  now answers "Exported session to `ocode_export_<id>.md`" (filename computed once
+  and shared with the download). Test updated in `commands.export.test.tsx`.
+
+- **"Open question" button now renders for a hidden mid-turn ask (web/desktop).**
+  The reopen affordance existed only on the committed-transcript tool card
+  (`ChatPanel.tsx` `onOpenQuestion`), but a question ask PAUSES the turn, so the
+  authoritative `messages` snapshot (turn-end broadcast) never lands while the
+  ask is pending — the live-buffer tool card received no `onOpenQuestion` at
+  all. After X/Escape (`QUESTION_HIDE`) the dialog closed with no way back, and
+  the card misleadingly showed `running…`. The live `ToolBlock` now passes the
+  same `QUESTION_SHOW` dispatch when the part is the pending question's call.
+  Two more gaps closed on the committed path: the render-entries memo now
+  derives entry-level `pendingQuestion` from the session's hidden state when the
+  transcript sentinel is absent/unparseable (sentinel-less paused save), and its
+  dependency list now includes `hiddenQuestionRequestId`/`pendingQuestion`
+  (previously `[messages]` only, so a hide never recomputed the entries).
+  Tests: `web/src/components/Chat/ChatPanel.test.tsx` — "offers 'Open question'
+  on the LIVE tool card while a mid-turn ask is hidden" and "derives the 'Open
+  question' button from session state when the sentinel is absent" (both
+  red against the pre-fix render paths). Files:
+  `web/src/components/Chat/ChatPanel.tsx`, `web/src/components/Chat/ChatPanel.test.tsx`.
+
+- **New agent tools `sqlite_schema`, `sqlite_query`, `sqlite_exec`.** The model
+  can now inspect, query and modify a SQLite file directly instead of writing a
+  throwaway `python3 script.py` per question. Motivation: a logged
+  `bash.interpreter.python` call to an 81 KB DB-helper script was denied
+  `truncated_or_unknown`, because the interpreter source read is capped at 48 KB
+  and a truncated script is never approved. The tools take `{path, sql}`, which
+  the permission layer can classify without reading any code. They wrap
+  `internal/dbbrowse` (same engine as the web SQLite browser): `sqlite_schema` and
+  `sqlite_query` open the file `mode=ro` + `query_only(1)` behind the read-only
+  allowlist (one statement, no `ATTACH`; default 100 rows, max 1000, `truncated`
+  flag) and ride allow inside the allowed roots; `sqlite_exec` asks by default,
+  takes a `<file>.bak` snapshot first (a failed backup aborts the write), runs
+  the batch in ONE transaction, and refuses `ATTACH`/`DETACH`/`VACUUM INTO`,
+  `PRAGMA writable_schema`/`journal_mode` assignments, non-SQLite or missing files
+  (never creates a database) and ocode's own data directory. Plan/debug modes
+  allow the two read tools and block `sqlite_exec`. Files: `internal/tool/sqlite.go`,
+  `internal/agent/permissions.go` (`pathScopedTools`, `extractPathFromArgs`,
+  `isReadOnlyTool`, default rules), `internal/agent/mode.go`,
+  `internal/config/ocodeconfig.go`. Doc: `docs/concepts/sqlite-browser.md` section 7.
+
 - **New Kaizen stack `webforms` (filling web forms with `htrcli`) + a live probe.**
   `docs/okf/webforms/` holds a 27-question closed-book corpus (8 tags: discover,
   text-input, choice-input, widgets, hard-dom, wait-nav, verify-submit, safety) and
@@ -442,7 +515,7 @@
     a fresh bundle can still talk to a host running the old server — the one
     case this build cannot fix server-side. Pinned by
     `web/src/api/client.dbArrays.test.ts`.
-- **Version Bump** — 0.8.126 → 0.8.127
+- **Version Bump** — 0.8.126 → 0.8.129
 - **Stop no longer leaves tasks and tool calls stuck on "running"** — Two
   independent bugs, both reported as "when the loop stops on main chat, the task
   is still shown as running, also for any tool calling".
@@ -9720,6 +9793,7 @@ Two follow-ups to the session-switch work.
 
 ## [Unreleased]
 
+- **Pulse assistant exclusion.** `buildPulseRows` skips pulse-session inputs and their children; pulse card stream scrolls independently with hover overlay. Tests and docs (`auto-permission-judge-eval`, `inbound-content-guardrail`) updated.
 - **Permissions: loopback port proof closed, and `isLocalhostURL` rewritten** (`internal/agent/permission_interpreter.go`, `internal/agent/permissions.go`) — two loopback bypasses: a compound assignment (`p=8080; p+=@evil.com; curl … "http://127.0.0.1:$p/"`) hid its write, because `strings.Cut(tok, "=")` yields the name `p+` and left `p`'s numeric proof standing; and a numeric `for p in 8080` header overrode a hostile body write, because the header proof was applied last. Both made the curl auto-ALLOW as loopback while the authority was really `evil.com` (`p` → `8080@evil.com`). `numericAssignedVarsFrom` is now an allowlist — a name is trusted only when every write to it on the line is exactly `name=<digits>` — with `shellAssignmentWrite`, `hasOpaqueVariableWriter`, `hasCompoundAssignment` and `hasEmbeddedAssignment`; an unseeable writer (`eval`, `read`, `((…))`, `${p:=…}`, a subscript) discards every numeric proof on the line, and a `for` header may only FILL a name the scan never saw written. Separately `isLocalhostURL` (the agent's self-escalation guard) stripped the port BEFORE the userinfo, so `http://user:pw@127.0.0.1/api/permissions` was read as host `user`, and `[::1]` / `[::1]:4096` were mis-parsed entirely. It now asks `net/url` first (userinfo, IPv6, case-fold), prepends `http://` for a scheme-less authority, rejects non-http(s) schemes, and OR-s in the hand-rolled `splitURLAuthorityForLoopback` — `net/url` alone is not enough because it rejects a `$p` port, and the inet_aton shorthands still need `isLoopbackHostForPermissionGuard`, since that guard must over-ask. Regressions: `TestLoopbackPortNumericProofRejectsLaterMutation`, `TestLoopbackPortNumericProofStillAcceptsLiteralForms`, `TestNumericProofRequiresEveryWriteToBeNumeric`, `TestPermissionApiLoopbackRecognisesUserinfoAndIPv6`, `TestPermissionGuardKeepsInetAtonShorthands`, `TestPermissionGuardSurvivesUnparseablePort`, `TestLoopbackParsersAgreeOnHost`. Docs: `docs/gotchas/loopback-curl-shell-port-variable.md`.
 - **Connect: cancelling a flow no longer persists its credential** (`internal/server/handler_connect.go`) — the Anthropic paste-code, Google token and manual-OpenAI exchanges take no context, so those flows had no cancel func at all and `DELETE /api/auth/connect/flows/{id}` was a no-op for them; `completeConnectFlow` then called `auth.Set` regardless, so a connect the user walked away from still saved its credential minutes later. New `committing` state plus `beginCommit` makes the save exclusive and claims it only from `running`/`waiting_browser`; `completeConnectFlow` also checks `ctx.Err()`; `runConnectExchange` runs a context-less exchange so cancel returns promptly and drops the result; `handleConnectFlowCancel` answers 409 once `committing`. Google now gets a cancel func at all.
 - **Connect: input endpoint double-submit** (`internal/server/handler_connect.go`) — the `waiting_input` check and the switch to `running` were two separate lock acquisitions, so two concurrent POSTs both passed and both started an exchange; the Grok branch additionally wrote `f.cancel` with no lock, racing the cancel handler's unlocked read. Replaced by `beginInput(cancel)`, one locked compare-and-set that also installs the cancel func, with `setCancel`/`takeCancel` helpers. A paste into a flow that does not accept input now answers 409 instead of 400.
@@ -10924,6 +10998,7 @@ Two follow-ups to the session-switch work.
 
 ## [Unreleased]
 
+- **Pulse assistant exclusion.** `buildPulseRows` skips pulse-session inputs and their children; pulse card stream scrolls independently with hover overlay. Tests and docs (`auto-permission-judge-eval`, `inbound-content-guardrail`) updated.
 ### Added
 - **Version** — Bumped from `0.3.2` to `0.3.3`.
 

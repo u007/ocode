@@ -426,7 +426,7 @@ func newBudgetJudgeAgent(t *testing.T, reply string) (*Agent, *budgetJudgeHarnes
 		_, _ = w.Write([]byte(h.reply))
 	}))
 	t.Cleanup(srv.Close)
-	return NewAgent(nil, nil, &config.Config{}, nil), h
+	return newTestAgent(nil, nil, &config.Config{}, nil), h
 }
 
 func budgetJudgeDecider(t *testing.T, srvURL string) Decider {
@@ -463,7 +463,7 @@ func TestJudgeRelevance_KeepsCandidateWhenAnswerIsInvalid(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	ids := []string{"bad-type", "bad-range", "missing-key", "never-sent", "good-low"}
 	keep, _, err := a.judgeRelevanceQuestions(t.Context(), budgetJudgeDecider(t, srv.URL), "TEST", "tag", ids,
 		map[string]any{"x": 1}, map[string]TypesafeQuestion{
@@ -490,7 +490,7 @@ func TestJudgeRelevance_StillVetoesAValidBelowFloorAnswer(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	keep, scores, err := a.judgeRelevanceQuestions(t.Context(), budgetJudgeDecider(t, srv.URL), "TEST", "tag",
 		[]string{"low", "high"}, map[string]any{"x": 1},
 		map[string]TypesafeQuestion{"low": qNoul(), "high": qNoul()})

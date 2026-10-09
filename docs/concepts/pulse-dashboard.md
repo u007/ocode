@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Pulse — cross-project live-sessions dashboard
-description: 'Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card streaming block (STREAM_ON_CARD, PulseStream wrap modes, STREAM_MAX_H height budget, PULSE_TAIL_LINES, min-h-0 gotcha), jump sequence, entry points (no client router), desktop wiring, and known limits.'
+description: 'Assistant drawer (docked chat, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.'
 tags:
   - pulse
   - dashboard
@@ -11,7 +11,7 @@ tags:
   - web
   - desktop
   - api
-timestamp: 2026-10-04T14:29:51Z
+timestamp: 2026-10-08T21:00:00Z
 ---
 # Pulse — cross-project live-sessions dashboard
 
@@ -20,7 +20,9 @@ timestamp: 2026-10-04T14:29:51Z
 Pulse is one glanceable view of **every live chat session across all local
 projects**, answering two questions: *what is running?* and *what is waiting on
 me?* — with a one-click jump into any session. It is deliberately **not** a
-session manager: no rename, delete, archive, or bulk actions. v1 is
+session manager: no rename, delete, archive, or bulk actions. It is no longer
+read-only, though: [focus mode](#focus-mode) resolves pending asks and sends
+replies inline (user decision 2026-10-08). v1 is
 **local-server only**; the desktop app renders the same SPA.
 
 - Design spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
@@ -184,8 +186,9 @@ The filter is applied in `PulseView` (`filtered = rows.filter(...)`) and the
 **section grouping is computed over the filtered set**, not the raw rows — so an
 empty result collapses the sections entirely and shows the
 `No sessions match "…"` line instead. Keyboard users get roving arrow-key
-navigation over `[role="listitem"] > button`, which is why the card's button
-must stay a *direct* child of the listitem.
+navigation over `[role="listitem"] button[aria-expanded]`: the card's header
+button. Each card also has a "Focus session" icon button, which is deliberately
+not a roving stop (it has no `aria-expanded`).
 
 **The filter only sees loaded rows.** Paging is an explicit *Load more* button
 (`PulseView.tsx`, driven by `loadMore`/`hasMore`/`nextCursor` in the store), not
@@ -196,14 +199,15 @@ matters, the fix is a server-side `q` parameter, not a bigger client fetch.
 
 ## The card hover overlay
 
-`PulseCard` is one button; hovering (or focusing) it expands an absolutely
+`PulseCard`'s header is one button inside a chrome `div`; hovering the chrome
+`div` (so the stream region counts) or focusing the button expands an absolutely
 positioned panel after `EXPAND_DELAY_MS` (150ms — a mouse crossing the grid
 would otherwise flash a panel over every card it passes; focus is a deliberate
 act so it expands with no delay at all). The panel is a **sibling** of the
 button, so showing it cannot resize the card and its content stays out of the
 button's click target and accessible name.
 
-Content, in precedence order: tail error → tail lines → todo items →
+Content, in precedence order: tail error → tail entries → todo items →
 `current_task` → `pending_ask`. Two rules that are easy to get wrong:
 
 - **`current_task` is rendered for kind `tool` *and* kind `text`.** Kind `text`
@@ -267,88 +271,301 @@ stream **on the card face**, not only in the hover overlay. The dashboard's job
 is watching turns; requiring a hover to see what a running session is saying
 inverted that, and made the preview unreachable on touch, which has no hover at
 all. The stream renders in exactly ONE place per card — the overlay for every
-other status — so the same lines are never on screen twice and `pulse-tail`
+other status — so the same entries are never on screen twice and `pulse-tail`
 stays unique.
+
+### Entries, not a text tail
+
+`usePulseTail` returns `entries: PulseTailEntry[]` (`{kind: "text" | "tool",
+text}`), an activity feed rather than prose alone. It used to read only `text`
+frames, so a turn that was mostly tool calls showed one stale paragraph and
+nothing else. One shared reducer (`Feed` in `usePulseTail.ts`) handles the seed
+`live_frames` and the live bus events, so the two cannot produce different
+entries for the same frames:
+
+- `text` deltas extend the current text entry, or start one when the last entry
+  is a tool entry; newlines split into separate text entries.
+- `tool_start` appends `▸ <tool> <subject>`. The live payload's `command` field is
+  the RAW `function.arguments` JSON, not a shell command, so `summarizeArgs`
+  parses it and takes the first string among `command`, `file_path`, `path`,
+  `pattern`, `query`, `url` (name only if none, or if it is not a JSON object).
+  The subject is whitespace-flattened and clipped to 80 characters. The glyph is single-width on purpose (a wide emoji
+  shifts the rest of the row in VS Code's renderer).
+- `tool_result` for a known `call_id` appends ` ✓`, or ` ✗` when the output starts
+  with `Error`/`error:`. Entries are tracked by identity under their `call_id`,
+  not by array index, because the front of the feed is trimmed as it grows and
+  would shift stored indexes. An unknown `call_id`, a missing one, or a repeat is
+  ignored.
+- `thinking` and `tool_output` are ignored (too noisy for a card), and the hook
+  does not subscribe to them. It subscribes to exactly `text`, `tool_start`,
+  `tool_result`.
+- The hold-until-seeded ordering is unchanged but now holds every live event, not
+  just text: a `tool_result` for a call only the seed knows about would otherwise
+  be dropped as unknown.
+- The idle/error path replays the LAST TURN of the fetched transcript through
+  the same reducer: every message after the last real `user` message (an
+  injected `[ocode:` notice is user-role but not a boundary; with no user
+  message the whole slice is the turn). Assistant `content` becomes text
+  entries, each `tool_calls[]` entry a `tool_start` (subject from the same
+  `summarizeArgs` over `function.arguments`), and a
+  `tool`-role message with `tool_call_id` a `tool_result`. A settled card
+  therefore has the same shape as a running one.
+
+`PULSE_TAIL_ENTRIES` (60) bounds the retained entries, tool entries included.
+It is no longer the visible height: the region scrolls, so it only bounds the
+DOM. `TEXT_BUFFER_CAP` still bounds the summed text characters.
 
 `PulseStream` has two modes, chosen by its `wrap` prop:
 
 - **On the card** (`wrap`): entries soft-wrap (`whitespace-pre-wrap break-words`,
   NO per-entry `truncate`). Model prose carries no newlines, so per-entry
-  truncation previously reduced a running card to a single clipped line in seven
-  lines of reserved space.
+  truncation reduced a running card to a single clipped line. Tool entries use
+  `font-mono text-[11px] text-muted-foreground`.
 - **In the overlay** (no `wrap`): each entry stays one truncated line. The
-  overlay has no height budget, so wrapping there would turn a 7-entry preview
-  into a page-height panel.
+  overlay has no height budget, so wrapping there would turn the preview into a
+  page-height panel.
+
+### The card is not one giant button
+
+A non-compact card is a chrome `div` (`flex h-full flex-col`, border,
+background, `CARD_MIN_H`) containing two siblings: the header button (status,
+title, task, plan; click jumps, double-click opens the ask, Enter focuses,
+Shift+Enter jumps, Escape collapses, focus ring, `aria-expanded`), the "Focus
+session" icon button (absolutely positioned top-right; a button may not contain
+a button, so it is a sibling, and the header reserves right padding for it) and
+the stream region
+(`data-testid="pulse-stream-region"`). The stream used to live inside the
+button, so a wheel over it scrolled the page grid and its text was part of the
+click target. Pointer enter/leave for the overlay delay are on the chrome `div`
+(for compact cards too) so hovering the stream or the focus button still
+counts; focus/blur stay on the header button. Compact cards have the header
+and focus buttons but no stream region.
+
+### The scrollable stream region
+
+The region is `min-h-0 flex-1 overflow-y-auto overscroll-contain` under the
+`STREAM_MAX_H` cap, and wraps `PulseStream`. `onWheel` stops propagation so a
+wheel never reaches the page scroller's React handlers, and `overscroll-contain`
+stops native scroll chaining once the region hits an edge.
+
+**Stick-to-bottom:** an effect on the entries scrolls the region to the bottom
+unless the user scrolled up. `onScroll` records `atBottom = scrollHeight -
+scrollTop - clientHeight < 8` in a ref (a ref, not state: it changes on every
+scroll event and nothing renders from it). Scrolling back to the bottom resumes
+following.
 
 ### Card height is a floor, not a hint
 
-Non-compact cards reserve `CARD_MIN_H = "min-h-[16rem]"` and are `h-full`, so
-every card in a grid row is one height. Both are needed: `min-h` alone still lets
-a taller card stretch its row, and `h-full` alone gives nowhere to stream into.
-The floor must stay ABOVE the content. When `min-h` sat below the content the
-content governed instead: a card grew from 224px to 240px as tail lines
-arrived, reflowing the whole grid row on every streaming delta. `h-full` is what
-the region below then fills.
+Non-compact cards reserve `CARD_MIN_H = "min-h-[16rem]"` on the chrome `div` and
+are `h-full`, so every card in a grid row is one height. Both are needed:
+`min-h` alone still lets a taller card stretch its row, and `h-full` alone gives
+nowhere to stream into. The floor must stay ABOVE the content. When `min-h` sat
+below the content the content governed instead: a card grew from 224px to 240px
+as tail lines arrived, reflowing the whole grid row on every streaming delta.
 
 ### Height budget
 
-The ceiling is `STREAM_MAX_H` = `max-h-[8rem]` (128px) on the stream region,
-sized as `PULSE_TAIL_LINES` (7) × the built 16.5px tail line-height + 6 × the
-2px `gap-0.5` = 127.5px. This ceiling — not the `CARD_MIN_H` = `min-h-[16rem]`
-floor on the button — is what keeps the card height constant, because `min-h`
-sets only a minimum and a `flex-1` child of an auto-height column is sized from
-its own content (`flex-basis: 0%` caps nothing). Truncation used to make the
-content self-limiting — `PULSE_TAIL_LINES` (7) entries × 1 truncated line box —
-so the floor held in practice; wrapping removed that, so the budget has to be
-explicit.
+The ceiling is `STREAM_MAX_H` = `max-h-[8rem]` (128px) on the stream region. This
+ceiling — not the `CARD_MIN_H` floor — is what keeps the card height constant,
+because `min-h` sets only a minimum and a `flex-1` child of an auto-height column
+is sized from its own content (`flex-basis: 0%` caps nothing). The 128px is the
+budget the original seven truncated 16.5px lines spent (7 × 16.5 + 6 × the 2px
+`gap-0.5` = 127.5px); it is now a layout constant, since the region scrolls past
+it rather than clipping.
 
-`justify-end` (pinning the newest line to the bottom edge, the way a terminal
-tail reads) only has an effect because `PulseStream`'s base carries `flex-col` —
-the region's vertical main axis.
+### The `min-h-0` gotcha (superseded)
 
-`PULSE_TAIL_LINES` now means LOGICAL lines of the stream text (newline-delimited),
-not lines of screen; the visible height is the region's cap. In the overlay each
-logical line is exactly one truncated screen line, so there the count still is
-the visible height.
+Before the region scrolled, the newest text stayed visible only because the
+block was a capped `flex-col justify-end overflow-hidden` and each entry's
+AUTOMATIC minimum size (its min-content height) stopped it shrinking, so excess
+overflowed out of the TOP where the clip discarded it; `min-h-0` on an entry
+flipped the overflow to the bottom and hid the text being streamed. **That no
+longer applies:** the region is `overflow-y-auto` with no `justify-end`, entries
+stack at their natural height, and stick-to-bottom decides what is visible.
+`PulseCard.test.tsx` therefore no longer asserts the absence of
+`min-h-0`/`shrink-0` on an entry; it still asserts `truncate` is absent from a
+wrapping entry.
 
-### The `min-h-0` gotcha
+### Geometry verification (historical)
 
-The newest text stays visible because the block is a capped
-`flex-col justify-end overflow-hidden` and each entry is a flex item whose
-AUTOMATIC minimum size is its min-content height, so an over-tall entry cannot
-be compressed and its excess overflows out of the TOP where the clip discards
-it. Adding `min-h-0` to a wrapping entry — or turning the stream block into a
-plain block container — removes that automatic minimum, flex-shrink then
-compresses the entry, the overflow lands at the BOTTOM, and the clip hides the
-text being streamed. `shrink-0` on the entry was tried and measured to be a
-no-op (the automatic minimum size already covers it), so it was removed from
-the shipped code rather than kept as a dead class. `PulseCard.test.tsx` asserts
-the absence of `min-h-0`/`shrink-0`/`truncate` on a wrapping entry for this
-reason.
+The 128px budget and the 256px card height were measured in headless Chromium
+against the built CSS (400px card, one 250-line un-newlined entry) for the
+earlier clip-based layout: the wrapping variant rendered 138 lines with the
+region capped at 128px and the card 256px tall, identical to the truncate
+baseline; uncapped, the same card measured 2236px. The scroll-based layout has
+not been re-measured in a real browser, and jsdom cannot check layout, so none
+of this is a unit-test assertion.
 
-### Geometry verification
+### Grid is capped at 2 columns
 
-The measurements above are geometry checks performed in headless Chromium
-against the built CSS (400px card, one 250-line un-newlined entry): the
-truncate variant rendered 1 line; the wrapping variant renders 138 lines with
-the region capped at 128px, the excess clipped 2148px above the top, the newest
-line flush with the bottom edge, and the card 256px tall — identical to the
-truncate baseline. Uncapped, the same card measured 2236px tall. Adding
-`min-h-0` to the entry put the newest line 2147px below the visible region.
-jsdom cannot check layout, so these are not unit-test assertions.
-
-### Grid is capped at 3 columns
-
-### Grid is capped at 3 columns
-
-`grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3`. The earlier `xl:grid-cols-4`
-is gone: a live card reserves a full block for its stream, and a fourth column
-squeezed those lines to unreadable width. This reverses the earlier "responsive
-columns, up to 4" intent from the design spec, deliberately, at the user's
-request for more height and more visible streaming context.
+`grid-cols-1 sm:grid-cols-2 gap-3`, with no `lg:`/`xl:` override. The earlier
+`xl:grid-cols-4` and then `lg:grid-cols-3` are gone: a live card carries a
+scrolling activity feed of prose and tool lines, and wider cards give those
+entries a readable width before they wrap. This deliberately overrides the
+previous "capped at 3 columns" rule and the design spec's "up to 4", at the
+product owner's request (2026-10-08).
 
 Compact (Recent-section) cards are unchanged: one line, no reserved height,
 hover-gated.
+
+## Focus mode
+
+A master-detail layout so one session can be watched and answered while the
+others stay visible. `PulseView` swaps the grid for a `flex` row: the
+`PulseFocusPane` (`flex-1`) on the left and a `w-80` column on the right
+listing every OTHER row (the focused one is the pane) as a `compact` card under
+the same Needs you / Running / Recent headings. Unfocused, the grid renders
+exactly as before.
+
+**State.** `focusedSessionId` is module state in `web/src/stores/pulseStore.tsx`
+(`setPulseFocus`, `usePulseFocus`, built on `useSyncExternalStore`). Not React
+state and not per-project persistence: it survives Cmd+J leaving and re-entering
+the dashboard (PulseView unmounts), yet never reaches `saveViewStateForProject`,
+because the dashboard is global.
+
+**Entering.** The card's "Focus session" icon button (every card, compact
+included) or `Enter` on a card header. Clicking the card still JUMPS, and
+`Shift+Enter` is the keyboard spelling of that click. The Enter handler calls
+`preventDefault`: a button's Enter keydown otherwise also fires a synthetic click
+and would jump on every focus.
+
+**Keyboard** (handler on the focus layout, `onFocusKeyDown`): `Escape` closes
+focus; `ArrowDown`/`ArrowUp` and `j`/`k` step to the next/previous row in
+reading order (Needs → Running → Recent over the filtered set), clamped at the
+ends. All of it is ignored when the event target is in a text field or a
+`[role="dialog"]`, and when `defaultPrevented`: a reply being typed must not
+vanish on Escape, and the confined ask dialogs own their Escape (Radix handles
+it in the capture phase) and option navigation. Stepping unmounts the
+side-column card that held DOM focus, so an effect re-focuses the pane wrapper
+when focus fell to `<body>`; otherwise the next key would never reach the
+handler.
+
+**Missing session.** If the focused id is not in `rows` (evicted, scope change)
+the pane is replaced by "Session no longer listed" with a Close button, never a
+blank pane.
+
+**The pane** (`PulseFocusPane.tsx`), top to bottom: header (status glyph, project,
+title, elapsed, "Open session" using the same `jumpTargetFor(row)` a card uses,
+Close); the full plan; the activity feed (`usePulseTail(id, true, status)` through
+the exported `PulseStream` with `wrap`, in a `flex-1 min-h-0 overflow-y-auto
+overscroll-contain` region with NO max-height and stick-to-bottom via the shared
+`useStickToBottom`); the pending ask; the reply box. `STATUS_META`, `TODO_MARK`,
+`formatDuration`/`formatAgo`, `usePulseElapsed` and `jumpTargetFor` are exported
+from `PulseCard.tsx` so the pane does not duplicate them.
+
+**Ask resolution contract.** When `row.pending_ask` is set the pane fetches
+`GET /api/sessions/:id/state` (re-fetched when the ask kind/summary or
+`updated_at` changes; a stale response is dropped) and renders the first
+permission (`kind: permission`) with `PermissionDialog` or the first question
+(`kind: question`) with `QuestionDialog`. Decisions call `api.resolvePermission`
+/ `api.answerQuestion` (and `api.cancelQuestion` for "Don't answer"). A failure
+is shown inline in the pane AND logged with the session id; it is never
+swallowed. Rows are NOT mutated optimistically: the ask clears when the next
+`/api/pulse` refresh drops `pending_ask`, keeping one source of truth for status.
+A hidden question leaves a "Show pending question" button.
+
+**Why the dialogs are container-scoped.** Both dialogs require a
+`ScopedDialogContainer`. The pane passes its own element (it is `relative`, which
+the scrim needs), so the ask is confined to the pane. A viewport modal would
+black out the very sessions focus mode keeps visible. The pane is rendered only
+while it exists, so the `dialogScope.ts` surface gate (which keeps an ask from
+mounting on an off-screen chat surface) does not apply: the pane IS the surface.
+
+**Reply contract.** A textarea (Enter sends, Shift+Enter newline, IME composition
+never sends) plus a Send button call `api.sendMessage(sessionId, text)`, an async
+turn whose output rides SSE. It is disabled with a stated reason while the status
+is `running` ("Turn in progress") or an ask is pending ("Answer the pending
+request first"). Success clears the box; failure keeps the text and shows the
+error. Slash commands are NOT interpreted: `ChatInput` dispatches a leading `/`
+through its parent's `onSlashCommand` prop rather than an exported helper, so the
+text goes to the model as typed.
+
+## Assistant drawer
+
+A chat drawer docked to the right of the dashboard (`PulseAssistantDrawer.tsx`),
+talking to the global Pulse assistant session. The server side (session
+creation, model slot, private project directory) is documented in
+[pulse-assistant.md](pulse-assistant.md). The web side only assumes the contract:
+`GET /api/pulse/assistant` returns `{session_id, model}` (ids start with
+`pulse_`), `GET/PUT /api/config/pulse-model` is the model slot, and the session is
+otherwise an ordinary one.
+
+**Toggle.** A `MessageSquare` header button (`aria-label="Toggle assistant"`) or
+the `a` key. The key is a document listener (`usePulseAssistantHotkey`) that
+ignores modifiers, text fields and dialogs. With focus mode open the row is
+pane | side column | drawer; the focus pane and side column keep their minimum
+widths and the area beside the drawer scrolls horizontally only as a last resort.
+
+**Persistence.** Open state and width live in `localStorage` under
+`pulse.assistant.open` and `pulse.assistant.width` (`usePulseAssistantPrefs`), not
+in the pulse store and not in per-project view state. They are per-viewer
+conveniences (another window or device wants its own layout), nothing else reads
+them, and the dashboard is global. Every read and write is guarded; a blocked or
+throwing storage logs a `console.warn` naming the key and only costs the
+remembered layout. Width is clamped to a 320px floor (default 420) and a CSS
+`max-width: 60%` ceiling; the drag handle on the left edge (`role="separator"`,
+also arrow-key resizable) clamps to the same bounds.
+
+**The real chat surface.** The drawer renders `ChatPanel` for the transcript and
+`ChatInput` for sending; there is no second renderer or composer. `ChatInput`'s
+own `useChat` performs the send, so the turn is marked streaming exactly as in a
+tab. A loading state ("Starting assistant…") and an error with a Retry button
+cover the `GET /api/pulse/assistant` call, so the drawer is never blank.
+
+**How the session is tracked for SSE, and why no store change was needed.** The
+router (`sessionIsTracked` in `web/src/lib/sessionEvents.ts`) applies a session's
+frames when it has an open tab OR a chat slice already exists. The assistant must
+not get a tab (it would show up in a project's tab list and the Sessions tab
+bar), so it is tracked through the slice clause: mounting `ChatPanel` hydrates the
+session's slice and sending dispatches `SET_STREAMING`. Three things a tab would
+have provided are restored explicitly: the stall watchdog (the drawer runs its own
+`useTurnWatchdogAll` for the assistant id), host resolution
+(`resolveSessionHost` returns undefined for `pulse_` ids, via
+`lib/pulseAssistant.ts`, because the draft-tab fallback would otherwise inherit a
+remote active project and send the turns to that host), and the ask dialogs
+(`PermissionDialog`/`QuestionDialog` confined to the drawer, as App only renders
+them for the active tab). Known limit: `SessionTabSync`'s reconnect reconcile
+walks open tabs only, so a turn that ends during an SSE outage is repaired by the
+watchdog rather than immediately.
+
+**Model chooser.** The model name in the header opens the existing `ModelDialog`
+with a new form-owned `pulse` purpose ("Select Assistant Model"): like recap/ocr
+it hands the pick to `onPick` instead of writing anything itself. The drawer
+calls `api.setPulseModel(model)` (empty clears) and then re-reads
+`GET /api/pulse/assistant` for the effective model, since the server decides
+slot-versus-default. Failures show inline. The change applies from the next turn.
+
+**Settings entry point.** A `Settings2` gear in the drawer header
+(`aria-label="Assistant settings"`) dispatches the window event
+`ocode:open-settings-pulse-assistant` (`OPEN_PULSE_ASSISTANT_SETTINGS_EVENT` in
+`lib/pulseAssistant.ts`), the same shape as `ocode:open-settings-profiles`. App
+switches the view to Settings and the force-mounted `SettingsPanel` selects the
+"Pulse assistant" section, which mounts `PulseAssistantForm`: the model slot
+(the shared chooser's `pulse` purpose, "Use default" clears) and the system
+prompt (monospace textarea, read-only built-in default under "Show default",
+"Reset to default" clears the override). Nothing is optimistic: every save, reset
+and model change round-trips and then re-reads
+`GET /api/config/pulse-system-prompt` / `pulse-model`, so the form only shows what
+the server holds. Both settings apply from the assistant's next turn. The drawer's
+header model button and the form both write through `api.setPulseModel`; neither
+keeps its own copy, each re-reads the server.
+
+**Permission asks from write tools.** The assistant's write tools
+(`session_send`, `session_command`, `permission_resolve`, `question_answer`) go
+through the normal permission Ask, so its session raises `permission` frames like
+any other. They are delivered by the same slice-based tracking described above,
+and the drawer renders `PermissionDialog` (and `QuestionDialog`) confined to its
+own chat surface, because App shows ask dialogs only for the active tab. Decisions
+call `resolvePermission(requestId, "pulse_…", decision, undefined)`: the host is
+always undefined (see `resolveSessionHost`), and "always allow" sends
+`always_tool`/`always_rule` only after the dialog's confirm step. Without the
+drawer open there is no dialog to answer, so a turn paused on such an ask waits
+until the drawer is opened.
+
+**Slash commands.** `ChatInput` routes a leading `/` through its parent's
+`onSlashCommand`. The drawer passes none, so everything, including `/...`, goes to
+the model through `sendMessage`; local instant commands do not apply to a
+model-side helper.
 
 ## SSE routing order
 
@@ -460,9 +677,12 @@ user was.
   ask, and no last assistant line has nothing for the hover overlay to show — it
   says so rather than opening a blank panel (see
   [The card hover overlay](#the-card-hover-overlay)).
-- The running card's **live tail** comes from buffered SSE frames while a turn
-  runs and from the last assistant message otherwise, because the server clears
-  `live_frames` at turn end (`web/src/components/Pulse/usePulseTail.ts`).
+- The running card's **activity feed** (prose plus tool lines) comes from
+  buffered `text`/`tool_start`/`tool_result` frames while a turn runs and from
+  the last turn of the transcript otherwise, because the server clears
+  `live_frames` at turn end (`web/src/components/Pulse/usePulseTail.ts`). The
+  transcript fetch is the last 200 messages, so a very long final turn shows
+  only its tail.
 
 ## Tests
 
@@ -482,7 +702,7 @@ user was.
   identity, unknown-project refusal.
 - `web/src/hooks/useKeyboard.pulse.test.ts` / `.browser.test.ts` — Cmd/Ctrl+J
   toggle, xterm guard.
-- `web/src/components/Pulse/` — `PulseView`, `PulseCard`, `PulseBadge`,
+- `web/src/components/Pulse/` — `PulseView` (including focus mode), `PulseFocusPane`, `PulseAssistantDrawer`, `PulseCard`, `PulseBadge`,
   `PulseShellSignal`, `pulseFilter`, `usePulseTail` suites.
   - `PulseCard` pins the overlay's **content**, not just that it appears: the
     `text`-kind task reaches it, and it is never a blank panel (loading vs
@@ -493,6 +713,8 @@ user was.
     and the disabled state.
 
 ## References
+
+- Assistant server side: [pulse-assistant.md](pulse-assistant.md)
 
 - Endpoint: `internal/server/handler_pulse.go`
 - Pure derivation: `internal/server/pulse_rows.go`

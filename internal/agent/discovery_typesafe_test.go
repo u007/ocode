@@ -46,7 +46,7 @@ func newDiscoveryJudgeAgent(t *testing.T, reply string, status int) (*Agent, *di
 	}))
 	t.Cleanup(srv.Close)
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -220,7 +220,7 @@ func TestDiscoveryJudgeClientNilWhenNotConnected(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("", "jev-latest", "http://127.0.0.1:1")
@@ -265,7 +265,7 @@ func TestDiscoveryJudgeClientCachesCredentialedOnly(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.disco = &discoveryState{enabled: true}
 
 	calls := 0

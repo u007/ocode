@@ -14,7 +14,7 @@ tags:
   - server
   - security
 timestamp: 2026-10-07T05:55:15Z
-resource: internal/dbbrowse/dbbrowse.go; internal/dbbrowse/page.go; internal/dbbrowse/write.go; internal/dbbrowse/blob.go; internal/dbbrowse/rowkeys.go; internal/server/handler_db.go; internal/server/handler_db_blob.go; web/src/api/client.ts; web/src/components/Preview/SQLiteViewer.tsx; web/src/components/Preview/SQLiteDialogs.tsx; web/src/components/Preview/BlobDialog.tsx; web/src/components/Preview/blobPreview.ts; web/src/components/Preview/csvExport.ts
+resource: internal/tool/sqlite.go; internal/dbbrowse/dbbrowse.go; internal/dbbrowse/page.go; internal/dbbrowse/write.go; internal/dbbrowse/blob.go; internal/dbbrowse/rowkeys.go; internal/server/handler_db.go; internal/server/handler_db_blob.go; web/src/api/client.ts; web/src/components/Preview/SQLiteViewer.tsx; web/src/components/Preview/SQLiteDialogs.tsx; web/src/components/Preview/BlobDialog.tsx; web/src/components/Preview/blobPreview.ts; web/src/components/Preview/csvExport.ts
 ---
 # SQLite Browser / DB IDE (preview pane)
 
@@ -114,6 +114,17 @@ The grid row carries only the **first 8 KB** of any value — a *prefix*, for di
 - **Every list field on a `/api/db/*` response is a JSON array, never `null`.** `encoding/json` renders a nil slice as `null`, and the viewer dereferences lists unguarded, so one nil slice crashes the pane. `dbbrowse` allocates every list it builds; the web client also normalises null lists once at the fetch boundary (`normalizeDBInfo` / `normalizeDBTable` / `normalizeDBResult`) because a **remote** project proxies to a host that may still run the old server.
 - **A `revision` live-refresh must not clear the query editor or the table selection** — the viewer refetches `dbInfo` and the current page but keeps `queryText` and `selected`.
 - **The table list is a drag-resizable, collapsible pane** (120–480 px, double-click resets) with an always-visible header toggle that collapses it to zero width. Width and collapsed state persist per browser under `ocode.ui.sqlite-viewer.width` and `ocode.ui.sqlite-viewer.width.collapsed` via the shared `useResizableSidebar` hook (same as the app sidebar and Git file list). The result grid (Data and Query tabs) scrolls on **both** axes: `ResultGrid`'s container is `min-w-0 overflow-auto` and its table is `w-max min-w-full`, so a wide table overflows horizontally while still filling a narrow pane. The `min-width: 0` on the viewer body/main pane/grid is load-bearing — without it the flex chain stretches the pane instead of the grid scrolling.
+
+## 7. Agent tools (`sqlite_schema` / `sqlite_query` / `sqlite_exec`)
+
+`internal/tool/sqlite.go` exposes the same engine to the model. They exist so a DB question is a typed `{path, sql}` call rather than a Python/`sqlite3` script: the auto-permission judge can classify the former directly, while a script's effect must be inferred from its source and a source over `maxInterpreterSourceBytes` (48 KB) is refused as `truncated_or_unknown`.
+
+- **Same invariants as sections 1, 2 and 5, not a new policy.** Reads go through `dbbrowse.Query`/`ListTables`/`DescribeTable` (read-only twice over); `sqlite_exec` is the explicit read-write path and takes `dbbrowse.Backup` BEFORE `dbbrowse.Exec`. A backup failure aborts the write.
+- **Path:** `confinedPath` (allowed roots, symlink-resolved) then `dbbrowse.Probe`, so a typo or non-SQLite file errors instead of making the driver create a stray database. `sqliteWriteGuard` mirrors `Handler.dbWriteGuard` (no writes under `paths.GlobalDataDir()`).
+- **Refused on the write path:** `BlockedWriteStatement` (ATTACH/DETACH/VACUUM INTO) and `WritePragma` (writable_schema, journal_mode assignments). The web editor allows the latter after a confirm dialog; the tool refuses them outright because there is no per-call UI to carry that nuance.
+- **Permissions:** all three are in `pathScopedTools` (the `path` arg drives the out-of-scope / sensitive-path checks). `sqlite_schema`/`sqlite_query` are default-allow and in `isReadOnlyTool`; `sqlite_exec` defaults to ask (like `delete`) so the judge or user sees the SQL. Plan/debug modes allow the two reads and block `sqlite_exec`.
+- **Output is capped for the model**, not the browser: default 100 rows, max 1000, `truncated` says more exist.
+- Not wired into sub-agent tool lists on purpose; add the names to an agent's `Tools` if a sub-agent needs DB access.
 
 ## Must-not-regress summary
 

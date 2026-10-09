@@ -13,15 +13,16 @@ import (
 )
 
 const (
-	promptEnvMarker       = "[ocode:environment]"
-	promptProviderMarker  = "[ocode:provider]"
-	promptModeMarker      = "[ocode:mode]"
-	promptContextMarker   = "[ocode:context]"
-	promptModelCtxMarker  = "[ocode:model_context]"
-	promptSelectionMarker = "[ocode:selection]"
-	promptNotesMarker     = "[ocode:notes]"
-	promptDocPromptMarker = "[ocode:doc_prompt]"
-	promptRecapMarker     = "[ocode:recap]"
+	promptEnvMarker            = "[ocode:environment]"
+	promptProviderMarker       = "[ocode:provider]"
+	promptModeMarker           = "[ocode:mode]"
+	promptContextMarker        = "[ocode:context]"
+	promptModelCtxMarker       = "[ocode:model_context]"
+	promptSelectionMarker      = "[ocode:selection]"
+	promptNotesMarker          = "[ocode:notes]"
+	promptDocPromptMarker      = "[ocode:doc_prompt]"
+	promptRecapMarker          = "[ocode:recap]"
+	promptSystemOverrideMarker = "[ocode:system_override]"
 )
 
 // docPromptContent is the documentation-first development prompt injected
@@ -152,6 +153,12 @@ func stripMarker(messages []Message, marker string) []Message {
 // server, ACP, and subagent entrypoints. Everything here is system-role and
 // therefore part of the cached prefix; per-turn state must not be added.
 func (a *Agent) BasePromptMessages() []Message {
+	if override := a.systemPromptOverride.Load(); override != nil && *override != "" {
+		// Server-supplied prompt replaces the whole base set (env block, mode,
+		// recap, project context): the Pulse root is not a project. One stable
+		// system message, so the cached prefix is byte-identical per session.
+		return []Message{{Role: "system", Content: promptSystemOverrideMarker + "\n" + *override}}
+	}
 	var msgs []Message
 	if env := a.environmentPrompt(); env != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptEnvMarker + "\n" + env})

@@ -78,7 +78,7 @@ Further optimisation is deferred (see `TODO.md`). What is left, roughly 36%:
 ```bash
 python3 internal/agent/testdata/permission_judge_eval/mine.py \
   > internal/agent/testdata/permission_judge_eval/mined.json
-OCODE_AGENT_TEST_HOME=1 OCODE_JEV_EVAL=1 go test ./internal/agent -run TestPermissionJudgeEval -count=1 -v -timeout 60m
+OCODE_AGENT_TEST_HOME=1 OCODE_JEV_EVAL=1 go test -tags integration ./internal/agent -run TestPermissionJudgeEval -count=1 -v -timeout 60m
 ```
 
 Needs the `typesafe` provider connected and bills real judge calls: two calls

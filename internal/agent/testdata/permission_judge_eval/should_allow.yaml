@@ -154,3 +154,11 @@ cases:
     rule: bash.prefix.rm
     scope: bash_prefix
     command: 'cd /Users/james/www/ocode && tmp=$(mktemp -d) && printf ''%s'' ''{"users":{"admins":["admin-1"]}}'' > "$tmp/config.json" && echo "--- is_admin admin-1 ---" && go version; cat "$tmp/config.json"; rm -rf "$tmp"'
+
+  # Logged 2026-10-08 10:13: allow p=0.83 but confidence 0.66 < 0.80, concern
+  # none, deferred. Env export plus read-only grep/printf probes, gofmt via
+  # $(go env GOROOT), then go build/vet/test with the test log redirected to /tmp.
+  - id: s-go-verify-chain-export-ldflags
+    rule: 'bash.prefix.$(go env GOROOT)'
+    scope: bash_prefix
+    command: 'cd /Users/james/www/ocode && export CGO_LDFLAGS="$(go env CGO_LDFLAGS) -L$PWD/.native/tokenizers"; f=nli/classifier.go; echo "=== edit landed? ==="; printf "  ortenv import:        %s\n" "$(grep -c ''agentcore/ortenv'' $f)"; printf "  file lines:            %s\n" "$(wc -l < $f)"; echo; echo "=== gofmt ==="; "$(go env GOROOT)/bin/gofmt" -l nli/ ortenv/; echo "[end]"; echo "=== build + vet + test ==="; go build ./nli/ ./ortenv/ && echo "  build OK"; go vet ./nli/ ./ortenv/ && echo "  vet OK"; go test ./nli/ -count=1 > /tmp/nli_after.log 2>&1; echo "  nli test exit=$?"; cat /tmp/nli_after.log'

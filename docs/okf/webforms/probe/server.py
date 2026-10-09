@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import sys
+import threading
 import time
 import urllib.parse
 from email import message_from_bytes
@@ -23,6 +24,7 @@ OUT = pathlib.Path(os.environ["PROBE_OUT"])
 PAGES = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else pathlib.Path(__file__).resolve().parent / "pages"
 OUT.mkdir(parents=True, exist_ok=True)
 STATE = {}
+STATE_LOCK = threading.Lock()
 
 BEACON = """(function(){
 function snap(){var o={};document.querySelectorAll('input,select,textarea').forEach(function(e,i){
@@ -70,8 +72,11 @@ class H(http.server.BaseHTTPRequestHandler):
         if u.path == "/_state":
             try:
                 d = json.loads(body)
-                STATE[d["page"]] = d["data"]
-                (OUT / "state.json").write_text(json.dumps(STATE))
+                with STATE_LOCK:  # beacons arrive on concurrent threads: serialise, and replace atomically so check.py never reads a torn file
+                    STATE[d["page"]] = d["data"]
+                    tmp = OUT / "state.json.tmp"
+                    tmp.write_text(json.dumps(STATE))
+                    os.replace(tmp, OUT / "state.json")
             except Exception:  # intentionally not logged: a malformed beacon must not break the probe
                 pass
             return self._send(204, "")

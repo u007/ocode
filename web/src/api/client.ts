@@ -895,6 +895,52 @@ export interface DBResultSet {
   elapsed_ms: number;
 }
 
+/** A saved Postgres connection. Its URL is never sent to the client. */
+export interface DBConnectConnection {
+  name: string;
+  driver: string;
+  /** True when the caller's surface holds an unlock grant for this connection. */
+  unlocked: boolean;
+}
+
+/** A Postgres query result. Values are JSON scalars, or objects for json/array columns. */
+export interface DBConnectQueryResult {
+  columns: string[];
+  rows: unknown[][];
+  truncated: boolean;
+  /** Set only for a committed write; the rows are then empty. */
+  rowsAffected: number | null;
+}
+
+/** One page of public table names. */
+export interface DBConnectTablePage {
+  tables: string[];
+  hasMore: boolean;
+}
+
+/** A column of a Postgres table. `type` is the catalog type text; `pk` is the 1-based primary-key position, 0 when not part of it. */
+export interface DBConnectColumn {
+  name: string;
+  type: string;
+  pk: number;
+}
+
+/** One page of a table's rows. Each row is in column order. */
+export interface DBConnectBrowsePage {
+  columns: DBConnectColumn[];
+  rows: unknown[][];
+  hasMore: boolean;
+  primaryKey: string[];
+}
+
+export interface DBConnectBrowseOptions {
+  sort: string;
+  dir: "asc" | "desc";
+  filter: string;
+  limit: number;
+  offset: number;
+}
+
 export interface DBTableResponse {
   schema: DBTableSchema;
   result: DBResultSet;
@@ -1246,6 +1292,31 @@ export const api = {
       },
       host,
     ),
+
+  // ── Pulse assistant (local-only, never host-routed) ──
+  // The one global assistant session behind the Pulse dashboard's chat drawer.
+  // Created on first call; the same id afterwards. It is an ordinary session
+  // for every other endpoint (transcript, sendMessage, SSE, model override).
+  getPulseAssistant: () =>
+    fetchJSON<import("./types").PulseAssistantInfo>("/api/pulse/assistant"),
+  // The assistant's model slot. Empty = unset (the server default applies);
+  // a PUT with an empty model clears it. Takes effect on the next turn.
+  getPulseModel: () => fetchJSON<{ model: string }>("/api/config/pulse-model"),
+  setPulseModel: (model: string) =>
+    fetchJSON<{ model: string }>("/api/config/pulse-model", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  // The assistant's system prompt override. `prompt` is empty when unset (the
+  // built-in `default` applies); a PUT with an empty prompt clears it. Takes
+  // effect on the assistant's next turn.
+  getPulseSystemPrompt: () =>
+    fetchJSON<import("./types").PulseSystemPrompt>("/api/config/pulse-system-prompt"),
+  setPulseSystemPrompt: (prompt: string) =>
+    fetchJSON<unknown>("/api/config/pulse-system-prompt", {
+      method: "PUT",
+      body: JSON.stringify({ prompt }),
+    }),
 
   getPermissionModel: (host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>(
@@ -3798,6 +3869,95 @@ export const api = {
       {
         method: "POST",
       },
+    ),
+
+  // ── Postgres connector ──
+  // Saved connections are global (ocodeconfig.json), not directory-bound, so
+  // these are NOT host-threaded. Unlock is per client surface, like the vault.
+  // Null lists are normalised here, once, at the fetch boundary.
+  dbConnectList: (surface: string) =>
+    fetchJSON<{ connections: DBConnectConnection[] | null }>(
+      `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
+    ).then((r) => ({ connections: r.connections ?? [] })),
+  dbConnectAdd: (name: string, url: string, password: string) =>
+    fetchJSON<{ name: string }>("/api/dbconnect/connections", {
+      method: "POST",
+      body: JSON.stringify({ name, url, password }),
+    }),
+  dbConnectRemove: (name: string) =>
+    fetchEmpty(`/api/dbconnect/connections/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  dbConnectUnlock: (surface: string, password: string) =>
+    fetchJSON<{ unlocked: string[] }>("/api/dbconnect/unlock", {
+      method: "POST",
+      body: JSON.stringify({ surface, password }),
+    }),
+  dbConnectLock: (surface: string) =>
+    fetchEmpty("/api/dbconnect/lock", {
+      method: "POST",
+      body: JSON.stringify({ surface }),
+    }),
+  dbConnectTables: (surface: string, connection: string, limit: number, offset: number) =>
+    fetchJSON<{ tables: string[] | null; has_more: boolean }>(
+      `/api/dbconnect/tables?surface=${encodeURIComponent(surface)}&connection=${encodeURIComponent(connection)}&limit=${limit}&offset=${offset}`,
+    ).then((r): DBConnectTablePage => ({ tables: r.tables ?? [], hasMore: r.has_more })),
+  /** One page of a table. Sort and filter are validated by the server; the filter is a read-only predicate. */
+  dbConnectRows: (surface: string, connection: string, table: string, opts: DBConnectBrowseOptions) => {
+    const q = new URLSearchParams({
+      surface,
+      connection,
+      table,
+      dir: opts.dir,
+      limit: String(opts.limit),
+      offset: String(opts.offset),
+    });
+    if (opts.sort) q.set("sort", opts.sort);
+    if (opts.filter.trim()) q.set("filter", opts.filter);
+    return fetchJSON<{
+      columns: DBConnectColumn[] | null;
+      rows: unknown[][] | null;
+      has_more: boolean;
+      primary_key: string[] | null;
+    }>(`/api/dbconnect/rows?${q.toString()}`).then(
+      (r): DBConnectBrowsePage => ({
+        columns: r.columns ?? [],
+        rows: r.rows ?? [],
+        hasMore: r.has_more,
+        primaryKey: r.primary_key ?? [],
+      }),
+    );
+  },
+  /** Insert, update or delete one row. Update and delete match exactly one row by primary key on the server. */
+  dbConnectRow: (
+    surface: string,
+    connection: string,
+    op: "insert" | "update" | "delete",
+    table: string,
+    key: Record<string, unknown>,
+    values: Record<string, unknown>,
+  ) =>
+    fetchJSON<{ rows_affected: number }>("/api/dbconnect/row", {
+      method: "POST",
+      body: JSON.stringify({ surface, connection, op, table, key, values }),
+    }).then((r) => ({ rowsAffected: r.rows_affected })),
+  /** `confirmed` must be true only after the user has approved a write (a 409 asked for it). */
+  dbConnectQuery: (surface: string, connection: string, sql: string, confirmed: boolean) =>
+    fetchJSON<{
+      columns: string[] | null;
+      rows: unknown[][] | null;
+      truncated: boolean;
+      rows_affected?: number;
+    }>("/api/dbconnect/query", {
+      method: "POST",
+      body: JSON.stringify({ surface, connection, sql, confirm: confirmed }),
+    }).then(
+      (r): DBConnectQueryResult => ({
+        columns: r.columns ?? [],
+        rows: r.rows ?? [],
+        truncated: r.truncated,
+        rowsAffected: r.rows_affected ?? null,
+      }),
     ),
 
   // ── Password vault ──

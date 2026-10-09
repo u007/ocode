@@ -9,7 +9,7 @@ tags:
   - shortcuts
   - ui
   - reference
-timestamp: 2026-09-22T18:24:11Z
+timestamp: 2026-10-09T02:48:30Z
 ---
 # Web UI Global Keyboard Shortcuts
 
@@ -19,7 +19,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 
 - **Dispatch:** `web/src/hooks/useKeyboard.ts` — a single `window` `keydown` listener with one `useEffect` and an empty dep array; handlers are read through a ref so re-renders never rebind. This is the only place global shortcuts may be registered.
 - **Wiring/semantics:** `web/src/App.tsx:695-763` — an `openNewChat` helper (`:695-699`) plus the top-level `useKeyboard({...})` call (`:701-763`), which supplies `onNewSession`, `onNewTerminal`, `onCommandPalette`, `onFilePicker`, `onSave`, `onEscape`, `onCloseSession`, `onCloseBrowserTab`, and `focusedKind` / `activeBrowserId`.
-- **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:724`, guarded to the visible chat tab. The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:746`).
+- **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:1145`, guarded to the visible chat tab. The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:1167`).
 
 ## Bindings
 

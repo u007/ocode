@@ -32,14 +32,17 @@ The menu wiring is trivial; the load-bearing part is how the path is turned into
    to the wrong `.gitignore`. Local gets the toplevel from
    `gitRunInDir(dir, "rev-parse", "--show-toplevel")` (`handler_git_ignore.go:43`); remote
    uses `remoteGitDirForMutation`, which normalizes `work.Path` to the remote toplevel
-   (`handler_remote_git_actions.go:92`, normalization at `:106-110`). Regression:
+   (`handler_remote_git_actions.go:93`, normalization at `:107-111`). Regression:
    `TestGitIgnoreNestedProjectUsesToplevel` (`handler_git_ignore_test.go:169`).
 
 2. **Decode git's C-quoting before building the pattern.**
    Porcelain C-quotes names containing spaces, quotes, backslashes or non-ASCII bytes
    (`"sp ace.txt"`, `"caf\303\251.txt"`). `gitignoreUnquotePath`
    (`handler_git_ignore.go:256`) reverses the quoting; without it the pattern would contain
-   the literal quotes/octal escapes. Regression: `TestGitIgnoreUnquotesCPath`
+   the literal quotes/octal escapes. The Git tab now sends raw names (its listings are `-z` or
+   decoded, see `docs/gotchas/git-status-c-quoted-paths.md`), so this decode is defensive: it
+   still mis-decodes a raw name that begins and ends with `"`. Removing it needs the user's
+   sign-off. Regression: `TestGitIgnoreUnquotesCPath`
    (`handler_git_ignore_test.go:126`) and `TestGitignoreUnquotePath` (`:276`).
 
 3. **Anchor with a leading `/` and escape glob metacharacters.**
@@ -94,7 +97,7 @@ Path containment (`../evil.txt` → 400, never a write outside the repo) is enfo
 
 ## Latent bug fixed in the same change: `remoteReadFile` ignored its own MISSING sentinel
 
-`remoteReadFile` (`internal/server/handler_remote_work.go:614`) runs a fixed shell script
+`remoteReadFile` (`internal/server/handler_remote_work.go:646`) runs a fixed shell script
 that emits the literal `MISSING` when the remote path does not exist (`:622`). The base
 function **did not check for it** — a missing remote file fell through to
 `"remote read failed: unexpected output"` (`:639`). Its sibling `remoteReadFileCapped`

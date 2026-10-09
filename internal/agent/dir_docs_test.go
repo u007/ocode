@@ -196,7 +196,7 @@ func TestAgentStepInjectsToolDiscoveredDocsBeforeNextLLMCall(t *testing.T) {
 		}}},
 		{Role: "assistant", Content: "done"},
 	}}
-	a := NewAgent(client, nil, nil, nil)
+	a := newTestAgent(client, nil, nil, nil)
 	a.workDir = root
 	a.Permissions().SetRule("read", PermissionAllow)
 	a.AddTools([]tool.Tool{&MockTool{name: "read", result: "file contents"}})

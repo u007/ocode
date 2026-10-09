@@ -588,7 +588,10 @@ function SortableProjectRow({
           <Button
             variant="ghost"
             size="sm"
-            className="p-1 h-5 w-5 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0"
+            className={cn(
+              "p-1 h-5 w-5 opacity-0 group-focus-within:opacity-100 text-muted-foreground hover:text-destructive shrink-0",
+              isActive && "opacity-100"
+            )}
             title={`Remove ${project.name} from the project list`}
             aria-label={`Remove ${project.name} from the project list`}
             onClick={(e) => {

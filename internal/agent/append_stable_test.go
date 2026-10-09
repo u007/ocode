@@ -21,7 +21,7 @@ import (
 // or re-renders stable content (e.g. swapping out a context
 // loader), this test fails.
 func TestContextAppendStable_NoBus(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	in := []Message{
 		{Role: "user", Content: "hello"},
 	}
@@ -44,7 +44,7 @@ func TestContextAppendStable_NoBus(t *testing.T) {
 // is not added (no delta), so the slice is the same.
 func TestContextAppendStable_NotesTailInert(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -69,7 +69,7 @@ func TestContextAppendStable_NotesTailInert(t *testing.T) {
 // definition of "stable prefix + volatile tail".
 func TestContextAppendStable_BlockOnlyInTail(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -112,7 +112,7 @@ func TestContextAppendStable_BlockOnlyInTail(t *testing.T) {
 // transcript, and re-injecting it would double-count).
 func TestContextAppendStable_BlockReplacedCleanly(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -153,7 +153,7 @@ func TestContextAppendStable_BlockReplacedCleanly(t *testing.T) {
 // fragments (e.g. swaps system prompt and context). The
 // prefix order must be the same across calls.
 func TestContextAppendStable_StableContentNotReordered(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	in := []Message{
 		{Role: "user", Content: "hello"},
 	}

@@ -1,3 +1,5 @@
+//go:build integration
+
 package agent
 
 import (
@@ -123,7 +125,7 @@ func TestCompactInlineExperiment(t *testing.T) {
 		started := time.Now()
 		switch mode {
 		case "loop", "compact":
-			a := NewAgent(client, nil, cfg, nil)
+			a := newTestAgent(client, nil, cfg, nil)
 			rt := a.resolveCompactRuntime(true)
 			priceModel = mainModel
 			if mode == "loop" {

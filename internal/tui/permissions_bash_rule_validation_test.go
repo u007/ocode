@@ -19,7 +19,7 @@ func newPermissionsRuleModel(t *testing.T) *model {
 	cfg := config.Config{}
 	return &model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 }

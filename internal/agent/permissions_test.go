@@ -757,7 +757,7 @@ func TestPermissions_BashCdIntoExtraAllowedPath_AutoAllows(t *testing.T) {
 // flagged as out-of-scope, even on a model ALLOW — scope expansion is human-only.
 func TestVerifyAutoGrant_BashOutOfScopePathRejected(t *testing.T) {
 	wd := t.TempDir()
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.permissions.SetWorkDir(wd)
 
 	req := &PermissionRequest{
@@ -2234,7 +2234,7 @@ func TestAskPermissionModelIncludesAllowedRootsInPrompt(t *testing.T) {
 	wd := t.TempDir()
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.permissions.SetWorkDir(wd)
 
 	capture := &scriptedCaptureClient{Responses: []string{"ALLOW: safe"}}
@@ -2354,7 +2354,7 @@ func TestAskPermissionModelPromptIncludesGlobalConfigDir(t *testing.T) {
 	wd := t.TempDir()
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.permissions.SetWorkDir(wd)
 
 	capture := &scriptedCaptureClient{Responses: []string{"ALLOW: safe"}}
@@ -2400,7 +2400,7 @@ func TestVerifyAutoGrantAcceptsGlobalConfigDir(t *testing.T) {
 		t.Helper()
 		cfg := &config.Config{}
 		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		a.permissions.SetWorkDir(t.TempDir())
 		prevClientFn := newClientFn
 		t.Cleanup(func() { newClientFn = prevClientFn })
@@ -3042,7 +3042,7 @@ func TestSandboxAskRoutesThroughAutoPermission(t *testing.T) {
 	t.Run("with auto enabled, ask reaches the judge (human callback not called)", func(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		a.Permissions().SetWorkDir(t.TempDir())
 		a.Permissions().SetMode(PermissionModeSandbox)
 		a.Permissions().SetAutoPermissionEnabled(true)
@@ -3072,7 +3072,7 @@ func TestSandboxAskRoutesThroughAutoPermission(t *testing.T) {
 
 	t.Run("with auto disabled, ask reaches the human callback", func(t *testing.T) {
 		cfg := &config.Config{}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		a.Permissions().SetWorkDir(t.TempDir())
 		a.Permissions().SetMode(PermissionModeSandbox)
 		a.Permissions().SetAutoPermissionEnabled(false)

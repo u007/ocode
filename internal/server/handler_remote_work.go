@@ -538,29 +538,61 @@ func shellQuotePathPOSIX(p string) string {
 	return remote.ShellQuotePath(p)
 }
 
-// remoteSafeSpec validates a caller-supplied path spec before it is embedded
-// in a remote shell command. Remote pathspecs must be repo-relative and free
-// of shell metacharacters: the resolver quotes nothing here (unlike the
-// local path, a remote pathspec with a quote could inject). Valid specs are
-// returned unchanged; anything containing quotes, semicolons, redirection,
-// variable expansion, glob-newline, or control characters is rejected.
+// remoteSafeSpec validates a caller-supplied path for a remote FILE operation
+// before it is embedded in a remote shell command. The file-op callers do not
+// shell-quote the path, so this strict check is their only guard: quotes,
+// semicolons, redirection, variable expansion, glob characters, and control
+// characters are rejected. Git endpoints use remoteGitSpec instead, because
+// they shell-quote their specs.
 func remoteSafeSpec(p string) (string, error) {
-	if p == "" {
-		return "", fmt.Errorf("empty path")
-	}
-	// Reject absolute paths: specs must be repo-relative (the frontend sends
-	// tree-anchored relative paths). Windows-style "C:..." forms are covered
-	// by the ":" rejection below.
-	if strings.HasPrefix(p, "/") || filepath.IsAbs(p) {
-		return "", fmt.Errorf("remote pathspecs must be repo-relative")
+	if err := remoteSpecCore(p); err != nil {
+		return "", err
 	}
 	for _, r := range p {
-		switch {
-		case r < 0x20 || r == 0x7f:
-			return "", fmt.Errorf("path contains control characters")
-		case strings.ContainsRune("'\";`$&|<>\\!*?[](){}#:", r):
+		if strings.ContainsRune("'\";`$&|<>\\!*?[](){}#:", r) {
 			return "", fmt.Errorf("path contains unsupported characters: %q", p)
 		}
+	}
+	return p, nil
+}
+
+// remoteSpecCore holds the checks every remote path validator shares: the
+// path must be non-empty, repo-relative and free of control characters.
+// Absolute paths are refused because the frontend sends tree-anchored
+// relative paths.
+func remoteSpecCore(p string) error {
+	if p == "" {
+		return fmt.Errorf("empty path")
+	}
+	if strings.HasPrefix(p, "/") || filepath.IsAbs(p) {
+		return fmt.Errorf("remote pathspecs must be repo-relative")
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("path contains control characters")
+		}
+	}
+	return nil
+}
+
+// remoteGitSpec validates a repo-relative git pathspec for a remote command.
+// Unlike remoteSafeSpec it allows shell metacharacters, because every caller
+// shell-quotes the spec (remoteQuoteSpecs / remoteQuoteSpecPath). It still
+// refuses what quoting cannot neutralize: git glob syntax (* ? [ would match
+// other files), a leading ":" (pathspec magic such as ":!x"), and a Windows
+// drive prefix ("C:"). remoteSafeSpec stays the rule for file operations.
+func remoteGitSpec(p string) (string, error) {
+	if err := remoteSpecCore(p); err != nil {
+		return "", err
+	}
+	if p[0] == ':' {
+		return "", fmt.Errorf("pathspec magic is not allowed: %q", p)
+	}
+	if len(p) >= 2 && p[1] == ':' && (p[0]|0x20) >= 'a' && (p[0]|0x20) <= 'z' {
+		return "", fmt.Errorf("drive-letter paths are not allowed: %q", p)
+	}
+	if strings.ContainsAny(p, "*?[") {
+		return "", fmt.Errorf("glob characters are not allowed in a pathspec: %q", p)
 	}
 	return p, nil
 }

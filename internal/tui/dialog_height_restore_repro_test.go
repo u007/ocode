@@ -12,7 +12,7 @@ import (
 // Repro: after answering a permission or ask-tool (question) dialog, the
 // transcript viewport must scale back to its pre-dialog height.
 func TestPermDialogRestoresViewportHeightAfterAnswer(t *testing.T) {
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = upd.(model)
@@ -38,7 +38,7 @@ func TestPermDialogRestoresViewportHeightAfterAnswer(t *testing.T) {
 }
 
 func TestQuestionDialogRestoresViewportHeightAfterAnswer(t *testing.T) {
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = upd.(model)

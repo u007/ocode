@@ -87,7 +87,7 @@ func TestResolveAutoJudgeOpaqueMinConfidence(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			a := NewAgent(nil, nil, &config.Config{}, nil)
+			a := newTestAgent(nil, nil, &config.Config{}, nil)
 			setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) { cfg.MinConfidence = tc.configured })
 			if got := a.resolveAutoJudgeMinConfidence(); got != tc.wantNormal {
 				t.Fatalf("normal floor = %v, want %v", got, tc.wantNormal)

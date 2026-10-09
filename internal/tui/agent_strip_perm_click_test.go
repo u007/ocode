@@ -14,7 +14,7 @@ import (
 // the sidebar column (X >= panelWidth) never open the agent detail view.
 // This is the direct unit guard: the old handler checked Y only.
 func TestAgentStripSidebarXGuard(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "did some work"})
 
@@ -63,7 +63,7 @@ func TestAgentStripSidebarXGuard(t *testing.T) {
 // clicks in the sidebar (X >= panelWidth) — opened the agent detail view and
 // never reached the sidebar "Allowed" permission handler.
 func TestAgentStripDoesNotStealSidebarPermClick(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "did some work"})
 
@@ -122,7 +122,7 @@ func TestAgentStripDoesNotStealSidebarPermClick(t *testing.T) {
 func TestAgentStripDoesNotStealStatusPermClick(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // isolate persist writes
 
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "did some work"})
 

@@ -32,6 +32,8 @@ import TTSForm from "./TTSForm";
 import ChatDisplayForm from "./ChatDisplayForm";
 import QuickActionsForm from "./QuickActionsForm";
 import ConnectorsForm from "./ConnectorsForm";
+import PulseAssistantForm from "./PulseAssistantForm";
+import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
 
 export type SettingsGroupId =
   | "backend"
@@ -48,6 +50,7 @@ export type SettingsGroupId =
   | "chat-display"
   | "quick-actions"
   | "advisor"
+  | "pulse-assistant"
   | "permissions"
   | "system-permissions"
   | "security"
@@ -89,6 +92,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "chat-display", label: "Chat display" },
   { id: "quick-actions", label: "Quick actions" },
   { id: "advisor", label: "Advisor" },
+  { id: "pulse-assistant", label: "Pulse assistant" },
   { id: "permissions", label: "Permissions" },
   { id: "system-permissions", label: "System Permissions" },
   { id: "security", label: "Security & Redaction" },
@@ -151,6 +155,8 @@ function renderGroup(id: SettingsGroupId) {
       return <QuickActionsForm />;
     case "advisor":
       return <AdvisorForm />;
+    case "pulse-assistant":
+      return <PulseAssistantForm />;
     case "permissions":
       return <PermissionsForm />;
     case "system-permissions":
@@ -252,6 +258,11 @@ export default function SettingsPanel() {
     const h = () => setActive("profiles")
     window.addEventListener("ocode:open-settings-profiles", h)
     return () => window.removeEventListener("ocode:open-settings-profiles", h)
+  }, [])
+  useEffect(() => {
+    const h = () => setActive("pulse-assistant")
+    window.addEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
+    return () => window.removeEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
   }, [])
 
   return (

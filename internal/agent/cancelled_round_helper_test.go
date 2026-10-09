@@ -71,7 +71,7 @@ func TestFinishCancelledRoundNeverDuplicatesPublishedResults(t *testing.T) {
 		{}, // call-c never executed — zero Message
 	}
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	var emitted []Message
 	a.OnMessage = func(m Message) { emitted = append(emitted, m) }
 
@@ -137,7 +137,7 @@ func TestFinishCancelledRoundIgnoresTheZeroResultSlots(t *testing.T) {
 	tc.Function.Name = "never_ran"
 	tc.Function.Arguments = `{}`
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{tc}}
 
 	got, err := a.finishCancelledRound([]Message{*resp}, []Message{*resp}, resp, []Message{{}}, 0)
@@ -161,7 +161,7 @@ func TestFinishCancelledRoundClampsPublishedBeyondResults(t *testing.T) {
 	tc.Function.Name = "alpha"
 	tc.Function.Arguments = `{}`
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{tc}}
 	results := []Message{{Role: "tool", ToolID: "call-1", Content: "done"}}
 
@@ -181,7 +181,7 @@ func TestFinishCancelledRoundIsIdempotentPerCall(t *testing.T) {
 	tc.Function.Name = "alpha"
 	tc.Function.Arguments = `{}`
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	resp := &Message{Role: "assistant", ToolCalls: []ToolCall{tc}}
 	results := []Message{{Role: "tool", ToolID: "call-1", Content: "done"}}
 

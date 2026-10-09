@@ -24,6 +24,11 @@ import (
 // what AddRemote's upsert semantics do).
 var ErrProjectExists = errors.New("project already exists")
 
+// ErrPortMapDirection is returned when a port map is added in the direction
+// opposite to the existing entry for the same remote port. Handlers map it to
+// 409 Conflict, not a server error.
+var ErrPortMapDirection = errors.New("remote port already forwarded in the other direction")
+
 // Project represents a saved project root.
 type Project struct {
 	Path       string    `json:"path"`
@@ -64,6 +69,16 @@ type PortMap struct {
 	RemotePort int  `json:"remote_port"`
 	LocalPort  int  `json:"local_port"`
 	Enabled    bool `json:"enabled"`
+	// Reverse marks an ssh -R forward (remote reaches the desktop's local
+	// port). Omitted when false, so existing -L entries keep their bytes.
+	Reverse bool `json:"reverse,omitempty"`
+}
+
+// Runtime is the shape ForwardManager opens. Every persisted-to-runtime
+// conversion goes through here, so a reverse entry cannot silently restart as
+// -L after a reconnect, an enable, or a watchdog retry.
+func (p PortMap) Runtime() remote.ProjectPortMap {
+	return remote.ProjectPortMap{RemotePort: p.RemotePort, LocalPort: p.LocalPort, Enabled: p.Enabled, Reverse: p.Reverse}
 }
 
 // ProjectRef identifies a project entry for scoped mutations (rename,
@@ -331,9 +346,25 @@ func (s *Store) PortMaps(ref ProjectRef) ([]PortMap, error) {
 	return out, nil
 }
 
-// AddPortMap upserts a forward for remotePort (matched by RemotePort),
+// AddPortMap upserts a -L forward for remotePort (matched by RemotePort),
 // enabled by default, and persists it.
 func (s *Store) AddPortMap(ref ProjectRef, remotePort, localPort int) error {
+	return s.upsertPortMap(ref, PortMap{RemotePort: remotePort, LocalPort: localPort, Enabled: true})
+}
+
+// AddReversePortMap upserts an -R forward: the remote's 127.0.0.1:remotePort
+// reaches the desktop's 127.0.0.1:localPort. The remote port is the key for
+// both directions, because on the remote host it is one namespace, so a
+// -R entry cannot shadow an existing -L entry on the same port.
+func (s *Store) AddReversePortMap(ref ProjectRef, remotePort, localPort int) error {
+	return s.upsertPortMap(ref, PortMap{RemotePort: remotePort, LocalPort: localPort, Enabled: true, Reverse: true})
+}
+
+// upsertPortMap updates the entry for pm.RemotePort or appends one, then
+// persists. Re-adding the same direction updates the local port and re-enables
+// it; the other direction is refused, because flipping it silently would
+// change what the remote port means.
+func (s *Store) upsertPortMap(ref ProjectRef, pm PortMap) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx, err := s.findRemoteIdx(ref)
@@ -342,13 +373,17 @@ func (s *Store) AddPortMap(ref ProjectRef, remotePort, localPort int) error {
 	}
 	maps := s.cache[idx].PortMaps
 	for i := range maps {
-		if maps[i].RemotePort == remotePort {
-			maps[i].LocalPort = localPort
-			maps[i].Enabled = true
-			return s.save()
+		if maps[i].RemotePort != pm.RemotePort {
+			continue
 		}
+		if maps[i].Reverse != pm.Reverse {
+			return fmt.Errorf("%w: remote port %d; remove it first", ErrPortMapDirection, pm.RemotePort)
+		}
+		maps[i].LocalPort = pm.LocalPort
+		maps[i].Enabled = true
+		return s.save()
 	}
-	s.cache[idx].PortMaps = append(maps, PortMap{RemotePort: remotePort, LocalPort: localPort, Enabled: true})
+	s.cache[idx].PortMaps = append(maps, pm)
 	return s.save()
 }
 

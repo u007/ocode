@@ -28,6 +28,7 @@ import ChatPanel from "./components/Chat/ChatPanel";
 import RemoteVersionBanner from "./components/Chat/RemoteVersionBanner";
 import AgentPreview from "./components/Chat/AgentPreview";
 import { BtwPanel } from "./components/Chat/BtwPanel";
+import DBPanel from "./components/Layout/DBPanel";
 import AgentsPanel from "./components/Agents/AgentsPanel";
 import ChatInput, { type SlashCommandResult } from "./components/Chat/ChatInput";
 import StatusBar from "./components/common/StatusBar";
@@ -46,6 +47,7 @@ import { Tabs, TabsContent } from "@/components/ui/tabs";
 import TopTabs from "./components/Layout/TopTabs";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import SettingsPanel from "./components/Settings/SettingsPanel";
+import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "./lib/pulseAssistant";
 import EditorTabBar from "./components/Layout/EditorTabBar";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
@@ -489,6 +491,13 @@ function HomeApp() {
     const h = () => setActiveView("settings")
     window.addEventListener("ocode:open-settings-profiles", h)
     return () => window.removeEventListener("ocode:open-settings-profiles", h)
+  }, [])
+  // The Pulse assistant drawer's gear: leave the dashboard for Settings.
+  // SettingsPanel (force-mounted) selects the section from the same event.
+  useEffect(() => {
+    const h = () => setActiveView("settings")
+    window.addEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
+    return () => window.removeEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
   }, [])
   const {
     editorTabs,
@@ -1896,6 +1905,16 @@ function HomeApp() {
                             nonce={takesActivation ? previewNonce : 0}
                             onConsumeActivation={takesActivation ? consumePreviewActivation : undefined}
                           />
+                        </div>
+                      );
+                    })}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "db";
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:db`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <DBPanel sessionId={tab.id} />
                         </div>
                       );
                     })}

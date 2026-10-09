@@ -26,7 +26,7 @@ func (h *storePortMapHook) Load() ([]remote.ProjectPortMap, error) {
 	}
 	out := make([]remote.ProjectPortMap, len(maps))
 	for i, m := range maps {
-		out[i] = remote.ProjectPortMap{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: m.Enabled}
+		out[i] = m.Runtime()
 	}
 	return out, nil
 }
@@ -46,10 +46,15 @@ func (h *storePortMapHook) Handle(fm *remote.ForwardManager, line string) (strin
 	case "status":
 		return h.status(fm), true
 	case "add":
-		if len(fields) < 3 {
-			return "usage: /port add <remotePort>[:<localPort>]", true
+		args := fields[2:]
+		reverse := len(args) > 0 && args[0] == "-R"
+		if reverse {
+			args = args[1:]
 		}
-		return h.add(fm, fields[2]), true
+		if len(args) == 0 {
+			return "usage: /port add [-R] <remotePort>[:<localPort>]", true
+		}
+		return h.add(fm, args[0], reverse), true
 	case "remove":
 		if len(fields) < 3 {
 			return "usage: /port remove <remotePort>", true
@@ -76,7 +81,7 @@ func (h *storePortMapHook) status(fm *remote.ForwardManager) string {
 		return "port maps: " + err.Error()
 	}
 	if len(maps) == 0 {
-		return "no extra port maps for this project. Add one: /port add <remotePort>[:<localPort>]"
+		return "no extra port maps for this project. Add one: /port add [-R] <remotePort>[:<localPort>]"
 	}
 	var b strings.Builder
 	b.WriteString("port maps:\n")
@@ -87,6 +92,10 @@ func (h *storePortMapHook) status(fm *remote.ForwardManager) string {
 			if fm.IsLive(m.RemotePort) {
 				state = "live"
 			}
+		}
+		if m.Reverse {
+			fmt.Fprintf(&b, "  remote:%d <- localhost:%d (reverse)  [%s]\n", m.RemotePort, m.LocalPort, state)
+			continue
 		}
 		fmt.Fprintf(&b, "  remote:%d -> localhost:%d  [%s]\n", m.RemotePort, m.LocalPort, state)
 	}
@@ -119,16 +128,25 @@ func parsePortSpec(spec string) (remotePort, localPort int, err error) {
 	return remotePort, localPort, nil
 }
 
-func (h *storePortMapHook) add(fm *remote.ForwardManager, spec string) string {
+func (h *storePortMapHook) add(fm *remote.ForwardManager, spec string, reverse bool) string {
 	remotePort, localPort, err := parsePortSpec(spec)
 	if err != nil {
 		return err.Error()
 	}
-	if err := h.store.AddPortMap(h.ref, remotePort, localPort); err != nil {
+	pm := projects.PortMap{RemotePort: remotePort, LocalPort: localPort, Enabled: true, Reverse: reverse}
+	if reverse {
+		err = h.store.AddReversePortMap(h.ref, remotePort, localPort)
+	} else {
+		err = h.store.AddPortMap(h.ref, remotePort, localPort)
+	}
+	if err != nil {
 		return "port maps: " + err.Error()
 	}
-	if err := fm.Start(remote.ProjectPortMap{RemotePort: remotePort, LocalPort: localPort, Enabled: true}); err != nil {
+	if err := fm.Start(pm.Runtime()); err != nil {
 		return "saved, but failed to open now: " + err.Error()
+	}
+	if reverse {
+		return fmt.Sprintf("added: remote:%d <- localhost:%d (reverse)", remotePort, localPort)
 	}
 	return fmt.Sprintf("added: localhost:%d -> remote:%d", localPort, remotePort)
 }
@@ -163,7 +181,7 @@ func (h *storePortMapHook) setEnabled(fm *remote.ForwardManager, arg string, ena
 	}
 	for _, m := range maps {
 		if m.RemotePort == remotePort {
-			if err := fm.Start(remote.ProjectPortMap{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: true}); err != nil {
+			if err := fm.Start(m.Runtime()); err != nil {
 				return "enabled, but failed to open now: " + err.Error()
 			}
 			break

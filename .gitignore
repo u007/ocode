@@ -110,3 +110,6 @@ ocode.exe
 .ocode/uploads
 
 .medusa/
+
+# testdoctor artifacts (skills/test-suite-cleanup)
+.test-doctor/

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { isBlobColumn, RowEditorDialog } from "./SQLiteDialogs";
+import { inputToCell, isBlobColumn, RowEditorDialog } from "./SQLiteDialogs";
 import type { DBTableSchema } from "../../api/client";
 
 const SCHEMA: DBTableSchema = {
@@ -41,6 +41,7 @@ describe("RowEditorDialog blob columns", () => {
         initial={null}
         busy={false}
         error={null}
+        parseInput={inputToCell}
         onCancel={vi.fn()}
         onSubmit={vi.fn()}
       />,
@@ -61,6 +62,7 @@ describe("RowEditorDialog blob columns", () => {
         initial={null}
         busy={false}
         error={null}
+        parseInput={inputToCell}
         onCancel={vi.fn()}
         onSubmit={onSubmit}
       />,
@@ -86,6 +88,7 @@ describe("RowEditorDialog blob columns", () => {
         initial={{ id: 1, label: "x", data: { $blob: true, bytes: 3, preview: "090807" } }}
         busy={false}
         error={null}
+        parseInput={inputToCell}
         onCancel={vi.fn()}
         onSubmit={onSubmit}
       />,
@@ -107,6 +110,7 @@ describe("RowEditorDialog blob columns", () => {
         initial={{ id: 1, label: "x", data: { $blob: true, bytes: 3, preview: "090807" } }}
         busy={false}
         error={null}
+        parseInput={inputToCell}
         onCancel={vi.fn()}
         onSubmit={onSubmit}
       />,
@@ -129,6 +133,7 @@ describe("RowEditorDialog blob columns", () => {
         initial={null}
         busy={false}
         error={null}
+        parseInput={inputToCell}
         onCancel={vi.fn()}
         onSubmit={onSubmit}
       />,

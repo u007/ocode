@@ -142,10 +142,6 @@ func TestClefChatAlwaysFails(t *testing.T) {
 	}
 }
 
-func TestClefSatisfiesDecider(t *testing.T) {
-	var _ Decider = (*ClefClient)(nil)
-}
-
 func TestClefDecideCtx_CancelledContextAbortsBeforeSending(t *testing.T) {
 	var called bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

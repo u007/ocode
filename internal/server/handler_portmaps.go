@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,6 +23,7 @@ type portMapView struct {
 	RemotePort int  `json:"remote_port"`
 	LocalPort  int  `json:"local_port"`
 	Enabled    bool `json:"enabled"`
+	Reverse    bool `json:"reverse"`
 	Live       bool `json:"live"`
 }
 
@@ -135,7 +137,7 @@ func (h *Handler) portMapViews(ref projects.ProjectRef, fm *remote.ForwardManage
 	}
 	out := make([]portMapView, len(maps))
 	for i, m := range maps {
-		out[i] = portMapView{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: m.Enabled, Live: fm.IsLive(m.RemotePort)}
+		out[i] = portMapView{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: m.Enabled, Reverse: m.Reverse, Live: fm.IsLive(m.RemotePort)}
 	}
 	return out
 }
@@ -154,7 +156,7 @@ func (h *Handler) autoStartPortMaps(ref projects.ProjectRef, fm *remote.ForwardM
 		if !m.Enabled {
 			continue
 		}
-		if err := fm.Start(remote.ProjectPortMap{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: true}); err != nil {
+		if err := fm.Start(m.Runtime()); err != nil {
 			log.Printf("port forwards: auto-start remote:%d for %s:%s: %v", m.RemotePort, ref.Host, ref.Path, err)
 		}
 	}
@@ -194,8 +196,9 @@ func (h *Handler) HandleAddPortMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		RemotePort int `json:"remote_port"`
-		LocalPort  int `json:"local_port"`
+		RemotePort int  `json:"remote_port"`
+		LocalPort  int  `json:"local_port"`
+		Reverse    bool `json:"reverse"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -209,14 +212,25 @@ func (h *Handler) HandleAddPortMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := portMapRef(rw)
-	if err := h.projects.AddPortMap(ref, body.RemotePort, body.LocalPort); err != nil {
+	pm := projects.PortMap{RemotePort: body.RemotePort, LocalPort: body.LocalPort, Enabled: true, Reverse: body.Reverse}
+	var err error
+	if body.Reverse {
+		err = h.projects.AddReversePortMap(ref, body.RemotePort, body.LocalPort)
+	} else {
+		err = h.projects.AddPortMap(ref, body.RemotePort, body.LocalPort)
+	}
+	if err != nil {
+		if errors.Is(err, projects.ErrPortMapDirection) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// An explicit add is a deliberate "try it now", so it clears any give-up
 	// the monitor reached for this port.
 	entry.policy.reset(body.RemotePort)
-	if err := entry.fm.Start(remote.ProjectPortMap{RemotePort: body.RemotePort, LocalPort: body.LocalPort, Enabled: true}); err != nil {
+	if err := entry.fm.Start(pm.Runtime()); err != nil {
 		writeError(w, http.StatusBadGateway, "saved, but failed to open now: "+err.Error())
 		return
 	}
@@ -320,7 +334,7 @@ func (h *Handler) setPortMapEnabled(w http.ResponseWriter, r *http.Request, enab
 				if m.RemotePort != port {
 					continue
 				}
-				if serr := entry.fm.Start(remote.ProjectPortMap{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: true}); serr != nil {
+				if serr := entry.fm.Start(m.Runtime()); serr != nil {
 					writeError(w, http.StatusBadGateway, "enabled, but failed to open now: "+serr.Error())
 					return
 				}

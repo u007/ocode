@@ -999,11 +999,12 @@ async function handleExport(ctx: CommandContext): Promise<CommandResult> {
 
   try {
     const markdown = await api.exportSessionMarkdown(sessionId, ctx.host);
+    const filename = `ocode_export_${sessionId}.md`;
     return {
       handled: true,
-      messages: [{ role: "assistant", content: "Exported session as Markdown." }],
+      messages: [{ role: "assistant", content: `Exported session to \`${filename}\`` }],
       download: {
-        filename: `ocode_export_${sessionId}.md`,
+        filename,
         content: markdown,
         mimeType: "text/markdown;charset=utf-8",
       },

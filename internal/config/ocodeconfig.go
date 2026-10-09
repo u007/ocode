@@ -938,10 +938,15 @@ type OcodeConfig struct {
 	SpeechSummaryEnabled bool
 	AutoContinueEnabled  bool
 	AutoContinueModel    string
-	CommitMsgModel       string
-	CommitMsgPrompt      string
-	TUI                  TUIConfig
-	MaxSteps             int `json:"max_steps,omitempty"`
+	// PulseModel / PulseSystemPrompt configure the Pulse dashboard assistant
+	// (docs/concepts/pulse-assistant.md). Empty PulseModel follows the default
+	// chat model; empty PulseSystemPrompt uses the built-in prompt.
+	PulseModel        string
+	PulseSystemPrompt string
+	CommitMsgModel    string
+	CommitMsgPrompt   string
+	TUI               TUIConfig
+	MaxSteps          int `json:"max_steps,omitempty"`
 	// MaxImageDim caps the longest edge (px) of an embedded image; larger
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
@@ -1001,7 +1006,10 @@ type OcodeConfig struct {
 	// desktop shell reconciles it at startup.
 	SystemPermissions sysperm.Config          `json:"system_permissions"`
 	Profiles          map[string]ProfileDelta `json:"profiles,omitempty"`
-	Extra             map[string]json.RawMessage
+	// DB holds saved database connections. Each URL is stored as an encrypted
+	// envelope (see internal/dbconnect.SealURL); plaintext URLs are never written.
+	DB    DBConfig `json:"db"`
+	Extra map[string]json.RawMessage
 }
 
 const (
@@ -1264,6 +1272,7 @@ type ocodeConfigFile struct {
 	QuickActions            *QuickActionsConfig         `json:"quick_actions,omitempty"`
 	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
 	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
+	DB                      DBConfig                    `json:"db"`
 	Security                securityConfigFile          `json:"security"`
 	Discovery               discoveryConfigFile         `json:"discovery"`
 	DocSearch               docSearchConfigFile         `json:"doc_search"`
@@ -1294,6 +1303,8 @@ type ocodeConfigFile struct {
 	SpeechSummaryEnabled    *bool                       `json:"speech_summary_enabled,omitempty"`
 	AutoContinueEnabled     *bool                       `json:"auto_continue_enabled,omitempty"`
 	AutoContinueModel       string                      `json:"auto_continue_model,omitempty"`
+	PulseModel              string                      `json:"pulse_model,omitempty"`
+	PulseSystemPrompt       string                      `json:"pulse_system_prompt,omitempty"`
 	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
 	UndoMaxAgeDelta         *int                        `json:"undo_max_age_delta,omitempty"`
 	MaxConcurrentAgents     *int                        `json:"max_concurrent_agents,omitempty"`
@@ -1441,6 +1452,9 @@ func defaultPermissionConfig() PermissionConfig {
 			"glob":            "allow",
 			"grep":            "allow",
 			"rgrep":           "allow",
+			"sqlite_schema":   "allow",
+			"sqlite_query":    "allow",
+			"sqlite_exec":     "ask",
 			"list":            "allow",
 			"lsp":             "allow",
 			"ast":             "allow",
@@ -1660,6 +1674,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "local_models")
 	}
 
+	if _, ok := raw["db"]; ok {
+		cfg.DB = file.DB
+		delete(raw, "db")
+	}
+
 	if _, ok := raw["security"]; ok {
 		applySecurityConfig(&cfg.Security, file.Security)
 		delete(raw, "security")
@@ -1859,6 +1878,18 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.AutoContinueModel = file.AutoContinueModel
 		}
 		delete(raw, "auto_continue_model")
+	}
+	if _, ok := raw["pulse_model"]; ok {
+		if file.PulseModel != "" {
+			cfg.PulseModel = file.PulseModel
+		}
+		delete(raw, "pulse_model")
+	}
+	if _, ok := raw["pulse_system_prompt"]; ok {
+		if file.PulseSystemPrompt != "" {
+			cfg.PulseSystemPrompt = file.PulseSystemPrompt
+		}
+		delete(raw, "pulse_system_prompt")
 	}
 
 	if _, ok := raw["commit_msg_model"]; ok {
@@ -2557,6 +2588,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if len(cfg.LocalModels) > 0 {
 		payload["local_models"] = cfg.LocalModels
 	}
+	if len(cfg.DB.Connections) > 0 {
+		payload["db"] = cfg.DB
+	}
 	if len(cfg.ExtraAllowedPaths) > 0 {
 		seen := make(map[string]struct{}, len(cfg.ExtraAllowedPaths))
 		deduped := cfg.ExtraAllowedPaths[:0:0]
@@ -2600,6 +2634,12 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	payload["auto_continue_enabled"] = cfg.AutoContinueEnabled
 	if cfg.AutoContinueModel != "" {
 		payload["auto_continue_model"] = cfg.AutoContinueModel
+	}
+	if cfg.PulseModel != "" {
+		payload["pulse_model"] = cfg.PulseModel
+	}
+	if cfg.PulseSystemPrompt != "" {
+		payload["pulse_system_prompt"] = cfg.PulseSystemPrompt
 	}
 	if cfg.RecapTimeoutSeconds > 0 {
 		payload["recap_timeout_seconds"] = cfg.RecapTimeoutSeconds
@@ -2653,7 +2693,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" {
 			continue
 		}
 		payload[k] = v
@@ -3780,6 +3820,24 @@ func SaveAutoContinueEnabled(enabled bool) error {
 func SaveAutoContinueModel(model string) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.AutoContinueModel = model
+		return nil
+	})
+}
+
+// SavePulseModel persists the Pulse assistant's model slot. Empty clears it,
+// so the assistant follows the default chat model.
+func SavePulseModel(model string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseModel = model
+		return nil
+	})
+}
+
+// SavePulseSystemPrompt persists the Pulse assistant's system prompt override.
+// Empty clears it, restoring the built-in prompt.
+func SavePulseSystemPrompt(prompt string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseSystemPrompt = prompt
 		return nil
 	})
 }

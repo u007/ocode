@@ -410,7 +410,7 @@ Two distinct code paths implement the auto-permission judge, and they do **not**
 - **The judge reasons about an expanded command, and the expansion is fail-closed.** `expandBashForJudge` (`internal/agent/permission_shellvars.go`) resolves in-command `NAME=value` assignments, environment references, and a fixed read-only `$(...)` allowlist (`pwd`, `git rev-parse --show-toplevel`, `npm root`/`prefix`, `go env <VAR>`, a few `python -c` path snippets). Three rules matter when editing it: a variable rebound in a form it does not model (`export`/`declare`/`local`, `NAME+=`, `for`/`read`/`unset`, an assignment buried in a `{ … }` group) is marked **opaque**, so `$NAME` reaches the judge unresolved rather than as the stale value the shell will not use; the allowlisted Python snippets run with `-I`, so a repo-local `sysconfig.py` cannot execute at judge-prep time; and a substitution that names a secret (`go env GITHUB_TOKEN`) or returns a URL userinfo (`GOPROXY=https://user:pass@…`) is withheld as `<redacted>` exactly like a secret-looking environment value. Pinned by `TestExpandBashForJudgeRebindingsAreOpaque` and `TestExpandBashForJudgeWithholdsSecretSubstitution`.
 
 - **Change Jev's rubric or state only with a scorecard.** `TestPermissionJudgeEval`
-  (`internal/agent/permission_judge_eval_test.go`, `OCODE_JEV_EVAL=1`) replays commands mined
+  (`internal/agent/permission_judge_eval_test.go`, `OCODE_JEV_EVAL=1`, build tag `integration`) replays commands mined
   from `permission-judge.log` plus the committed `must_ask.yaml` / `should_allow.yaml` fixtures
   against the live judge; how-to in `internal/agent/testdata/permission_judge_eval/README.md`,
   findings in `docs/concepts/auto-permission-judge-eval.md`. Three things it established:

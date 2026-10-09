@@ -641,3 +641,73 @@ func renderPlainSegment(out *strings.Builder, text string, textStyle, linkStyle 
 		i = urlStart + len(trimmed)
 	}
 }
+
+// contRunBounds returns the [first, last] line range of the hard-wrap run
+// containing idx: it walks back while idx itself is a continuation and
+// forward while the following lines are continuations. cont is the parallel
+// flag slice from wrapViewMarked. A line that is not part of any run returns
+// first == last == idx.
+func contRunBounds(cont []bool, idx int) (int, int) {
+	first, last := idx, idx
+	for first > 0 && first < len(cont) && cont[first] {
+		first--
+	}
+	for last+1 < len(cont) && cont[last+1] {
+		last++
+	}
+	return first, last
+}
+
+// urlLinkInRun finds the URL under visualCol on lines[idx], where lines is
+// one hard-wrap run (every line after the first is the continuation of a
+// single token split by wordWrap). The lines are concatenated without any
+// separator — exactly how the renderer split them — so a URL that spans any
+// number of rows yields its full text. The returned region covers only the
+// portion on lines[idx]; markdown links take priority over raw URLs.
+func urlLinkInRun(lines []string, idx, visualCol int) (urlLinkRegion, bool) {
+	if idx < 0 || idx >= len(lines) {
+		return urlLinkRegion{}, false
+	}
+	combined := strings.Join(lines, "")
+	lineStart := 0
+	for i := 0; i < idx; i++ {
+		lineStart += len(lines[i])
+	}
+	lineEnd := lineStart + len(lines[idx])
+	clip := func(start, end int) (int, int) {
+		// Byte span of the match clipped to lines[idx], converted to
+		// visual columns relative to that line.
+		if start < lineStart {
+			start = lineStart
+		}
+		if end > lineEnd {
+			end = lineEnd
+		}
+		return byteIdxToVisualCol(lines[idx], start-lineStart), byteIdxToVisualCol(lines[idx], end-lineStart)
+	}
+	for _, loc := range markdownLinkRe.FindAllStringSubmatchIndex(combined, -1) {
+		textStart, textEnd := loc[2], loc[3]
+		if textEnd <= lineStart || textStart >= lineEnd {
+			continue
+		}
+		startCol, endCol := clip(textStart, textEnd)
+		if visualCol >= startCol && visualCol < endCol {
+			return urlLinkRegion{startCol: startCol, endCol: endCol, url: combined[loc[4]:loc[5]], markdown: true}, true
+		}
+	}
+	for _, loc := range urlCandidateRe.FindAllStringIndex(combined, -1) {
+		trimmed := stripURLTrailingPunct(combined[loc[0]:loc[1]])
+		if trimmed == "" || !looksLikeURL(trimmed) {
+			continue
+		}
+		start, end := loc[0], loc[0]+len(trimmed)
+		if end <= lineStart || start >= lineEnd {
+			continue
+		}
+		startCol, endCol := clip(start, end)
+		if visualCol >= startCol && visualCol < endCol {
+			return urlLinkRegion{startCol: startCol, endCol: endCol, url: trimmed, markdown: false}, true
+		}
+	}
+	return urlLinkRegion{}, false
+}

@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
+.PHONY: test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -188,6 +188,12 @@ clean:
 
 test:
 	go test ./...
+
+# Postgres integration tests (build tag pgintegration) against a throwaway
+# postgres:16 container, started with the docker CLI. Not part of `make test`,
+# which needs no server.
+test-postgres:
+	./scripts/test-postgres.sh
 
 # ── Models snapshot ──────────────────────────────────────────────────────────
 # Regenerate the embedded models.dev snapshot (gitignored build artifact) that

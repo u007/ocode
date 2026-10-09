@@ -1,4 +1,4 @@
-import { render, fireEvent, act, waitFor, screen } from "@testing-library/react";
+import { render, fireEvent, act, waitFor, screen, cleanup } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel, { writeClipboardText } from "./TerminalPanel";
@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
     _selectionChange: (() => void) | null;
     _customKeyHandler: ((ev: KeyboardEvent) => boolean) | null;
     selectionText: string;
+    selectionRange: { start: { x: number; y: number }; end: { x: number; y: number } } | undefined;
     element: HTMLElement | undefined;
     paste: (text: string) => void;
     selectAll: ReturnType<typeof vi.fn>;
@@ -46,6 +47,7 @@ vi.mock("@xterm/xterm", () => {
     rows = 24;
     options: Record<string, unknown> = {};
     selectionText = "";
+    selectionRange: { start: { x: number; y: number }; end: { x: number; y: number } } | undefined = undefined;
     element: HTMLElement | undefined = undefined;
     _selectionChange: (() => void) | null = null;
     _customKeyHandler: ((ev: KeyboardEvent) => boolean) | null = null;
@@ -63,6 +65,7 @@ vi.mock("@xterm/xterm", () => {
     });
     getSelection = vi.fn(() => this.selectionText);
     hasSelection = vi.fn(() => this.selectionText.length > 0);
+    getSelectionPosition = vi.fn(() => this.selectionRange);
     selectAll = vi.fn();
     onBell = vi.fn(() => ({ dispose: vi.fn() }));
     onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
@@ -631,6 +634,33 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
       input.remove();
     }
   });
+
+  it("leaves a copy from the find bar's input alone when xterm shows no selection", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+    // A drag leaves a snapshot behind; xterm then drops its own selection.
+    term.selectionText = "stale snapshot";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("stale snapshot"));
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+
+    const input = document.createElement("input");
+    host.appendChild(input);
+    input.focus();
+    const setData = vi.fn();
+    const event = new Event("copy", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { setData } });
+    fireEvent(input, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(setData).not.toHaveBeenCalled();
+  });
 });
 
 describe("terminal copy under a redrawing program (claude code over ssh)", () => {
@@ -639,7 +669,7 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   // selection every frame, so a later live read of getSelection() returns a
   // partial/mutated line set. The text the user saw at release must be what
   // every later copy path (Cmd+C, Edit-menu copy event) writes.
-  function fireKey(init: { key: string; metaKey?: boolean }) {
+  function fireKey(init: { key: string; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean }) {
     const term = h.terminals[0];
     const { key, ...modifiers } = init;
     const e = new KeyboardEvent("keydown", { key, ...modifiers, bubbles: true, cancelable: true });
@@ -753,6 +783,256 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
     term.selectionText = "released outside";
     act(() => term._selectionChange?.());
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("released outside"));
+  });
+
+  it("right-click → Copy copies the word xterm selected even though the mouse-up report cleared it (mouse-tracking app)", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    // claude code has ?1000/?1006 on: xterm's contextmenu listener selects
+    // the word under the cursor, then the button-release mouse report counts
+    // as user input and xterm clears that selection again before the user
+    // can reach the menu.
+    fireEvent.mouseDown(host, { button: 2, clientX: 20, clientY: 20 });
+    term.selectionText = "word";
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+    fireEvent.mouseUp(host, { button: 2, clientX: 20, clientY: 20 });
+
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(false);
+    fireEvent.mouseDown(copy);
+    fireEvent.mouseUp(copy);
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("word");
+    expect(screen.queryByText("Copy")).toBeNull();
+  });
+
+  it("right-click → Copy after a scrollback trim dropped the selection still copies the dragged text", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "scrolled away";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("scrolled away"));
+    writeText.mockClear();
+    await new Promise((r) => setTimeout(r, 300));
+
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("scrolled away");
+    expect(screen.queryByText("Copy")).toBeNull();
+  });
+
+  it("a plain left click in the terminal drops the snapshot (user deselected)", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "old";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("old"));
+    writeText.mockClear();
+
+    term.selectionText = "";
+    fireEvent.mouseDown(host, { clientX: 30, clientY: 30 });
+    act(() => term._selectionChange?.());
+    fireEvent.mouseUp(host, { clientX: 30, clientY: 30 });
+
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("a key that reaches the pty drops the snapshot; bare modifiers and Cmd-combos do not", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "typed over";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("typed over"));
+    writeText.mockClear();
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+
+    fireKey({ key: "Shift" });
+    fireKey({ key: "ArrowUp", metaKey: true });
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    fireKey({ key: "a" });
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("right-click over the dragged range keeps the mouse-up snapshot, not the rewritten rows", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "line one\nline two\nline three";
+    term.selectionRange = { start: { x: 0, y: 1 }, end: { x: 10, y: 3 } };
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 40 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 40 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("line one\nline two\nline three"));
+    writeText.mockClear();
+    // Past the same-text duplicate-copy window, so the Copy below is a real write.
+    await new Promise((r) => setTimeout(r, 300));
+
+    // The Ink redraw rewrote the rows under the still-highlighted range.
+    term.selectionText = "line one\n\n";
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("line one\nline two\nline three");
+  });
+
+  it("right-click that selects a word over a NEW range replaces the snapshot", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "dragged";
+    term.selectionRange = { start: { x: 0, y: 1 }, end: { x: 7, y: 1 } };
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("dragged"));
+    writeText.mockClear();
+
+    term.selectionText = "word";
+    term.selectionRange = { start: { x: 3, y: 9 }, end: { x: 7, y: 9 } };
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 90 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("word");
+  });
+
+  it("a right-button press/release never copies the word rightClickSelectsWord picked", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    fireEvent.mouseDown(host, { button: 2, clientX: 20, clientY: 20 });
+    term.selectionText = "wordUnderCursor";
+    act(() => term._selectionChange?.());
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    fireEvent.mouseUp(host, { button: 2, clientX: 20, clientY: 20 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(writeText).not.toHaveBeenCalled();
+    // The word is still offered to the menu's Copy.
+    expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("a press on the panel's own chrome leaves the snapshot alone", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "keep across chrome click";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("keep across chrome click"));
+    writeText.mockClear();
+    await new Promise((r) => setTimeout(r, 300));
+
+    fireKey({ key: "f", metaKey: true });
+    const findInput = await screen.findByRole("search");
+    fireEvent.mouseDown(findInput, { clientX: 300, clientY: 10 });
+    fireEvent.mouseUp(findInput, { clientX: 300, clientY: 10 });
+
+    term.selectionText = "keep\n\n";
+    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
+    expect(writeText).toHaveBeenCalledWith("keep across chrome click");
+  });
+
+  it("Ctrl+C as SIGINT, Cmd+V and Shift+Enter all drop the snapshot", async () => {
+    for (const key of [
+      { key: "c", ctrlKey: true },
+      { key: "v", metaKey: true },
+      { key: "Enter", shiftKey: true },
+    ]) {
+      // Distinct text per iteration: same-text writes inside the duplicate
+      // window are dropped.
+      const text = `typed over ${key.key}`;
+      cleanup();
+      writeText.mockClear();
+      h.terminals.length = 0;
+      h.sockets.length = 0;
+      const { container } = render(<Panel />);
+      const term = h.terminals[0];
+      await act(async () => {
+        h.sockets[0]?.onopen?.();
+      });
+      const host = container.firstElementChild as HTMLElement;
+
+      term.selectionText = text;
+      fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+      fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+      fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(text));
+      term.selectionText = "";
+      act(() => term._selectionChange?.());
+
+      fireKey(key);
+      fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+      expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled, JSON.stringify(key)).toBe(true);
+    }
   });
 
   it("drops the snapshot once the selection is cleared so Ctrl+C sends SIGINT again", async () => {

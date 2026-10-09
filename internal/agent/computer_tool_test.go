@@ -11,7 +11,7 @@ func TestAgentHidesComputerToolUntilSupervisorAttached(t *testing.T) {
 	cfg := &config.Config{Ocode: config.OcodeConfig{
 		ComputerUse: config.ComputerUseConfig{Enabled: true},
 	}}
-	ag := NewAgent(nil, []tool.Tool{&tool.ComputerTool{Config: cfg}}, cfg, nil)
+	ag := newTestAgent(nil, []tool.Tool{&tool.ComputerTool{Config: cfg}}, cfg, nil)
 	defer ag.Shutdown()
 
 	if ag.isToolAllowed("computer") {
@@ -37,7 +37,7 @@ func TestAgentAttachesWindowToolWithComputerDriver(t *testing.T) {
 	cfg := &config.Config{Ocode: config.OcodeConfig{
 		ComputerUse: config.ComputerUseConfig{Enabled: true},
 	}}
-	ag := NewAgent(nil, []tool.Tool{&tool.ComputerTool{Config: cfg}, &tool.WindowTool{Config: cfg}}, cfg, nil)
+	ag := newTestAgent(nil, []tool.Tool{&tool.ComputerTool{Config: cfg}, &tool.WindowTool{Config: cfg}}, cfg, nil)
 	defer ag.Shutdown()
 
 	if ag.isToolAllowed("window") {

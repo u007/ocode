@@ -276,7 +276,7 @@ func newNetworkGuardAgent(t *testing.T, reply string, status int) (*Agent, *netw
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("k", "jev-latest", srv.URL)
 	}
-	return NewAgent(nil, nil, cfg, nil), h
+	return newTestAgent(nil, nil, cfg, nil), h
 }
 
 func (h *networkGuardHarness) count() int {
@@ -458,7 +458,7 @@ func TestNetworkGuardFailsOpenWithoutTypesafeClient(t *testing.T) {
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("", "jev-latest", "http://127.0.0.1:1")
 	}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	res := a.checkNetworkGuard("webfetch", json.RawMessage(`{"url":"https://example.com/x"}`))
 	if res.Escalate {
 		t.Fatalf("an unconnected provider must not block: %+v", res)

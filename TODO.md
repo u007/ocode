@@ -1,5 +1,70 @@
 # TODO
 
+## Open: review-fix follow-ups (2026-10-09)
+
+- Pulse `session_send` is atomic only against async turns. A synchronous `runTurn` sets
+  `IsTurnActive` without `turnInFlight`, so a send can still start behind one in the gap
+  between the `IsTurnActive` read and dispatch. Closing it needs the sync path to register
+  in `turnInFlight` too. See `handler.go` (`HandleSendMessage`) and `agent_session.go`
+  (`dispatchTurnWithRewind`).
+- `Handler.dbWriteGuard` (`internal/server/handler_db.go`) still allows a write when the data
+  dir cannot be resolved. `sqliteWriteGuard` now refuses in that case. Align the two.
+- `internal/config/storage_connectors.go` writes plaintext JSON. Its comment says encryption
+  is planned. Encryption and the `CONNECTOR_SESSION_KEY_REF` wiring are not built. The file
+  and its test are untracked, so review them before committing.
+- Line anchors in `docs/` that cite `handler.go`, `agent_session.go`, `session.go`,
+  `dbconnect.go`, and `handler_dbconnect*.go` may have drifted from this round's edits.
+  Re-derive them per the knowledge-system rule. Only the port-forward gotcha and DB connector
+  pages were checked in this pass.
+
+## DONE: Remote Git tab: C-quoted non-ASCII names and unquoted specs (2026-10-09)
+
+Remote listings decode git's C-quoting per line, remote command args that embed a spec are
+shell-quoted, and remote untracked patches are read despite `diff --no-index` exiting 1.
+Details and regression tests: `docs/gotchas/git-status-c-quoted-paths.md`.
+
+Still open, from the same work:
+- Remote git pathspecs with `*`, `?`, `[`, a leading `:` or a drive prefix are still refused
+  (git glob and pathspec syntax, which quoting does not neutralize). Metacharacters such as
+  `& ' " ; $ # ( )` are accepted since 2026-10-09; see the gotcha.
+- `nonEmptyLines` trims trailing spaces from listed names on the remote side.
+- The ignore endpoint's `gitignoreUnquotePath` decode still mis-decodes a raw name that begins
+  and ends with `"`. Removing it needs sign-off, together with `TestGitIgnoreUnquotesCPath`.
+
+## Test suite speed: remaining work (2026-10-08)
+
+Done this pass (`skills/test-suite-cleanup`, see its plan/verify artifacts in
+`.test-doctor/`): `internal/tui` 206s → ~104s and `internal/agent` 584s → ~144s,
+both `-race` green, by (a) `newTestAgent`/`newTestModel` preloading a stub context so
+`BasePromptMessages` no longer spawns git ~5× per sidebar render / `Step`, (b)
+bounding the two permission race tests by a 300ms deadline instead of 300/400 rounds
+against hot-spinning writers (123s and 413s → ~3s), (c) deleting two committed
+`zz_tmp_probe*_test.go` probes, (d) moving the five env-gated live evals behind
+`//go:build integration`, (e) folding 35 data-variant tests into 8 table tests.
+Per-test coverage isolation found ~40% of both packages coverage-redundant, but
+those are pure-function assertions costing microseconds: deleting them buys no time.
+
+- **Environment, not code:** `/usr/bin/git` is the Xcode shim at ~130–270ms per
+  spawn; no homebrew git on PATH. `internal/server`'s git-fixture tests
+  (`TestResolveConflict*`, `TestGitOperation*`, 10–30s each) are bound by it. A
+  `brew install git` first on PATH should roughly halve that package; measure with
+  `testdoctor.py timing --go ./internal/server` before touching tests there.
+- **Prod perf, needs a decision:** every TUI sidebar render before the first turn
+  calls `agent.LoadContext` via `currentContextEstimate` → `BasePromptMessages`
+  (git show/diff per context file + rev-parse). Either cache the loaded context on
+  the agent for a short TTL or stat the file before shelling out to git; both change
+  prod semantics slightly, so not done here.
+- **Order-dependent / flaky in `internal/agent`, found by isolation runs:**
+  `TestPermissionJudgeLog_RegistrationIsIdempotent` fails alone (expects
+  `permission-judge.log` another test created); `TestChatWithContext_CancellationInterruptsRetry`
+  fails alone on timing (826ms > 500ms budget). Both pass in the full suite.
+- **`internal/server` and `web/` not pruned.** Server needs the git fix first;
+  web's `plan` needs `@vitest/coverage-v8` added as a pinned devDependency.
+- **Pre-existing failure:** `internal/version TestVersionMatchesChangelog` fails
+  because `CHANGES.md` has no bump entry for 0.8.128. Unrelated to tests.
+- Optional further merges (`.test-doctor/all/smells.json` → `same_shape_groups`):
+  ~45 remaining 2–4-member data-variant groups across `internal/`; LOC only.
+
 ## Web/desktop `/btw` side query — live checks partly run (2026-10-07)
 
 Verified live against a REAL provider on the local server (`ocode serve`, session
@@ -3528,13 +3593,12 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
   both the operation state and the conflict list), so a revert is a deliberate
   act rather than a cleanup.
 
-- [ ] **Remote conflicted paths containing `:` cannot be resolved.**
-  `remoteSafeSpec` (`internal/server/handler_remote_work.go:547`) rejects `:`
-  among many other characters, but a colon is legal in a git path, so such a
-  file is unresolvable on a remote project. The endpoint surfaces the
-  validator's error rather than skipping the file silently. Fixing it means
-  replacing the broad denylist with a strict allowlist — a deliberate security
-  change, not a drive-by edit.
+- [x] **Remote conflicted paths containing `:` cannot be resolved.** Resolved 2026-10-09 for
+  git endpoints, conflict resolve included: they validate with `remoteGitSpec`, which allows a
+  colon inside a path and shell-quotes the spec at the command site
+  (`remoteQuoteSpecPath`). Still refused: a leading `:` (pathspec magic), a drive prefix, and
+  glob characters. File operations keep `remoteSafeSpec`. See
+  `docs/gotchas/git-status-c-quoted-paths.md`.
 
 
 Plan: `.opencode/plans/2026-09-25-git-conflicts-and-operations/` (INDEX.md
@@ -3677,22 +3741,16 @@ open below.
   the `gitOperationCommand(kind, action)` arguments — the last is a real bug
   this phase actually had, and it failed 3 tests.
 - [ ] **Remote conflict-resolution limitation (real, by design, not a bug).**
-  `remoteSafeSpec` rejects the characters `'";` + backtick + `$&|<>\!*?[](){}#:`
-  and control chars, so a remote conflict on a file whose name contains any of
-  them **cannot be resolved** through the web UI, even though the same file
-  resolves fine locally (the local path uses `GIT_LITERAL_PATHSPECS=1` plus
-  `resolveRepoPath`). This blocks common paths such as `app/[slug]/page.tsx`,
-  `(group)/layout.tsx` and any name with a colon.
-  **The validator is deliberately NOT relaxed here:** it is shared by every
-  remote git mutation, so loosening it for conflicts would widen the
-  shell-injection guard for unrelated endpoints. The current behavior is a
-  clear 400 carrying the validator's reason, with the file left untouched —
-  pinned by `TestRemoteGitResolveConflictRefusesPathspecMagicName`.
-  To actually fix this, the right change is a *transport* that passes the path
-  via stdin or argv rather than interpolating it into a shell string (as
-  `remoteGitHunk` already does for its patch), not a weaker character filter.
-  Until then the honest options for a user are to resolve that one file in a
-  terminal on the host, or to rename it.
+  Git endpoints validate with `remoteGitSpec` (2026-10-09): shell metacharacters such as
+  `'";$&|<>!(){}#` pass because the spec is shell-quoted at the command site. Still refused:
+  `*`, `?`, `[`, a leading `:` and a drive prefix. So `(group)/layout.tsx` and mid-path colons
+  now resolve, while `app/[slug]/page.tsx` still cannot.
+  The remaining refusals are deliberate: glob characters and a leading `:` change what git
+  matches, and quoting does not neutralize them. The current behavior is a clear 400 carrying
+  the validator's reason, with the file left untouched, pinned by
+  `TestRemoteGitResolveConflictRefusesPathspecMagicName`. Relaxing the globs would need
+  `GIT_LITERAL_PATHSPECS=1` on the remote command, which the conflict commands already set.
+  Until then, a `[slug]` file is resolved in a terminal on the host or renamed.
 - [x] **Phase 06 — web UI.** Conflicts section + operation banner, and
   rebase-aware button labels (ours/theirs are swapped during a rebase).
   **DONE + VERIFIED 2026-09-25.** `api.gitResolveConflict` + `api.gitOperation`
@@ -5759,11 +5817,58 @@ priority order (line anchors verified 2026-10-06; expect drift):
 - [ ] Validate `webforms-tuning-deepseek-v4.1-flash` WITH the skill: closed-book re-run on
   `_prompts/webforms.md` with the skill body prepended (target safety/widgets >= 0.9) and a
   live probe run; the skill was written from the scorecard but has not been re-measured.
-- [ ] Other models: `mimo-v2.6-flash` is running (`probe/runs/mimo1`); `space-bunny-free` and
-  `glm-5.3-flash` not started. Each needs closed-book -> grade -> derive -> with-skill.
+- [ ] Other models: `mimo-v2.6-flash` has a closed-book score (95.1%) and a derived skill; its
+  with-skill sweep is `probe/runs/mimo-v2.6-flash`. `space-bunny-free` and `glm-5.3-flash` not started.
+  Each needs closed-book -> grade -> derive -> with-skill.
 - [ ] The Greenhouse task depends on a live posting and its `question_*` ids; re-verify the
   posting before comparing runs made weeks apart (see `probe/README.md`).
 - [ ] Install the new htrcli (`make htrcli-install` in how-to-recorder): `~/go/bin/htrcli` is
   still the old build; the probe uses `probe/htrhome/htrcli-bin`.
 - [ ] Single run per task is noisy (wall time is dominated by model latency); repeat
   disagreeing tasks before concluding.
+
+## Cloud connectors (design in progress — 2026-10-08)
+- Scope: both global + per-project (global keychain tokens + per-project `.ocode/storage-connectors.json` overrides); separate virtual root per connector (`gdrive://...`, `s3://bucket/...`, `onedrive://...`, `gcs://...`).
+- Phase 1 (blocked): connector framework + settings UI + Drive + S3 read-only browse/open.
+- Phase 2 (deferred): OneDrive + GCS.
+- Phase 3 (deferred): full write/upload/delete + conditional conflict handling + sandbox gating.
+- Credentials: OS keychain (NOT ocodeconfig.json); metadata only in JSON settings.
+- .env.example: add GDRIVE_CLIENT_ID / S3_BUCKET references (no secrets).
+- Docs: `docs/cloud-connectors-design.md` is a non-bundle design spec; bundle index (`docs/index.md`) unchanged until Phase 1 merged.
+- DB connector web sub-tab (DB session view with picker + SQL editor) — deferred from P1 core (tab added, content deferred). See docs/concepts/db-connector.md, .opencode/plans/2026-10-08-db-connector-spec.md.
+
+## DB connector — status (2026-10-09)
+Shipped: saved Postgres connections (encrypted in `ocodeconfig.json`), per-panel unlock, table list (paged), table data view (sort, read-only filter, paged, insert/update/delete by primary key; a table without a primary key is read-only), SQL editor with confirmed writes (incl. `RETURNING` rows, labelled "returned"). Concept doc: `docs/concepts/db-connector.md`.
+
+Automated: `make test-postgres` runs the `pgintegration` build-tag suites in `internal/dbconnect/pg_integration_test.go` and `internal/server/handler_dbconnect_pg_integration_test.go` against a throwaway `postgres:16` container started with the docker CLI. Each test gets its own database, dropped afterwards. The same suites run as the `postgres` job in `.github/workflows/ci.yml`. Not part of `make test`.
+
+Open:
+- **CI `postgres` job has not run on GitHub.** It was added on 2026-10-09. The first run can still fail on runner details (service health check, port mapping). Local runs pass.
+- **Browser pass is manual.** The stacked layout (below 444px of table-and-data width) was checked by hand in headless Chrome, not in an automated test. The width decisions are unit tested.
+- **`rows_affected` for `WITH … DELETE … SELECT`** counts the rows the SELECT returned. The Postgres command tag reports only the top-level statement, so the deleted-row count is not available without the native pgx write path. The panel says "returned", not "affected". Pinned by `TestPGDataModifyingCTEReportsReturnedRows`.
+
+Decided (2026-10-09):
+- **Single-statement confirmed writes, by design.** A confirmed batch would need a lexical splitter, which the design avoids, or the simple protocol. The simple protocol lets `COMMIT; DELETE …` commit and then run the DELETE outside the transaction, which is the escape the read-only checks close. Batches happen only if the user asks for them after hearing this.
+- **No pre-write snapshot or undo.** Not feasible for arbitrary remote SQL. The confirm dialog says the change is permanent.
+- **Row CRUD is not available for tables without a primary key**, the same rule as SQLite's no-rowid case.
+
+Decided (2026-10-09): connection secrets use `ocodeconfig.json#db.connections` with per-envelope Argon2id via `internal/encryption` (not `internal/vault`, not keychain); the sync of encrypted URLs to the hub follows from that. Connections are managed in the DBPanel, not Connectors settings (the Connectors spec has no database coverage).
+
+## Encryption wrapper — partial package, no callers (2026-10-08)
+- `internal/encryption/envelope.go` + `envelope_test.go`: AES-256-GCM + Argon2id settings encryption.
+- No importers yet; package exists but is unconnected (see cloud-connectors design).
+- `.env.example` missing; must be added before any settings save that references keychain/session keys.
+
+## Remote SSH reverse tunnel (`-R`) — implemented, follow-ups (2026-10-09)
+
+Implemented: `ssh -R` port forwards for the remote host to reach the desktop's local htrcli relay (`:3845`) and Chrome CDP (`:9222`). Entry points: `/port add -R <remotePort>[:<localPort>]`, and `"reverse": true` on `POST /api/portmaps` and `POST /api/desktop/portmaps`. Persisted as `projects.PortMap.Reverse` (`omitempty`, no migration). Rules and security notes: `docs/gotchas/port-forwards-url-composition-and-supervisor-restart.md` §6.
+
+Follow-ups, not done:
+- Web panel add form has no direction toggle (`web/src/components/Layout/PortMapsWidget.tsx`). Reverse rows are labelled, but can only be created from the CLI or API.
+- Not verified live: no real `ssh -R` run against a remote host. Reverse readiness ("still alive after the probe budget") is an estimate, not proof the remote bind works.
+- Desktop add path has no WSL pre-check. `ForwardManager.Start` refuses a reverse forward on a non-SSH target only after the entry is saved, so the response is 502 "saved, but failed to open now". Confirm whether a desktop workspace can ever be non-SSH; if not, drop the question.
+- The reverse forward has no auth of its own. Anything on the remote host's loopback can drive the desktop's CDP port (§6 Security).
+
+## Terminal touch scroll: SGR-only wheel reports, no momentum (2026-10-09)
+
+`TerminalPanel.tsx` touch handler (`onTouchMove`) scrolls scrollback via `term.scrollLines`, and when a TUI owns the mouse (`modes.mouseTrackingMode !== "none"`) sends SGR (1006) wheel reports via `term.input`. Not done: apps that enable mouse tracking without SGR encoding (X10/UTF-8) get a report they will not parse (xterm exposes no public encoding mode); alt-screen apps with NO mouse tracking get nothing (xterm's own wheel path sends arrow keys there; touch does not); no inertia/momentum after the finger lifts. See `docs/gotchas/terminal-touch-scroll-xterm6.md`.

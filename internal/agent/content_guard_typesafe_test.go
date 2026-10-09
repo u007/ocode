@@ -21,7 +21,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestContentGuardScopeIncludesOnlyRemoteContent(t *testing.T) {
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.mcpTools = map[string]struct{}{"github_create_issue": {}}
 
 	cases := []struct {
@@ -261,7 +261,7 @@ func TestContentGuardFailureIsReportedNotSilent(t *testing.T) {
 // An unconfigured judge is "absent, not disabled" — pass through with no failure
 // claim, because nothing was supposed to run.
 func TestContentGuardUnconfiguredIsNotReportedAsFailure(t *testing.T) {
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -324,7 +324,7 @@ func newContentGuardAgent(t *testing.T, h *contentGuardHarness) *Agent {
 	}))
 	t.Cleanup(srv.Close)
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -440,7 +440,7 @@ func TestContentGuardFailsOpenWhenJudgeErrors(t *testing.T) {
 func TestContentGuardPassesThroughWhenJevNotConfigured(t *testing.T) {
 	// No TypeSafe key => no judge client => "absent, not disabled". The result
 	// must be delivered untouched and no request made.
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {

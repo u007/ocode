@@ -221,7 +221,7 @@ func TestExplainBashCommandDescribesControlFlow(t *testing.T) {
 func TestPermissions_BenignLoopNeedsNoJudge(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.Permissions().SetAutoPermissionEnabled(true)
 	a.AddTools([]tool.Tool{&MockTool{name: "bash", result: "ran"}})
 
@@ -276,7 +276,7 @@ func TestExplainBashCommandIsSilentForUnlistedHeads(t *testing.T) {
 }
 
 func TestPermissionContextOmitsCommandAnalysisForUnlistedHeads(t *testing.T) {
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	args := json.RawMessage(`{"command":"cd /tmp/x && git log --oneline -1 main"}`)
 	// The byte budget is generous on purpose: the roots list scales with the
 	// length of the home path, and at 4096 a longer home (the package's isolated

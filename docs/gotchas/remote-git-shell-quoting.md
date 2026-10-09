@@ -1,7 +1,7 @@
 ---
 type: Gotcha
 title: Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract)
-description: Free-form git messages passed to remoteGitCommand must be shell-quoted by the caller; pathspecs from remoteSafeSpec must not be.
+description: Free-form git messages and git pathspecs passed to remoteGitCommand must be shell-quoted by the caller; remote lookups against path sets keep the raw spec.
 tags:
   - remote
   - git
@@ -36,7 +36,16 @@ Local mutations are unaffected: they call `gitRunInDir(dir, args...)`, which pas
 
 **ANY** free-form argument (commit message, stash message, a ref, a branch name) passed to `remoteGitCommand` **must** be wrapped with `remote.ShellQuote` by the caller.
 
-Pathspecs produced by `remoteSafeSpec` are already metachar-free and **must not** be pre-quoted — double-quoting breaks rev resolution (e.g. `remote.ShellQuote(rev)+"^{commit}"` would literalize the `^{commit}` suffix).
+**Pathspecs are quoted too** (2026-10-09). A git pathspec is validated by `remoteGitSpec`, which
+allows shell metacharacters, so the quoting at the command site is the guard. Quote with
+`remoteQuoteSpecs` (a list) or `remoteQuoteSpecPath` (one spec) only where the spec becomes a
+command argument. Keep the raw spec where it is compared against a path set, such as
+`remoteRestoreStashPaths`, because a quoted value would not match. Do not pre-quote a rev that
+already carries a suffix: `remote.ShellQuote(rev)+"^{commit}"` is correct, but quoting the suffix
+too would literalize `^{commit}`.
+
+File operations are different. Their callers do not quote, so `remoteSafeSpec` stays strict for
+them (`handler_remote_fs.go`).
 
 ## Tests
 
@@ -51,6 +60,13 @@ Pathspecs produced by `remoteSafeSpec` are already metachar-free and **must not*
 | `TestStashPushArgsOmitEmptyMessage` | Empty stash message is omitted, not passed as `-m ""` |
 
 These run through the fake-SSH shim (`installFakeSSH` in `handler_remote_git_test.go`), which translates `ssh` → `/bin/sh -c`, so real word-splitting is exercised — not a mock assertion.
+
+Pathspec quoting is pinned by `internal/server/handler_remote_git_injection_test.go`
+(`TestRemoteGitCanaryPathsStayLiteral`). A canary filename full of metacharacters goes through
+stage, unstage, discard, commit, stash push and apply, hunk stage, and the diff path filter.
+After each call the test fails if a `PWNED*` file appeared in the repo or the test directory.
+Mutation check: removing `remoteQuoteSpecs` from the remote stage argv fails the test with
+`shell injection: canary command created [...PWNED...]`. Conflict resolve is not covered.
 
 ## See also
 

@@ -130,7 +130,7 @@ func TestSubAgentSpec_InheritsModelAndSamplingParams(t *testing.T) {
 		TopP:        &top,
 	}
 	// Mirror what TaskTool.Execute does after the fix:
-	sub := NewAgent(parent.client, nil, nil, nil)
+	sub := newTestAgent(parent.client, nil, nil, nil)
 	sub.SetSpec(&subAgentSpec)
 
 	if sub.spec == nil {

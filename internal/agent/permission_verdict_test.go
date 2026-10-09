@@ -172,7 +172,7 @@ func TestParsePermissionVerdict(t *testing.T) {
 func TestVerifyAutoGrantGuardrails(t *testing.T) {
 	wd := t.TempDir()
 	cfg := &config.Config{}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.permissions.SetWorkDir(wd)
 
 	inRoot := filepath.Join(wd, "notes.txt")
@@ -222,7 +222,7 @@ func TestAskPermissionModelRepromptRecovery(t *testing.T) {
 	newAgentWithScript := func(responses []string) (*Agent, *scriptedCaptureClient) {
 		cfg := &config.Config{}
 		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		client := &scriptedCaptureClient{Responses: responses}
 		prevClientFn := newClientFn
 		t.Cleanup(func() { newClientFn = prevClientFn })
@@ -280,7 +280,7 @@ func TestAskPermissionModelRepromptRecovery(t *testing.T) {
 func TestConsultPermissionModelFiresOnPermissionCheck(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prevClientFn := newClientFn
 	t.Cleanup(func() { newClientFn = prevClientFn })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -307,7 +307,7 @@ func TestConsultPermissionModelReportsUnconsulted(t *testing.T) {
 	t.Run("client creation fails", func(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		prevClientFn := newClientFn
 		t.Cleanup(func() { newClientFn = prevClientFn })
 		newClientFn = func(_ *config.Config, _ string) LLMClient { return nil }
@@ -324,7 +324,7 @@ func TestConsultPermissionModelReportsUnconsulted(t *testing.T) {
 	t.Run("real verdict is consulted", func(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		prevClientFn := newClientFn
 		t.Cleanup(func() { newClientFn = prevClientFn })
 		newClientFn = func(_ *config.Config, _ string) LLMClient {

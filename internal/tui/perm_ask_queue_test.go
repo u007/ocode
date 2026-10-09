@@ -54,8 +54,8 @@ func permAskToolMsg(t *testing.T, toolCallID, toolName, command string) agent.Me
 // the dialog geometry is real, and theme styles so rendering does not panic.
 func newPermQueueTestModel(t *testing.T) model {
 	t.Helper()
-	m := newModel()
-	m.agent = agent.NewAgent(nil, nil, &config.Config{}, nil)
+	m := newTestModel()
+	m.agent = newTestAgent(nil, nil, &config.Config{}, nil)
 	m.ready = true
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = upd.(model)

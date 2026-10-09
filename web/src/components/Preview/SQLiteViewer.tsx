@@ -115,7 +115,7 @@ function Cell({ value, onOpenBlob }: { value: DBCell; onOpenBlob?: () => void })
 }
 
 /** Shared result-grid renderer for the Data and Query tabs. */
-function ResultGrid({
+export function ResultGrid({
   result,
   testId,
   renderRowActions,
@@ -1349,6 +1349,7 @@ export default function SQLiteViewer({ path, projectRoot, projectHost, revision 
           initial={rowEdit.index == null ? null : rowByName(table.result.rows[rowEdit.index])}
           busy={rowBusy}
           error={rowError}
+          parseInput={inputToCell}
           onCancel={() => setRowEdit(null)}
           onSubmit={saveRow}
         />

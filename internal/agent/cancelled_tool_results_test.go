@@ -75,7 +75,7 @@ func TestStepCancelDuringToolRoundEmitsResultForEveryCall(t *testing.T) {
 	client := &oneShotClient{tcs: []ToolCall{tc1, tc2}}
 	slow := &cancelBlockingTool{name: "slow_tool", started: make(chan struct{}), release: make(chan struct{})}
 	second := &cancelBlockingTool{name: "second_tool", started: make(chan struct{}), release: make(chan struct{})}
-	a := NewAgent(client, []tool.Tool{slow, second}, nil, nil)
+	a := newTestAgent(client, []tool.Tool{slow, second}, nil, nil)
 	a.permissions = nil
 
 	done := make(chan struct{})
@@ -134,7 +134,7 @@ func TestStepCancelBeforeFirstToolAnswersLaterCalls(t *testing.T) {
 
 	client := &oneShotClient{tcs: []ToolCall{tc}}
 	never := &cancelBlockingTool{name: "never_runs", started: make(chan struct{}), release: make(chan struct{})}
-	a := NewAgent(client, []tool.Tool{never}, nil, nil)
+	a := newTestAgent(client, []tool.Tool{never}, nil, nil)
 	a.permissions = nil
 
 	// Cancel BEFORE Step runs: the sequential loop's isCancelled() guard fires

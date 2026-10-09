@@ -2,19 +2,17 @@ package agent
 
 import "testing"
 
-// TestDecider_TypesafeSatisfiesInterface pins the property that makes the whole
-// Decider seam cheap: TypesafeClient already declares all four methods, so
-// widening the judges to an interface is a signature change, not a rewrite.
-// If a future refactor renames or re-signs any of these, this fails to compile.
-func TestDecider_TypesafeSatisfiesInterface(t *testing.T) {
-	var _ Decider = (*TypesafeClient)(nil)
-}
-
 // TestDecider_SlotModelDefaults pins the invariant that an unconfigured install
 // behaves identically to today: every slot resolves to Jev. Part 02 of the plan
 // replaces slotModel's body with a config lookup; this test is what proves that
 // lookup defaults back to the same value rather than to "" (a "" model would make
 // resolveDecider return nil and silently disable every judge).
+// Both decision backends must satisfy Decider; checked at compile time.
+var (
+	_ Decider = (*TypesafeClient)(nil)
+	_ Decider = (*ClefClient)(nil)
+)
+
 func TestDecider_SlotModelDefaults(t *testing.T) {
 	a := &Agent{}
 	slots := []judgeSlot{

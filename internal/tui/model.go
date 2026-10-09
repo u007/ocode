@@ -1548,6 +1548,7 @@ type model struct {
 	streamWasInterrupted     bool
 	transcriptLines          []string
 	rawTranscriptLines       []string
+	rawTranscriptCont        []bool                      // parallel to rawTranscriptLines: true when the line is a hard-wrap continuation of the previous one (see wrapViewMarked)
 	urlLinkRegions           []urlLinkRegion             // clickable [text](url) markdown-link targets, indexed by absolute transcript line. Markdown links drop the URL during rendering (so rawTranscriptLines can't detect them); these regions restore clickability.
 	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for hidden messages outside the window). Used to scroll to a chat-search match.
 	transcriptWindowStart    int                         // first message index rendered in the transcript window; always >= 0 once initialized (0 = show all). Never -1: -1 is reserved for transcriptMsgStartLine entries meaning "hidden".
@@ -7682,7 +7683,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if m.sel.dragging {
 			m.sel.dragging = false
 			if m.sel.active {
-				text := extractSelectionText(m.rawTranscriptLines, m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
+				text := extractSelectionTextCont(m.rawTranscriptLines, m.rawTranscriptCont, m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
 				m.sel = selectionState{}
 				m.applyOrClearSelectionHighlight()
 				return m, copyToClipboard(text), true
@@ -11773,6 +11774,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.invalidateDelayedChatInput()
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
+	m.rawTranscriptCont = nil
 	m.urlLinkRegions = nil
 	m.sel = selectionState{}
 	m.resetTranscriptWindow()
@@ -15175,7 +15177,7 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
 		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
 			lang := strings.TrimPrefix(req.Prefix, "bash.interpreter.")
-			lines = append(lines, fmt.Sprintf("Always-rule scope: interpreter execution %q (stores bash prefix %q)", lang, req.Prefix))
+			lines = append(lines, fmt.Sprintf("Always-rule scope: exact %s script grant (file hash + command + cwd)", lang))
 		} else {
 			lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q (all `%s ...` commands)", req.Prefix, req.Prefix))
 		}
@@ -15533,6 +15535,14 @@ type permDirtyFlags struct {
 // would claim a rule that does not exist. The caller's control flow must not
 // change: the approved call still runs, only the reporting differs.
 func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.PermissionLevel) error {
+	if level == agent.PermissionAllow && strings.HasPrefix(req.Prefix, "bash.interpreter.") {
+		// A per-language prefix rule is never read back (Decide always routes
+		// interpreter runs through the judge), so persist an exact script grant.
+		if m.agent == nil || m.agent.Permissions() == nil {
+			return fmt.Errorf("no permission manager")
+		}
+		return m.agent.Permissions().PersistInterpreterScriptGrant(req.Command, m.persistAutoGrant)
+	}
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
 		if err := agent.ValidateBashPrefixRule(req.Prefix, level); err != nil {
 			return fmt.Errorf("bash prefix %q cannot be stored: %w", req.Prefix, err)
@@ -17254,8 +17264,8 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 	case req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "":
 		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
 			lang := strings.TrimPrefix(req.Prefix, "bash.interpreter.")
-			lines = append(lines, fmt.Sprintf("Persist an interpreter rule: always allow %q interpreter executions.", lang))
-			lines = append(lines, fmt.Sprintf("Stores bash prefix %q for future calls.", req.Prefix))
+			lines = append(lines, fmt.Sprintf("Persist an exact %s script grant: this script file, this exact command, this directory.", lang))
+			lines = append(lines, "Stops matching if the file changes. Heredoc and inline code cannot be saved.")
 		} else {
 			lines = append(lines, fmt.Sprintf("Persist a bash-prefix rule: always allow `%s ...` (all commands starting with %q).", req.Prefix, req.Prefix))
 		}
@@ -17886,6 +17896,7 @@ type msgRenderCacheEntry struct {
 	// region line counter without re-scanning bytes.
 	wrapped  []string
 	stripped []string
+	cont     []bool // parallel to wrapped: hard-wrap continuation flags (wrapViewMarked)
 	nl       int
 }
 
@@ -17956,7 +17967,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			block = m.buildToolOutputBox(toolName, hit.innerContent, hit.rawLineCount, expanded)
 		case hit.kind == blockKindPlain && msg.role != roleUser:
 			// Assistant text blocks have no width-baked borders; re-wrap the cached block.
-			wrapped := strings.Split(wrapView(hit.block, width), "\n")
+			wrapped, cont := wrapViewMarked(hit.block, width)
 			stripped := make([]string, len(wrapped))
 			for j, ln := range wrapped {
 				stripped[j] = stripANSI(ln)
@@ -17964,7 +17975,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			entry := msgRenderCacheEntry{
 				key: key, innerContent: hit.innerContent,
 				block: hit.block, kind: hit.kind,
-				wrapped: wrapped, stripped: stripped, nl: hit.nl,
+				wrapped: wrapped, stripped: stripped, cont: cont, nl: hit.nl,
 			}
 			m.msgRenderCache[i] = entry
 			return entry
@@ -17977,7 +17988,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			block = m.styles.UserMessageBox.Width(bubbleWidth).Render(hit.innerContent)
 		}
 		if block != "" {
-			wrapped := strings.Split(wrapView(block, width), "\n")
+			wrapped, cont := wrapViewMarked(block, width)
 			stripped := make([]string, len(wrapped))
 			for j, ln := range wrapped {
 				stripped[j] = stripANSI(ln)
@@ -17985,7 +17996,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			entry := msgRenderCacheEntry{
 				key: key, innerContent: hit.innerContent, rawLineCount: hit.rawLineCount,
 				block: block, kind: hit.kind,
-				wrapped: wrapped, stripped: stripped, nl: strings.Count(block, "\n"),
+				wrapped: wrapped, stripped: stripped, cont: cont, nl: strings.Count(block, "\n"),
 			}
 			m.msgRenderCache[i] = entry
 			return entry
@@ -18035,7 +18046,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 	// messages on every streamed delta. Joining per-message wrapView output with
 	// the inter-message "\n\n" separator is byte-identical to wrapView over the
 	// full concatenation (wrapView is line-wise; escapes never span "\n").
-	wrapped := strings.Split(wrapView(block, width), "\n")
+	wrapped, cont := wrapViewMarked(block, width)
 	stripped := make([]string, len(wrapped))
 	for j, ln := range wrapped {
 		stripped[j] = stripANSI(ln)
@@ -18048,6 +18059,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 		kind:         kind,
 		wrapped:      wrapped,
 		stripped:     stripped,
+		cont:         cont,
 		nl:           strings.Count(block, "\n"),
 	}
 	m.msgRenderCache[i] = entry
@@ -18117,6 +18129,7 @@ func (m *model) renderTranscript() {
 		// case; this defends against other paths that lead here).
 		m.transcriptLines = nil
 		m.rawTranscriptLines = nil
+		m.rawTranscriptCont = nil
 		m.urlLinkRegions = nil
 		m.sel = selectionState{}
 		m.transcriptRenderedLen = len(m.messages)
@@ -18210,6 +18223,7 @@ func (m *model) renderTranscript() {
 	}
 	m.transcriptLines = make([]string, 0, (len(m.messages)-windowStart)*2+10)
 	m.rawTranscriptLines = make([]string, 0, (len(m.messages)-windowStart)*2+10)
+	m.rawTranscriptCont = make([]bool, 0, (len(m.messages)-windowStart)*2+10)
 	// Parallel to m.messages: for each message index, the first wrapped line of
 	// its block in transcriptLines. -1 for hidden messages outside the window.
 	// The chat-search jump-to-match uses this to scroll the viewport to the
@@ -18235,6 +18249,7 @@ func (m *model) renderTranscript() {
 		notice = truncateToWidth(notice, max(1, m.viewport.Width()))
 		m.transcriptLines = append(m.transcriptLines, notice)
 		m.rawTranscriptLines = append(m.rawTranscriptLines, stripANSI(notice))
+		m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 		nlAcc = 1
 	}
 	firstRendered := true
@@ -18244,6 +18259,7 @@ func (m *model) renderTranscript() {
 			nlAcc += 1 // one separator empty line
 			m.transcriptLines = append(m.transcriptLines, "")
 			m.rawTranscriptLines = append(m.rawTranscriptLines, "")
+			m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 		}
 		firstRendered = false
 		entry := m.renderMessageBlock(i, msg, toolNames)
@@ -18259,6 +18275,11 @@ func (m *model) renderTranscript() {
 		}
 		m.transcriptLines = append(m.transcriptLines, wrappedLines...)
 		m.rawTranscriptLines = append(m.rawTranscriptLines, entry.stripped...)
+		if len(entry.cont) == len(entry.stripped) {
+			m.rawTranscriptCont = append(m.rawTranscriptCont, entry.cont...)
+		} else {
+			m.rawTranscriptCont = append(m.rawTranscriptCont, make([]bool, len(entry.stripped))...)
+		}
 		switch entry.kind {
 		case blockKindThinking:
 			m.thinkingRegions = append(m.thinkingRegions, toolOutputRegion{messageIndex: i, startLine: startLine, endLine: endLine})
@@ -18273,6 +18294,7 @@ func (m *model) renderTranscript() {
 	for k := 0; k < 10; k++ {
 		m.transcriptLines = append(m.transcriptLines, "")
 		m.rawTranscriptLines = append(m.rawTranscriptLines, "")
+		m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 	}
 	// Recover clickable targets for markdown links ([text](url)): the markdown
 	// renderer drops the URL from the visible/stripped text, so the generic
@@ -18642,29 +18664,54 @@ func constrainViewPreservingBottom(view string, width int, height int, bottomLin
 }
 
 func wrapView(view string, width int) string {
+	lines, _ := wrapViewMarked(view, width)
+	return strings.Join(lines, "\n")
+}
+
+// wrapViewMarked is wrapView returning the wrapped lines plus a parallel
+// continuation slice: cont[j] is true when line j is the tail of a word that
+// was HARD-wrapped (split mid-token because it exceeded the width) from line
+// j-1. Selection copy joins such lines without a newline and URL click
+// detection reassembles the token across them; word-wrapped lines are never
+// marked because a real space was dropped at that boundary.
+func wrapViewMarked(view string, width int) ([]string, []bool) {
 	if width <= 0 {
-		return view
+		lines := strings.Split(view, "\n")
+		return lines, make([]bool, len(lines))
 	}
 	lines := strings.Split(view, "\n")
 	wrapped := make([]string, 0, len(lines))
+	cont := make([]bool, 0, len(lines))
 	for _, line := range lines {
-		wrapped = append(wrapped, strings.Split(wordWrap(line, width), "\n")...)
+		ls, cs := wordWrapMarked(line, width)
+		wrapped = append(wrapped, ls...)
+		cont = append(cont, cs...)
 	}
-	return strings.Join(wrapped, "\n")
+	return wrapped, cont
 }
 
 // wordWrap wraps text at word (space) boundaries to fit within the given width.
 // It preserves ANSI escape codes and handles wide characters. If a single word
 // exceeds the width, it falls back to hard-wrapping at grapheme boundaries.
 func wordWrap(text string, width int) string {
+	lines, _ := wordWrapMarked(text, width)
+	return strings.Join(lines, "\n")
+}
+
+// wordWrapMarked is wordWrap returning the lines plus the hard-wrap
+// continuation flags described on wrapViewMarked.
+func wordWrapMarked(text string, width int) ([]string, []bool) {
 	if width <= 0 {
-		return text
+		lines := strings.Split(text, "\n")
+		return lines, make([]bool, len(lines))
 	}
 	lines := strings.Split(text, "\n")
 	var wrapped []string
+	var cont []bool
 	for _, line := range lines {
 		if ansi.StringWidth(line) <= width {
 			wrapped = append(wrapped, line)
+			cont = append(cont, false)
 			continue
 		}
 		// Try to break at spaces first.
@@ -18677,10 +18724,14 @@ func wordWrap(text string, width int) string {
 				// Word too long — flush current line and hard-wrap the word.
 				if cur.Len() > 0 {
 					wrapped = append(wrapped, cur.String())
+					cont = append(cont, false)
 					cur.Reset()
 					curW = 0
 				}
-				wrapped = append(wrapped, strings.Split(ansi.Hardwrap(word, width, false), "\n")...)
+				for k, piece := range strings.Split(ansi.Hardwrap(word, width, false), "\n") {
+					wrapped = append(wrapped, piece)
+					cont = append(cont, k > 0)
+				}
 			} else if curW == 0 {
 				cur.WriteString(word)
 				curW = wW
@@ -18690,6 +18741,7 @@ func wordWrap(text string, width int) string {
 				curW += 1 + wW
 			} else {
 				wrapped = append(wrapped, cur.String())
+				cont = append(cont, false)
 				cur.Reset()
 				cur.WriteString(word)
 				curW = wW
@@ -18697,9 +18749,10 @@ func wordWrap(text string, width int) string {
 		}
 		if cur.Len() > 0 {
 			wrapped = append(wrapped, cur.String())
+			cont = append(cont, false)
 		}
 	}
-	return strings.Join(wrapped, "\n")
+	return wrapped, cont
 }
 
 // wireCompactCallbacks attaches OnCompactStart and OnCompact to the active
@@ -22941,9 +22994,23 @@ func (m *model) transcriptUrlLinkAt(mouse tea.Mouse) (urlLinkRegion, bool) {
 		return r, true
 	}
 
-	// 2. Single-line miss — try wrapped-line detection (combine with
-	//    adjacent lines). This bypasses the probe cache since wrap
-	//    crossings are rare and the combined regex scan is cheap.
+	// 2. Single-line miss — a hard-wrapped token (a long URL) spans a run
+	//    of continuation lines; reassemble the whole run so the click target
+	//    is the full URL, not the 2-line prefix the adjacent-line pass below
+	//    would return.
+	if len(m.rawTranscriptCont) == len(m.rawTranscriptLines) {
+		first, last := contRunBounds(m.rawTranscriptCont, contentLine)
+		if last > first {
+			if r, ok := urlLinkInRun(m.rawTranscriptLines[first:last+1], contentLine-first, col); ok {
+				r.line = contentLine
+				return r, true
+			}
+		}
+	}
+
+	// 3. Try wrapped-line detection (combine with adjacent lines) for
+	//    surfaces without continuation flags. This bypasses the probe cache
+	//    since wrap crossings are rare and the combined regex scan is cheap.
 	prevLine := ""
 	if contentLine > 0 {
 		prevLine = m.rawTranscriptLines[contentLine-1]

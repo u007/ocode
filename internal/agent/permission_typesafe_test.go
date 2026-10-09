@@ -38,7 +38,7 @@ func newTypesafeJudge(t *testing.T, reply string) (*Agent, *typesafeJudgeHarness
 
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "typesafe/jev-latest"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -180,7 +180,7 @@ func TestConsultPermissionModelTypesafeLowConfidenceDoesNotAllow(t *testing.T) {
 func TestConsultPermissionModelTypesafeTransportFailureIsUnconsulted(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "typesafe/jev-latest"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {

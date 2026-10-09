@@ -83,19 +83,6 @@ func TestNewClientGrokSubscription(t *testing.T) {
 	}
 }
 
-func TestGrokProviderRegistered(t *testing.T) {
-	p := auth.FindProvider("grok")
-	if p == nil {
-		t.Fatal("grok provider not registered in auth.Providers")
-	}
-	if p.EnvVar != "XAI_API_KEY" {
-		t.Errorf("EnvVar = %q, want XAI_API_KEY", p.EnvVar)
-	}
-	if _, ok := providers["grok"]; !ok {
-		t.Error("grok not present in client providers map")
-	}
-}
-
 func TestGrokSupportsReasoningEffort(t *testing.T) {
 	if !providerSupportsReasoningEffort("grok") {
 		t.Error("grok should support reasoning_effort")

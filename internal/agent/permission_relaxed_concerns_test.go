@@ -259,7 +259,7 @@ func TestChatJudgePromptCarriesRelaxedSection(t *testing.T) {
 	cap := &chatJudgeCapture{}
 	newClientFn = func(_ *config.Config, _ string) LLMClient { return cap }
 
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	allowed, reason, consulted := a.askPermissionModel("bash", json.RawMessage(`{"command":"curl https://example.com"}`), nil)
 	if !allowed || !consulted {
 		t.Fatalf("expected the captured allow verdict, got allowed=%v consulted=%v reason=%q", allowed, consulted, reason)

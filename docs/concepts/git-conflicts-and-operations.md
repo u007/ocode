@@ -25,7 +25,7 @@ timestamp: 2026-09-26T05:57:29Z
 - `conflicts: [{ path, code, ours, theirs }]` — one entry per unmerged path, `code` being git's porcelain `XY` (`DD`, `AU`, `UD`, `UA`, `DU`, `AA`, `UU`), `ours`/`theirs` reporting whether stage 2 / stage 3 exists (a false side is a deletion on that side).
 - `operation?: { kind, label, step, total }` — present only while an operation is halted; `kind` is one of `merge`, `rebase`, `rebase-interactive`, `am`, `cherry-pick`, `revert`, `bisect`; `label` is human text (e.g. `Rebasing feature/login onto 1a2b3c4 (3/7)`), with `step`/`total` only where progress exists.
 
-A conflicted path is reported **once**: both transports strip it from `staged_files` and `changed_files` so nothing is double-counted (`internal/server/handler_git.go:221-226`, mirrored in `handler_remote_git.go`). The UI — a conflicts section above the staged list with per-file actions, and an operation banner under the header with the valid buttons — **now ships in `GitPanel.tsx`** (phase 06): the banner drives `api.gitOperation` and each conflict row drives `api.gitResolveConflict`.
+A conflicted path is reported **once**: both transports strip it from `staged_files` and `changed_files` so nothing is double-counted (`internal/server/handler_git.go:365-389`, mirrored in `handler_remote_git.go`). The UI — a conflicts section above the staged list with per-file actions, and an operation banner under the header with the valid buttons — **now ships in `GitPanel.tsx`** (phase 06): the banner drives `api.gitOperation` and each conflict row drives `api.gitResolveConflict`.
 
 ## 2. One parser, two transports
 

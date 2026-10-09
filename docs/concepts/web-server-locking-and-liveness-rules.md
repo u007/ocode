@@ -63,7 +63,9 @@ Rules for anything in `internal/server`:
   the whole turn, and state endpoints are polled by the browser and the turn
   watchdog, so a blocking read re-creates the "stuck session" symptom. When the
   try-lock fails, skip the live read and fall back to persisted state. Follow
-  `livePendingAsks`. The same rule covers **every** fan-out over `h.agents`
+  `livePendingAsks`. A **write** that must know the pending-ask state (pulse
+  `session_send`) does not fall back: a failed try-lock refuses the send, because
+  skipping the ask check would dispatch over an unresolved ask. The same rule covers **every** fan-out over `h.agents`
   from a request or poll path, not just message reads: `PendingPermissionAsks`
   (desktop badge watcher, quit dialog) uses `TryLock` (mid-turn ⇒ not pending),
   `applyLimitsToLiveSessions` (Settings save) takes no `as.mu` at all because

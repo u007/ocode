@@ -43,6 +43,12 @@
 
 
 
+
+## 2026-10-09
+
+* **Update**: Chat Verbosity Display — Design Spec ([superpowers/specs/2026-09-24-chat-verbosity-display-design.md](/superpowers/specs/2026-09-24-chat-verbosity-display-design.md))
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: Reopen a locally hidden question dialog ([superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md](/superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md))
 ## 2026-10-07
 
 * **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))

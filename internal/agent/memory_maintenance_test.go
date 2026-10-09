@@ -51,7 +51,7 @@ func TestQueueMemoryMaintenanceRaceWithShutdown(t *testing.T) {
 	setHomeTree(t, home)
 	workDir := t.TempDir()
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.SetMemoryEnabled(true)
 
 	var wg sync.WaitGroup

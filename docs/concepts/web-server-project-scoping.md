@@ -62,7 +62,7 @@ and closed at shutdown; the proxy builder is
 `remote.NewAPIProxy`/`remote.InjectAuth` (`internal/remote/proxy.go`), which
 `internal/desktop/proxy.go` also uses. Terminal pty's are therefore children of
 the **host's** server, not the local one: a remote project's shell survives a
-laptop sleep or a desktop restart (24 h detach TTL in `--remote` mode; 30 min
+laptop sleep or a desktop restart (24 h detach TTL in `--remote` mode; 2 h
 local). The Files tab, git, `!` commands, and port forwards keep their existing
 per-request ssh/wsl.exe paths — they are not proxied.
 
@@ -120,6 +120,6 @@ shared, one attachment slot / `superseded` / **Take over**) lives in
 - **Closing a tab is a PERMANENT discard, not a detach.** `DELETE
   /api/terminal/{id}` kills the shell AND removes its append-only disk history
   (`sess.history.remove()`, `handler_terminal.go`); unmounting the panel alone
-  only detaches and keeps both (30 min local / 24 h remote TTL). With the list
+  only detaches and keeps both (2 h local / 24 h remote TTL). With the list
   shared, a close ends the session for EVERY client, including one attached to
   that shell. `TestTerminalKillDropsDiskHistory` pins the history removal.

@@ -517,13 +517,22 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		projectRoot = h.workDir
 	}
 	lspMgr := h.lspManagerFor(projectRoot)
-	var computerDriver tool.ComputerDriver
-	var computerDriverErr error
-	if effCfg != nil && effCfg.Ocode.ComputerUse.Enabled {
-		computerDriver, computerDriverErr = computer.New(h.computerSup)
+	// The Pulse assistant gets no builtin tools (no bash, file, edit or task):
+	// configurePulseAgent installs only its read-only tool set below.
+	pulse := isPulseSession(sessionID)
+	var tools []tool.Tool
+	if !pulse {
+		var computerDriver tool.ComputerDriver
+		var computerDriverErr error
+		if effCfg != nil && effCfg.Ocode.ComputerUse.Enabled {
+			computerDriver, computerDriverErr = computer.New(h.computerSup)
+		}
+		tools = tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.cronToolService(projectRoot), computerDriver, computerDriverErr)
 	}
-	tools := tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.cronToolService(projectRoot), computerDriver, computerDriverErr)
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
+	if pulse {
+		h.configurePulseAgent(ag, effCfg)
+	}
 	ag.SetSessionID(sessionID)
 	// Replace the process-wide seed with THIS session's own advisor model and
 	// trigger set (pinning the current default if the session has none yet).
@@ -567,28 +576,33 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 
 	// Stage "tools": external/plugin tools.
 	h.publishBootstrapStage(sessionID, "tools")
-	ag.LoadExternalTools(effCfg)
+	if !pulse {
+		ag.LoadExternalTools(effCfg)
+	}
 
 	// Stage "mcp": MCP tools with a bounded wait. Stragglers are dropped with
 	// a warning event rather than stalling the bootstrap.
 	h.publishBootstrapStage(sessionID, "mcp")
+	// The Pulse assistant's tool set is fixed: no plugin or MCP tools attach.
 	// A session that toggled MCP servers from the web sidebar has a per-session
 	// override; enumerate fresh against its effective config so the toggle takes
 	// effect in THIS chat only. Sessions with no override reuse the process-wide
 	// cache (the common case) instead of re-running the blocking enumeration.
-	if sidTools, sidErrs := h.mcpToolsForSession(effCfg, sessionID); sidTools != nil || sidErrs != nil {
-		ag.AddMCPTools(sidTools)
-		ag.AddMCPErrors(sidErrs)
-	} else {
-		timeout := h.mcpBootstrapTimeout
-		if timeout <= 0 {
-			timeout = bootstrapMCPTimeout
-		}
-		mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
-		ag.AddMCPTools(mcpTools)
-		ag.AddMCPErrors(mcpErrs)
-		if timedOut {
-			h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
+	if !pulse {
+		if sidTools, sidErrs := h.mcpToolsForSession(effCfg, sessionID); sidTools != nil || sidErrs != nil {
+			ag.AddMCPTools(sidTools)
+			ag.AddMCPErrors(sidErrs)
+		} else {
+			timeout := h.mcpBootstrapTimeout
+			if timeout <= 0 {
+				timeout = bootstrapMCPTimeout
+			}
+			mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
+			ag.AddMCPTools(mcpTools)
+			ag.AddMCPErrors(mcpErrs)
+			if timedOut {
+				h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
+			}
 		}
 	}
 
@@ -1055,6 +1069,11 @@ type turnOptions struct {
 	// duplicates the user's message. Mirrors the TUI's Ctrl+Y retry
 	// (model.retryLastLLMError).
 	retryLast bool
+
+	// refuseIfBusy makes dispatch fail with errTurnInFlight, instead of queueing
+	// a turn, when another async turn is already registered on the session. The
+	// check and the registration share one cancelMu section.
+	refuseIfBusy bool
 }
 
 // runTurn executes one agent turn: appends the user message (unless
@@ -1684,6 +1703,10 @@ func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*tu
 	return h.dispatchTurnWithRewind(id, model, content, opts, "")
 }
 
+// errTurnInFlight means a turn is already running on the session and the caller
+// asked not to queue behind it.
+var errTurnInFlight = errors.New("session is mid-turn; try again when it finishes")
+
 func (h *Handler) dispatchTurnWithRewind(id, model, content string, opts turnOptions, rewindToken string) (*turnJob, error) {
 	job := &turnJob{content: content, model: model, opts: opts, rewindToken: rewindToken, persistAck: make(chan struct{})}
 	// Refuse new turns once shutdown has begun: shutdown joins a bounded job
@@ -1699,6 +1722,11 @@ func (h *Handler) dispatchTurnWithRewind(id, model, content string, opts turnOpt
 	h.cancelMu.Lock()
 	if h.turnInFlight == nil {
 		h.turnInFlight = make(map[string]int)
+	}
+	if opts.refuseIfBusy && h.turnInFlight[id] > 0 {
+		h.cancelMu.Unlock()
+		h.turnJobsWG.Done()
+		return nil, errTurnInFlight
 	}
 	h.turnInFlight[id]++
 	h.cancelMu.Unlock()

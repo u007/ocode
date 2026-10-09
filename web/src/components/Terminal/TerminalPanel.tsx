@@ -89,6 +89,15 @@ export function buildTerminalWsConnection(opts: {
   return { url, protocols };
 }
 
+/**
+ * Keys whose keydown never becomes pty input (see the custom key handler):
+ * bare modifiers and lock/layout keys.
+ */
+const MODIFIER_KEYS = new Set([
+  "Shift", "Control", "Alt", "AltGraph", "Meta", "CapsLock", "NumLock", "ScrollLock",
+  "Fn", "Hyper", "Super", "OS", "ContextMenu",
+]);
+
 // Debounce window for duplicate clipboard writes of the SAME text. In the
 // desktop shell one physical Cmd+C can legitimately take two copy paths: the
 // native Edit ▸ Copy menu role (bound to CmdOrCtrl+c, firing the WKWebView
@@ -100,6 +109,12 @@ export function buildTerminalWsConnection(opts: {
 const DUPLICATE_COPY_WINDOW_MS = 250;
 let lastCopyText = "";
 let lastCopyAt = 0;
+
+/** Buffer range of xterm's current selection, as a comparable string. */
+function selectionRangeKey(term: Pick<Terminal, "getSelectionPosition">): string {
+  const p = term.getSelectionPosition();
+  return p ? `${p.start.x},${p.start.y}-${p.end.x},${p.end.y}` : "";
+}
 
 function isDuplicateCopy(text: string): boolean {
   const now = Date.now();
@@ -271,8 +286,22 @@ export default function TerminalPanel({
   // ssh stream) rewrites the rows under those coordinates every frame, so a
   // later getSelection() returns a partial/mutated line set. Every copy path
   // that runs after release (Cmd+C, Edit-menu copy event, context menu)
-  // writes this snapshot instead. Cleared when xterm drops the selection.
+  // writes this snapshot instead.
+  //
+  // It deliberately OUTLIVES xterm's own selection. xterm clears a selection
+  // on its own in three ways the user never asked for: a scrollback trim that
+  // pushes the selected rows off the top (a busy redraw loop does this within
+  // seconds), any "user input" — which includes the mouse-button reports a
+  // mouse-tracking program (claude code enables ?1000/?1006) receives for the
+  // very right-click that opened the context menu, so the selection is gone
+  // before Copy can be clicked — and an alt-screen switch. Only a new left
+  // pointer gesture in the terminal, a keystroke that reaches the pty, or
+  // Select All replaces or drops it.
   const selectionSnapshotRef = useRef("");
+  // Buffer range of the snapshotted selection (see selectionRangeKey). A
+  // right-click over the SAME range is the mutated-rows case and keeps the
+  // snapshot; a different range is a new selection (rightClickSelectsWord).
+  const selectionRangeRef = useRef("");
   // True from a mousedown in the container until the resulting selection has
   // been copied. Gates the debounced onSelectionChange copy: xterm also fires
   // that event on scrollback trim (every scroll while a selection exists),
@@ -366,11 +395,39 @@ export default function TerminalPanel({
   }, [projectPath, host]);
 
   // ── Context menu (right-click) — Supacode-style ────────────────
+  // A pointer gesture in the terminal proper: left button only (the right
+  // button opens the context menu, and on mac xterm's rightClickSelectsWord
+  // has selected a word under it that must NOT be copied before the user
+  // picks a menu item), and not on the panel's own chrome. The context menu
+  // is portaled to <body> but React still bubbles its events through this
+  // container, and the find bar / take-over overlay render inside it; a
+  // press on any of those leaves xterm's selection untouched.
+  const isTerminalPress = useCallback((e: React.MouseEvent): boolean => {
+    if (e.button !== 0) return false;
+    const target = e.target as Element;
+    if (ctxMenuRef.current?.contains(target)) return false;
+    return !target.closest("[data-terminal-chrome]");
+  }, []);
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    const sel = termRef.current?.getSelection() ?? "";
-    setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: sel.length > 0 });
+    // xterm's own contextmenu listener has already run (rightClickSelectsWord
+    // on mac): a selection over a NEW range is what the user sees under the
+    // menu, so snapshot it before the mouse-up report that follows clears it.
+    // A live selection over the range already snapshotted at mouse-up is the
+    // same drag whose rows a redrawing program may have rewritten since; the
+    // snapshot stays (see selectionSnapshotRef).
+    const term = termRef.current;
+    if (term) {
+      const live = term.getSelection();
+      const range = selectionRangeKey(term);
+      if (live && (!selectionSnapshotRef.current || range !== selectionRangeRef.current)) {
+        selectionSnapshotRef.current = live;
+        selectionRangeRef.current = range;
+      }
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: selectionSnapshotRef.current.length > 0 });
   }, []);
 
   useEffect(() => {
@@ -395,28 +452,30 @@ export default function TerminalPanel({
   }, [ctxMenu]);
 
   // Text every post-release copy path writes: the snapshot taken when the
-  // user finished selecting, while xterm still holds that selection. Falls
-  // through to a live read only for selections made without a pointer
-  // gesture (selectAll, API), which never took a snapshot.
+  // user finished selecting (or right-clicked), even if xterm has since
+  // dropped the selection on its own. Falls through to a live read only for
+  // selections made without a pointer gesture (selectAll, API), which never
+  // took a snapshot.
   const selectedTextForCopy = useCallback((): string => {
     const term = termRef.current;
-    if (!term || !term.hasSelection()) return "";
+    if (!term) return "";
     return selectionSnapshotRef.current || term.getSelection();
   }, []);
 
   const handleCopy = useCallback(async () => {
+    // The menu closes whether or not there was anything to copy: a Copy that
+    // silently left the menu open is how an empty selection used to surface.
+    setCtxMenu(null);
     const sel = selectedTextForCopy();
     if (!sel) return;
     await writeClipboardText(sel);
-    setCtxMenu(null);
   }, [selectedTextForCopy]);
 
   const handleSpeakSelection = useCallback(() => {
-    const selection = termRef.current?.getSelection() ?? "";
-    const text = sanitizeSpeechText(selection);
+    const text = sanitizeSpeechText(selectedTextForCopy());
     if (text) requestSpeech(text);
     setCtxMenu(null);
-  }, []);
+  }, [selectedTextForCopy]);
 
   const handleSpeakVisible = useCallback(() => {
     setCtxMenu(null);
@@ -462,9 +521,11 @@ export default function TerminalPanel({
       clearTimeout(copyDebounceRef.current);
       copyDebounceRef.current = null;
     }
-    const sel = termRef.current?.getSelection() ?? "";
-    if (!sel) return false;
+    const term = termRef.current;
+    const sel = term?.getSelection() ?? "";
+    if (!term || !sel) return false;
     selectionSnapshotRef.current = sel;
+    selectionRangeRef.current = selectionRangeKey(term);
     void writeClipboardText(sel);
     return true;
   }, []);
@@ -687,6 +748,11 @@ export default function TerminalPanel({
   //     listener below): the keydown must NOT read the clipboard as well, or
   //     one Cmd/V pastes twice.
   const copyViaShortcut = useCallback(() => {
+    // Gated on the VISIBLE selection, not the snapshot: once nothing is
+    // highlighted, Ctrl+C must reach the pty as SIGINT again. The snapshot
+    // only decides WHAT is copied while a selection is still showing.
+    const term = termRef.current;
+    if (!term?.hasSelection()) return false;
     const sel = selectedTextForCopy();
     if (!sel) return false;
     void writeClipboardText(sel);
@@ -709,6 +775,11 @@ export default function TerminalPanel({
     const el = containerRef.current;
     if (!el) return;
     const onCopy = (e: ClipboardEvent) => {
+      // Same gate as copyViaShortcut: only a VISIBLE xterm selection claims
+      // the event. Without it a copy from the find bar's input (inside this
+      // container) or the desktop Edit ▸ Copy role with nothing highlighted
+      // would be answered with a stale snapshot.
+      if (!termRef.current?.hasSelection()) return;
       const sel = selectedTextForCopy();
       if (!sel) return;
       // Record this copy EVEN when xterm's element-level handler already
@@ -802,10 +873,14 @@ export default function TerminalPanel({
     try {
       // Open http(s) URLs on any left click (the addon's default only fires on
       // ctrl/cmd+click). Only left-click (button 0) opens; right-click pastes.
+      // xterm's Linkifier activates a link from its MOUSEUP listener (there is
+      // no click listener), so the event here is a mouseup, never a click — a
+      // `type === "click"` guard silently disabled every URL in the terminal.
+      // A drag that moved is a selection, not a click.
       // Route through openExternalURL so the desktop shell opens them in the
       // OS browser instead of losing the webview to a navigation.
       webLinks = new WebLinksAddon((event, uri) => {
-        if (event.type === "click" && event.button === 0 && /^https?:\/\//.test(uri) && !dragMovedRef.current) {
+        if ((event.type === "mouseup" || event.type === "click") && event.button === 0 && /^https?:\/\//.test(uri) && !dragMovedRef.current) {
           openExternalURL(uri);
         }
       });
@@ -862,6 +937,9 @@ export default function TerminalPanel({
           ev.preventDefault();
           return false;
         }
+        // Ctrl+C with nothing highlighted is SIGINT: pty input (see the
+        // fall-through rule at the end of this handler).
+        if (!ev.metaKey) selectionSnapshotRef.current = "";
         return true;
       }
       // Cmd/Ctrl+V (and Ctrl+Shift+V): return false so xterm's keydown never
@@ -870,9 +948,12 @@ export default function TerminalPanel({
       // container listener above owns) is what pastes. Reading the clipboard
       // here too is the double paste — the event arrives either way.
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "v") {
+        // The paste is pty input: drop the snapshot as any typed key would.
+        selectionSnapshotRef.current = "";
         return false;
       }
       if (ev.key === "Enter" && ev.shiftKey) {
+        selectionSnapshotRef.current = "";
         const sock = socketRef.current;
         if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
         // Returning false skips xterm's own cancel(), so the browser still
@@ -901,6 +982,11 @@ export default function TerminalPanel({
           return false;
         }
       }
+      // A key xterm will turn into pty input ends the selection the user made
+      // (xterm clears its own on user input); drop the snapshot with it so a
+      // later Copy never resurrects text typed over. Bare modifiers and
+      // Cmd-combos (left to the browser on mac) produce no input.
+      if (!ev.metaKey && !MODIFIER_KEYS.has(ev.key)) selectionSnapshotRef.current = "";
       return true;
     });
 
@@ -929,10 +1015,10 @@ export default function TerminalPanel({
         clearTimeout(copyDebounceRef.current);
         copyDebounceRef.current = null;
       }
-      if (!term.hasSelection()) {
-        selectionSnapshotRef.current = "";
-        return;
-      }
+      // A cleared selection leaves the snapshot alone: xterm clears on
+      // scrollback trim, mouse-report input and buffer switch, none of which
+      // is the user deselecting (that is the mouse-down / keydown paths).
+      if (!term.hasSelection()) return;
       if (!userSelectingRef.current) return;
       copyDebounceRef.current = setTimeout(() => {
         copyDebounceRef.current = null;
@@ -1041,6 +1127,49 @@ export default function TerminalPanel({
       event.preventDefault();
     };
     el.addEventListener("wheel", onWheelGuard, { passive: false });
+    // xterm 6 dropped touch scrolling: it bundles VS Code's touch Gesture but
+    // never registers the viewport as a target, so a finger drag on a phone or
+    // tablet (mobile browser pointed at a shared desktop server) does nothing.
+    // Synthetic wheel events cannot stand in for it: xterm ignores untrusted
+    // ones. Drive it through the API instead — whole cell rows of drag become
+    // `scrollLines`, or, when a TUI owns the mouse (mouse tracking on), one SGR
+    // wheel report per row sent to the app. The container is `touch-none`, so
+    // the browser never claims the pan and these listeners can stay passive.
+    let touchY: number | null = null;
+    let touchRemainder = 0;
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+      touchRemainder = 0;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const screen = term.element?.querySelector(".xterm-screen");
+      if (touchY === null || event.touches.length !== 1 || !screen) return;
+      const touch = event.touches[0];
+      const rect = screen.getBoundingClientRect();
+      const cellHeight = rect.height / term.rows;
+      touchRemainder += touchY - touch.clientY;
+      touchY = touch.clientY;
+      // Drag down = finger pulls older content into view = scroll up (negative).
+      const rows = Math.trunc(touchRemainder / cellHeight);
+      if (rows === 0) return;
+      touchRemainder -= rows * cellHeight;
+      if (term.modes.mouseTrackingMode === "none") {
+        term.scrollLines(rows);
+        return;
+      }
+      const col = Math.min(term.cols, Math.max(1, Math.floor(((touch.clientX - rect.left) / rect.width) * term.cols) + 1));
+      const row = Math.min(term.rows, Math.max(1, Math.floor((touch.clientY - rect.top) / cellHeight) + 1));
+      const report = `\x1b[<${rows < 0 ? 64 : 65};${col};${row}M`;
+      term.input(report.repeat(Math.abs(rows)), true);
+    };
+    const onTouchEnd = () => {
+      touchY = null;
+      touchRemainder = 0;
+    };
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("touchend", onTouchEnd, { passive: true });
+    el.addEventListener("touchcancel", onTouchEnd, { passive: true });
     el.addEventListener("keydown", snapshot.input, true);
     el.addEventListener("pointerdown", onSnapshotPointerDown, true);
     window.addEventListener("pointerup", snapshot.endSelection, true);
@@ -1477,6 +1606,10 @@ export default function TerminalPanel({
       resizeDisp?.dispose();
       el.removeEventListener("wheel", snapshot.input);
       el.removeEventListener("wheel", onWheelGuard);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchEnd);
       el.removeEventListener("keydown", snapshot.input, true);
       el.removeEventListener("pointerdown", onSnapshotPointerDown, true);
       window.removeEventListener("pointerup", snapshot.endSelection, true);
@@ -1659,9 +1792,16 @@ export default function TerminalPanel({
       // auto": a scrollbar appears only when content genuinely overflows
       // (font resize before refit, tiny windows where even one row doesn't
       // fit). Horizontal overflow belongs to xterm, hence overflow-x-hidden.
-      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden overscroll-contain [&_.xterm]:p-2"
+      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden overscroll-contain touch-none [&_.xterm]:p-2"
       onContextMenu={handleContextMenu}
       onMouseDown={(e) => {
+        // The context menu is portaled to <body>, but React still bubbles its
+        // events through this container: a press on a menu item is not a
+        // gesture in the terminal.
+        if (!isTerminalPress(e)) return;
+        // A fresh left press starts a new selection or deselects; either way
+        // the previous drag's text is no longer what the user sees selected.
+        selectionSnapshotRef.current = "";
         dragStartedRef.current = true;
         userSelectingRef.current = true;
         dragMovedRef.current = false;
@@ -1674,7 +1814,8 @@ export default function TerminalPanel({
         const dy = Math.abs(e.clientY - dragStartYRef.current);
         if (dx > 2 || dy > 2) dragMovedRef.current = true;
       }}
-      onMouseUp={() => {
+      onMouseUp={(e) => {
+        if (!isTerminalPress(e)) return;
         dragStartedRef.current = false;
         // Copy-on-selection at release, inside the user-gesture handler (see
         // copySelectionNow above for the TUI-parity rationale). No-op on a
@@ -1689,6 +1830,7 @@ export default function TerminalPanel({
       {takenOver && (
         <div
           role="status"
+          data-terminal-chrome=""
           className="absolute inset-x-0 bottom-2 z-10 mx-auto flex w-fit max-w-[90%] items-center gap-3 rounded-md border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs text-amber-200 shadow-lg"
         >
           <span>Taken over by another client — reconnecting is paused.</span>

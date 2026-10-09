@@ -24,7 +24,7 @@ func newSecretContextAgent(t *testing.T, tmp string) *Agent {
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	return a
 }

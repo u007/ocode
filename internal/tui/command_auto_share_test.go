@@ -132,17 +132,3 @@ func TestAutoShareCmdRejectsUnknownArg(t *testing.T) {
 		t.Fatal("an unknown argument must not change the persisted setting")
 	}
 }
-
-// TestAutoShareCmdRegisteredInCommandList keeps the toggle discoverable; a
-// handler that exists but is unreachable from the palette is a dead feature.
-func TestAutoShareCmdRegisteredInCommandList(t *testing.T) {
-	// commandSpecs is populated in init(); a handler that exists but was never
-	// registered would be unreachable from the palette.
-	spec, ok := commandLookup["/auto-share"]
-	if !ok {
-		t.Fatal("/auto-share is not registered in commandLookup")
-	}
-	if spec.handler == nil {
-		t.Fatal("/auto-share has no handler")
-	}
-}

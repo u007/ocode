@@ -31,7 +31,7 @@ describe("/export and /export-claude", () => {
     mockExportMarkdown.mockResolvedValue("# Hi\n\n## User\n\nhello\n\n");
     const result = await dispatchCommand("/export", ctx(REAL_ID));
     expect(mockExportMarkdown).toHaveBeenCalledWith(REAL_ID, undefined);
-    expect(result.messages?.[0]?.content).toBe("Exported session as Markdown.");
+    expect(result.messages?.[0]?.content).toBe(`Exported session to \`ocode_export_${REAL_ID}.md\``);
     expect(result.download?.filename).toBe(`ocode_export_${REAL_ID}.md`);
     expect(result.download?.content).toContain("hello");
   });

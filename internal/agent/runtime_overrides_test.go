@@ -18,7 +18,7 @@ func TestAgentRuntimeOverrides(t *testing.T) {
 	cfg.Ocode.SmallModelEnabled = true
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Model: "prov/judge"}
 
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 
 	// No overrides: everything falls through to config.
 	if !a.SmallModelRuntimeEnabled() {
@@ -72,7 +72,7 @@ func TestAgentRuntimeOverrides(t *testing.T) {
 // TestAgentRuntimeOverridesNilConfig guards the nil-config paths used by
 // minimally-constructed agents in tests and headless bootstrap edges.
 func TestAgentRuntimeOverridesNilConfig(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	if a.SmallModelRuntimeEnabled() {
 		t.Fatal("nil config must report small model disabled")
 	}

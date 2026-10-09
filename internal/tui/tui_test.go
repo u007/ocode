@@ -22,11 +22,7 @@ func TestExitResumeSummarySkipsEmptySession(t *testing.T) {
 	}
 }
 
-func TestCleanupProgramModelSkipsNilModel(t *testing.T) {
+func TestCleanupProgramModelToleratesNilAndPointer(t *testing.T) {
 	cleanupProgramModel(nil)
-}
-
-func TestCleanupProgramModelHandlesModelPointer(t *testing.T) {
-	m := &model{}
-	cleanupProgramModel(tea.Model(m))
+	cleanupProgramModel(tea.Model(&model{}))
 }

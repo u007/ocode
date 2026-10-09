@@ -55,6 +55,10 @@ interface ChatInputProps {
    *  from the project context) so this component can be memoized — a context
    *  read would re-render every mounted composer on every tab/project switch. */
   projectPath?: string;
+  /** Show the quick-actions strip (Compact, Continue, Approve, ...). Defaults
+   *  to on; the Pulse assistant drawer turns it off because those chips are
+   *  project-session actions that make no sense for it and eat its height. */
+  quickActions?: boolean;
 }
 
 export interface ChatInputHandle {
@@ -88,6 +92,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   onClearPreviewContext,
   isActive,
   projectPath,
+  quickActions: showQuickActions = true,
 }: ChatInputProps,
   ref: ForwardedRef<ChatInputHandle>
 ) {
@@ -1378,7 +1383,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
-      {quickActions.length > 0 && (
+      {showQuickActions && quickActions.length > 0 && (
         <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
       )}
     </div>

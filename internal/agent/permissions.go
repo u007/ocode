@@ -836,6 +836,7 @@ var pathScopedTools = map[string]bool{
 	"read": true, "write": true, "edit": true, "delete": true,
 	"multiedit": true, "multi_file_edit": true, "replace_lines": true, "glob": true, "grep": true, "rgrep": true,
 	"list": true, "lsp": true, "apply_patch": true, "format": true, "repo_overview": true,
+	"sqlite_schema": true, "sqlite_query": true, "sqlite_exec": true,
 }
 
 // harmfulBashPrefixes are git subcommand prefixes that are inherently
@@ -1685,7 +1686,7 @@ func NewPermissionManager() *PermissionManager {
 	// even though tool registration is conditional on rg availability
 	// (see LoadBuiltins): harmless when rg is missing, and keeps the
 	// rule table total (mirrors the ast/ast_grep opt-ins).
-	readOnlyDefaults := []string{"read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron"}
+	readOnlyDefaults := []string{"read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron", "sqlite_schema", "sqlite_query"}
 	defaultRules := make(map[string]PermissionLevel, len(readOnlyDefaults))
 	for _, name := range readOnlyDefaults {
 		defaultRules[name] = PermissionAllow
@@ -1694,7 +1695,7 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {
 		pm.SetRule(name, PermissionAllow)
 	}
-	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window"} {
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window", "sqlite_exec"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	// No bash prefixes are banned by default — bans are opt-in via
@@ -3754,7 +3755,7 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 		return ""
 	}
 	switch toolName {
-	case "read", "write", "delete", "edit", "multiedit", "multi_file_edit", "replace_lines", "format", "lsp", "apply_patch", "grep", "rgrep", "repo_overview":
+	case "read", "write", "delete", "edit", "multiedit", "multi_file_edit", "replace_lines", "format", "lsp", "apply_patch", "grep", "rgrep", "repo_overview", "sqlite_schema", "sqlite_query", "sqlite_exec":
 		if params.Path != "" {
 			return params.Path
 		}
@@ -4815,6 +4816,47 @@ func (pm *PermissionManager) AddAutoGrant(g config.AutoGrant) {
 	pm.autoConfig.Store(&cp)
 }
 
+// PersistInterpreterScriptGrant turns a user's "always allow" on a
+// bash.interpreter.<lang> ask into an exact grant keyed to the script that was
+// approved (language, normalized command, resolved path, cwd, sha256 of the
+// file). A blanket per-language prefix rule is never stored: Decide routes every
+// interpreter execution through the judge and the effect verifier, so such a
+// rule would be written and never read. Only script_file executions can be
+// saved; heredoc and inline-eval source is transient, so the caller must tell
+// the user the approval covers this call only. save performs the durable write.
+func (pm *PermissionManager) PersistInterpreterScriptGrant(command string, save func(config.AutoGrant) error) error {
+	ie, ok := classifyInterpreterExecution(command)
+	if !ok || ie.SourceMode != "script_file" {
+		return fmt.Errorf("only script-file interpreter runs can be saved as an always-allow grant")
+	}
+	if ie.Entrypoint == "" || !pm.IsPathWithinAllowedRoots(ie.Entrypoint) {
+		return fmt.Errorf("script %q is outside the allowed roots", ie.Entrypoint)
+	}
+	cwd := pm.effectiveWorkDir()
+	resolved := resolvedInterpreterEntrypoint(ie, cwd)
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return fmt.Errorf("read script %q: %w", resolved, err)
+	}
+	if _, valid := sanitizeSource(string(data)); !valid {
+		return fmt.Errorf("script %q is binary or not valid UTF-8", resolved)
+	}
+	grant := config.AutoGrant{
+		Kind:              "interpreter_exact",
+		Language:          ie.Language,
+		SourceMode:        ie.SourceMode,
+		NormalizedCommand: normalizeGrantCommand(command),
+		EntrypointPath:    resolved,
+		EntrypointSHA256:  hashBytes(data),
+		CWD:               cwd,
+	}
+	if err := save(grant); err != nil {
+		return err
+	}
+	pm.AddAutoGrant(grant)
+	return nil
+}
+
 // normalizeGrantCommand canonicalizes a shell command enough for exact grant
 // matching: trim outer whitespace and collapse shell-token whitespace while
 // preserving argument order.
@@ -5178,7 +5220,7 @@ func validPermissionLevel(level PermissionLevel) bool {
 
 func isReadOnlyTool(name string) bool {
 	switch name {
-	case "read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite":
+	case "read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite", "sqlite_schema", "sqlite_query":
 		return true
 	default:
 		return false

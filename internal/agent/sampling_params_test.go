@@ -139,264 +139,75 @@ func TestApplySpecModel_CarriesDebugSessionIDOntoSwappedClient(t *testing.T) {
 	}
 }
 
-func TestDefaultTemperatureMinimaxM2(t *testing.T) {
-	tests := []string{
-		"minimax/minimax-m2.5",
-		"minimax/minimax-m2.7",
-		"minimax/minimax-m2",
-	}
-	for _, m := range tests {
-		v := defaultTemperature(m)
-		if v == nil || *v != 1.0 {
-			t.Errorf("defaultTemperature(%q) = %v, want 1.0", m, v)
-		}
-	}
-}
-
-func TestDefaultTemperatureQwen(t *testing.T) {
-	v := defaultTemperature("qwen/qwen3.7-max")
-	if v == nil || *v != 0.55 {
-		t.Errorf("defaultTemperature(qwen/qwen3.7-max) = %v, want 0.55", v)
-	}
-}
-
-func TestDefaultTemperatureUnset(t *testing.T) {
-	if v := defaultTemperature("claude-sonnet-4-6"); v != nil {
-		t.Errorf("defaultTemperature(claude) = %v, want nil", v)
-	}
-}
-
-func TestDefaultTemperatureNorthMiniCode(t *testing.T) {
-	v := defaultTemperature("north/north-mini-code")
-	if v == nil || *v != 1.0 {
-		t.Errorf("defaultTemperature(north-mini-code) = %v, want 1.0", v)
-	}
-}
-
-func TestDefaultTemperatureDeepseekV4(t *testing.T) {
-	tests := []struct {
+// TestDefaultTemperature pins the per-family default temperature table. A nil
+// want means the model gets no default (the provider's own default applies).
+func TestDefaultTemperature(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	cases := []struct {
 		model string
-		want  float64
+		want  *float64
 	}{
-		{"deepseek/deepseek-v4-pro", 0.6},
-		{"deepseek/deepseek-v4-flash", 0.6},
+		{"minimax/minimax-m2.5", f(1.0)}, {"minimax/minimax-m2.7", f(1.0)}, {"minimax/minimax-m2", f(1.0)},
+		{"qwen/qwen3.7-max", f(0.55)},
+		{"claude-sonnet-4-6", nil},
+		{"north/north-mini-code", f(1.0)},
+		{"deepseek/deepseek-v4-pro", f(0.6)}, {"deepseek/deepseek-v4-flash", f(0.6)},
+		{"xiaomi/mimo-v2-flash", f(0.6)}, {"xiaomi/mimo-v2-pro", f(0.6)}, {"xiaomi/mimo-v2.5", f(0.6)}, {"xiaomi/mimo-v2.5-pro", f(0.6)},
+		{"x-ai/grok-4-fast-non-reasoning", f(0.7)}, {"x-ai/grok-4-1-fast-non-reasoning", f(0.7)},
+		{"x-ai/grok-4", nil}, {"x-ai/grok-4.3", nil}, {"x-ai/grok-4-fast-reasoning", nil},
+		{"google/gemma-4-31b-it", f(0.8)},
+		{"mistral/codestral-latest", f(0.7)}, {"mistral/devstral-latest", f(0.7)}, {"mistral/mistral-large-latest", f(0.7)},
+		{"cohere/command-a-03-2025", f(0.75)}, {"cohere/command-r-08-2024", f(0.75)},
+		{"meta/llama-3.3-70b-instruct", f(0.7)},
+		{"nvidia/nemotron-3-nano-30b-a3b", f(0.7)},
+		{"gemini/gemini-2.0-flash", f(1.0)},
+		{"zhipu/glm-4.5", f(1.0)}, {"zhipu/glm-4.6", f(1.0)}, {"zhipu/glm-4.7", f(1.0)}, {"zai/glm-5", f(1.0)}, {"zai/glm-5.1", f(1.0)}, {"zai/glm-5.2", f(1.0)},
+		{"kimi/kimi-k2-thinking", f(1.0)}, {"kimi/kimi-k2.5", f(1.0)}, {"kimi/kimi-k2p5", f(1.0)}, {"kimi/kimi-k2-5", f(1.0)}, {"kimi/kimi-k2.6", f(1.0)}, {"moonshotai/kimi-k2.7-code", f(1.0)},
+		{"kimi/kimi-k2", f(0.6)},
 	}
-	for _, tc := range tests {
-		v := defaultTemperature(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
-		}
-	}
-}
-
-func TestDefaultTemperatureMiMo(t *testing.T) {
-	tests := []struct {
-		model string
-		want  float64
-	}{
-		{"xiaomi/mimo-v2-flash", 0.6},
-		{"xiaomi/mimo-v2-pro", 0.6},
-		{"xiaomi/mimo-v2.5", 0.6},
-		{"xiaomi/mimo-v2.5-pro", 0.6},
-	}
-	for _, tc := range tests {
-		v := defaultTemperature(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
-		}
-	}
-}
-
-func TestDefaultTemperatureGrok(t *testing.T) {
-	// Non-reasoning variants get a moderate temp
-	nonReasoning := []string{
-		"x-ai/grok-4-fast-non-reasoning",
-		"x-ai/grok-4-1-fast-non-reasoning",
-	}
-	for _, m := range nonReasoning {
-		v := defaultTemperature(m)
-		if v == nil || *v != 0.7 {
-			t.Errorf("defaultTemperature(%q) = %v, want 0.7", m, v)
-		}
-	}
-	// Reasoning variants get nil (use reasoning_effort)
-	reasoning := []string{
-		"x-ai/grok-4",
-		"x-ai/grok-4.3",
-		"x-ai/grok-4-fast-reasoning",
-	}
-	for _, m := range reasoning {
-		if v := defaultTemperature(m); v != nil {
-			t.Errorf("defaultTemperature(%q) = %v, want nil", m, v)
-		}
-	}
-}
-
-func TestDefaultTemperatureGemma(t *testing.T) {
-	v := defaultTemperature("google/gemma-4-31b-it")
-	if v == nil || *v != 0.8 {
-		t.Errorf("defaultTemperature(gemma) = %v, want 0.8", v)
-	}
-}
-
-func TestDefaultTemperatureMistral(t *testing.T) {
-	tests := []struct {
-		model string
-		want  float64
-	}{
-		{"mistral/codestral-latest", 0.7},
-		{"mistral/devstral-latest", 0.7},
-		{"mistral/mistral-large-latest", 0.7},
-	}
-	for _, tc := range tests {
-		v := defaultTemperature(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
-		}
-	}
-}
-
-func TestDefaultTemperatureCohere(t *testing.T) {
-	tests := []struct {
-		model string
-		want  float64
-	}{
-		{"cohere/command-a-03-2025", 0.75},
-		{"cohere/command-r-08-2024", 0.75},
-	}
-	for _, tc := range tests {
-		v := defaultTemperature(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
-		}
-	}
-}
-
-func TestDefaultTemperatureLlama(t *testing.T) {
-	v := defaultTemperature("meta/llama-3.3-70b-instruct")
-	if v == nil || *v != 0.7 {
-		t.Errorf("defaultTemperature(llama) = %v, want 0.7", v)
-	}
-}
-
-func TestDefaultTemperatureNemotron(t *testing.T) {
-	v := defaultTemperature("nvidia/nemotron-3-nano-30b-a3b")
-	if v == nil || *v != 0.7 {
-		t.Errorf("defaultTemperature(nemotron) = %v, want 0.7", v)
-	}
-}
-
-func TestDefaultTemperatureGemini(t *testing.T) {
-	v := defaultTemperature("gemini/gemini-2.0-flash")
-	if v == nil || *v != 1.0 {
-		t.Errorf("defaultTemperature(gemini) = %v, want 1.0", v)
-	}
-}
-
-func TestDefaultTemperatureGLM(t *testing.T) {
-	tests := []struct {
-		model string
-		want  float64
-	}{
-		{"zhipu/glm-4.5", 1.0},
-		{"zhipu/glm-4.6", 1.0},
-		{"zhipu/glm-4.7", 1.0},
-		{"zai/glm-5", 1.0},
-		{"zai/glm-5.1", 1.0},
-		{"zai/glm-5.2", 1.0},
-	}
-	for _, tc := range tests {
-		v := defaultTemperature(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
-		}
-	}
-}
-
-func TestDefaultTemperatureKimiK2(t *testing.T) {
-	tests := []struct {
-		model string
-		want  float64
-	}{
-		{"kimi/kimi-k2-thinking", 1.0},
-		{"kimi/kimi-k2.5", 1.0},
-		{"kimi/kimi-k2p5", 1.0},
-		{"kimi/kimi-k2-5", 1.0},
-		{"kimi/kimi-k2.6", 1.0},
-		{"moonshotai/kimi-k2.7-code", 1.0},
-		{"kimi/kimi-k2", 0.6},
-	}
-	for _, tc := range tests {
-		v := defaultTemperature(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
-		}
+	for _, tc := range cases {
+		checkSamplingDefault(t, "defaultTemperature", tc.model, defaultTemperature(tc.model), tc.want)
 	}
 }
 
 func TestDefaultTopP(t *testing.T) {
-	tests := []struct {
+	f := func(v float64) *float64 { return &v }
+	cases := []struct {
 		model string
-		want  float64
+		want  *float64
 	}{
-		{"minimax/minimax-m2.5", 0.95},
-		{"gemini/gemini-2.0-flash", 0.95},
-		{"kimi/kimi-k2.5", 0.95},
-		{"kimi/kimi-k2p5", 0.95},
-		{"kimi/kimi-k2-5", 0.95},
-		{"kimi/kimi-k2.6", 0.95},
-		{"moonshotai/kimi-k2.7-code", 0.95},
-		{"qwen/qwen3.7-max", 1},
+		{"minimax/minimax-m2.5", f(0.95)}, {"gemini/gemini-2.0-flash", f(0.95)},
+		{"kimi/kimi-k2.5", f(0.95)}, {"kimi/kimi-k2p5", f(0.95)}, {"kimi/kimi-k2-5", f(0.95)}, {"kimi/kimi-k2.6", f(0.95)}, {"moonshotai/kimi-k2.7-code", f(0.95)},
+		{"qwen/qwen3.7-max", f(1)},
+		{"claude-sonnet-4-6", nil},
 	}
-	for _, tc := range tests {
-		v := defaultTopP(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTopP(%q) = %v, want %v", tc.model, v, tc.want)
-		}
+	for _, tc := range cases {
+		checkSamplingDefault(t, "defaultTopP", tc.model, defaultTopP(tc.model), tc.want)
 	}
 }
 
-func TestDefaultTopPUnset(t *testing.T) {
-	if v := defaultTopP("claude-sonnet-4-6"); v != nil {
-		t.Errorf("defaultTopP(claude) = %v, want nil", v)
-	}
-}
-
-func TestDefaultTopKMinimaxM2Dot(t *testing.T) {
-	tests := []struct {
+func TestDefaultTopK(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	cases := []struct {
 		model string
-		want  float64
+		want  *float64
 	}{
-		{"minimax/minimax-m2.5", 40},
-		{"minimax/minimax-m2.1", 40},
-		{"minimax/minimax-m2.7", 40},
-		{"minimax/minimax-m25", 40},
-		{"minimax/minimax-m21", 40},
+		{"minimax/minimax-m2.5", f(40)}, {"minimax/minimax-m2.1", f(40)}, {"minimax/minimax-m2.7", f(40)}, {"minimax/minimax-m25", f(40)}, {"minimax/minimax-m21", f(40)},
+		{"minimax/minimax-m2", f(20)},
+		{"gemini/gemini-2.0-flash", f(64)},
+		{"claude-sonnet-4-6", nil},
 	}
-	for _, tc := range tests {
-		v := defaultTopK(tc.model)
-		if v == nil || *v != tc.want {
-			t.Errorf("defaultTopK(%q) = %v, want %v", tc.model, v, tc.want)
-		}
+	for _, tc := range cases {
+		checkSamplingDefault(t, "defaultTopK", tc.model, defaultTopK(tc.model), tc.want)
 	}
 }
 
-func TestDefaultTopKMinimaxM2Other(t *testing.T) {
-	v := defaultTopK("minimax/minimax-m2")
-	if v == nil || *v != 20 {
-		t.Errorf("defaultTopK(minimax/minimax-m2) = %v, want 20", v)
-	}
-}
-
-func TestDefaultTopKGemini(t *testing.T) {
-	v := defaultTopK("gemini/gemini-2.0-flash")
-	if v == nil || *v != 64 {
-		t.Errorf("defaultTopK(gemini) = %v, want 64", v)
-	}
-}
-
-func TestDefaultTopKUnset(t *testing.T) {
-	if v := defaultTopK("claude-sonnet-4-6"); v != nil {
-		t.Errorf("defaultTopK(claude) = %v, want nil", v)
+func checkSamplingDefault(t *testing.T, fn, model string, got, want *float64) {
+	t.Helper()
+	switch {
+	case want == nil && got != nil:
+		t.Errorf("%s(%q) = %v, want nil", fn, model, *got)
+	case want != nil && (got == nil || *got != *want):
+		t.Errorf("%s(%q) = %v, want %v", fn, model, got, *want)
 	}
 }

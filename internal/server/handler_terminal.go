@@ -501,7 +501,7 @@ func (h *Handler) serveFreshTerminal(w http.ResponseWriter, r *http.Request, ses
 // connection alive through NATs/proxies and to detect dead connections
 // (common with remote SSH/WSL tunnels that can silently drop). If a
 // ping write fails, the shell is detached immediately — far faster
-// than the 30-minute detach TTL.
+// than the detach TTL (terminalDetachTTL, or terminalDetachTTLRemote in remote mode).
 func (h *Handler) serveTerminalSocket(sess *terminalSession, ws *websocket.Conn) {
 	defer sess.detach(ws)
 

@@ -132,7 +132,7 @@ invariant violation documented in
 `gotchas/remote-project-path-trust-boundary.md`. That gotcha now carries a
 "Status: fixed 2026-09-28" note: `allowedProjectRoots` (`handler.go:662`)
 skips remote records, and the second path-only allowlist
-`isRegisteredProjectRoot` (`handler_git.go:156`) was fixed at the same time.
+`isRegisteredProjectRoot` (`handler_git.go:164`) was fixed at the same time.
 `AddRemote` already accepts an arbitrary caller-supplied host+path, so this
 endpoint does **not** widen that surface — and the invariant is now enforced.
 Regression coverage: `internal/server/remote_project_trust_boundary_test.go`

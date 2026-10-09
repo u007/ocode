@@ -22,6 +22,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Postgres integration tests (tag pgintegration). Each test creates its own
+  # database and drops it, so the service needs no setup. Local runs: make test-postgres.
+  postgres:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ocode-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OCODE_TEST_POSTGRES_URL: postgres://postgres:ocode-test@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet with the pgintegration tag
+        run: go vet -tags pgintegration ./internal/dbconnect/... ./internal/server/
+
+      - name: Test
+        run: go test -tags pgintegration -count=1 -timeout 10m -run 'TestPG' ./internal/dbconnect/ ./internal/server/
+
   go:
     name: Go build, vet, test
     runs-on: ubuntu-latest

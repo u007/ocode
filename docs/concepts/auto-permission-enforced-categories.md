@@ -264,3 +264,11 @@ The fail-open contract, the confidence floors, and the opaque-floor override are
 Path handling: `canonicalPath` (`filepath.Clean` + `filepath.EvalSymlinks`, resolving through the nearest existing ancestor so a not-yet-created target is judged by where it WOULD live) and `pathsEqual` (case-insensitive on darwin/windows) mean neither a symlink nor a spelling difference slips past. `pathUnder` treats `/` explicitly, because `parent + sep` would be `//` and match nothing.
 
 **Tests:** `internal/agent/rm_guard_paths_test.go`, plus the `TestPermissions_*` cases in `permission_overwrites_test.go`.
+
+## Amendment (2026-10-09): "always allow" on an interpreter ask saves an exact script grant
+
+`Decide` routes every `python`/`node`/… execution to Ask with rule `bash.interpreter.<lang>` *before* the bash-prefix checker, so a persisted `permissions.bash.prefixes["bash.interpreter.python"] = "allow"` was written by "always allow" and **never read** — the same prompt returned on the next call. The TUI (`setPermissionRule`) and the server (`persistAlwaysAllow`) now call `PermissionManager.PersistInterpreterScriptGrant`, which stores an `interpreter_exact` grant (language, normalized command, resolved script path, cwd, sha256 of the file). It is matched by `MatchInterpreterGrant` inside `askPermissionModelInterpreter`.
+
+- Only `script_file` runs can be saved. Heredoc and inline-eval source is transient; the call is allowed once and the user is told the rule was not saved.
+- Editing the script changes the hash, so the grant stops matching and the call asks again. The match is on the whole normalized command, so different arguments also ask again.
+- Never reintroduce a per-language prefix rule for `bash.interpreter.*`.
