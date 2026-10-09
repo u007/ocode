@@ -62,6 +62,9 @@ export default function ConnectFlowPanel({
   const modes = method.modes ?? [];
   const choosesMode = modes.includes("auto") && modes.includes("manual");
   const [pasted, setPasted] = useState("");
+  // Grok's x.com session cookies. Held only until a successful submit: a
+  // rejected submit keeps them so the user can correct a typo without retyping.
+  const [cookies, setCookies] = useState({ authToken: "", ct0: "" });
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Guards onDone against a second invocation: a poll that returns `complete`
@@ -72,6 +75,7 @@ export default function ConnectFlowPanel({
     setStarting(true);
     setError(null);
     setPasted("");
+    setCookies({ authToken: "", ct0: "" });
     reportedRef.current = false;
     try {
       // "Start over" on a live flow: cancel it first. The auto flow holds the
@@ -104,12 +108,19 @@ export default function ConnectFlowPanel({
   const submit = useCallback(async () => {
     if (!flow) return;
     setError(null);
+    // The server's flow kind decides the payload shape: a cookie flow takes
+    // authToken/ct0, every other waiting_input flow takes the pasted redirect.
+    const input =
+      flow.kind === "cookies"
+        ? { authToken: cookies.authToken.trim(), ct0: cookies.ct0.trim() }
+        : { code: pasted };
     try {
-      setFlow(await api.submitConnectFlowInput(flow.flowId, { code: pasted }, host));
+      setFlow(await api.submitConnectFlowInput(flow.flowId, input, host));
+      if (flow.kind === "cookies") setCookies({ authToken: "", ct0: "" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [flow, pasted, host]);
+  }, [flow, pasted, cookies, host]);
 
   // Poll while the server is still able to finish on its own. The dependency is
   // the flow object, so any state change re-arms (or tears down) the interval.
@@ -202,7 +213,39 @@ export default function ConnectFlowPanel({
       {flow.instructions && <p className="text-sm">{flow.instructions}</p>}
       {flow.note && <p className="text-xs text-muted-foreground">{flow.note}</p>}
 
-      {flow.state === "waiting_input" && (
+      {flow.state === "waiting_input" && flow.kind === "cookies" && (
+        <div className="space-y-2">
+          {/* Password-masked and autocomplete-off, like every key field in
+              Settings: auth_token is a full x.com session secret. */}
+          <Input
+            aria-label="auth_token"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="auth_token"
+            value={cookies.authToken}
+            onChange={(e) => setCookies((c) => ({ ...c, authToken: e.target.value }))}
+          />
+          <Input
+            aria-label="ct0"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="ct0"
+            value={cookies.ct0}
+            onChange={(e) => setCookies((c) => ({ ...c, ct0: e.target.value }))}
+          />
+          <Button
+            size="sm"
+            onClick={() => void submit()}
+            disabled={!cookies.authToken.trim() || !cookies.ct0.trim()}
+          >
+            Finish sign-in
+          </Button>
+        </div>
+      )}
+
+      {flow.state === "waiting_input" && flow.kind !== "cookies" && (
         <div className="space-y-2">
           <label className="block text-sm" htmlFor={`connect-paste-${flow.flowId}`}>
             Paste the URL your browser was redirected to

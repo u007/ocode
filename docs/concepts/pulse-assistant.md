@@ -35,7 +35,7 @@ through the normal permission dialog, see "Permission design".
   load for it, and it is not in `allowedProjectRoots` (that list is a security
   boundary). `sessionSearchRoots` adds it to the SessionManager's search space only,
   so a message sent after a restart still finds the transcript.
-- Exactly one id is persisted, in `<root>/state.json` as `{"session_id": "..."}`,
+- Exactly one id is persisted as the CURRENT chat, in `<root>/state.json` as `{"session_id": "..."}`,
   written atomically (`secretfile.WriteFileAtomic`) under `Handler.pulseMu`. It is
   never stored in `ocodeconfig.json`. A state file naming a non-`pulse_` id is
   rejected with a 500, not repaired.
@@ -48,6 +48,9 @@ through the normal permission dialog, see "Permission design".
 
 | Route | Response |
 |---|---|
+| `PUT /api/pulse/assistant` | Body `{"session_id": "pulse_..."}`. Makes an earlier chat current. `400` for a non-`pulse_` id, `404` when its transcript is gone, `409` while the CURRENT chat is mid-turn, compacting or paused on an ask (switching would hide that chat). Returns the same body as GET. |
+| `POST /api/pulse/assistant/new` | Starts an empty chat and makes it current under `pulseMu`; the previous transcript stays on disk. Same `409` rule as PUT. Registers only, never pre-builds the agent. Returns the same body as GET. |
+| `GET /api/pulse/assistant/chats?limit=&offset=` | `{chats: [{session_id, title, created_at, updated_at}], total, offset, limit, current}`, newest first by `updated_at`. `limit` defaults to 20, capped at 100; `limit<1` or a negative offset is `400`. Lists only `pulse_` transcripts in the pulse root. |
 | `GET /api/pulse/assistant` | `200 {"session_id": "pulse_...", "model": "<effective model id>"}`. First call mints and persists the id; every call registers the session entry but does NOT build the agent: the first message builds it through the normal path (a pre-build under the endpoint's profile resolution differed from the message path's and forced a rebuild plus an illegal bootstrap transition). `400 no model configured` when neither slot nor chat model is set. |
 | `GET /api/config/pulse-model` | `200 {"model": "..."}`, empty string when unset. |
 | `PUT /api/config/pulse-model` | Body `{"model": "..."}`; empty string clears. `400` when the `model` key is absent. Returns `{"model": "..."}`. |
@@ -93,6 +96,12 @@ Built in `buildAgentSession` when `isPulseSession(id)`, via
   `status | project basename | session_id | title (<=80 runes) | ask or current task (<=120 runes)`.
   Rows come from `buildPulseRows(gatherPulseInputs(live))` in board order, capped at
   60 (`pulseBoardMaxRows`), with a header stating shown-of-total.
+  The same block then carries a **running terminals** section from
+  `renderPulseTerminals(h.pulseTerminalRows())`: one line per terminal whose
+  foreground is a program other than the shell (`terminal_id | project | title | command`),
+  capped at 20 (`pulseBoardMaxTerminals`). Idle shells are left out; with none running
+  the line reads `No programs running in terminals.` `pulseTerminalRows` walks the
+  process table once per call, so the board costs one walk per turn.
 - **Memory section**: the same block carries a second section wrapped
   `[ocode:pulse-memory]`: global memory plus the memory of every project with a row
   on the board (deduped, sorted), each clipped to 8 KB (`pulseMemoryPromptCap`) with
@@ -121,22 +130,68 @@ error.
 | `pulse_board` | `scope?` live (default) / all | `{items: [PulseRow]}` as `GET /api/pulse` | cap drops tail rows |
 | `session_read` | `session_id`, `last?` 1-200 (30), `search?` | `{session_id, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
 | `session_recap` | `session_id` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
-| `terminal_tabs` | none | `{projects: [{project, terminals}]}` from `internal/termtabs` | sorted by project then terminal id |
-| `terminal_read` | `terminal_id`, `lines?` 1-1000 (100) | `{terminal_id, project, lines}` | ANSI stripped, `\r` redraws collapsed, 2000 runes per line; reads only the last 256 KB of the history log; same access gate and project boundary as `GET /api/terminal/{id}/history`; local projects only; cap drops OLDEST lines |
+| `terminal_tabs` | none | `{projects: [{project, terminals: [{id, title, osc_title?, live, running, command?}]}]}`: open tabs from `internal/termtabs`, joined with the live registry | sorted by project then terminal id; `live` = a shell is running, `running` = a program other than the shell is in the foreground, `command` names it |
+| `terminal_read` | `terminal_id`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?}` | ANSI stripped, `\r` redraws collapsed, 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; local projects only; the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
 | `memory_read` | `scope` global/project, `project_path?` | `{scope, path, content}`; empty content = nothing saved | project scope needs a path in `allowedProjectRoots()` |
-| `memory_write` | `scope`, `project_path?`, `content` | `{scope, path, bytes}`; full replace, atomic | 32 KB (`pulseMemoryCap`), over-cap rejected |
+| `memory_write` | `scope`, `project_path?`, `content` | `{scope, path, bytes}`; full replace, atomic | ~30k tokens (`pulseMemoryTokenBudget`) = 90 KB at 3 bytes/token (`pulseMemoryCap`), over-cap rejected; the system prompt tells the assistant to keep only important, durable notes |
 | `session_send` | `session_id`, `content` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage` | **asks**; refuses own id, child ids, unknown sessions, and a target that is mid-turn, compacting or paused on an ask (never queued). The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
 | `session_command` | `session_id`, `command`, `args?` | `{session_id, command, result}` where `result` is the operation's own JSON | **asks**; fixed allowlist `/btw` `/cancel` `/compact` `/recap` `/title`, anything else is an error listing them, no send-as-text fallback |
 | `permission_resolve` | `session_id`, `request_id`, `decision` allow/deny | `{session_id, request_id, decision, accepted: true}` via `HandleResolvePermission` | **asks**; unknown request id is an error; always_* decisions are not offered |
 | `question_answer` | `session_id`, `request_id`, `answers` | `{session_id, request_id, accepted: true}` via `HandleAnswerQuestion` (same payload as `POST /api/questions`) | **asks**; unknown request id is an error |
 | `agent_runs` | `session_id?` | `{sessions: [{session_id, runs: [...nested children]}]}` | transcripts omitted, results 500 runes; sessions without runs omitted; the assistant is excluded |
 
+### Terminal tools
+
+`terminal_tabs` and `terminal_read` let the assistant see terminals: which are open,
+which is running a program, and what a terminal printed. They are read-only. Nothing
+in this set writes to a terminal, and the terminal send tool is not built.
+
+**Scope: Pulse assistant only.** Both tools are defined in `pulseTools()`
+(`internal/server/pulse_tools.go`). That set reaches an agent in one place:
+`configurePulseAgent`, called from `buildAgentSession` only when `isPulseSession(id)`.
+The built-in toolset that ordinary sessions get (`tool.InitBuiltinToolsWithComputerDriver`)
+does not contain either name. The Pulse agent is restricted to the Pulse set with
+`RestrictToTools`. `TestTerminalToolsAreOnlyForThePulseAssistant`
+(`internal/server/handler_pulse_terminal_scope_test.go`) pins both directions: an
+ordinary agent never lists them, and a Pulse agent lists only Pulse tools and includes
+them. Do not register a terminal tool anywhere else. Add it to `pulseTools()` and the
+scope test will say whether it leaked.
+
+**What the tools return**
+
+- `terminal_tabs` returns the open tabs, grouped by project, from `internal/termtabs`.
+  Each terminal carries `live` (a shell is running), and when live also `running` (a
+  program other than the shell is in the foreground) and `command` (that program's
+  command line). The live join reads the process table on each call.
+- `terminal_read` returns N lines of a terminal's output history with ANSI codes stripped.
+  `lines` is 1–1000, default 100. By default it returns the last lines. `offset` pages
+  back from the end. `head: true` reads from the start instead, and then `offset` counts
+  forward. Only the newest or oldest `pulseTerminalWindowBytes` (1 MiB) is reachable,
+  read in 256 KB chunks, because the history reader caps each call. The page reports
+  `has_more_before` and `has_more_after`. A still-writing terminal is not pinned: each call
+  reads the output as it is at that moment, so paging can overlap or skip lines. The
+  history HTTP endpoint pins a byte cursor; this read does not.
+
+**Access**
+
+- `terminal_read`, the per-turn board's running-terminal block, and every `command` value
+  go through `terminalAccessAllowed()`: server auth or a loopback bind. The gate is
+  checked inside `pulseTerminalRows`, so the board and `terminal_tabs` share it. On
+  Windows the gate is a stub that returns false.
+- `terminal_tabs` still lists tab ids and titles without the gate. Only the live fields
+  are gated. This is a known gap, recorded in the Known limits below.
+
+**The same data for the UI.** The web Pulse dashboard does not use these tools. It reads
+`GET /api/pulse/terminals` for the live terminals (see `pulse-dashboard.md`, "Terminals
+section"). The terminal endpoints `GET /api/terminal` and `GET /api/terminal/{id}/history`
+serve the Processes tab and the terminal panel. All of these apply the same gate.
+
 ## Permission design
 
 The read tools and `memory_write` get explicit `allow` rules in
 `configurePulseAgent`. The four tools marked **asks** (`pulseTool.ask`) get NO
 rule, so the permission manager's default applies: every call becomes a normal
-permission ask that the drawer renders as a dialog, and the operator can "always
+permission ask that the assistant window renders as a dialog, and the operator can "always
 allow" from it like any tool. `memory_write` is exempt because it only replaces the
 assistant's own size-capped notes under its private root. The system prompt tells
 the model to use write tools only when the operator's CURRENT message explicitly
@@ -179,6 +234,11 @@ assistant never appears as a card, never counts as a child, and is absent from
 
 ## Known limits
 
+- `terminal_tabs` lists tab ids and titles without the terminal access gate; only the
+  live fields (`running`, `command`) are gated. Gate the whole tool, or accept that tab
+  ids and titles reach the model, and record which in this list.
+- `terminal_read` returns only the newest or oldest 1 MiB of a terminal's history, and a
+  still-writing terminal is not pinned, so paging can overlap or skip lines.
 - Cross-process blindness carries over from Pulse: the assistant sees only this
   server process's live sessions (and, for `scope=all`, the disk listing of local
   projects). Sessions held by another `ocode` process are invisible until they

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,13 +92,14 @@ type pulseAssistantState struct {
 	SessionID string `json:"session_id"`
 }
 
-// pulseAssistantID returns the persisted assistant session id, minting and
-// persisting one on first use. Serialised by pulseMu so two concurrent first
-// calls cannot mint two assistants.
-func (h *Handler) pulseAssistantID(root string) (string, error) {
-	h.pulseMu.Lock()
-	defer h.pulseMu.Unlock()
+// errPulseChatBusy marks a chat switch refused because the current chat is
+// mid-turn or paused on an ask. The drawer would stop showing that chat, so the
+// switch waits for it to settle.
+var errPulseChatBusy = errors.New("pulse assistant chat is busy")
 
+// readPulseState returns the persisted current chat id, or "" when no chat has
+// been minted yet.
+func readPulseState(root string) (string, error) {
 	statePath := filepath.Join(root, "state.json")
 	data, err := os.ReadFile(statePath)
 	switch {
@@ -109,35 +111,82 @@ func (h *Handler) pulseAssistantID(root string) (string, error) {
 		if !isPulseSession(st.SessionID) {
 			return "", fmt.Errorf("%s holds session_id %q without the %q prefix", statePath, st.SessionID, pulseSessionPrefix)
 		}
-		// A state file naming an id whose transcript is gone would hand the
-		// dashboard a dead id (GET /api/sessions/{id} 404s), so mint a new one.
-		exists, lerr := session.ExistsForDir(root, st.SessionID)
-		switch {
-		case lerr != nil:
-			return "", fmt.Errorf("check pulse assistant transcript %s: %w", st.SessionID, lerr)
-		case exists:
-			return st.SessionID, nil
-		default:
-			log.Printf("serve: pulse assistant transcript for %s is missing in %s; minting a new session", st.SessionID, root)
-		}
-	case !errors.Is(err, os.ErrNotExist):
+		return st.SessionID, nil
+	case errors.Is(err, os.ErrNotExist):
+		return "", nil
+	default:
 		return "", fmt.Errorf("read %s: %w", statePath, err)
 	}
+}
 
+// writePulseState makes id the current chat.
+func writePulseState(root, id string) error {
+	out, err := json.Marshal(pulseAssistantState{SessionID: id})
+	if err != nil {
+		return fmt.Errorf("encode pulse assistant state: %w", err)
+	}
+	statePath := filepath.Join(root, "state.json")
+	if err := secretfile.WriteFileAtomic(statePath, out, 0o600); err != nil {
+		return fmt.Errorf("persist %s: %w", statePath, err)
+	}
+	return nil
+}
+
+// mintPulseChat creates a new chat id and persists its empty transcript. The
+// transcript goes to disk BEFORE the id is published or the live agent
+// registered: GET /api/sessions/{id} and the advisor pin both read from disk.
+func mintPulseChat(root string) (string, error) {
 	id := pulseSessionPrefix + strings.TrimPrefix(session.NewSessionID(), "ses_")
-	// Persist an empty transcript BEFORE the id is published or the live agent
-	// registered: GET /api/sessions/{id} and the advisor pin both read from disk.
 	if err := session.SaveForDir(root, id, pulseAssistantTitle, nil, nil); err != nil {
 		return "", fmt.Errorf("persist empty pulse assistant transcript %s: %w", id, err)
 	}
-	out, err := json.Marshal(pulseAssistantState{SessionID: id})
+	return id, nil
+}
+
+// pulseAssistantID returns the current chat id, minting and persisting one on
+// first use. Serialised by pulseMu so two concurrent first calls cannot mint two
+// assistants.
+func (h *Handler) pulseAssistantID(root string) (string, error) {
+	h.pulseMu.Lock()
+	defer h.pulseMu.Unlock()
+
+	cur, err := readPulseState(root)
 	if err != nil {
-		return "", fmt.Errorf("encode pulse assistant state: %w", err)
+		return "", err
 	}
-	if err := secretfile.WriteFileAtomic(statePath, out, 0o600); err != nil {
-		return "", fmt.Errorf("persist %s: %w", statePath, err)
+	if cur != "" {
+		// A state file naming an id whose transcript is gone would hand the
+		// dashboard a dead id (GET /api/sessions/{id} 404s), so mint a new one.
+		exists, lerr := session.ExistsForDir(root, cur)
+		switch {
+		case lerr != nil:
+			return "", fmt.Errorf("check pulse assistant transcript %s: %w", cur, lerr)
+		case exists:
+			return cur, nil
+		default:
+			log.Printf("serve: pulse assistant transcript for %s is missing in %s; minting a new session", cur, root)
+		}
+	}
+
+	id, err := mintPulseChat(root)
+	if err != nil {
+		return "", err
+	}
+	if err := writePulseState(root, id); err != nil {
+		return "", err
 	}
 	return id, nil
+}
+
+// writePulseAssistantInfo writes the {session_id, model} body shared by every
+// endpoint that makes a chat current.
+func (h *Handler) writePulseAssistantInfo(w http.ResponseWriter, id string) {
+	model := h.effectiveSessionModel(id)
+	if model == "" {
+		writeError(w, http.StatusBadRequest, "no model configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"session_id": id, "model": model})
 }
 
 // HandlePulseAssistant serves GET /api/pulse/assistant:
@@ -155,19 +204,196 @@ func (h *Handler) HandlePulseAssistant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	model := h.effectiveSessionModel(id)
-	if model == "" {
-		writeError(w, http.StatusBadRequest, "no model configured")
-		return
-	}
-
 	// Register the registry entry only. The live agent is NOT pre-built here:
 	// a build under this request's profile resolution can differ from the one
 	// the first message resolves, forcing a rebuild and an illegal bootstrap
 	// transition. The first message builds it through the normal path (which
 	// has the isPulseSession branch), from the persisted transcript.
 	h.sessions.Register(id, root)
-	writeJSON(w, http.StatusOK, map[string]string{"session_id": id, "model": model})
+	h.writePulseAssistantInfo(w, id)
+}
+
+// pulseChatBusyOrInternal maps a chat-switch failure to its status: a busy
+// current chat is a conflict, anything else an internal error.
+func pulseChatBusyOrInternal(w http.ResponseWriter, err error) {
+	if errors.Is(err, errPulseChatBusy) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err.Error())
+}
+
+// refuseIfPulseChatBusy returns errPulseChatBusy when the current chat cannot be
+// switched away from right now. An empty cur (no chat yet) is never busy.
+func (h *Handler) refuseIfPulseChatBusy(cur string) error {
+	if cur == "" {
+		return nil
+	}
+	if err := h.pulseSessionBusy(cur); err != nil {
+		return fmt.Errorf("%w: %v", errPulseChatBusy, err)
+	}
+	return nil
+}
+
+// HandleNewPulseChat serves POST /api/pulse/assistant/new: starts an empty chat
+// and makes it current. The previous transcript stays on disk and is listed by
+// HandleListPulseChats. Refused (409) while the current chat is mid-turn or
+// paused on an ask.
+func (h *Handler) HandleNewPulseChat(w http.ResponseWriter, r *http.Request) {
+	root, err := pulseAssistantRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.pulseMu.Lock()
+	cur, err := readPulseState(root)
+	if err == nil {
+		err = h.refuseIfPulseChatBusy(cur)
+	}
+	var id string
+	if err == nil {
+		id, err = mintPulseChat(root)
+	}
+	if err == nil {
+		err = writePulseState(root, id)
+	}
+	h.pulseMu.Unlock()
+	if err != nil {
+		pulseChatBusyOrInternal(w, err)
+		return
+	}
+	h.sessions.Register(id, root)
+	h.writePulseAssistantInfo(w, id)
+}
+
+// HandleSelectPulseChat serves PUT /api/pulse/assistant with
+// {"session_id": "pulse_..."}: makes an earlier chat current. Refused (409)
+// while the current chat is mid-turn or paused on an ask; 404 when the target
+// transcript is gone.
+func (h *Handler) HandleSelectPulseChat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID *string `json:"session_id"`
+	}
+	if err := readBodyJSON(r, &req); err != nil || req.SessionID == nil || !isPulseSession(*req.SessionID) {
+		writeError(w, http.StatusBadRequest, `invalid body (want {"session_id": "pulse_..."})`)
+		return
+	}
+	target := *req.SessionID
+	root, err := pulseAssistantRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.pulseMu.Lock()
+	cur, err := readPulseState(root)
+	if err == nil && cur != target {
+		err = h.refuseIfPulseChatBusy(cur)
+	}
+	var exists bool
+	if err == nil {
+		exists, err = session.ExistsForDir(root, target)
+	}
+	if err == nil && exists {
+		err = writePulseState(root, target)
+	}
+	h.pulseMu.Unlock()
+	if err != nil {
+		pulseChatBusyOrInternal(w, err)
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "pulse assistant chat not found")
+		return
+	}
+	h.sessions.Register(target, root)
+	h.writePulseAssistantInfo(w, target)
+}
+
+// pulseChatSummary is one row of GET /api/pulse/assistant/chats.
+type pulseChatSummary struct {
+	SessionID string `json:"session_id"`
+	Title     string `json:"title"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// pulsePageParams reads ?limit (default def, capped at max) and ?offset from a
+// listing request. A malformed or non-positive limit, or a negative offset, is
+// an error the caller answers with 400.
+func pulsePageParams(r *http.Request, def, max int) (limit, offset int, err error) {
+	limit = def
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 1 {
+			return 0, 0, fmt.Errorf("limit must be a positive integer")
+		}
+		limit = min(n, max)
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 0 {
+			return 0, 0, fmt.Errorf("offset must be a non-negative integer")
+		}
+		offset = n
+	}
+	return limit, offset, nil
+}
+
+// HandleListPulseChats serves GET /api/pulse/assistant/chats?limit=&offset=:
+// the assistant's chats, most recently updated first. limit defaults to 20 and
+// is capped at 100.
+func (h *Handler) HandleListPulseChats(w http.ResponseWriter, r *http.Request) {
+	limit, offset, err := pulsePageParams(r, 20, 100)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	root, err := pulseAssistantRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	refs, err := session.ListRefsForDir(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list pulse assistant chats: %v", err))
+		return
+	}
+	chats := make([]session.Ref, 0, len(refs))
+	for _, ref := range refs {
+		if isPulseSession(ref.ID) {
+			chats = append(chats, ref)
+		}
+	}
+	sort.SliceStable(chats, func(i, j int) bool {
+		if !chats[i].UpdatedAt.Equal(chats[j].UpdatedAt) {
+			return chats[i].UpdatedAt.After(chats[j].UpdatedAt)
+		}
+		return chats[i].ID > chats[j].ID
+	})
+	total := len(chats)
+	start := min(offset, total)
+	end := min(start+limit, total)
+	page := make([]pulseChatSummary, 0, end-start)
+	for _, ref := range chats[start:end] {
+		page = append(page, pulseChatSummary{
+			SessionID: ref.ID,
+			Title:     ref.Title,
+			CreatedAt: ref.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: ref.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+	current, err := readPulseState(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chats":   page,
+		"total":   total,
+		"offset":  offset,
+		"limit":   limit,
+		"current": current,
+	})
 }
 
 // HandleGetPulseModel serves GET /api/config/pulse-model: {"model": "..."},
@@ -224,7 +450,7 @@ Tools:
 Rules:
 - Write tools (the ones that message a session, run a command on it, or answer its permission or question asks) act on the operator's other work. Use them ONLY when the operator's CURRENT message explicitly asks for that action on that session. Otherwise describe what is pending and ask what they want. Each call needs the operator's approval; if it is denied or errors, say so and do not retry around it.
 - You cannot edit files or run shell commands. Never claim to have changed, sent, approved or started anything unless the write tool result confirmed it.
-- Your memory files (memory_read, memory_write) are yours alone. Save things the operator asks you to remember; read before you write, because a write replaces the whole file.
+- Your memory files (memory_read, memory_write) are yours alone. Keep them minimal: save only important, durable notes, such as standing preferences, ongoing goals and decisions the operator asks you to keep. Never save transient status, copies of the board, or task progress. Each file is capped at about 30k tokens, so condense on every write and drop stale entries instead of appending. Read before you write, because a write replaces the whole file.
 - You only see sessions of this ocode server process. Sessions in other ocode processes are invisible to you.
 - Cite session ids when you refer to a session. Say when a tool result was truncated.
 - Be concise and factual. If you do not know, say so and name the tool call that would find out.`
@@ -287,6 +513,9 @@ func (h *Handler) pulseBoardSnapshot() string {
 	now := time.Now()
 	rows := buildPulseRows(h.gatherPulseInputs(pulseScopeLive, now), pulseScopeLive, now)
 	board := renderPulseBoard(rows, now)
+	if h.terminalAccessAllowed() {
+		board += "\n" + renderPulseTerminals(h.pulseTerminalRows())
+	}
 	mem, err := h.pulseMemorySection(rows)
 	if err != nil {
 		log.Printf("serve: pulse memory for the board: %v", err)

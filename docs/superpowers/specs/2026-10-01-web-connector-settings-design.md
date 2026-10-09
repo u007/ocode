@@ -194,6 +194,12 @@ Web, landed 2026-10-01 (plan Phase 1): client methods for all 8 routes
 legacy `api.connectProvider` (`client.ts:2885`) is kept deliberately: it targets
 a different, older Server-level route.
 
+2026-10-09: the web surfaces for the remaining kinds landed. `ConnectFlowPanel` renders
+`cookies` (Grok `auth_token`/`ct0` fields), `device-code` (the user code and
+verification URI), and `plugin` (instructions, then polling). `ConnectorsForm` sends
+Cloudflare's `accountId` (Workers) and `baseUrl` (AI Gateway) with the key. Google
+manual completion is still not started.
+
 ## 6. Test obligations
 
 Per endpoint in `handler_connect_test.go`. Plus, new: TUI/server method-catalog

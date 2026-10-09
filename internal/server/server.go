@@ -275,6 +275,9 @@ func (s *Server) registerRoutes() {
 	// The Pulse assistant: one global chat session bound to the dashboard.
 	// Messages and streaming use the ordinary /api/sessions/{id}/... routes.
 	s.mux.HandleFunc("GET /api/pulse/assistant", s.authMiddleware(s.handlePulseAssistant))
+	s.mux.HandleFunc("PUT /api/pulse/assistant", s.authMiddleware(s.handleSelectPulseChat))
+	s.mux.HandleFunc("POST /api/pulse/assistant/new", s.authMiddleware(s.handleNewPulseChat))
+	s.mux.HandleFunc("GET /api/pulse/assistant/chats", s.authMiddleware(s.handleListPulseChats))
 	s.mux.HandleFunc("GET /api/config/pulse-model", s.authMiddleware(s.handleGetPulseModel))
 	s.mux.HandleFunc("PUT /api/config/pulse-model", s.authMiddleware(s.handleSetPulseModel))
 	s.mux.HandleFunc("GET /api/config/pulse-system-prompt", s.authMiddleware(s.handleGetPulseSystemPrompt))
@@ -535,6 +538,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/terminal/ws", s.authMiddleware(s.handleTerminalWS))
 	s.mux.HandleFunc("GET /api/terminal/processes", s.authMiddleware(s.handleTerminalProcesses))
 	s.mux.HandleFunc("GET /api/terminal", s.authMiddleware(s.handler.HandleTerminalList))
+	s.mux.HandleFunc("GET /api/pulse/terminals", s.authMiddleware(s.handler.HandlePulseTerminals))
 	s.mux.HandleFunc("DELETE /api/terminal/{id}", s.authMiddleware(s.handleTerminalKill))
 	s.mux.HandleFunc("GET /api/terminal/{id}/history", s.authMiddleware(s.handleTerminalHistory))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
@@ -1412,6 +1416,18 @@ func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePulseAssistant(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandlePulseAssistant(w, r)
+}
+
+func (s *Server) handleSelectPulseChat(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSelectPulseChat(w, r)
+}
+
+func (s *Server) handleNewPulseChat(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleNewPulseChat(w, r)
+}
+
+func (s *Server) handleListPulseChats(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListPulseChats(w, r)
 }
 
 func (s *Server) handleGetPulseModel(w http.ResponseWriter, r *http.Request) {

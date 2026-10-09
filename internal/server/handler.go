@@ -1234,7 +1234,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	content, err := h.runTurn(sid, as, req.Content, opts)
+	content, err := h.runSyncTurn(sid, as, req.Content, opts)
 	// A close that arrived while this synchronous turn was running could not
 	// release the agent mid-turn; drain the close-pending marker now that the
 	// turn has unwound (runTurn set turnActive=false before returning).
@@ -1607,8 +1607,9 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	// goroutine with events streamed over the unified bus.
 	if req.Async {
 		if pulse && h.sessions.IsTurnActive(id) {
-			// A synchronous turn is not counted in turnInFlight, so dispatch
-			// cannot see it. This read narrows that gap but cannot close it.
+			// Synchronous turns are counted in turnInFlight (runSyncTurn), so
+			// dispatch refuses them under its lock. This read also refuses a turn
+			// that was started without that count, and it is not the guarantee.
 			writeError(w, http.StatusConflict, errTurnInFlight.Error())
 			return
 		}
@@ -1634,7 +1635,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	content, err := h.runTurn(id, as, req.Content, turnOptions{})
+	content, err := h.runSyncTurn(id, as, req.Content, turnOptions{})
 	// A close that arrived while this synchronous turn was running could not
 	// release the agent mid-turn; drain the close-pending marker now that the
 	// turn has unwound (runTurn set turnActive=false before returning).

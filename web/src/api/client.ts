@@ -1299,6 +1299,27 @@ export const api = {
   // for every other endpoint (transcript, sendMessage, SSE, model override).
   getPulseAssistant: () =>
     fetchJSON<import("./types").PulseAssistantInfo>("/api/pulse/assistant"),
+  // Chat history. A new chat becomes current and the old transcript stays on
+  // disk; a select makes an earlier chat current. Both are refused (409) while
+  // the current chat is mid-turn or paused on an ask.
+  newPulseChat: () =>
+    fetchJSON<import("./types").PulseAssistantInfo>("/api/pulse/assistant/new", {
+      method: "POST",
+    }),
+  selectPulseChat: (sessionId: string) =>
+    fetchJSON<import("./types").PulseAssistantInfo>("/api/pulse/assistant", {
+      method: "PUT",
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
+  /** Live terminals for the Pulse dashboard, running programs first. */
+  listPulseTerminals: (offset: number, limit: number) =>
+    fetchJSON<import("./types").PulseTerminalPage>(
+      `/api/pulse/terminals?offset=${offset}&limit=${limit}`,
+    ),
+  listPulseChats: (offset: number, limit: number) =>
+    fetchJSON<import("./types").PulseChatPage>(
+      `/api/pulse/assistant/chats?offset=${offset}&limit=${limit}`,
+    ),
   // The assistant's model slot. Empty = unset (the server default applies);
   // a PUT with an empty model clears it. Takes effect on the next turn.
   getPulseModel: () => fetchJSON<{ model: string }>("/api/config/pulse-model"),

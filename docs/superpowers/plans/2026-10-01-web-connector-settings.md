@@ -1,21 +1,21 @@
 ---
 type: Plan
 title: Web/Desktop Connectors settings — implementation plan
-description: 'Implementation plan for web/desktop Connectors settings (TUI /connect parity): shared method catalog, credential-version invalidation, client methods/forms, OAuth flow wiring; records the 2026-10-02 connect-flow correctness fixes (commit gate, beginInput single authority, cancel-drops-credential, tail-only masking). Phase 0–1 done; Phase 2 partial.'
+description: 'Implementation plan for web/desktop Connectors settings (TUI /connect parity): shared method catalog, credential-version invalidation, client methods/forms, OAuth flow wiring; records the 2026-10-02 connect-flow correctness fixes (commit gate, beginInput single authority, cancel-drops-credential, tail-only masking). Phases 0–4 done except Google manual completion (not started; needs client credentials).'
 tags:
   - plan
   - connectors
   - oauth
   - web
-timestamp: 2026-10-01T18:14:06Z
+timestamp: 2026-10-09T11:46:44Z
 ---
 # Web/Desktop Connectors settings — implementation plan
 
 Spec: `docs/superpowers/specs/2026-10-01-web-connector-settings-design.md`
 
 Server half was already built by another session (`internal/server/handler_connect.go`)
-and is green. **Phase 0 and ALL of Phase 1 are DONE** (2026-10-01). Phase 2
-(OAuth flows) is the remaining work.
+and is green. **Phase 0 and ALL of Phase 1 are DONE** (2026-10-01). As of
+2026-10-09, Phases 2–4 are done except Google manual completion, which is deferred (item 13).
 
 A concurrent session is building the same feature at the same time, and also
 edits this file. Treat every file it owns as read-only until it lands: as of
@@ -34,6 +34,12 @@ actually cancelling the Anthropic/Google/manual-OpenAI exchanges
 (`runConnectExchange` runs their context-free exchanges under a cancellable
 wait), and tail-only credential masking (≥16-char keys show their last 4;
 shorter masked whole). Tests: `handler_connect_cancel_test.go` (12).
+
+**2026-10-09 — Phase 2–4 closed out.** Grok cookies and Cloudflare prompts now
+work in the web UI (they were server-only): `ConnectFlowPanel` renders the
+`cookies` kind as masked `auth_token`/`ct0` fields, and `ConnectorsForm` sends
+Cloudflare's `accountId` / `baseUrl`. Panel tests added for the cookies,
+device-code and plugin kinds. Remaining open items are recorded in TODO.md.
 
 ## Phase 0 — gate, then shared catalog (DRY)
 
@@ -120,8 +126,10 @@ shorter masked whole). Tests: `handler_connect_cancel_test.go` (12).
 ## Phase 2 — OAuth, one flow at a time
 
 11. [x] Anthropic paste-code — already shipped in the server handler.
-12. [~] **PARTIAL — the auth layer of manual completion is done; the server
-    wiring is blocked on file ownership.** `internal/auth/openai_oauth_manual.go`
+12. [x] **OpenAI manual completion — DONE.** (The text below is the historical
+    progression; the server wiring landed and is described under "Server wiring: DONE".)
+    The auth layer of manual completion is done;
+    the server wiring was blocked on file ownership at the time. `internal/auth/openai_oauth_manual.go`
     (new file, this session) provides `OpenAIManualFlow`,
     `StartOpenAIOAuthManual()` (builds the authorize URL, binds NO port) and
     `ExchangeOpenAIManual(f, pasted)`; TDD'd in
@@ -163,30 +171,44 @@ shorter masked whole). Tests: `handler_connect_cancel_test.go` (12).
     Google manual mode is still not started; it additionally needs user-supplied
     client credentials. Do not hold `h.mu` while deciding or while the flow runs
     — the file has zero `h.mu` references and that is the invariant.
-13. OpenAI then Google `local-callback` in the web UI, both modes.
-14. Copilot device code (host-agnostic, single mode) with polling.
-15. Flow UI: one component per `connectFlowKind`, driven by
+13. [~] OpenAI then Google `local-callback` in the web UI, both modes. OpenAI: both
+    modes are in the UI, but reachable only via the `codex` provider (in shipped
+    binaries `openai` has no `oauth` method). Google: auto mode only. Manual mode is
+    NOT started and is deferred: it needs user-supplied client credentials (TODO.md).
+14. [x] Copilot device code (host-agnostic, single mode) with polling. The panel shows
+    the `userCode` and verification URI; a `device-code` panel test was added 2026-10-09.
+15. [x] Flow UI: one `ConnectFlowPanel` renders every kind, not one component per kind.
+    It branches on kind inside `waiting_input` (cookies fields; redirect paste box for
+    paste-code and manual local-callback) and shows device-code and plugin output. It is
+    driven by
     `GET /flows/{flowId}` polling + `POST /flows/{id}/input` + `DELETE` cancel.
-16. Tests: flow lifecycle per kind; the `auto`/`manual` selection incl. the remote
-    case; cancel. — **cancel: DONE 2026-10-02** (`handler_connect_cancel_test.go`,
+16. [x] Tests: flow lifecycle per kind (local-callback, cookies, device-code, plugin;
+    paste-code uses the same redirect box as manual local-callback); the `auto`/`manual`
+    selection incl. the remote case (`ConnectFlowPanel.test.tsx`); cancel. — **cancel: DONE 2026-10-02** (`handler_connect_cancel_test.go`,
     12 tests: cancel discards the credential for all three context-free
     exchanges, 409 while committing, double-submit starts exactly one exchange,
     the mask never reveals a key's head).
-17. Test: `GET /flows/{id}` never returns the PKCE verifier or OAuth state.
+17. [x] Test: `GET /flows/{id}` never returns the PKCE verifier or OAuth state
+    (`handler_connect_secrets_test.go`).
 
 ## Phase 3 — the odd providers
 
-18. Grok x.com cookies (UI collects the cookies, posts to `flows/{id}/input`).
-19. Cloudflare account-id / gateway prompts.
-20. Generic plugin `AuthMethod.Run` dispatch rendering.
+18. [x] Grok x.com cookies. Server: `connectFlowCookies`, input `{authToken, ct0}`. UI
+    (added 2026-10-09): masked `auth_token`/`ct0` fields in `ConnectFlowPanel`.
+19. [x] Cloudflare account-id / gateway prompts. Server requires `accountId` (Workers) or
+    `baseUrl` (AI Gateway). UI (added 2026-10-09): both fields in `ConnectorsForm`.
+20. [x] Generic plugin `AuthMethod.Run` dispatch rendering. Plugin flows start `running`
+    and take no input; the panel shows the server's instructions and polls to completion
+    (test added 2026-10-09).
 
 ## Phase 4 — cross-cutting
 
-21. Remote refusal: a `host=`, `remoteMode` request must never answer from local
-    `auth.json`. Test the refusal.
-22. Docs: a `concepts/` page for the Connectors section (via the `context`
-    agent), stating the masked-key contract and the base-vs-profile store
-    boundary — neither is documented anywhere today (spec §7).
+21. [x] Remote refusal: a `host=`, `remoteMode` request must never answer from local
+    `auth.json`. Covered by `handler_connect_remote_refusal_test.go` (403 admission
+    refusal, no local-credential leak).
+22. [x] Docs: `docs/concepts/web-connector-settings.md` (masked-key contract, base-vs-profile
+    boundary, flow kinds). Written before 2026-10-09; corrected directly that day. See the
+    bundle note under Notes.
 
 ## Notes
 
@@ -197,3 +219,9 @@ shorter masked whole). Tests: `handler_connect_cancel_test.go` (12).
   the mask is tail-4-only for keys ≥ 16 chars; shorter keys are masked whole).
 - `docs/` is bundle-owned: route the concept page through the `context` agent;
   this plan and the spec are plain files and may be edited directly.
+- **Bundle note (2026-10-09):** the concept page was edited directly on 2026-10-02 and
+  2026-10-09, not through the `context` agent. `docs/index.md` has `okf_version: 0.1`,
+  so the sole-writer invariant applies. The content is checked against the code, but
+  it still needs a `context`-agent pass to meet the invariant.
+- **Deferred:** Google manual completion (item 13). It needs client credentials and is
+  tracked in TODO.md. The start responses that omitted `state` were fixed 2026-10-09.

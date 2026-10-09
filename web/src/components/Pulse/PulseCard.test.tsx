@@ -93,7 +93,7 @@ describe("PulseCard structure", () => {
     // The header is the click target; the focus control is a SIBLING of it, as
     // a button may not contain a button.
     const buttons = within(item).getAllByRole("button");
-    expect(buttons).toHaveLength(2);
+    expect(buttons).toHaveLength(3);
     expect(buttons.filter((b) => b.hasAttribute("aria-expanded"))).toEqual([cardButton()]);
     expect(cardButton().contains(screen.getByRole("button", { name: "Focus session" }))).toBe(false);
   });
@@ -360,15 +360,15 @@ describe("PulseCard streams a live row on the card itself", () => {
 
     // The floor sits on the card chrome div now, not on the header button.
     const chrome = cardButton().parentElement!;
-    expect(chrome.className).toContain("min-h-[16rem]");
-    expect(cardButton().className).not.toContain("min-h-[16rem]");
+    expect(chrome.className).toContain("min-h-[32rem]");
+    expect(cardButton().className).not.toContain("min-h-[32rem]");
     // The FLOOR above is not the budget that keeps the height constant: min-h
     // only sets a minimum, and a flex-1 child of an auto-height column is sized
     // from its own content, so `flex-basis: 0%` caps nothing. The region's
     // ceiling is what pins the height; measured in headless Chromium against the
     // built CSS, an uncapped long wrapped stream grew the card to 2236px.
     const region = screen.getByTestId("pulse-stream-region");
-    expect(region.className).toContain("max-h-[8rem]");
+    expect(region.className).toContain("max-h-[24rem]");
     expect(region.className).toContain("flex-1");
     expect(region.className).toContain("min-h-0");
     // The region SCROLLS instead of clipping, and no longer bottom-pins with
@@ -442,8 +442,8 @@ describe("PulseCard streams a live row on the card itself", () => {
     expect(screen.queryByTestId("pulse-tail")).not.toBeInTheDocument();
     expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "running");
     // No reserved height either: the one-line Recent row keeps its own box.
-    expect(cardButton().className).not.toContain("min-h-[16rem]");
-    expect(cardButton().parentElement!.className).not.toContain("min-h-[16rem]");
+    expect(cardButton().className).not.toContain("min-h-[32rem]");
+    expect(cardButton().parentElement!.className).not.toContain("min-h-[32rem]");
   });
 });
 
@@ -642,6 +642,49 @@ describe("PulseCard overlay", () => {
     fireEvent.pointerLeave(cardButton());
 
     expect(overlay()).not.toBeInTheDocument();
+  });
+
+  it("pins the panel open from the toggle, so mouse leave does not close it", async () => {
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+    const toggle = screen.getByRole("button", { name: "Keep details open" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(overlay()).toBeInTheDocument();
+    expect(cardButton()).toHaveAttribute("aria-expanded", "true");
+    expect(mockTail).toHaveBeenLastCalledWith("ses_1", true, "idle");
+
+    fireEvent.pointerLeave(cardButton());
+
+    expect(overlay()).toBeInTheDocument();
+    expect(cardButton()).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("unpins on a second toggle click and closes once the pointer has left", () => {
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+    const toggle = screen.getByRole("button", { name: "Keep details open" });
+    fireEvent.click(toggle);
+    fireEvent.pointerLeave(cardButton());
+    expect(overlay()).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(overlay()).not.toBeInTheDocument();
+    expect(cardButton()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("clears the pin on Escape", () => {
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Keep details open" }));
+    expect(overlay()).toBeInTheDocument();
+
+    fireEvent.keyDown(cardButton(), { key: "Escape" });
+
+    expect(overlay()).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Keep details open" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("expands immediately on keyboard focus, with no delay", () => {
@@ -947,5 +990,15 @@ describe("PulseCard hover overlay is never empty", () => {
 
     const items = within(overlay()!).getByTestId("pulse-todo-items");
     expect(within(items).getAllByText("second")).toHaveLength(1);
+  });
+});
+
+describe("PulseCard settled multi-line", () => {
+  it("renders a settled card with its header and no stream or height floor", () => {
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+
+    expect(cardButton().textContent).toContain("Fix the pulse dashboard");
+    expect(screen.queryByTestId("pulse-stream-region")).not.toBeInTheDocument();
+    expect(cardButton().parentElement!.className).not.toContain("min-h-[32rem]");
   });
 });

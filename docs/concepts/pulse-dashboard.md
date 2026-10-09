@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Pulse — cross-project live-sessions dashboard
-description: 'Assistant drawer (docked chat, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.'
+description: 'Assistant window (floating at app level: drag, minimise, maximise, narrow sheet, shared prefs store, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.'
 tags:
   - pulse
   - dashboard
@@ -32,6 +32,51 @@ replies inline (user decision 2026-10-08). v1 is
   hamburger main menu in the `ProjectSidebar` header — is itself superseded;
   all are replaced as described under
   [Entry points](#entry-points-and-the-no-client-router-correction).
+
+## Terminals section
+
+The dashboard shows the live terminals above the session sections, so a running
+dev server, build or test watcher is visible without opening its project. A terminal
+has no ask to answer, so nothing here resolves anything. Each row has two controls:
+
+- **Chevron** (`aria-expanded`, `aria-label="Show terminal details"`) expands the
+  row to show the full command, the project path, the pid and the terminal id.
+  The header shows the command truncated to 40% width, so the expansion is where
+  a long command is read in full. There is no output preview: the endpoint returns
+  metadata only, so a preview would need a new endpoint.
+- **Open** jumps to the terminal in its project. `useJumpToTerminal`
+  (`web/src/lib/jumpToSession.tsx`) runs `selectProject` → `attachTerminal` →
+  `tabFocusActions.request({kind:"terminal"})` → `exitPulse`, in that order. The
+  request is applied by App's passive focus effect after `exitPulse`'s
+  `setFocusedKind("chat")`, so the terminal tab wins. Open is disabled, with a
+  title saying why, when no **local** sidebar project has the row's path.
+
+The rows keep no `role="listitem"`, so their controls stay out of PulseView's
+arrow-key roving over the session cards. Their `aria-expanded` is not matched by
+that selector, which only looks inside explicit listitems.
+
+- **API:** `GET /api/pulse/terminals?limit=&offset=` (`HandlePulseTerminals`,
+  `internal/server/handler_terminal.go`; Windows stub in `handler_terminal_windows.go`).
+  Returns `{terminals, total, limit, offset}`, running programs first, then by
+  project and terminal id. `limit` defaults to 50 and is capped at 200; a bad
+  `limit` or `offset` is `400`. It has the same access gate as `GET /api/terminal`
+  (`terminalAccessAllowed`), so a non-loopback server without auth gets `403`.
+- **Shape:** `{id, project, title, pid, command, running}`. `running` is true only
+  when a program other than the interactive shell is in the foreground;
+  `command` is that program's command line, or the bare shell name when idle.
+  Both come from `terminalForeground` in `emitters.go`, the same walk the Processes
+  tab uses, so the two never disagree about what is running.
+- **Source:** the live registry (`terminalProcs`) joined with the open-tab store for
+  the title (`pulseTerminalRows`, `internal/server/pulse_terminals.go`). A tab with no
+  live pty is not listed here; `terminal_tabs` still shows it, marked not live.
+- **Refresh:** `usePulseTerminals` polls the first page every 3 s
+  (`PULSE_TERMINALS_POLL_MS`) and skips a tick while the document is hidden. "Load
+  more" grows the window, and each poll refetches all of it.
+- **Not in focus mode:** the focus layout keeps only the focused session and its
+  side column, so the terminals section is not drawn there.
+- **Assistant:** the same rows reach the assistant twice: the per-turn board carries
+  the running ones (`renderPulseTerminals`), and `terminal_tabs` marks each tab
+  live and running, with its command.
 
 ## API: `GET /api/pulse`
 
@@ -207,6 +252,17 @@ act so it expands with no delay at all). The panel is a **sibling** of the
 button, so showing it cannot resize the card and its content stays out of the
 button's click target and accessible name.
 
+The top-right **chevron toggle** (`aria-label="Keep details open"`,
+`aria-pressed`) pins the panel open for touch and for users who want it to stay
+put. The pin is a separate `pinned` state: pointer leave and blur only ever
+clear the hover/focus `expanded` state, so they cannot close a pinned panel.
+Escape and a second toggle click clear the pin. The gate everywhere is
+`open = expanded || pinned`: the header's `aria-expanded`, the overlay, and the
+`usePulseTail` enable flag all read `open`, never `expanded` alone. The toggle is
+`aria-pressed`, not `aria-expanded`, on purpose: `PulseView`'s roving selector
+matches `button[aria-expanded]`, so a second `aria-expanded` per card would add a
+second arrow-key stop.
+
 Content, in precedence order: tail error → tail entries → todo items →
 `current_task` → `pending_ask`. Two rules that are easy to get wrong:
 
@@ -330,9 +386,10 @@ DOM. `TEXT_BUFFER_CAP` still bounds the summed text characters.
 A non-compact card is a chrome `div` (`flex h-full flex-col`, border,
 background, `CARD_MIN_H`) containing two siblings: the header button (status,
 title, task, plan; click jumps, double-click opens the ask, Enter focuses,
-Shift+Enter jumps, Escape collapses, focus ring, `aria-expanded`), the "Focus
-session" icon button (absolutely positioned top-right; a button may not contain
-a button, so it is a sibling, and the header reserves right padding for it) and
+Shift+Enter jumps, Escape collapses and unpins, focus ring, `aria-expanded`), a
+flex group of the details toggle and the "Focus session" icon button
+(absolutely positioned top-right; a button may not contain a button, so the
+group is a sibling, and the header reserves `pr-12` for both icons) and
 the stream region
 (`data-testid="pulse-stream-region"`). The stream used to live inside the
 button, so a wheel over it scrolled the page grid and its text was part of the
@@ -356,7 +413,7 @@ following.
 
 ### Card height is a floor, not a hint
 
-Non-compact cards reserve `CARD_MIN_H = "min-h-[16rem]"` on the chrome `div` and
+Cards that carry a stream reserve `CARD_MIN_H = "min-h-[32rem]"` on the chrome `div` and
 are `h-full`, so every card in a grid row is one height. Both are needed:
 `min-h` alone still lets a taller card stretch its row, and `h-full` alone gives
 nowhere to stream into. The floor must stay ABOVE the content. When `min-h` sat
@@ -365,13 +422,13 @@ as tail lines arrived, reflowing the whole grid row on every streaming delta.
 
 ### Height budget
 
-The ceiling is `STREAM_MAX_H` = `max-h-[8rem]` (128px) on the stream region. This
+The ceiling is `STREAM_MAX_H` = `max-h-[24rem]` (384px) on the stream region. This
 ceiling — not the `CARD_MIN_H` floor — is what keeps the card height constant,
 because `min-h` sets only a minimum and a `flex-1` child of an auto-height column
-is sized from its own content (`flex-basis: 0%` caps nothing). The 128px is the
-budget the original seven truncated 16.5px lines spent (7 × 16.5 + 6 × the 2px
-`gap-0.5` = 127.5px); it is now a layout constant, since the region scrolls past
-it rather than clipping.
+is sized from its own content (`flex-basis: 0%` caps nothing). 384px (24rem) is
+the budget the live stream was raised to from the original 128px (seven truncated
+16.5px lines); it is a layout constant, since the region scrolls past it rather
+than clipping.
 
 ### The `min-h-0` gotcha (superseded)
 
@@ -405,8 +462,10 @@ entries a readable width before they wrap. This deliberately overrides the
 previous "capped at 3 columns" rule and the design spec's "up to 4", at the
 product owner's request (2026-10-08).
 
-Compact (Recent-section) cards are unchanged: one line, no reserved height,
-hover-gated.
+Recent-section cards are multi-line (`compact={compactAll}`, so `false` in the grid):
+header, title and task, with no stream region and NO height floor, so they size to
+their content. Only the focus-mode side column stays compact (one line each).
+The 32rem floor must stay above the header (~112px) plus the 24rem stream cap.
 
 ## Focus mode
 
@@ -482,29 +541,76 @@ text goes to the model as typed.
 
 ## Assistant drawer
 
-A chat drawer docked to the right of the dashboard (`PulseAssistantDrawer.tsx`),
-talking to the global Pulse assistant session. The server side (session
+A floating window (`PulseAssistantWindow.tsx`; the name is historical) talking to
+the global Pulse assistant session. It is mounted by `App`, not by `PulseView`, so
+it stays open across every view. It is a region, not a modal: the app behind it
+keeps working. The server side (session
 creation, model slot, private project directory) is documented in
 [pulse-assistant.md](pulse-assistant.md). The web side only assumes the contract:
 `GET /api/pulse/assistant` returns `{session_id, model}` (ids start with
 `pulse_`), `GET/PUT /api/config/pulse-model` is the model slot, and the session is
 otherwise an ordinary one.
 
-**Toggle.** A `MessageSquare` header button (`aria-label="Toggle assistant"`) or
-the `a` key. The key is a document listener (`usePulseAssistantHotkey`) that
-ignores modifiers, text fields and dialogs. With focus mode open the row is
-pane | side column | drawer; the focus pane and side column keep their minimum
-widths and the area beside the drawer scrolls horizontally only as a last resort.
+**Toggle.** Three ways in, all on the same store (`toggleAssistantWindow`):
 
-**Persistence.** Open state and width live in `localStorage` under
-`pulse.assistant.open` and `pulse.assistant.width` (`usePulseAssistantPrefs`), not
-in the pulse store and not in per-project view state. They are per-viewer
-conveniences (another window or device wants its own layout), nothing else reads
-them, and the dashboard is global. Every read and write is guarded; a blocked or
-throwing storage logs a `console.warn` naming the key and only costs the
-remembered layout. Width is clamped to a 320px floor (default 420) and a CSS
-`max-width: 60%` ceiling; the drag handle on the left edge (`role="separator"`,
-also arrow-key resizable) clamps to the same bounds.
+- A `MessageSquare` button in the top bar's right-hand cluster, before the port-map
+  and sync widgets (`AssistantToggleButton` in `TopTabs.tsx`, `aria-label="Toggle
+  assistant"`, `aria-pressed` from the store, its `title` naming the platform's
+  shortcut). The top bar is always visible, so this is the one control; the sidebar
+  has none.
+- `⌘⇧A` / `Ctrl+Shift+A` from any view, through `useKeyboard` (`onToggleAssistant`).
+  The combo and its guards are in `web-keyboard-shortcuts.md`, under "The assistant key".
+- The `a` key, only while the Pulse view is mounted (`usePulseAssistantHotkey`, which
+  ignores modifiers, text fields and dialogs). It stays scoped to Pulse on purpose:
+  app-wide, a stray `a` in a file tree or git list would open the window.
+
+Closed opens. A minimised window restores, so pressing the key on the bar does not
+hide it. Anything else closes. The top bar stays on screen, so the button is always
+there, and the key works from any view without reaching for it.
+
+**Modes and layout (`pulseAssistantPrefs.ts`).** The window has three modes:
+
+- *normal*: floating at `rect` (x, y, width, height). The grip (`data-testid`
+  `pulse-assistant-grip`) drags it through `@dnd-kit/core`, the library the app
+  already uses, with a 4 px activation distance. The corner handle
+  (`role="separator"`, arrow-key resizable) resizes it. Position and size are
+  committed once, on release, not on every pointer move.
+- *minimised*: only the header bar stays, 40 px high, at the same x and y.
+  The body is hidden with `hidden`, not unmounted, so the composer draft, the hydrated
+  asks and the chat's dialog surface survive.
+- *maximised*: fills the app inside an 8 px margin. Dragging and resizing are off.
+  Restore size returns to the saved rectangle.
+
+Below a 640 px viewport width (`ASSISTANT_NARROW_BREAKPOINT`) the window is an 8 px
+inset sheet with no grip and no corner handle. Minimising there becomes a full-width
+bar at the bottom. Any stored rectangle is clamped to the current viewport on every
+render (`clampRect`), so a rectangle saved on a larger screen cannot leave the header
+off-screen. The header always stays visible.
+
+One DOM tree serves every mode, so minimising never remounts the chat. The header
+buttons are: model (opens the chooser), New chat, chat history, settings, minimise
+(or restore from the bar), maximise (or restore size), and close.
+
+**Shared state.** Open state, mode and rectangle live in one module-level store
+(`pulseAssistantPrefs.ts`, read with `useSyncExternalStore`, the same pattern as the
+pulse focus store). The toolbar toggle in `PulseView` and the window both read it,
+so they cannot drift apart. Two separate `useState` copies would.
+
+**Persistence.** The store is mirrored to `localStorage` under `pulse.assistant.open`
+("1"/"0", the key from before the redesign, so existing open state carries over),
+`pulse.assistant.mode` and `pulse.assistant.rect` (JSON). Those are per-viewer
+conveniences (another window or device wants its own layout), nothing else reads them,
+and they are not in the pulse store or per-project view state. A stored rectangle with
+any non-finite field is dropped, and an unknown mode reads as normal. The old
+`pulse.assistant.width` key is no longer read, so a previously chosen width does not
+carry over. Every read and write is guarded: a blocked or throwing storage logs a
+`console.warn` naming the key and only costs the remembered layout.
+
+**Pending asks.** `AssistantChat` reports whether a permission or question is pending.
+If an ask arrives while the window is minimised, the window restores itself, because
+the turn is waiting on a dialog that only the open window can show. If the window was
+minimised by hand with an ask already pending, the bar shows a "Needs approval" badge
+(`pulse-assistant-ask-badge`).
 
 **The real chat surface.** The drawer renders `ChatPanel` for the transcript and
 `ChatInput` for sending; there is no second renderer or composer. `ChatInput`'s
@@ -598,6 +704,16 @@ per-session and would otherwise attach to nothing. The view transition is
 supplied by App via `PulseJumpProvider` (the module never reaches into
 `activeView` itself).
 
+A terminal row's **Open** button uses the sibling `useJumpToTerminal`, with the
+same select-first contract and the same refusal for an unknown project. Its order
+is `selectProject` → `attachTerminal(path, "", id, title)` →
+`tabFocusActions.request({kind:"terminal"})` → `exitPulse`. The request, not a
+direct view write, does the reveal, because App's focus effect is the one that
+can set `activeView`. `attachTerminal` does not activate an id the project already
+lists; App's effect activates the requested id. The hook lives in its own function
+so `useTerminalState` is only required by terminal callers. `jumpToSession.test.tsx`
+mocks both the project store and the terminal store.
+
 ## Entry points and the "no client router" correction
 
 **This app has no client router.** A view is the `activeView` state union in
@@ -665,6 +781,9 @@ user was.
 
 ## Known limits
 
+- **Remote terminals are not listed:** `GET /api/pulse/terminals` reads only this
+  server's local registry. A remote project's terminals live on the remote host and
+  are not fanned in, the same gap as remote sessions.
 - **Cross-process blindness:** the desktop app and a separately-running dev
   server each have their own in-process session registry (see
   [cross-process-session-sync.md](cross-process-session-sync.md)), so each sees
@@ -702,7 +821,7 @@ user was.
   identity, unknown-project refusal.
 - `web/src/hooks/useKeyboard.pulse.test.ts` / `.browser.test.ts` — Cmd/Ctrl+J
   toggle, xterm guard.
-- `web/src/components/Pulse/` — `PulseView` (including focus mode), `PulseFocusPane`, `PulseAssistantDrawer`, `PulseCard`, `PulseBadge`,
+- `web/src/components/Pulse/` — `PulseView` (including focus mode), `PulseFocusPane`, `PulseAssistantWindow` (the floating assistant window), `pulseAssistantPrefs` (its shared store), `PulseTerminals`, `PulseCard`, `PulseBadge`,
   `PulseShellSignal`, `pulseFilter`, `usePulseTail` suites.
   - `PulseCard` pins the overlay's **content**, not just that it appears: the
     `text`-kind task reaches it, and it is never a blank panel (loading vs

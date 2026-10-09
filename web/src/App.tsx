@@ -104,6 +104,8 @@ import { getTrustedTerminalProject } from "./lib/trustedProject";
 import { resolveSessionHost, useSessionHost } from "./hooks/useSessionHost";
 import { SpeechProvider } from "./components/Speech/SpeechProvider";
 import { PulseView } from "./components/Pulse/PulseView";
+import { PulseAssistantWindow } from "./components/Pulse/PulseAssistantWindow";
+import { toggleAssistantWindow } from "./components/Pulse/pulseAssistantPrefs";
 import { PulseBadge } from "./components/Pulse/PulseBadge";
 import { PulseShellSignal } from "./components/Pulse/PulseShellSignal";
 import { focusDesktopWindow } from "./lib/wails";
@@ -868,6 +870,7 @@ function HomeApp() {
     focusedKind,
     activeBrowserId,
     onTogglePulse: togglePulse,
+    onToggleAssistant: toggleAssistantWindow,
     onCloseBrowserTab: (id) => {
       // Mirrors the browser pill's X: strip identity + page state + session.
       closeBrowserTab(id);
@@ -2247,6 +2250,9 @@ export default function App() {
 	                <Route path="*" element={<HomeApp />} />
 	              </Routes>
               <SpeechToolbar />
+              {/* The Pulse assistant is a floating window at app level, so it is
+                  available on every view. Mounted here, not inside PulseView. */}
+              <PulseAssistantWindow />
               {/* Settings-action failures (sidebar toggles, model picks) are
                   otherwise only console.error'd. Root-mounted so it survives
                   the ModelDialog closing on pick. */}

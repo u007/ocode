@@ -123,7 +123,7 @@ The old `GET /api/tailscale-url` (which started a funnel-first exposure on read)
 | POST | `/api/tailscale-share/start` | `handleStartTailscaleShare` (`internal/server/tailscale_share.go:312`) | Starts funnel-first exposure (upgrades a warm serve mount) |
 | POST | `/api/tailscale-share/stop` | `handleStopTailscaleShare` (`internal/server/tailscale_share.go:329`) | Kills process + removes mount |
 
-Routes registered at `internal/server/server.go:431-433`.
+Routes registered at `internal/server/server.go:454-456`.
 
 ### Status shape
 
@@ -211,7 +211,7 @@ unauthenticated route would let any tailnet peer turn sharing on):
 | GET | `/api/config/ocode/auto-share` | `HandleGetAutoShareConfig` (`internal/server/handler_config.go:2868`) |
 | PUT | `/api/config/ocode/auto-share` | `HandleSetAutoShareConfig` (`internal/server/handler_config.go:2890`) |
 
-Routes registered at `internal/server/server.go:496-497`.
+Routes registered at `internal/server/server.go:519-520`.
 
 Response shape: `{enabled, available, running, kind?, url?, hint?}`
 (`autoShareResponse`, `internal/server/handler_config.go:2840`). The `running` and
@@ -249,7 +249,7 @@ propose changing the shared loader.
 ## Teardown
 
 `Server.Shutdown` calls `tsShare.cleanup()`
-(`internal/server/server.go:1764` → `internal/server/tailscale_share.go:251`),
+(`internal/server/server.go:1820` → `internal/server/tailscale_share.go:251`),
 which kills the process and removes **only** the `--set-path /desktop` mount —
 never a global reset, which would tear down TUI `/rc` sessions on the same node.
 

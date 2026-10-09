@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { AlertCircle, MessageSquare, RefreshCw } from "lucide-react";
+import { AlertCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePulse, usePulseFocus } from "@/stores/pulseStore";
 import { PulseCard } from "./PulseCard";
+import { PulseTerminals } from "./PulseTerminals";
 import { PulseFocusPane } from "./PulseFocusPane";
-import {
-  PulseAssistantDrawer,
-  usePulseAssistantHotkey,
-  usePulseAssistantPrefs,
-} from "./PulseAssistantDrawer";
+import { usePulseAssistantHotkey } from "./PulseAssistantWindow";
+import { usePulseAssistantPrefs } from "./pulseAssistantPrefs";
 import type { PulseStatus } from "@/api/types";
 import { pulseRowMatchesFilter } from "./pulseFilter";
 
@@ -25,9 +23,11 @@ import { pulseRowMatchesFilter } from "./pulseFilter";
  * in pulseStore, so it survives a Cmd+J toggle without touching per-project view
  * state.
  *
- * The assistant drawer docks to the right of everything else (grid or focus
- * layout), so with focus mode open the row is pane | side column | drawer. Its
- * open state and width are per-viewer localStorage prefs, not store state.
+ * The assistant is a floating window at app level (PulseAssistantWindow, mounted
+ * by App), not part of this view, so it stays available on every view. This view
+ * owns only the toolbar toggle and the `a` hotkey, which is scoped to the Pulse
+ * view so a stray key elsewhere cannot open it. Its open state and layout are
+ * per-viewer localStorage prefs (pulseAssistantPrefs), not store state.
  *
  * The row order it renders is the server's (pulseStore keeps it in step with
  * pulse_rows.go); the only thing computed here is the client-side filter, which
@@ -129,7 +129,7 @@ export function PulseView() {
             className={compactAll ? "flex flex-col gap-2" : "grid grid-cols-1 sm:grid-cols-2 gap-3"}
           >
             {inSection.map((r) => (
-              <PulseCard key={r.session_id} row={r} compact={compactAll || key === "recent"} />
+              <PulseCard key={r.session_id} row={r} compact={compactAll} />
             ))}
           </div>
         </section>
@@ -164,16 +164,6 @@ export function PulseView() {
             </Button>
           ))}
         </div>
-        <Button
-          size="icon"
-          variant={assistant.open ? "secondary" : "ghost"}
-          aria-label="Toggle assistant"
-          aria-pressed={assistant.open}
-          title="Toggle assistant (a)"
-          onClick={() => assistant.setOpen(!assistant.open)}
-        >
-          <MessageSquare className="h-4 w-4" aria-hidden />
-        </Button>
       </div>
 
       {/* Error banner. Deliberately NOT destructive: the rows below stay, so a
@@ -193,9 +183,9 @@ export function PulseView() {
       )}
 
       <div className="flex flex-1 min-h-0 min-w-0">
-        {/* Horizontal scroll is the last resort when pane, side column and
-            drawer together outgrow the view: the pane and column keep their
-            minimum widths instead of crushing. */}
+        {/* Horizontal scroll is the last resort when the focus pane and side
+            column together outgrow the view: they keep their minimum widths
+            instead of crushing. */}
         <div className="flex flex-1 min-h-0 min-w-0 flex-col overflow-x-auto">
         {focusedId !== null ? (
           <div className="flex flex-1 min-h-0" data-testid="pulse-focus-layout" onKeyDown={onFocusKeyDown}>
@@ -242,7 +232,10 @@ export function PulseView() {
               </p>
             )}
 
-            <div className="flex flex-col gap-6">{sections(false, null)}</div>
+            <div className="flex flex-col gap-6">
+              <PulseTerminals />
+              {sections(false, null)}
+            </div>
 
             {hasMore && (
               <div className="mt-6 flex justify-center">
@@ -254,13 +247,6 @@ export function PulseView() {
           </div>
         )}
         </div>
-        {assistant.open && (
-          <PulseAssistantDrawer
-            width={assistant.width}
-            onWidthChange={assistant.setWidth}
-            onClose={() => assistant.setOpen(false)}
-          />
-        )}
       </div>
     </div>
   );

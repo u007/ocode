@@ -1707,6 +1707,38 @@ func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*tu
 // asked not to queue behind it.
 var errTurnInFlight = errors.New("session is mid-turn; try again when it finishes")
 
+// beginSyncTurn counts a synchronous turn in turnInFlight. Without the count an
+// async dispatch cannot see the turn under the lock it refuses under, so a pulse
+// send could start behind it. The returned release undoes the count. When the
+// last in-flight turn ends, release also clears pendingCancel: a Stop during a
+// synchronous turn sets the flag, but no executeTurnJob runs to consume it, so a
+// stale flag would cancel the next message.
+func (h *Handler) beginSyncTurn(id string) func() {
+	h.cancelMu.Lock()
+	if h.turnInFlight == nil {
+		h.turnInFlight = make(map[string]int)
+	}
+	h.turnInFlight[id]++
+	h.cancelMu.Unlock()
+	return func() {
+		h.cancelMu.Lock()
+		defer h.cancelMu.Unlock()
+		if n := h.turnInFlight[id] - 1; n <= 0 {
+			delete(h.turnInFlight, id)
+			delete(h.pendingCancel, id)
+		} else {
+			h.turnInFlight[id] = n
+		}
+	}
+}
+
+// runSyncTurn runs a synchronous turn counted by beginSyncTurn.
+func (h *Handler) runSyncTurn(id string, as *agentSession, content string, opts turnOptions) (string, error) {
+	release := h.beginSyncTurn(id)
+	defer release()
+	return h.runTurn(id, as, content, opts)
+}
+
 func (h *Handler) dispatchTurnWithRewind(id, model, content string, opts turnOptions, rewindToken string) (*turnJob, error) {
 	job := &turnJob{content: content, model: model, opts: opts, rewindToken: rewindToken, persistAck: make(chan struct{})}
 	// Refuse new turns once shutdown has begun: shutdown joins a bounded job

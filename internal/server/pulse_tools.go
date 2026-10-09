@@ -12,7 +12,6 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
-	"github.com/u007/ocode/internal/termtabs"
 )
 
 // Read-only tools the Pulse assistant uses to look at other sessions and
@@ -38,6 +37,10 @@ const (
 	// pulseTerminalLineRuneBudget clips one terminal line (a progress bar can
 	// emit megabytes without a newline).
 	pulseTerminalLineRuneBudget = 2000
+	// pulseTerminalWindowBytes is how much of a terminal's history one read covers:
+	// the newest bytes for a tail read, the oldest for a head read. Lines beyond it
+	// are not reachable through terminal_read.
+	pulseTerminalWindowBytes = 1 << 20
 
 	// pulseRunResultRuneBudget clips a sub-agent run's result in agent_runs.
 	pulseRunResultRuneBudget = 500
@@ -106,16 +109,18 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 		},
 		{
 			name:  "terminal_tabs",
-			desc:  "List the open terminal tabs, grouped by project.",
+			desc:  "List the open terminal tabs, grouped by project. Each terminal says whether it is live and whether a program (command) is running in it.",
 			props: map[string]any{},
 			run:   h.pulseTerminalTabsTool,
 		},
 		{
 			name: "terminal_read",
-			desc: fmt.Sprintf("Read the last N lines (default %d, max %d) of a terminal's output history, ANSI escape codes removed. Terminal ids come from terminal_tabs.", pulseTerminalDefaultLines, pulseTerminalMaxLines),
+			desc: fmt.Sprintf("Read N lines (default %d, max %d) of a terminal's output, ANSI escape codes removed. By default the last lines; offset skips that many lines back from the end, so repeated calls page backwards. head=true reads from the start of the output instead, and offset then skips forward from the start. Only the newest or oldest %d KiB of history is reachable. Each call reads the output as it is now, so on a terminal that is still writing, paging can overlap or skip lines. Terminal ids come from terminal_tabs.", pulseTerminalDefaultLines, pulseTerminalMaxLines, pulseTerminalWindowBytes>>10),
 			props: map[string]any{
 				"terminal_id": str("Terminal id from terminal_tabs"),
-				"lines":       integer(fmt.Sprintf("How many trailing lines to return (1-%d, default %d)", pulseTerminalMaxLines, pulseTerminalDefaultLines)),
+				"lines":       integer(fmt.Sprintf("How many lines to return (1-%d, default %d)", pulseTerminalMaxLines, pulseTerminalDefaultLines)),
+				"offset":      integer("Lines to skip from the end (or from the start with head), default 0"),
+				"head":        map[string]any{"type": "boolean", "description": "true to read from the start of the output, default false (the end)"},
 			},
 			run: h.pulseTerminalReadTool,
 		},
@@ -349,9 +354,21 @@ func (h *Handler) pulseSessionRecapTool(raw json.RawMessage) (string, error) {
 
 // --- terminal_tabs / terminal_read ---
 
+// pulseTabTerminal is one open tab, joined with its live process when the
+// terminal has one: Live says a shell is running, Running says a program other
+// than the shell is in the foreground, Command names it.
+type pulseTabTerminal struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	OSCTitle string `json:"osc_title,omitempty"`
+	Live     bool   `json:"live"`
+	Running  bool   `json:"running"`
+	Command  string `json:"command,omitempty"`
+}
+
 type pulseTabsProject struct {
-	Project   string              `json:"project"`
-	Terminals []termtabs.Terminal `json:"terminals"`
+	Project   string             `json:"project"`
+	Terminals []pulseTabTerminal `json:"terminals"`
 }
 
 func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
@@ -369,9 +386,22 @@ func (h *Handler) pulseTerminalTabsTool(raw json.RawMessage) (string, error) {
 		}
 	}
 	sort.Strings(keys)
+	live := make(map[string]pulseTerminalRow)
+	for _, row := range h.pulseTerminalRows() {
+		live[row.ID] = row
+	}
 	projects := make([]pulseTabsProject, 0, len(keys))
 	for _, k := range keys {
-		terms := append([]termtabs.Terminal{}, all[k].Terminals...)
+		terms := make([]pulseTabTerminal, 0, len(all[k].Terminals))
+		for _, t := range all[k].Terminals {
+			pt := pulseTabTerminal{ID: t.ID, Title: t.Title, OSCTitle: t.OSCTitle}
+			if row, ok := live[t.ID]; ok {
+				pt.Live = true
+				pt.Running = row.Running
+				pt.Command = row.Command
+			}
+			terms = append(terms, pt)
+		}
 		sort.Slice(terms, func(i, j int) bool { return terms[i].ID < terms[j].ID })
 		projects = append(projects, pulseTabsProject{Project: k, Terminals: terms})
 	}
@@ -387,6 +417,8 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 	var args struct {
 		TerminalID string `json:"terminal_id"`
 		Lines      *int   `json:"lines"`
+		Offset     int    `json:"offset"`
+		Head       bool   `json:"head"`
 	}
 	if err := decodePulseArgs(raw, &args); err != nil {
 		return "", err
@@ -401,20 +433,54 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 			return "", fmt.Errorf("lines must be 1-%d, got %d", pulseTerminalMaxLines, n)
 		}
 	}
-	project, text, err := h.pulseTerminalTail(args.TerminalID)
+	if args.Offset < 0 {
+		return "", fmt.Errorf("offset must be non-negative, got %d", args.Offset)
+	}
+	project, text, windowBefore, windowAfter, err := h.pulseTerminalWindow(args.TerminalID, args.Head)
 	if err != nil {
 		return "", err
 	}
-	lines := pulseTailLines(text, n)
-	// Under the byte cap the OLDEST lines are dropped first.
+	lines, pageBefore, pageAfter := pulseLinePage(pulseDisplayLines(text), n, args.Offset, args.Head)
+	moreBefore := windowBefore || pageBefore
+	moreAfter := windowAfter || pageAfter
+	// Under the byte cap the far end is dropped: the OLDEST lines of a tail
+	// page, the NEWEST lines of a head page. Either way the caller is told.
 	return pulseCapped(len(lines), func(k int, truncated bool) any {
+		kept := lines[len(lines)-k:]
+		before, after := moreBefore, moreAfter
+		if args.Head {
+			kept = lines[:k]
+			after = after || truncated
+		} else {
+			before = before || truncated
+		}
 		return struct {
-			TerminalID string   `json:"terminal_id"`
-			Project    string   `json:"project"`
-			Lines      []string `json:"lines"`
-			Truncated  bool     `json:"truncated,omitempty"`
-		}{args.TerminalID, project, append([]string{}, lines[len(lines)-k:]...), truncated}
+			TerminalID    string   `json:"terminal_id"`
+			Project       string   `json:"project"`
+			Head          bool     `json:"head,omitempty"`
+			Offset        int      `json:"offset,omitempty"`
+			Lines         []string `json:"lines"`
+			HasMoreBefore bool     `json:"has_more_before,omitempty"`
+			HasMoreAfter  bool     `json:"has_more_after,omitempty"`
+			Truncated     bool     `json:"truncated,omitempty"`
+		}{args.TerminalID, project, args.Head, args.Offset, append([]string{}, kept...), before, after, truncated}
 	})
+}
+
+// pulseLinePage picks one page of n lines from a window of display lines. A tail
+// page (head false) counts offset back from the end; a head page counts it
+// forward from the start. moreBefore and moreAfter say whether lines exist in
+// the window before and after the page.
+func pulseLinePage(lines []string, n, offset int, head bool) (page []string, moreBefore, moreAfter bool) {
+	total := len(lines)
+	if head {
+		start := min(offset, total)
+		end := min(start+n, total)
+		return lines[start:end], start > 0, end < total
+	}
+	end := max(total-offset, 0)
+	start := max(end-n, 0)
+	return lines[start:end], start > 0, end < total
 }
 
 // pulseTailLines turns raw terminal output into at most n display lines.
@@ -422,6 +488,16 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 // the last one on that line (the visible result of a progress-bar redraw), and
 // each line is rune-clipped.
 func pulseTailLines(text string, n int) []string {
+	all := pulseDisplayLines(text)
+	if len(all) > n {
+		all = all[len(all)-n:]
+	}
+	return all
+}
+
+// pulseDisplayLines turns raw terminal output into display lines, all of them.
+// The normalisation is the one pulseTailLines always applied.
+func pulseDisplayLines(text string) []string {
 	text = stripANSIEscapes(text)
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.TrimRight(text, "\n")
@@ -429,9 +505,6 @@ func pulseTailLines(text string, n int) []string {
 		return []string{}
 	}
 	all := strings.Split(text, "\n")
-	if len(all) > n {
-		all = all[len(all)-n:]
-	}
 	for i, l := range all {
 		if j := strings.LastIndexByte(l, '\r'); j >= 0 {
 			l = l[j+1:]

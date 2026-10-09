@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { MessageSquare, Play, RotateCw, SquareTerminal, X } from "lucide-react";
+import { ChevronDown, ChevronRight, MessageSquare, Play, RotateCw, SquareTerminal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AgentRun, Project } from "@/api/types";
 import type { RemoteHostStatusState } from "@/hooks/useRemoteHostStatus";
@@ -185,6 +185,12 @@ export function RemoteProjectStatus({
         aria-expanded={expanded}
         data-testid="remote-project-status"
       >
+        {connected &&
+          (expanded ? (
+            <ChevronDown className="w-3 h-3 shrink-0" aria-hidden />
+          ) : (
+            <ChevronRight className="w-3 h-3 shrink-0" aria-hidden />
+          ))}
         {outdated && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-label="outdated" />}
         <span className="truncate">{line}</span>
         {!connected && (

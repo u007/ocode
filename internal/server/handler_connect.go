@@ -674,6 +674,7 @@ func (h *Handler) startAnthropicConnectFlow(w http.ResponseWriter, p *auth.Provi
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":       f.id,
 		"kind":         connectFlowPasteCode,
+		"state":        f.getState(),
 		"url":          f.url,
 		"instructions": f.instructions,
 	})
@@ -796,6 +797,7 @@ func (h *Handler) startGoogleConnectFlow(w http.ResponseWriter, p *auth.Provider
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":       f.id,
 		"kind":         connectFlowLocalCallback,
+		"state":        f.getState(),
 		"url":          f.url,
 		"instructions": f.instructions,
 		"note":         "The sign-in page redirects back to localhost, so this flow needs your browser on the same machine as ocode.",
@@ -826,6 +828,7 @@ func (h *Handler) startCopilotConnectFlow(w http.ResponseWriter, p *auth.Provide
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":          f.id,
 		"kind":            connectFlowDeviceCode,
+		"state":           f.getState(),
 		"userCode":        f.userCode,
 		"verificationUri": f.verificationURI,
 		"instructions":    f.instructions,
@@ -839,6 +842,7 @@ func (h *Handler) startGrokConnectFlow(w http.ResponseWriter, p *auth.Provider) 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":       f.id,
 		"kind":         connectFlowCookies,
+		"state":        f.getState(),
 		"instructions": f.instructions,
 	})
 }
@@ -877,6 +881,7 @@ func (h *Handler) startPluginConnectFlow(w http.ResponseWriter, p *auth.Provider
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"flowId":       f.id,
 		"kind":         connectFlowPlugin,
+		"state":        f.getState(),
 		"instructions": f.instructions,
 	})
 }
@@ -1071,8 +1076,12 @@ func (h *Handler) handleConnectFlowInput(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusConflict, fmt.Sprintf("flow is %s, it already started", f.getState()))
 			return
 		}
+		// Read the seam on the request goroutine: the spawned goroutine is not
+		// joined by the response, so reading it inside would race any writer
+		// (the test seam restore) that runs once the response has returned.
+		loginFn := grokSubscriptionLoginFn
 		crashguard.Go(func() {
-			cred, err := grokSubscriptionLoginFn(ctx, authToken, ct0)
+			cred, err := loginFn(ctx, authToken, ct0)
 			completeConnectFlow(ctx, f, f.provider, cred, err)
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowRunning})

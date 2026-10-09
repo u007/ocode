@@ -27,7 +27,7 @@ POST /api/sessions/{id}/compact/cancel        →  200 {"cancelled": true | fals
                                                  404 {"error": "session not found"}   (unknown session)
 ```
 
-- Route: `internal/server/server.go:352` (registered next to `POST /api/sessions/{id}/compact` at `:351`, behind `s.authMiddleware`); wrapper `handleCancelCompaction` at `internal/server/server.go:2093-2095`.
+- Route: `internal/server/server.go:414` (registered next to `POST /api/sessions/{id}/compact` at `:413`, behind `s.authMiddleware`); wrapper `handleCancelCompaction` at `internal/server/server.go:2175-2177`.
 - Handler: `Handler.HandleCancelCompaction` (`internal/server/handler_cancel.go:94-104`). It resolves the session (404 if unknown), then calls `as.agent.CancelCompaction()` and returns `{"cancelled": <bool>}`.
 - **Idempotent by design:** cancelling with nothing in flight returns `200 {"cancelled": false}`, not an error, so a stale or double-clicked Cancel button can never surface as a failure (`TestCancelCompactionEndpointNoPassIsNoop`, `internal/server/compact_cancel_test.go:198`).
 - **No lifecycle bookkeeping in this handler.** The running pass retires its own slot and publishes the terminal `compaction_done` frame itself — a second publisher here would double-decrement the session's compaction counter (see the indicator spec §5 ordering rules).
@@ -50,7 +50,7 @@ Both entry points register: manual synchronous compaction goes through `runCompa
 
 - A cancellation nobody asked for (provider abort, transport teardown, a mis-routed context) is a *fault*: silently reporting it as a clean user cancel would discard a compaction the user still wants and hide the fault from every client. A user cancel is *intent*: it must clear the shared indicator with no error banner.
 - `summaryContextErr` wraps the cause so the class survives: a non-timeout cause becomes `compact: summary cancelled: %w` (`internal/agent/compact.go:1012`), and because it wraps with `%w`, `errors.Is(err, agent.ErrCompactionCanceled)` matches through the label. Classification is **by sentinel identity only, never by message text**.
-- In `HandleCompactSession` the ordering matters: the `ErrCompactionTimeout` branch (`internal/server/handler.go:1923-1937`) and the dead-request branch (`internal/server/handler.go:1938-1942`) are checked **before** the cancel-sentinel branch (`internal/server/handler.go:1943`); a bare `context.Canceled` that reaches neither falls through to the 500 (`internal/server/handler.go:1959-1962`).
+- In `HandleCompactSession` the ordering matters: the `ErrCompactionTimeout` branch (`internal/server/handler.go:2002-2016`) and the dead-request branch (`internal/server/handler.go:2017-2021`) are checked **before** the cancel-sentinel branch (`internal/server/handler.go:2022`); a bare `context.Canceled` that reaches neither falls through to the 500 (`internal/server/handler.go:2040`).
 
 ## 4. Context plumbing: parent cause, child deadline
 
@@ -74,13 +74,13 @@ To support this, `runCompact` was split: `runCompact` (`internal/agent/agent.go:
 
 ## 6. Server result classification
 
-### Manual path — `HandleCompactSession` (`internal/server/handler.go:1889`)
+### Manual path — `HandleCompactSession` (`internal/server/handler.go:1950`)
 
-On `errors.Is(result.Err, agent.ErrCompactionCanceled)` with a **live** request (`internal/server/handler.go:1943`): `finish("")` — a clean `compaction_done {ok:true}`, no error banner — then `200 {"cancelled": true, "original_len": result.OriginalLen, "compacted_len": len(as.messages)}` (`internal/server/handler.go:1951-1956`). The branch sits **after** the `ErrCompactionTimeout` and `r.Context().Err() != nil` branches, never before them.
+On `errors.Is(result.Err, agent.ErrCompactionCanceled)` with a **live** request (`internal/server/handler.go:2022`): `finish("")` — a clean `compaction_done {ok:true}`, no error banner — then `200 {"cancelled": true, "original_len": result.OriginalLen, "compacted_len": len(as.messages)}` (`internal/server/handler.go:2031-2035`). The branch sits **after** the `ErrCompactionTimeout` and `r.Context().Err() != nil` branches, never before them.
 
-### Automatic path — `applyCompactResult` (`internal/server/agent_session.go:2100`)
+### Automatic path — `applyCompactResult` (`internal/server/agent_session.go:2160`)
 
-Treats `ErrCompactionCanceled` as a clean cancel (`internal/server/agent_session.go:2088-2092`): `compactionErr` stays `""`, the failure log at `internal/server/agent_session.go:2099-2103` is skipped, and the deferred `finishCompaction` (`internal/server/agent_session.go:2096-2098`) still always retires the lifecycle slot. The terminal `compaction_done {ok:true}` therefore clears the shared indicator on **every** client, not just the one that pressed Cancel.
+Treats `ErrCompactionCanceled` as a clean cancel (`internal/server/agent_session.go:2165-2169`): `compactionErr` stays `""`, the failure log at `internal/server/agent_session.go:2177-2179` is skipped, and the deferred `finishCompaction` (`internal/server/agent_session.go:2173-2175`) still always retires the lifecycle slot. The terminal `compaction_done {ok:true}` therefore clears the shared indicator on **every** client, not just the one that pressed Cancel.
 
 ### Latch: a cancel never stops auto-compaction
 

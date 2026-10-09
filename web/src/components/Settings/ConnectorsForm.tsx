@@ -65,6 +65,10 @@ export default function ConnectorsForm({ host }: { host?: string }) {
   // what "Connect" opens with.
   const [openMethodId, setOpenMethodId] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
+  // Cloudflare's two extra prompts: the Workers account id, and the AI Gateway
+  // base URL. Only the matching provider renders and sends one of them.
+  const [accountId, setAccountId] = useState("");
+  const [gatewayBaseUrl, setGatewayBaseUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<ConnectProvider | null>(null);
@@ -103,6 +107,8 @@ export default function ConnectorsForm({ host }: { host?: string }) {
   const closeForm = () => {
     setOpenId(null);
     setApiKey("");
+    setAccountId("");
+    setGatewayBaseUrl("");
     setSaveError(null);
     setOpenMethodId(null);
   };
@@ -113,10 +119,15 @@ export default function ConnectorsForm({ host }: { host?: string }) {
       setSaveError("Enter an API key first.");
       return;
     }
+    // The server rejects a missing extra field with a message that names it,
+    // so send what the user typed (possibly empty) and surface that error.
+    const payload: { apiKey: string; accountId?: string; baseUrl?: string } = { apiKey: key };
+    if (providerId === "cloudflare-workers") payload.accountId = accountId.trim();
+    if (providerId === "cloudflare-gateway") payload.baseUrl = gatewayBaseUrl.trim();
     setSaving(true);
     setSaveError(null);
     try {
-      await api.setConnectCredential(providerId, { apiKey: key }, host);
+      await api.setConnectCredential(providerId, payload, host);
       closeForm();
       // The mask is server-derived, so re-list rather than patching locally:
       // an optimistic mask would be one the server never produced.
@@ -215,6 +226,8 @@ export default function ConnectorsForm({ host }: { host?: string }) {
                     onClick={() => {
                       setOpenId(openId === p.id ? null : p.id);
                       setApiKey("");
+                      setAccountId("");
+                      setGatewayBaseUrl("");
                       setSaveError(null);
                     }}
                   >
@@ -271,6 +284,26 @@ export default function ConnectorsForm({ host }: { host?: string }) {
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
                       />
+                      {p.id === "cloudflare-workers" && (
+                        <Input
+                          aria-label="Cloudflare account ID"
+                          placeholder="Account ID"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={accountId}
+                          onChange={(e) => setAccountId(e.target.value)}
+                        />
+                      )}
+                      {p.id === "cloudflare-gateway" && (
+                        <Input
+                          aria-label="AI Gateway base URL"
+                          placeholder="https://gateway.ai.cloudflare.com/v1/<account>/<gateway>"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={gatewayBaseUrl}
+                          onChange={(e) => setGatewayBaseUrl(e.target.value)}
+                        />
+                      )}
                       {saveError && <div className="text-xs text-destructive">{saveError}</div>}
                       <div className="flex gap-2">
                         <Button size="sm" disabled={saving} onClick={() => void save(p.id)}>

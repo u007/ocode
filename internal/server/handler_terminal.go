@@ -836,6 +836,32 @@ func (h *Handler) HandleTerminalList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandlePulseTerminals serves GET /api/pulse/terminals?limit=&offset=: the live
+// terminals for the Pulse dashboard, running programs first. It has the same
+// access gate as GET /api/terminal. limit defaults to 50 and is capped at 200.
+func (h *Handler) HandlePulseTerminals(w http.ResponseWriter, r *http.Request) {
+	if !h.terminalAccessAllowed() {
+		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
+		return
+	}
+	limit, offset, err := pulsePageParams(r, 50, 200)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rows := h.pulseTerminalRows()
+	total := len(rows)
+	start := min(offset, total)
+	end := min(start+limit, total)
+	page := append([]pulseTerminalRow{}, rows[start:end]...)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"terminals": page,
+		"total":     total,
+		"limit":     limit,
+		"offset":    offset,
+	})
+}
+
 // remoteProjectRegistered reports whether (host, path) is a remote project
 // entry in the projects store. Path is matched verbatim, as AddRemote
 // stores it (no Clean — its conventions belong to the remote).

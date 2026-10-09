@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ChatProvider, useChatDispatch } from "../../stores/chatStore";
 import { ProjectProvider } from "../../stores/projectStore";
-import { PulseAssistantDrawer } from "./PulseAssistantDrawer";
+import { PulseAssistantWindow } from "./PulseAssistantWindow";
+import { resetAssistantPrefsForTests, setAssistantOpen } from "./pulseAssistantPrefs";
 
 // The real useChat, chat store and PermissionDialog run here: the point is that
 // a tool ask raised mid-turn for the assistant session (its write tools go
@@ -43,11 +44,13 @@ function Probe() {
 }
 
 function mount() {
+  // The window renders only while open, and open state is store state.
+  setAssistantOpen(true);
   return render(
     <ProjectProvider>
       <ChatProvider>
         <Probe />
-        <PulseAssistantDrawer width={420} onWidthChange={() => {}} onClose={() => {}} />
+        <PulseAssistantWindow />
       </ChatProvider>
     </ProjectProvider>,
   );
@@ -65,6 +68,8 @@ function raiseAsk(sessionId: string, over: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  resetAssistantPrefsForTests();
+  window.localStorage.clear();
   mockGetSessionState.mockReset();
   mockGetSessionState.mockResolvedValue({});
   mockResolvePermission.mockReset();
@@ -73,7 +78,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe("PulseAssistantDrawer permission asks from write tools", () => {
+describe("PulseAssistantWindow permission asks from write tools", () => {
   it("renders the ask for the assistant session inside the drawer and Allow resolves by request id", async () => {
     mount();
     await screen.findByTestId("chat-panel");

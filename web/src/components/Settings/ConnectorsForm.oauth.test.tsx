@@ -182,4 +182,67 @@ describe("ConnectorsForm — OAuth flows", () => {
     await waitFor(() => expect(setCredential).toHaveBeenCalled());
     expect(setCredential).toHaveBeenCalledWith("anthropic", { apiKey: "sk-test-1" }, "host-a");
   });
+
+  // Cloudflare's two providers refuse a save without their extra field, so the
+  // form has to collect it and send it. Each fixture is one provider with one
+  // apikey method, the shape the server reports for these two.
+  it("sends the Cloudflare Workers account id alongside the key", async () => {
+    listProviders.mockImplementation(async () => ({
+      providers: [
+        {
+          id: "cloudflare-workers",
+          label: "Cloudflare Workers AI",
+          status: "✗",
+          statusDetail: "no credential",
+          hasCredential: false,
+          methods: [{ id: "apikey", label: "API key", kind: "apikey" as const }],
+        },
+      ] as ConnectProvider[],
+    }));
+    render(<ConnectorsForm host="host-a" />);
+    await waitFor(() => expect(listProviders).toHaveBeenCalled());
+
+    fireEvent.click(within(rowFor("cloudflare-workers")).getByRole("button", { name: /connect/i }));
+    fireEvent.change(screen.getByLabelText(/api key/i), { target: { value: "cf-token" } });
+    fireEvent.change(screen.getByLabelText(/account id/i), { target: { value: " acct-123 " } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(setCredential).toHaveBeenCalled());
+    expect(setCredential).toHaveBeenCalledWith(
+      "cloudflare-workers",
+      { apiKey: "cf-token", accountId: "acct-123" },
+      "host-a",
+    );
+  });
+
+  it("sends the Cloudflare AI Gateway base URL alongside the key", async () => {
+    listProviders.mockImplementation(async () => ({
+      providers: [
+        {
+          id: "cloudflare-gateway",
+          label: "Cloudflare AI Gateway",
+          status: "✗",
+          statusDetail: "no credential",
+          hasCredential: false,
+          methods: [{ id: "apikey", label: "API key", kind: "apikey" as const }],
+        },
+      ] as ConnectProvider[],
+    }));
+    render(<ConnectorsForm host="host-a" />);
+    await waitFor(() => expect(listProviders).toHaveBeenCalled());
+
+    fireEvent.click(within(rowFor("cloudflare-gateway")).getByRole("button", { name: /connect/i }));
+    fireEvent.change(screen.getByLabelText(/api key/i), { target: { value: "cf-token" } });
+    fireEvent.change(screen.getByLabelText(/base url/i), {
+      target: { value: " https://gateway.ai.cloudflare.com/v1/acct/gw " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(setCredential).toHaveBeenCalled());
+    expect(setCredential).toHaveBeenCalledWith(
+      "cloudflare-gateway",
+      { apiKey: "cf-token", baseUrl: "https://gateway.ai.cloudflare.com/v1/acct/gw" },
+      "host-a",
+    );
+  });
 });

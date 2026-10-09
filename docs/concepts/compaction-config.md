@@ -55,12 +55,12 @@ So the semantics of an explicit `0` **for the two timeouts** are *"use the runti
 - A malformed summary that survives all attempts is returned as a **degraded success** (`compact.go:945-950`) — the batch and the pass succeed and the transcript shrinks, so (relevant to §5) a degraded success does **not** arm the stop-after-failure latch.
 - `runCompact` passes the resolved value through per batch (`agent.go:2944`).
 
-**API / UI:** `GET|PUT /api/config/ocode/compact` (`internal/server/server.go:412-413`) serve the raw persisted values; the web `CompactForm` (`web/src/components/Settings/CompactForm.tsx:23`, rows "First-token timeout (s)" / "Summary max retries" at `:18-19`) edits them through `api.getCompactConfig`/`setCompactConfig` (`web/src/api/client.ts:1055`, `:1061`).
+**API / UI:** `GET|PUT /api/config/ocode/compact` (`internal/server/server.go:477-478`) serve the raw persisted values; the web `CompactForm` (`web/src/components/Settings/CompactForm.tsx:23`, rows "First-token timeout (s)" / "Summary max retries" at `:18-19`) edits them through `api.getCompactConfig`/`setCompactConfig` (`web/src/api/client.ts:1055`, `:1061`).
 
 ## 2. Runtime data flow (one compaction pass)
 
 ```
-web /compact  →  POST /api/sessions/{id}/compact  (server.go:351)
+web /compact  →  POST /api/sessions/{id}/compact  (server.go:413)
   → HandleCompactSession (handler.go:1871)
   → Agent.CompactWithFocus → runCompact (agent.go:2810)
        resolveCompactRuntime → chunkMiddleByBudget (batches)

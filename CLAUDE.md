@@ -563,9 +563,15 @@ the fallback, never the reverse. Details: `docs/concepts/web-context-gauge-resol
   install/remove, never per turn.
 
 ## Pulse assistant
-The Pulse dashboard's overview chat is one global `pulse_…` session, rooted at
-`<GlobalDataDir>/pulse` (not a project). Concept doc: `docs/concepts/pulse-assistant.md`.
+The Pulse dashboard's overview chat is one current `pulse_…` session at a time
+(New chat rotates it; earlier chats stay on disk and are listed by
+`GET /api/pulse/assistant/chats`), rooted at `<GlobalDataDir>/pulse` (not a project). Concept doc: `docs/concepts/pulse-assistant.md`.
 
+- **Terminal tools are Pulse-only.** `terminal_tabs` and `terminal_read` live in
+  `pulseTools()` and reach an agent only through `configurePulseAgent` (gated on
+  `isPulseSession`). Never add them to the builtin toolset. `TestTerminalToolsAreOnlyForThePulseAssistant`
+  enforces it. Command lines go to the model only through `pulseTerminalRows`, which checks
+  `terminalAccessAllowed`.
 - **It is never on the board.** `buildPulseRows` skips every `pulse_` id; any new
   surface listing sessions (board text, `agent_runs`, search) must exclude it too.
 - **`allowedProjectRoots()` is a security boundary; the pulse root is not in it.**

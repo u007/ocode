@@ -55,6 +55,9 @@ const SINGLE_SHAPE_PROVIDER = {
   methods: [SINGLE_SHAPE_METHOD],
 };
 
+/** Grok's x.com cookie flow: the server reports kind "cookies", no `modes`. */
+const GROK_METHOD = { id: "grok_subscription", label: "Grok subscription", kind: "oauth" as const };
+
 function deferred<T>() {
   let resolve!: (v: T) => void;
   const promise = new Promise<T>((r) => {
@@ -327,5 +330,113 @@ describe("ConnectFlowPanel", () => {
       gate.resolve({ flowId: "f1", kind: "local-callback", state: "waiting_input" });
     });
     expect(screen.queryByText(/user code/i)).toBeNull();
+  });
+
+  // Real timers here: the panel polls every 1.5s and waitFor's default 1s
+  // timeout would expire before the first poll lands.
+  const POLL_TIMEOUT = { timeout: 4000 };
+
+  it("collects Grok's auth_token and ct0 instead of a redirect URL, and sends only those", async () => {
+    // Mirror the server: startGrokConnectFlow answers WITHOUT a `state`, so the
+    // panel only reaches waiting_input after its first poll.
+    api.startConnectFlow = vi.fn(async () => ({
+      flowId: "f1",
+      kind: "cookies",
+      instructions: "Paste your x.com cookies (auth_token and ct0) to connect your Grok subscription.",
+    })) as never;
+    api.getConnectFlow = vi.fn(async () => ({
+      flowId: "f1",
+      kind: "cookies",
+      state: "waiting_input",
+    })) as never;
+    const onDone = vi.fn();
+    render(
+      <ConnectFlowPanel
+        provider={{ ...PROVIDER, id: "grok", label: "Grok", methods: [GROK_METHOD] }}
+        method={GROK_METHOD}
+        onDone={onDone}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /sign in with grok subscription/i }));
+
+    await waitFor(() => expect(screen.getByLabelText("auth_token")).toBeInTheDocument(), POLL_TIMEOUT);
+    expect(screen.getByLabelText("auth_token")).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText("ct0")).toHaveAttribute("type", "password");
+    // A cookie flow must not show the localhost redirect box.
+    expect(screen.queryByRole("textbox", { name: /redirect/i })).toBeNull();
+
+    const finish = screen.getByRole("button", { name: /finish sign-in/i });
+    expect(finish).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("auth_token"), { target: { value: " tok " } });
+    expect(finish).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("ct0"), { target: { value: "csrf" } });
+    expect(finish).toBeEnabled();
+    fireEvent.click(finish);
+
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(api.submitConnectFlowInput).toHaveBeenCalledWith("f1", { authToken: "tok", ct0: "csrf" }, undefined);
+    // Exact key set, so a regression that also sends `code` fails here.
+    const sent = vi.mocked(api.submitConnectFlowInput).mock.calls[0][1];
+    expect(Object.keys(sent).sort()).toEqual(["authToken", "ct0"]);
+  });
+
+  it("shows a device code and its verification address for a device-code flow", async () => {
+    const copilot = { id: "oauth", label: "GitHub device flow", kind: "oauth" as const };
+    api.startConnectFlow = vi.fn(async () => ({
+      flowId: "f1",
+      kind: "device-code",
+      state: "waiting_browser",
+      userCode: "ABCD-1234",
+      verificationUri: "https://github.com/login/device",
+      instructions: "Open the URL, enter the code, and authorize ocode.",
+    })) as never;
+
+    render(
+      <ConnectFlowPanel
+        provider={{ ...PROVIDER, id: "copilot", label: "GitHub Copilot", methods: [copilot] }}
+        method={copilot}
+        onDone={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /sign in with github device flow/i }));
+
+    expect(await screen.findByText("ABCD-1234")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "https://github.com/login/device" })).toHaveAttribute(
+      "href",
+      "https://github.com/login/device",
+    );
+    // A device flow has no paste box and no sign-in URL of its own.
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("shows a plugin flow's instructions while it runs, then reports completion", async () => {
+    const plugin = { id: "plugin_ChatGPT Pro/Plus (browser)", label: "ChatGPT Pro/Plus (browser)", kind: "plugin" as const };
+    api.startConnectFlow = vi.fn(async () => ({
+      flowId: "f1",
+      kind: "plugin",
+      state: "running",
+      instructions: "Approve the sign-in in your browser.",
+    })) as never;
+    // Plugin flows take no input and never wait: the panel only polls to the end.
+    api.getConnectFlow = vi.fn(async () => ({
+      flowId: "f1",
+      kind: "plugin",
+      state: "complete",
+      account: "me@example.com",
+    })) as never;
+    const onDone = vi.fn();
+    render(
+      <ConnectFlowPanel
+        provider={{ ...PROVIDER, id: "openai", label: "OpenAI", methods: [plugin] }}
+        method={plugin}
+        onDone={onDone}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /sign in with chatgpt pro\/plus \(browser\)/i }));
+
+    expect(await screen.findByText("Approve the sign-in in your browser.")).toBeInTheDocument();
+    expect(await screen.findByText(/OpenAI connected as me@example.com/, undefined, POLL_TIMEOUT)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(onDone).toHaveBeenCalledTimes(1);
   });
 });

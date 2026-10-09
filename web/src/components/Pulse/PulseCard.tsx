@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { GitFork, Maximize2 } from "lucide-react";
+import { ChevronDown, GitFork, Maximize2 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "../../lib/utils";
 import { useJumpToSession, useJumpToPendingAsk, type JumpTarget } from "../../lib/jumpToSession";
@@ -82,25 +82,26 @@ const STREAM_ON_CARD: ReadonlySet<PulseStatus> = new Set<PulseStatus>([
 ]);
 
 /**
- * Reserved height for the card (on the chrome `div`, not the button).
+ * Reserved height for a card that carries a stream (on the chrome `div`, not the
+ * button). Settled cards have no stream and no floor: they size to their content.
  *
  * The FLOOR alone is not a height budget: `min-h` sets a minimum, so content
  * still governs above it, and a `flex-1` child of an auto-height column is sized
- * from its own content — `flex-basis: 0%` does not cap it. Measured in headless
- * Chromium against the built CSS, a full card (status row, title, task, todo
- * bar) plus a capped stream region is ~240px, so 16rem leaves ~15px of slack.
+ * from its own content — `flex-basis: 0%` does not cap it. The header (status
+ * row, title, task, todo bar) is ~112px, and the capped stream region is 24rem
+ * (384px), so 32rem (512px) leaves the stream room above the header.
  * The cap that actually pins the height is `STREAM_MAX_H` on the region.
  */
-const CARD_MIN_H = "min-h-[16rem]";
+const CARD_MIN_H = "min-h-[32rem]";
 
 /**
  * Hard ceiling for the on-card stream region, and the thing that actually makes
  * the card height constant. See CARD_MIN_H: the floor alone never did that.
  *
- * 8rem = 128px, the budget the original seven truncated lines spent. The region
- * SCROLLS past it, so it is a layout constant rather than a count of entries.
+ * 24rem = 384px. The region SCROLLS past it, so it is a layout constant rather
+ * than a count of entries. The floor (CARD_MIN_H) must stay above header + this.
  */
-const STREAM_MAX_H = "max-h-[8rem]";
+const STREAM_MAX_H = "max-h-[24rem]";
 
 export const STATUS_META: Record<PulseStatus, { glyph: string; label: string; className: string }> = {
   needs_permission: { glyph: "◆", label: "needs permission", className: "text-amber-400" },
@@ -259,13 +260,17 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
     clearExpandTimer();
     setExpanded(false);
   }, [clearExpandTimer]);
+  // The chevron toggle pins the panel open. Hover and blur only ever touch
+  // `expanded`, so a pinned panel survives them; Escape and a second click clear it.
+  const [pinned, setPinned] = useState(false);
+  const open = expanded || pinned;
 
   // A live card reads its tail whether or not it is hovered — which is also the
   // only way it is reachable at all on a touch device, where there is no hover.
-  // Every other status stays gated on `expanded`, so a collapsed card
+  // Every other status stays gated on `open`, so a collapsed card
   // subscribes to nothing and fetches nothing.
   const streamOnCard = !compact && STREAM_ON_CARD.has(row.status);
-  const tail = usePulseTail(row.session_id, expanded || streamOnCard, row.status);
+  const tail = usePulseTail(row.session_id, open || streamOnCard, row.status);
 
   const streamRef = useRef<HTMLDivElement | null>(null);
   const { onScroll: onStreamScroll } = useStickToBottom(streamRef, tail.entries);
@@ -308,6 +313,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
   const onButtonKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key === "Escape") {
       collapse();
+      setPinned(false);
       return;
     }
     // Enter focuses the session in the dashboard; Shift+Enter is the keyboard
@@ -336,12 +342,12 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
         // stretch its row, and `h-full` alone gives no room to stream into.
         className={cn(
           "relative flex h-full min-w-0 flex-col rounded-md border border-border bg-card",
-          !compact && CARD_MIN_H,
+          streamOnCard && CARD_MIN_H,
         )}
       >
         <button
           type="button"
-          aria-expanded={expanded}
+          aria-expanded={open}
           onClick={() => jump(target)}
           onDoubleClick={() => {
             if (row.pending_ask) jumpAsk(target);
@@ -349,7 +355,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
           onFocus={expandNow}
           onBlur={collapse}
           onKeyDown={onButtonKeyDown}
-          className="flex w-full min-w-0 flex-col gap-1.5 rounded-md p-2 pr-8 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="flex w-full min-w-0 flex-col gap-1.5 rounded-md p-2 pr-12 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {compact ? (
             <div data-pulse-line="" className="flex min-w-0 items-center gap-2">
@@ -435,16 +441,31 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
 
         {/* Beside the header button, never inside it (a button may not contain
             a button), pinned to the top-right corner the header leaves clear
-            with its right padding. Clicking the card itself still JUMPS. */}
-        <button
-          type="button"
-          aria-label="Focus session"
-          title="Focus session"
-          onClick={() => setPulseFocus(row.session_id)}
-          className="absolute right-1.5 top-1.5 rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <Maximize2 className="h-3 w-3" aria-hidden />
-        </button>
+            with its right padding. Clicking the card itself still JUMPS. The
+            details toggle is `aria-pressed`, not `aria-expanded`: the header is
+            the one roving stop per card, and a second `aria-expanded` would add
+            another. */}
+        <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5">
+          <button
+            type="button"
+            aria-pressed={pinned}
+            aria-label="Keep details open"
+            title="Keep details open"
+            onClick={() => setPinned((p) => !p)}
+            className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <ChevronDown className={cn("h-3 w-3 transition-transform", pinned && "rotate-180")} aria-hidden />
+          </button>
+          <button
+            type="button"
+            aria-label="Focus session"
+            title="Focus session"
+            onClick={() => setPulseFocus(row.session_id)}
+            className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Maximize2 className="h-3 w-3" aria-hidden />
+          </button>
+        </div>
 
         {streamOnCard && (
           // A SIBLING of the button, not inside it: a scroller nested in a
@@ -470,7 +491,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
         )}
       </div>
 
-      {expanded && (
+      {open && (
         // bottom-full: grows upward so it is never clipped by the bottom of the
         // scrolling list. Absolute, so the card keeps its exact box.
         <div

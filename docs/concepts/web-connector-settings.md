@@ -11,7 +11,7 @@ tags:
   - web
   - desktop
   - security
-timestamp: 2026-10-02T08:37:10Z
+timestamp: 2026-10-09T11:38:11Z
 ---
 # Settings → Connectors (web/desktop)
 
@@ -36,7 +36,7 @@ timestamp: 2026-10-02T08:37:10Z
 
 The previous implementation showed a 4+4 window, which handed over 8 characters of a 9-character key. No endpoint ever returns a full secret.
 
-`ConnectFlow.snapshot()` in the same file is an **explicit allowlist**, not a struct marshal. That is structurally why the PKCE verifier and the OAuth `state` can never reach the poll response, even though the in-memory flow struct holds them.
+`connectFlow.snapshot()` in the same file is an **explicit allowlist**, not a struct marshal. That is structurally why the PKCE verifier and the OAuth `state` can never reach the poll response, even though the in-memory flow struct holds them.
 
 ## Host threading
 
@@ -62,7 +62,7 @@ Each connect method may carry a `modes` array. `oauthFlowTakesMode` (`internal/s
 ### Traps
 
 - It is keyed on **`OAuthFlow`, not the provider id**. `codex` also declares `OAuthFlow: "openai"`, and `google` uses the same method id `oauth` while having no manual mode yet.
-- A plugin **replaces** a provider's built-in OAuth flow (`MethodsFor` in `internal/auth/methods.go`). The built-in `codex` plugin (`internal/plugin/codex/codex.go`) registers for provider id `openai` and is linked by `main.go`, so in every shipped binary `openai` offers only `apikey` plus two `plugin_*` methods and **no `oauth` method at all**. Manual mode is therefore reachable via `codex`, not `openai`. Corollary for testing: `internal/server` tests see a catalog no shipped binary has, because that package does not link the plugin.
+- A plugin **replaces** a provider's built-in OAuth flow (`MethodsFor` in `internal/auth/methods.go`). The built-in `codex` plugin (`internal/plugin/codex/codex.go`) registers for provider id `openai` and is linked by `main.go`, so in every shipped binary `openai` offers only `apikey`, two `plugin_*` methods, and `remove`, with **no `oauth` method at all**. Manual mode is therefore reachable via `codex`, not `openai`. Corollary for testing: `internal/server` tests see a catalog no shipped binary has, because that package does not link the plugin.
 
 ### The client picks the mode
 
@@ -76,23 +76,25 @@ A client must never render a mode chooser the server did not advertise. An Anthr
 
 ## Flow states and invariants
 
-- **`waiting_input` is load-bearing** — it is the only thing that renders the paste box, and the panel never renders a field the server did not send.
+- **`waiting_input` is load-bearing** — it is the only thing that renders an input, and the panel never renders a field the server did not send.
+- **The flow `kind` picks the input.** A `cookies` flow (Grok) renders masked `auth_token` and `ct0` fields and submits `{authToken, ct0}`; the redirect box is never shown for it. Every other kind renders the redirect paste box and submits `{code}`.
 - **`beginInput`** is a `waiting_input` → `running` compare-and-set that also installs the cancel func under one lock. It is what makes a pasted code **single-use**; a replayed paste gets **409**.
 - **`beginCommit`** claims the exclusive right to persist a credential, moving the flow to `committing`. A **cancelled** flow's credential is discarded rather than saved behind the user's back, and cancel is refused with **409** once a flow is `committing`.
 - A pasted value carrying no `state`, or a `state` that does not match this flow, is rejected. A bare code is deliberately refused: it carries no state, so accepting it would let an attacker-supplied code be redeemed on the user's machine.
+- **Every start response reports the flow's `state`**, so a client can branch on it without a second poll.
 - **Polling is the only completion signal** (`GET /flows/{id}`); the server holds the loopback listener, so nothing is pushed to the tab.
 
 ## Known gaps
 
 State these as gaps, not as behaviour:
 
-- **Google has no manual mode.** Its flow binds a loopback port, so it cannot complete from a remote host, and it would additionally need user-supplied client credentials.
+- **Google has no manual mode.** Its flow listens on `localhost:8080` on the server, so it cannot complete from a remote host. It also needs `GOOGLE_CLIENT_ID` (and `GOOGLE_CLIENT_SECRET` for a confidential client) set in the server's environment.
 - **OpenAI's own remote sign-in is unreachable.** The codex plugin's browser method calls `auth.OpenAILogin`, which binds a localhost callback on the server's machine and calls `openBrowser`; its device-code method is host-agnostic but `startPluginConnectFlow` never surfaces `userCode` / `verificationUri`, so the user is never shown their code. Reviewed 2026-10-02 and deliberately left unchanged — a remote OpenAI user uses an API key or switches to `codex`.
 
 ## References
 
 - Component: `web/src/components/Settings/ConnectorsForm.tsx`
-- Server handler: `internal/server/handler_connect.go` (`maskConnectCredential`, `ConnectFlow.snapshot`, `oauthFlowTakesMode`, `beginInput`, `beginCommit`)
+- Server handler: `internal/server/handler_connect.go` (`maskConnectCredential`, `connectFlow.snapshot`, `oauthFlowTakesMode`, `beginInput`, `beginCommit`)
 - Method catalog: `internal/auth/methods.go` (`MethodsFor`)
 - Codex plugin: `internal/plugin/codex/codex.go`
-- Related: `superpowers/specs/2026-10-01-web-connector-settings-design.md`, `superpowers/plans/2026-10-01-web-connector-settings.md`
+- Related: `docs/superpowers/specs/2026-10-01-web-connector-settings-design.md`, `docs/superpowers/plans/2026-10-01-web-connector-settings.md`

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { PulseView } from "./PulseView";
+import { resetAssistantPrefsForTests, setAssistantOpen } from "./pulseAssistantPrefs";
 import { PulseJumpProvider } from "@/lib/jumpToSession";
 import { usePulse, setPulseFocus } from "@/stores/pulseStore";
 import type { PulseRow } from "@/api/types";
@@ -11,6 +12,9 @@ vi.mock("@/stores/pulseStore", async (importOriginal) => {
 });
 
 // The pane has its own suite; here only the view's wiring of it is under test.
+vi.mock("./PulseTerminals", () => ({
+  PulseTerminals: () => null,
+}));
 vi.mock("./PulseFocusPane", () => ({
   PulseFocusPane: ({ row, onClose }: { row: { title: string }; onClose: () => void }) => (
     <div data-testid="pulse-focus-pane">
@@ -20,18 +24,12 @@ vi.mock("./PulseFocusPane", () => ({
   ),
 }));
 
-// The drawer has its own suite (it pulls in the whole chat surface); the prefs
-// and hotkey hooks stay real so the toggle wiring is exercised.
-vi.mock("./PulseAssistantDrawer", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./PulseAssistantDrawer")>();
-  return {
-    ...actual,
-    PulseAssistantDrawer: ({ width, onClose }: { width: number; onClose: () => void }) => (
-      <aside data-testid="pulse-assistant-drawer" data-width={width}>
-        <button onClick={onClose}>close drawer</button>
-      </aside>
-    ),
-  };
+// The floating window has its own suite (it pulls in the whole chat surface) and
+// is mounted by App, not by this view. The toggle and the `a` hotkey stay real so
+// the wiring to the shared store is exercised.
+vi.mock("./PulseAssistantWindow", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./PulseAssistantWindow")>();
+  return { ...actual, PulseAssistantWindow: () => null };
 });
 
 vi.mock("./usePulseTail", () => ({
@@ -421,68 +419,40 @@ describe("PulseView focus mode", () => {
   });
 });
 
-describe("PulseView assistant drawer", () => {
-  const toggle = () => screen.getByRole("button", { name: "Toggle assistant" });
+describe("PulseView assistant key", () => {
+  const storedOpen = () => window.localStorage.getItem("pulse.assistant.open");
 
-  it("is closed until the header button opens it, and the button closes it again", () => {
-    overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
-    mount();
-    expect(screen.queryByTestId("pulse-assistant-drawer")).toBeNull();
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
-
-    fireEvent.click(toggle());
-    expect(screen.getByTestId("pulse-assistant-drawer")).toBeTruthy();
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
-
-    fireEvent.click(toggle());
-    expect(screen.queryByTestId("pulse-assistant-drawer")).toBeNull();
+  beforeEach(() => {
+    resetAssistantPrefsForTests();
+    window.localStorage.clear();
   });
 
+  // The window's toggle lives in the project sidebar (AssistantToggleButton), not
+  // here. This view keeps only the `a` key, which is scoped to the Pulse view.
   it("toggles on the `a` key, but not while typing in the filter", () => {
     overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
     mount();
 
     fireEvent.keyDown(screen.getByPlaceholderText(/filter/i), { key: "a" });
-    expect(screen.queryByTestId("pulse-assistant-drawer")).toBeNull();
+    expect(storedOpen()).not.toBe("1");
 
     fireEvent.keyDown(document.body, { key: "a" });
-    expect(screen.getByTestId("pulse-assistant-drawer")).toBeTruthy();
+    expect(storedOpen()).toBe("1");
   });
 
-  it("closes from the drawer's own close button", () => {
-    overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
-    mount();
-    fireEvent.click(toggle());
-
-    fireEvent.click(screen.getByText("close drawer"));
-
-    expect(screen.queryByTestId("pulse-assistant-drawer")).toBeNull();
-  });
-
-  it("remembers open state across a remount", () => {
-    overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
-    const first = mount();
-    fireEvent.click(toggle());
-    first.unmount();
-
-    mount();
-
-    expect(screen.getByTestId("pulse-assistant-drawer")).toBeTruthy();
-  });
-
-  it("renders beside the focus pane and side column together", () => {
+  it("does not dock the window into the focus layout: the focus panes stand alone", () => {
     overrides = {
       rows: [
         row({ session_id: "run", status: "running", title: "Runs" }),
         row({ session_id: "old", status: "idle", title: "Old one" }),
       ],
     };
+    setAssistantOpen(true);
     setPulseFocus("run");
     mount();
-    fireEvent.click(toggle());
 
     expect(screen.getByTestId("pulse-focus-pane")).toBeTruthy();
     expect(screen.getByTestId("pulse-focus-side")).toBeTruthy();
-    expect(screen.getByTestId("pulse-assistant-drawer")).toBeTruthy();
+    expect(screen.queryByTestId("pulse-assistant-window")).toBeNull();
   });
 });

@@ -125,10 +125,19 @@ func (h *Handler) dbWriteGuard(path string) (int, string) {
 	if !isSQLite {
 		return http.StatusBadRequest, "not a SQLite database"
 	}
-	if dataDir, err := paths.GlobalDataDir(); err == nil && dataDir != "" {
-		if containedIn(path, dataDir) || containedLexical(path, dataDir) {
-			return http.StatusBadRequest, "refusing to write to ocode's own data directory"
-		}
+	// Fail closed when the data dir cannot be resolved: the write is refused,
+	// as sqliteWriteGuard refuses it, instead of being allowed unchecked.
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		logDBError("resolve data dir for write", path, err)
+		return http.StatusInternalServerError, "cannot resolve ocode's data directory; refusing to write"
+	}
+	if dataDir == "" {
+		logDBError("resolve data dir for write", path, errors.New("data directory is empty"))
+		return http.StatusInternalServerError, "ocode's data directory is empty; refusing to write"
+	}
+	if containedIn(path, dataDir) || containedLexical(path, dataDir) {
+		return http.StatusBadRequest, "refusing to write to ocode's own data directory"
 	}
 	return 0, ""
 }

@@ -85,7 +85,7 @@ The **API itself accepts a tracked path** — the frontend is what restricts the
 (`TestGitIgnoreAcceptsTrackedPath`, `handler_git_ignore_test.go:108`). Do not "fix" the
 server to reject tracked paths; the endpoint is a mechanism, the UI is the policy.
 
-Route is registered in `internal/server/server.go:318` behind `s.authMiddleware`, next to
+Route is registered in `internal/server/server.go:328` behind `s.authMiddleware`, next to
 `/api/git/stage` (`:315`). A handler-only test cannot catch a missing/shadowed route
 (it presents as an SPA 404), hence `TestGitIgnoreRouteIsRegistered`
 (`handler_git_ignore_test.go:293`) drives the **real mux**.

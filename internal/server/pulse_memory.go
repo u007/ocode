@@ -22,8 +22,13 @@ import (
 //	<pulse root>/memory/projects/<slug>.md   (<slug> = memory.ProjectSlug)
 
 const (
-	// pulseMemoryCap is the per-file size limit; larger writes are rejected.
-	pulseMemoryCap = 32 * 1024
+	// pulseMemoryTokenBudget is the per-file ceiling in tokens. There is no
+	// tokenizer here, so the byte cap is derived from the conservative estimate
+	// the decision-state budget uses (~3 bytes per token).
+	pulseMemoryTokenBudget = 30_000
+	pulseMemoryBytesPerTok = 3
+	// pulseMemoryCap is the per-file size limit in bytes; larger writes are rejected.
+	pulseMemoryCap = pulseMemoryTokenBudget * pulseMemoryBytesPerTok
 	// pulseMemoryPromptCap clips one memory in the per-turn prompt section.
 	pulseMemoryPromptCap = 8 * 1024
 
@@ -91,7 +96,7 @@ func (h *Handler) pulseMemoryTools() []*pulseTool {
 		"scope":        map[string]any{"type": "string", "enum": []string{pulseMemoryScopeGlobal, pulseMemoryScopeProject}, "description": "global, or project for one project's notes"},
 		"project_path": str("Project root, required for scope project"),
 	}
-	writeProps := map[string]any{"content": str(fmt.Sprintf("The COMPLETE new memory text (replaces the old; max %d bytes). Read first and keep what is still valid.", pulseMemoryCap))}
+	writeProps := map[string]any{"content": str(fmt.Sprintf("The COMPLETE new memory text (replaces the old; max about %d tokens). Read first, keep only what is still important, and drop stale notes.", pulseMemoryTokenBudget))}
 	for k, v := range scopeProps {
 		writeProps[k] = v
 	}
@@ -148,7 +153,7 @@ func (h *Handler) pulseMemoryWriteTool(raw json.RawMessage) (string, error) {
 		return "", errors.New("content is required (an empty string clears the memory)")
 	}
 	if len(*args.Content) > pulseMemoryCap {
-		return "", fmt.Errorf("memory is %d bytes, over the %d byte cap; condense it", len(*args.Content), pulseMemoryCap)
+		return "", fmt.Errorf("memory is %d bytes, over the ~%d token cap (%d bytes); keep only the important notes and condense it", len(*args.Content), pulseMemoryTokenBudget, pulseMemoryCap)
 	}
 	path, err := h.pulseMemoryFile(args.Scope, args.ProjectPath)
 	if err != nil {

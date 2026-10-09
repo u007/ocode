@@ -2,20 +2,51 @@
 
 ## Open: review-fix follow-ups (2026-10-09)
 
-- Pulse `session_send` is atomic only against async turns. A synchronous `runTurn` sets
-  `IsTurnActive` without `turnInFlight`, so a send can still start behind one in the gap
-  between the `IsTurnActive` read and dispatch. Closing it needs the sync path to register
-  in `turnInFlight` too. See `handler.go` (`HandleSendMessage`) and `agent_session.go`
-  (`dispatchTurnWithRewind`).
-- `Handler.dbWriteGuard` (`internal/server/handler_db.go`) still allows a write when the data
-  dir cannot be resolved. `sqliteWriteGuard` now refuses in that case. Align the two.
-- `internal/config/storage_connectors.go` writes plaintext JSON. Its comment says encryption
-  is planned. Encryption and the `CONNECTOR_SESSION_KEY_REF` wiring are not built. The file
-  and its test are untracked, so review them before committing.
-- Line anchors in `docs/` that cite `handler.go`, `agent_session.go`, `session.go`,
-  `dbconnect.go`, and `handler_dbconnect*.go` may have drifted from this round's edits.
-  Re-derive them per the knowledge-system rule. Only the port-forward gotcha and DB connector
-  pages were checked in this pass.
+- **FIXED (2026-10-09): Pulse `session_send` raced a synchronous turn.** Every turn
+  now counts in `turnInFlight`: `runSyncTurn` wraps the sync `runTurn` callers via
+  `beginSyncTurn`, so `dispatchTurn(refuseIfBusy)` refuses behind it under the same
+  lock. Release clears a stale `pendingCancel` once the last turn ends, so a Stop
+  during a sync turn cannot cancel the next message. The `IsTurnActive` pre-read
+  stays as a second check. Tests: `handler_sync_turn_test.go`.
+- **FIXED (2026-10-09): `Handler.dbWriteGuard` now fails closed** when the data dir
+  cannot be resolved, matching `sqliteWriteGuard`. The failure branch has no test:
+  the only trigger is an unresolvable `HOME`, and the test rules forbid overriding
+  `HOME` directly. Add one through `setHomeTree` if that rule ever changes.
+- **Reviewed (2026-10-09): `internal/config/storage_connectors.go`.** The file is
+  tracked (landed in 73891a62), not untracked as this entry said. It has no production
+  caller, only tests, and stores non-secret metadata only. Plaintext is acceptable
+  while nothing secret is stored there. Encryption and the `CONNECTOR_SESSION_KEY_REF`
+  wiring remain unbuilt. Its loader comment still mentions an "encrypted envelope"
+  path that does not exist.
+- **Possible pulse-assistant orphaning (2026-10-09, not explained).** `state.json` in the
+  pulse root named `pulse_2026-10-09-001143-26275806` until about 00:15, then
+  `pulse_2026-10-09-001531-a3c7bbd3`. The first transcript still existed on disk with 11
+  messages, so `pulseAssistantID`'s existence check should have kept it. Find out why the
+  id was re-minted. Until then, the 11-message chat is a candidate for loss. The read-only
+  listing of `GET /api/pulse/assistant/chats` was not confirmed against the real data dir,
+  because test `TestMain` redirects the data dir.
+- **Partly done (2026-10-09): `file.go:NNN` anchors in `docs/`.** Re-derived:
+  `docs/concepts/compaction-cancellation.md`, and the `server.go` anchors in
+  `compaction-config.md`, `git-ignore-toplevel-and-quoting.md`,
+  `files-tab-preview-only-routing.md`, `port-forwards-url-composition-and-supervisor-restart.md`
+  and `auto-share-on-start.md`. Those were checked by reading the live line, not by the
+  identifier script. `agent_session.go` gained `beginSyncTurn`/`runSyncTurn` above
+  `dispatchTurn` this round, so any `agent_session.go` anchor below about line 1720 may
+  have moved again and needs the same check. Still stale, pending re-derivation by
+  content: `docs/concepts/compaction-config.md` (about 20 anchors, several into
+  `configuredProviderIDs`/`HandleCompactSession`), `docs/concepts/per-chat-mcp-toggle.md`
+  (`agent_session.go:566`, `handler.go:508`), `docs/gotchas/auto-continue-turn-transcript-rebase.md`
+  (4 ranges in `agent_session.go`), `docs/gotchas/session-writers-conflict-recovery.md`
+  (`agent_session.go:1453`), `docs/gotchas/web-ask-dialog-resolved-before-continuation.md`
+  (`agent_session.go:1683`), `docs/gotchas/remote-project-path-trust-boundary.md`
+  (`handler.go:662`), `docs/gotchas/session-snapshot-stale-derived-fields.md`
+  (`handler.go:1243`), `docs/gotchas/files-tab-preview-only-routing.md` (`handler.go:226`),
+  `docs/gotchas/pending-ask-recovery-live-session-state.md` (`handler.go:1583`),
+  `docs/gotchas/speech-summary-turn-lock-wait.md` and `project-endpoint-isolation.md`
+  (`agent_session.go` ranges), and `docs/gotchas/derived-title-label-must-be-bounded.md`
+  (`session.go`, ambiguous). The `reconcileProfileAgent` anchors at `agent_session.go:668`
+  are correct: line 668 is the quoted comment. Historical `docs/superpowers/` specs and
+  plans were out of scope and have not been checked.
 
 ## DONE: Remote Git tab: C-quoted non-ASCII names and unquoted specs (2026-10-09)
 
@@ -697,7 +728,11 @@ Two things this cost, both worth not repeating:
       -maxdepth 1 -newermt "-6 minutes" -name "*.sqlite" | wc -l`. mtime vs your own
       session's start time is the fastest tell.
 
-## PRE-EXISTING `-race` failure in `TestConnectFlowCancelRacesInputHandler` (2026-10-03)
+## FIXED: `-race` failure in `TestConnectFlowCancelRacesInputHandler` (2026-10-03)
+
+**Fixed (2026-10-09):** `handleConnectFlowInput`'s cookies branch now captures
+`grokSubscriptionLoginFn` on the request goroutine before `crashguard.Go`. `-race
+-count=200` on the test is clean; the `Connect` group passes under `-race`.
 
 Found while running the `go test -race` gate over the ten review fixes. **Not
 caused by that work** — verified by reverting `handler_connect.go` and the new
@@ -4268,6 +4303,25 @@ was written to `skills/`. Partial work left open, deliberately:
   `review-changes` may be consolidatable; `use-modern-go` may not match the Go
   version in `go.mod`. None were inspected.
 
+## Paradee local TTS engine — known limitations (2026-10-09)
+
+The `paradee` engine is registered, pinned, installable and verified end to end on
+`darwin/arm64` (real download, SHA-256 + size verify, pip install with the staged
+spaCy wheel, probe synthesis, WAV out via `PARADEE_TTS_E2E=1`). These are the
+boundaries it shipped with:
+
+- [ ] **Host matrix is `darwin/arm64` only.** Other hosts report `unavailable`. Before
+  adding `linux/*`, `windows/amd64` or `darwin/amd64`: pin the same set there, check
+  that `en_core_web_sm-3.8.0` and `spacy==3.8.16` have wheels for that host, and run
+  `PARADEE_TTS_E2E=1` on that platform. The `en_core_web_sm` wheel is `py3-none-any`,
+  so it is shared across hosts.
+- [ ] **Single voice.** The model has one built-in voice (`af_heart`). The Paradee
+  config has no speaker table, so there is nothing for `model_voice` to select.
+- [ ] **Upstream is pinned, not maintained.** The model repository is pinned by commit
+  and the spaCy model by wheel SHA-256. An upstream fix cannot arrive on its own;
+  revisiting the engine means re-verifying `misaki==0.9.4` (its `[en]` extra is
+  deliberately left off because it pulls PyTorch) and the spaCy 3.8 line together.
+
 ## MeloTTS local TTS engine — known limitations (2026-09-30)
 
 The `melo` engine is registered, pinned, installable and verified end to end on
@@ -5872,3 +5926,16 @@ Follow-ups, not done:
 ## Terminal touch scroll: SGR-only wheel reports, no momentum (2026-10-09)
 
 `TerminalPanel.tsx` touch handler (`onTouchMove`) scrolls scrollback via `term.scrollLines`, and when a TUI owns the mouse (`modes.mouseTrackingMode !== "none"`) sends SGR (1006) wheel reports via `term.input`. Not done: apps that enable mouse tracking without SGR encoding (X10/UTF-8) get a report they will not parse (xterm exposes no public encoding mode); alt-screen apps with NO mouse tracking get nothing (xterm's own wheel path sends arrow keys there; touch does not); no inertia/momentum after the finger lifts. See `docs/gotchas/terminal-touch-scroll-xterm6.md`.
+
+## FIXED: connect start responses omit `state`; Google manual completion deferred (2026-10-09)
+
+Found while closing `docs/superpowers/plans/2026-10-01-web-connector-settings.md`
+Phases 2–4.
+
+- **Fixed (2026-10-09):** the Anthropic, Google, Copilot, Grok and plugin start
+  responses now carry `state` (`f.getState()`), matching the OpenAI starts.
+  `TestConnectStartResponsesReportFlowState` covers each kind.
+- Google manual completion is not started. It needs `GOOGLE_CLIENT_ID` and, for a
+  confidential client, `GOOGLE_CLIENT_SECRET`, and a paste-back exchange in
+  `internal/auth/google.go`. Until then Google sign-in works from the server machine
+  only.

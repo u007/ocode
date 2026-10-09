@@ -123,7 +123,7 @@ export interface ModelInfo {
   has_kaizen?: boolean;
 }
 
-export type TTSEngineId = "browser-native" | "piper" | "melo" | "kokoro";
+export type TTSEngineId = "browser-native" | "piper" | "paradee" | "melo" | "kokoro";
 export type TTSPlaybackMode = "manual" | "at-bottom" | "auto";
 
 export interface TTSEngine {
@@ -1375,6 +1375,44 @@ export interface TodoUpdatedEvent {
 export interface PulseAssistantInfo {
   session_id: string;
   model: string;
+}
+
+/** One live terminal on the Pulse dashboard, from GET /api/pulse/terminals.
+ *  `command` is the program running in it, or the bare shell name when idle;
+ *  `running` is true only when a program other than the shell is in the foreground. */
+export interface PulseTerminal {
+  id: string;
+  project: string;
+  title: string;
+  pid: number;
+  command: string;
+  running: boolean;
+}
+
+/** One page of GET /api/pulse/terminals, running programs first. */
+export interface PulseTerminalPage {
+  terminals: PulseTerminal[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** One chat of the Pulse assistant, from GET /api/pulse/assistant/chats. */
+export interface PulseChatSummary {
+  session_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One page of GET /api/pulse/assistant/chats, newest first. `current` is the
+ *  chat the drawer shows ("" before the first chat is minted). */
+export interface PulseChatPage {
+  chats: PulseChatSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+  current: string;
 }
 
 /** GET /api/config/pulse-system-prompt. `prompt` is the override ("" when

@@ -249,6 +249,25 @@ describe("RemoteProjectStatus", () => {
   // in the desktop app, or a session restored on the host) used to leave the
   // count stuck at its mount-time value forever, because expanding did not
   // re-read. That is the "0 terminals" the user reported.
+  it("shows a chevron on the expand line only while connected, pointing down when open", () => {
+    const { rerender } = render(<RemoteProjectStatus project={project} statusState={state()} />);
+    const line = screen.getByTestId("remote-project-status");
+    expect(line.querySelector(".lucide-chevron-right")).not.toBeNull();
+
+    fireEvent.click(line);
+    expect(line.querySelector(".lucide-chevron-down")).not.toBeNull();
+    expect(line.querySelector(".lucide-chevron-right")).toBeNull();
+
+    // Disconnected there is no inventory to expand, so no chevron.
+    rerender(
+      <RemoteProjectStatus
+        project={project}
+        statusState={state({ status: connected({ connected: false, version: "", pid: 0 }) })}
+      />,
+    );
+    expect(line.querySelector("svg")).toBeNull();
+  });
+
   it("re-reads the host terminal inventory when the row expands", () => {
     render(<RemoteProjectStatus project={project} statusState={state()} />);
     expect(mockRefresh).not.toHaveBeenCalled(); // collapsed: no extra fetch

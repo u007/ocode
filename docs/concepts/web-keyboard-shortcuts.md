@@ -33,6 +33,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 | `⌘W` / `Ctrl+W` | Close the frontmost thing (desktop shell only — see caveats) |
 | `Escape` | Close the CommandPalette / FilePicker (`onEscape`) |
 | `⌘F` / `Ctrl+F` | In-chat find bar (ChatPanel-local, not the global hook) |
+| `⌘⇧A` / `Ctrl+Shift+A` | Toggle the Pulse assistant window (`onToggleAssistant` → `toggleAssistantWindow`, `components/Pulse/pulseAssistantPrefs.ts`). Closed opens; a minimised window restores; otherwise closes. The same toggle is the top bar's "Toggle assistant" button |
 
 `e.preventDefault()` is called on every bound combo so the webview's own handling (e.g. browser find) does not also fire.
 

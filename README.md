@@ -23,7 +23,7 @@ powers a terminal TUI, a React web UI, and a native desktop app.
 |------|--------------|
 | 🌍 **Remote projects** | SSH **and** WSL projects with one-click connect, automatic provisioning, and **self-updating remote binaries** — the agent runs on the host while files, git, terminals, and the web UI proxy over the wire. |
 | 🌐 **Embedded browser** | A real browser panel (isolated local iframe **or** your Chrome over CDP) with tabs, address bar, dev console, a **password vault**, and **HTR** browser automation. |
-| 🔊 **Text-to-speech** | Speak assistant replies with a browser-native or local engine (Kokoro / Piper / Melo), with an optional **speech-summary** model that rewrites replies to be listened to, not read. |
+| 🔊 **Text-to-speech** | Speak assistant replies with a browser-native or local engine (Kokoro / Piper / Paradee / Melo), with an optional **speech-summary** model that rewrites replies to be listened to, not read. |
 | 🧠 **Project context** | Auto-loads `CLAUDE.md` / `AGENTS.md` / `OCODE.md` / `.cursorrules` / `.opencode/rules`, layered **memory**, and the **OKF knowledge bundle** with a dedicated context model. |
 | 🧩 **Superpowers plugin** | A built-in, customized [Superpowers](https://github.com/u007/superpowers) workflow — brainstorm → plan → TDD → verify — plus 70+ bundled skills. |
 | ⚙️ **Beautiful settings** | A 30+ section settings overlay (backend, browser, passwords, speech, connectors, profiles, compact, permissions, security, themes, MCP, …) shared by web and desktop. |
@@ -384,7 +384,7 @@ current message with a client-side FIFO queue and a now-playing
 `project · session` label.
 
 - **Engines.** **Browser Native** (default — no install, uses the OS voice) plus
-  local engines: **Kokoro**, **Piper**, and **Melo**, with per-model voice
+  local engines: **Kokoro**, **Piper**, **Paradee**, and **Melo**, with per-model voice
   overrides.
 - **Speech summary.** An optional small model rewrites a reply into 2–5 plain
   spoken sentences — no code, diffs, stack traces, paths, or URLs — before
