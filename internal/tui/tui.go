@@ -143,8 +143,10 @@ func cleanupProgramModel(m tea.Model) {
 	switch m := m.(type) {
 	case model:
 		m.cleanupCurrentSession()
+		m.abortVoice()
 	case *model:
 		m.cleanupCurrentSession()
+		m.abortVoice()
 	}
 }
 
