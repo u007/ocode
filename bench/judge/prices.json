@@ -1,0 +1,6 @@
+{
+  "_comment": "USD per million tokens, used only for the cost column. null = not published or not verified here, so the report says n/a instead of guessing. Fill in from your own invoice or the provider's current price list before trusting the cost column.",
+  "deberta": {"input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0, "note": "local CPU/GPU inference; electricity and hardware not counted"},
+  "jev": {"input_usd_per_mtok": null, "output_usd_per_mtok": null, "note": "TypeSafe Jev price not published to this benchmark"},
+  "clef": {"input_usd_per_mtok": null, "output_usd_per_mtok": null, "note": "Cloudflare Workers AI bills per model or per Neuron; clef-specific rate not found. Set it from the Workers AI pricing page for your account"}
+}
