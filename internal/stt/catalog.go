@@ -61,6 +61,15 @@ var catalog = []spec{
 		Description: "Offline English-only model. Slightly better English accuracy than v3.",
 	},
 	{
+		ID:          "parakeet-unified-en-0.6b",
+		Label:       "Parakeet Unified EN 0.6B",
+		Engine:      EngineLocal,
+		Upstream:    "nemo-parakeet-rnnt-0.6b",
+		Repo:        "bobNight/parakeet-unified-en-0.6b-onnx",
+		Languages:   "English",
+		Description: "NVIDIA Parakeet Unified EN (RNNT), ONNX conversion by bobNight (CC-BY-4.0). Offline, English only.",
+	},
+	{
 		ID:          "gpt-4o-transcribe",
 		Label:       "OpenAI gpt-4o-transcribe",
 		Engine:      EngineOpenAI,

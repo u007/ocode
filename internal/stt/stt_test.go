@@ -176,3 +176,20 @@ func TestLiveParakeetTranscribes(t *testing.T) {
 		t.Fatalf("transcript = %q, want it to contain \"hello world\"", res.Text)
 	}
 }
+
+// TestLiveParakeetUnifiedTranscribes is the same check for Parakeet Unified EN
+// (RNNT). Gated by OCODE_STT_LIVE like the v3 test; it shares the model dir.
+func TestLiveParakeetUnifiedTranscribes(t *testing.T) {
+	dir := os.Getenv("OCODE_STT_LIVE")
+	if dir == "" {
+		t.Skip("set OCODE_STT_LIVE to a model directory to run the live Parakeet test")
+	}
+	res, err := Transcribe(context.Background(), Options{Model: "parakeet-unified-en-0.6b", ModelDir: dir},
+		filepath.Join("testdata", "speech-16k.wav"))
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(res.Text), "hello world") {
+		t.Fatalf("transcript = %q, want it to contain \"hello world\"", res.Text)
+	}
+}
