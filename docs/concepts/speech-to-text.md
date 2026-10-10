@@ -17,6 +17,7 @@ need no local install.
 | --- | --- | --- | --- |
 | `parakeet-tdt-0.6b-v3` (default) | local | this machine | Python 3 + `onnx-asr[cpu,hub]` |
 | `parakeet-tdt-0.6b-v2` | local | this machine | Python 3 + `onnx-asr[cpu,hub]` |
+| `parakeet-unified-en-0.6b` | local | this machine | Python 3 + `onnx-asr[cpu,hub]` + `sentencepiece` |
 | `gpt-4o-transcribe` | openai | OpenAI | OpenAI API key |
 | `whisper-1` | openai | OpenAI | OpenAI API key |
 
@@ -57,8 +58,15 @@ Config lives under the `stt` section of `ocodeconfig.json`
 
 ## Not done yet
 
-- Local Parakeet v3 is verified end to end on Linux: `TestLiveParakeetTranscribes`
-  (gated by `OCODE_STT_LIVE=<model dir>`) transcribes a spoken clip correctly.
-  It is not run in CI because it needs the ~3 GB model.
+- Local Parakeet v3 and Parakeet Unified EN are verified end to end on Linux:
+  `TestLiveParakeetTranscribes` and `TestLiveParakeetUnifiedTranscribes`
+  (gated by `OCODE_STT_LIVE=<model dir>`) transcribe a spoken clip correctly.
+  They are not run in CI because they need the models.
+- Parakeet Unified EN comes from `bobNight/parakeet-unified-en-0.6b-onnx`, a
+  third-party ONNX conversion of NVIDIA's model (CC-BY-4.0). The helper renames
+  its graph files, rebuilds its vocab from the SentencePiece tokenizer, and sets
+  the 128 mel-bin feature size, once per download (marked by `.ocode-ready`).
+  The unified model is English-only and offline here; NVIDIA's streaming mode is
+  not wired.
 - Remote (SSH/WSL) projects transcribe on whichever server the browser is
   talking to, not on the remote host.
