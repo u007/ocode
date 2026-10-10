@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import {
   VOICE_NOTHING_HEARD_MESSAGE,
+  VOICE_PARTIAL_INTERVAL_MS,
+  VOICE_TIMESLICE_MS,
   VOICE_UNAVAILABLE_MESSAGE,
   audioExtensionFor,
   describeMicError,
@@ -199,5 +201,174 @@ describe("useVoiceRecorder unmount", () => {
   it("describeMicError maps common DOMException names", () => {
     expect(describeMicError({ name: "NotFoundError" })).toBe("No microphone was found.");
     expect(describeMicError({ name: "NotReadableError" })).toMatch(/in use/);
+  });
+});
+
+describe("useVoiceRecorder live partials", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Lets timers and the promise chain settle together. */
+  async function tick(ms = 0) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("records with a timeslice and, every 3s, sends all chunks so far (no request when empty)", async () => {
+    const transcribe = vi.fn().mockResolvedValue({ text: "partial", model: "m" });
+    const { result } = setup(transcribe);
+    await act(async () => result.current.start());
+    const rec = FakeMediaRecorder.instances[0];
+    expect(rec.start).toHaveBeenCalledWith(VOICE_TIMESLICE_MS);
+
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(transcribe).not.toHaveBeenCalled();
+
+    act(() => rec.pushChunk(10));
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(transcribe.mock.calls[0][0]).toBeInstanceOf(Blob);
+    expect(transcribe.mock.calls[0][0].size).toBe(10);
+    expect(transcribe.mock.calls[0][1]).toBe("recording.webm");
+    expect(result.current.partialText).toBe("partial");
+
+    act(() => {
+      rec.pushChunk(5);
+      rec.pushChunk(7);
+    });
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    // Accumulated: the second request carries every chunk from the start.
+    expect(transcribe.mock.calls[1][0].size).toBe(22);
+  });
+
+  it("keeps at most one partial request in flight", async () => {
+    const first = deferred<{ text: string; model: string }>();
+    const transcribe = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValue({ text: "next", model: "m" });
+    const { result } = setup(transcribe);
+    await act(async () => result.current.start());
+    act(() => FakeMediaRecorder.instances[0].pushChunk(10));
+
+    await tick(VOICE_PARTIAL_INTERVAL_MS * 3);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+
+    await act(async () => first.resolve({ text: "first", model: "m" }));
+    expect(result.current.partialText).toBe("first");
+
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    expect(result.current.partialText).toBe("next");
+  });
+
+  it("drops a partial that arrives after stop, and the final still runs", async () => {
+    const partial = deferred<{ text: string; model: string }>();
+    const transcribe = vi
+      .fn()
+      .mockReturnValueOnce(partial.promise)
+      .mockResolvedValueOnce({ text: "final words", model: "m" });
+    const { result, onTranscript } = setup(transcribe);
+    await act(async () => result.current.start());
+    act(() => FakeMediaRecorder.instances[0].pushChunk(10));
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+
+    act(() => result.current.stop());
+    await tick();
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    expect(onTranscript).toHaveBeenCalledWith("final words");
+
+    await act(async () => partial.resolve({ text: "late partial", model: "m" }));
+    expect(result.current.partialText).toBe("");
+    expect(onTranscript).toHaveBeenCalledTimes(1);
+    expect(onTranscript).toHaveBeenCalledWith("final words");
+  });
+
+  it("stop clears the preview, stops the timer, and the final carries every chunk", async () => {
+    const transcribe = vi
+      .fn()
+      .mockResolvedValueOnce({ text: "preview", model: "m" })
+      .mockResolvedValueOnce({ text: "final", model: "m" });
+    const { result, onTranscript } = setup(transcribe);
+    await act(async () => result.current.start());
+    const rec = FakeMediaRecorder.instances[0];
+    act(() => rec.pushChunk(10));
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(result.current.partialText).toBe("preview");
+
+    act(() => result.current.stop());
+    expect(result.current.partialText).toBe("");
+    await tick();
+    expect(onTranscript).toHaveBeenCalledWith("final");
+
+    // Only the final upload follows stop: no more partial ticks.
+    await tick(VOICE_PARTIAL_INTERVAL_MS * 3);
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    // 10 bytes pushed mid-recording, plus the 4-byte clip the fake emits on stop.
+    expect(transcribe.mock.calls[1][0].size).toBe(14);
+  });
+
+  it("partial errors are silent (no error state) and the next tick retries", async () => {
+    const transcribe = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("speech model busy"))
+      .mockResolvedValue({ text: "recovered", model: "m" });
+    const { result, onTranscript } = setup(transcribe);
+    await act(async () => result.current.start());
+    act(() => FakeMediaRecorder.instances[0].pushChunk(10));
+
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(result.current.error).toBeNull();
+    expect(result.current.partialText).toBe("");
+
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(result.current.error).toBeNull();
+    expect(result.current.partialText).toBe("recovered");
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("a partial never triggers onTranscript; only the final does", async () => {
+    const transcribe = vi
+      .fn()
+      .mockResolvedValueOnce({ text: "partial only", model: "m" })
+      .mockResolvedValueOnce({ text: "final", model: "m" });
+    const { result, onTranscript } = setup(transcribe);
+    await act(async () => result.current.start());
+    act(() => FakeMediaRecorder.instances[0].pushChunk(10));
+    await tick(VOICE_PARTIAL_INTERVAL_MS);
+    expect(result.current.partialText).toBe("partial only");
+    expect(onTranscript).not.toHaveBeenCalled();
+
+    act(() => result.current.stop());
+    await tick();
+    expect(onTranscript.mock.calls).toEqual([["final"]]);
+  });
+
+  it("unmounting cancels the partial timer", async () => {
+    const transcribe = vi.fn().mockResolvedValue({ text: "x", model: "m" });
+    const { result, unmount } = setup(transcribe);
+    await act(async () => result.current.start());
+    act(() => FakeMediaRecorder.instances[0].pushChunk(10));
+    unmount();
+    await tick(VOICE_PARTIAL_INTERVAL_MS * 3);
+    expect(transcribe).not.toHaveBeenCalled();
   });
 });

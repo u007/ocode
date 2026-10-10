@@ -13,6 +13,10 @@ export type VoiceState = "idle" | "recording" | "transcribing";
 export const VOICE_UNAVAILABLE_MESSAGE =
   "Voice input is unavailable: this browser cannot record microphone audio.";
 export const VOICE_NOTHING_HEARD_MESSAGE = "Nothing was heard. Try again.";
+/** MediaRecorder timeslice: one chunk per second, so the accumulated chunks are always a playable clip. */
+export const VOICE_TIMESLICE_MS = 1000;
+/** How often a live partial transcript is requested while recording. */
+export const VOICE_PARTIAL_INTERVAL_MS = 3000;
 
 /** Preferred recording formats, first supported one wins. Anything else falls
  *  back to the browser default (no mimeType passed to MediaRecorder). */
@@ -62,7 +66,7 @@ export function describeMicError(err: unknown): string {
 export interface UseVoiceRecorderOptions {
   /** Uploads the clip. Resolves with the transcript; an empty text means nothing was heard. */
   transcribe: (audio: Blob, filename: string) => Promise<STTTranscribeResult>;
-  /** Receives a non-empty transcript. Never called for an empty one. */
+  /** Receives a non-empty transcript. Never called for an empty one. Partials never reach it. */
   onTranscript: (text: string) => void;
 }
 
@@ -70,6 +74,8 @@ export interface VoiceRecorder {
   /** False when getUserMedia or MediaRecorder is missing. */
   supported: boolean;
   state: VoiceState;
+  /** Live preview of the recording so far. Display only: never sent, never put in the draft. */
+  partialText: string;
   error: string | null;
   start: () => Promise<void>;
   /** Stops the recording and transcribes it. No-op unless recording. */
@@ -82,6 +88,7 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
   const supported = isVoiceRecordingSupported();
   const [state, setState] = useState<VoiceState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [partialText, setPartialTextState] = useState("");
 
   // stateRef is the synchronous source of truth for guards (a double click
   // must not start two recorders); `state` only drives rendering.
@@ -90,6 +97,13 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const mountedRef = useRef(false);
+  // Interval that requests live partials while recording.
+  const partialTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // At most one partial request in flight across the hook.
+  const partialInFlightRef = useRef(false);
+  // Bumped whenever a recording ends or restarts; a partial result that
+  // captured an older epoch is dropped.
+  const partialEpochRef = useRef(0);
   // Set on unmount: an in-flight recording is discarded, never transcribed.
   const discardRef = useRef(false);
   // Set by stop() while getUserMedia is still waiting on the permission prompt.
@@ -108,6 +122,43 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
   const report = useCallback((message: string | null) => {
     if (mountedRef.current) setError(message);
   }, []);
+
+  const setPartial = useCallback((text: string) => {
+    if (mountedRef.current) setPartialTextState(text);
+  }, []);
+
+  /** Ends the live preview: stops the timer, invalidates in-flight partials, clears the text. */
+  const stopPartials = useCallback(() => {
+    if (partialTimerRef.current !== null) {
+      clearInterval(partialTimerRef.current);
+      partialTimerRef.current = null;
+    }
+    partialEpochRef.current += 1;
+    setPartial("");
+  }, [setPartial]);
+
+  /** Requests a transcript of everything recorded so far. Errors are silent: the final transcription still runs on stop. */
+  const sendPartial = useCallback(
+    async (type: string) => {
+      if (partialInFlightRef.current || stateRef.current !== "recording") return;
+      const chunks = chunksRef.current;
+      if (chunks.length === 0) return;
+      const epoch = partialEpochRef.current;
+      partialInFlightRef.current = true;
+      try {
+        // new Blob copies the chunk list now, so later chunks do not leak into this request.
+        const blob = new Blob(chunks, { type });
+        const result = await callbacksRef.current.transcribe(blob, `recording${audioExtensionFor(type)}`);
+        if (epoch !== partialEpochRef.current) return;
+        setPartial((result?.text ?? "").trim());
+      } catch {
+        // Ignored on purpose: partials are a preview, not a result.
+      } finally {
+        partialInFlightRef.current = false;
+      }
+    },
+    [setPartial],
+  );
 
   const releaseStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -141,6 +192,7 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
       return;
     }
     report(null);
+    stopPartials();
     cancelStartRef.current = false;
     setPhase("recording");
 
@@ -180,6 +232,7 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
       if (recorder.state !== "inactive") recorder.stop();
     };
     recorder.onstop = () => {
+      stopPartials();
       releaseStream();
       recorderRef.current = null;
       const chunks = chunksRef.current;
@@ -203,17 +256,23 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
 
     recorderRef.current = recorder;
     try {
-      recorder.start();
+      recorder.start(VOICE_TIMESLICE_MS);
     } catch (err) {
       recorderRef.current = null;
       releaseStream();
       setPhase("idle");
       report(describeMicError(err));
+      return;
     }
-  }, [releaseStream, report, setPhase, transcribeBlob]);
+    const partialType = recorder.mimeType || mimeType || "audio/webm";
+    partialTimerRef.current = setInterval(() => {
+      void sendPartial(partialType);
+    }, VOICE_PARTIAL_INTERVAL_MS);
+  }, [releaseStream, report, setPhase, sendPartial, stopPartials, transcribeBlob]);
 
   const stop = useCallback(() => {
     if (stateRef.current !== "recording") return;
+    stopPartials();
     const recorder = recorderRef.current;
     if (!recorder) {
       // Still waiting on the permission prompt: cancel the start.
@@ -223,7 +282,7 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
     }
     setPhase("transcribing");
     if (recorder.state !== "inactive") recorder.stop();
-  }, [setPhase]);
+  }, [setPhase, stopPartials]);
 
   const toggle = useCallback(() => {
     if (stateRef.current === "idle") void start();
@@ -237,6 +296,7 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
       mountedRef.current = false;
       discardRef.current = true;
       cancelStartRef.current = true;
+      stopPartials();
       const recorder = recorderRef.current;
       recorderRef.current = null;
       if (recorder && recorder.state !== "inactive") {
@@ -248,7 +308,7 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
       }
       releaseStream();
     };
-  }, [releaseStream]);
+  }, [releaseStream, stopPartials]);
 
-  return { supported, state, error, start, stop, toggle };
+  return { supported, state, partialText, error, start, stop, toggle };
 }

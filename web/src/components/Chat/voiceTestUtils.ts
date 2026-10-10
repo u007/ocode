@@ -25,9 +25,19 @@ export class FakeMediaRecorder {
     FakeMediaRecorder.instances.push(this);
   }
 
-  start = vi.fn(() => {
+  /** Timeslice passed to start(), in ms. Undefined means one chunk on stop(). */
+  timeslice: number | undefined;
+
+  start = vi.fn((timeslice?: number) => {
     this.state = "recording";
+    this.timeslice = timeslice;
   });
+
+  /** Simulates a timeslice dataavailable event carrying `size` bytes of audio. */
+  pushChunk(size: number) {
+    if (this.state !== "recording") return;
+    this.ondataavailable?.({ data: new Blob([new Uint8Array(size)], { type: this.mimeType }) });
+  }
 
   stop = vi.fn(() => {
     if (this.state === "inactive") return;

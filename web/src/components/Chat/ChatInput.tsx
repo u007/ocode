@@ -1301,9 +1301,16 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           ) : (
             <Loader2 aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin" />
           )}
-          <span className="min-w-0 truncate whitespace-nowrap">
+          <span className="shrink-0 whitespace-nowrap">
             {voiceRecording ? "Recording… click to stop" : "Transcribing…"}
           </span>
+          {voiceRecording && voice.partialText && (
+            // aria-hidden: a live preview that changes every few seconds would
+            // make the status region announce constantly. The final text is announced by the send.
+            <span aria-hidden="true" title={voice.partialText} className="min-w-0 flex-1 truncate italic text-muted-foreground/80">
+              {voice.partialText}
+            </span>
+          )}
         </div>
       )}
       {voice.error && (

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import ChatInput from "./ChatInput";
 import { VOICE_NOTHING_HEARD_MESSAGE, VOICE_UNAVAILABLE_MESSAGE } from "./useVoiceRecorder";
-import { installVoiceEnv, removeVoiceEnv } from "./voiceTestUtils";
+import { FakeMediaRecorder, installVoiceEnv, removeVoiceEnv } from "./voiceTestUtils";
 import { api } from "@/api/client";
 import { clearDraft } from "../../lib/tabDrafts";
 
@@ -142,6 +142,34 @@ describe("ChatInput voice input", () => {
     const button = screen.getByRole("button", { name: "Start voice input" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("title")).toBe(VOICE_UNAVAILABLE_MESSAGE);
+  });
+
+  it("shows a live partial preview while recording, never sends it, and clears it on stop", async () => {
+    const transcribe = vi
+      .spyOn(api, "transcribeSpeech")
+      .mockResolvedValueOnce({ text: "almost there", model: "m" })
+      .mockResolvedValueOnce({ text: "final words", model: "m" });
+    render(<ChatInput sessionTabId={TAB} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+    });
+    act(() => FakeMediaRecorder.instances[0].pushChunk(10));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.getByText("almost there")).toBeDefined();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(textarea().value).toBe("");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+    });
+    expect(screen.queryByText("almost there")).toBeNull();
+    await flush();
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith("final words");
   });
 
   it("Enter still sends typed text while the mic is available", async () => {
