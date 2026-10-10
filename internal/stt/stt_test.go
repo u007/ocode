@@ -158,3 +158,21 @@ func TestEmbeddedOnnxScriptIsPresent(t *testing.T) {
 		t.Fatalf("embedded helper missing onnx_asr import")
 	}
 }
+
+// TestLiveParakeetTranscribes runs the real local engine (onnx-asr + Parakeet
+// v3). It downloads ~3 GB on first run, so it only runs when OCODE_STT_LIVE
+// names a model directory to use (e.g. OCODE_STT_LIVE=$HOME/.cache/ocode/stt-models).
+func TestLiveParakeetTranscribes(t *testing.T) {
+	dir := os.Getenv("OCODE_STT_LIVE")
+	if dir == "" {
+		t.Skip("set OCODE_STT_LIVE to a model directory to run the live Parakeet test")
+	}
+	res, err := Transcribe(context.Background(), Options{Model: "parakeet-tdt-0.6b-v3", ModelDir: dir},
+		filepath.Join("testdata", "speech-16k.wav"))
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(res.Text), "hello world") {
+		t.Fatalf("transcript = %q, want it to contain \"hello world\"", res.Text)
+	}
+}

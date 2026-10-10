@@ -38,6 +38,9 @@ type Options struct {
 	Python string
 	// TempDir holds normalised WAV copies. Empty uses os.TempDir.
 	TempDir string
+	// ModelDir holds downloaded local models, one subdirectory per catalog id.
+	// Empty uses <user cache dir>/ocode/stt-models.
+	ModelDir string
 }
 
 // Result is one finished transcription.
@@ -130,13 +133,28 @@ func Transcribe(ctx context.Context, opts Options, audioPath string) (Result, er
 			return Result{}, err
 		}
 		defer cleanup()
-		text, err := transcribeOnnx(ctx, opts.Python, s.Upstream, wav)
+		modelDir, err := opts.modelRoot()
+		if err != nil {
+			return Result{}, err
+		}
+		text, err := transcribeOnnx(ctx, opts.Python, s.Repo, s.Upstream, filepath.Join(modelDir, id), wav)
 		if err != nil {
 			return Result{}, err
 		}
 		return Result{Text: text, Model: id}, nil
 	}
 	return Result{}, fmt.Errorf("speech-to-text: unsupported engine %q", s.Engine)
+}
+
+func (o Options) modelRoot() (string, error) {
+	if o.ModelDir != "" {
+		return o.ModelDir, nil
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("speech-to-text: no cache dir: %w", err)
+	}
+	return filepath.Join(cache, "ocode", "stt-models"), nil
 }
 
 func (o Options) baseURL() string {
@@ -213,10 +231,12 @@ func transcribeOpenAI(ctx context.Context, key, baseURL, model, audioPath string
 }
 
 // transcribeOnnx runs the embedded helper under python -I (isolated mode, so
-// no script or module in the working directory can shadow onnx_asr). Only
-// stdout is parsed; stderr carries model-download progress and is surfaced on
-// failure.
-func transcribeOnnx(ctx context.Context, python, upstream, wavPath string) (string, error) {
+// no script or module in the working directory can shadow onnx_asr). The
+// helper fetches the model into modelDir as real files and loads it from
+// there: onnx-asr's default HF cache uses symlinks into blobs/, which
+// onnxruntime rejects for external weight files. Only stdout is parsed;
+// stderr carries download progress and is surfaced on failure.
+func transcribeOnnx(ctx context.Context, python, repo, upstream, modelDir, wavPath string) (string, error) {
 	py, err := resolvePython(python)
 	if err != nil {
 		return "", err
@@ -234,7 +254,7 @@ func transcribeOnnx(ctx context.Context, python, upstream, wavPath string) (stri
 	ctx, cancel := context.WithTimeout(ctx, localTimeout)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, py, "-I", scriptPath, upstream, wavPath)
+	cmd := exec.CommandContext(ctx, py, "-I", scriptPath, upstream, repo, modelDir, wavPath)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

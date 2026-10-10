@@ -28,10 +28,12 @@ const DefaultModel = "parakeet-tdt-0.6b-v3"
 // spec is one catalog entry. Upstream is the onnx-asr model name for local
 // engines and the API model name for hosted ones.
 type spec struct {
-	ID          string
-	Label       string
-	Engine      Engine
-	Upstream    string
+	ID       string
+	Label    string
+	Engine   Engine
+	Upstream string
+	// Repo is the Hugging Face repo holding the ONNX export (local engines).
+	Repo        string
 	Languages   string
 	SizeMB      int
 	Description string
@@ -43,6 +45,7 @@ var catalog = []spec{
 		Label:       "Parakeet TDT 0.6B v3",
 		Engine:      EngineLocal,
 		Upstream:    "nemo-parakeet-tdt-0.6b-v3",
+		Repo:        "istupakov/parakeet-tdt-0.6b-v3-onnx",
 		Languages:   "25 European languages",
 		SizeMB:      478,
 		Description: "Offline and fast on CPU. Recommended default.",
@@ -52,6 +55,7 @@ var catalog = []spec{
 		Label:       "Parakeet TDT 0.6B v2",
 		Engine:      EngineLocal,
 		Upstream:    "nemo-parakeet-tdt-0.6b-v2",
+		Repo:        "istupakov/parakeet-tdt-0.6b-v2-onnx",
 		Languages:   "English",
 		SizeMB:      473,
 		Description: "Offline English-only model. Slightly better English accuracy than v3.",

@@ -29,7 +29,10 @@ The first local transcription downloads the model weights from Hugging Face.
 
 - **local**: `internal/stt/transcribe_onnx.py` (embedded in the binary) runs
   under `python3 -I` so no module in the working directory can shadow
-  `onnx_asr`. Non-WAV input (browser webm/mp4) is converted to 16 kHz mono WAV
+  `onnx_asr`. It downloads the model into `ModelDir/<id>` (default
+  `<user cache>/ocode/stt-models`) as real files and loads from there: onnx-asr's
+  own HF cache stores symlinks into `blobs/`, and onnxruntime rejects the
+  external weight file (`External data path escapes model directory`). Non-WAV input (browser webm/mp4) is converted to 16 kHz mono WAV
   with `ffmpeg`. Only stdout is parsed; stderr carries download progress.
 - **openai**: multipart `POST {base}/audio/transcriptions`, returns `text`.
 
@@ -54,8 +57,8 @@ Config lives under the `stt` section of `ocodeconfig.json`
 
 ## Not done yet
 
-- Local Parakeet is wired but not exercised end to end here: no `onnx-asr`
-  install or model download was run in CI. The unit tests cover catalog,
-  validation, the OpenAI path, and capture-command selection.
+- Local Parakeet v3 is verified end to end on Linux: `TestLiveParakeetTranscribes`
+  (gated by `OCODE_STT_LIVE=<model dir>`) transcribes a spoken clip correctly.
+  It is not run in CI because it needs the ~3 GB model.
 - Remote (SSH/WSL) projects transcribe on whichever server the browser is
   talking to, not on the remote host.
