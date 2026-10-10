@@ -852,6 +852,7 @@ type OcodeConfig struct {
 	Plugins       PluginsConfig
 	Browser       BrowserConfig
 	TTS           TTSConfig
+	STT           STTConfig
 	ChatVerbosity ChatVerbosityConfig
 	// QuickActions is the composer strip. It is seeded in memory by
 	// defaultOcodeConfig when the key is absent, so an untouched install
@@ -1268,6 +1269,7 @@ type ocodeConfigFile struct {
 	Plugins                 pluginsConfigFile           `json:"plugins"`
 	Browser                 browserConfigFile           `json:"browser"`
 	TTS                     TTSConfig                   `json:"tts,omitempty"`
+	STT                     STTConfig                   `json:"stt,omitempty"`
 	ChatVerbosity           *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
 	QuickActions            *QuickActionsConfig         `json:"quick_actions,omitempty"`
 	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
@@ -1730,6 +1732,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			}
 		}
 		delete(raw, "tts")
+	}
+
+	if _, ok := raw["stt"]; ok {
+		cfg.STT = file.STT
+		delete(raw, "stt")
 	}
 
 	if _, ok := raw["chat_verbosity"]; ok {
@@ -2457,6 +2464,21 @@ func SaveOcodeConfig(cfg *OcodeConfig) error {
 	return writeOcodeConfigFile(path, cfg)
 }
 
+// STTConfig is the persisted speech-to-text selection. Model is a catalog id
+// from internal/stt; empty means the default model.
+type STTConfig struct {
+	Model string `json:"model,omitempty"`
+}
+
+// SaveOcodeSTTConfig updates only the persisted speech-to-text selection while
+// preserving the other ocode configuration sections.
+func SaveOcodeSTTConfig(stt STTConfig) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.STT = stt
+		return nil
+	})
+}
+
 // SaveOcodeTTSConfig updates only the persisted speech selection while
 // preserving the other ocode configuration sections.
 func SaveOcodeTTSConfig(tts TTSConfig) error {
@@ -2576,6 +2598,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"discovery":      discoveryMap,
 		"browser":        cfg.Browser,
 		"tts":            cfg.TTS,
+		"stt":            cfg.STT,
 		"chat_verbosity": chatVerbosity,
 		"quick_actions":  NormalizeQuickActions(cfg.QuickActions),
 	}

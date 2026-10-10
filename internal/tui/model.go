@@ -1384,6 +1384,8 @@ type model struct {
 	showThinking   bool
 	showDetails    bool
 	leaderActive   bool
+	// voice is the ctrl+x v dictation state (see voice.go).
+	voice voiceState
 	// MCP tool loading state. mcpReady gates user chat submission until the
 	// background MCP tool enumeration (LoadMCPTools) has applied its results.
 	mcpReady            bool         // true once MCP tools are loaded (or none configured)
@@ -3448,7 +3450,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty()
+	inputAllowed := m.chatComposerFree() && !m.leaderActive
 
 	// Chat search bar takes priority over the chat input and the slash popup
 	// while it's open. The bar is only available on the chat tab; other tabs
@@ -3572,6 +3574,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.leaderActive && msg.seq == m.leaderSeq {
 			m.leaderActive = false
 		}
+		return m, nil
+	case voiceStartedMsg:
+		cmd := m.onVoiceStarted(msg)
+		return m, cmd
+	case voicePartialTickMsg:
+		return m, m.onVoicePartialTick(msg)
+	case voicePartialMsg:
+		return m, m.onVoicePartial(msg)
+	case voiceTranscribedMsg:
+		if msg.err != nil {
+			m.voice.phase = voiceIdle
+			m.voice.note = msg.err.Error()
+			return m, nil
+		}
+		m.voice.phase = voiceIdle
+		text := strings.TrimSpace(msg.text)
+		if text == "" {
+			m.voice.note = "nothing heard"
+			return m, nil
+		}
+		return m.submitVoiceTranscript(text)
+	case voiceCancelledMsg:
 		return m, nil
 	case chatSearchFlashExpiredMsg:
 		// The 1.2s flash window started by jumpToChatMatch has elapsed —
@@ -6359,6 +6383,12 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				return true, m, copyToClipboard(m.sessionID)
 			}
 			return true, m, nil
+		case "v":
+			if !m.voiceKeyAllowed() {
+				return true, m, nil
+			}
+			cmd := m.toggleVoice()
+			return true, m, cmd
 		case "t":
 			m.cycleThinkingLevel()
 			return true, m, nil
@@ -6720,6 +6750,10 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return leaderTimeoutMsg{seq: seq}
 		})
 	case "esc":
+		if m.voice.phase == voiceRecording {
+			cmd := m.cancelVoice()
+			return m, cmd
+		}
 		return m.handleEscKey()
 	case "ctrl+c":
 		if strings.TrimSpace(m.input.Value()) != "" {
@@ -9007,6 +9041,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
 		cmd == "/advisor" || cmd == "/mask" || cmd == "/mem" ||
 		cmd == "/paths" ||
+		cmd == "/voice" ||
 		cmd == "/rc" || cmd == "/remote-control" ||
 		cmd == "/search" || cmd == "/find" ||
 		cmd == "/discover" ||
@@ -20563,7 +20598,7 @@ func (m *model) renderStatus() string {
 		if supportsReasoning {
 			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact t:thinking y:copy-id q:quit"
 		} else {
-			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact y:copy-id q:quit"
+			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact v:voice y:copy-id q:quit"
 		}
 	} else {
 		switch m.activeTab {
@@ -20693,6 +20728,9 @@ func (m *model) renderStatus() string {
 	}
 	if m.mcpLoading {
 		leftStatus += " · ~MCP"
+	}
+	if vs := m.voiceStatusText(); vs != "" {
+		leftStatus += " · " + vs
 	}
 	if m.rcSrv != nil {
 		leftStatus += " | " + rcActiveStyle.Render("⊕ RC")
