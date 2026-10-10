@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
@@ -42,11 +44,29 @@ var (
 	voiceTranscribe = stt.Transcribe
 	voiceStatusFor  = stt.StatusFor
 	voiceMicCheck   = stt.RecordingAvailable
+	// voicePartial decodes the audio captured so far. Partials are display
+	// only: their result never reaches the composer or the submit path.
+	voicePartial = func(ctx context.Context, rec voiceRecorder, opts stt.Options) (stt.Result, error) {
+		r, ok := rec.(*stt.Recording)
+		if !ok {
+			return stt.Result{}, errors.New("no live audio")
+		}
+		return stt.PartialTranscribe(ctx, opts, r)
+	}
 )
 
 const (
 	voiceStopTimeout       = 5 * time.Second
 	voiceTranscribeTimeout = 3 * time.Minute
+	// voicePartialInterval is the pause after each live partial result before
+	// the next decode starts, so at most one partial is ever in flight.
+	voicePartialInterval = 3 * time.Second
+	voicePartialTimeout  = 60 * time.Second
+	// voicePartialShown is how many trailing characters of a partial the
+	// status row shows.
+	voicePartialShown = 40
+	// voicePartialKept bounds the stored partial line.
+	voicePartialKept = 240
 )
 
 type voicePhase int
@@ -64,6 +84,13 @@ type voiceState struct {
 	phase voicePhase
 	rec   voiceRecorder
 	note  string
+	// gen identifies the current recording. A partial result carries the gen
+	// it was started for and is dropped when it no longer matches.
+	gen int
+	// partial is the latest live transcript of the current recording, one
+	// ASCII line. partialBusy is true while a partial decode is in flight.
+	partial     string
+	partialBusy bool
 }
 
 type voiceStartedMsg struct {
@@ -77,6 +104,21 @@ type voiceTranscribedMsg struct {
 }
 
 type voiceCancelledMsg struct{}
+
+// voicePartialTickMsg fires voicePartialInterval after a recording starts or a
+// partial finishes. It is ignored unless gen is still the current recording.
+type voicePartialTickMsg struct {
+	gen int
+}
+
+// voicePartialMsg is the result of one live partial decode. Its error is never
+// shown: a partial that fails simply leaves the previous text in place.
+type voicePartialMsg struct {
+	gen     int
+	text    string
+	err     error
+	skipped bool // the selected engine is hosted, so no preview ran
+}
 
 // voiceDir is where captured clips are written. Captured WAVs are removed
 // after transcription, so the directory only holds a clip mid-flight.
@@ -147,6 +189,8 @@ func (m *model) toggleVoice() tea.Cmd {
 		m.voice.rec = nil
 		m.voice.phase = voiceTranscribing
 		m.voice.note = ""
+		m.voice.partial = ""
+		m.voice.partialBusy = false
 		return voiceFinishCmd(rec)
 	default:
 		m.voice.note = "still busy, try again in a moment"
@@ -191,7 +235,94 @@ func (m *model) onVoiceStarted(msg voiceStartedMsg) tea.Cmd {
 	m.voice.phase = voiceRecording
 	m.voice.rec = msg.rec
 	m.voice.note = ""
-	return nil
+	m.voice.gen++
+	m.voice.partial = ""
+	m.voice.partialBusy = false
+	return voicePartialTick(m.voice.gen)
+}
+
+// voicePartialTick schedules the next live partial for recording gen.
+func voicePartialTick(gen int) tea.Cmd {
+	return tea.Tick(voicePartialInterval, func(time.Time) tea.Msg {
+		return voicePartialTickMsg{gen: gen}
+	})
+}
+
+// onVoicePartialTick starts one partial decode of the audio captured so far.
+// It does nothing when the recording has ended, a newer one has started, or a
+// decode is already in flight. The next tick is armed by the result.
+func (m *model) onVoicePartialTick(msg voicePartialTickMsg) tea.Cmd {
+	if m.voice.phase != voiceRecording || msg.gen != m.voice.gen || m.voice.partialBusy || m.voice.rec == nil {
+		return nil
+	}
+	m.voice.partialBusy = true
+	rec := m.voice.rec
+	gen := m.voice.gen
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), voicePartialTimeout)
+		defer cancel()
+		opts := voiceOptions()
+		// Previews re-send the whole clip on every pass. Only a local engine
+		// can afford that; a hosted one would bill for each re-upload.
+		if stt.EngineOf(stt.ResolveModel(opts.Model)) != stt.EngineLocal {
+			return voicePartialMsg{gen: gen, skipped: true}
+		}
+		res, err := voicePartial(ctx, rec, opts)
+		return voicePartialMsg{gen: gen, text: res.Text, err: err}
+	}
+}
+
+// onVoicePartial stores a live partial and re-arms the tick. A result for a
+// recording that has stopped (or was replaced) is dropped and arms nothing.
+func (m *model) onVoicePartial(msg voicePartialMsg) tea.Cmd {
+	if m.voice.phase != voiceRecording || msg.gen != m.voice.gen {
+		return nil
+	}
+	m.voice.partialBusy = false
+	if msg.err == nil && !msg.skipped {
+		if line := voicePartialLine(msg.text); line != "" {
+			m.voice.partial = line
+		}
+	}
+	return voicePartialTick(msg.gen)
+}
+
+// voicePartialLine collapses a transcript to one line. Whitespace runs become
+// one space and control characters are dropped, so the status row stays one
+// line; printable text, including non-ASCII, is kept.
+func voicePartialLine(text string) string {
+	var b strings.Builder
+	pendingSpace := false
+	for _, r := range strings.TrimSpace(text) {
+		if unicode.IsSpace(r) {
+			pendingSpace = true
+			continue
+		}
+		if !unicode.IsPrint(r) {
+			continue
+		}
+		if pendingSpace && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		pendingSpace = false
+		b.WriteRune(r)
+	}
+	runes := []rune(b.String())
+	if len(runes) > voicePartialKept {
+		runes = runes[len(runes)-voicePartialKept:]
+	}
+	return string(runes)
+}
+
+// voicePartialShownText is the clamped segment for the status row: the last
+// words, wrapped to voicePartialShown cells and cut to one line.
+func voicePartialShownText(partial string) string {
+	tail := partial
+	if len(tail) > voicePartialShown {
+		tail = tail[len(tail)-voicePartialShown:]
+	}
+	out := lipgloss.NewStyle().Width(voicePartialShown).MaxHeight(1).Render(tail)
+	return strings.TrimRight(out, " ")
 }
 
 // voiceFinishCmd stops the capture and transcribes it. The clip is deleted
@@ -223,6 +354,8 @@ func (m *model) cancelVoice() tea.Cmd {
 	m.voice.rec = nil
 	m.voice.phase = voiceIdle
 	m.voice.note = "recording cancelled"
+	m.voice.partial = ""
+	m.voice.partialBusy = false
 	if rec == nil {
 		return nil
 	}
@@ -244,6 +377,8 @@ func (m *model) abortVoice() {
 	}
 	m.voice.rec = nil
 	m.voice.phase = voiceIdle
+	m.voice.partial = ""
+	m.voice.partialBusy = false
 }
 
 // submitVoiceTranscript sends a finished transcript through the chat Enter
@@ -287,6 +422,9 @@ func (m model) voiceStatusText() string {
 	case voiceStarting:
 		return "voice: starting mic..."
 	case voiceRecording:
+		if m.voice.partial != "" {
+			return "REC - ctrl+x v to stop, esc to cancel | heard: " + voicePartialShownText(m.voice.partial)
+		}
 		return "REC - ctrl+x v to stop, esc to cancel"
 	case voiceTranscribing:
 		return "voice: transcribing..."

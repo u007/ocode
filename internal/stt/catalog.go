@@ -119,6 +119,14 @@ func ValidModel(id string) bool {
 	return ok
 }
 
+// EngineOf returns the engine that serves id, or "" for an unknown id.
+func EngineOf(id string) Engine {
+	if s, ok := lookup(id); ok {
+		return s.Engine
+	}
+	return ""
+}
+
 // ResolveModel maps a configured id to a catalog id, falling back to the
 // default for an empty or unknown value so a stale config never breaks voice.
 func ResolveModel(id string) string {

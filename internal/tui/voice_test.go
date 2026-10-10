@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
@@ -308,5 +309,253 @@ func TestVoiceAbortOnQuitCancelsRecording(t *testing.T) {
 	m.abortVoice()
 	if s.cancels != 1 || m.voice.phase != voiceIdle || m.voice.rec != nil {
 		t.Fatalf("abort: cancels=%d phase=%v rec=%v", s.cancels, m.voice.phase, m.voice.rec)
+	}
+}
+
+// stubPartial swaps the live-partial decoder for one test.
+func stubPartial(t *testing.T, fn func(context.Context, voiceRecorder, stt.Options) (stt.Result, error)) *int {
+	t.Helper()
+	calls := new(int)
+	orig := voicePartial
+	t.Cleanup(func() { voicePartial = orig })
+	voicePartial = func(ctx context.Context, rec voiceRecorder, opts stt.Options) (stt.Result, error) {
+		*calls++
+		return fn(ctx, rec, opts)
+	}
+	return calls
+}
+
+// startRecording drives ctrl+x v twice-free: it opens the stubbed microphone
+// and returns the model in the recording phase with gen set.
+func startRecording(t *testing.T, s *voiceSeams) model {
+	t.Helper()
+	m := newVoiceTestModel()
+	m, _ = press(t, m, voiceKey("ctrl+x"))
+	m, cmd := press(t, m, voiceKey("v"))
+	m = runMsg(t, m, cmd)
+	if m.voice.phase != voiceRecording {
+		t.Fatalf("phase = %v, want recording", m.voice.phase)
+	}
+	return m
+}
+
+func TestVoicePartialShownWhileRecordingAndClamped(t *testing.T) {
+	stubVoice(t, availableStatus())
+	m := startRecording(t, &voiceSeams{rec: &fakeVoiceRec{}})
+
+	long := strings.Repeat("alpha beta gamma delta ", 10) + "THE END"
+	m.onVoicePartial(voicePartialMsg{gen: m.voice.gen, text: long})
+
+	status := stripANSI(m.voiceStatusText())
+	if !strings.Contains(status, "REC - ctrl+x v to stop") || !strings.Contains(status, "heard: ") {
+		t.Fatalf("status = %q", status)
+	}
+	if !strings.Contains(status, "THE END") {
+		t.Fatalf("status should show the latest words, got %q", status)
+	}
+	if strings.ContainsAny(status, "\n\r") {
+		t.Fatalf("status must be one line: %q", status)
+	}
+	segment := status[strings.Index(status, "heard: ")+len("heard: "):]
+	if len(segment) > voicePartialShown {
+		t.Fatalf("partial segment is %d cells, want <= %d: %q", len(segment), voicePartialShown, segment)
+	}
+}
+
+func TestVoicePartialLineIsOneLine(t *testing.T) {
+	got := voicePartialLine("  hello\n\n  wor\tld  café 你好 \x07")
+	want := "hello wor ld café 你好"
+	if got != want {
+		t.Fatalf("voicePartialLine = %q, want %q", got, want)
+	}
+	if strings.ContainsAny(got, "\n\r\t\x07") {
+		t.Fatalf("control character left in %q", got)
+	}
+}
+
+// The tail keeps the last voicePartialKept runes, never a split UTF-8 sequence.
+func TestVoicePartialLineTruncatesOnRuneBoundary(t *testing.T) {
+	long := strings.Repeat("é", voicePartialKept+10)
+	got := voicePartialLine(long)
+	if !utf8.ValidString(got) || len([]rune(got)) != voicePartialKept {
+		t.Fatalf("truncated to %d runes (valid utf8=%v)", len([]rune(got)), utf8.ValidString(got))
+	}
+}
+
+func TestVoicePartialLateAfterStopIsDropped(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	stubPartial(t, func(context.Context, voiceRecorder, stt.Options) (stt.Result, error) {
+		return stt.Result{Text: "late words"}, nil
+	})
+	m := startRecording(t, s)
+	gen := m.voice.gen
+
+	tickCmd := m.onVoicePartialTick(voicePartialTickMsg{gen: gen})
+	if tickCmd == nil || !m.voice.partialBusy {
+		t.Fatal("tick should start a partial decode")
+	}
+
+	// The user stops before the decode returns.
+	m, _ = press(t, m, voiceKey("ctrl+x"))
+	m, _ = press(t, m, voiceKey("v"))
+	if m.voice.phase != voiceTranscribing {
+		t.Fatalf("phase = %v, want transcribing", m.voice.phase)
+	}
+
+	if cmd := m.onVoicePartial(voicePartialMsg{gen: gen, text: "late words"}); cmd != nil {
+		t.Fatal("late partial must not re-arm a tick")
+	}
+	if m.voice.partial != "" {
+		t.Fatalf("late partial shown after stop: %q", m.voice.partial)
+	}
+	if strings.Contains(stripANSI(m.voiceStatusText()), "late words") {
+		t.Fatal("status shows a partial after stop")
+	}
+}
+
+func TestVoicePartialFromPreviousRecordingIsDropped(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	m := startRecording(t, s)
+	oldGen := m.voice.gen
+
+	// Stop, then start a fresh recording.
+	m, _ = press(t, m, voiceKey("ctrl+x"))
+	m, _ = press(t, m, voiceKey("v"))
+	m.voice.phase = voiceIdle
+	m, cmd := press(t, m, voiceKey("ctrl+x"))
+	_ = cmd
+	m, cmd = press(t, m, voiceKey("v"))
+	m = runMsg(t, m, cmd)
+	if m.voice.gen == oldGen {
+		t.Fatal("a new recording must get a new generation")
+	}
+
+	m.onVoicePartial(voicePartialMsg{gen: oldGen, text: "stale"})
+	if m.voice.partial != "" {
+		t.Fatalf("partial from an earlier recording shown: %q", m.voice.partial)
+	}
+}
+
+func TestVoicePartialErrorIsSilent(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	stubPartial(t, func(context.Context, voiceRecorder, stt.Options) (stt.Result, error) {
+		return stt.Result{}, errors.New("decoder exploded")
+	})
+	m := startRecording(t, s)
+	gen := m.voice.gen
+	m.voice.partial = "previous words"
+
+	if cmd := m.onVoicePartialTick(voicePartialTickMsg{gen: gen}); cmd == nil {
+		t.Fatal("tick should start a decode")
+	}
+	cmd := m.onVoicePartial(voicePartialMsg{gen: gen, err: errors.New("decoder exploded")})
+	if cmd == nil {
+		t.Fatal("a failed partial should keep the tick chain alive")
+	}
+	if m.voice.note != "" {
+		t.Fatalf("partial error set the note: %q", m.voice.note)
+	}
+	if m.voice.partial != "previous words" {
+		t.Fatalf("partial error changed the shown text: %q", m.voice.partial)
+	}
+	if m.voice.phase != voiceRecording {
+		t.Fatalf("partial error changed the phase to %v", m.voice.phase)
+	}
+}
+
+func TestVoicePartialSingleFlight(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	calls := stubPartial(t, func(context.Context, voiceRecorder, stt.Options) (stt.Result, error) {
+		return stt.Result{Text: "one two"}, nil
+	})
+	m := startRecording(t, s)
+	gen := m.voice.gen
+
+	first := m.onVoicePartialTick(voicePartialTickMsg{gen: gen})
+	if second := m.onVoicePartialTick(voicePartialTickMsg{gen: gen}); second != nil {
+		t.Fatal("a second tick while a partial is in flight must not start another decode")
+	}
+	msg := first().(voicePartialMsg)
+	if *calls != 1 {
+		t.Fatalf("decoder calls = %d, want 1", *calls)
+	}
+	if cmd := m.onVoicePartial(msg); cmd == nil {
+		t.Fatal("result should re-arm the tick")
+	}
+	if m.voice.partial != "one two" || m.voice.partialBusy {
+		t.Fatalf("partial=%q busy=%v", m.voice.partial, m.voice.partialBusy)
+	}
+}
+
+func TestVoicePartialStaleTickIsIgnored(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	calls := stubPartial(t, func(context.Context, voiceRecorder, stt.Options) (stt.Result, error) {
+		return stt.Result{Text: "x"}, nil
+	})
+	m := startRecording(t, s)
+	if cmd := m.onVoicePartialTick(voicePartialTickMsg{gen: m.voice.gen + 7}); cmd != nil {
+		t.Fatal("tick for another recording must do nothing")
+	}
+	if *calls != 0 {
+		t.Fatalf("decoder ran %d times for a stale tick", *calls)
+	}
+}
+
+func TestVoicePartialNeverSubmitsOrTouchesComposer(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	stubPartial(t, func(context.Context, voiceRecorder, stt.Options) (stt.Result, error) {
+		return stt.Result{Text: "should not be sent"}, nil
+	})
+	m := startRecording(t, s)
+	m.input.SetValue("my draft")
+	gen := m.voice.gen
+
+	msg := m.onVoicePartialTick(voicePartialTickMsg{gen: gen})().(voicePartialMsg)
+	m.onVoicePartial(msg)
+
+	if m.voice.partial != "should not be sent" {
+		t.Fatalf("partial = %q", m.voice.partial)
+	}
+	if m.hasDelayedChatInput() {
+		t.Fatal("a partial must never submit a message")
+	}
+	if got := m.input.Value(); got != "my draft" {
+		t.Fatalf("composer changed to %q", got)
+	}
+	if m.voice.phase != voiceRecording {
+		t.Fatalf("partial changed phase to %v", m.voice.phase)
+	}
+}
+
+func TestVoicePartialClearedOnCancel(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	m := startRecording(t, s)
+	m.voice.partial = "some words"
+	m, _ = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.voice.partial != "" || m.voice.phase != voiceIdle {
+		t.Fatalf("after cancel: partial=%q phase=%v", m.voice.partial, m.voice.phase)
+	}
+}
+
+// A hosted engine never gets live previews: each would re-upload the clip.
+func TestVoicePartialSkippedForHostedEngine(t *testing.T) {
+	s := stubVoice(t, availableStatus())
+	if err := config.SaveOcodeSTTConfig(config.STTConfig{Model: "whisper-1"}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	calls := stubPartial(t, func(context.Context, voiceRecorder, stt.Options) (stt.Result, error) {
+		return stt.Result{Text: "should not run"}, nil
+	})
+	m := startRecording(t, s)
+	cmd := m.onVoicePartialTick(voicePartialTickMsg{gen: m.voice.gen})
+	if cmd == nil {
+		t.Fatalf("tick returned no command")
+	}
+	msg, ok := cmd().(voicePartialMsg)
+	if !ok || !msg.skipped {
+		t.Fatalf("hosted engine partial = %#v, want skipped", msg)
+	}
+	if *calls != 0 {
+		t.Fatalf("decoder ran %d times for a hosted engine", *calls)
 	}
 }

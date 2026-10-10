@@ -3578,6 +3578,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case voiceStartedMsg:
 		cmd := m.onVoiceStarted(msg)
 		return m, cmd
+	case voicePartialTickMsg:
+		return m, m.onVoicePartialTick(msg)
+	case voicePartialMsg:
+		return m, m.onVoicePartial(msg)
 	case voiceTranscribedMsg:
 		if msg.err != nil {
 			m.voice.phase = voiceIdle
