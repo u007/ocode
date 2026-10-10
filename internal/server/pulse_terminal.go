@@ -13,24 +13,26 @@ import (
 // pulseTerminalWindow returns the project key and one window of a terminal's
 // on-disk output history: its newest pulseTerminalWindowBytes, or with head its
 // oldest. moreBefore and moreAfter say whether history exists beyond the window
-// on that side. It mirrors GET /api/terminal/{id}/history: the same access gate,
+// on that side. lineClipped says the window's edge on the read side cuts a line
+// with no newline inside the window, so the returned text starts or ends
+// mid-line. It mirrors GET /api/terminal/{id}/history: the same access gate,
 // the same project trust boundary, the same log.
-func (h *Handler) pulseTerminalWindow(terminalID string, head bool) (project, text string, moreBefore, moreAfter bool, err error) {
+func (h *Handler) pulseTerminalWindow(terminalID string, head bool) (project, text string, moreBefore, moreAfter, lineClipped bool, err error) {
 	if !h.terminalAccessAllowed() {
-		return "", "", false, false, errors.New("terminal access requires server authentication or a loopback bind address")
+		return "", "", false, false, false, errors.New("terminal access requires server authentication or a loopback bind address")
 	}
 	if strings.HasPrefix(terminalID, "anon-") {
-		return "", "", false, false, fmt.Errorf("terminal %q has no history", terminalID)
+		return "", "", false, false, false, fmt.Errorf("terminal %q has no history", terminalID)
 	}
 	project, err = h.pulseTerminalProject(terminalID)
 	if err != nil {
-		return "", "", false, false, err
+		return "", "", false, false, false, err
 	}
 
 	// Pin the snapshot end with a one-byte read, then read the chosen window.
 	_, end, err := readTerminalHistoryRangeAt(project, terminalID, 0, 1, nil)
 	if err != nil {
-		return "", "", false, false, fmt.Errorf("terminal %q history: %w", terminalID, err)
+		return "", "", false, false, false, fmt.Errorf("terminal %q history: %w", terminalID, err)
 	}
 	var offset, length int64
 	if head {
@@ -43,26 +45,33 @@ func (h *Handler) pulseTerminalWindow(terminalID string, head bool) (project, te
 	}
 	data, err := readPulseWindow(project, terminalID, offset, length, end)
 	if err != nil {
-		return "", "", false, false, fmt.Errorf("terminal %q history: %w", terminalID, err)
+		return "", "", false, false, false, fmt.Errorf("terminal %q history: %w", terminalID, err)
 	}
 	text = string(data)
 	if !head && offset > 0 {
 		// The window starts mid-stream: drop the partial first line, which may
-		// also begin inside a multi-byte character.
+		// also begin inside a multi-byte character. With no newline the whole
+		// window is that partial line, so keep the bytes (they are all that is
+		// reachable) and report the clip instead.
 		if i := strings.IndexByte(text, '\n'); i >= 0 {
 			text = text[i+1:]
+		} else {
+			lineClipped = true
 		}
 	}
 	if head && moreAfter {
-		// The window ends mid-stream: drop the partial last line.
+		// The window ends mid-stream: drop the partial last line, or keep it
+		// and report the clip when the window holds no newline at all.
 		if i := strings.LastIndexByte(text, '\n'); i >= 0 {
 			text = text[:i+1]
+		} else {
+			lineClipped = true
 		}
 	}
 	if !utf8.ValidString(text) {
 		text = strings.ToValidUTF8(text, "�")
 	}
-	return project, text, moreBefore, moreAfter, nil
+	return project, text, moreBefore, moreAfter, lineClipped, nil
 }
 
 // readPulseWindow reads [offset, offset+length) of a terminal's log, pinned to

@@ -436,7 +436,7 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 	if args.Offset < 0 {
 		return "", fmt.Errorf("offset must be non-negative, got %d", args.Offset)
 	}
-	project, text, windowBefore, windowAfter, err := h.pulseTerminalWindow(args.TerminalID, args.Head)
+	project, text, windowBefore, windowAfter, lineClipped, err := h.pulseTerminalWindow(args.TerminalID, args.Head)
 	if err != nil {
 		return "", err
 	}
@@ -463,7 +463,8 @@ func (h *Handler) pulseTerminalReadTool(raw json.RawMessage) (string, error) {
 			HasMoreBefore bool     `json:"has_more_before,omitempty"`
 			HasMoreAfter  bool     `json:"has_more_after,omitempty"`
 			Truncated     bool     `json:"truncated,omitempty"`
-		}{args.TerminalID, project, args.Head, args.Offset, append([]string{}, kept...), before, after, truncated}
+			LineClipped   bool     `json:"line_clipped,omitempty"`
+		}{args.TerminalID, project, args.Head, args.Offset, append([]string{}, kept...), before, after, truncated, lineClipped}
 	})
 }
 

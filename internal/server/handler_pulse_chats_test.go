@@ -117,6 +117,24 @@ func TestPulseChatSelectRejectsBadAndMissingIDs(t *testing.T) {
 		`{"session_id":"pulse_2000-01-01-000000-deadbeef"}`); code != http.StatusNotFound {
 		t.Fatalf("missing chat: status %d, want 404", code)
 	}
+	// The id becomes a path segment under the pulse root, so a traversal id is
+	// refused before any file is probed.
+	if code, _ := pulseChatsTestCall(t, h.HandleSelectPulseChat, http.MethodPut, "/api/pulse/assistant",
+		`{"session_id":"pulse_/../../x"}`); code != http.StatusBadRequest {
+		t.Fatalf("traversal id: status %d, want 400", code)
+	}
+}
+
+func TestPulsePageClampsAndCopies(t *testing.T) {
+	all := []int{1, 2, 3, 4, 5}
+	page, total := pulsePage(all, 2, 4)
+	if total != 5 || len(page) != 1 || page[0] != 5 {
+		t.Fatalf("last partial page: %v of %d, want [5] of 5", page, total)
+	}
+	past, total := pulsePage(all, 2, 9)
+	if total != 5 || past == nil || len(past) != 0 {
+		t.Fatalf("offset past the end: %v of %d, want an empty non-nil page of 5", past, total)
+	}
 }
 
 func TestPulseChatNewAndSelectRefuseWhileCurrentChatIsBusy(t *testing.T) {

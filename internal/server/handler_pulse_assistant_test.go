@@ -192,6 +192,16 @@ func TestHandlePulseAssistantRejectsCorruptState(t *testing.T) {
 	if code != http.StatusInternalServerError {
 		t.Fatalf("status = %d (%s), want 500 for a state file naming a non-pulse session", code, raw)
 	}
+
+	// A pulse_ id that is not a safe path segment is refused the same way, and
+	// never reaches the transcript probe.
+	if err := os.WriteFile(filepath.Join(root, "state.json"), []byte(`{"session_id":"pulse_/../../x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, raw = getPulseAssistant(t, h)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("status = %d (%s), want 500 for a state file naming a traversal id", code, raw)
+	}
 }
 
 func TestPulseModelSlotRoundTrip(t *testing.T) {

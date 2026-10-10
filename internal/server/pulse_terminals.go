@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/shirou/gopsutil/v4/process"
 )
@@ -27,17 +29,51 @@ type pulseTerminalRow struct {
 	Running bool `json:"running"`
 }
 
+// pulseRowsMemo is the last walk behind pulseTerminalRows. The walk reads the
+// whole process table. The dashboard poll (one per open viewer, every
+// terminalProcsPollInterval), every assistant turn and terminal_tabs all call
+// it, so callers inside one interval share a single walk. A terminal opened or
+// closed bumps the registry generation, so the memo never serves a stale set
+// of terminals.
+type pulseRowsMemo struct {
+	mu    sync.Mutex
+	valid bool
+	gen   uint64
+	at    time.Time
+	rows  []pulseTerminalRow
+}
+
 // pulseTerminalRows lists every live terminal, running programs first, then by
-// project and id. Each call does one process-table walk and takes no CPU sample
-// (that needs the emitter's long-lived cache), so it is cheap enough to poll.
+// project and id. The result is shared between callers, so it is read-only.
+// It is memoized for terminalProcsPollInterval (see pulseRowsMemo), so a
+// command that just started can show as idle for up to that long.
 func (h *Handler) pulseTerminalRows() []pulseTerminalRow {
 	// The command line of a terminal can carry secrets (a --token flag, a
 	// connection string), so it is listed only when the same access gate that
 	// guards the terminal endpoints passes. The board sends these rows to the
 	// model provider, so the gate must hold here, not only at the HTTP layer.
+	// It runs before the memo, so a denied caller never sees cached rows.
 	if !h.terminalAccessAllowed() {
 		return nil
 	}
+	m := &h.terminalProcs.pulseRows
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Read the generation before the walk: a terminal registered mid-walk then
+	// leaves the memo tagged with an older generation, and the next call walks again.
+	gen := h.terminalProcs.generation()
+	if m.valid && m.gen == gen && time.Since(m.at) < terminalProcsPollInterval {
+		return m.rows
+	}
+	at := time.Now()
+	rows := h.walkPulseTerminalRows()
+	m.valid, m.gen, m.at, m.rows = true, gen, at, rows
+	return rows
+}
+
+// walkPulseTerminalRows does the process-table walk behind pulseTerminalRows.
+// It takes no CPU sample (that needs the emitter's long-lived cache).
+func (h *Handler) walkPulseTerminalRows() []pulseTerminalRow {
 	entries := h.terminalProcs.snapshot()
 	titles := make(map[string]string)
 	if h.termTabsStore != nil {

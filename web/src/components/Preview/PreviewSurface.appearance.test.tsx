@@ -20,10 +20,14 @@ describe("PreviewSurface appearance scope", () => {
   it("wraps the surface in the requested palette class", () => {
     const light = render(<PreviewSurface path="/a.md" kind="markdown" appearance="light" />);
     expect(light.container.firstElementChild).toHaveClass("editor-appearance-light");
+    // The scope only sets CSS variables; the root must also paint them, or the
+    // app's dark background shows through behind light text.
+    expect(light.container.firstElementChild).toHaveClass("bg-background", "text-foreground");
     light.unmount();
 
     const dark = render(<PreviewSurface path="/a.md" kind="markdown" appearance="dark" />);
     expect(dark.container.firstElementChild).toHaveClass("editor-appearance-dark");
+    expect(dark.container.firstElementChild).toHaveClass("bg-background", "text-foreground");
     dark.unmount();
 
     // No appearance prop (sidebar / Preview-tab hosts) → inherit the app theme.
@@ -31,5 +35,6 @@ describe("PreviewSurface appearance scope", () => {
     const root = none.container.firstElementChild as HTMLElement;
     expect(root).not.toHaveClass("editor-appearance-light");
     expect(root).not.toHaveClass("editor-appearance-dark");
+    expect(root).not.toHaveClass("bg-background");
   });
 });

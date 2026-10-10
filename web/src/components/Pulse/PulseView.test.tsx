@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { PulseView } from "./PulseView";
-import { resetAssistantPrefsForTests, setAssistantOpen } from "./pulseAssistantPrefs";
+import { resetAssistantPrefsForTests, setAssistantMode, setAssistantOpen } from "./pulseAssistantPrefs";
 import { PulseJumpProvider } from "@/lib/jumpToSession";
 import { usePulse, setPulseFocus } from "@/stores/pulseStore";
 import type { PulseRow } from "@/api/types";
@@ -427,7 +427,7 @@ describe("PulseView assistant key", () => {
     window.localStorage.clear();
   });
 
-  // The window's toggle lives in the project sidebar (AssistantToggleButton), not
+  // The window's toggle lives in the top bar (AssistantToggleButton in TopTabs), not
   // here. This view keeps only the `a` key, which is scoped to the Pulse view.
   it("toggles on the `a` key, but not while typing in the filter", () => {
     overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
@@ -438,6 +438,17 @@ describe("PulseView assistant key", () => {
 
     fireEvent.keyDown(document.body, { key: "a" });
     expect(storedOpen()).toBe("1");
+  });
+
+  it("restores a minimised window on the `a` key instead of closing it", () => {
+    overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
+    setAssistantOpen(true);
+    setAssistantMode("minimized");
+    mount();
+
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(storedOpen()).toBe("1");
+    expect(window.localStorage.getItem("pulse.assistant.mode")).toBe("normal");
   });
 
   it("does not dock the window into the focus layout: the focus panes stand alone", () => {

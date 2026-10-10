@@ -71,7 +71,9 @@ that selector, which only looks inside explicit listitems.
   live pty is not listed here; `terminal_tabs` still shows it, marked not live.
 - **Refresh:** `usePulseTerminals` polls the first page every 3 s
   (`PULSE_TERMINALS_POLL_MS`) and skips a tick while the document is hidden. "Load
-  more" grows the window, and each poll refetches all of it.
+  more" grows the window, and each poll refetches all of it. A `403` or `501` answer
+  (no auth on a non-loopback bind, or Windows) is permanent: polling stops, and the
+  section is not drawn at all rather than repeating a red banner every tick.
 - **Not in focus mode:** the focus layout keeps only the focused session and its
   side column, so the terminals section is not drawn there.
 - **Assistant:** the same rows reach the assistant twice: the per-turn board carries

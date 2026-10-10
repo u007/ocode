@@ -120,3 +120,59 @@ func TestTerminalReadPagesBackAndFromHead(t *testing.T) {
 		t.Fatal("negative offset must be rejected")
 	}
 }
+
+// TestTerminalReadFlagsLineClippedAtWindowEdge: a window holding no newline is a
+// single line cut at the window edge. Its bytes are kept (a line-based offset
+// cannot reach them otherwise), but line_clipped says the edge is a fragment.
+// A window of whole lines never sets it.
+func TestTerminalReadFlagsLineClippedAtWindowEdge(t *testing.T) {
+	h := pulseTestHandler(t)
+	proj := t.TempDir()
+	h.workDir = proj
+	h.terminalLoopback = true
+	store, err := termtabs.NewStoreAt(filepath.Join(t.TempDir(), "term.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.termTabsStore = store
+	if err := store.Set(proj, termtabs.ProjectTerminals{Terminals: []termtabs.Terminal{{ID: "term-1", Title: "dev"}}}); err != nil {
+		t.Fatal(err)
+	}
+	logPath, err := terminalHistoryPath(proj, "term-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type page struct {
+		Lines         []string `json:"lines"`
+		HasMoreBefore bool     `json:"has_more_before"`
+		HasMoreAfter  bool     `json:"has_more_after"`
+		LineClipped   bool     `json:"line_clipped"`
+	}
+	read := func(args string) page {
+		t.Helper()
+		var p page
+		if err := json.Unmarshal([]byte(mustPulseTool(t, h, "terminal_read", args)), &p); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+		return p
+	}
+
+	// One newline-free line wider than the window: tail and head both clip it.
+	if err := os.WriteFile(logPath, []byte(strings.Repeat("x", pulseTerminalWindowBytes+100)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p := read(`{"terminal_id":"term-1"}`); !p.LineClipped || !p.HasMoreBefore || len(p.Lines) != 1 {
+		t.Fatalf("tail of an over-window line must keep the bytes and flag the clip: %+v", p)
+	}
+	if p := read(`{"terminal_id":"term-1","head":true}`); !p.LineClipped || !p.HasMoreAfter || len(p.Lines) != 1 {
+		t.Fatalf("head of an over-window line must keep the bytes and flag the clip: %+v", p)
+	}
+
+	// Whole lines: nothing is clipped.
+	if err := os.WriteFile(logPath, []byte("alpha\nbeta\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p := read(`{"terminal_id":"term-1"}`); p.LineClipped {
+		t.Fatalf("whole lines must not set line_clipped: %+v", p)
+	}
+}

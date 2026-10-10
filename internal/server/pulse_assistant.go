@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,19 @@ const (
 // isPulseSession reports whether id is the Pulse assistant's session id.
 func isPulseSession(id string) bool {
 	return strings.HasPrefix(id, pulseSessionPrefix)
+}
+
+// pulseChatIDPattern is the charset a client-supplied assistant chat id must
+// match. The id becomes a path segment under the pulse root, so separators and
+// dots are refused. It is looser than the minted format on purpose, so chats
+// minted by an older build stay selectable.
+var pulseChatIDPattern = regexp.MustCompile(`^pulse_[A-Za-z0-9_-]+$`)
+
+// isValidPulseChatID reports whether id is a pulse chat id that is safe to join
+// into a path. It is the request-boundary check; isPulseSession stays a prefix
+// test, because the board filter relies on it to skip every pulse_ id.
+func isValidPulseChatID(id string) bool {
+	return pulseChatIDPattern.MatchString(id)
 }
 
 // pulseRootPath is the assistant's dedicated project root, WITHOUT creating it.
@@ -108,8 +122,10 @@ func readPulseState(root string) (string, error) {
 		if err := json.Unmarshal(data, &st); err != nil {
 			return "", fmt.Errorf("parse %s: %w", statePath, err)
 		}
-		if !isPulseSession(st.SessionID) {
-			return "", fmt.Errorf("%s holds session_id %q without the %q prefix", statePath, st.SessionID, pulseSessionPrefix)
+		// Checked before any caller joins the id into a path (ExistsForDir), so a
+		// malformed id persisted by an older build is rejected rather than probed.
+		if !isValidPulseChatID(st.SessionID) {
+			return "", fmt.Errorf("%s holds session_id %q, which is not a valid %q chat id", statePath, st.SessionID, pulseSessionPrefix)
 		}
 		return st.SessionID, nil
 	case errors.Is(err, os.ErrNotExist):
@@ -274,7 +290,7 @@ func (h *Handler) HandleSelectPulseChat(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		SessionID *string `json:"session_id"`
 	}
-	if err := readBodyJSON(r, &req); err != nil || req.SessionID == nil || !isPulseSession(*req.SessionID) {
+	if err := readBodyJSON(r, &req); err != nil || req.SessionID == nil || !isValidPulseChatID(*req.SessionID) {
 		writeError(w, http.StatusBadRequest, `invalid body (want {"session_id": "pulse_..."})`)
 		return
 	}
@@ -317,17 +333,17 @@ type pulseChatSummary struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-// pulsePageParams reads ?limit (default def, capped at max) and ?offset from a
-// listing request. A malformed or non-positive limit, or a negative offset, is
-// an error the caller answers with 400.
-func pulsePageParams(r *http.Request, def, max int) (limit, offset int, err error) {
+// pulsePageParams reads ?limit (default def, capped at maxLimit) and ?offset
+// from a listing request. A malformed or non-positive limit, or a negative
+// offset, is an error the caller answers with 400.
+func pulsePageParams(r *http.Request, def, maxLimit int) (limit, offset int, err error) {
 	limit = def
 	if v := r.URL.Query().Get("limit"); v != "" {
 		n, perr := strconv.Atoi(v)
 		if perr != nil || n < 1 {
 			return 0, 0, fmt.Errorf("limit must be a positive integer")
 		}
-		limit = min(n, max)
+		limit = min(n, maxLimit)
 	}
 	if v := r.URL.Query().Get("offset"); v != "" {
 		n, perr := strconv.Atoi(v)
@@ -337,6 +353,15 @@ func pulsePageParams(r *http.Request, def, max int) (limit, offset int, err erro
 		offset = n
 	}
 	return limit, offset, nil
+}
+
+// pulsePage cuts the [offset, offset+limit) window out of all and reports
+// len(all). The page is a fresh slice, so it stays valid after all is dropped.
+// Callers sort before paging so that pages do not overlap or skip rows.
+func pulsePage[T any](all []T, limit, offset int) ([]T, int) {
+	start := min(offset, len(all))
+	end := min(start+limit, len(all))
+	return append([]T{}, all[start:end]...), len(all)
 }
 
 // HandleListPulseChats serves GET /api/pulse/assistant/chats?limit=&offset=:
@@ -370,11 +395,9 @@ func (h *Handler) HandleListPulseChats(w http.ResponseWriter, r *http.Request) {
 		}
 		return chats[i].ID > chats[j].ID
 	})
-	total := len(chats)
-	start := min(offset, total)
-	end := min(start+limit, total)
-	page := make([]pulseChatSummary, 0, end-start)
-	for _, ref := range chats[start:end] {
+	refsPage, total := pulsePage(chats, limit, offset)
+	page := make([]pulseChatSummary, 0, len(refsPage))
+	for _, ref := range refsPage {
 		page = append(page, pulseChatSummary{
 			SessionID: ref.ID,
 			Title:     ref.Title,

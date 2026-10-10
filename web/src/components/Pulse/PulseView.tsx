@@ -6,7 +6,7 @@ import { PulseCard } from "./PulseCard";
 import { PulseTerminals } from "./PulseTerminals";
 import { PulseFocusPane } from "./PulseFocusPane";
 import { usePulseAssistantHotkey } from "./PulseAssistantWindow";
-import { usePulseAssistantPrefs } from "./pulseAssistantPrefs";
+import { toggleAssistantWindow } from "./pulseAssistantPrefs";
 import type { PulseStatus } from "@/api/types";
 import { pulseRowMatchesFilter } from "./pulseFilter";
 
@@ -24,10 +24,11 @@ import { pulseRowMatchesFilter } from "./pulseFilter";
  * state.
  *
  * The assistant is a floating window at app level (PulseAssistantWindow, mounted
- * by App), not part of this view, so it stays available on every view. This view
- * owns only the toolbar toggle and the `a` hotkey, which is scoped to the Pulse
- * view so a stray key elsewhere cannot open it. Its open state and layout are
- * per-viewer localStorage prefs (pulseAssistantPrefs), not store state.
+ * by App), not part of this view, so it stays available on every view. Its toggle
+ * button lives in the top bar (TopTabs). This view owns only the `a` hotkey,
+ * which is scoped to the Pulse view so a stray key elsewhere cannot open it. Its
+ * open state and layout are per-viewer localStorage prefs (pulseAssistantPrefs),
+ * not store state.
  *
  * The row order it renders is the server's (pulseStore keeps it in step with
  * pulse_rows.go); the only thing computed here is the client-side filter, which
@@ -49,8 +50,7 @@ const SECTION_ORDER: { key: Section; title: string; matches: (s: PulseStatus) =>
 export function PulseView() {
   const { rows, scope, setScope, loadMore, hasMore, error, retry } = usePulse();
   const [filter, setFilter] = useState("");
-  const assistant = usePulseAssistantPrefs();
-  usePulseAssistantHotkey(() => assistant.setOpen(!assistant.open));
+  usePulseAssistantHotkey(toggleAssistantWindow);
 
   const filtered = useMemo(() => rows.filter((r) => pulseRowMatchesFilter(r, filter)), [rows, filter]);
 

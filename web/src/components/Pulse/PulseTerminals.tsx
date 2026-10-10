@@ -21,7 +21,10 @@ import { usePulseTerminals } from "./usePulseTerminals";
  * of PulseView's arrow-key roving over the session cards.
  */
 export function PulseTerminals() {
-  const { terminals, total, error, hasMore, loadMore } = usePulseTerminals();
+  const { terminals, total, error, unavailable, hasMore, loadMore } = usePulseTerminals();
+  // The server refuses the list outright (no auth on a non-loopback bind, or no
+  // pty on Windows), so there is no section to show.
+  if (unavailable) return null;
 
   return (
     <section aria-label="Terminals" data-testid="pulse-terminals">

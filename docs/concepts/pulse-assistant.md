@@ -37,8 +37,9 @@ through the normal permission dialog, see "Permission design".
   so a message sent after a restart still finds the transcript.
 - Exactly one id is persisted as the CURRENT chat, in `<root>/state.json` as `{"session_id": "..."}`,
   written atomically (`secretfile.WriteFileAtomic`) under `Handler.pulseMu`. It is
-  never stored in `ocodeconfig.json`. A state file naming a non-`pulse_` id is
-  rejected with a 500, not repaired.
+  never stored in `ocodeconfig.json`. A state file whose id is not `pulse_` plus
+  `[A-Za-z0-9_-]+` (`isValidPulseChatID`) is rejected with a 500, not repaired; fix or
+  delete `state.json` to recover.
 - Minting persists an EMPTY transcript (title "Pulse assistant", pulse root) before
   the id is returned or the agent registered, so `GET /api/sessions/{id}` and the
   advisor pin find it. If `state.json` names an id whose transcript is gone, the
@@ -48,7 +49,7 @@ through the normal permission dialog, see "Permission design".
 
 | Route | Response |
 |---|---|
-| `PUT /api/pulse/assistant` | Body `{"session_id": "pulse_..."}`. Makes an earlier chat current. `400` for a non-`pulse_` id, `404` when its transcript is gone, `409` while the CURRENT chat is mid-turn, compacting or paused on an ask (switching would hide that chat). Returns the same body as GET. |
+| `PUT /api/pulse/assistant` | Body `{"session_id": "pulse_..."}`. Makes an earlier chat current. `400` for an id outside `pulse_` plus `[A-Za-z0-9_-]+` (`isValidPulseChatID`; the id becomes a path segment, so a traversal id is refused before any file is probed), `404` when its transcript is gone, `409` while the CURRENT chat is mid-turn, compacting or paused on an ask (switching would hide that chat). Returns the same body as GET. |
 | `POST /api/pulse/assistant/new` | Starts an empty chat and makes it current under `pulseMu`; the previous transcript stays on disk. Same `409` rule as PUT. Registers only, never pre-builds the agent. Returns the same body as GET. |
 | `GET /api/pulse/assistant/chats?limit=&offset=` | `{chats: [{session_id, title, created_at, updated_at}], total, offset, limit, current}`, newest first by `updated_at`. `limit` defaults to 20, capped at 100; `limit<1` or a negative offset is `400`. Lists only `pulse_` transcripts in the pulse root. |
 | `GET /api/pulse/assistant` | `200 {"session_id": "pulse_...", "model": "<effective model id>"}`. First call mints and persists the id; every call registers the session entry but does NOT build the agent: the first message builds it through the normal path (a pre-build under the endpoint's profile resolution differed from the message path's and forced a rebuild plus an illegal bootstrap transition). `400 no model configured` when neither slot nor chat model is set. |
@@ -100,8 +101,11 @@ Built in `buildAgentSession` when `isPulseSession(id)`, via
   `renderPulseTerminals(h.pulseTerminalRows())`: one line per terminal whose
   foreground is a program other than the shell (`terminal_id | project | title | command`),
   capped at 20 (`pulseBoardMaxTerminals`). Idle shells are left out; with none running
-  the line reads `No programs running in terminals.` `pulseTerminalRows` walks the
-  process table once per call, so the board costs one walk per turn.
+  the line reads `No programs running in terminals.` `pulseTerminalRows` memoizes its
+  process-table walk for `terminalProcsPollInterval` (1.5 s), so the board, `terminal_tabs`
+  and the dashboard poll share one walk. The memo is keyed by the registry generation, so a
+  terminal opened or closed shows at once; a command started inside the interval can read as
+  idle until the memo expires.
 - **Memory section**: the same block carries a second section wrapped
   `[ocode:pulse-memory]`: global memory plus the memory of every project with a row
   on the board (deduped, sorted), each clipped to 8 KB (`pulseMemoryPromptCap`) with
@@ -131,7 +135,7 @@ error.
 | `session_read` | `session_id`, `last?` 1-200 (30), `search?` | `{session_id, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
 | `session_recap` | `session_id` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
 | `terminal_tabs` | none | `{projects: [{project, terminals: [{id, title, osc_title?, live, running, command?}]}]}`: open tabs from `internal/termtabs`, joined with the live registry | sorted by project then terminal id; `live` = a shell is running, `running` = a program other than the shell is in the foreground, `command` names it |
-| `terminal_read` | `terminal_id`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?}` | ANSI stripped, `\r` redraws collapsed, 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; local projects only; the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
+| `terminal_read` | `terminal_id`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?, line_clipped?}` | ANSI stripped, `\r` redraws collapsed, 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; local projects only; the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
 | `memory_read` | `scope` global/project, `project_path?` | `{scope, path, content}`; empty content = nothing saved | project scope needs a path in `allowedProjectRoots()` |
 | `memory_write` | `scope`, `project_path?`, `content` | `{scope, path, bytes}`; full replace, atomic | ~30k tokens (`pulseMemoryTokenBudget`) = 90 KB at 3 bytes/token (`pulseMemoryCap`), over-cap rejected; the system prompt tells the assistant to keep only important, durable notes |
 | `session_send` | `session_id`, `content` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage` | **asks**; refuses own id, child ids, unknown sessions, and a target that is mid-turn, compacting or paused on an ask (never queued). The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
@@ -170,7 +174,10 @@ scope test will say whether it leaked.
   read in 256 KB chunks, because the history reader caps each call. The page reports
   `has_more_before` and `has_more_after`. A still-writing terminal is not pinned: each call
   reads the output as it is at that moment, so paging can overlap or skip lines. The
-  history HTTP endpoint pins a byte cursor; this read does not.
+  history HTTP endpoint pins a byte cursor; this read does not. When the window holds no
+  newline on the read side, one line is cut at the window edge: its bytes are returned (a
+  line-based offset cannot reach them otherwise), and `line_clipped: true` marks the first
+  line (tail) or last line (head) as a fragment.
 
 **Access**
 

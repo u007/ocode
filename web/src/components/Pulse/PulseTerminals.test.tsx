@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { PulseTerminals } from "./PulseTerminals";
 import { PULSE_TERMINALS_POLL_MS } from "./usePulseTerminals";
+import { ApiError } from "../../api/client";
 import type { PulseTerminal, PulseTerminalPage } from "../../api/types";
 
 const mockList = vi.fn();
-vi.mock("../../api/client", () => ({
+vi.mock("../../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/client")>()),
   api: {
     listPulseTerminals: (...a: unknown[]) => mockList(...a),
   },
@@ -142,5 +144,18 @@ describe("PulseTerminals", () => {
 
     expect(open).toBeDisabled();
     expect(open).toHaveAttribute("title", "This project is not in the sidebar");
+  });
+
+  it.each([403, 501])("stops polling and hides the section when the server answers %i", async (status) => {
+    vi.useFakeTimers();
+    mockList.mockRejectedValue(new ApiError("terminals unavailable", status));
+    const { container } = render(<PulseTerminals />);
+    await act(async () => {});
+    expect(container).toBeEmptyDOMElement();
+
+    await act(async () => {
+      vi.advanceTimersByTime(PULSE_TERMINALS_POLL_MS * 3);
+    });
+    expect(mockList).toHaveBeenCalledTimes(1);
   });
 });

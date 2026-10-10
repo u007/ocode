@@ -849,11 +849,7 @@ func (h *Handler) HandlePulseTerminals(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rows := h.pulseTerminalRows()
-	total := len(rows)
-	start := min(offset, total)
-	end := min(start+limit, total)
-	page := append([]pulseTerminalRow{}, rows[start:end]...)
+	page, total := pulsePage(h.pulseTerminalRows(), limit, offset)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"terminals": page,
 		"total":     total,

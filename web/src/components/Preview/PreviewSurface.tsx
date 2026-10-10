@@ -98,7 +98,7 @@ export default function PreviewSurface({
   const handleSlideChange = onSlideChange ?? (() => {});
   const handleOpenFile = onOpenFile ?? (() => {});
   return (
-    <div className={cn("min-h-0 flex-1", editorAppearanceClass(appearance))}>
+    <div className={cn("min-h-0 flex-1", editorAppearanceClass(appearance), appearance && "bg-background text-foreground")}>
       <Suspense fallback={<ViewerLoading />}>
         {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
         {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}

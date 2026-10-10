@@ -61,9 +61,9 @@ import { isMacPlatform } from "../../lib/platform";
  */
 
 /**
- * The app-level toggle in the project sidebar header, beside "Open dashboard". Its
- * title names the shortcut the platform actually uses. The window is global, so
- * this button works from every view.
+ * The app-level toggle in the top bar (TopTabs), before the port-map and sync
+ * widgets. Its title names the shortcut the platform actually uses. The window is
+ * global, so this button works from every view.
  */
 export function AssistantToggleButton() {
   const { open } = usePulseAssistantPrefs();

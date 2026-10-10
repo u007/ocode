@@ -200,6 +200,25 @@ func TestPulseTerminalReportsRealRunningProgram(t *testing.T) {
 	}
 }
 
+// TestPulseTerminalRowsSeeOpenAndCloseAtOnce pins the memo's invalidation: a
+// terminal opened or closed is visible on the very next call, even though the
+// previous walk is still inside its interval.
+func TestPulseTerminalRowsSeeOpenAndCloseAtOnce(t *testing.T) {
+	h := NewHandler()
+	h.SetTerminalAccessPolicy(false, true)
+	if rows := h.pulseTerminalRows(); len(rows) != 0 {
+		t.Fatalf("no terminals registered: rows = %+v", rows)
+	}
+	seedLiveTerminal(h, "term-open", "/work/app", int32(os.Getpid()))
+	if rows := h.pulseTerminalRows(); len(rows) != 1 {
+		t.Fatalf("a terminal opened inside the memo interval must show at once: rows = %+v", rows)
+	}
+	h.terminalProcs.unregister("term-open")
+	if rows := h.pulseTerminalRows(); len(rows) != 0 {
+		t.Fatalf("a terminal closed inside the memo interval must drop at once: rows = %+v", rows)
+	}
+}
+
 // TestPulseTerminalCommandsStayBehindTheAccessGate pins the rule that a terminal's
 // command line reaches the model only when the terminal access gate passes: the
 // per-turn board and terminal_tabs both leave it out when the gate is closed.
