@@ -68,6 +68,11 @@ export interface UseVoiceRecorderOptions {
   transcribe: (audio: Blob, filename: string) => Promise<STTTranscribeResult>;
   /** Receives a non-empty transcript. Never called for an empty one. Partials never reach it. */
   onTranscript: (text: string) => void;
+  /**
+   * Resolves true when live previews may run. Each preview re-uploads the whole
+   * clip, so only a local engine should get them. Absent or failing means off.
+   */
+  canPreview?: () => Promise<boolean>;
 }
 
 export interface VoiceRecorder {
@@ -84,7 +89,8 @@ export interface VoiceRecorder {
   toggle: () => void;
 }
 
-export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderOptions): VoiceRecorder {
+export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorder {
+  const { transcribe, onTranscript } = options;
   const supported = isVoiceRecordingSupported();
   const [state, setState] = useState<VoiceState>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +110,10 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
   // Bumped whenever a recording ends or restarts; a partial result that
   // captured an older epoch is dropped.
   const partialEpochRef = useRef(0);
+  // Set once canPreview confirms a local engine for the current recording.
+  const partialAllowedRef = useRef(false);
+  const canPreviewRef = useRef(options.canPreview);
+  canPreviewRef.current = options.canPreview;
   // Set on unmount: an in-flight recording is discarded, never transcribed.
   const discardRef = useRef(false);
   // Set by stop() while getUserMedia is still waiting on the permission prompt.
@@ -134,13 +144,14 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
       partialTimerRef.current = null;
     }
     partialEpochRef.current += 1;
+    partialAllowedRef.current = false;
     setPartial("");
   }, [setPartial]);
 
   /** Requests a transcript of everything recorded so far. Errors are silent: the final transcription still runs on stop. */
   const sendPartial = useCallback(
     async (type: string) => {
-      if (partialInFlightRef.current || stateRef.current !== "recording") return;
+      if (!partialAllowedRef.current || partialInFlightRef.current || stateRef.current !== "recording") return;
       const chunks = chunksRef.current;
       if (chunks.length === 0) return;
       const epoch = partialEpochRef.current;
@@ -265,6 +276,19 @@ export function useVoiceRecorder({ transcribe, onTranscript }: UseVoiceRecorderO
       return;
     }
     const partialType = recorder.mimeType || mimeType || "audio/webm";
+    const epochAtStart = partialEpochRef.current;
+    const check = canPreviewRef.current;
+    if (check) {
+      void check()
+        .then((ok) => {
+          if (ok && partialEpochRef.current === epochAtStart && stateRef.current === "recording") {
+            partialAllowedRef.current = true;
+          }
+        })
+        .catch(() => {
+          // No preview when the engine cannot be confirmed; the final still runs.
+        });
+    }
     partialTimerRef.current = setInterval(() => {
       void sendPartial(partialType);
     }, VOICE_PARTIAL_INTERVAL_MS);

@@ -1038,6 +1038,12 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const voice = useVoiceRecorder({
     transcribe: (audio, filename) => api.transcribeSpeech(audio, filename),
     onTranscript: onVoiceTranscript,
+    // Previews re-upload the whole clip, so they run only for a local engine.
+    canPreview: () =>
+      api
+        .getSTT()
+        .then((s) => s.models.find((m) => m.id === s.selected)?.engine === "local")
+        .catch(() => false),
   });
   const voiceRecording = voice.state === "recording";
   const voiceTranscribing = voice.state === "transcribing";

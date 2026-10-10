@@ -23,9 +23,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function setup(transcribe = vi.fn().mockResolvedValue({ text: "hello there", model: "m" })) {
+function setup(
+  transcribe = vi.fn().mockResolvedValue({ text: "hello there", model: "m" }),
+  canPreview: () => Promise<boolean> = async () => true,
+) {
   const onTranscript = vi.fn();
-  const hook = renderHook(() => useVoiceRecorder({ transcribe, onTranscript }));
+  const hook = renderHook(() => useVoiceRecorder({ transcribe, onTranscript, canPreview }));
   return { ...hook, transcribe, onTranscript };
 }
 
@@ -370,5 +373,27 @@ describe("useVoiceRecorder live partials", () => {
     unmount();
     await tick(VOICE_PARTIAL_INTERVAL_MS * 3);
     expect(transcribe).not.toHaveBeenCalled();
+  });
+});
+
+describe("useVoiceRecorder preview gating", () => {
+  it("sends no live partials when the selected engine is not local", async () => {
+    vi.useFakeTimers();
+    try {
+      const transcribe = vi.fn().mockResolvedValue({ text: "x", model: "m" });
+      const { result } = setup(transcribe, async () => false);
+      await act(async () => {
+        await result.current.start();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(VOICE_PARTIAL_INTERVAL_MS * 3);
+      });
+      expect(transcribe).not.toHaveBeenCalled();
+      await act(async () => {
+        result.current.stop();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
