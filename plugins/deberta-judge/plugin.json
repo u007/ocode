@@ -1,0 +1,5 @@
+{
+  "name": "deberta-judge",
+  "description": "Local DeBERTa-v3 NLI decision judge. Serves the System One wire contract on localhost so a judge slot can use deberta/deberta-v3-base-nli in place of typesafe/jev-latest.",
+  "version": "0.1.0"
+}

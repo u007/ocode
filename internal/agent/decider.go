@@ -226,7 +226,7 @@ const cloudflareWorkersProvider = "cloudflare-workers"
 // backend rather than a chat model. This is the single place that decides, so a
 // new decision provider is taught here once.
 func isDecisionModel(modelID string) bool {
-	if strings.HasPrefix(modelID, "typesafe/") {
+	if strings.HasPrefix(modelID, "typesafe/") || strings.HasPrefix(modelID, debertaProvider+"/") {
 		return true
 	}
 	return isCloudflareDecisionModel(modelID)
@@ -246,6 +246,8 @@ func DecisionBackendName(modelID string) string {
 	switch {
 	case strings.HasPrefix(modelID, "typesafe/"):
 		return "typesafe"
+	case strings.HasPrefix(modelID, debertaProvider+"/"):
+		return debertaProvider
 	case isCloudflareDecisionModel(modelID):
 		return "clef"
 	default:

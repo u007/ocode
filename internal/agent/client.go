@@ -4546,6 +4546,11 @@ func providerAndModelID(cfg *config.Config, id string) (provider, model string, 
 	if _, known := providers[head]; known {
 		return head, rest, true
 	}
+	// The local DeBERTa judge is a decision backend, not a chat provider, so it is
+	// deliberately absent from providers (which feeds the chat-provider listings).
+	if head == debertaProvider {
+		return head, rest, true
+	}
 	if canon, known := providerAliases[head]; known {
 		return canon, rest, true
 	}
@@ -4867,6 +4872,14 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 				baseURL = info.baseURL
 			}
 		}
+	}
+	// The local DeBERTa judge runs on the user's machine: it has no credential and
+	// no registry base URL, so it is built here, before the key and base-URL
+	// checks that would otherwise refuse it.
+	if provider == debertaProvider {
+		c := newDebertaClient(model, debertaBaseURL())
+		emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q url=%s (local decision-only client)", provider, model, c.BaseURL))
+		return c
 	}
 	if apiKey == "" && profile != "" && provider != "" {
 		if k := auth.ResolveKeyForProfile(provider, profile, cfg); k != "" {

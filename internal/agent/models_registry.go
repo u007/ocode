@@ -1123,6 +1123,13 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 			ids = append(ids, id)
 		}
 	}
+	// The local DeBERTa judge is not in models.dev either. Its one id is listed
+	// so it can be picked as a judge model; the sidecar must be running for it to answer.
+	for _, m := range debertaModels {
+		if id := debertaProvider + "/" + m; !containsString(ids, id) {
+			ids = append(ids, id)
+		}
+	}
 	// AIHubMix live models — supplement the snapshot so models the models.dev
 	// catalog omits (e.g. "ox-alpha") appear in the picker. Guarded by refresh (or
 	// a still-fresh cache) to avoid blocking the main loop on a network fetch.
@@ -1185,9 +1192,16 @@ var typesafeModels = []string{"jev-latest"}
 // clefBodySelectors) and the two are not interchangeable.
 var clefModels = []string{"@cf/cloudflare/clef", "@cf/cloudflare/clef-flash"}
 
+// debertaModels is the local DeBERTa-v3 judge catalog. It is one id, served by
+// the sidecar in plugins/deberta-judge; the id must match the sidecar's served name.
+var debertaModels = []string{"deberta-v3-base-nli"}
+
 func providerModelsFromRegistry(provider string, refresh bool) []string {
 	if provider == "typesafe" {
 		return slices.Clone(typesafeModels)
+	}
+	if provider == debertaProvider {
+		return slices.Clone(debertaModels)
 	}
 	if provider == cloudflareWorkersProvider {
 		// Workers AI serves chat models from this provider as well, and clef is
