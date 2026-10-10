@@ -145,6 +145,20 @@ func Transcribe(ctx context.Context, opts Options, audioPath string) (Result, er
 	return Result{}, fmt.Errorf("speech-to-text: unsupported engine %q", s.Engine)
 }
 
+// PartialTranscribe decodes the audio rec has captured so far with the same
+// Options as a final transcription. It only reads the live file, never
+// signals or reopens the capture, and removes its snapshot before returning.
+// It writes nothing to stdout or stderr; the caller decides what a failure
+// means (a live partial that fails is simply not shown).
+func PartialTranscribe(ctx context.Context, opts Options, rec *Recording) (Result, error) {
+	snap, err := rec.Snapshot()
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() { _ = os.Remove(snap) }()
+	return Transcribe(ctx, opts, snap)
+}
+
 func (o Options) modelRoot() (string, error) {
 	if o.ModelDir != "" {
 		return o.ModelDir, nil
