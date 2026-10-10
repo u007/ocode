@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsgo && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=4",
     "typecheck": "tsgo --noEmit",
     "typecheck:legacy": "tsc --noEmit"
   },

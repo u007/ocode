@@ -100,7 +100,7 @@ Do not answer no on a substring match that is not what the request is about, and
 //
 // On a non-nil error the caller must render every result unfiltered: a judge
 // failure may never make a search return fewer results than it does today.
-func (a *Agent) judgeSearchResults(ctx context.Context, client *TypesafeClient, req tool.SearchJudgeRequest) ([]tool.SearchResult, int, error) {
+func (a *Agent) judgeSearchResults(ctx context.Context, client Decider, req tool.SearchJudgeRequest) ([]tool.SearchResult, int, error) {
 	if len(req.Results) == 0 {
 		return req.Results, 0, nil
 	}
@@ -118,7 +118,7 @@ func (a *Agent) judgeSearchResults(ctx context.Context, client *TypesafeClient, 
 		return req.Results, 0, nil
 	}
 
-	keepSet, err := a.judgeRelevanceQuestions(ctx, client, "TOOL", "search_typesafe", ids, state, questions)
+	keepSet, _, err := a.judgeRelevanceQuestions(ctx, client, "TOOL", "search_typesafe", ids, state, questions)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -160,7 +160,7 @@ func (a *Agent) searchResultJudge() tool.SearchResultJudge {
 		defer cancel()
 		kept, vetoed, err := a.judgeSearchResults(ctx, client, req)
 		if err != nil {
-			a.emitDebug("TOOL", fmt.Sprintf("search_typesafe tool=%s judge=%s failed (fail-open, all %d result(s) kept): %v", req.Tool, client.Model, len(req.Results), err))
+			a.emitDebug("TOOL", fmt.Sprintf("search_typesafe tool=%s judge=%s failed (fail-open, all %d result(s) kept): %v", req.Tool, deciderLabel(client), len(req.Results), err))
 			return req.Results, 0, err
 		}
 		return kept, vetoed, nil

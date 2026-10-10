@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -47,6 +48,13 @@ type Handler struct {
 	// computer use. Overridable in tests so the suite never fires a real
 	// consent dialog; nil falls back to computer.RequestPermissions.
 	requestComputerPermissions func(context.Context) computer.PermissionReport
+	// tailscaleShareSnapshot reports the server's CURRENTLY cached tailscale
+	// exposure without starting one. Injected rather than held as a *Server
+	// reference so the Handler stays decoupled, and so the config handlers can
+	// read exposure state without taking h.mu across any tailscale work
+	// (Handler.mu is a map lock, never a work lock). nil = no exposure
+	// subsystem, which the handlers treat as "nothing shared".
+	tailscaleShareSnapshot func() tailscaleShareStatus
 	// sysPermMu serializes read-modify-write of the system-permissions
 	// sub-tree (persisted + the in-memory h.cfg copy).
 	sysPermMu sync.Mutex
@@ -74,6 +82,12 @@ type Handler struct {
 	cfg         *config.Config
 	rc          *RCBridge          // set when proxying to a TUI session
 	scheduler   *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	// cronServices resolves the cron engine for a project root, per call. It is
+	// installed by the Server (see Server.cronServiceResolver) so the LLM `cron`
+	// tool operates on the SESSION's project instead of the server's boot project.
+	// nil on a host that never installed a per-project scope, in which case the
+	// tool falls back to the single `scheduler` service above.
+	cronServices func(root string) (*scheduler.Service, error)
 	// sessions is the single authority for session ID → project root + agent
 	// lifecycle. Every session-scoped handler resolves through it, so sessions
 	// from any registered project load and run (no more cross-project 404s).
@@ -91,6 +105,18 @@ type Handler struct {
 	// `/mcp-auth` command (see handler_mcp_auth.go). The flow blocks up to 2
 	// minutes waiting for the browser callback, so it is job-id + poll.
 	mcpAuthJobs *mcpAuthJobManager
+
+	// btwMu guards btwRuns. Held only for map reads/writes, never across the
+	// side-query loop (which runs on its own goroutine).
+	btwMu sync.Mutex
+	// btwRuns holds the in-flight /btw side query per session id. A second
+	// /btw replaces (cancels) the first; DELETE cancels by id. The entry is
+	// kept after a run completes (cancel cleared) and dropped on /reset-id or
+	// session close/eviction. btwSeq is process-wide, so a generation is never
+	// reused even after its entry is deleted: the client's staleness guard
+	// (a generation lower than the one it holds is dropped) cannot wedge.
+	btwRuns map[string]*btwRun
+	btwSeq  uint64
 
 	// bus is the unified tagged event bus (Part 02). Every emitters publishes
 	// envelopes here; /api/events streams them to web clients.
@@ -133,6 +159,12 @@ type Handler struct {
 	projects         *projects.Store
 	projectGroups    *projects.GroupStore
 	tabsStore        *tabs.Store
+
+	// pulseMu serialises minting/reading the Pulse assistant's state.json so two
+	// concurrent first requests cannot create two assistants. Held only around
+	// that small file read/write, never across agent construction.
+	pulseMu sync.Mutex
+
 	// termTabsStore persists which terminal tabs are open, so a terminal
 	// started in one client is visible in another (the session-tab store above
 	// does the same for session tabs). Nil when the data dir could not be
@@ -147,6 +179,13 @@ type Handler struct {
 	vault       *vault.Vault
 	vaultMu     sync.Mutex
 	vaultGrants map[string]bool
+	// dbGrants holds the plaintext URLs of unlocked DB connections, keyed by
+	// client surface then connection name; guarded by dbMu. Never serialized.
+	// dbPools holds the open handle for each granted connection, opened on
+	// first use and closed when its grant is replaced, locked or removed.
+	dbMu     sync.Mutex
+	dbGrants map[string]dbGrant
+	dbPools  map[string]map[string]*sql.DB
 	// terminalAuthConfigured and terminalLoopback are set by Server.New. A
 	// terminal is only exposed without credentials when the server is bound to
 	// a loopback address.
@@ -459,9 +498,12 @@ type agentSession struct {
 	// Compared against the window's current active profile on each turn so a
 	// profile switch takes effect on the next turn without an app restart.
 	profile string
-	// credVersion snapshots auth.ProfileCredentialVersion() at build time, so
-	// an in-place credential edit on the same profile (not just a switch to a
-	// different profile) also triggers a rebuild — see reconcileProfileAgent.
+	// credVersion snapshots auth.CredentialVersion() at build time, so an
+	// in-place credential edit triggers a rebuild even when nothing else
+	// changed — not just a switch to a different profile, and not just a
+	// profile-overlay edit. It covers the BASE store too (TUI /connect, the
+	// web/desktop Connectors settings write auth.json). See
+	// reconcileProfileAgent.
 	credVersion int64
 	// liveAppend mirrors a mid-turn transcript row into the in-flight
 	// live-persist view (set by wireLivePersist for headless turns). Without it,
@@ -471,6 +513,13 @@ type agentSession struct {
 	// turns, where the TUI persists its own transcript.
 	liveAppend func(agent.Message)
 	mu         sync.Mutex
+	// childAsks is the registry of sub-agent permission asks parked on this
+	// session. It deliberately lives OUTSIDE as.mu (own mutex, never takes
+	// as.mu): runTurn holds as.mu for the whole turn and a synchronous sub-agent
+	// dispatch is parked inside that turn, so the ask could not otherwise be
+	// reported to — or answered by — an HTTP caller. nil is a valid empty
+	// registry (see childPermAsks).
+	childAsks *childPermAsks
 	// spentMicros is this session's accumulated LLM spend in USD micros
 	// (1e-6 USD), summed from each turn's Step messages' Spend plus side-path
 	// calls (advisor/compact) via OnSideUsage. Atomic: written by the turn
@@ -566,7 +615,7 @@ func NewHandler() *Handler {
 	// workdir first (backward compat with single-project servers) plus every
 	// saved project root; the onEvict hook keeps the legacy h.agents mirror in
 	// sync when idle agents are released.
-	h.sessions = NewSessionManager(defaultSessionIdleTimeout, h.allowedProjectRoots, func(sessionID string) {
+	h.sessions = NewSessionManager(defaultSessionIdleTimeout, h.sessionSearchRoots, func(sessionID string) {
 		h.mu.Lock()
 		as := h.agents[sessionID]
 		delete(h.agents, sessionID)
@@ -577,14 +626,30 @@ func NewHandler() *Handler {
 		h.turnMu.Lock()
 		delete(h.turnLocks, sessionID)
 		h.turnMu.Unlock()
-		// Shut down the released agent so plugin/LSP/background workers
-		// don't linger past eviction (mirrors the register-dedup path).
-		if as != nil && as.agent != nil {
-			as.agent.Shutdown()
-		}
+		// Stop and forget any in-flight /btw side query before shutting
+		// down the agent (mirrors HandleCloseSession ordering). The entry is
+		// removed so evicted sessions do not accumulate in btwRuns; generations
+		// come from the process-wide btwSeq, so a later run still supersedes
+		// any frame the browser holds from this one.
+		h.cancelBtwRun(sessionID, true)
+
 		// Drop any per-session MCP overrides so the map doesn't grow one entry
 		// per session id the process has ever served.
 		h.clearMCPSessionOverrides(sessionID)
+
+		// Shut down the released agent so plugin/LSP/background workers
+		// don't linger past eviction (mirrors the register-dedup path).
+		if as != nil {
+			// Deny every parked sub-agent permission ask first, so no child
+			// goroutine is left waiting on a channel whose session is gone.
+			// Agent.Shutdown closes the stop channel too, which the asker also
+			// watches — but it does so asynchronously behind a bounded wait, and
+			// the asker's own auto-deny is what guarantees the registry empties.
+			as.childAsks.denyAll()
+			if as.agent != nil {
+				as.agent.Shutdown()
+			}
+		}
 	})
 
 	// Reap persistent `!` shells that have been idle past the session idle
@@ -1169,7 +1234,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	content, err := h.runTurn(sid, as, req.Content, opts)
+	content, err := h.runSyncTurn(sid, as, req.Content, opts)
 	// A close that arrived while this synchronous turn was running could not
 	// release the agent mid-turn; drain the close-pending marker now that the
 	// turn has unwound (runTurn set turnActive=false before returning).
@@ -1520,10 +1585,19 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		as = reb
 	}
 
+	// A pulse write never queues: it neither slots into a running turn nor
+	// starts a turn behind one. Its refusal is decided in dispatchTurn, under
+	// the lock that registers the turn.
+	pulse := isPulseOrigin(r)
+	if pulse && !req.Async {
+		writeError(w, http.StatusBadRequest, "pulse writes must be async")
+		return
+	}
+
 	// A turn already running on this session slots the message into the live
 	// Step loop at the next tool-call boundary instead of waiting for the
 	// whole turn to finish and queuing a brand new one behind it.
-	if h.tryEnqueueInjection(id, req.Content) {
+	if !pulse && h.tryEnqueueInjection(id, req.Content) {
 		writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: as.model})
 		return
 	}
@@ -1532,7 +1606,18 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	// returns; bootstrap (if needed) and the turn run on a per-session
 	// goroutine with events streamed over the unified bus.
 	if req.Async {
-		job, err := h.dispatchTurn(id, desiredModel, req.Content, turnOptions{})
+		if pulse && h.sessions.IsTurnActive(id) {
+			// Synchronous turns are counted in turnInFlight (runSyncTurn), so
+			// dispatch refuses them under its lock. This read also refuses a turn
+			// that was started without that count, and it is not the guarantee.
+			writeError(w, http.StatusConflict, errTurnInFlight.Error())
+			return
+		}
+		job, err := h.dispatchTurn(id, desiredModel, req.Content, turnOptions{refuseIfBusy: pulse})
+		if errors.Is(err, errTurnInFlight) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1550,7 +1635,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	content, err := h.runTurn(id, as, req.Content, turnOptions{})
+	content, err := h.runSyncTurn(id, as, req.Content, turnOptions{})
 	// A close that arrived while this synchronous turn was running could not
 	// release the agent mid-turn; drain the close-pending marker now that the
 	// turn has unwound (runTurn set turnActive=false before returning).
@@ -1934,6 +2019,22 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 				finish("")
 				return
 			}
+			if errors.Is(result.Err, agent.ErrCompactionCanceled) {
+				// The user (the compaction bar's Cancel button, or Stop)
+				// interrupted the pass. That is not a summarization failure:
+				// clear the shared indicator with no error banner and report a
+				// clean cancellation to the client. A bare provider
+				// context.Canceled deliberately does NOT land here and stays a
+				// 500 (see TestCompactSessionBareCancellationRemains500).
+				log.Printf("serve: compaction cancelled for session %s", id)
+				finish("")
+				writeJSON(w, http.StatusOK, map[string]any{
+					"cancelled":     true,
+					"original_len":  result.OriginalLen,
+					"compacted_len": len(as.messages),
+				})
+				return
+			}
 			log.Printf("serve: compaction failed for session %s: %v", id, result.Err)
 			finish(result.Err.Error())
 			writeError(w, http.StatusInternalServerError, result.Err.Error())
@@ -1952,7 +2053,16 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 	compacted = append(compacted, after...)
 	as.messages = compacted
 
-	_ = h.saveSession(id, "", as.messages, nil)
+	// Compaction SHRINKS the transcript, so it must persist through the
+	// replace path. An ordinary save can never delete stored rows: with
+	// replace=false, sqlitestore.go refuses a shorter snapshot with
+	// ErrTranscriptConflict. Using it here left memory compacted while disk
+	// stayed whole, so every later save conflicted and the session silently
+	// lost turns (ses_2026-10-02-205400-f1e06e02). Same contract as
+	// applyCompactResult, which already used replaceSession.
+	if err := h.replaceSession(id, "", as.messages, nil); err != nil {
+		log.Printf("serve: persisting compacted transcript for session %s: %v", id, err)
+	}
 
 	// Broadcast the compacted snapshot so the SSE mirror (and every connected
 	// browser) replaces its stale message list — otherwise the web transcript
@@ -1982,10 +2092,26 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 }
 
 func (h *Handler) HandleRecapSession(w http.ResponseWriter, r *http.Request, id string) {
+	text, err := h.recapSession(id)
+	switch {
+	case errors.Is(err, errRecapEmpty):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case err != nil:
+		writeError(w, http.StatusNotFound, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"recap": text})
+	}
+}
+
+// errRecapEmpty marks a session that exists but has nothing to recap.
+var errRecapEmpty = errors.New("no messages to recap")
+
+// recapInputs snapshots what a recap needs: the session's agent and a copy of
+// its transcript.
+func (h *Handler) recapInputs(id string) (*agent.Agent, []agent.Message, error) {
 	as, err := h.getOrCreateAgentSession(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
+		return nil, nil, err
 	}
 
 	// Snapshot the transcript under the session lock, then release it: Recap is
@@ -1994,17 +2120,35 @@ func (h *Handler) HandleRecapSession(w http.ResponseWriter, r *http.Request, id 
 	as.mu.Lock()
 	if len(as.messages) == 0 {
 		as.mu.Unlock()
-		writeError(w, http.StatusUnprocessableEntity, "no messages to recap")
-		return
+		return nil, nil, errRecapEmpty
 	}
 	msgs := make([]agent.Message, len(as.messages))
 	copy(msgs, as.messages)
 	ag := as.agent
 	as.mu.Unlock()
+	return ag, msgs, nil
+}
 
-	text := ag.Recap(msgs, "")
+// recapSession produces the recap text for a session (GET
+// /api/sessions/{id}/recap). Failures inside the recap model call come back as
+// human-readable text, as they always did.
+func (h *Handler) recapSession(id string) (string, error) {
+	ag, msgs, err := h.recapInputs(id)
+	if err != nil {
+		return "", err
+	}
+	return ag.Recap(msgs, ""), nil
+}
 
-	writeJSON(w, http.StatusOK, map[string]string{"recap": text})
+// recapSessionCtx is recapSession bounded by ctx, reporting failure as an
+// error. Used by the Pulse assistant, which must not mistake "Recap timed out."
+// text for a recap.
+func (h *Handler) recapSessionCtx(ctx context.Context, id string) (string, error) {
+	ag, msgs, err := h.recapInputs(id)
+	if err != nil {
+		return "", err
+	}
+	return ag.RecapCtx(ctx, msgs, "")
 }
 
 func (h *Handler) HandleExportSession(w http.ResponseWriter, r *http.Request, id string) {
@@ -2078,35 +2222,6 @@ func (h *Handler) HandleShareSession(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"markdown": b.String()})
-}
-
-// HandleBtw appends a "By the way" user message to a session.
-func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
-	var req struct {
-		Content string `json:"content"`
-	}
-	if err := readBodyJSON(r, &req); err != nil || req.Content == "" {
-		writeError(w, http.StatusBadRequest, "content is required")
-		return
-	}
-
-	// Resolve the project root so we can use the concurrent-safe append path.
-	// A load→append→save here races any concurrent writer (another ocode process,
-	// a live turn's sync save): the overlap check finds the stored transcript
-	// has diverged from our stale snapshot and returns ErrTranscriptConflict.
-	// AppendUserMessageForDir does a tail-insert with bounded retry instead.
-	entry, err := h.sessions.Resolve(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	content := "By the way: " + req.Content
-	if err := session.AppendUserMessageForDir(entry.ProjectRoot, id, content); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "noted"})
 }
 
 func (h *Handler) HandleSetSessionTitle(w http.ResponseWriter, r *http.Request, id string) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -308,7 +309,7 @@ func TestHandleResolvePermissionAlreadyResolved(t *testing.T) {
 func isolatedConfigHome(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(tmp, "cfgdir"))
 	return tmp
 }
@@ -705,5 +706,31 @@ func TestHandleResolvePermissionLegacyApprovedStillResolves(t *testing.T) {
 	}
 	if tailIsPermissionAsk(as.messages) {
 		t.Fatalf("legacy approved=true must resolve the pending ask")
+	}
+}
+
+// An always-allowed out-of-workspace path must survive the next session build:
+// buildAgentSession → tool.InitBuiltinTools resets the process-global allowlist
+// from h.cfg, so a grant that only reached disk + the global was silently
+// dropped and every later `cd <path>` re-asked.
+func TestPersistAlwaysAllow_OutOfScopePathKeptInHandlerConfig(t *testing.T) {
+	isolatedConfigHome(t)
+	config.SetWorkDir(t.TempDir())
+	t.Cleanup(func() { config.SetWorkDir("") })
+
+	root := t.TempDir()
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(root) })
+	h := &Handler{cfg: &config.Config{}}
+	req := agent.PermissionRequest{ToolName: "bash", Rule: "bash.path.out_of_scope", OutOfScopePath: root}
+
+	h.persistAlwaysAllow(PermDecisionAlwaysRule, req, agent.NewPermissionManager())
+
+	if got := h.cfg.Ocode.ExtraAllowedPaths; len(got) != 1 || got[0] != filepath.Clean(root) {
+		t.Fatalf("h.cfg extra_allowed_paths = %v, want [%s]", got, root)
+	}
+	// What a new session build does with that snapshot.
+	tool.InitBuiltinTools(nil, h.cfg, nil)
+	if !tool.HasExtraAllowedPath(root) {
+		t.Fatalf("grant for %s dropped by session build", root)
 	}
 }

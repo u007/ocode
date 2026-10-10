@@ -1,4 +1,4 @@
-import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
+import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useMemo, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, drainQueuedMessagesIntoDraft, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
@@ -6,8 +6,9 @@ import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
-import { Archive, FileText, Paperclip, Play, RotateCcw, X } from "lucide-react";
+import { Paperclip, RotateCcw, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
+import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
@@ -22,7 +23,10 @@ import {
 import { describeActionError, reportActionErrorMessage } from "../../lib/actionErrors";
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
 import { getCompactionState, isCompactCommand, useCompactionState } from "../../lib/compactionState";
+import { isInstantCommand } from "../../lib/instantCommands";
 import CompactionStatus from "./CompactionStatus";
+import CommandActivityBar from "./CommandActivityBar";
+import RecentInputsStrip from "./RecentInputsStrip";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. */
@@ -51,6 +55,10 @@ interface ChatInputProps {
    *  from the project context) so this component can be memoized — a context
    *  read would re-render every mounted composer on every tab/project switch. */
   projectPath?: string;
+  /** Show the quick-actions strip (Compact, Continue, Approve, ...). Defaults
+   *  to on; the Pulse assistant drawer turns it off because those chips are
+   *  project-session actions that make no sense for it and eat its height. */
+  quickActions?: boolean;
 }
 
 export interface ChatInputHandle {
@@ -63,6 +71,17 @@ export interface SlashCommandResult {
   accepted?: boolean;
 }
 
+/**
+ * The composer's keyboard/slash shortcuts. Deliberately NOT the placeholder:
+ * Chrome counts placeholder text in a textarea's `scrollHeight`, so a long one
+ * wraps and inflates the EMPTY composer on narrow viewports (and Chrome paints
+ * a scrollbar once the wrapped placeholder no longer fits the one-line box).
+ * It is surfaced as the textarea's `title` (hover) instead, so the hints are
+ * still discoverable without owning the box's layout.
+ */
+const CHAT_INPUT_PLACEHOLDER_HINT =
+  "Enter to send · Shift+Enter for newline · ↑/↓ history · / for commands · ! for shell";
+
 const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   onSlashCommand,
   activeEditorContext,
@@ -73,6 +92,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   onClearPreviewContext,
   isActive,
   projectPath,
+  quickActions: showQuickActions = true,
 }: ChatInputProps,
   ref: ForwardedRef<ChatInputHandle>
 ) {
@@ -132,7 +152,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const delayedInputsRef = useRef<string[]>([]);
   const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const delayedGenerationRef = useRef(0);
-  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost, transcriptScrolledUp, recentInputs } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -165,10 +185,29 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   const fitTextarea = useCallback(() => {
     const el = textareaRef.current;
     if (!el || el.scrollHeight <= 0) return;
+    // An EMPTY composer is exactly one line tall. Drop the inline height and
+    // let `.composer-control` (index.css) supply it — that value is already
+    // derived from the textarea's own box model and scales with the root font
+    // size. Measuring instead would be wrong here: Chrome counts the PLACEHOLDER
+    // in `scrollHeight`, so on a narrow viewport this composer's 110-character
+    // placeholder wrapped and inflated the empty box to 3-5 lines (measured 110px
+    // at a 320px viewport vs 47px at 1400px). Clearing the draft from a tall
+    // multi-line box lands here too, so this is also the shrink-to-one-line path.
+    if (!el.value) {
+      el.style.height = "";
+      return;
+    }
+    // `scrollHeight` covers content + padding but NOT the border, and `height`
+    // is border-box, so applying it raw left the box 2px short of its content —
+    // which pinned a scrollbar track on an EMPTY composer. `offsetHeight -
+    // clientHeight` is exactly the chrome we omitted (borders + any horizontal
+    // scrollbar). Both are 0 under jsdom, so the modelled tests still see the
+    // bare scrollHeight.
+    const chrome = el.offsetHeight - el.clientHeight;
     // Must clear the explicit height *before* reading, otherwise a shrink keeps
     // reporting the old (taller) box as its minimum scrollHeight.
     el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
+    el.style.height = `${el.scrollHeight + chrome}px`;
   }, []);
 
   useLayoutEffect(() => {
@@ -617,10 +656,10 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // touch the composer draft or the @ref/editor context — clicking "Continue"
   // must not clear what the user is already typing.
   //
-  // The whole strip is hidden until the session has conversation content
-  // (`hasConversation`, from useChat): a brand-new/empty session has nothing
-  // to compact, continue, or recap, and the mid-conversation nudges were just
-  // noise there. The slash commands themselves are unaffected.
+  // Visibility is a PER-CHIP decision made in the memo below, not a wrapper
+  // gate: a brand-new/empty session has nothing to compact, continue, or
+  // recap, but a custom chip can be useful there. The slash commands
+  // themselves are unaffected either way.
   const runQuickDispatch = (text: string, kind: "command" | "message") => {
     if (
       effectiveBusy ||
@@ -634,43 +673,33 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     void dispatchCommand(text);
   };
 
-  const runQuickAction = (id: string) => {
-    switch (id) {
-      case "compact":
-        runQuickDispatch("/compact", "command");
-        return;
-      case "recap":
-        runQuickDispatch("/recap", "command");
-        return;
-      case "continue":
-        // Context-aware: an interrupted turn is RESUMED (the pill is already
-        // labelled "Resume"); otherwise "continue" is a plain nudge message.
-        if (wasInterrupted) {
-          handleResume();
-          return;
-        }
-        runQuickDispatch("continue", "message");
-        return;
-      default:
-        return;
-    }
-  };
+  // The configured chips, read from the shared module store (one fetch for N
+  // mounted composer tabs). ONE memo produces the final, already-filtered
+  // list the strip consumes: a second memo layered on top of this one would
+  // split the ordering logic across two places.
+  const { chips: quickActionChips } = useQuickActions();
 
-  const quickActions: QuickActionItem[] = [
-    {
-      id: "compact",
-      label: "Compact",
-      icon: Archive,
-      title: compacting
-        ? "Compaction already in progress"
-        : "Compact conversation context (/compact)",
-      disabled: compacting,
-    },
-    wasInterrupted
-      ? { id: "continue", label: "Resume", icon: Play, title: "Resume the interrupted turn" }
-      : { id: "continue", label: "Continue", icon: Play, title: "Send 'continue' to keep the agent going" },
-    { id: "recap", label: "Recap", icon: FileText, title: "Generate session recap (/recap)" },
-  ];
+  const quickActions: QuickActionItem[] = useMemo(
+    () =>
+      visibleChips(quickActionChips, hasConversation).map((chip) => {
+        // The Continue seed resumes an interrupted turn, so its title says so.
+        // The LABEL stays as the user configured it — the spec makes the label
+        // user-controlled and locks only the seed's behaviour; this is a
+        // deliberate visible change from the old pill that relabelled itself to
+        // "Resume", with the hint moved into the tooltip.
+        const resumeVariant = chip.seed === "continue" && wasInterrupted;
+        return {
+          id: chip.id,
+          label: chip.label,
+          icon: quickActionIconComponent(chip.icon),
+          title: resumeVariant
+            ? `${chip.label} — resume the interrupted turn`
+            : `${chip.label} — ${chip.message.trim()}`,
+          disabled: compacting && chip.mode === "send" && chipDispatchesCompact(chip),
+        };
+      }),
+    [quickActionChips, hasConversation, wasInterrupted, compacting],
+  );
 
   const updateDraft = (value: string) => {
     setInput(value);
@@ -688,6 +717,26 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     // leaves history mode, so the next ↑ starts from the newest entry again.
     historyIndexRef.current = -1;
     historyDraftRef.current = "";
+  };
+
+  // Behaviour is resolved by SEED, then MODE. Declared below `updateDraft`
+  // because a `fill` chip calls it, and a `const` referenced from a handler
+  // that runs before its declaration is a TDZ crash on the first click.
+  const runQuickAction = (id: string) => {
+    const chip = quickActionChips.find((c) => c.id === id);
+    if (!chip) return;
+    // Resume wins over both modes: it is a turn-lifecycle action, not a text
+    // dispatch, so "fill the box with continue" would be wrong here.
+    if (chip.seed === "continue" && wasInterrupted) {
+      handleResume();
+      return;
+    }
+    if (chip.mode === "fill") {
+      updateDraft(chip.message);
+      textareaRef.current?.focus();
+      return;
+    }
+    runQuickDispatch(chip.message, chipDispatchKind(chip));
   };
 
   const cancelPendingRewind = () => {
@@ -849,7 +898,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           await flushDelayedMessages();
           return;
         }
-        if (effectiveBusy || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
+        const compactionActive = getCompactionState(sessionTabId)?.status === "active";
+        // Instant commands (see lib/instantCommands) skip the queue so an aside
+        // typed mid-turn lands immediately instead of waiting for the turn to
+        // end — the server has a mid-turn path for them that avoids writing to
+        // the transcript under a live turn. Compaction still queues EVERY
+        // command, instant ones included: it replaces the transcript wholesale
+        // when it lands, so a concurrently recorded aside would be dropped.
+        if (
+          compactionActive ||
+          (!isInstantCommand(trimmed) &&
+            (effectiveBusy || drainingRef.current.has(sessionTabId)))
+        ) {
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
           setQueuedItems([...getQueue(sessionTabId)]);
           return;
@@ -1075,6 +1135,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <span className="text-blue-300 text-sm font-medium">Drop files here</span>
         </div>
       )}
+      {/* Recent inputs: a read-only reminder of the last couple of things the
+          user typed, shown ONLY while the transcript is scrolled away from its
+          tail (the state where your own prompts are off-screen). First in the
+          stack, above the attach/context pills, so it reads as ambient context
+          for the block rather than as part of the next message's send flow.
+          RecentInputsStrip renders null when there is nothing to show, so an
+          at-the-tail transcript reserves no chrome. */}
+      {transcriptScrolledUp && <RecentInputsStrip inputs={recentInputs} />}
       {showSlashMenu && (
         <SlashCommandMenu
           query={slashQuery}
@@ -1147,7 +1215,8 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             </span>
           ))}
       </div>
-      <CompactionStatus sessionId={sessionTabId} queued={getQueue(sessionTabId).some((item) => !item.dispatched && item.kind === "command" && isCompactCommand(item.text))} />
+      <CommandActivityBar sessionId={sessionTabId} host={projectHost} />
+      <CompactionStatus sessionId={sessionTabId} host={projectHost} queued={getQueue(sessionTabId).some((item) => !item.dispatched && item.kind === "command" && isCompactCommand(item.text))} />
       {queueCount > 0 && (
         <div className="text-xs text-muted-foreground mb-1">
           <div>{queueCount} queued — press ↑ in an empty box to edit the last one</div>
@@ -1205,20 +1274,34 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         className="hidden"
         onChange={handleAttach}
       />
+      {/* Every child carries `composer-control` (index.css) so the row reads
+        as one aligned unit: the textarea box, the attach button's hit area and
+        the action button all share a height and a `rounded-lg` radius, and
+        their top edges line up with the top of the input. `items-end` (not
+        `items-center`) is deliberate — the textarea auto-grows up to
+        `max-h-40` and the controls must stay pinned to its bottom edge. */}
       <div className="flex items-end gap-2">
         <button
           type="button"
           onClick={() => attachRef.current?.click()}
-          className="shrink-0 p-1.5 rounded text-muted-foreground hover:text-accent-foreground hover:bg-accent"
+          className="composer-control flex w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           title="Attach files"
+          aria-label="Attach files"
         >
-          <Paperclip className="w-4 h-4" />
+          <Paperclip className="h-4 w-4" />
         </button>
         <textarea
           ref={textareaRef}
-          className="flex-1 resize-none overflow-y-auto max-h-40 rounded-lg border border-border bg-muted p-3 text-sm leading-[1.5em] text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="composer-control flex-1 resize-none overflow-y-auto max-h-40 rounded-lg border border-border bg-muted p-3 text-sm leading-[1.5em] text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           rows={1}
-          placeholder="Type a message... (Enter to send, Shift+Enter for newline, ↑/↓ history, / for commands, ! for shell)"
+          placeholder="Type a message…"
+          // The full shortcut list used to live in the placeholder, where 110
+          // characters dominated the box and — because Chrome counts the
+          // PLACEHOLDER in `scrollHeight` — wrapped to 3-5 lines and forced the
+          // empty composer to overflow on any narrow viewport. It stays
+          // reachable on hover instead; `CHAT_INPUT_PLACEHOLDER_HINT` keeps one
+          // copy of the text.
+          title={CHAT_INPUT_PLACEHOLDER_HINT}
           value={input}
           onChange={(e) => updateDraft(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -1232,7 +1315,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             type="button"
             variant="outline"
             size="icon"
-            className="h-9 w-9 shrink-0"
+            className="composer-control w-11 shrink-0 rounded-lg"
             onClick={() => {
               void retryLastTurn();
             }}
@@ -1247,7 +1330,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             type="button"
             variant="destructive"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             onClick={stop}
           >
             Stop
@@ -1260,7 +1343,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             disabled
           >
             Running…
@@ -1273,7 +1356,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             disabled
           >
             Waiting for permission…
@@ -1282,7 +1365,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             onClick={handleResume}
             title={queueCount > 0 ? `Resume — ${queueCount} queued` : "Resume"}
           >
@@ -1292,7 +1375,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           <Button
             type="button"
             size="sm"
-            className="shrink-0"
+            className="composer-control shrink-0 rounded-lg px-4"
             onClick={handleSend}
             disabled={!input.trim()}
           >
@@ -1300,7 +1383,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
-      {hasConversation && (
+      {showQuickActions && quickActions.length > 0 && (
         <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
       )}
     </div>

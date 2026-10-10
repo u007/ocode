@@ -18,7 +18,7 @@ func TestGetToolDefinitions_OCRSilentWhenDisabled(t *testing.T) {
 
 	cfg := &config.Config{Ocode: config.OcodeConfig{Ocr: ocr.OcrConfig{Enabled: false}}}
 	// Agent without ocr in a.tools (e.g. an explore sub-agent).
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	// Ensure ocr is absent to trigger the "missing from a.tools" branch.
 	delete(a.tools, "ocr")
 
@@ -38,7 +38,7 @@ func TestGetToolDefinitions_OCREmitsWhenEnabledAndMissing(t *testing.T) {
 	defer func() { DebugAppend = old }()
 
 	cfg := &config.Config{Ocode: config.OcodeConfig{Ocr: ocr.OcrConfig{Enabled: true}}}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	delete(a.tools, "ocr")
 
 	got = nil
@@ -63,7 +63,7 @@ func TestGetToolDefinitions_OCREmitsWhenEnabledButFiltered(t *testing.T) {
 
 	cfg := &config.Config{Ocode: config.OcodeConfig{Ocr: ocr.OcrConfig{Enabled: true}}}
 	tools := []tool.Tool{&tool.OcrTool{Config: cfg}, &tool.ReadTool{}}
-	a := NewAgent(nil, tools, cfg, nil)
+	a := newTestAgent(nil, tools, cfg, nil)
 	// Deny ocr via spec so it exists but is not exposed.
 	a.spec = &AgentSpec{DeniedTools: []string{"ocr"}}
 

@@ -217,7 +217,7 @@ func newInterpreterAgent(t *testing.T, reply string, relaxed ...string) (*Agent,
 		Model:           "openai/gpt-4o-mini",
 		RelaxedConcerns: relaxed,
 	}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.Permissions().SetWorkDir(resolved)
 
 	client := &fixedJSONChatClient{reply: reply}

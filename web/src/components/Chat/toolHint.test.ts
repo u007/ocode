@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bashCommandFromArgs, formatToolArgsHint } from "./toolHint";
+import { bashCommandFromArgs, formatToolArgsHint, skillNameFromArgs } from "./toolHint";
 
 describe("formatToolArgsHint", () => {
   it("summarizes bash as a shell prompt line", () => {
@@ -36,6 +36,35 @@ describe("formatToolArgsHint", () => {
 
   it("falls back to empty for bash with no command", () => {
     expect(formatToolArgsHint("bash", "{}")).toBe("");
+  });
+
+  // Without this case the header read a bare "skill" and the name sat hidden in
+  // a collapsed JSON block. `load_skill` is the registered alias some models
+  // emit instead (internal/tool/misc.go SkillAliasTool).
+  it("names the skill for both the skill tool and its load_skill alias", () => {
+    expect(formatToolArgsHint("skill", '{"name":"git-commit-push"}')).toBe('Skill "git-commit-push"');
+    expect(formatToolArgsHint("load_skill", '{"name":"git-commit-push"}')).toBe('Skill "git-commit-push"');
+  });
+
+  it("returns empty for a skill call with no usable name", () => {
+    expect(formatToolArgsHint("skill", "{}")).toBe("");
+    expect(formatToolArgsHint("skill", '{"name":42}')).toBe("");
+    expect(formatToolArgsHint("skill", "not json")).toBe("");
+    expect(formatToolArgsHint("skill", undefined)).toBe("");
+  });
+});
+
+describe("skillNameFromArgs", () => {
+  it("extracts the name the composer bar shows", () => {
+    expect(skillNameFromArgs('{"name":"brainstorming"}')).toBe("brainstorming");
+  });
+
+  it("returns empty when the name is missing or the payload is malformed", () => {
+    expect(skillNameFromArgs("{}")).toBe("");
+    expect(skillNameFromArgs('{"name":42}')).toBe("");
+    expect(skillNameFromArgs("not json")).toBe("");
+    expect(skillNameFromArgs(undefined)).toBe("");
+    expect(skillNameFromArgs('["skill"]')).toBe("");
   });
 });
 

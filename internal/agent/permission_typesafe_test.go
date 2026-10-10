@@ -38,7 +38,7 @@ func newTypesafeJudge(t *testing.T, reply string) (*Agent, *typesafeJudgeHarness
 
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "typesafe/jev-latest"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -64,6 +64,13 @@ func typesafeChoiceReply(choice string, confidence float64) string {
 
 func typesafeReplyWithConcern(choice string, confidence float64, concern string) string {
 	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":10,"output_tokens":2}}`
+}
+
+// typesafeReplyWithConcernConf is typesafeReplyWithConcern with an explicit
+// confidence on the CONCERN answer, so a test can make the judge unsure about
+// the very category that unlocks a relaxed grant.
+func typesafeReplyWithConcernConf(choice string, confidence float64, concern string, concernConf float64) string {
+	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":` + jsonFloat(concernConf) + `}},"usage":{"input_tokens":10,"output_tokens":2}}`
 }
 
 func jsonFloat(f float64) string {
@@ -173,7 +180,7 @@ func TestConsultPermissionModelTypesafeLowConfidenceDoesNotAllow(t *testing.T) {
 func TestConsultPermissionModelTypesafeTransportFailureIsUnconsulted(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "typesafe/jev-latest"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -266,5 +273,46 @@ func TestConsultPermissionModelTypesafeAllowedPrefixesInState(t *testing.T) {
 	// the trust to them.
 	if !strings.Contains(instr, "called by a path (e.g. /tmp/x/vp) is NOT covered") {
 		t.Fatalf("verdict instructions must exclude path-qualified binaries from allowed_command_prefixes trust")
+	}
+}
+
+// End-to-end through the real judge entry point: whatever the permission layer
+// decides, exactly one durable judge record is emitted, and its outcome field
+// says which of the four things happened. This is the assertion that the log is
+// actually wired, rather than merely constructible.
+func TestPermissionJudgeLog_RecordsOutcomeEndToEnd(t *testing.T) {
+	cases := []struct {
+		name    string
+		reply   string
+		allowed bool
+		outcome judgeOutcome
+	}{
+		{"granted", typesafeChoiceReply("allow", 0.97), true, outcomeGranted},
+		{"below floor", typesafeChoiceReply("allow", 0.21), false, outcomeBelowFloor},
+		{"denied", typesafeChoiceReply("deny", 0.99), false, outcomeJudgeDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := captureDebug(t)
+			a, _ := newTypesafeJudge(t, tc.reply)
+			allowed, _, _, _ := a.consultPermissionModel("bash",
+				json.RawMessage(`{"command":"cd /tmp && ls drizzle"}`), nil)
+			if allowed != tc.allowed {
+				t.Errorf("allowed = %v, want %v", allowed, tc.allowed)
+			}
+			recs := decodeRecords(t, lines())
+			if len(recs) != 1 {
+				t.Fatalf("expected exactly 1 judge record, got %d", len(recs))
+			}
+			if recs[0].Outcome != tc.outcome {
+				t.Errorf("outcome = %q, want %q", recs[0].Outcome, tc.outcome)
+			}
+			// Provider-qualified: the judges label with deciderLabel(client) rather than the
+			// bare model name, so a second decision backend is distinguishable in the
+			// log without having to know which slot produced the record.
+			if recs[0].Model != "typesafe/jev-latest" || recs[0].Tool != "bash" {
+				t.Errorf("record lost model/tool: %+v", recs[0])
+			}
+		})
 	}
 }

@@ -2,21 +2,34 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
-// btwRequest hits HandleBtw for id with the given content and returns the recorder.
+// btwRequest POSTs /btw for id with the given content and returns the recorder.
 func btwRequest(h *Handler, id, content string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	body := `{"content":` + strconvQuote(content) + `}`
 	req := httptest.NewRequest("POST", "/api/sessions/"+id+"/btw", strings.NewReader(body))
 	h.HandleBtw(rec, req, id)
+	return rec
+}
+
+// btwCancelRequest DELETEs the in-flight side query for id.
+func btwCancelRequest(h *Handler, id string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("DELETE", "/api/sessions/"+id+"/btw", nil)
+	h.HandleBtwCancel(rec, req, id)
 	return rec
 }
 
@@ -44,101 +57,572 @@ func strconvQuote(s string) string {
 	return buf.String()
 }
 
-// TestHandleBtwDoesNotConflictWithConcurrentWriter verifies that /btw uses
-// the concurrent-safe append path (tail-insert with bounded retry) instead
-// of load→append→save. A concurrent writer appending messages while /btw
-// runs must NOT cause ErrTranscriptConflict — both messages land.
-func TestHandleBtwDoesNotConflictWithConcurrentWriter(t *testing.T) {
+// btwLoopStub replaces btwAskLoopFn so a test drives the side-query loop
+// deterministically (the production loop builds a fresh client from the
+// session's model, which needs a live provider). It records every invocation
+// and counts cancel calls.
+type btwLoopStub struct {
+	mu       sync.Mutex
+	invocs   int
+	cancels  int
+	lastOpts agent.AskLoopOptions
+	lastMsgs []agent.Message
+	// optss/results keep one entry per invocation so a test can drive a LATE
+	// callback for a superseded run.
+	optss   []agent.AskLoopOptions
+	results []func(string, error)
+}
+
+func (s *btwLoopStub) snapshot() (invocs, cancels int, msgs []agent.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.invocs, s.cancels, s.lastMsgs
+}
+
+// resultAt returns the i-th invocation's onResult so a test can complete a
+// superseded run late.
+func (s *btwLoopStub) resultAt(i int) func(string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.results[i]
+}
+
+// optsAt returns the i-th invocation's options so a test can push a late
+// activity/delta frame from a superseded run.
+func (s *btwLoopStub) optsAt(i int) agent.AskLoopOptions {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.optss[i]
+}
+
+// stubBtwLoop installs the stub for one test. run, when non-nil, is invoked
+// synchronously inside the loop call with the options the handler passed.
+func stubBtwLoop(t *testing.T, run func(opts agent.AskLoopOptions, onResult func(string, error))) *btwLoopStub {
+	t.Helper()
+	s := &btwLoopStub{}
+	prev := btwAskLoopFn
+	btwAskLoopFn = func(_ *agent.Agent, msgs []agent.Message, opts agent.AskLoopOptions, onResult func(string, error)) func() {
+		s.mu.Lock()
+		s.invocs++
+		s.lastOpts = opts
+		s.lastMsgs = msgs
+		s.optss = append(s.optss, opts)
+		s.results = append(s.results, onResult)
+		s.mu.Unlock()
+		if run != nil {
+			run(opts, onResult)
+		}
+		return func() {
+			s.mu.Lock()
+			s.cancels++
+			s.mu.Unlock()
+		}
+	}
+	t.Cleanup(func() { btwAskLoopFn = prev })
+	return s
+}
+
+// collectBtwFrames drains `btw` frames from sub until want have been seen.
+func collectBtwFrames(t *testing.T, sub chan Envelope, want int) []btwFrame {
+	t.Helper()
+	var out []btwFrame
+	deadline := time.After(3 * time.Second)
+	for len(out) < want {
+		select {
+		case env := <-sub:
+			if env.Event != "btw" {
+				continue
+			}
+			raw, _ := json.Marshal(env.Data)
+			var f btwFrame
+			if err := json.Unmarshal(raw, &f); err != nil {
+				t.Fatalf("decode btw frame: %v", err)
+			}
+			out = append(out, f)
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d btw frames, got %d (%+v)", want, len(out), out)
+		}
+	}
+	return out
+}
+
+// TestHandleBtwStartsSideQueryWithoutWritingTranscript is the core contract:
+// /btw answers 202 immediately, runs a side query over the transcript plus the
+// aside, and writes NOTHING to the persisted transcript.
+func TestHandleBtwStartsSideQueryWithoutWritingTranscript(t *testing.T) {
 	h := NewHandler()
 	proj := t.TempDir()
 	id := session.NewSessionID()
 	h.sessions.Register(id, proj)
-
-	// Seed the session with an initial message so the sqlite file exists.
-	if err := session.AppendUserMessageForDir(proj, id, "initial message"); err != nil {
+	if err := session.AppendUserMessageForDir(proj, id, "hello"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
 
-	// Run /btw concurrently with another writer that uses the same
-	// load→append→save pattern (simulating a second ocode process's sync
-	// save). The old /btw load→append→save would conflict here because both
-	// writers race: one appends between the other's load and save, and the
-	// overlap check finds the stored transcript has diverged from the stale
-	// snapshot. The fixed /btw uses tail-insert (AppendUserMessageForDir)
-	// which retries and converges.
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	var btwRec *httptest.ResponseRecorder
-
-	go func() {
-		defer wg.Done()
-		btwRec = btwRequest(h, id, "by the way note")
-	}()
-
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 5; i++ {
-			// Use the concurrent-safe tail-insert path so this writer always
-			// succeeds. The /btw handler's old load→append→save would then
-			// see a stale snapshot (stored transcript longer than its in-memory
-			// copy) and conflict. The fixed /btw uses the same tail-insert
-			// path, so both converge.
-			if err := session.AppendUserMessageForDir(proj, id, "concurrent message"); err != nil {
-				return
-			}
-		}
-	}()
-
-	wg.Wait()
-
-	// The /btw request must succeed — it uses the concurrent-safe tail-insert
-	// path (AppendUserMessageForDir) which retries on conflict. The
-	// concurrent writer's load→append→save MAY fail (that's the expected
-	// behavior for a non-concurrent-safe path racing another writer); we
-	// don't assert on it.
-	if btwRec.Code != http.StatusOK {
-		t.Fatalf("btw status %d, want 200 (body: %s)", btwRec.Code, btwRec.Body.String())
-	}
-
-	// Verify the /btw message landed in the transcript.
-	s, err := session.LoadForDir(proj, id)
+	before, err := session.LoadForDir(proj, id)
 	if err != nil {
-		t.Fatalf("load: %v", err)
+		t.Fatalf("load before: %v", err)
 	}
-	foundBTW := false
-	for _, m := range s.Messages {
-		if strings.Contains(m.Content, "by the way note") {
-			foundBTW = true
-			break
-		}
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	stub := stubBtwLoop(t, func(_ agent.AskLoopOptions, onResult func(string, error)) {
+		onResult("the answer", nil)
+	})
+
+	rec := btwRequest(h, id, "actually use tabs")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (body: %s)", rec.Code, rec.Body.String())
 	}
-	if !foundBTW {
-		t.Error("btw message missing from transcript")
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "started" {
+		t.Errorf("status = %v, want started", body["status"])
+	}
+	if gen, _ := body["generation"].(float64); gen != 1 {
+		t.Errorf("generation = %v, want 1", body["generation"])
+	}
+
+	after, err := session.LoadForDir(proj, id)
+	if err != nil {
+		t.Fatalf("load after: %v", err)
+	}
+	if len(after.Messages) != len(before.Messages) {
+		t.Fatalf("transcript grew from %d to %d messages; a side query must never write the transcript",
+			len(before.Messages), len(after.Messages))
+	}
+
+	_, _, msgs := stub.snapshot()
+	if len(msgs) == 0 {
+		t.Fatal("side query got no messages")
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" || last.Content != "actually use tabs" {
+		t.Errorf("last side-query message = %q/%q, want user/actually use tabs", last.Role, last.Content)
+	}
+
+	frames := collectBtwFrames(t, sub, 2)
+	if frames[0].Phase != "started" || frames[0].Question != "actually use tabs" {
+		t.Errorf("frame[0] = %+v, want started with the question", frames[0])
+	}
+	if frames[1].Phase != "done" || frames[1].Text != "the answer" {
+		t.Errorf("frame[1] = %+v, want done with the answer", frames[1])
 	}
 }
 
-// TestHandleBtwCreatesSessionWhenMissing verifies that /btw on a brand-new
-// session id (no prior transcript) creates the session and appends the message.
-func TestHandleBtwCreatesSessionWhenMissing(t *testing.T) {
+// TestHandleBtwEmitsBusFrames pins the activity + delta streaming shape.
+func TestHandleBtwEmitsBusFrames(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	stubBtwLoop(t, func(opts agent.AskLoopOptions, onResult func(string, error)) {
+		if opts.OnMessage != nil {
+			m := agent.Message{Role: "assistant"}
+			m.ToolCalls = []agent.ToolCall{{}}
+			m.ToolCalls[0].Function.Name = "read"
+			m.ToolCalls[0].Function.Arguments = `{"file":"a.go"}`
+			opts.OnMessage(m)
+		}
+		if opts.OnDelta != nil {
+			opts.OnDelta("text", "partial ")
+			opts.OnDelta("reasoning", "must be ignored")
+		}
+		onResult("final", nil)
+	})
+
+	if rec := btwRequest(h, id, "q"); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202", rec.Code)
+	}
+
+	frames := collectBtwFrames(t, sub, 4)
+	if frames[0].Phase != "started" {
+		t.Errorf("frame[0] phase = %q, want started", frames[0].Phase)
+	}
+	if frames[1].Phase != "activity" || !strings.Contains(frames[1].Text, "→ read") {
+		t.Errorf("frame[1] = %+v, want activity containing '→ read'", frames[1])
+	}
+	if frames[2].Phase != "delta" || frames[2].Text != "partial " {
+		t.Errorf("frame[2] = %+v, want delta 'partial '", frames[2])
+	}
+	if frames[3].Phase != "done" || frames[3].Text != "final" {
+		t.Errorf("frame[3] = %+v, want done 'final'", frames[3])
+	}
+	// Exactly 4: the reasoning-kind delta must not be published.
+	select {
+	case env := <-sub:
+		if env.Event == "btw" {
+			t.Errorf("unexpected extra btw frame: %+v", env)
+		}
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestHandleBtwCancelAndReplace: a second /btw cancels the first, DELETE cancels
+// the current run, and DELETE is idempotent.
+func TestHandleBtwCancelAndReplace(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	stub := stubBtwLoop(t, nil) // never completes: the runs stay in flight
+
+	if rec := btwRequest(h, id, "first"); rec.Code != http.StatusAccepted {
+		t.Fatalf("first status %d, want 202", rec.Code)
+	}
+	if rec := btwRequest(h, id, "second"); rec.Code != http.StatusAccepted {
+		t.Fatalf("second status %d, want 202", rec.Code)
+	}
+
+	invocs, cancels, _ := stub.snapshot()
+	if invocs != 2 {
+		t.Fatalf("loop invocations = %d, want 2", invocs)
+	}
+	if cancels != 1 {
+		t.Fatalf("cancels after replace = %d, want 1 (the first run must be cancelled)", cancels)
+	}
+
+	if rec := btwCancelRequest(h, id); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status %d, want 200", rec.Code)
+	}
+	_, cancels, _ = stub.snapshot()
+	if cancels != 2 {
+		t.Fatalf("cancels after DELETE = %d, want 2", cancels)
+	}
+
+	// Idempotent: a second DELETE cancels nothing more.
+	if rec := btwCancelRequest(h, id); rec.Code != http.StatusOK {
+		t.Fatalf("second DELETE status %d, want 200", rec.Code)
+	}
+	if _, cancels, _ = stub.snapshot(); cancels != 2 {
+		t.Fatalf("cancels after second DELETE = %d, want 2 (idempotent)", cancels)
+	}
+}
+
+// TestHandleBtwSupersededRunPublishesNothing: once a second /btw replaces the
+// first, the superseded run's late callbacks must not surface frames — a stale
+// "done" would overwrite the panel's answer for the new run.
+func TestHandleBtwSupersededRunPublishesNothing(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	stub := stubBtwLoop(t, nil)
+	if rec := btwRequest(h, id, "first"); rec.Code != http.StatusAccepted {
+		t.Fatalf("first status %d, want 202", rec.Code)
+	}
+	if rec := btwRequest(h, id, "second"); rec.Code != http.StatusAccepted {
+		t.Fatalf("second status %d, want 202", rec.Code)
+	}
+
+	// Complete the FIRST (superseded) run late.
+	stub.resultAt(0)("stale answer", nil)
+	// Also try to push a late activity frame from it.
+	if opts := stub.optsAt(0); opts.OnMessage != nil {
+		m := agent.Message{Role: "assistant"}
+		m.ToolCalls = []agent.ToolCall{{}}
+		m.ToolCalls[0].Function.Name = "read"
+		opts.OnMessage(m)
+	}
+
+	// None of the superseded run's frames may appear; only the two `started`
+	// frames are expected, and no terminal frame at all.
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case env := <-sub:
+			if env.Event != "btw" {
+				continue
+			}
+			raw, _ := json.Marshal(env.Data)
+			var f btwFrame
+			if err := json.Unmarshal(raw, &f); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if f.Phase != "started" {
+				t.Fatalf("superseded run published %q frame: %+v", f.Phase, f)
+			}
+			if f.Generation != 1 && f.Generation != 2 {
+				t.Fatalf("unexpected generation: %+v", f)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// TestHandleBtwUnknownSessionStillNotFound: no registry entry -> 404.
+func TestHandleBtwUnknownSessionStillNotFound(t *testing.T) {
+	h := NewHandler()
+	rec := httptest.NewRecorder()
+	body := `{"content":"orphan aside"}`
+	req := httptest.NewRequest("POST", "/api/sessions/nope/btw", strings.NewReader(body))
+	h.HandleBtw(rec, req, "nope")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleBtwEmptyContentBadRequest: an empty aside is a 400.
+func TestHandleBtwEmptyContentBadRequest(t *testing.T) {
+	h := NewHandler()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sessions/x/btw", strings.NewReader(`{"content":""}`))
+	h.HandleBtw(rec, req, "x")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleBtwBuildsAgentWhenNotResident: an idle/evicted session (registry
+// entry, no resident agent) must build an agent and answer, not 404 or hang.
+func TestHandleBtwBuildsAgentWhenNotResident(t *testing.T) {
+	h := NewHandler()
+	if h.cfg == nil {
+		t.Skip("no config loaded; cannot build a client")
+	}
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	session.SetWorkDir(proj)
+	t.Cleanup(func() { session.SetWorkDir("") })
+	h.cfg.Model = "opencode-go/deepseek-v4-flash"
+
+	// Completed MCP cache so bootstrap does not stall waiting on MCP.
+	ready := make(chan struct{})
+	close(ready)
+	h.mcpCache = &mcpCache{ready: ready, tools: []tool.Tool{}}
+
+	id := session.NewSessionID()
+	if err := session.Save(id, "idle", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.sessions.BindNewOrVerify(id, proj, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := stubBtwLoop(t, func(_ agent.AskLoopOptions, onResult func(string, error)) {
+		onResult("ok", nil)
+	})
+
+	defer func() {
+		if as := h.lookupAgentSession(id); as != nil && as.agent != nil {
+			as.agent.Shutdown()
+		}
+	}()
+
+	rec := btwRequest(h, id, "are we there yet")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if h.lookupAgentSession(id) == nil {
+		t.Fatal("handler did not build/register an agent for the non-resident session")
+	}
+	if invocs, _, _ := stub.snapshot(); invocs != 1 {
+		t.Fatalf("loop invocations = %d, want 1", invocs)
+	}
+}
+
+// TestHandleBtwStartupErrorEmitsErrorFrame: a loop that fails to start surfaces
+// an error frame instead of hanging.
+func TestHandleBtwStartupErrorEmitsErrorFrame(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
+
+	stubBtwLoop(t, func(_ agent.AskLoopOptions, onResult func(string, error)) {
+		onResult("", errors.New("could not build a side-query client"))
+	})
+
+	if rec := btwRequest(h, id, "q"); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202", rec.Code)
+	}
+
+	frames := collectBtwFrames(t, sub, 2)
+	if frames[0].Phase != "started" {
+		t.Errorf("frame[0] phase = %q, want started", frames[0].Phase)
+	}
+	if frames[1].Phase != "error" || !strings.Contains(frames[1].Error, "could not build") {
+		t.Errorf("frame[1] = %+v, want error carrying the startup failure", frames[1])
+	}
+}
+
+// TestHandleBtwResetIdCancelsRun: /reset-id cancels the in-flight side query
+// and strands no btwRuns entry under the deleted id.
+func TestHandleBtwResetIdCancelsRun(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	session.SetWorkDir(proj)
+	t.Cleanup(func() { session.SetWorkDir("") })
+
+	id := session.NewSessionID()
+	if err := session.Save(id, "Keep me", []agent.Message{
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "second"},
+	}, map[string]any{"spend": 0.5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.sessions.BindNewOrVerify(id, proj, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed an in-flight side query directly (no live agent needed for this
+	// wiring; the assertion is that reset-id cancels + clears it).
+	gen, _ := h.registerBtwRun(id)
+	cancelled := false
+	h.recordBtwCancel(id, gen, func() { cancelled = true })
+
+	rec := httptest.NewRecorder()
+	h.HandleResetSessionID(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/reset-id", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset status %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !cancelled {
+		t.Fatal("reset-id did not cancel the in-flight btw run")
+	}
+	if _, ok := h.btwRuns[id]; ok {
+		t.Fatal("btwRuns entry stranded under the deleted id")
+	}
+}
+
+// TestHandleBtwSnapshotStripsAskSentinels: the side query must not receive the
+// main turn's ask sentinels, exactly as the TUI's snapshot strips them. `/btw`
+// mid-turn is precisely when the turn may be parked on a permission/question
+// ask, and the raw PERMISSION_ASK / WAITING_FOR_USER_RESPONSE JSON leaks
+// internal protocol to the provider and degrades the answer.
+func TestHandleBtwSnapshotStripsAskSentinels(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	as.mu.Lock()
+	as.messages = []agent.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "tool", ToolID: "call_ask", Content: tool.SentinelPermissionAsk + `{"tool":"bash"}`},
+		{Role: "tool", Content: `{"status":"` + tool.SentinelWaitingForUser + `"}`},
+		{Role: "assistant", Content: "ok"},
+		{Role: "user", Content: "trailing"},
+	}
+	as.mu.Unlock()
+
+	got := h.btwMessages(id, as)
+	if len(got) != 5 {
+		t.Fatalf("snapshot = %d msgs, want 5 (sentinels kept with placeholder content)", len(got))
+	}
+	// The permission-ask message must be preserved (not dropped) with its
+	// ToolID intact and a neutral placeholder content.
+	if got[1].Content != "[permission ask]" {
+		t.Errorf("permission-ask msg content = %q, want placeholder", got[1].Content)
+	}
+	if got[1].Role != "tool" || got[1].ToolID == "" {
+		t.Errorf("permission-ask msg lost role/tool-id: role=%q id=%q", got[1].Role, got[1].ToolID)
+	}
+	if got[2].Content != "[waiting for user]" {
+		t.Errorf("waiting msg content = %q, want placeholder", got[2].Content)
+	}
+	for _, m := range got {
+		if strings.Contains(m.Content, tool.SentinelPermissionAsk) || strings.Contains(m.Content, tool.SentinelWaitingForUser) {
+			t.Fatalf("raw sentinel leaked into the side-query snapshot: %q", m.Content)
+		}
+	}
+}
+
+// TestHandleBtwCancelDuringBuildWindowIsNotDropped: a DELETE that lands between
+// registerBtwRun and recordBtwCancel marks the run done before its cancel func
+// is stored. The late-recorded cancel must still be invoked (it is idempotent
+// for a finished loop) — otherwise the loop runs uncancelled.
+func TestHandleBtwCancelDuringBuildWindowIsNotDropped(t *testing.T) {
 	h := NewHandler()
 	proj := t.TempDir()
 	id := session.NewSessionID()
 	h.sessions.Register(id, proj)
 
-	rec := btwRequest(h, id, "first ever note")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("btw status %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
+	cancelled := 0
+	gen, _ := h.registerBtwRun(id)
+	h.cancelBtwRun(id, false) // DELETE arrives during the child-build window
+	h.recordBtwCancel(id, gen, func() { cancelled++ })
 
-	s, err := session.LoadForDir(proj, id)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	if cancelled != 1 {
+		t.Fatalf("cancels = %d, want 1 (a cancel during the build window must not be dropped)", cancelled)
 	}
-	if len(s.Messages) != 1 {
-		t.Fatalf("got %d messages, want 1", len(s.Messages))
+}
+
+// TestHandleCloseSessionCancelsBtwRun: closing a tab/session must stop the
+// independent side query too. It is not turn work, so interruptSessionWork does
+// not reach it; without this the loop keeps burning spend and holding the
+// child's bash processes past the close, and btwRuns retains the entry.
+func TestHandleCloseSessionCancelsBtwRun(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	h.projects = newTestProjectStore(t, proj)
+	h.SetWorkDir(proj)
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	as := newTestSession(h, id, instantClient{})
+	defer as.agent.Shutdown()
+
+	gen, _ := h.registerBtwRun(id)
+	cancelled := false
+	h.recordBtwCancel(id, gen, func() { cancelled = true })
+
+	rec := httptest.NewRecorder()
+	h.HandleCloseSession(rec, httptest.NewRequest("POST", "/api/sessions/"+id+"/close", nil), id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close status %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(s.Messages[0].Content, "first ever note") {
-		t.Errorf("message = %q, want to contain 'first ever note'", s.Messages[0].Content)
+	if !cancelled {
+		t.Fatal("close did not cancel the in-flight btw run")
+	}
+	if _, ok := h.btwRuns[id]; ok {
+		t.Fatal("btwRuns entry retained after close")
+	}
+}
+
+// Regression: eviction must keep btwRuns entry (monotonic generation).
+func TestEvictionKeepsBtwGeneration(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	gen, _ := h.registerBtwRun(id)
+	h.cancelBtwRun(id, false) // false = keep entry (not delete)
+	if _, ok := h.btwRuns[id]; !ok {
+		t.Fatal("btwRuns entry deleted by eviction; generation lost")
+	}
+	if h.btwRuns[id].generation != gen {
+		t.Errorf("generation changed: %d vs %d", h.btwRuns[id].generation, gen)
+	}
+	if !h.btwRuns[id].done {
+		t.Error("entry not marked done after cancel")
 	}
 }

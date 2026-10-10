@@ -6,7 +6,6 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
@@ -19,7 +18,7 @@ import (
 // TestTypingDuringShellAndModelSwitchQueuesForReplacement documents the
 // ordering: the message must go to the replacement queue, not be dispatched.
 func TestTypingDuringShellAndModelSwitchQueuesForReplacement(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { a.Shutdown() })
 	m := model{
 		input:     textarea.New(),
@@ -46,7 +45,7 @@ func TestTypingDuringShellAndModelSwitchQueuesForReplacement(t *testing.T) {
 // TestReplacementDrainHonoursShell is the actual probe: once the replacement
 // completes, does the drain fire while the shell is still running?
 func TestReplacementDrainHonoursShell(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { a.Shutdown() })
 	m := model{
 		input:     textarea.New(),
@@ -75,7 +74,7 @@ func TestReplacementDrainHonoursShell(t *testing.T) {
 // TestReplacementDrainLatchParityWithStreaming checks the EXISTING behaviour
 // when m.streaming blocks the replacement drain, so a shell guard can match it.
 func TestReplacementDrainLatchParityWithStreaming(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { a.Shutdown() })
 	m := model{
 		input:     textarea.New(),
@@ -102,7 +101,7 @@ func TestReplacementDrainLatchParityWithStreaming(t *testing.T) {
 // TestReplacementQueueReleasedAfterShellFinishes closes the loop: the guard
 // defers the drain, so shellFinishedMsg must be the thing that releases it.
 func TestReplacementQueueReleasedAfterShellFinishes(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { a.Shutdown() })
 	m := model{
 		input:     textarea.New(),

@@ -68,7 +68,7 @@ All four are wrapped by the existing auth middleware (`server.go:393–396`); un
 
 #### GET /api/config/ocode/htr — status snapshot
 
-Returns `htrStatusResponse` (`internal/server/handler_config.go:1934`):
+Returns `htrStatusResponse` (`internal/server/handler_config.go:2087`):
 
 ```json
 {
@@ -84,7 +84,7 @@ Returns `htrStatusResponse` (`internal/server/handler_config.go:1934`):
 ```
 
 - `enabled` is the **persisted** config flag (`BrowserConfig.HTREnabled`), not a live runtime fact.
-- `running`/`managed`/`addr`/`port`/`socket`/`binary` come from the live probe (`cdp.HTRDaemonStatus` in `internal/browse/cdp/htr.go:313`), which reads ocode's owner marker (port match + identity match + PID alive + healthy health-probe). If any check fails, the probe returns `managed:false` without an error.
+- `running`/`managed`/`addr`/`port`/`socket`/`binary` come from the live probe (`cdp.HTRDaemonStatus` in `internal/browse/cdp/htr.go:453`), which reads ocode's owner marker (port match + identity match + PID alive + healthy health-probe). If any check fails, the probe returns `managed:false` without an error.
 - `error` is empty when nothing is wrong; it carries the notice string when a caller requested a startup that failed resolution (see status.error contract below).
 - This endpoint is read-only: it never starts or stops anything.
 
@@ -93,7 +93,7 @@ Returns `htrStatusResponse` (`internal/server/handler_config.go:1934`):
 Two sequential steps, both reported at HTTP 200:
 
 1. Persist `htr_enabled=true` to config (`config.SaveOcodeHTRConfig(true, "", "", 0)`) and apply it in-memory (`setHTREnabledInMemory`).
-2. Call `cdp.EnsureHTRServe` (`internal/browse/cdp/htr.go:782`) via `ensureHTRServeFn` through the handler seam.
+2. Call `cdp.EnsureHTRServe` (`internal/browse/cdp/htr.go:1449`) via `ensureHTRServeFn` through the handler seam.
 
 `EnsureHTRServe` implements the singleton guarantee: it reuses a healthy existing instance (same port/socket/identity, healthy health probe) or starts a new supervised `htrcli serve --no-tray` process (leases, owner marker, supervisor registration). If startup fails (asset resolution, native-host setup, port binding, extension launch), the failure is reported in the status body's `error` field at HTTP 200 — the endpoint itself never non-200s for a daemon reason.
 
@@ -102,13 +102,13 @@ Two sequential steps, both reported at HTTP 200:
 Two sequential steps, both at HTTP 200:
 
 1. Persist `htr_enabled=false` and apply in-memory.
-2. Call `cdp.StopHTRServe` (`internal/browse/cdp/htr.go:340`) via `stopHTRServeFn`.
+2. Call `cdp.StopHTRServe` (`internal/browse/cdp/htr.go:491`) via `stopHTRServeFn`.
 
 `StopHTRServe` only ever kills a process positively attributable to ocode — verified either by the owner marker's executable/start-token match or a healthy managed-identity health probe (`processMatchesOwner` / `htrHealthyForInstance`, line 360). A standalone `htrcli` daemon (no ocode owner marker, port `3845`) is never touched. Stopping an already-stopped daemon returns `Running:false` with no error.
 
 #### GET /api/config/ocode/htr/tabs — connected browser tabs
 
-Calls `cdp.ListHTRTabs` (`internal/browse/cdp/htr.go:384`), which:
+Calls `cdp.ListHTRTabs` (`internal/browse/cdp/htr.go:550`), which:
 1. Reads the owner marker; if no managed daemon is recorded (no owner, wrong port, empty identity) returns an error.
 2. Issues `GET http://127.0.0.1:<port>/api/tabs` with `Authorization: Bearer <owner.Identity>` — the daemon's own bearer-protected tabs endpoint.
 3. Returns `{ "tabs": [{ id, url, title, active, browser? }] }` at HTTP 200. If the daemon is not running or the query fails, returns `{ "tabs": [], "error": "…" }` at HTTP 200 so the Settings UI can render the error inline.

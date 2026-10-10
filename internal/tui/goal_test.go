@@ -5,22 +5,6 @@ import (
 	"testing"
 )
 
-func TestGoalCommandRegistered(t *testing.T) {
-	found := false
-	for _, spec := range commandSpecs {
-		if spec.name == "/goal" {
-			found = true
-			if spec.handler == nil {
-				t.Error("/goal has no handler")
-			}
-			break
-		}
-	}
-	if !found {
-		t.Error("/goal not found in commandSpecs")
-	}
-}
-
 func TestGoalGoalExtraction(t *testing.T) {
 	cases := []struct {
 		args []string

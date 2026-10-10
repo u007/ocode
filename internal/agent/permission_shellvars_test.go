@@ -25,7 +25,7 @@ func stubJudgeExpansion(t *testing.T, env map[string]string, outputs map[string]
 }
 
 func newExpansionAgent() *Agent {
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.workDir = "/work/proj"
 	return a
 }
@@ -231,7 +231,7 @@ func TestChatJudgeMasksSecretsWhenMaskOn(t *testing.T) {
 	stubJudgeExpansion(t, nil, nil)
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.permissions.SetWorkDir(t.TempDir())
 	enableTestMask(a)
 

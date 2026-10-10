@@ -1,0 +1,95 @@
+name: Bug report
+description: Something behaves incorrectly or crashes.
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing this. The more precise the reproduction, the faster it gets fixed.
+
+        **Before filing:** search existing issues — this project ships fast and a
+        duplicate is easy to create by accident.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, including the error text if there was one.
+      placeholder: |
+        Running `/model` on a remote SSH project crashes the TUI with
+        `panic: runtime error: invalid memory address`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps starting from a fresh launch.
+      placeholder: |
+        1. `ocode serve`
+        2. Open the Files tab
+        3. Click a `.sqlite` file
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ocode version
+      placeholder: "0.8.126"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      options:
+        - TUI
+        - Web UI
+        - Desktop app
+        - CLI / headless (`ocode run`)
+        - Editor integration (ACP / Zed)
+        - Build / packaging
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux
+        - Windows
+        - WSL2
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro-logs
+    attributes:
+      label: Debug log
+      description: |
+        Optional but very helpful. The TUI has a Log tab (Ctrl+X then L); the web
+        and desktop builds expose the same ring buffer at `GET /api/logs`.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this.
+          required: true
+        - label: This is not about a third-party provider's outage.

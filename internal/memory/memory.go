@@ -244,6 +244,10 @@ func loadMemorySkill() string {
 	return ""
 }
 
+// ProjectSlug is the per-project directory slug memory files are keyed by.
+// Exported so the Pulse assistant's project memory uses the same key.
+func ProjectSlug(workDir string) string { return projectSlug(workDir) }
+
 func projectSlug(workDir string) string {
 	if workDir == "" {
 		workDir, _ = os.Getwd()

@@ -40,16 +40,16 @@ func TestTypesafeOpaqueFloorBoundary(t *testing.T) {
 }
 
 // The lower floor must not leak to every request: a below-floor allow that the
-// judge could resolve still defers at the normal 0.85 floor.
+// judge could resolve still defers at the normal 0.80 floor.
 func TestTypesafeResolvedConcernKeepsNormalFloor(t *testing.T) {
 	for _, concern := range []string{"none", "secrets", "network"} {
-		a, _ := newTypesafeJudge(t, typesafeReplyWithConcern("allow", 0.80, concern))
+		a, _ := newTypesafeJudge(t, typesafeReplyWithConcern("allow", 0.79, concern))
 		allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"$g --version"}`), nil)
 		if allowed || !consulted {
 			t.Fatalf("concern %q: expected below-floor defer, got allowed=%v consulted=%v", concern, allowed, consulted)
 		}
-		if !strings.Contains(reason, "0.85") {
-			t.Fatalf("concern %q: reason should cite the normal floor 0.85, got %q", concern, reason)
+		if !strings.Contains(reason, "0.80") {
+			t.Fatalf("concern %q: reason should cite the normal floor 0.80, got %q", concern, reason)
 		}
 	}
 }
@@ -87,7 +87,7 @@ func TestResolveAutoJudgeOpaqueMinConfidence(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			a := NewAgent(nil, nil, &config.Config{}, nil)
+			a := newTestAgent(nil, nil, &config.Config{}, nil)
 			setTestAutoPermissionConfig(a, func(cfg *config.AutoPermissionConfig) { cfg.MinConfidence = tc.configured })
 			if got := a.resolveAutoJudgeMinConfidence(); got != tc.wantNormal {
 				t.Fatalf("normal floor = %v, want %v", got, tc.wantNormal)

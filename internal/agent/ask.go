@@ -16,6 +16,54 @@ import (
 // agent's or another side-query's identically-numbered processes.
 var btwAgentCounter atomic.Uint64
 
+// BtwExcludedTools lists tools the independent side-query loop (/btw) must not
+// expose. It is used BOTH to filter the builtin slice (question, todo/plan
+// tools) and as AskLoopOptions.ExcludedTools, which deletes NewAgent-registered
+// tools (task family, wait, knowledge_lookup, advisor) from the child's final
+// tool map — the slice filter alone cannot remove those, since NewAgent
+// registers them unconditionally. The result stays non-interactive: any
+// permission ASK is denied non-blockingly by AskLoopAsync.
+//
+// Exported so the web/desktop server (internal/server) runs the SAME
+// side-query semantics as the TUI, with one source of truth for the list.
+var BtwExcludedTools = []string{
+	"question",
+	"task",
+	"task_status",
+	"agent_status",
+	"task_cancel",
+	"wait",
+	"todo_write",
+	"todo_update",
+	"plan_enter",
+	"plan_exit",
+	"discover_more",
+	"knowledge_lookup",
+	"advisor",
+}
+
+// FormatSideQueryActivity renders a compact activity line for a side-query
+// loop message: "→ name args" for each assistant tool call (args trimmed,
+// truncated to 60 chars with "..."). Returns "" when the message has nothing
+// worth surfacing. Shared by the TUI popup and the web/desktop panel.
+func FormatSideQueryActivity(m Message) string {
+	if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, tc := range m.ToolCalls {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		args := strings.TrimSpace(tc.Function.Arguments)
+		if len(args) > 60 {
+			args = args[:57] + "..."
+		}
+		b.WriteString("→ " + tc.Function.Name + " " + args)
+	}
+	return b.String()
+}
+
 // AskLoopOptions configures the independent side-query agent loop behind
 // AskLoopAsync (the /btw popup).
 type AskLoopOptions struct {
@@ -172,6 +220,7 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 
 	child := NewAgent(client, tools, a.config, a.lspMgr)
 	child.toolBatchDelay = 0
+	child.SetRecapPromptEnabled(false)
 	child.SetMaxSteps(maxSteps)
 	child.skipDiscovery = true
 	// Side-query agents belong to the same logical session. Share the root
@@ -193,13 +242,13 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 	// path-scoped permission checks agree with the active /cd target. Direct
 	// field assignment (not SetWorkDir) so the SHARED snapshot store's base
 	// dir is not re-pointed.
-	if a.workDir != "" {
-		child.workDir = a.workDir
+	if wd := a.WorkDir(); wd != "" {
+		child.workDir = wd
 	}
 	// Match the parent's project host too, so a remote project's side query
 	// renders the same "this project lives on <host>" note rather than
 	// presenting the local machine's paths as the project's.
-	child.projectHost = a.projectHost
+	child.projectHost = a.ProjectHost()
 	if a.sessionID != "" {
 		child.SetSessionID(a.sessionID)
 	} else if sessionID := a.OpenCodeSessionID(); sessionID != "" {

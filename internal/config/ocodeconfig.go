@@ -634,6 +634,13 @@ func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, err
 // HTTP port (0 means the managed 3846 default).
 // HTRSocketPath and HTRNativeHostName are optional development overrides. The
 // defaults are deliberately namespaced away from a user's standalone htrcli.
+//
+// HTRShared selects the shared daemon (true, the default): one `htrcli serve`
+// that serves both ocode's embedded browser and the user's own extension, whose
+// coordinates are read from htrcli's own config rather than invented here. false
+// is the rollback path — today's private, ocode-managed 3846 daemon, unchanged.
+// HTRToken is the escape hatch for a bearer token ocode cannot read from
+// htrcli's config; empty means "read htrcli's config".
 type BrowserConfig struct {
 	ChromePath         string `json:"chrome_path"`
 	IdleTimeoutMinutes int    `json:"idle_timeout_minutes"`
@@ -644,6 +651,8 @@ type BrowserConfig struct {
 	HTRPort            int    `json:"htr_port"`
 	HTRSocketPath      string `json:"htr_socket_path"`
 	HTRNativeHostName  string `json:"htr_native_host_name"`
+	HTRShared          bool   `json:"htr_shared"`
+	HTRToken           string `json:"htr_token"`
 	NoSandbox          bool   `json:"no_sandbox"`
 }
 
@@ -753,6 +762,52 @@ type DiscoveryConfig struct {
 	// The built-in defaults always include skills/, .opencode/, .claude/, .qwen/,
 	// .agent/, .pnpm/, node_modules/, vendor/, .git/, dist/, build/, and target/.
 	IgnorePaths []string
+	// JudgeModel is the decision-judge model for the discovery relevance judge —
+	// a full provider/model id. It is deliberately SEPARATE from EmbeddingModel:
+	// that one picks the embedder, this one picks the judge, and conflating them
+	// would make "make discovery cheaper" ambiguous between the two.
+	JudgeModel string
+}
+
+// JudgeModelConfig is the decision-judge model selection for one judge call site.
+// One exists per slot so a user can point, say, the permission judge at a
+// different backend than the egress guard without touching the others.
+//
+// JudgeModel is a full provider/model id ("typesafe/jev-latest",
+// "cloudflare-workers/@cf/cloudflare/clef-flash"). It defaults to
+// "typesafe/jev-latest", the constant these judges used before per-slot
+// selection existed.
+type JudgeModelConfig struct {
+	JudgeModel string
+}
+
+// defaultJudgeModel is the incumbent decision backend every judge slot falls back
+// to. It is "typesafe/jev-latest" — the exact value of the discoveryJudgeModel,
+// networkGuardJudgeModel and contentGuardJudgeModel constants this replaces — so
+// an unconfigured install resolves identically. Defined once, here, so there is a
+// single thing to change if the incumbent ever moves.
+const defaultJudgeModel = "typesafe/jev-latest"
+
+// applyJudgeModelConfig writes a slot's judge model only when the file value is
+// non-blank.
+//
+// A blank judge_model must NOT clear the slot. Clearing it would resolve to no
+// client and silently DISABLE a judge the user never touched. Disabling fails
+// open (candidates are kept), so it is not a safety problem — but it is invisible,
+// and the user has no way to notice or undo it. Leave the default in place.
+func applyJudgeModelConfig(dst *string, v string) {
+	if v = strings.TrimSpace(v); v != "" {
+		*dst = v
+	}
+}
+
+// defaultJudgeModelConfig is the single place a judge slot's default is defined.
+// defaultJudgeModel is "typesafe/jev-latest" — the exact value of the three
+// hardcoded judge constants this replaces, so an unconfigured install is
+// unchanged. It is a named resolver rather than an inline literal at each use so
+// there is one thing to change if the incumbent ever moves.
+func defaultJudgeModelConfig() JudgeModelConfig {
+	return JudgeModelConfig{JudgeModel: defaultJudgeModel}
 }
 
 // LocalModelConfig is one user-registered local chat/completion model
@@ -798,6 +853,10 @@ type OcodeConfig struct {
 	Browser       BrowserConfig
 	TTS           TTSConfig
 	ChatVerbosity ChatVerbosityConfig
+	// QuickActions is the composer strip. It is seeded in memory by
+	// defaultOcodeConfig when the key is absent, so an untouched install
+	// renders the three starters without anything on disk.
+	QuickActions QuickActionsConfig
 	// Wallpaper holds the chat background wallpaper selection
 	// (enabled, light/dark image IDs, auto/manual mode).
 	Wallpaper wallpaper.WallpaperConfig
@@ -814,6 +873,15 @@ type OcodeConfig struct {
 	LocalModels map[string]LocalModelConfig
 	Security    SecurityConfig
 	Discovery   DiscoveryConfig
+	// DocSearch, Search, NetworkGuard and ContentGuard select the decision-judge
+	// model for one judge call site each. They are separate fields rather than one
+	// shared judge setting because doc_search and Search used to share discovery's
+	// client, and un-sharing them is the point: each judge can now be moved
+	// independently.
+	DocSearch    JudgeModelConfig
+	Search       JudgeModelConfig
+	NetworkGuard JudgeModelConfig
+	ContentGuard JudgeModelConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
 	MemoryEnabled bool
@@ -821,6 +889,15 @@ type OcodeConfig struct {
 	// prompt into the agent's system prompt so it reads existing docs before
 	// implementing and updates them afterward.
 	DocPromptEnabled bool
+	// AutoShareOnStart starts the tailscale share exposure automatically when
+	// the desktop app boots, instead of waiting for the user to open the Share
+	// dialog. Default OFF: it publishes this instance to the tailnet, so it
+	// must be an explicit opt-in.
+	//
+	// Deliberately NOT part of ProfileDelta: boot-time network exposure is a
+	// property of the machine, not of a model/provider profile, so switching
+	// profiles must never silently publish or un-publish the instance.
+	AutoShareOnStart bool
 	// ProfileDebug toggles verbose profile debugging to the log tab, emitting
 	// the active profile and its effective overrides (model, provider, creds,
 	// mcp, etc.) when a session is built or the profile switches. Default
@@ -861,10 +938,15 @@ type OcodeConfig struct {
 	SpeechSummaryEnabled bool
 	AutoContinueEnabled  bool
 	AutoContinueModel    string
-	CommitMsgModel       string
-	CommitMsgPrompt      string
-	TUI                  TUIConfig
-	MaxSteps             int `json:"max_steps,omitempty"`
+	// PulseModel / PulseSystemPrompt configure the Pulse dashboard assistant
+	// (docs/concepts/pulse-assistant.md). Empty PulseModel follows the default
+	// chat model; empty PulseSystemPrompt uses the built-in prompt.
+	PulseModel        string
+	PulseSystemPrompt string
+	CommitMsgModel    string
+	CommitMsgPrompt   string
+	TUI               TUIConfig
+	MaxSteps          int `json:"max_steps,omitempty"`
 	// MaxImageDim caps the longest edge (px) of an embedded image; larger
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
@@ -924,7 +1006,10 @@ type OcodeConfig struct {
 	// desktop shell reconciles it at startup.
 	SystemPermissions sysperm.Config          `json:"system_permissions"`
 	Profiles          map[string]ProfileDelta `json:"profiles,omitempty"`
-	Extra             map[string]json.RawMessage
+	// DB holds saved database connections. Each URL is stored as an encrypted
+	// envelope (see internal/dbconnect.SealURL); plaintext URLs are never written.
+	DB    DBConfig `json:"db"`
+	Extra map[string]json.RawMessage
 }
 
 const (
@@ -1130,6 +1215,33 @@ type discoveryConfigFile struct {
 	LocalServerURL   string   `json:"local_server_url,omitempty"`
 	PinnedSkills     []string `json:"pinned_skills,omitempty"`
 	IgnorePaths      []string `json:"ignore_paths,omitempty"`
+	// JudgeModel selects the decision-judge model for the discovery relevance
+	// judge. Distinct from embedding_model above, which selects the embedder.
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+// Each judge_model field below selects the decision-judge model for ONE judge call
+// site. All default to typesafe/jev-latest, the constant those judges used before
+// per-slot selection existed, so an unconfigured install is unchanged.
+//
+// doc_search and search (code search) were previously served by the SAME client as
+// discovery — all three called discoveryJudgeClient — so one key moved all three.
+// They are now independent: setting discovery.judge_model no longer silently
+// changes the other two.
+type docSearchConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+type searchConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+type networkGuardConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+type contentGuardConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
 }
 
 // browserConfigFile is the on-disk mirror of BrowserConfig. Extensions is read
@@ -1144,6 +1256,8 @@ type browserConfigFile struct {
 	HTRPort            *int            `json:"htr_port,omitempty"`
 	HTRSocketPath      string          `json:"htr_socket_path,omitempty"`
 	HTRNativeHostName  string          `json:"htr_native_host_name,omitempty"`
+	HTRShared          *bool           `json:"htr_shared,omitempty"`
+	HTRToken           string          `json:"htr_token,omitempty"`
 	Extensions         json.RawMessage `json:"extensions,omitempty"`
 }
 
@@ -1155,12 +1269,19 @@ type ocodeConfigFile struct {
 	Browser                 browserConfigFile           `json:"browser"`
 	TTS                     TTSConfig                   `json:"tts,omitempty"`
 	ChatVerbosity           *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
+	QuickActions            *QuickActionsConfig         `json:"quick_actions,omitempty"`
 	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
 	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
+	DB                      DBConfig                    `json:"db"`
 	Security                securityConfigFile          `json:"security"`
 	Discovery               discoveryConfigFile         `json:"discovery"`
+	DocSearch               docSearchConfigFile         `json:"doc_search"`
+	Search                  searchConfigFile            `json:"search"`
+	NetworkGuard            networkGuardConfigFile      `json:"network_guard"`
+	ContentGuard            contentGuardConfigFile      `json:"content_guard"`
 	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
+	AutoShareOnStart        *bool                       `json:"auto_share_on_start,omitempty"`
 	ProfileDebug            *bool                       `json:"profile_debug,omitempty"`
 	TerminalScrollbackLines *int                        `json:"terminal_scrollback_lines,omitempty"`
 	TerminalFontFamily      string                      `json:"terminal_font_family,omitempty"`
@@ -1182,6 +1303,8 @@ type ocodeConfigFile struct {
 	SpeechSummaryEnabled    *bool                       `json:"speech_summary_enabled,omitempty"`
 	AutoContinueEnabled     *bool                       `json:"auto_continue_enabled,omitempty"`
 	AutoContinueModel       string                      `json:"auto_continue_model,omitempty"`
+	PulseModel              string                      `json:"pulse_model,omitempty"`
+	PulseSystemPrompt       string                      `json:"pulse_system_prompt,omitempty"`
 	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
 	UndoMaxAgeDelta         *int                        `json:"undo_max_age_delta,omitempty"`
 	MaxConcurrentAgents     *int                        `json:"max_concurrent_agents,omitempty"`
@@ -1246,9 +1369,10 @@ func defaultOcodeConfig() OcodeConfig {
 		Compact:              defaultCompactConfig(),
 		Advisor:              defaultAdvisorConfig(),
 		Permissions:          defaultPermissionConfig(),
-		Browser:              BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", NoSandbox: true},
+		Browser:              BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", HTRShared: true, NoSandbox: true},
 		TTS:                  TTSConfig{Engine: "browser-native", Mode: "manual"},
 		ChatVerbosity:        defaultChatVerbosityConfig(),
+		QuickActions:         SeedQuickActions(),
 		MemoryEnabled:        true,
 		SmallModelEnabled:    true,
 		RecapModelEnabled:    false,
@@ -1259,6 +1383,10 @@ func defaultOcodeConfig() OcodeConfig {
 		SpeechSummaryEnabled:    true,
 		Security:                defaultSecurityConfig(),
 		Discovery:               defaultDiscoveryConfig(),
+		DocSearch:               defaultJudgeModelConfig(),
+		Search:                  defaultJudgeModelConfig(),
+		NetworkGuard:            defaultJudgeModelConfig(),
+		ContentGuard:            defaultJudgeModelConfig(),
 		RecapTimeoutSeconds:     120,
 		UndoMaxAgeDelta:         10,
 		MaxConcurrentAgents:     2,
@@ -1281,6 +1409,7 @@ func defaultDiscoveryConfig() DiscoveryConfig {
 		LocalModelStatus: "none",
 		PinnedSkills:     []string{"brainstorming", "using-superpowers"},
 		IgnorePaths:      DefaultDiscoveryIgnorePaths(),
+		JudgeModel:       defaultJudgeModel,
 	}
 }
 
@@ -1323,6 +1452,9 @@ func defaultPermissionConfig() PermissionConfig {
 			"glob":            "allow",
 			"grep":            "allow",
 			"rgrep":           "allow",
+			"sqlite_schema":   "allow",
+			"sqlite_query":    "allow",
+			"sqlite_exec":     "ask",
 			"list":            "allow",
 			"lsp":             "allow",
 			"ast":             "allow",
@@ -1352,7 +1484,7 @@ func defaultPermissionConfig() PermissionConfig {
 			MaxContextBytes:          4096,
 			MaxContextSources:        2,
 			MaxContextLinesPerSource: 80,
-			MinConfidence:            0.85,
+			MinConfidence:            0.80,
 			Grants:                   nil,
 		},
 	}
@@ -1542,6 +1674,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "local_models")
 	}
 
+	if _, ok := raw["db"]; ok {
+		cfg.DB = file.DB
+		delete(raw, "db")
+	}
+
 	if _, ok := raw["security"]; ok {
 		applySecurityConfig(&cfg.Security, file.Security)
 		delete(raw, "security")
@@ -1550,6 +1687,23 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["discovery"]; ok {
 		applyDiscoveryConfig(&cfg.Discovery, file.Discovery)
 		delete(raw, "discovery")
+	}
+
+	if _, ok := raw["doc_search"]; ok {
+		applyJudgeModelConfig(&cfg.DocSearch.JudgeModel, file.DocSearch.JudgeModel)
+		delete(raw, "doc_search")
+	}
+	if _, ok := raw["search"]; ok {
+		applyJudgeModelConfig(&cfg.Search.JudgeModel, file.Search.JudgeModel)
+		delete(raw, "search")
+	}
+	if _, ok := raw["network_guard"]; ok {
+		applyJudgeModelConfig(&cfg.NetworkGuard.JudgeModel, file.NetworkGuard.JudgeModel)
+		delete(raw, "network_guard")
+	}
+	if _, ok := raw["content_guard"]; ok {
+		applyJudgeModelConfig(&cfg.ContentGuard.JudgeModel, file.ContentGuard.JudgeModel)
+		delete(raw, "content_guard")
 	}
 
 	if _, ok := raw["browser"]; ok {
@@ -1583,6 +1737,40 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			return fmt.Errorf("chat_verbosity: %w", err)
 		}
 		delete(raw, "chat_verbosity")
+	}
+
+	if _, ok := raw["quick_actions"]; ok {
+		if file.QuickActions != nil {
+			cfg.QuickActions = NormalizeQuickActions(*file.QuickActions)
+			// Validate on load, exactly as chat_verbosity does above. Normalize
+			// alone would let a hand-edited strip (too many chips, duplicate ids,
+			// a retired icon) load silently, and writeOcodeConfigFile would then
+			// write that same invalid block straight back -- an invalid strip
+			// that perpetuates itself, and a cap Task 3's PUT depends on that an
+			// editor can walk straight past. Failing the whole load is the
+			// deliberate cost: it is what the chat_verbosity precedent already
+			// does, and a loud error beats a silently broken strip.
+			if err := cfg.QuickActions.Validate(); err != nil {
+				return fmt.Errorf("quick_actions: %w", err)
+			}
+			// Branch on Chips == nil, never on len(Chips) == 0. The type's doc
+			// makes nil the "absent" marker for both a missing key and a JSON
+			// null, while a non-nil empty slice is the user having deleted
+			// every chip. A length check would resurrect the starters for them.
+			if cfg.QuickActions.Chips == nil {
+				cfg.QuickActions = SeedQuickActions()
+			}
+		} else {
+			cfg.QuickActions = SeedQuickActions()
+		}
+		delete(raw, "quick_actions")
+	} else {
+		// An absent key seeds the starters WITHOUT the loader writing a default
+		// to disk, so a fresh install still renders today's three pills.
+		// defaultOcodeConfig already seeded; restating it here binds the
+		// contract to the loader and covers a caller that passes a zero-value
+		// OcodeConfig.
+		cfg.QuickActions = SeedQuickActions()
 	}
 
 	if _, ok := raw["extra_allowed_paths"]; ok {
@@ -1691,6 +1879,18 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		}
 		delete(raw, "auto_continue_model")
 	}
+	if _, ok := raw["pulse_model"]; ok {
+		if file.PulseModel != "" {
+			cfg.PulseModel = file.PulseModel
+		}
+		delete(raw, "pulse_model")
+	}
+	if _, ok := raw["pulse_system_prompt"]; ok {
+		if file.PulseSystemPrompt != "" {
+			cfg.PulseSystemPrompt = file.PulseSystemPrompt
+		}
+		delete(raw, "pulse_system_prompt")
+	}
 
 	if _, ok := raw["commit_msg_model"]; ok {
 		if file.CommitMsgModel != "" {
@@ -1766,6 +1966,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.DocPromptEnabled = *file.DocPromptEnabled
 		}
 		delete(raw, "doc_prompt_enabled")
+	}
+
+	if _, ok := raw["auto_share_on_start"]; ok {
+		if file.AutoShareOnStart != nil {
+			cfg.AutoShareOnStart = *file.AutoShareOnStart
+		}
+		delete(raw, "auto_share_on_start")
 	}
 
 	if _, ok := raw["profile_debug"]; ok {
@@ -2160,6 +2367,7 @@ func applyDiscoveryConfig(dst *DiscoveryConfig, src discoveryConfigFile) {
 	if src.IgnorePaths != nil {
 		dst.IgnorePaths = mergeDiscoveryIgnorePaths(DefaultDiscoveryIgnorePaths(), src.IgnorePaths)
 	}
+	applyJudgeModelConfig(&dst.JudgeModel, src.JudgeModel)
 }
 
 func applyBrowserConfig(dst *BrowserConfig, src browserConfigFile) error {
@@ -2211,6 +2419,12 @@ func applyBrowserConfig(dst *BrowserConfig, src browserConfigFile) error {
 			return fmt.Errorf("browser.htr_native_host_name must use the com.ocode.* namespace")
 		}
 		dst.HTRNativeHostName = src.HTRNativeHostName
+	}
+	if src.HTRShared != nil {
+		dst.HTRShared = *src.HTRShared
+	}
+	if src.HTRToken != "" {
+		dst.HTRToken = src.HTRToken
 	}
 	return nil
 }
@@ -2363,6 +2577,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"browser":        cfg.Browser,
 		"tts":            cfg.TTS,
 		"chat_verbosity": chatVerbosity,
+		"quick_actions":  NormalizeQuickActions(cfg.QuickActions),
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
@@ -2372,6 +2587,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if len(cfg.LocalModels) > 0 {
 		payload["local_models"] = cfg.LocalModels
+	}
+	if len(cfg.DB.Connections) > 0 {
+		payload["db"] = cfg.DB
 	}
 	if len(cfg.ExtraAllowedPaths) > 0 {
 		seen := make(map[string]struct{}, len(cfg.ExtraAllowedPaths))
@@ -2417,6 +2635,12 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.AutoContinueModel != "" {
 		payload["auto_continue_model"] = cfg.AutoContinueModel
 	}
+	if cfg.PulseModel != "" {
+		payload["pulse_model"] = cfg.PulseModel
+	}
+	if cfg.PulseSystemPrompt != "" {
+		payload["pulse_system_prompt"] = cfg.PulseSystemPrompt
+	}
 	if cfg.RecapTimeoutSeconds > 0 {
 		payload["recap_timeout_seconds"] = cfg.RecapTimeoutSeconds
 	}
@@ -2428,6 +2652,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
+	payload["auto_share_on_start"] = cfg.AutoShareOnStart
 	payload["profile_debug"] = cfg.ProfileDebug
 	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
 	if cfg.TerminalFontFamily != "" {
@@ -2468,7 +2693,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		// Canonical keys are set either by the Extra loop (preserving raw
 		// on-disk values that failed normalization) or overridden afterward
 		// by the canonical setters below when a valid normalized value exists.
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "db" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "auto_continue_enabled" || k == "auto_continue_model" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" || k == "system_permissions" || k == "chat_verbosity" || k == "quick_actions" {
 			continue
 		}
 		payload[k] = v
@@ -3599,6 +3824,24 @@ func SaveAutoContinueModel(model string) error {
 	})
 }
 
+// SavePulseModel persists the Pulse assistant's model slot. Empty clears it,
+// so the assistant follows the default chat model.
+func SavePulseModel(model string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseModel = model
+		return nil
+	})
+}
+
+// SavePulseSystemPrompt persists the Pulse assistant's system prompt override.
+// Empty clears it, restoring the built-in prompt.
+func SavePulseSystemPrompt(prompt string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseSystemPrompt = prompt
+		return nil
+	})
+}
+
 // SaveOcrConfig persists the full OCR configuration via load-modify-write.
 // Only the OCR sub-tree is touched; all other fields are preserved from disk.
 func SaveOcrConfig(ocrCfg ocr.OcrConfig) error {
@@ -3679,6 +3922,24 @@ func SaveSingleBashPrefixRule(prefix, level string) error {
 			cfg.Permissions.Bash.Prefixes = make(map[string]string)
 		}
 		cfg.Permissions.Bash.Prefixes[prefix] = level
+		return nil
+	})
+}
+
+// DeleteBashPrefixRule removes one entry from permissions.bash.prefixes via
+// load-modify-write. Only the named prefix is touched; every other rule and
+// permissions field is preserved from disk. Deleting an absent prefix is a
+// no-op, not an error — the Settings UI's Remove is idempotent.
+func DeleteBashPrefixRule(prefix string) error {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Bash.Prefixes == nil {
+			return nil
+		}
+		delete(cfg.Permissions.Bash.Prefixes, prefix)
 		return nil
 	})
 }
@@ -3930,6 +4191,18 @@ func SaveOcodeFeatures(memoryEnabled, docPromptEnabled bool) error {
 	return withOcodeConfigLock(func(c *OcodeConfig) error {
 		c.MemoryEnabled = memoryEnabled
 		c.DocPromptEnabled = docPromptEnabled
+		return nil
+	})
+}
+
+// SaveAutoShareOnStart persists the auto-share-on-boot toggle.
+//
+// Targeted load-modify-write (via withOcodeConfigLock), never a whole-snapshot
+// save: concurrent writers (TUI command, web Settings PUT) would otherwise
+// clobber each other's unrelated keys.
+func SaveAutoShareOnStart(enabled bool) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.AutoShareOnStart = enabled
 		return nil
 	})
 }

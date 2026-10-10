@@ -55,6 +55,10 @@ export type LivePart =
       output?: string;
     }
   | { kind: "status"; text: string }
+  /** A user message injected mid-turn (queued input). It sits in the live
+   *  buffer, not `messages`, so it renders AFTER the assistant parts that
+   *  were produced before it; the turn-end snapshot supersedes it. */
+  | { kind: "user"; content: string; user_seq?: number }
   /** A transient, informational notice (e.g. "Discovered: …" / "Indexing: …"
    *  mirrored from the TUI's discovery notices). Not LLM output and not
    *  persisted — cleared with the rest of the live buffer at the turn
@@ -119,7 +123,7 @@ export interface ModelInfo {
   has_kaizen?: boolean;
 }
 
-export type TTSEngineId = "browser-native" | "piper" | "melo" | "kokoro";
+export type TTSEngineId = "browser-native" | "piper" | "paradee" | "melo" | "kokoro";
 export type TTSPlaybackMode = "manual" | "at-bottom" | "auto";
 
 export interface TTSEngine {
@@ -188,6 +192,27 @@ export interface ChatDisplayPolicy {
 }
 
 export type ChatVerbosityResponse = ChatVerbosityConfig;
+
+/** Quick actions — the pill strip above the composer. Mirrors
+ *  `internal/config.QuickActionChip`. `seed` is `omitempty` in Go, so the key
+ *  is ABSENT (not empty) for a custom chip: it must stay optional here. */
+export type QuickActionMode = "fill" | "send";
+export type QuickActionSeed = "compact" | "continue" | "recap";
+
+export interface QuickActionChip {
+  id: string;
+  label: string;
+  icon: string;
+  message: string;
+  mode: QuickActionMode;
+  seed?: QuickActionSeed;
+}
+
+export interface QuickActionsConfig {
+  chips: QuickActionChip[];
+}
+
+export type QuickActionsResponse = QuickActionsConfig;
 
 export interface TTSPlayback {
   generation: number;
@@ -476,6 +501,35 @@ export interface OcrConfig {
   paddle: { endpoint: string; variant: string };
 }
 
+/** Auto-share-on-start toggle plus the server's current share exposure.
+ *  `url` is the cached exposure (empty until auto-share or the Share dialog
+ *  starts one); `available` reports whether tailscale could serve at all.
+ *
+ *  `running`/`kind` describe the LIVE exposure: `kind` is "funnel" (public on
+ *  the internet) or "serve" (tailnet-only). An unproven DNS-name URL is
+ *  deliberately reported as not running with no url. */
+export interface AutoShareConfig {
+  enabled: boolean;
+  available: boolean;
+  running: boolean;
+  kind?: ShareKind;
+  url?: string;
+  hint?: string;
+}
+
+/** Which tailscale exposure is live: public funnel or tailnet-only serve. */
+export type ShareKind = "funnel" | "serve";
+
+/** Status of the whole-desktop tailscale share. Reading it is side-effect
+ *  free — STARTING is an explicit POST, never a GET. */
+export interface ShareStatus {
+  running: boolean;
+  available: boolean;
+  url?: string;
+  kind?: ShareKind;
+  hint?: string;
+}
+
 export interface ComputerUseConfig {
   enabled: boolean;
   status_lines: string[];
@@ -547,6 +601,8 @@ export interface SSEPermissionEvent {
   prefix?: string;
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
+  /** Name of the sub-agent that raised the ask; absent for a main-agent ask. */
+  agent_name?: string;
 }
 
 /** Decisions accepted by POST /api/permissions/resolve (`decision` field). */
@@ -1047,6 +1103,18 @@ export interface PermissionsResponse {
   bash_rules: PermissionRule[];
 }
 
+/** The three levels a bash prefix rule (or a tool rule) can carry. */
+export type PermissionLevelName = "allow" | "ask" | "deny";
+
+/** A staged change to the bash prefix rule set. Deliberately a DELTA: `set`
+ * carries added/changed rules, `remove` deleted keys. The server applies each
+ * entry with a targeted load-modify-write, so a rule another surface added
+ * between the editor's load and save is never clobbered. */
+export interface BashRulesDelta {
+  set?: Record<string, PermissionLevelName>;
+  remove?: string[];
+}
+
 /** The persisted default permission mode new TUI/web/RC sessions start in —
  * distinct from the live mode in PermissionsResponse. */
 export interface PermissionModeConfigResponse {
@@ -1139,6 +1207,8 @@ export interface PortMapView {
   remote_port: number;
   local_port: number;
   enabled: boolean;
+  /** ssh -R: the remote reaches the desktop's local port. Absent on older servers, which only ran -L. */
+  reverse?: boolean;
   live: boolean;
 }
 
@@ -1298,4 +1368,56 @@ export interface TodoUpdatedEvent {
   total: number;
   current: string;
   items: PulseTodoItem[];
+}
+
+/** GET /api/pulse/assistant: the global Pulse assistant session. `model` is the
+ *  effective model (the pulse-model slot when set, else the server default). */
+export interface PulseAssistantInfo {
+  session_id: string;
+  model: string;
+}
+
+/** One live terminal on the Pulse dashboard, from GET /api/pulse/terminals.
+ *  `command` is the program running in it, or the bare shell name when idle;
+ *  `running` is true only when a program other than the shell is in the foreground. */
+export interface PulseTerminal {
+  id: string;
+  project: string;
+  title: string;
+  pid: number;
+  command: string;
+  running: boolean;
+}
+
+/** One page of GET /api/pulse/terminals, running programs first. */
+export interface PulseTerminalPage {
+  terminals: PulseTerminal[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** One chat of the Pulse assistant, from GET /api/pulse/assistant/chats. */
+export interface PulseChatSummary {
+  session_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One page of GET /api/pulse/assistant/chats, newest first. `current` is the
+ *  chat the drawer shows ("" before the first chat is minted). */
+export interface PulseChatPage {
+  chats: PulseChatSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+  current: string;
+}
+
+/** GET /api/config/pulse-system-prompt. `prompt` is the override ("" when
+ *  unset); `default` is the built-in prompt text the override replaces. */
+export interface PulseSystemPrompt {
+  prompt: string;
+  default: string;
 }

@@ -3,14 +3,18 @@ import { render, act, waitFor } from "@testing-library/react";
 import {
   useJumpToSession,
   useJumpToPendingAsk,
+  useJumpToTerminal,
   PulseJumpProvider,
+  type TerminalJumpTarget,
 } from "./jumpToSession";
 import { browserActions } from "./browserStore";
 import { sideChatKey } from "./sidePaneState";
+import { tabFocusActions } from "./tabFocus";
 import type { Project } from "../api/types";
 
 const mockSelectProject = vi.fn();
 const mockOpenSessionTab = vi.fn();
+const mockAttachTerminal = vi.fn();
 const projects: Project[] = [
   { path: "/proj-a", name: "a", added_at: "", last_used_at: "", order: 1, group: "" },
   { path: "/proj-b", name: "b", added_at: "", last_used_at: "", order: 2, group: "" },
@@ -32,6 +36,10 @@ const projects: Project[] = [
     host: "user@box",
   },
 ] as unknown as Project[];
+
+vi.mock("../stores/terminalStore", () => ({
+  useTerminalState: () => ({ attachTerminal: mockAttachTerminal }),
+}));
 
 vi.mock("../stores/projectStore", () => ({
   useProjectState: () => ({
@@ -77,6 +85,7 @@ function mount() {
 beforeEach(() => {
   mockSelectProject.mockReset();
   mockOpenSessionTab.mockReset();
+  mockAttachTerminal.mockReset();
   openSpy = vi.spyOn(browserActions, "open");
   exitPulseCalls = 0;
   exitPulsePaths = [];
@@ -202,5 +211,72 @@ describe("PulseJumpProvider", () => {
     }
     expect(() => render(<Bare />)).toThrow(/PulseJumpProvider/);
     spy.mockRestore();
+  });
+});
+
+describe("useJumpToTerminal", () => {
+  it("selects the project, attaches the terminal, queues the reveal, then leaves the dashboard", async () => {
+    // Order is the contract: attach needs the project active, and the reveal
+    // request must be queued before the dashboard is left.
+    const order: string[] = [];
+    mockSelectProject.mockImplementation(async () => {
+      order.push("select");
+    });
+    mockAttachTerminal.mockImplementation(() => {
+      order.push("attach");
+    });
+    const requestSpy = vi.spyOn(tabFocusActions, "request").mockImplementation(() => {
+      order.push("request");
+    });
+    let openTerminal!: (t: TerminalJumpTarget) => Promise<void>;
+    function TerminalProbe() {
+      openTerminal = useJumpToTerminal();
+      return null;
+    }
+    render(
+      <PulseJumpProvider exitPulse={() => order.push("exit")}>
+        <TerminalProbe />
+      </PulseJumpProvider>,
+    );
+
+    await act(async () => {
+      await openTerminal({ projectPath: "/proj-b", terminalId: "term-9", title: "dev server" });
+    });
+
+    expect(order).toEqual(["select", "attach", "request", "exit"]);
+    expect(mockSelectProject).toHaveBeenCalledWith(projects[1]);
+    expect(mockAttachTerminal).toHaveBeenCalledWith("/proj-b", "", "term-9", "dev server");
+    expect(requestSpy).toHaveBeenCalledWith({
+      kind: "terminal",
+      projectPath: "/proj-b",
+      host: "",
+      terminalId: "term-9",
+    });
+  });
+
+  it("refuses a project the sidebar does not know and changes nothing", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const requestSpy = vi.spyOn(tabFocusActions, "request");
+    const exitPulse = vi.fn();
+    let openTerminal!: (t: TerminalJumpTarget) => Promise<void>;
+    function TerminalProbe() {
+      openTerminal = useJumpToTerminal();
+      return null;
+    }
+    render(
+      <PulseJumpProvider exitPulse={exitPulse}>
+        <TerminalProbe />
+      </PulseJumpProvider>,
+    );
+
+    await act(async () => {
+      await openTerminal({ projectPath: "/nowhere", terminalId: "term-1", title: "" });
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("/nowhere"));
+    expect(mockSelectProject).not.toHaveBeenCalled();
+    expect(mockAttachTerminal).not.toHaveBeenCalled();
+    expect(requestSpy).not.toHaveBeenCalled();
+    expect(exitPulse).not.toHaveBeenCalled();
   });
 });

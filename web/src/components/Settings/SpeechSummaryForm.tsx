@@ -76,7 +76,7 @@ export default function SpeechSummaryForm() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 max-w-lg space-y-4">
       <label className="flex items-center gap-2 text-xs text-muted-foreground">
         <input
           type="checkbox"

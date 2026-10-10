@@ -38,14 +38,23 @@ func TestCronRunsEndpoints(t *testing.T) {
 		}
 	}
 
+	// The runs endpoints are now PROJECT-scoped, so the handler must know this
+	// temp dir is a registered project — a `NewHandler()` on its own reports the
+	// process cwd and would (correctly) refuse this directory. Pointing the
+	// handler's workDir at `dir` mirrors reality, where the server's own default
+	// project is always allowed.
+	h := NewHandler()
+	h.workDir = dir
 	srv := &Server{
 		workDir:          dir,
 		mux:              http.NewServeMux(),
-		handler:          NewHandler(),
+		handler:          h,
 		schedulerRuns:    rh,
 		schedulerOutbox:  scheduler.NewOutbox(storePath),
 		schedulerTargets: scheduler.NewTargets(storePath),
 	}
+	srv.markCronEnabled()
+	srv.setCronScopeConfig(nil, nil, nil, nil, dir, srv.schedulerOutbox, rh, srv.schedulerTargets)
 	srv.mux.HandleFunc("GET /api/cron/{id}/runs", srv.handleCronRuns)
 	srv.mux.HandleFunc("GET /api/cron/{id}/runs/{runId}", srv.handleCronRunDetail)
 

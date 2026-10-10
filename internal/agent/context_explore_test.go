@@ -19,7 +19,7 @@ func TestTaskDefinition_HidesExploreWhenContextActive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.SetDocPromptEnabled(true)
 	a.SetWorkDir(td)
 
@@ -97,7 +97,7 @@ func TestTaskDefinition_ShowsExploreWhenContextInactive(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			a := NewAgent(nil, nil, nil, nil)
+			a := newTestAgent(nil, nil, nil, nil)
 			a.SetDocPromptEnabled(tc.enabled)
 			a.SetWorkDir(td)
 			tt := TaskTool{mainAgent: a}
@@ -207,7 +207,7 @@ func TestIsContextActive(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(docsDir, "index.md"), []byte("---\nokf_version: \"0.1\"\n---\n# Index\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	tt := TaskTool{mainAgent: a}
 
 	// disabled -> false

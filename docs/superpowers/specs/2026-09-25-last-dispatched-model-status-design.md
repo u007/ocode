@@ -46,17 +46,17 @@ timestamp: 2026-09-25T14:06:25Z
   (`web/src/lib/sessionEvents.ts:468-479`) and dispatches the same action;
   `turn_done` / `turn_error` handlers are untouched, so the value is retained.
 - **Server — `turn_started`:** `publishTurnStarted(sessionID, model string)`
-  (`internal/server/agent_session.go:811`) adds `data["model"]` when non-empty;
-  its only call site is `runTurn` (`agent_session.go:1084`). This is the
+  (`internal/server/agent_session.go:852`) adds `data["model"]` when non-empty;
+  its only call site is `runTurn` (`agent_session.go:1103`). This is the
   **headless/server-event fallback** — see §5.1 and R1 for exactly which turns
   emit it.
 - **Server — rewind 202:** the tokenized-rewind 202 reports the model handed to
   the queued job (`h.effectiveSessionModel` → `dispatchTurnWithRewind`), **not** a
-  stale resident-agent model (`internal/server/handler.go:1332-1352`, with an
+  stale resident-agent model (`internal/server/handler.go:1338-1358`, with an
   inline comment forbidding the old overwrite).
 - **Server — bridged RC responses:** all three bridged RC response branches —
-  async send 202 (`handler.go:1367`), rewind 202 (`handler.go:1329`), and the
-  synchronous send 200 (`handler.go:1391-1395`) — return
+  async send 202 (`handler.go:1373`), rewind 202 (`handler.go:1335`), and the
+  synchronous send 200 (`handler.go:1397-1401`) — return
   `ChatResponse{Model: rc.ModelForDispatch()}` — live `TUIStatus.MainModel`
   first, registration `RCBridge.Model` only as fallback
   (`internal/server/rc_bridge.go:276-286`). The browser captures only the
@@ -79,7 +79,7 @@ timestamp: 2026-09-25T14:06:25Z
   dispatched model" (`CHANGES.md:53`); `skills/ocode-web/SKILL.md`
   "Status-bar model semantics".
 - **R1 resolved (see §10):** `publishTurnStarted` is called only from `runTurn`
-  (`agent_session.go:1084`), and `runTurn` publishes `turn_started` regardless of
+  (`agent_session.go:1103`), and `runTurn` publishes `turn_started` regardless of
   an attached bridge — the bridge only suppresses the headless status-snapshot
   push. Turns the TUI executes through the RC channel never reach `runTurn` and
   emit **no** `turn_started`; they are covered by their 202, which reports
@@ -160,17 +160,17 @@ this client.**
 
 - **Set on 202.** Every dispatch-acknowledging path resolves a `ChatResponse`
   (`server.go:2486-2490`; `Content`, `SessionID`, `Model`): initial send
-  (`HandleChat` async 202, `handler.go:1048-1051`; `HandleSendMessage` async
+  (`HandleChat` async 202, `handler.go:1054-1057`; `HandleSendMessage` async
   202, injection 202, sync 200), retry (`handler_retry.go:98`),
   permission-resolve continuation (`handler_permissions_resolve.go:371`),
   question-answer continuation (`handler_questions.go:336`), rewind
-  (`handler.go:1352`), and the two RC-bridge 202s (`handler.go:1329`,
+  (`handler.go:1358`), and the two RC-bridge 202s (`handler.go:1335`,
   `:1367` — `ModelForDispatch()`, see below). The moment the response resolves,
   the client dispatches `SET_LAST_DISPATCHED_MODEL` with the trimmed, non-empty
   `model` — the bar flips synchronously with acceptance, without waiting on any
   turn event (arrival-order race with `turn_started` in §6.3).
 - **Rewind reports the queued job's model.** The rewind 202 echoes the model
-  handed to `dispatchTurnWithRewind` (`handler.go:1332-1352`), never the resident
+  handed to `dispatchTurnWithRewind` (`handler.go:1338-1358`), never the resident
   agent's pre-rewind model — the 202 must identify the dispatch the client just
   accepted, not whichever model a to-be-rebuilt agent happened to hold.
 - **Bridged RC responses report the live TUI model.** All three bridged RC
@@ -255,7 +255,7 @@ not a redefinition.
 
 - **`ChatResponse.Model` is pre-existing on all dispatch paths** — no wire
   change was needed:
-  - `HandleChat` async 202 (`handler.go:1048-1051`) and sync 200
+  - `HandleChat` async 202 (`handler.go:1054-1057`) and sync 200
     (`:1102-1106`); `HandleSendMessage` live-injection 202 (`:1443`), async
     dispatch 202 (`:1465`), sync 200 (`:1483-1487`).
   - `HandleRetrySession` 202 (`handler_retry.go:83` → `:98`, model =
@@ -266,16 +266,16 @@ not a redefinition.
     (`handler_questions.go:281` → `:336`). Bridge-mode ask resolutions return
     `200 ChatResponse{}` (`handler_permissions_resolve.go:194`,
     `handler_questions.go:139`/`:240`) — the client guard makes those a no-op.
-  - **Rewind 202** (`handler.go:1332-1352`): `model :=
+  - **Rewind 202** (`handler.go:1338-1358`): `model :=
     h.effectiveSessionModel(id)` is handed to `dispatchTurnWithRewind` and
     echoed verbatim. The pre-fix code overwrote it with the resident agent's
     model (`if as := h.lookupAgentSession(id); as != nil { model = as.model }`);
     that overwrite was removed with an inline comment — the 202 must report the
     model the queued job will use, not a stale resident-agent model. Pinned by
     `TestRewindAcceptedResponseUsesDispatchedModel`.
-  - **Bridged RC response branches** (async send `handler.go:1367`, rewind
-    `handler.go:1329`, synchronous send 200 at the RC result branch
-    `handler.go:1391-1395`): all three return
+  - **Bridged RC response branches** (async send `handler.go:1373`, rewind
+    `handler.go:1335`, synchronous send 200 at the RC result branch
+    `handler.go:1397-1401`): all three return
     `ChatResponse{Model: rc.ModelForDispatch()}`.
     `ModelForDispatch` (`rc_bridge.go:276-286`) returns the live
     `TUIStatus.MainModel` when set and falls back to the registration-time
@@ -286,7 +286,7 @@ not a redefinition.
     `async: true`, so the synchronous 200 is never issued to the web client;
     it reports the same live-model value anyway, keeping every RC response
     branch consistent.
-- **`publishTurnStarted` (`agent_session.go:811`)** now accepts the model and
+- **`publishTurnStarted` (`agent_session.go:852`)** now accepts the model and
   adds `"model": …` to the data map when non-empty; its only call site is
   `runTurn` (`:1084`, where `as.model` is in scope). `publishTurnDone`
   (`:858`) already emitted `"model"` — `turn_done` remains the wrong moment for
@@ -404,7 +404,7 @@ guard branch — no behavior change. `turn_done` (`:488-494`) and `turn_error`
 - **Remote SSH/WSL projects:** the 202 arrives through the same
   `/api/remote/{host}` proxy as a plain `ChatResponse` — `Model` needs no
   host-specific handling. `turn_started` arrives via the host's
-  `/api/remote/{host}/api/events` stream (`eventBus.ts:256`) into the same
+  `/api/remote/{host}/api/events` stream (`eventBus.ts:257`) into the same
   `routeBusEnvelope` — same dispatch, no host threading (the store key is the
   session id; sessions are unique per host and the event's session id routes
   it to the right slice).
@@ -463,8 +463,8 @@ guard branch — no behavior change. `turn_done` (`:488-494`) and `turn_error`
   server: 202 path fully functional, event fallback inert. Old client + new
   server: unaffected.
 - **Bridged TUI sessions:** all bridged RC response branches — async-send 202
-  (`handler.go:1367`), rewind 202 (`:1329`), and the synchronous send 200
-  (`handler.go:1391-1395`) — return
+  (`handler.go:1373`), rewind 202 (`:1329`), and the synchronous send 200
+  (`handler.go:1397-1401`) — return
   `ChatResponse{Model: rc.ModelForDispatch()}` — live `TUIStatus.MainModel`,
   registration `RCBridge.Model` only as fallback. The browser still captures
   only async 202 dispatch acknowledgements (both send endpoints always pass
@@ -573,7 +573,7 @@ suite rather than relying on the reducer pins.
 ## 10. Open risks
 
 - **R1 — RC-bridged turns and `turn_started` (resolved, precise scope).**
-  `turn_started` is published only by `runTurn` (`agent_session.go:1084`) —
+  `turn_started` is published only by `runTurn` (`agent_session.go:1103`) —
   and `runTurn` publishes it even when a bridge is attached (the bridge only
   suppresses the headless status push; `TestBridgedTurnTimingStillFlowsOnBus`).
   The gap is RC-*channel* turns: web sends, rewinds and ask continuations on a

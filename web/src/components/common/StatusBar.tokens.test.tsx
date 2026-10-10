@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import StatusBar from "./StatusBar";
+import { STATUS_BAR_COLLAPSED_STORAGE_KEY } from "./statusBarCollapse";
 
 // StatusBar reads two stores and the speech provider; stub all three so the
 // test drives only the per-session token segment (mirrors the collapse suite).
@@ -54,5 +55,75 @@ describe("StatusBar per-session token segment", () => {
     render(<StatusBar />);
     expect(screen.queryByText(/in \d/)).toBeNull();
     expect(screen.queryByText(/cache /)).toBeNull();
+  });
+});
+
+describe("StatusBar context segment", () => {
+  beforeEach(() => {
+    state.spendingUSD = 0;
+    state.slice = { isStreaming: false, error: null, live: [], tuiStatus: null, turnActive: false };
+    window.localStorage.clear();
+  });
+
+  it("shows a compact colored ctx percentage in the collapsed row", () => {
+    window.localStorage.setItem(STATUS_BAR_COLLAPSED_STORAGE_KEY, "true");
+    state.slice.tuiStatus = { context_current_tokens: 12000, context_max_tokens: 200000 };
+    render(<StatusBar />);
+    const el = screen.getByText("ctx 6%");
+    expect(el.className).toContain("text-emerald-500");
+    expect(screen.getByTitle("Context: 12000 / 200000 tokens (6% of window)")).toBeTruthy();
+  });
+
+  it("colors the collapsed row's compact ctx percentage red from 85%", () => {
+    window.localStorage.setItem(STATUS_BAR_COLLAPSED_STORAGE_KEY, "true");
+    state.slice.tuiStatus = { context_current_tokens: 85000, context_max_tokens: 100000 };
+    render(<StatusBar />);
+    const el = screen.getByText("ctx 85%");
+    expect(el.className).toContain("text-red-500");
+  });
+
+  it("omits the compact ctx percentage in the collapsed row when usage is unknown", () => {
+    window.localStorage.setItem(STATUS_BAR_COLLAPSED_STORAGE_KEY, "true");
+    state.slice.tuiStatus = { context_current_tokens: 0, context_max_tokens: 200000 };
+    render(<StatusBar />);
+    expect(screen.queryByText(/ctx \d+%/)).toBeNull();
+  });
+
+  it("shows the context percentage colored green under 65%", () => {
+    state.slice.tuiStatus = { context_current_tokens: 12000, context_max_tokens: 200000 };
+    render(<StatusBar />);
+    const el = screen.getByText(/ctx: 12k\/200k \(6%\)/);
+    expect(el.className).toContain("text-emerald-500");
+    expect(screen.getByTitle("Context: 12000 / 200000 tokens (6% of window)")).toBeTruthy();
+  });
+
+  it("colors the context percentage yellow from 65%", () => {
+    state.slice.tuiStatus = { context_current_tokens: 65000, context_max_tokens: 100000 };
+    render(<StatusBar />);
+    const el = screen.getByText(/ctx: 65k\/100k \(65%\)/);
+    expect(el.className).toContain("text-yellow-500");
+  });
+
+  it("colors the context percentage red from 85%", () => {
+    state.slice.tuiStatus = { context_current_tokens: 85000, context_max_tokens: 100000 };
+    render(<StatusBar />);
+    const el = screen.getByText(/ctx: 85k\/100k \(85%\)/);
+    expect(el.className).toContain("text-red-500");
+  });
+
+  it("clamps the percentage to 100% when usage exceeds the window", () => {
+    state.slice.tuiStatus = { context_current_tokens: 250000, context_max_tokens: 200000 };
+    render(<StatusBar />);
+    const el = screen.getByText(/ctx: 250k\/200k \(100%\)/);
+    expect(el.className).toContain("text-red-500");
+    expect(el.textContent).not.toContain("125%");
+  });
+
+  it("omits the percentage and stays muted when current usage is unknown", () => {
+    state.slice.tuiStatus = { context_current_tokens: 0, context_max_tokens: 200000 };
+    render(<StatusBar />);
+    const el = screen.getByText("ctx: ?/200k");
+    expect(el.className).toContain("text-muted-foreground");
+    expect(el.textContent).not.toContain("%");
   });
 });

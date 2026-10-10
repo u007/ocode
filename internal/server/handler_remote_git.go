@@ -67,8 +67,8 @@ func remoteGitStatus(ctx context.Context, rw remoteWork) (GitStatus, error) {
 	sections := strings.SplitN(out, sep, 8)
 	get := func(i int) string { return strings.TrimSpace(sectionAt(sections, i)) }
 	status.Branch = get(1)
-	status.StagedFiles = nonEmptyLines(get(2))
-	status.ChangedFiles = nonEmptyLines(get(3))
+	status.StagedFiles = remoteUnquoteNames(nonEmptyLines(get(2)))
+	status.ChangedFiles = remoteUnquoteNames(nonEmptyLines(get(3)))
 	// Untracked entries from porcelain -u ("?? path") merge into the
 	// unstaged list — same behavior as the local pipeline.
 	seen := map[string]bool{}
@@ -85,7 +85,7 @@ func remoteGitStatus(ctx context.Context, rw remoteWork) (GitStatus, error) {
 		if !strings.Contains(line[:2], "?") {
 			continue
 		}
-		f := strings.Trim(line[3:], `"`)
+		f := gitignoreUnquotePath(line[3:])
 		if f == "" || seen[f] {
 			continue
 		}
@@ -173,6 +173,18 @@ func sectionAt(sections []string, i int) string {
 }
 
 // nonEmptyLines splits s into trimmed, non-empty lines.
+// remoteUnquoteNames decodes the C-quoted names git emits in the non-`-z`
+// remote listings. Git quotes a name containing non-ASCII, quote or backslash
+// bytes, and an unquoted line never starts with `"`, so plain names pass
+// through unchanged.
+func remoteUnquoteNames(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		out = append(out, gitignoreUnquotePath(l))
+	}
+	return out
+}
+
 func nonEmptyLines(s string) []string {
 	out := []string{}
 	for _, l := range strings.Split(s, "\n") {
@@ -278,14 +290,18 @@ func remoteDiffFiles(ctx context.Context, rw remoteWork, staged bool, pathFilter
 				continue
 			}
 			statusCode := line[:2]
-			filePath := strings.Trim(line[3:], `"`)
+			filePath := gitignoreUnquotePath(line[3:])
 			if !strings.Contains(statusCode, "?") {
 				continue
 			}
 			if !remoteSpecIsSafe(filePath) {
 				continue
 			}
-			patch := remoteRunTrimOrEmpty(ctx, rw, remoteGitCommand(rw.Path, "diff", "--no-index", "/dev/null", remoteQuoteSpecPath(filePath)))
+			// `diff --no-index` exits 1 whenever it finds a difference, which is
+			// always for /dev/null. remoteRun discards stdout on any nonzero exit,
+			// so the exit status is masked here and the patch read from stdout,
+			// matching the local pipeline.
+			patch := remoteRunTrimOrEmpty(ctx, rw, remoteGitCommand(rw.Path, "diff", "--no-index", "/dev/null", remoteQuoteSpecPath(filePath))+" || true")
 			files = append(files, GitDiffFile{Path: filePath, Status: "untracked", Patch: patch})
 		}
 	}
@@ -302,21 +318,33 @@ func remoteRunTrimOrEmpty(ctx context.Context, rw remoteWork, script string) str
 }
 
 // remoteQuoteSpecPath quotes a repo-relative pathspec for a remote git
-// invocation. Unlike remoteAbsJoin'd filesystem paths, these are validated
-// by remoteSpecIsSafe first (defense in depth: quoted anyway).
+// invocation. This quoting is the guard against shell injection: a spec is
+// validated by remoteGitSpec for git semantics only, not for shell syntax.
 func remoteQuoteSpecPath(p string) string {
 	return remote.ShellQuote(p)
 }
 
+// remoteQuoteSpecs quotes every validated pathspec for a remote git argv.
+// remoteGitCommand joins its arguments raw, so an unquoted name with a space
+// is split by the remote shell into several pathspecs. Quote only where a
+// spec becomes a command argument: callers that look a spec up in a path set
+// keep the raw value.
+func remoteQuoteSpecs(specs []string) []string {
+	quoted := make([]string, 0, len(specs))
+	for _, s := range specs {
+		quoted = append(quoted, remoteQuoteSpecPath(s))
+	}
+	return quoted
+}
+
 // remoteSpecIsSafe reports whether an untracked path from remote porcelain
-// output can be re-embedded in a shell command. Porcelain quotes paths with
-// special characters ("..."), so any path that still contains a quote or
-// control character after the trim is skipped rather than passed through.
+// output is a usable git pathspec. The name is decoded before this check, so
+// a quote or backslash in the real name is fine; the git-spec rules decide.
 func remoteSpecIsSafe(p string) bool {
 	if p == "" {
 		return false
 	}
-	ok, err := remoteSafeSpec(p)
+	ok, err := remoteGitSpec(p)
 	return err == nil && ok == p
 }
 

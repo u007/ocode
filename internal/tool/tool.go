@@ -166,6 +166,9 @@ func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computer
 		&GitHubPRTool{},
 		&GitHubIssueTool{},
 		&GitHubWorkflowTool{},
+		&SqliteSchemaTool{},
+		&SqliteQueryTool{},
+		&SqliteExecTool{},
 	}
 	// The "ast" semantic tool (LSP-backed) is registered by default whenever a
 	// language server is available on PATH — no plugin toggle required.
@@ -200,6 +203,7 @@ func initBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any, computer
 	// Computer tool — opt-in via cfg.Ocode.ComputerUse.Enabled.
 	if cfg != nil && cfg.Ocode.ComputerUse.Enabled {
 		builtins = append(builtins, &ComputerTool{Config: cfg, Driver: computerDriver, DriverErr: computerDriverErr})
+		builtins = append(builtins, newWindowTool(cfg, computerDriver, computerDriverErr))
 	}
 	// Scheduled-job management — only included when a scheduler service is
 	// attached. The indirection through any (resolved in cron.go) avoids a

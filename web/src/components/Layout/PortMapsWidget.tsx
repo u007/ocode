@@ -215,7 +215,9 @@ export default function PortMapsWidget() {
                 className="flex items-center gap-2 rounded-md border border-border px-2 py-1.5"
               >
                 <span className="flex-1 text-sm font-mono">
-                  localhost:{m.local_port} → remote:{m.remote_port}
+                  {m.reverse
+                    ? `remote:${m.remote_port} ← localhost:${m.local_port} (reverse)`
+                    : `localhost:${m.local_port} → remote:${m.remote_port}`}
                 </span>
                 <span
                   className={`text-xs ${m.live ? "text-emerald-500" : "text-muted-foreground"}`}

@@ -182,11 +182,11 @@ func TestInsertHighlight_emptyRange(t *testing.T) {
 
 func TestParseHexColor(t *testing.T) {
 	tests := []struct {
-		input    string
-		wantR    int
-		wantG    int
-		wantB    int
-		wantOK   bool
+		input  string
+		wantR  int
+		wantG  int
+		wantB  int
+		wantOK bool
 	}{
 		{"#7aa2f7", 122, 162, 247, true},
 		{"#000000", 0, 0, 0, true},
@@ -249,7 +249,7 @@ func TestSetSelectionHighlightCodes(t *testing.T) {
 	if selectionHighlightClose != "CLOSE" {
 		t.Errorf("selectionHighlightClose = %q, want CLOSE", selectionHighlightClose)
 	}
-	
+
 	// Verify insertHighlight uses the new codes
 	got := insertHighlight("hello world", "hello world", 0, 5)
 	if !strings.Contains(got, "OPEN") || !strings.Contains(got, "CLOSE") {

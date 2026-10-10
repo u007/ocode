@@ -3,8 +3,9 @@ import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo, ServerProjectTabs } from "../api/types";
 import { eventBus } from "../lib/eventBus";
+import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "../lib/title";
 
-export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview";
+export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview" | "db";
 export type ProjectMetadataStatus = "loading" | "ready" | "error";
 
 export interface Tab {
@@ -151,6 +152,50 @@ export function findProjectPathForTab(state: ProjectState, tabId: string): strin
   return null;
 }
 
+/** One tab per session id across every project. The server file is merged by
+ *  several processes and an older client could persist a session under two
+ *  paths; the first path (iteration order) keeps it, later copies are dropped.
+ *  Returns the same object when nothing had to change. */
+export function dropCrossProjectDuplicateTabs(
+  tabsByProject: Record<string, Tab[]>,
+): Record<string, Tab[]> {
+  const seen = new Set<string>();
+  let changed = false;
+  const out: Record<string, Tab[]> = {};
+  for (const [path, list] of Object.entries(tabsByProject)) {
+    const kept = list.filter((t) => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+    if (kept.length !== list.length) changed = true;
+    if (kept.length > 0) out[path] = kept;
+    else if (list.length > 0) changed = true;
+  }
+  return changed ? out : tabsByProject;
+}
+
+/** Reconciles active ids against a FINAL tab map: a project left with no tabs
+ *  loses its entry, and an id naming a tab that is not in its list (dropped as a
+ *  cross-project duplicate) moves to the last surviving tab.
+ *
+ *  Both tab-assembly paths MUST run this after `dropCrossProjectDuplicateTabs`,
+ *  because every id they resolved earlier was resolved against the pre-dedupe
+ *  lists. Without it the two paths disagree about which tab is active: the
+ *  restore leaves a dangling id while the refetch re-points it. */
+function reconcileActiveTabs(
+  tabsByProject: Record<string, Tab[]>,
+  activeTabByProject: Record<string, string | null>,
+): Record<string, string | null> {
+  const out = { ...activeTabByProject };
+  for (const path of Object.keys(out)) {
+    const list = tabsByProject[path];
+    if (!list) delete out[path];
+    else if (!list.some((t) => t.id === out[path])) out[path] = list[list.length - 1].id;
+  }
+  return out;
+}
+
 /** The Tab bound to a session id, across every project. Lets host resolution
  *  read the tab's own host instead of re-deriving it from the (possibly
  *  ambiguous) project path. */
@@ -237,6 +282,19 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       return { ...state, sessionsError: action.error };
     case "ADD_TAB": {
       const key = action.tab.projectPath || path;
+      // A session is open under at most ONE project. A second copy under
+      // another project (deep link / picker while a different project is
+      // active) gave App.tsx two panes with the same React key for one
+      // session; React then re-created the pane on every render and the
+      // transcript reloaded and re-pinned under the reader. Activate the copy
+      // that already exists instead.
+      const owner = findProjectPathForTab(state, action.tab.id);
+      if (owner && owner !== key) {
+        return {
+          ...state,
+          activeTabByProject: { ...state.activeTabByProject, [owner]: action.tab.id },
+        };
+      }
       const list = state.tabsByProject[key] || [];
       if (list.find((t) => t.id === action.tab.id)) {
         return {
@@ -345,7 +403,15 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         if (localActive && merged.some((m) => m.id === localActive)) activeTabByProject[path] = localActive;
         else if (!activeTabByProject[path]) activeTabByProject[path] = merged[merged.length - 1].id;
       }
-      return { ...state, tabsByProject, activeTabByProject, tabsRestored: true };
+      const deduped = dropCrossProjectDuplicateTabs(tabsByProject);
+      return {
+        ...state,
+        tabsByProject: deduped,
+        // Reconciled AFTER the dedupe: the ids above were resolved against the
+        // pre-dedupe lists, so one can name a tab this pass just dropped.
+        activeTabByProject: reconcileActiveTabs(deduped, activeTabByProject),
+        tabsRestored: true,
+      };
     }
     case "SET_GROUPS":
       return { ...state, groups: Array.isArray(action.groups) ? action.groups : [] };
@@ -373,7 +439,8 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
       // ignores it until the write is acknowledged, so a refetch can't
       // restore the orphaned old-path tabs before the delete lands.
       delete nextTabs[oldPath];
-      nextTabs[newPath] = [...(nextTabs[newPath] || []), ...tabs];
+      const existing = nextTabs[newPath] || [];
+      nextTabs[newPath] = [...existing, ...tabs.filter((t) => !existing.some((e) => e.id === t.id))];
       const nextActive = { ...state.activeTabByProject };
       if (nextActive[oldPath] != null) {
         nextActive[newPath] = nextActive[oldPath];
@@ -415,7 +482,7 @@ interface RestoredTabs {
 const EMPTY_RESTORE: RestoredTabs = { tabsByProject: {}, activeTabByProject: {} };
 
 function toSubTab(v: unknown): SessionSubTabId {
-  return (v === "agents" || v === "changes" || v === "logs" || v === "status" || v === "preview" ? v : "chat") as SessionSubTabId;
+  return (v === "agents" || v === "changes" || v === "logs" || v === "status" || v === "preview" || v === "db" ? v : "chat") as SessionSubTabId;
 }
 
 /** Converts the server's `{root: {tabs, active}}` map into store shape,
@@ -431,7 +498,7 @@ function fromServerTabs(projects: Record<string, ServerProjectTabs> | null | und
       .map((t) => ({
         id: t.id,
         projectPath: path,
-        title: typeof t.title === "string" ? t.title : t.id,
+        title: typeof t.title === "string" ? truncateTitle(t.title, MAX_TITLE_TOOLTIP_CHARS) : t.id,
         activeSubTab: toSubTab(t.sub_tab),
       }));
     if (tabs.length === 0) continue;
@@ -536,14 +603,14 @@ function mergeExternalTabs(prev: ProjectState, external: RestoredTabs): Restored
       if (merged.length === 0) delete mergedActive[path];
     }
   }
-  // Remove projects that were deleted externally (no real nor new tabs)
-  for (const path of Object.keys(mergedActive)) {
-    if (!mergedByProject[path]) delete mergedActive[path];
-  }
+  const dedupedByProject = dropCrossProjectDuplicateTabs(mergedByProject);
+  // Remove projects that were deleted externally (no real nor new tabs), and
+  // re-point an active id whose tab was dropped as a cross-project duplicate.
+  const dedupedActive = reconcileActiveTabs(dedupedByProject, mergedActive);
   const prevStr = JSON.stringify({ tbp: prev.tabsByProject, atb: prev.activeTabByProject });
-  const nextStr = JSON.stringify({ tbp: mergedByProject, atb: mergedActive });
+  const nextStr = JSON.stringify({ tbp: dedupedByProject, atb: dedupedActive });
   if (prevStr === nextStr) return null;
-  return { tabsByProject: mergedByProject, activeTabByProject: mergedActive };
+  return { tabsByProject: dedupedByProject, activeTabByProject: dedupedActive };
 }
 
 interface ProjectContextType {
@@ -886,8 +953,20 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
    *  that project through — a tab bound to the local active project silently
    *  routes the resumed remote session locally. The owning project must
    *  separately be made active for the tab to be visible. */
+  const { tabsByProject, projects, activeProject } = state;
   const openSessionTab = useCallback((sessionId: string, sessionTitle: string, projectPath?: string, host?: string) => {
-    const path = projectPath || state.activeProject?.path || "";
+    const path = projectPath || activeProject?.path || "";
+    // The session is already open under another project: show THAT tab (the
+    // reducer refuses a second copy) and bring its project forward, so a deep
+    // link for another project's session does not land on an empty bar.
+    const owner =
+      Object.entries(tabsByProject).find(([, list]) => list.some((t) => t.id === sessionId))?.[0] ?? null;
+    if (owner && owner !== path) {
+      const ownerProject = projects.find((p) => p.path === owner);
+      if (ownerProject && activeProject?.path !== owner) void selectProject(ownerProject);
+      dispatch({ type: "ADD_TAB", tab: { id: sessionId, projectPath: owner, title: sessionTitle || sessionId, activeSubTab: "chat" } });
+      return;
+    }
     // Only stamp host when the caller supplied one. `undefined` keeps the
     // legacy path-inference behaviour; passing "" records an explicit local
     // binding (which survives a same-path remote duplicate ambiguity).
@@ -899,7 +978,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       ...(host !== undefined ? { host } : {}),
     };
     dispatch({ type: "ADD_TAB", tab });
-  }, [state.activeProject]);
+  }, [tabsByProject, projects, activeProject, selectProject]);
 
   // Deep-link sessions (desktop -session, /session/:id) may arrive before the
   // active project is resolved. Defer via a pending marker applied when a

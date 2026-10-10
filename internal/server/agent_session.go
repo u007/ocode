@@ -500,20 +500,6 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 			SessionID: sessionID,
 		})
 	}
-	lspMgr := h.lspManagerFor(projectRoot)
-	var computerDriver tool.ComputerDriver
-	var computerDriverErr error
-	if effCfg != nil && effCfg.Ocode.ComputerUse.Enabled {
-		computerDriver, computerDriverErr = computer.New(h.computerSup)
-	}
-	tools := tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.scheduler, computerDriver, computerDriverErr)
-	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
-	ag.SetSessionID(sessionID)
-	// Replace the process-wide seed with THIS session's own advisor model and
-	// trigger set (pinning the current default if the session has none yet).
-	// effCfg may be a per-profile snapshot or a per-session copy, so without
-	// this the advisor would follow a global value the chat never chose.
-	ag.SetAdvisorConfig(h.advisorConfigSeed(sessionID))
 	// The agent's workdir comes from the registry entry's project root, not
 	// the process cwd — multi-project sessions run against their own repo
 	// (environment prompt, file-edit snapshots, permissions, discovery all
@@ -521,9 +507,40 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// dir", never the process cwd: the desktop .app launches with cwd "/", so
 	// leaving workDir empty made confinedPath resolve relative tool paths
 	// ("TODO.md") against "/" and reject them as outside the working directory.
+	//
+	// This normalisation is hoisted above every projectRoot consumer (the LSP
+	// manager, the cron tool) on purpose. It used to sit just above SetWorkDir,
+	// which meant everything built in between saw the RAW root — so a session
+	// with no project resolved its per-project cron engine against "", a
+	// different store directory from the default project's.
 	if projectRoot == "" {
 		projectRoot = h.workDir
 	}
+	lspMgr := h.lspManagerFor(projectRoot)
+	// The Pulse assistant gets no builtin tools (no bash, file, edit or task):
+	// configurePulseAgent installs only its read-only tool set below.
+	pulse := isPulseSession(sessionID)
+	var tools []tool.Tool
+	if !pulse {
+		var computerDriver tool.ComputerDriver
+		var computerDriverErr error
+		if effCfg != nil && effCfg.Ocode.ComputerUse.Enabled {
+			computerDriver, computerDriverErr = computer.New(h.computerSup)
+		}
+		tools = tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.cronToolService(projectRoot), computerDriver, computerDriverErr)
+	}
+	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
+	if pulse {
+		h.configurePulseAgent(ag, effCfg)
+	}
+	ag.SetSessionID(sessionID)
+	// Replace the process-wide seed with THIS session's own advisor model and
+	// trigger set (pinning the current default if the session has none yet).
+	// effCfg may be a per-profile snapshot or a per-session copy, so without
+	// this the advisor would follow a global value the chat never chose.
+	ag.SetAdvisorConfig(h.advisorConfigSeed(sessionID))
+	// projectRoot was normalised to the server's own project dir above, before
+	// any consumer keyed off it.
 	ag.SetWorkDir(projectRoot)
 	// Apply this session's own persisted permission-mode override, if any, so
 	// every build path (bootstrap, profile reconcile, plugin reload) restores
@@ -559,28 +576,33 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 
 	// Stage "tools": external/plugin tools.
 	h.publishBootstrapStage(sessionID, "tools")
-	ag.LoadExternalTools(effCfg)
+	if !pulse {
+		ag.LoadExternalTools(effCfg)
+	}
 
 	// Stage "mcp": MCP tools with a bounded wait. Stragglers are dropped with
 	// a warning event rather than stalling the bootstrap.
 	h.publishBootstrapStage(sessionID, "mcp")
+	// The Pulse assistant's tool set is fixed: no plugin or MCP tools attach.
 	// A session that toggled MCP servers from the web sidebar has a per-session
 	// override; enumerate fresh against its effective config so the toggle takes
 	// effect in THIS chat only. Sessions with no override reuse the process-wide
 	// cache (the common case) instead of re-running the blocking enumeration.
-	if sidTools, sidErrs := h.mcpToolsForSession(effCfg, sessionID); sidTools != nil || sidErrs != nil {
-		ag.AddMCPTools(sidTools)
-		ag.AddMCPErrors(sidErrs)
-	} else {
-		timeout := h.mcpBootstrapTimeout
-		if timeout <= 0 {
-			timeout = bootstrapMCPTimeout
-		}
-		mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
-		ag.AddMCPTools(mcpTools)
-		ag.AddMCPErrors(mcpErrs)
-		if timedOut {
-			h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
+	if !pulse {
+		if sidTools, sidErrs := h.mcpToolsForSession(effCfg, sessionID); sidTools != nil || sidErrs != nil {
+			ag.AddMCPTools(sidTools)
+			ag.AddMCPErrors(sidErrs)
+		} else {
+			timeout := h.mcpBootstrapTimeout
+			if timeout <= 0 {
+				timeout = bootstrapMCPTimeout
+			}
+			mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
+			ag.AddMCPTools(mcpTools)
+			ag.AddMCPErrors(mcpErrs)
+			if timedOut {
+				h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
+			}
 		}
 	}
 
@@ -590,7 +612,18 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// leak into another chat, and a resume/restart re-seeds from metadata.
 	ag.SetAdvisorEnabled(h.advisorSeed(sessionID, h.advisorFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.ProfileCredentialVersion()}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks()}
+	// Give this session's sub-agents a working permission-ask callback. Without
+	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
+	// server never wires OnSubAgentMessage and a child's messages never reach
+	// the parent's OnMessage mirror, nothing reported it: the child aborted
+	// mid-work and its run was recorded as done (see
+	// docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md).
+	// Installed here and nowhere else, so ACP, runcli and the TUI keep their own
+	// asker (or their sentinel path) untouched. An RC-bridged session does reach
+	// buildAgentSession for status/state reads, but its AGENT is owned and
+	// stepped by the TUI, so this asker is never invoked on it.
+	ag.SetSubAgentPermAsker(h.newServerSubAgentAsker(sessionID, as))
 	// Restore this session's spend and token history before anything reads the
 	// gauge. The totals live in transcript metadata (the same keys the TUI
 	// writes) and a freshly built agent starts at zero, so without this seed the
@@ -670,7 +703,7 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// The credential version is global, not per-profile: an in-place edit must
 	// invalidate the cached client for window-unbound sessions too, so it is
 	// read unconditionally rather than only on the window-bound path.
-	curCredVersion := auth.ProfileCredentialVersion()
+	curCredVersion := auth.CredentialVersion()
 	cur := as.profile
 	if entry.WindowID != "" {
 		cur = h.resolveSessionProfile(entry)
@@ -698,9 +731,22 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 // The old agent is shut down only when no turn is active for id: this is
 // enforced here, not just by callers, so a future or racing caller can't
 // tear down an agent mid-turn by skipping the IsTurnActive check.
+//
+// A turn that survives the swap can have a sub-agent parked on a permission ask
+// in the OLD session's registry, while every lookup (resolve, pending_asks)
+// goes through h.agents[id] — now the replacement. The replacement therefore
+// always inherits the old registry, or the ask became unanswerable and the turn
+// hung until the park timed out. It is unconditional rather than gated on
+// IsTurnActive: that read cannot be made under h.mu (SessionManager.mu is never
+// taken under it), so a gate would leave a window where a turn starting between
+// the read and the swap still stranded its asks. With no turn active the
+// registry is empty after the denyAll below, so sharing it costs nothing.
 func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 	h.mu.Lock()
 	old, ok := h.agents[id]
+	if ok && old != as && old.childAsks != nil {
+		as.childAsks = old.childAsks
+	}
 	h.agents[id] = as
 	h.mu.Unlock()
 	if ok && old != as {
@@ -711,6 +757,10 @@ func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 		in, out, cached, total := old.usageSnapshot()
 		as.seedUsage(in, out, cached, total)
 		if old.agent != nil && !h.sessions.IsTurnActive(id) {
+			// Same reason as the idle-eviction hook: a child parked on a
+			// permission ask must be denied before its agent goes away, so the
+			// rebuild cannot strand a goroutine waiting on a dead session.
+			old.childAsks.denyAll()
 			old.agent.Shutdown()
 		}
 	}
@@ -1019,6 +1069,11 @@ type turnOptions struct {
 	// duplicates the user's message. Mirrors the TUI's Ctrl+Y retry
 	// (model.retryLastLLMError).
 	retryLast bool
+
+	// refuseIfBusy makes dispatch fail with errTurnInFlight, instead of queueing
+	// a turn, when another async turn is already registered on the session. The
+	// check and the registration share one cancelMu section.
+	refuseIfBusy bool
 }
 
 // runTurn executes one agent turn: appends the user message (unless
@@ -1648,6 +1703,42 @@ func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*tu
 	return h.dispatchTurnWithRewind(id, model, content, opts, "")
 }
 
+// errTurnInFlight means a turn is already running on the session and the caller
+// asked not to queue behind it.
+var errTurnInFlight = errors.New("session is mid-turn; try again when it finishes")
+
+// beginSyncTurn counts a synchronous turn in turnInFlight. Without the count an
+// async dispatch cannot see the turn under the lock it refuses under, so a pulse
+// send could start behind it. The returned release undoes the count. When the
+// last in-flight turn ends, release also clears pendingCancel: a Stop during a
+// synchronous turn sets the flag, but no executeTurnJob runs to consume it, so a
+// stale flag would cancel the next message.
+func (h *Handler) beginSyncTurn(id string) func() {
+	h.cancelMu.Lock()
+	if h.turnInFlight == nil {
+		h.turnInFlight = make(map[string]int)
+	}
+	h.turnInFlight[id]++
+	h.cancelMu.Unlock()
+	return func() {
+		h.cancelMu.Lock()
+		defer h.cancelMu.Unlock()
+		if n := h.turnInFlight[id] - 1; n <= 0 {
+			delete(h.turnInFlight, id)
+			delete(h.pendingCancel, id)
+		} else {
+			h.turnInFlight[id] = n
+		}
+	}
+}
+
+// runSyncTurn runs a synchronous turn counted by beginSyncTurn.
+func (h *Handler) runSyncTurn(id string, as *agentSession, content string, opts turnOptions) (string, error) {
+	release := h.beginSyncTurn(id)
+	defer release()
+	return h.runTurn(id, as, content, opts)
+}
+
 func (h *Handler) dispatchTurnWithRewind(id, model, content string, opts turnOptions, rewindToken string) (*turnJob, error) {
 	job := &turnJob{content: content, model: model, opts: opts, rewindToken: rewindToken, persistAck: make(chan struct{})}
 	// Refuse new turns once shutdown has begun: shutdown joins a bounded job
@@ -1663,6 +1754,11 @@ func (h *Handler) dispatchTurnWithRewind(id, model, content string, opts turnOpt
 	h.cancelMu.Lock()
 	if h.turnInFlight == nil {
 		h.turnInFlight = make(map[string]int)
+	}
+	if opts.refuseIfBusy && h.turnInFlight[id] > 0 {
+		h.cancelMu.Unlock()
+		h.turnJobsWG.Done()
+		return nil, errTurnInFlight
 	}
 	h.turnInFlight[id]++
 	h.cancelMu.Unlock()
@@ -1953,9 +2049,22 @@ func (h *Handler) bootstrapEntryAgent(entry *sessionEntry, model string) (*agent
 	if model == "" {
 		model = h.effectiveSessionModel(entry.SessionID)
 	}
+	// A missing transcript is a brand-new session (empty history). Any other
+	// load failure (e.g. SQLITE_BUSY under machine load) must fail the
+	// bootstrap: building the agent on an empty history makes it diverge from
+	// the stored rows, so every live snapshot is dropped and every turn-end
+	// save conflicts — the turn's output is discarded and the session reverts
+	// to its last stored input row.
 	var history []agent.Message
-	if s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID); err == nil {
+	s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID)
+	switch {
+	case err == nil:
 		history = s.Messages
+	case errors.Is(err, os.ErrNotExist):
+		// new session: nothing persisted yet
+	default:
+		log.Printf("serve error: load transcript for %s in %s: %v", entry.SessionID, entry.ProjectRoot, err)
+		return nil, "history", fmt.Errorf("load session transcript: %w", err)
 	}
 	if n := pendingStripLen(history, h.sessions.PendingContents(entry.SessionID)); n > 0 {
 		history = history[:len(history)-n]
@@ -2049,8 +2158,13 @@ func (h *Handler) wireCompactCallbacks(sessionID string, ag *agent.Agent) {
 // transcript has not shrunk since (a racing manual /compact can shrink it —
 // in that case the stale result is dropped).
 func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
+	// A user cancel is not a summarization failure: retire the lifecycle slot
+	// with a clean completion (compaction_done{ok:true}) so the shared
+	// indicator clears on every client without an error banner, and leave the
+	// transcript untouched.
+	cancelled := errors.Is(r.Err, agent.ErrCompactionCanceled)
 	compactionErr := ""
-	if r.Err != nil {
+	if r.Err != nil && !cancelled {
 		compactionErr = r.Err.Error()
 	}
 	// Always retire the lifecycle slot, including malformed/stale results and
@@ -2060,7 +2174,7 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 		h.finishCompaction(sessionID, compactionErr)
 	}()
 	if !r.OK {
-		if r.Err != nil {
+		if r.Err != nil && !cancelled {
 			log.Printf("serve: auto-compaction failed for session %s: %v", sessionID, r.Err)
 		}
 		return
@@ -2217,4 +2331,25 @@ func (h *Handler) loadSession(sessionID string) (*session.Session, error) {
 		return session.LoadForDir(e.ProjectRoot, sessionID)
 	}
 	return session.Load(sessionID)
+}
+
+// cronToolService picks the value handed to the tool registry as the cron engine.
+//
+// A per-project resolver wins, so the LLM `cron` tool manages the session's own
+// project's jobs. The single `scheduler` service is the fallback for a host that
+// never installed a per-project scope (and for tests that set that field
+// directly), which preserves the pre-existing single-project behaviour rather
+// than stripping the tool from those hosts.
+//
+// This is a fallback for a MISSING resolver, not for one that FAILS: a per-call
+// failure is surfaced to the model by the tool, because quietly using another
+// project's engine is the bug this whole path exists to fix.
+func (h *Handler) cronToolService(projectRoot string) any {
+	if h.cronServices != nil {
+		return &tool.ProjectCronService{Root: projectRoot, Resolve: h.cronServices}
+	}
+	if h.scheduler != nil {
+		return h.scheduler
+	}
+	return nil
 }

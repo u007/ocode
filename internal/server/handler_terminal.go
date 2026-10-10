@@ -501,7 +501,7 @@ func (h *Handler) serveFreshTerminal(w http.ResponseWriter, r *http.Request, ses
 // connection alive through NATs/proxies and to detect dead connections
 // (common with remote SSH/WSL tunnels that can silently drop). If a
 // ping write fails, the shell is detached immediately — far faster
-// than the 30-minute detach TTL.
+// than the detach TTL (terminalDetachTTL, or terminalDetachTTLRemote in remote mode).
 func (h *Handler) serveTerminalSocket(sess *terminalSession, ws *websocket.Conn) {
 	defer sess.detach(ws)
 
@@ -834,6 +834,28 @@ func (h *Handler) HandleTerminalList(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(terminalListResponse{Terminals: entries}); err != nil {
 		log.Printf("terminal list: failed to encode response: %v", err)
 	}
+}
+
+// HandlePulseTerminals serves GET /api/pulse/terminals?limit=&offset=: the live
+// terminals for the Pulse dashboard, running programs first. It has the same
+// access gate as GET /api/terminal. limit defaults to 50 and is capped at 200.
+func (h *Handler) HandlePulseTerminals(w http.ResponseWriter, r *http.Request) {
+	if !h.terminalAccessAllowed() {
+		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
+		return
+	}
+	limit, offset, err := pulsePageParams(r, 50, 200)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	page, total := pulsePage(h.pulseTerminalRows(), limit, offset)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"terminals": page,
+		"total":     total,
+		"limit":     limit,
+		"offset":    offset,
+	})
 }
 
 // remoteProjectRegistered reports whether (host, path) is a remote project

@@ -12,7 +12,7 @@ import (
 func TestSystemPermissionsConfigRoundTrip(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	// Seed an unrelated field so we can prove the targeted save preserves it.
 	seed := defaultOcodeConfig()

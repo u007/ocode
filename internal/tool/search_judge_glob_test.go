@@ -74,7 +74,7 @@ func TestGlobJudgeAbsentGolden(t *testing.T) {
 }
 
 // TestGlobJudgeReceivesMtimeOrderAndCap pins that the judge samples the
-// mtime-descending order glob produces, capped at searchJudgeMaxCandidates, and
+// mtime-descending order glob produces, capped at SearchJudgeMaxCandidates, and
 // that the unjudged remainder is disclosed rather than dropped.
 func TestGlobJudgeReceivesMtimeOrderAndCap(t *testing.T) {
 	n := globMaxResults + 5
@@ -96,17 +96,17 @@ func TestGlobJudgeReceivesMtimeOrderAndCap(t *testing.T) {
 	if got.Tool != "glob" || got.Intent != "the txt files" {
 		t.Fatalf("tool/intent = %q/%q", got.Tool, got.Intent)
 	}
-	if len(got.Results) != searchJudgeMaxCandidates {
-		t.Fatalf("judge received %d candidates, want %d", len(got.Results), searchJudgeMaxCandidates)
+	if len(got.Results) != SearchJudgeMaxCandidates {
+		t.Fatalf("judge received %d candidates, want %d", len(got.Results), SearchJudgeMaxCandidates)
 	}
 	if got.Results[0].Path != fmt.Sprintf("f%03d.txt", n-1) {
 		t.Fatalf("first judged candidate = %q, want the newest file", got.Results[0].Path)
 	}
-	if got.Results[searchJudgeMaxCandidates-1].Path != fmt.Sprintf("f%03d.txt", n-searchJudgeMaxCandidates) {
-		t.Fatalf("last judged candidate = %q, want mtime-descending order preserved", got.Results[searchJudgeMaxCandidates-1].Path)
+	if got.Results[SearchJudgeMaxCandidates-1].Path != fmt.Sprintf("f%03d.txt", n-SearchJudgeMaxCandidates) {
+		t.Fatalf("last judged candidate = %q, want mtime-descending order preserved", got.Results[SearchJudgeMaxCandidates-1].Path)
 	}
 	wantFooter := fmt.Sprintf("[relevance judge: 1 of %d result(s) omitted as out of scope for this intent]; %d beyond the judge cap were not judged",
-		searchJudgeMaxCandidates, globMaxResults-searchJudgeMaxCandidates)
+		SearchJudgeMaxCandidates, globMaxResults-SearchJudgeMaxCandidates)
 	if !strings.Contains(out, wantFooter) {
 		t.Fatalf("cap footer missing:\n--- want substring ---\n%s\n--- got ---\n%s", wantFooter, out)
 	}
@@ -114,7 +114,7 @@ func TestGlobJudgeReceivesMtimeOrderAndCap(t *testing.T) {
 	if strings.Contains(out, fmt.Sprintf("f%03d.txt", n-1)) {
 		t.Fatalf("vetoed file leaked into output:\n%s", out)
 	}
-	if !strings.Contains(out, fmt.Sprintf("f%03d.txt", n-searchJudgeMaxCandidates-1)) {
+	if !strings.Contains(out, fmt.Sprintf("f%03d.txt", n-SearchJudgeMaxCandidates-1)) {
 		t.Fatalf("unjudged file past the cap was dropped:\n%s", out)
 	}
 }

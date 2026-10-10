@@ -157,7 +157,7 @@ func TestFindChrome_CandidateOrderTable(t *testing.T) {
 	cases := []struct {
 		name     string
 		exists   []string // which candidates exist (by base name)
-		wantName string    // expected selected binary base name
+		wantName string   // expected selected binary base name
 	}{
 		{"chromium_first", []string{"Chromium"}, "Chromium"},
 		{"canary_before_branded", []string{"Canary"}, "Canary"},
@@ -313,6 +313,19 @@ func TestMain(m *testing.M) {
 }
 
 func runFakeChrome() {
+	// Optional environment dump, used by the HTR launch-env tests to read back
+	// what this process actually received. Written before the first CDP read
+	// so it exists as soon as the handshake is answered.
+	if dump := os.Getenv("OCODE_FAKE_CHROME_ENV_DUMP"); dump != "" {
+		if f, err := os.Create(dump); err == nil {
+			for _, kv := range os.Environ() {
+				if strings.HasPrefix(kv, "HTR_") {
+					_, _ = f.WriteString(kv + "\n")
+				}
+			}
+			_ = f.Close()
+		}
+	}
 	in := os.NewFile(3, "cdp-in")
 	out := os.NewFile(4, "cdp-out")
 	buf := make([]byte, 0, 4096)

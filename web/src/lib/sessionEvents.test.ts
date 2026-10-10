@@ -3,6 +3,7 @@ import {
   routeBusEnvelope,
   reconcileOpenSessions,
   revalidateSession,
+  hydrateSessionOnActivation,
   applyReconcileState,
   RECONCILE_PAGE_SIZE,
   LIVE_DELTA_FLUSH_MS,
@@ -37,6 +38,7 @@ vi.mock("../api/client", () => ({
     getSession: (...a: unknown[]) => mockGetSession(...a),
     closeSession: (...a: unknown[]) => mockCloseSession(...a),
   },
+  apiPath: (p: string) => p,
 }));
 
 function env(event: string, over: Partial<BusEnvelope> = {}): BusEnvelope {
@@ -63,6 +65,12 @@ function makeRouter(
     hostFor,
   };
   return { router, actions, projectActions, getState: () => state };
+}
+
+/** Marks sessions as opened this page load (their ChatPanel mounted): lazy tab
+ *  hydration only fetches a transcript for such slices. */
+function hydrate(router: SessionEventRouter, ...ids: string[]) {
+  for (const id of ids) router.dispatch({ type: "MARK_INITIALIZED", sessionId: id });
 }
 
 describe("routeBusEnvelope", () => {
@@ -173,6 +181,26 @@ describe("routeBusEnvelope", () => {
     routeBusEnvelope(env("user_message", { data: { content: "again", user_seq: 1 } }), router);
     routeBusEnvelope(env("user_message", { data: { content: "again", user_seq: 2 } }), router);
     expect(getState().sessions["s1"].messages).toHaveLength(2);
+  });
+
+  // Queued input injected mid-turn: assistant output already streamed into
+  // `live` (rendered after `messages`), so the echo must join `live` in order
+  // or the user line is hoisted above output that preceded it.
+  it("keeps a mid-turn user_message after the live output that preceded it", () => {
+    vi.useFakeTimers();
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("user_message", { data: { content: "first", user_seq: 1 } }), router);
+    routeBusEnvelope(env("text", { data: { delta: "working" } }), router);
+    vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
+    routeBusEnvelope(env("user_message", { data: { content: "also", user_seq: 2 } }), router);
+    routeBusEnvelope(env("user_message", { data: { content: "also", user_seq: 2 } }), router);
+    const slice = getState().sessions["s1"];
+    expect(slice.messages).toHaveLength(1);
+    expect(slice.live).toEqual([
+      { kind: "text", text: "working" },
+      { kind: "user", content: "also", user_seq: 2 },
+    ]);
+    vi.useRealTimers();
   });
 
   it("never dedupes a legacy user_message without user_seq", () => {
@@ -755,6 +783,7 @@ describe("reconcileOpenSessions", () => {
     mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 10 });
     mockGetSession.mockResolvedValue({ messages: [{ role: "assistant", content: "rec" }], total: 1 });
     const { router, actions } = makeRouter(["s1"]);
+    hydrate(router, "s1");
     await reconcileOpenSessions(new Set(["s1", "new-9"]), router);
 
     expect(mockGetSessionState).toHaveBeenCalledTimes(1);
@@ -799,6 +828,7 @@ describe("reconcileOpenSessions", () => {
     mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 11 });
     mockGetSession.mockResolvedValue({ messages: [{ role: "assistant", content: "rec" }], total: 1 });
     const { router } = makeRouter(["s1"], undefined, (id) => (id === "s1" ? "devbox" : undefined));
+    hydrate(router, "s1");
     await reconcileOpenSessions(new Set(["s1"]), router);
     expect(mockGetSessionState).toHaveBeenCalledWith("s1", "devbox");
     expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, "devbox");
@@ -807,16 +837,23 @@ describe("reconcileOpenSessions", () => {
   it("applies the fetched title to every open tab, active or background", async () => {
     // A never-visited tab never mounts ChatPanel, so reconcile's detail fetch
     // is the only place its authoritative title can be applied.
-    mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 1 });
-    mockGetSession.mockImplementation((id: string) =>
+    // The opened tab relabels from its transcript fetch; the never-opened
+    // one from the state poll's persisted title (lazy tab hydration).
+    mockGetSessionState.mockImplementation((id: string) =>
       Promise.resolve({
-        title: id === "s1" ? "Active session" : "Background session",
-        messages: [],
-        total: 0,
+        bootstrap_stage: "ready",
+        turn_active: false,
+        last_seq: 1,
+        title: id === "background" ? "Background session" : "Stale state title",
       }),
     );
+    mockGetSession.mockResolvedValue({ title: "Active session", messages: [], total: 0 });
     const { router, projectActions } = makeRouter(["s1", "background"]);
+    hydrate(router, "s1");
     await reconcileOpenSessions(new Set(["s1", "background"]), router);
+
+    expect(mockGetSession).toHaveBeenCalledTimes(1);
+    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
 
     expect(projectActions).toHaveLength(2);
     expect(projectActions).toEqual(
@@ -861,6 +898,27 @@ describe("reconcileOpenSessions", () => {
     expect(slice.turnActive).toBe(true);
   });
 
+  it("hydrates a never-opened tab from state only: turn state, live asks and title, no transcript fetch", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "ready",
+      turn_active: true,
+      last_seq: 4,
+      title: "From state",
+      live_frames: [{ event: "text", seq: 4, data: { delta: "buffered" } }],
+    });
+    const { router, actions, projectActions, getState } = makeRouter(["s1"]);
+    await reconcileOpenSessions(new Set(["s1"]), router);
+
+    expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(actions.some((a) => a.type === "SET_TURN_STATE" && a.sessionId === "s1" && a.turnActive)).toBe(true);
+    expect(actions.some((a) => a.type === "MERGE_SNAPSHOT")).toBe(false);
+    expect(projectActions).toEqual([{ type: "UPDATE_TAB_TITLE", id: "s1", title: "From state" }]);
+    // Buffered frames wait for the first activation (there is no transcript
+    // to attach them to yet) — see hydrateSessionOnActivation.
+    expect(getState().sessions["s1"]?.live ?? []).toEqual([]);
+  });
+
   it("continues when one session's reconcile fails", async () => {
     mockGetSessionState.mockRejectedValueOnce(new Error("404")).mockResolvedValueOnce({
       bootstrap_stage: "",
@@ -870,6 +928,7 @@ describe("reconcileOpenSessions", () => {
     mockGetSession.mockResolvedValue({ messages: [], total: 0 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { router, actions } = makeRouter(["bad", "good"]);
+    hydrate(router, "bad", "good");
     await reconcileOpenSessions(new Set(["bad", "good"]), router);
     expect(actions.filter((a) => a.type === "MERGE_SNAPSHOT").length).toBe(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad"), expect.any(Error));
@@ -879,6 +938,7 @@ describe("reconcileOpenSessions", () => {
     __resetLastAppliedSeqForTests();
     vi.useFakeTimers();
     const { router, getState } = makeRouter(["s1"]);
+    hydrate(router, "s1");
     // A live envelope already landed for seq 1 during the reconnect race
     // (chatStore.tsx's MERGE_SNAPSHOT comment documents this ordering).
     routeBusEnvelope(env("text", { session_id: "s1", seq: 1, data: { delta: "hel" } }), router);
@@ -907,6 +967,7 @@ describe("reconcileOpenSessions", () => {
   it("replays a buffered tool_start frame with no prior live activity", async () => {
     __resetLastAppliedSeqForTests();
     const { router, getState } = makeRouter(["s1"]);
+    hydrate(router, "s1");
     mockGetSessionState.mockResolvedValue({
       bootstrap_stage: "",
       turn_active: true,
@@ -1223,6 +1284,7 @@ describe("revalidateSession", () => {
       total: 1,
     });
     const { router, actions } = makeRouter(["s1"]);
+    hydrate(router, "s1");
     await revalidateSession("s1", router);
 
     expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
@@ -1309,6 +1371,7 @@ describe("revalidateSession", () => {
       total: 0,
     });
     const { router, projectActions } = makeRouter(["s1"]);
+    hydrate(router, "s1");
     await revalidateSession("s1", router);
 
     expect(projectActions).toEqual([
@@ -1336,6 +1399,7 @@ describe("revalidateSession", () => {
     });
     mockGetSession.mockResolvedValue({ messages: [], total: 0 });
     const { router } = makeRouter(["s1"], undefined, () => "devbox");
+    hydrate(router, "s1");
     await revalidateSession("s1", router);
 
     expect(mockGetSessionState).toHaveBeenCalledWith("s1", "devbox");
@@ -1478,5 +1542,83 @@ describe("retryable turn errors (composer Retry)", () => {
     router.dispatch({ type: "SET_ERROR", sessionId: "s1", error: "network down" });
     expect(getState().sessions["s1"].turnError).toBe(true);
     expect(getState().sessions["s1"].error).toBe("network down");
+  });
+});
+
+describe("hydrateSessionOnActivation", () => {
+  beforeEach(() => {
+    mockGetSessionState.mockReset();
+    mockGetSession.mockReset();
+    clearCompaction("s1");
+  });
+
+  it("replays buffered live_frames and live asks for a never-opened tab", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "ready",
+      turn_active: true,
+      last_seq: 4,
+      live_frames: [
+        { event: "text", seq: 3, data: { delta: "hel" } },
+        { event: "text", seq: 4, data: { delta: "lo" } },
+      ],
+    });
+    const { router, actions, getState } = makeRouter(["s1"]);
+    await hydrateSessionOnActivation("s1", router);
+    // LIVE_DELTA is buffered (LIVE_DELTA_FLUSH_MS); flush it.
+    await new Promise((r) => setTimeout(r, 120));
+
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(actions.some((a) => a.type === "SET_TURN_STATE" && a.turnActive)).toBe(true);
+    expect(getState().sessions["s1"].live).toEqual([{ kind: "text", text: "hello" }]);
+  });
+
+  it("only syncs turn state for a tab that already holds a transcript", async () => {
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "ready",
+      turn_active: false,
+      last_seq: 4,
+      live_frames: [{ event: "text", seq: 4, data: { delta: "stale" } }],
+    });
+    const { router, actions, getState } = makeRouter(["s1"]);
+    hydrate(router, "s1");
+    actions.length = 0;
+    await hydrateSessionOnActivation("s1", router);
+    await new Promise((r) => setTimeout(r, 120));
+
+    expect(actions.some((a) => a.type === "SET_TURN_STATE" && !a.turnActive)).toBe(true);
+    expect(getState().sessions["s1"].live).toEqual([]);
+  });
+});
+
+describe("revalidateSession (never-opened tab)", () => {
+  beforeEach(() => {
+    mockGetSessionState.mockReset();
+    mockGetSession.mockReset();
+    resetSessionRevisions();
+    clearCompaction("s1");
+  });
+
+  it("relabels and notes the moved revision without fetching a transcript", async () => {
+    noteSessionRevision("s1", undefined, "rev-1");
+    mockGetSessionState.mockResolvedValue({
+      bootstrap_stage: "",
+      turn_active: false,
+      last_seq: 2,
+      revision: "rev-2",
+      title: "Renamed elsewhere",
+    });
+    const { router, actions, projectActions } = makeRouter(["s1"]);
+    await revalidateSession("s1", router);
+
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(actions.some((a) => a.type === "MERGE_SNAPSHOT")).toBe(false);
+    expect(projectActions).toEqual([{ type: "UPDATE_TAB_TITLE", id: "s1", title: "Renamed elsewhere" }]);
+
+    // The revision is now noted: the next idle poll is a no-op.
+    projectActions.length = 0;
+    actions.length = 0;
+    await revalidateSession("s1", router);
+    expect(actions).toEqual([]);
+    expect(projectActions).toEqual([]);
   });
 });

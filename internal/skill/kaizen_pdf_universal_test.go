@@ -157,3 +157,14 @@ func containsName(names []string, want string) bool {
 	}
 	return false
 }
+
+// TestWebFormsIsUniversal pins the webforms corpus (filling web forms with htrcli) as
+// model-gated only: web forms live on any URL, so no repo marker could detect the task.
+func TestWebFormsIsUniversal(t *testing.T) {
+	if !stackActive("webforms", nil) {
+		t.Fatal("webforms must be a universal stack")
+	}
+	if stackActive("webform", nil) || stackActive("webforms-x", nil) {
+		t.Fatal("universal lookup must be exact-set membership")
+	}
+}

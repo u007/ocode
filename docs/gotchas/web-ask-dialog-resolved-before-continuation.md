@@ -13,7 +13,7 @@ tags:
   - async
   - concurrency
   - locks
-timestamp: 2026-09-25T06:00:07Z
+timestamp: 2026-10-01T05:24:05Z
 ---
 # Web ask dialogs: 202 + background continuation (broadcast `*_resolved` before Step)
 
@@ -76,7 +76,7 @@ deadlocks the session.
 
 ### Shutdown admission mirrors `dispatchTurn`
 
-`dispatchTurn` (`internal/server/agent_session.go:1615`) is the pattern;
+`dispatchTurn` (`internal/server/agent_session.go:1683`) is the pattern;
 `dispatchAskContinuation` mirrors it exactly:
 
 - Under `shutdownMu`, if `shutdownStarted`: unlock and run `fn` INLINE on the
@@ -108,7 +108,7 @@ the POST, so the visible result never depends on response latency:
 - `resolvePermission` dispatches `PERMISSION_RESOLVED` first
   (`useChat.ts:255`), then awaits `api.resolvePermission`.
 - `submitQuestionAnswers` dispatches `QUESTION_ANSWERED` (local transcript
-  echo of the answers) + `QUESTION_RESOLVED` first (`useChat.ts:291-292`),
+  echo of the answers) + `QUESTION_RESOLVED` first (`useChat.ts:394-395`),
   then awaits `api.answerQuestion`.
 - On a retryable failure (anything that is not HTTP 404/409) they call
   `hydratePendingAsks()` (`useChat.ts:101`, called at `:266` and `:300`),

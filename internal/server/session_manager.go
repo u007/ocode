@@ -471,6 +471,18 @@ func (m *SessionManager) IsTurnActive(sessionID string) bool {
 	return false
 }
 
+// IsCompacting reports whether one or more compaction passes (manual or
+// automatic) are in flight for the session. Used by the Stop path so it can
+// interrupt a compaction that is running with no active turn.
+func (m *SessionManager) IsCompacting(sessionID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		return e.compactingCount > 0
+	}
+	return false
+}
+
 // BeginCompaction marks one compaction pass active for sessionID and returns
 // whether the session is known plus the group's start time and generation. All
 // three values are read under the same manager lock, so a start event cannot

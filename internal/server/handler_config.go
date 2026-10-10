@@ -15,6 +15,7 @@ import (
 	"github.com/u007/ocode/internal/browse/cdp"
 	"github.com/u007/ocode/internal/computer"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/network"
 	"github.com/u007/ocode/internal/ocr"
@@ -1915,32 +1916,40 @@ func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) 
 
 // HandleGetBrowserConfig reports the embedded-browser settings (including
 // the HTR companion; HTR port 0 means the managed 3846 default).
+//
+// htr_port/htr_socket_path stay the *configured* values so the settings UI keeps
+// editing the legacy fields. The shared-daemon resolution is reported beside
+// them as effective_port/effective_socket plus its provenance, because in
+// shared mode the daemon actually used is htrcli's own and its coordinates come
+// from htrcli's config, not from what is set here. The token itself is never
+// emitted: htr_token_set says only that one is configured.
 func (h *Handler) HandleGetBrowserConfig(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	chromePath, idleTimeoutMinutes, quality := "", 10, config.DefaultScreencastQuality
-	htrEnabled, htrExt, htrCli, htrSocket, htrHost, htrPort := true, "", "", "", "com.ocode.htrcontrol", 3846
-	if h.cfg != nil {
-		chromePath = h.cfg.Ocode.Browser.ChromePath
-		idleTimeoutMinutes = h.cfg.Ocode.Browser.IdleTimeoutMinutes
-		quality = config.NormalizeScreencastQuality(h.cfg.Ocode.Browser.ScreencastQuality)
-		htrEnabled = h.cfg.Ocode.Browser.HTREnabled
-		htrExt = h.cfg.Ocode.Browser.HTRExtensionPath
-		htrCli = h.cfg.Ocode.Browser.HTRCliPath
-		htrPort = h.cfg.Ocode.Browser.HTRPort
-		htrSocket = h.cfg.Ocode.Browser.HTRSocketPath
-		htrHost = h.cfg.Ocode.Browser.HTRNativeHostName
-	}
-	h.mu.Unlock()
+	bcfg := h.htrBrowserConfig()
+	chromePath, idleTimeoutMinutes := bcfg.ChromePath, bcfg.IdleTimeoutMinutes
+	quality := config.NormalizeScreencastQuality(bcfg.ScreencastQuality)
+	shared := cdp.ResolveSharedDaemon(cdp.HTRSharedInput{
+		Token:        bcfg.HTRToken,
+		Shared:       bcfg.HTRShared,
+		LegacyPort:   bcfg.HTRPort,
+		LegacySocket: bcfg.HTRSocketPath,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"chrome_path":          chromePath,
 		"idle_timeout_minutes": idleTimeoutMinutes,
 		"screencast_quality":   quality,
-		"htr_enabled":          htrEnabled,
-		"htr_extension_path":   htrExt,
-		"htrcli_path":          htrCli,
-		"htr_port":             htrPort,
-		"htr_socket_path":      htrSocket,
-		"htr_native_host_name": htrHost,
+		"htr_enabled":          bcfg.HTREnabled,
+		"htr_extension_path":   bcfg.HTRExtensionPath,
+		"htrcli_path":          bcfg.HTRCliPath,
+		"htr_port":             bcfg.HTRPort,
+		"htr_socket_path":      bcfg.HTRSocketPath,
+		"htr_native_host_name": bcfg.HTRNativeHostName,
+		"htr_shared":           bcfg.HTRShared,
+		"htr_token_set":        bcfg.HTRToken != "",
+		"effective_port":       shared.Port,
+		"effective_socket":     shared.Socket,
+		"token_source":         shared.TokenSource,
+		"adopt_only":           shared.AdoptOnly,
+		"config_path":          shared.ConfigPath,
 	})
 }
 
@@ -2071,6 +2080,7 @@ var (
 	htrDaemonStatusFn = cdp.HTRDaemonStatus
 	listHTRTabsFn     = cdp.ListHTRTabs
 	htrOptionsFn      = resolveManagedHTROptions
+	htrProvenanceFn   = cdp.HTRProvenanceFor
 )
 
 // htrStatusResponse is the settings-UI snapshot of the managed daemon.
@@ -2082,7 +2092,34 @@ type htrStatusResponse struct {
 	Port    int    `json:"port"`
 	Socket  string `json:"socket"`
 	Binary  string `json:"binary"`
-	Error   string `json:"error,omitempty"`
+	// Mode is "shared" when the daemon is htrcli's own singleton, "private" for
+	// the legacy ocode-managed one, and "" when HTR is off entirely.
+	Mode string `json:"mode"`
+	// AdoptOnly reports that ocode may use this daemon but must never start
+	// one. It is the reason Start can be impossible, so the UI has to say so
+	// instead of offering a button that cannot succeed.
+	AdoptOnly bool `json:"adopt_only"`
+	// Notice explains adopt-only in the user's terms — which file to fix, or
+	// which command to run themselves. It is information, not a failure, so it
+	// is kept separate from Error.
+	Notice      string `json:"notice"`
+	TokenSource string `json:"token_source"`
+	ConfigPath  string `json:"config_path"`
+	// DaemonPID is the live daemon's pid from ocode's owner marker, or 0 when
+	// no running daemon is recorded. It is 0 whenever Running is false.
+	DaemonPID int `json:"daemon_pid"`
+	// StartedByOcode is true only when THIS process may stop the daemon: it
+	// reports cdp's stop entitlement, not merely that a marker exists. The UI
+	// must gate its Stop button on it, because ocode refuses to stop a daemon it
+	// did not spawn and a button that appears to work and silently does
+	// nothing is the failure mode worth avoiding.
+	StartedByOcode bool   `json:"started_by_ocode"`
+	Error          string `json:"error,omitempty"`
+	// Stopped is nil unless this body came from a stop attempt, so a plain
+	// status never implies a stop was tried. false is a refusal, not a failure
+	// — see Reason.
+	Stopped *bool  `json:"stopped,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // htrBrowserConfig copies the HTR-relevant browser config under the handler
@@ -2098,18 +2135,83 @@ func (h *Handler) htrBrowserConfig() config.BrowserConfig {
 
 // htrStatus builds the API snapshot from the persisted config plus a live probe.
 func (h *Handler) htrStatus(errMsg string) htrStatusResponse {
+	return h.htrStatusFor(h.resolveHTRShared(), errMsg)
+}
+
+// resolveHTRShared resolves the shared-daemon descriptor for the persisted
+// config. It is the same resolution StartBrowse performs, so the settings UI
+// reports the coordinates ocode would actually use rather than the legacy ones.
+func (h *Handler) resolveHTRShared() cdp.SharedDaemon {
 	bcfg := h.htrBrowserConfig()
-	info := htrDaemonStatusFn(bcfg.HTRPort, bcfg.HTRSocketPath)
-	return htrStatusResponse{
-		Enabled: bcfg.HTREnabled,
-		Running: info.Running,
-		Managed: info.Managed,
-		Addr:    info.Addr,
-		Port:    info.Port,
-		Socket:  info.Socket,
-		Binary:  info.Binary,
-		Error:   errMsg,
+	return cdp.ResolveSharedDaemon(cdp.HTRSharedInput{
+		Token:        bcfg.HTRToken,
+		Shared:       bcfg.HTRShared,
+		LegacyPort:   bcfg.HTRPort,
+		LegacySocket: bcfg.HTRSocketPath,
+	})
+}
+
+// htrStatusFor is htrStatus with the resolved shared descriptor passed in, so a
+// caller that already holds one (startManagedHTR, via the htrOptionsFn seam)
+// does not resolve a second time and risk reporting a different answer than the
+// one it acted on. The descriptor is the sole source of the provenance fields;
+// the bearer token it may carry is never copied into the response.
+//
+// The probe targets shared.Port/shared.Socket, NOT the configured
+// browser.htr_port. startManagedHTR starts the daemon through resolveManagedHTROptions,
+// which overwrites those two fields with the resolved values (3845 by default in
+// shared mode), so probing the configured port reported a daemon that was never
+// there: Settings showed Stopped against a live shared daemon, and the provenance
+// lookup read the wrong marker. In private mode the resolver echoes the legacy
+// values verbatim, so this is behaviour-preserving there.
+func (h *Handler) htrStatusFor(shared cdp.SharedDaemon, errMsg string) htrStatusResponse {
+	bcfg := h.htrBrowserConfig()
+	info := htrDaemonStatusFn(shared.Port, shared.Socket, shared.Token)
+	// Provenance is only meaningful for a live daemon: a marker whose pid is
+	// gone names a process that no longer exists, and echoing its number would
+	// read as a running daemon. Gating on Running also keeps the settings poll
+	// cheap when nothing is up — the common case — since the entitlement check
+	// costs a liveness probe and a bearer-protected health probe.
+	var prov cdp.HTRProvenance
+	if info.Running {
+		prov = htrProvenanceFn(shared.Port)
 	}
+	st := htrStatusResponse{
+		Enabled:        bcfg.HTREnabled,
+		Running:        info.Running,
+		Managed:        info.Managed,
+		Addr:           info.Addr,
+		Port:           info.Port,
+		Socket:         info.Socket,
+		Binary:         info.Binary,
+		Mode:           shared.Mode,
+		AdoptOnly:      shared.AdoptOnly,
+		TokenSource:    shared.TokenSource,
+		ConfigPath:     shared.ConfigPath,
+		DaemonPID:      prov.DaemonPID,
+		StartedByOcode: prov.StartedByOcode,
+		Error:          errMsg,
+	}
+	if shared.AdoptOnly {
+		st.Notice = adoptOnlyNotice(shared)
+	}
+	return st
+}
+
+// adoptOnlyNotice prefers the resolver's own wording, which names the specific
+// thing that is wrong, and falls back to the action only the user can take.
+// Either way it names `htrcli serve`: an adopt-only config is not a failure
+// ocode can retry its way out of.
+func adoptOnlyNotice(shared cdp.SharedDaemon) string {
+	if shared.Notice != "" {
+		return shared.Notice
+	}
+	where := shared.ConfigPath
+	if where == "" {
+		where = "htrcli's config"
+	}
+	return "ocode is configured to adopt the shared htrcli daemon and never start one. " +
+		"Start `htrcli serve` yourself, or fix " + where + " and retry."
 }
 
 func (h *Handler) setHTREnabledInMemory(enabled bool) {
@@ -2127,21 +2229,48 @@ func (h *Handler) startManagedHTR() htrStatusResponse {
 	bcfg := h.htrBrowserConfig()
 	opts, notice := htrOptionsFn(bcfg)
 	if notice != "" {
-		return h.htrStatus(notice)
+		return h.htrStatusFor(opts.Shared, notice)
 	}
+	// Adopt-only is deliberately NOT short-circuited here: EnsureHTRServe
+	// adopts an already-running shared daemon before it refuses to start one,
+	// and a settings panel that reported "stopped" for a daemon the user is
+	// happily running would be wrong. The refusal comes back as an error, and
+	// htrStatusFor's Notice says the same thing without an error.
 	if _, err := ensureHTRServeFn(h.procSup, opts, log.Default()); err != nil {
-		return h.htrStatus("HTR automation is unavailable: " + err.Error())
+		return h.htrStatusFor(opts.Shared, "HTR automation is unavailable: "+err.Error())
 	}
-	return h.htrStatus("")
+	return h.htrStatusFor(opts.Shared, "")
 }
 
-// stopManagedHTR stops the managed daemon recorded for the configured port.
+// stopManagedHTR stops the managed daemon recorded for the configured port. A
+// daemon ocode did not spawn — another instance's, an adopted one, or the
+// user's own `htrcli serve` — survives, and that is reported as stopped:false
+// with a reason rather than as an error: the request was understood and the
+// refusal is the contract (see cdp.StopHTRServe). The UI gates its Stop button
+// on started_by_ocode so a user rarely gets here, but a direct API caller must
+// still be told the truth instead of inferring success from a 200.
+//
+// The port is the RESOLVED one, not browser.htr_port, for the same reason
+// htrStatusFor probes shared.Port: stop had to target the daemon startManagedHTR
+// actually launched, or a shared daemon survived its own Stop and the caller was
+// told stopped:true. The descriptor is resolved once and reused for the status
+// so the stop and the reported state cannot disagree.
 func (h *Handler) stopManagedHTR() htrStatusResponse {
-	bcfg := h.htrBrowserConfig()
-	if _, err := stopHTRServeFn(h.procSup, bcfg.HTRPort, log.Default()); err != nil {
-		return h.htrStatus("failed to stop HTR daemon: " + err.Error())
+	shared := h.resolveHTRShared()
+	res, err := stopHTRServeFn(h.procSup, shared.Port, log.Default())
+	if err != nil {
+		return h.htrStatusFor(shared, "failed to stop HTR daemon: "+err.Error())
 	}
-	return h.htrStatus("")
+	// The stop result, not a fresh probe, decides stopped: a refusal is exactly
+	// the case where the daemon is still up but a later probe might race.
+	stopped := !res.Running
+	st := h.htrStatusFor(shared, "")
+	st.Stopped = &stopped
+	if !stopped {
+		st.Reason = "left running: ocode only stops a daemon it started itself, so this one " +
+			"belongs to another ocode instance or to your own `htrcli serve`."
+	}
+	return st
 }
 
 // HandleGetHTRStatus reports the managed `htrcli serve` daemon (enabled flag +
@@ -2176,9 +2305,14 @@ func (h *Handler) HandleStopHTR(w http.ResponseWriter, r *http.Request) {
 // HandleListHTRTabs lists the browser tabs connected to the managed daemon.
 // A failure (daemon not running, query error) returns an empty list plus the
 // reason at HTTP 200 so the settings UI renders it inline.
+//
+// The daemon is queried on the RESOLVED port, for the same reason stop and
+// status are: in shared mode the daemon listens on htrcli's port (3845), so
+// querying browser.htr_port asked a port nothing was serving and "List tabs"
+// always reported an error against a perfectly healthy daemon.
 func (h *Handler) HandleListHTRTabs(w http.ResponseWriter, r *http.Request) {
-	bcfg := h.htrBrowserConfig()
-	tabs, err := listHTRTabsFn(bcfg.HTRPort)
+	shared := h.resolveHTRShared()
+	tabs, err := listHTRTabsFn(shared.Port, shared.Token)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"tabs": []cdp.HTRTab{}, "error": err.Error()})
 		return
@@ -2541,22 +2675,32 @@ func (h *Handler) applyRedactionToLiveSessions(rc config.RedactionConfig) {
 		ids = append(ids, id)
 	}
 	h.mu.Unlock()
+	// The redaction setters are plain field writes the turn loop reads, so
+	// they need as.mu — but runTurn holds as.mu for the whole turn, and this
+	// runs inside the Settings save handler. Apply per session in the
+	// background so the HTTP response never waits for a running turn; a
+	// mid-turn session picks the change up as soon as its turn releases the
+	// lock.
 	for _, id := range ids {
 		as := h.lookupAgentSession(id)
 		if as == nil {
 			continue
 		}
-		as.mu.Lock()
-		h.applyRedactionToAgent(as.agent, rc)
-		as.mu.Unlock()
+		crashguard.Go(func() {
+			as.mu.Lock()
+			h.applyRedactionToAgent(as.agent, rc)
+			as.mu.Unlock()
+		})
 	}
 }
 
 // applyLimitsToLiveSessions propagates max-step and max-concurrent limits to
 // every resident agent session so runtime changes via the Settings UI take
 // effect without restarting the server or waiting for the next bootstrap. The
-// h.mu map lock is only held to snapshot ids; per-session updates take
-// as.mu only long enough to call SetMaxSteps / SetMaxConcurrent.
+// h.mu map lock is only held to snapshot ids. SetMaxSteps and SetMaxConcurrent
+// are atomic, so no as.mu is taken: runTurn holds as.mu for the whole turn and
+// a blocking Lock here froze the Settings save (and the desktop UI) until the
+// running turn finished.
 func (h *Handler) applyLimitsToLiveSessions(maxSteps, maxConcurrent int) {
 	h.mu.Lock()
 	ids := make([]string, 0, len(h.agents))
@@ -2569,12 +2713,10 @@ func (h *Handler) applyLimitsToLiveSessions(maxSteps, maxConcurrent int) {
 		if as == nil || as.agent == nil {
 			continue
 		}
-		as.mu.Lock()
 		as.agent.SetMaxSteps(maxSteps)
 		if as.agent.Runs() != nil {
 			as.agent.Runs().SetMaxConcurrent(maxConcurrent)
 		}
-		as.mu.Unlock()
 	}
 }
 
@@ -2685,4 +2827,85 @@ func (h *Handler) HandleSetFakeAgentConfig(w http.ResponseWriter, r *http.Reques
 
 func (h *Handler) HandleGetNetworkIP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ip": network.GetIP()})
+}
+
+// autoShareResponse is the auto-share-on-start toggle plus what the server
+// currently has exposed, so the Settings UI can show the live consequence of
+// the flag instead of asking the user to trust it.
+//
+// `url` is the CACHED exposure (empty until the boot hook or the Share dialog
+// starts one); `available` says whether tailscale could serve at all. Neither
+// is required to render the toggle — the toggle works on a machine with no
+// tailscale installed.
+type autoShareResponse struct {
+	Enabled   bool   `json:"enabled"`
+	Available bool   `json:"available"`
+	Running   bool   `json:"running"`
+	Kind      string `json:"kind,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Hint      string `json:"hint,omitempty"`
+}
+
+// applyShareStatus copies the live exposure state into the response. The
+// snapshot accessor is injected (never a *Server) and is side-effect free:
+// reading config must never START an exposure.
+func (h *Handler) applyShareStatus(resp *autoShareResponse) {
+	if h.tailscaleShareSnapshot == nil {
+		return
+	}
+	st := h.tailscaleShareSnapshot()
+	resp.Available = st.Available
+	resp.Running = st.Running
+	resp.Kind = st.Kind
+	resp.URL = st.URL
+	resp.Hint = st.Hint
+}
+
+// HandleGetAutoShareConfig reports the auto-share toggle and the current
+// exposure. Reading it never STARTS an exposure: this endpoint must stay safe
+// to poll, or merely opening Settings would publish the instance — the exact
+// surprise the opt-in default exists to prevent.
+func (h *Handler) HandleGetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	enabled := false
+	if h.cfg != nil {
+		enabled = h.cfg.Ocode.AutoShareOnStart
+	}
+	h.mu.Unlock()
+
+	resp := autoShareResponse{Enabled: enabled}
+	// Read the exposure without holding h.mu across any tailscale work (the
+	// Handler mutex is a map lock, per the web-server locking rules). Access
+	// goes through the injected accessor so this handler needs no Server ref.
+	h.applyShareStatus(&resp)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// HandleSetAutoShareConfig persists the auto-share toggle.
+//
+// Takes effect on the NEXT launch: the exposure is created at boot, and
+// turning it off does not tear down a share that is already running (that is
+// Shutdown's job, and the Share dialog's own reset flow). The response reports
+// the stored value so the UI can echo exactly what was persisted.
+func (h *Handler) HandleSetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveAutoShareOnStart(req.Enabled); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.AutoShareOnStart = req.Enabled
+	}
+	h.mu.Unlock()
+
+	resp := autoShareResponse{Enabled: req.Enabled}
+	h.applyShareStatus(&resp)
+	writeJSON(w, http.StatusOK, resp)
 }

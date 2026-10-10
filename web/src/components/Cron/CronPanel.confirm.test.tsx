@@ -45,7 +45,9 @@ const job = {
  * while looking correct in a browser. The guard must be a rendered dialog.
  */
 function renderPanel() {
-  return render(<CronPanel loadingKey="cron" onLoadingEvent={() => {}} active={false} />);
+  return render(
+    <CronPanel loadingKey="cron" onLoadingEvent={() => {}} active={false} />,
+  );
 }
 
 /** Click the row's trash button. */
@@ -165,7 +167,7 @@ describe("CronPanel delete confirmation", () => {
     expect(mocks.deleteCronJob).not.toHaveBeenCalled();
 
     fireEvent.click(within(dialog()).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(mocks.deleteCronJob).toHaveBeenCalledWith("job-1"));
+    await waitFor(() => expect(mocks.deleteCronJob).toHaveBeenCalledWith("job-1", undefined, undefined));
   });
 
   it("names the job in the confirm", async () => {

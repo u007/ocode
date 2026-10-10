@@ -59,5 +59,7 @@ answered in <60 ms at the same time — the server was not wedged.
 - **The cap was hiding server load.** Without it, many projects can hit the
   server at once; remote execs are therefore capped per host (see
   `project-endpoint-isolation.md` rule 4).
-- **Browsers on `ocode serve` still have the 6-connection cap** — the
-  CLAUDE.md "do not pin a connection per turn" rule still applies.
+- **Browsers on `ocode serve` and on a desktop share URL still have the
+  6-connection cap** — the CLAUDE.md "do not pin a connection per turn" rule
+  still applies, and the event bus holds exactly one stream however many
+  remote hosts are open (`share-url-http1-connection-cap.md`).

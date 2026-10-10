@@ -1,3 +1,7 @@
+// NOTE: the titles and ids below are arbitrary presentational fixtures, chosen
+// when this component had a fixed trio. The strip is configured now, so a real
+// title is derived from the chip's label. These are NOT the shipped pills.
+
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { Archive, Play } from "lucide-react";

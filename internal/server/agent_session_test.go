@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 )
 
@@ -44,11 +45,24 @@ func (instantClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Mes
 func (instantClient) GetProvider() string { return "fake" }
 func (instantClient) GetModel() string    { return "fake-model" }
 
+// newTestSession registers a ready-to-serve fake session the way
+// buildAgentSession does, INCLUDING the credVersion snapshot. That snapshot is
+// load-bearing: reconcileProfileAgent rebuilds a session whose stored version
+// differs from auth.CredentialVersion(), reading a zero as "credentials changed
+// since build". A fake-model session cannot survive that rebuild — "fake-model"
+// has no provider to resolve — so a literal that leaves credVersion at 0 turns
+// any earlier credential write anywhere in the binary (another test, or the
+// Connectors endpoints) into a spurious rebuild and a 500. Production sessions
+// never hit this because buildAgentSession always snapshots.
 func newTestSession(h *Handler, id string, client agent.LLMClient) *agentSession {
 	if h.cfg != nil {
 		h.cfg.Model = "fake-model"
 	}
-	as := &agentSession{agent: agent.NewAgent(client, nil, nil, nil), model: "fake-model"}
+	as := &agentSession{
+		agent:       agent.NewAgent(client, nil, nil, nil),
+		model:       "fake-model",
+		credVersion: auth.CredentialVersion(),
+	}
 	h.mu.Lock()
 	h.agents[id] = as
 	h.mu.Unlock()

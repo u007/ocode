@@ -10,7 +10,7 @@ import (
 // remaining opt-out list, so a merge would resurrect the unticked category).
 func TestRelaxedConcernsRoundTrip(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	chdirTempForConfigTest(t)
 
 	if err := SaveOcodeAutoPermissionConfig(AutoPermissionConfig{

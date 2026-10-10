@@ -155,14 +155,14 @@ profile and usage attribution as its turns. Settings pair is read/written via
   `""` — the established "speak the original" signal — *before* resolving a
   client and *before* reading the 24h disk cache (nothing ever caches a
   summary for such text, so there is nothing to look up), gated by
-  `speechTextNeedsRewrite` (`internal/agent/speech_summary.go:290`): the text
+  `speechTextNeedsRewrite` (`internal/agent/speech_summary.go:189`): the text
   must be at most `speechSummarySkipChars = 400` runes
   (`speech_summary.go:61`, the const block shared with
   `speechSummaryMaxInputChars`, `speechSummaryMaxOutputChars`,
   `speechSummaryTimeoutSeconds`, `speechSummaryCacheTTL` and
   `speechSummaryPruneInterval` — roughly 20 seconds of speech at 160 wpm)
   **and** carry no speakable artifact. Length alone is not the test:
-  `speechTextHasSpeakableArtifact` (`speech_summary.go:153`) scans for a
+  `speechTextHasSpeakableArtifact` (`speech_summary.go:212`) scans for a
   backtick (fence or inline code), `http://`/`https://`, a `@@` diff hunk
   header, crash markers (`panic:`, `Traceback (most recent call last)`,
   `Exception in thread`, `fatal error:`), and per line a `+`/`-` marker with

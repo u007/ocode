@@ -21,6 +21,11 @@ vi.mock("@xterm/addon-web-links", () => ({
   },
 }));
 
+const openExternalSpy = vi.fn();
+vi.mock("../../lib/externalLinks", () => ({
+  openExternalURL: (...args: unknown[]) => openExternalSpy(...args),
+}));
+
 vi.mock("./terminalLinkProvider", () => ({
   registerFileLinkProvider: (...args: unknown[]) => fileProviderSpy(...args),
 }));
@@ -129,6 +134,24 @@ describe("TerminalPanel link wiring", () => {
     unmount();
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(webLinksDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens an http(s) URL on left mouseup (xterm activates links from mouseup, not click)", async () => {
+    openExternalSpy.mockClear();
+    const { unmount } = render(
+      <TerminalPanel id="t3" active projectPath="/proj" scrollbackLines={100} fontFamily="mono" fontSize={12} />,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    const handler = (webLinksInstances[0] as { handler: (e: MouseEvent, uri: string) => void }).handler;
+    const url =
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&state=Lbv_ZqZchTvEz5Zyxdt";
+    handler({ type: "mouseup", button: 0 } as MouseEvent, url);
+    expect(openExternalSpy).toHaveBeenCalledWith(url);
+    openExternalSpy.mockClear();
+    handler({ type: "mouseup", button: 2 } as MouseEvent, url);
+    handler({ type: "mouseup", button: 0 } as MouseEvent, "ftp://example.com");
+    expect(openExternalSpy).not.toHaveBeenCalled();
+    unmount();
   });
 
   it("passes current projectPath to file provider", async () => {

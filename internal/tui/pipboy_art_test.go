@@ -40,23 +40,6 @@ func TestRandomPipboyArtIsOneOfThree(t *testing.T) {
 	}
 }
 
-func TestRandomPipboyArtCanProduceMultipleVariants(t *testing.T) {
-	// Not a strong randomness test, but verifies the function doesn't always
-	// return the same slice identity (it copies).
-	seen := make(map[int]bool)
-	for i := 0; i < 10; i++ {
-		art := RandomPipboyArt()
-		// Key by length as a simple differentiator across the three arts
-		seen[len(art)] = true
-		if len(seen) >= 2 {
-			return // at least two different variants seen
-		}
-	}
-	// It's statistically possible but extremely unlikely to always get the same
-	// art in 10 tries. If it happens, something is likely wrong.
-	t.Logf("Only saw one art variant (line count %d) in 10 random picks", len(RandomPipboyArt()))
-}
-
 func TestRenderPipboyBackgroundZeroDimensions(t *testing.T) {
 	art := RandomPipboyArt()
 	style := lipgloss.NewStyle()

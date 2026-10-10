@@ -29,10 +29,15 @@ const stopped = {
   socket: "",
   binary: "",
 };
+// started_by_ocode: the Stop button is gated on it, because ocode refuses to
+// stop a daemon it did not spawn and reports that as stopped:false with a
+// reason rather than an error. A "running" fixture without it describes a daemon
+// ocode may not touch, so the stop test below would assert on a disabled button.
 const running = {
   enabled: true,
   running: true,
   managed: true,
+  started_by_ocode: true,
   addr: "127.0.0.1:3846",
   port: 3846,
   socket: "",

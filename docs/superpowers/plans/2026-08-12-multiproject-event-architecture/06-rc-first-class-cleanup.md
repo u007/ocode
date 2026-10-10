@@ -7,13 +7,13 @@ paths are deleted, along with all legacy SSE endpoints and dead client code.
 **Context (self-contained):**
 - Today, when a TUI attaches via RC-bridge: `HandleSendMessage` ignores the
   `:id` path parameter and forwards every message to the single TUI agent
-  (`internal/server/handler.go:521-550`); the mirror SSE handler re-stamps
+  (`internal/server/handler.go:527-556`); the mirror SSE handler re-stamps
   every untagged frame with the bridge's session id
   (`internal/server/handler_sse.go:283-285`); and `runTurn` suppresses
   headless events when a bridge is attached
   (`internal/server/agent_session.go:184-232`, `headless := h.RCBridge() ==
   nil`). The TUI registers with the server via
-  `RegisterExternalSession` (`internal/server/server.go:495`).
+  `RegisterExternalSession` (`internal/server/server.go:1825`).
 - Parts 01–05 provide: `SessionManager.Register(sessionID, projectRoot)` and
   `Resolve`; `EventBus.Publish(event, project, sessionID, data)`; turn
   lifecycle events (`turn_started`/`turn_heartbeat`/`turn_done`/`turn_error`);
@@ -69,7 +69,7 @@ paths are deleted, along with all legacy SSE endpoints and dead client code.
 - [ ] **Task 3: uniform send path.** Test-first: `POST /api/sessions/:id/message`
   with a bridged TUI session id reaches that session; a different (headless)
   session id in the same server reaches *its* agent — no global forwarding.
-  Delete the `handler.go:521-550` branch and the bridge-suppression in
+  Delete the `handler.go:527-556` branch and the bridge-suppression in
   `agent_session.go` turn events. Verify + manual: TUI `/rc`, drive the TUI
   session from the web, and run a second web-only session concurrently.
   Commit.

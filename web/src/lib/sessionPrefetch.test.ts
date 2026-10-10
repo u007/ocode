@@ -4,6 +4,7 @@ import type { SessionDetail } from "../api/types";
 const getSession = vi.fn();
 vi.mock("../api/client", () => ({
   api: { getSession: (...a: unknown[]) => getSession(...a) },
+  apiPath: (p: string) => p,
 }));
 
 import {

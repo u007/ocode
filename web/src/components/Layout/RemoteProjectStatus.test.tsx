@@ -12,6 +12,9 @@ vi.mock("@/hooks/useRemoteTerminals", () => ({
   useRemoteTerminals: (...a: unknown[]) => mockTerminals(...a),
 }));
 
+const copyTextToClipboard = vi.hoisted(() => vi.fn(async (_text: string) => true));
+vi.mock("../../lib/clipboard", () => ({ copyTextToClipboard }));
+
 const authedFetchMock = vi.fn((..._args: unknown[]) => Promise.resolve({ ok: true, status: 204 }));
 vi.mock("@/api/client", () => ({
   authedFetch: (...a: unknown[]) => authedFetchMock(...a),
@@ -131,6 +134,8 @@ describe("RemoteProjectStatus", () => {
     };
     mockTabFocusRequest.mockReset();
     mockRefresh.mockReset();
+    copyTextToClipboard.mockClear();
+    copyTextToClipboard.mockResolvedValue(true);
     eventBusFake.handlers = [];
     mockTerminals.mockReturnValue({
       terminals: [
@@ -244,6 +249,25 @@ describe("RemoteProjectStatus", () => {
   // in the desktop app, or a session restored on the host) used to leave the
   // count stuck at its mount-time value forever, because expanding did not
   // re-read. That is the "0 terminals" the user reported.
+  it("shows a chevron on the expand line only while connected, pointing down when open", () => {
+    const { rerender } = render(<RemoteProjectStatus project={project} statusState={state()} />);
+    const line = screen.getByTestId("remote-project-status");
+    expect(line.querySelector(".lucide-chevron-right")).not.toBeNull();
+
+    fireEvent.click(line);
+    expect(line.querySelector(".lucide-chevron-down")).not.toBeNull();
+    expect(line.querySelector(".lucide-chevron-right")).toBeNull();
+
+    // Disconnected there is no inventory to expand, so no chevron.
+    rerender(
+      <RemoteProjectStatus
+        project={project}
+        statusState={state({ status: connected({ connected: false, version: "", pid: 0 }) })}
+      />,
+    );
+    expect(line.querySelector("svg")).toBeNull();
+  });
+
   it("re-reads the host terminal inventory when the row expands", () => {
     render(<RemoteProjectStatus project={project} statusState={state()} />);
     expect(mockRefresh).not.toHaveBeenCalled(); // collapsed: no extra fetch
@@ -366,5 +390,43 @@ describe("RemoteProjectStatus", () => {
     const s = state({ busy: "restarting", status: connected({ outdated: true }) });
     render(<RemoteProjectStatus project={project} statusState={s} />);
     expect(screen.getByText("restarting…")).toBeTruthy();
+  });
+
+  it("copies a listed chat's session ID without opening it", async () => {
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("sidebar-copy-session-id-s1"));
+    });
+
+    expect(copyTextToClipboard).toHaveBeenCalledWith("s1");
+    // The row opens the chat on pointer-UP, so stopping only the click would
+    // still navigate away from the session whose ID was just copied.
+    expect(projectStoreFake.openSessionTab).not.toHaveBeenCalled();
+    expect(mockTabFocusRequest).not.toHaveBeenCalled();
+  });
+
+  it("gives every listed chat its own copy button", () => {
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+    act(() => emitRunningRun("s2"));
+
+    expect(screen.getByTestId("sidebar-copy-session-id-s1")).toBeTruthy();
+    expect(screen.getByTestId("sidebar-copy-session-id-s2")).toBeTruthy();
+  });
+
+  // The row is a <div role="button"> (it hosts the copy control, and a real
+  // <button> cannot nest one). It opens on pointer-UP, so unlike the old native
+  // <button> it gets no synthetic click for free — keyboard activation has to
+  // be wired or the row is mouse-only.
+  it("opens a chat row from the keyboard", () => {
+    render(<RemoteProjectStatus project={project} statusState={state()} />);
+    fireEvent.click(screen.getByTestId("remote-project-status"));
+
+    const row = screen.getByText("Chat one").closest('[role="button"]')!;
+    expect(row).toBeTruthy();
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(projectStoreFake.openSessionTab).toHaveBeenCalledWith("s1", "Chat one", "/srv", "dev@box");
   });
 });

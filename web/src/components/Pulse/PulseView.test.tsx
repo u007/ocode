@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { PulseView } from "./PulseView";
+import { resetAssistantPrefsForTests, setAssistantMode, setAssistantOpen } from "./pulseAssistantPrefs";
 import { PulseJumpProvider } from "@/lib/jumpToSession";
-import { usePulse } from "@/stores/pulseStore";
+import { usePulse, setPulseFocus } from "@/stores/pulseStore";
 import type { PulseRow } from "@/api/types";
 
 vi.mock("@/stores/pulseStore", async (importOriginal) => {
@@ -10,8 +11,29 @@ vi.mock("@/stores/pulseStore", async (importOriginal) => {
   return { ...actual, usePulse: () => mockPulse() };
 });
 
+// The pane has its own suite; here only the view's wiring of it is under test.
+vi.mock("./PulseTerminals", () => ({
+  PulseTerminals: () => null,
+}));
+vi.mock("./PulseFocusPane", () => ({
+  PulseFocusPane: ({ row, onClose }: { row: { title: string }; onClose: () => void }) => (
+    <div data-testid="pulse-focus-pane">
+      {row.title}
+      <button onClick={onClose}>close pane</button>
+    </div>
+  ),
+}));
+
+// The floating window has its own suite (it pulls in the whole chat surface) and
+// is mounted by App, not by this view. The toggle and the `a` hotkey stay real so
+// the wiring to the shared store is exercised.
+vi.mock("./PulseAssistantWindow", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./PulseAssistantWindow")>();
+  return { ...actual, PulseAssistantWindow: () => null };
+});
+
 vi.mock("./usePulseTail", () => ({
-  usePulseTail: () => ({ lines: [], error: null }),
+  usePulseTail: () => ({ entries: [], error: null }),
 }));
 
 vi.mock("@/lib/jumpToSession", async (importOriginal) => {
@@ -64,6 +86,8 @@ function mount() {
 
 beforeEach(() => {
   overrides = {};
+  setPulseFocus(null);
+  window.localStorage.clear();
   mockJump.mockReset();
   mockJumpAsk.mockReset();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -272,5 +296,174 @@ describe("PulseView interaction", () => {
     expect(document.activeElement?.textContent ?? "").toContain("Runs");
     fireEvent.keyDown(document.activeElement as Element, { key: "ArrowUp" });
     expect(document.activeElement?.textContent ?? "").toContain("Needs");
+  });
+});
+
+describe("PulseView focus mode", () => {
+  const threeRows = () => [
+    row({ session_id: "ask", status: "needs_permission", title: "Needs" }),
+    row({ session_id: "run", status: "running", title: "Runs" }),
+    row({ session_id: "old", status: "idle", title: "Old one" }),
+  ];
+
+  function focusRun() {
+    fireEvent.click(
+      within(screen.getByText("Runs").closest('[role="listitem"]') as HTMLElement).getByRole("button", {
+        name: "Focus session",
+      }),
+    );
+  }
+
+  it("renders the grid, not the pane, until a card is focused", () => {
+    overrides = { rows: threeRows() };
+    mount();
+    expect(screen.queryByTestId("pulse-focus-pane")).toBeNull();
+    expect(screen.queryByTestId("pulse-focus-side")).toBeNull();
+  });
+
+  it("enters focus mode from a card's expand button, with every other row compact in the side column", () => {
+    overrides = { rows: threeRows() };
+    mount();
+
+    focusRun();
+
+    expect(screen.getByTestId("pulse-focus-pane")).toHaveTextContent("Runs");
+    const side = screen.getByTestId("pulse-focus-side");
+    expect(within(side).queryByText("Runs")).toBeNull();
+    expect(within(side).getByText("Needs")).toBeTruthy();
+    expect(within(side).getByText("Old one")).toBeTruthy();
+    // Compact cards: one line each, no stream, still under the section headings.
+    expect(side.querySelectorAll("[data-pulse-line]")).toHaveLength(2);
+    expect(within(side).getByRole("region", { name: "Needs you" })).toBeTruthy();
+    expect(within(side).getByRole("region", { name: "Recent" })).toBeTruthy();
+    expect(within(side).queryByRole("region", { name: "Running" })).toBeNull();
+  });
+
+  it("closes focus on Escape and returns to the grid", () => {
+    overrides = { rows: threeRows() };
+    mount();
+    focusRun();
+
+    fireEvent.keyDown(screen.getByTestId("pulse-focus-pane"), { key: "Escape" });
+
+    expect(screen.queryByTestId("pulse-focus-pane")).toBeNull();
+    expect(screen.getByText("Runs")).toBeTruthy();
+  });
+
+  it("ignores Escape and arrows typed inside a text field", () => {
+    overrides = { rows: threeRows() };
+    mount();
+    focusRun();
+    const pane = screen.getByTestId("pulse-focus-pane");
+    const area = document.createElement("textarea");
+    pane.appendChild(area);
+
+    fireEvent.keyDown(area, { key: "Escape" });
+    fireEvent.keyDown(area, { key: "ArrowUp" });
+
+    expect(screen.getByTestId("pulse-focus-pane")).toHaveTextContent("Runs");
+  });
+
+  it("steps to the next and previous row with the arrow keys and j/k", () => {
+    overrides = { rows: threeRows() };
+    mount();
+    focusRun();
+    const pane = () => screen.getByTestId("pulse-focus-pane");
+
+    fireEvent.keyDown(pane(), { key: "ArrowDown" });
+    expect(pane()).toHaveTextContent("Old one");
+    // Clamped at the end, not wrapped.
+    fireEvent.keyDown(pane(), { key: "j" });
+    expect(pane()).toHaveTextContent("Old one");
+    fireEvent.keyDown(pane(), { key: "ArrowUp" });
+    expect(pane()).toHaveTextContent("Runs");
+    fireEvent.keyDown(pane(), { key: "k" });
+    expect(pane()).toHaveTextContent("Needs");
+    // The row that became the pane left the side column.
+    expect(within(screen.getByTestId("pulse-focus-side")).queryByText("Needs")).toBeNull();
+  });
+
+  it("says so, with a Close button, when the focused session is no longer listed", () => {
+    overrides = { rows: threeRows() };
+    setPulseFocus("gone");
+    mount();
+
+    expect(screen.queryByTestId("pulse-focus-pane")).toBeNull();
+    expect(screen.getByTestId("pulse-focus-missing")).toHaveTextContent("Session no longer listed");
+
+    fireEvent.click(within(screen.getByTestId("pulse-focus-missing")).getByRole("button", { name: "Close" }));
+
+    expect(screen.queryByTestId("pulse-focus-missing")).toBeNull();
+  });
+
+  it("keeps the focused session across an unmount, as a Cmd+J toggle does", () => {
+    overrides = { rows: threeRows() };
+    const first = mount();
+    focusRun();
+    first.unmount();
+
+    mount();
+
+    expect(screen.getByTestId("pulse-focus-pane")).toHaveTextContent("Runs");
+  });
+
+  it("Enter on a side-column card re-focuses it", () => {
+    overrides = { rows: threeRows() };
+    mount();
+    focusRun();
+
+    const side = screen.getByTestId("pulse-focus-side");
+    fireEvent.keyDown(within(side).getByText("Needs").closest("button")!, { key: "Enter" });
+
+    expect(screen.getByTestId("pulse-focus-pane")).toHaveTextContent("Needs");
+  });
+});
+
+describe("PulseView assistant key", () => {
+  const storedOpen = () => window.localStorage.getItem("pulse.assistant.open");
+
+  beforeEach(() => {
+    resetAssistantPrefsForTests();
+    window.localStorage.clear();
+  });
+
+  // The window's toggle lives in the top bar (AssistantToggleButton in TopTabs), not
+  // here. This view keeps only the `a` key, which is scoped to the Pulse view.
+  it("toggles on the `a` key, but not while typing in the filter", () => {
+    overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
+    mount();
+
+    fireEvent.keyDown(screen.getByPlaceholderText(/filter/i), { key: "a" });
+    expect(storedOpen()).not.toBe("1");
+
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(storedOpen()).toBe("1");
+  });
+
+  it("restores a minimised window on the `a` key instead of closing it", () => {
+    overrides = { rows: [row({ session_id: "a", title: "alpha" })] };
+    setAssistantOpen(true);
+    setAssistantMode("minimized");
+    mount();
+
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(storedOpen()).toBe("1");
+    expect(window.localStorage.getItem("pulse.assistant.mode")).toBe("normal");
+  });
+
+  it("does not dock the window into the focus layout: the focus panes stand alone", () => {
+    overrides = {
+      rows: [
+        row({ session_id: "run", status: "running", title: "Runs" }),
+        row({ session_id: "old", status: "idle", title: "Old one" }),
+      ],
+    };
+    setAssistantOpen(true);
+    setPulseFocus("run");
+    mount();
+
+    expect(screen.getByTestId("pulse-focus-pane")).toBeTruthy();
+    expect(screen.getByTestId("pulse-focus-side")).toBeTruthy();
+    expect(screen.queryByTestId("pulse-assistant-window")).toBeNull();
   });
 });

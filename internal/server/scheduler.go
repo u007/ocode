@@ -17,7 +17,7 @@ import (
 // scheduled jobs. It is attached to the Server only when a *scheduler.Service
 // is set via attachScheduler below.
 type cronHandler struct {
-	svc *scheduler.Service
+	srv *Server
 }
 
 // cronAddRequest is the JSON body for POST /api/cron. Exactly one of AtMs /
@@ -61,11 +61,19 @@ func (req cronScheduleReq) toSchedule() scheduler.Schedule {
 	}
 }
 
-func (h *cronHandler) list(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": h.svc.ListJobs()})
+func (h *cronHandler) list(w http.ResponseWriter, r *http.Request) {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": svcs.cron.ListJobs()})
 }
 
 func (h *cronHandler) add(w http.ResponseWriter, r *http.Request) {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -97,7 +105,7 @@ func (h *cronHandler) add(w http.ResponseWriter, r *http.Request) {
 			PermMode:  req.PermMode,
 		},
 	}
-	id, err := h.svc.AddJob(job)
+	id, err := svcs.cron.AddJob(job)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -111,7 +119,11 @@ func (h *cronHandler) remove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	if err := h.svc.RemoveJob(id); err != nil {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
+	if err := svcs.cron.RemoveJob(id); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -119,6 +131,10 @@ func (h *cronHandler) remove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *cronHandler) update(w http.ResponseWriter, r *http.Request) {
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
+		return
+	}
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -134,7 +150,7 @@ func (h *cronHandler) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	cur := h.svc.GetJob(id)
+	cur := svcs.cron.GetJob(id)
 	if cur == nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("job %s not found", id))
 		return
@@ -169,7 +185,7 @@ func (h *cronHandler) update(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.Payload = &payload
 	}
-	updated, err := h.svc.UpdateJob(id, patch)
+	updated, err := svcs.cron.UpdateJob(id, patch)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -179,18 +195,18 @@ func (h *cronHandler) update(w http.ResponseWriter, r *http.Request) {
 
 // handleCronTargetsList returns the current (workdir → chatID) mapping.
 func (s *Server) handleCronTargetsList(w http.ResponseWriter, r *http.Request) {
-	if s.schedulerTargets == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"targets": map[string]int64{}})
+	svcs, ok := s.cronServicesFor(w, r)
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"targets": s.schedulerTargets.All()})
+	writeJSON(w, http.StatusOK, map[string]any{"targets": svcs.targets.All()})
 }
 
 // handleCronTargetsSet writes/clears a single (workdir → chatID) mapping.
 // Body: {"workdir": "/abs/path", "chat_id": 12345}; chat_id=0 removes.
 func (s *Server) handleCronTargetsSet(w http.ResponseWriter, r *http.Request) {
-	if s.schedulerTargets == nil {
-		writeError(w, http.StatusServiceUnavailable, "no scheduler attached")
+	svcs, ok := s.cronServicesFor(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -205,7 +221,7 @@ func (s *Server) handleCronTargetsSet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "workdir is required")
 		return
 	}
-	if err := s.schedulerTargets.Set(body.Workdir, body.ChatID); err != nil {
+	if err := svcs.targets.Set(body.Workdir, body.ChatID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -220,11 +236,11 @@ func (s *Server) handleCronTargetsSet(w http.ResponseWriter, r *http.Request) {
 //
 // The response is {"entries": [...]} where each entry is a scheduler.Delivery.
 func (s *Server) handleCronOutbox(w http.ResponseWriter, r *http.Request) {
-	if s.schedulerOutbox == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+	svcs, ok := s.cronServicesFor(w, r)
+	if !ok {
 		return
 	}
-	entries, err := s.schedulerOutbox.Peek()
+	entries, err := svcs.outbox.Peek()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -239,7 +255,7 @@ func (s *Server) handleCronOutbox(w http.ResponseWriter, r *http.Request) {
 		// Drain truncates; we already peeked. Re-Drain to clear.
 		// (Peek does not mutate, so call Drain after — it returns the
 		// current contents and truncates.)
-		if _, derr := s.schedulerOutbox.Drain(); derr != nil {
+		if _, derr := svcs.outbox.Drain(); derr != nil {
 			writeError(w, http.StatusInternalServerError, derr.Error())
 			return
 		}
@@ -248,19 +264,21 @@ func (s *Server) handleCronOutbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *cronHandler) get(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	j := h.svc.GetJob(id)
-	if j == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("job %s not found", id))
+	svcs, ok := h.srv.cronServicesFor(w, r)
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, j)
+	if j := svcs.cron.GetJob(r.PathValue("id")); j != nil {
+		writeJSON(w, http.StatusOK, j)
+		return
+	}
+	writeError(w, http.StatusNotFound, "job not found")
 }
 
 // handleCronRuns returns the run history for a single job: GET /api/cron/{id}/runs
 func (s *Server) handleCronRuns(w http.ResponseWriter, r *http.Request) {
-	if s.schedulerRuns == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"runs": []any{}, "total": 0})
+	svcs, ok := s.cronServicesFor(w, r)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -272,7 +290,7 @@ func (s *Server) handleCronRuns(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	runs, total, err := s.schedulerRuns.List(id, limit, offset)
+	runs, total, err := svcs.runs.List(id, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -282,13 +300,13 @@ func (s *Server) handleCronRuns(w http.ResponseWriter, r *http.Request) {
 
 // handleCronRunDetail returns a single run: GET /api/cron/{id}/runs/{runId}
 func (s *Server) handleCronRunDetail(w http.ResponseWriter, r *http.Request) {
-	if s.schedulerRuns == nil {
-		writeError(w, http.StatusNotFound, "no scheduler attached")
+	svcs, ok := s.cronServicesFor(w, r)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	runID := r.PathValue("runId")
-	rec, err := s.schedulerRuns.Get(id, runID)
+	rec, err := svcs.runs.Get(id, runID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -316,6 +334,19 @@ func (s *Server) SetScheduler(svc *scheduler.Service) {
 			s.schedulerOutbox = scheduler.NewOutbox(storePath)
 			s.schedulerRuns = scheduler.NewRunHistory(storePath)
 			s.schedulerTargets = scheduler.NewTargets(storePath)
+		}
+		// Seed the default project's per-project entry with THIS service. It has
+		// the Telegram drainer sink and the RC-bridge fan-out already attached by
+		// AttachTelegramBot, so lazily starting a twin for the same project would
+		// silently drop that wiring. Every other project is started on first use
+		// (and eagerly by WarmCronProjects, so a reminder in an unopened project
+		// still fires).
+		s.setCronScopeConfig(s.cronConfig(), nil, svc, s.reminders, s.workDir, s.schedulerOutbox, s.schedulerRuns, s.schedulerTargets)
+		// Give the handler a per-project resolver so the LLM `cron` tool follows the
+		// session's project. Installed here, next to the `s.handler.scheduler = svc`
+		// above, so both cron wirings are set from one place.
+		if s.handler != nil {
+			s.handler.cronServices = s.cronServiceResolver()
 		}
 		s.mux.HandleFunc("GET /api/cron/outbox", s.authMiddleware(s.handleCronOutbox))
 		s.mux.HandleFunc("GET /api/cron/targets", s.authMiddleware(s.handleCronTargetsList))
@@ -532,7 +563,7 @@ func (s *Server) attachScheduler(svc *scheduler.Service) {
 		return
 	}
 	s.scheduler = svc
-	h := &cronHandler{svc: svc}
+	h := &cronHandler{srv: s}
 	s.mux.HandleFunc("GET /api/cron", s.authMiddleware(h.list))
 	s.mux.HandleFunc("POST /api/cron", s.authMiddleware(h.add))
 	s.mux.HandleFunc("GET /api/cron/{id}", s.authMiddleware(h.get))

@@ -140,7 +140,7 @@ func TestResolveChatVerbosityPolicy(t *testing.T) {
 func TestChatVerbosityConfigRoundTrip(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	seed := defaultOcodeConfig()
 	seed.Editor = "vim"
@@ -172,7 +172,7 @@ func TestChatVerbosityConfigRoundTrip(t *testing.T) {
 func TestChatVerbosityConfigFileRejectsUnknownOverrideCategory(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	dir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -190,7 +190,7 @@ func TestChatVerbosityConfigFileRejectsUnknownOverrideCategory(t *testing.T) {
 func TestChatVerbosityConfigFileRejectsExplicitEmptyOverride(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	dir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -208,7 +208,7 @@ func TestChatVerbosityConfigFileRejectsExplicitEmptyOverride(t *testing.T) {
 func TestSaveOcodeChatVerbosityWritesSpecCategoryKeys(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	cfg := defaultChatVerbosityConfig()
 	cfg.Preset = "balanced"
@@ -234,7 +234,7 @@ func TestSaveOcodeChatVerbosityWritesSpecCategoryKeys(t *testing.T) {
 func TestSaveOcodeChatVerbosityRejectsInvalidWithoutRewrite(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	seed := defaultOcodeConfig()
 	seed.Editor = "nano"

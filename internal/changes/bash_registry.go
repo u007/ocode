@@ -13,9 +13,43 @@
 package changes
 
 import (
+	"fmt"
 	"sort"
 	"time"
 )
+
+// NotifyBashSkipped records that the bash recorder declined to turn one
+// command's diff into change rows. Nothing else retains that fact, so without
+// this a dropped event is indistinguishable from a command that changed
+// nothing — which is exactly the ambiguity that made a 4,214-row false
+// positive undiagnosable after the fact.
+//
+// The history is a bounded ring (maxSkipNotices): skips are diagnostic, not
+// inventory.
+func (r *Registry) NotifyBashSkipped(n SkipNotice) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifyBashSkippedLocked(n)
+}
+
+// notifyBashSkippedLocked is NotifyBashSkipped for callers already holding
+// r.mu (NotifyBashWrite hits the ceiling while holding it).
+func (r *Registry) notifyBashSkippedLocked(n SkipNotice) {
+	if n.At.IsZero() {
+		n.At = time.Now()
+	}
+	r.bashSkips = append(r.bashSkips, n)
+	if len(r.bashSkips) > maxSkipNotices {
+		r.bashSkips = append([]SkipNotice(nil), r.bashSkips[len(r.bashSkips)-maxSkipNotices:]...)
+	}
+}
+
+// BashSkips returns the retained SkipNotice history, oldest first.
+func (r *Registry) BashSkips() []SkipNotice {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]SkipNotice(nil), r.bashSkips...)
+}
 
 // NotifyBashWrite materializes one FileChange per touch in
 // event.Touches. The entries are Undoable:false (no snapshot
@@ -49,7 +83,20 @@ func (r *Registry) NotifyBashWrite(event BashWriteEvent) {
 		return touches[i].Path < touches[j].Path
 	})
 
+	limit := r.maxFiles
+	if limit <= 0 {
+		limit = maxTrackedFiles
+	}
+	refused := 0
 	for _, t := range touches {
+		// The ceiling gates NEW paths only. A bash touch on a path the
+		// registry already tracks must still refresh its metadata, or
+		// LastBashCommand would silently go stale for every row once a
+		// session neared the ceiling.
+		if _, known := r.files[t.Path]; !known && len(r.files) >= limit {
+			refused++
+			continue
+		}
 		// Build a partial FileChange. We need a value (not a
 		// pointer) so the map can be populated atomically.
 		fc := FileChange{
@@ -101,5 +148,16 @@ func (r *Registry) NotifyBashWrite(event BashWriteEvent) {
 			continue
 		}
 		r.files[t.Path] = &fc
+	}
+	if refused > 0 {
+		r.notifyBashSkippedLocked(SkipNotice{
+			Reason:  SkipRegistryCeiling,
+			Detail:  fmt.Sprintf("registry already tracks %d paths (ceiling); refused %d new path(s) from this command", limit, refused),
+			Command: event.Command,
+			// ExitCode is intentionally the event's: the shell's status says
+			// nothing about why the registry refused a path.
+			ExitCode: event.ExitCode,
+			Paths:    refused,
+		})
 	}
 }

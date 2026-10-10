@@ -214,3 +214,57 @@ func TestFoldTopLevelCds_DestructiveTailIsPreserved(t *testing.T) {
 		}
 	}
 }
+
+// Parens inside a double-quoted echo label are data, not a subshell: they must
+// not block the fold (otherwise the judge sees the raw cross-project cd and
+// defers below the confidence floor).
+func TestFoldTopLevelCds_QuotedParensDoNotBlockFold(t *testing.T) {
+	in := scopeOf("/Users/james/www")
+	cmd := `cd /Users/james/www/ocode && git log --oneline -8 | cat && echo "=== git status (short) ===" && git status --short | head -20`
+	folded, cwd, ok := foldTopLevelCds(cmd, "/Users/james/app/nylakid", in)
+	if !ok {
+		t.Fatal("expected fold to succeed; parens inside double quotes are literal")
+	}
+	if cwd != "/Users/james/www/ocode" {
+		t.Errorf("cwd = %q, want /Users/james/www/ocode", cwd)
+	}
+	if strings.HasPrefix(folded, "cd ") {
+		t.Errorf("cd not removed: %q", folded)
+	}
+}
+
+// A real bare subshell must still refuse, even when quoted parens are present.
+func TestFoldTopLevelCds_BareSubshellStillRefusesWithQuotedParens(t *testing.T) {
+	in := scopeOf("/Users/james/www")
+	cmd := `cd /Users/james/www/ocode && echo "(a)" && (cd /tmp && ls)`
+	if _, _, ok := foldTopLevelCds(cmd, "/Users/james/app/nylakid", in); ok {
+		t.Fatal("bare subshell must still refuse the fold")
+	}
+}
+
+// Group characters inside double quotes (including a parameter-expansion default
+// containing an open paren) are literal data and must not block the fold; a bare
+// subshell after them must still refuse. An unterminated quote blanks to the end
+// of the string, so a trailing "subshell" inside it is part of the quote.
+func TestStripSubstitutions_DoubleQuoteEdgeCases(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		wantGroup bool
+	}{
+		{"param default open paren", `echo "${x:-(}"`, false},
+		{"param default then bare subshell", `echo "${x:-(}" && (ls)`, true},
+		{"unterminated quote swallows tail", `echo "a (b)`, false},
+		{"command substitution in quotes", `echo "$(date)"`, false},
+		{"backtick in quotes", "echo \"`date`\"", false},
+		{"escaped quote does not close", `echo "a\" (b)"`, false},
+		{"single quote inside double", `echo "it's (ok)"`, false},
+		{"bare subshell", `(ls)`, true},
+	}
+	for _, c := range cases {
+		got := strings.ContainsAny(stripSubstitutions(c.in), "(){}")
+		if got != c.wantGroup {
+			t.Errorf("%s: ContainsAny(stripSubstitutions(%q)) = %v, want %v", c.name, c.in, got, c.wantGroup)
+		}
+	}
+}

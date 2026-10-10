@@ -158,7 +158,7 @@ func TestDocSearchJudgeNilWhenNotConnected(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("", "jev-latest", "http://127.0.0.1:1")

@@ -187,7 +187,7 @@ Two coupled defects in the concurrent-writer reconcile (`internal/session/sessio
    `rebaseAppend` produced a merge whose last rows were still the raw
    rows (calls intact), but `reconcileAppendToDirWithMessages` returned
    `removeIncompleteToolRequests(merged)` — the filtered view.
-   `persistTurnTranscript` (`internal/server/agent_session.go:1145`) adopted
+   `persistTurnTranscript` (`internal/server/agent_session.go:1453`) adopted
    it as `as.messages`, erasing the trailing PERMISSION_ASK sentinel + its
    tool-call from the resident transcript. `tailIsPermissionAsk` went
    false (the next user message started a fresh turn, the orphaned call

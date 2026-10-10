@@ -750,7 +750,7 @@ Verified facts the implementer must not re-derive:
 - `session.copy_to_container(paths, container_dir=..., container_filename=...)` copies arbitrary host files in. This is how the binary gets there — no download, no release asset, no host file server.
 - The container agent-logs directory is `/agent-logs`, mounted to the host `logging_dir`.
 - Commands run in a **tmux pane**, so stdout is not a captured pipe. The redirect to `/agent-logs/ocode-run.jsonl` is mandatory.
-- `ocode run -p` is a complete agentic run: `Agent.Step` loops until a response has no tool calls, bounded by `maxSteps` (default 100) — see `internal/agent/agent.go:843`.
+- `ocode run -p` is a complete agentic run: `Agent.Step` loops until a response has no tool calls, bounded by `maxSteps` (default 100) — see `internal/agent/agent.go:844`.
 
 - [x] **Step 1: Write the failing test**
 

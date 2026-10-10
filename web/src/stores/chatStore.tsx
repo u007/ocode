@@ -53,6 +53,12 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
       scope: (req["scope"] as string) || undefined,
       prefix: (req["prefix"] as string) || undefined,
       out_of_scope_path: (req["out_of_scope_path"] as string) || undefined,
+      untrusted_content: (req["untrusted_content"] as string) || undefined,
+      untrusted_source: (req["untrusted_source"] as string) || undefined,
+      untrusted_summary: (req["untrusted_summary"] as string) || undefined,
+      untrusted_scores: (req["untrusted_scores"] as ContentGuardScore[]) || undefined,
+      untrusted_failure: (req["untrusted_failure"] as string) || undefined,
+      agent_name: (req["agent_name"] as string) || undefined,
     };
   } catch {
     return null;
@@ -201,6 +207,32 @@ export interface PermissionRequest {
   prefix?: string;
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
+  /** Content-guardrail ask (scope "content"): the flagged result text. */
+  untrusted_content?: string;
+  /** Content-guardrail ask: one-line origin of the flagged content. */
+  untrusted_source?: string;
+  /** Content-guardrail ask: the guardrail's headline (concern + confidence). */
+  untrusted_summary?: string;
+  /** Content-guardrail ask: the per-question judge scores, one per judged chunk. */
+  untrusted_scores?: ContentGuardScore[];
+  /** Content-guardrail ask: why the guardrail could not clear this result. */
+  untrusted_failure?: string;
+  /** Name of the sub-agent that raised the ask; absent for a main-agent ask.
+   *  Without it the dialog can only say "a sub-agent asked", which is useless
+   *  when several are parked at once. */
+  agent_name?: string;
+}
+
+/** One chunk's judge output. Both questions are reported separately so the
+ *  dialog can show the raw scores instead of one collapsed verdict. */
+export interface ContentGuardScore {
+  chunk: number;
+  total: number;
+  verdict: string;
+  verdict_confidence: number;
+  concern?: string;
+  concern_confidence?: number;
+  probabilities?: Record<string, number>;
 }
 
 export interface QuestionRequest {
@@ -289,6 +321,16 @@ export interface SessionSlice {
   // streamWasInterrupted which prevents drainQueuedItems on cancel). Cleared
   // when the user resumes or starts a new turn.
   wasInterrupted: boolean;
+  // True while this session's transcript is scrolled away from its tail
+  // (>= 200px of content below the fold — the same threshold that drives
+  // ChatPanel's jump-to-bottom affordance). Drives the composer's "recent
+  // inputs" strip, which is the recall affordance for exactly the state where
+  // your own prompts are no longer on screen.
+  //
+  // Written by ChatPanel's scroll handler and read by ChatInput. They are
+  // SIBLINGS under App.tsx, so this per-session slice is the only channel
+  // between them; ChatInput carries no scroll props and must not grow any.
+  transcriptScrolledUp: boolean;
   // Server-derived "settled on an unfinished turn" flag (GET /state). Distinct
   // from `wasInterrupted`, which is the live user-Stop signal that BLOCKS
   // sending — reusing it would disable the Continue action this flag drives.
@@ -349,6 +391,7 @@ export const emptySessionSlice: SessionSlice = {
   statusLoading: false,
   wasInterrupted: false,
   interrupted: false,
+  transcriptScrolledUp: false,
   model: undefined,
 };
 
@@ -455,6 +498,7 @@ export type ChatAction =
   /** A transient informational line appended to the live buffer (discovery
    *  notices mirrored from the TUI). Append-only: unlike a permission/advisor
    *  status part it is never removed on completion. */
+  | { type: "LIVE_USER"; sessionId: string; content: string; user_seq?: number }
   | { type: "LIVE_NOTICE"; sessionId: string; text: string }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
@@ -471,6 +515,7 @@ export type ChatAction =
   | { type: "QUESTION_DISMISSED"; sessionId: string; requestId: string }
   | { type: "PREPEND_MESSAGES"; sessionId: string; messages: Message[]; total: number }
   | { type: "SET_LOADING_MORE"; sessionId: string; loading: boolean }
+  | { type: "SET_TRANSCRIPT_SCROLLED_UP"; sessionId: string; scrolledUp: boolean }
   | { type: "MERGE_SNAPSHOT"; sessionId: string; messages: Message[]; total: number }
   | { type: "SET_TOTAL"; sessionId: string; total: number }
   | { type: "SET_SPENDING"; spendingUSD: number | null }
@@ -785,6 +830,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           hasMore: capped.hasMore || s.hasMore,
         };
       });
+    case "LIVE_USER":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        live: [...s.live, { kind: "user", content: action.content, user_seq: action.user_seq }],
+      }));
     case "LIVE_DELTA":
       return updateSession(state, action.sessionId, (s) => {
         const live = [...s.live];
@@ -1218,6 +1268,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     case "SET_LOADING_MORE":
       return updateSession(state, action.sessionId, (s) => ({ ...s, loadingMore: action.loading }));
+    case "SET_TRANSCRIPT_SCROLLED_UP":
+      // Identity guard: the scroll handler dispatches on every animation frame
+      // while the reader scrolls, and `updateSession` replaces the slice object.
+      // Without this, a scroll that does not cross the threshold would still
+      // re-render every subscriber of the slice on every frame.
+      return updateSession(state, action.sessionId, (s) =>
+        s.transcriptScrolledUp === action.scrolledUp ? s : { ...s, transcriptScrolledUp: action.scrolledUp },
+      );
     case "MERGE_SNAPSHOT":
       // Merge snapshot into current state.
       // If action.messages is a full snapshot (length == total), replace all.

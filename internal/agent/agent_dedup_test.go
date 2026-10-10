@@ -183,7 +183,7 @@ func TestStepRejectsDuplicateParallelCallAndSharesWinnerResult(t *testing.T) {
 		{Role: "assistant", ToolCalls: []ToolCall{first, second}},
 		{Role: "assistant", Content: "done"},
 	}}
-	a := NewAgent(client, []tool.Tool{dedupParallelTool{calls: &calls}}, nil, nil)
+	a := newTestAgent(client, []tool.Tool{dedupParallelTool{calls: &calls}}, nil, nil)
 	a.Permissions().SetMode(PermissionModeYOLO)
 	messages, err := a.Step([]Message{{Role: "user", Content: "run it"}})
 	if err != nil {

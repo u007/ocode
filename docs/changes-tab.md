@@ -8,10 +8,9 @@ tags:
   - session
   - file-tracking
   - TUI
-timestamp: 2026-07-22T16:15:00Z
+timestamp: 2026-10-01T06:27:17Z
 status: draft
 ---
-
 # Changes Tab
 
 The **changes tab** is a per-session TUI surface that lists every file the
@@ -54,10 +53,16 @@ detects file mutations made by the shell directly.
    runs a pre/post stat-walk around the bash tool's execution. `Pre()`
    returns a per-call `BashBaseline` that the caller hands back to
    `Post(base, …)` — one `BashTool` serves parallel tool calls, so the
-   baseline must not live on the recorder. It compares file mtime
+   baseline must not live on the recorder. The baseline is either
+   **complete** (Post may diff it) or **flagged** (`BashBaseline.complete`);
+   diffing a partial walk is actively wrong, so `Post` declines and drops
+   the event instead. Both walks run through one shared `fingerprint()`
+   method that reports a `walkStatus`. `Post` compares file mtime
    (nanosecond) and size before and after, then intersects with path-shaped
-   tokens extracted from the command string. Detected changes are added to
-   the registry with `Undoable: false`.
+   tokens extracted from the command string (`targetTokens`, which drops
+   `cd`-style location tokens — see "Bash detection guards"). Detected
+   changes are added to the registry with `Undoable: false`; an event that
+   fails a guard is dropped **whole** and recorded as a `SkipNotice`.
 
 4. **TUI changes model (`internal/tui/changes_model.go`).** The `changesModel`
    calls `Registry.List()` on every render to get the current file list.
@@ -124,9 +129,15 @@ consumes every snapshot, the row falls back to bash-only (non-undoable) and
 
 The pre/post stat-walk is conservative:
 - Skips `.git/`, `node_modules/`, `.opencode/`, `build/`, `dist/`.
-- Intersects the stat diff with path-shaped tokens extracted from the
-  command string (paths after `>`, `>>`, `tee`, `sed -i`, `mv`, `cp`,
-  `rm`, `mkdir -p`, `touch`, `cat <<EOF >`).
+- Intersects the stat diff with tokens from `pathTokenRegex`, a single
+  regex (not a shell parser): any run of `[A-Za-z0-9_./~+-]` containing
+  at least one slash. It has no verb awareness (`tee`/`sed -i`/`mv`/`cp`/
+  `rm`/`touch` are never matched as verbs), and a bare slashless filename
+  (`TODO.md`, `Makefile`) produces no token at all. `targetTokens` /
+  `isLocationToken` first drop tokens naming the workDir or an ancestor of
+  it (the `cd <workdir> && …` prefix); subdirectory targets are kept. See
+  "Bash detection guards" for the fail-open this triggers and the `cd`-token
+  rule.
 - A file whose mtime or size moved is reported as modified. The
   pre-walk records no content hash (hashing every file per bash call is
   too slow), so a touched-but-identical file cannot be told apart from a
@@ -137,6 +148,83 @@ The pre/post stat-walk is conservative:
   soft links outside the working dir.
 - V2 may upgrade to FSNotifier (inotify/FSEvents) if the heuristic
   proves insufficient.
+
+## Bash detection guards
+
+Three guards stop one command from claiming files it never wrote. All live
+in `internal/changes` (`bash.go`, plus `bash_registry.go` for the ceiling).
+A guarded event is dropped **whole** — a row is never partially listed —
+and the drop is recorded as a `SkipNotice`.
+
+### 1. A baseline is complete or flagged
+
+Diffing an incomplete pre-walk is actively wrong: every file the walk never
+reached looks newly created (one truncated walk produced 4,214 phantom
+"added" rows). `Pre`'s old contract — "the post-exec walk will still
+produce a useful diff against an empty baseline" — was wrong and is
+replaced: a baseline is either complete or flagged.
+
+- `BashBaseline` carries `applicable`, `complete`, and `skipReason`.
+- `applicable` is false only when `Pre` ran **no** walk (no workDir bound,
+  or `unsafeWalkRoot`); `Post` then stays silent — that is a configuration
+  state, not a dropped event.
+- `walkStatus` (`walkDisabled` / `walkTruncated` / `walkComplete`) is
+  returned by the single shared method
+  `func (r *StatBashRecorder) fingerprint() (map[string]fileFingerprint, walkStatus)`,
+  which replaced the previously duplicated Pre and Post walk bodies.
+- The walk budget is a per-recorder `budget` field whose default is
+  `defaultWalkBudget` (2s; formerly the bare `walkBudget` constant).
+- A pre- or post-walk that hits the budget → `Post` drops the whole event
+  with `SkipIncompleteBaseline`.
+
+### 2. A `cd` is a location, not a target
+
+`targetTokens()` wraps `pathTokensFromCommand` and drops every token for
+which `isLocationToken(tok, workDir)` is true — i.e. the token **equals the
+workDir or is an ancestor of it**. Touch matching is deliberately permissive
+(a candidate matches as a substring of the path, either direction), so a
+directory token admits every file beneath it; since virtually every command
+begins `cd <workdir> && …`, an undropped location token made the candidate
+intersection a no-op — which is how one command claimed thousands of rows it
+never wrote. Subdirectory targets inside the workDir are deliberately
+**kept** (`cp -r <workdir>/docs /tmp/x` names a real target).
+
+### 3. Bounds
+
+- `maxTouchesPerEvent = 200` — one event may contribute at most this many
+  paths; above the cap the event is dropped whole (`SkipTooManyTouches`).
+- `maxTrackedFiles = 5000` — registry-wide ceiling, enforced in
+  `Registry.NotifyBashWrite`. It gates **new** paths only: a touch on an
+  already-tracked path still refreshes `LastBashCommand` /
+  `LastBashExitCode`. Refused paths are reported as `SkipRegistryCeiling`.
+- `maxSkipNotices = 20` — size of the retained `SkipNotice` ring.
+
+### Bounded fail-open (unchanged in spirit)
+
+A command that names no slash-bearing path token — `cat >> TODO.md` yields
+no token (the token regex requires a slash), and the same is true of most
+heredocs and in-place `sed`s — leaves its diff unfiltered, but only while
+the diff stays at or under `maxTouchesPerEvent`. That cap is what keeps
+heredocs and in-place `sed`s visible in the tab; unbounded, this branch is
+how a concurrent writer's files were attributed to an unrelated command.
+
+### Skip visibility
+
+A skipped event is **silent in the changes tab** but never invisible:
+
+- `SkipNotice{Reason, Detail, Command, ExitCode, Paths, At}` with reasons
+  `SkipIncompleteBaseline`, `SkipTooManyTouches`, `SkipRegistryCeiling`.
+- `NewStatBashRecorder` takes a variadic `RecorderOption`;
+  `WithSkipNotice(fn)` registers the callback. All four
+  `changes.NewStatBashRecorder(...)` construction sites in
+  `internal/agent/agent.go` pass `changes.WithSkipNotice(a.noteBashChangeSkip)`,
+  which emits a `WARN` debug-panel line (the command echoed through
+  `truncateForDebug`, capped at 120 bytes).
+- The registry retains the notices (`NotifyBashSkipped` /
+  `notifyBashSkippedLocked`, readable via `Registry.BashSkips()`),
+  exposed agent-side as `Agent.BashChangeSkips()`.
+
+A bash change row remains `Undoable: false`, guarded or not.
 
 ## See also
 

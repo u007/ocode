@@ -382,7 +382,17 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
             // Duplicate id — show the call without a second copy of the same result.
             return { tc, resultContent: undefined, resultIdx: undefined };
           }
-          return { tc, resultContent: undefined, resultIdx: undefined, pendingQuestion: pendingQuestionById.get(tc.id) };
+          // The entry-level parse can miss the ask while the session still
+          // holds it: the persisted sentinel may be absent or unparseable (the
+          // server documents sentinel-less paused saves — sessionEvents.ts
+          // livePendingAsks) even though SSE set pendingQuestion. Once the user
+          // hides the dialog, that session state is the only source left for
+          // the transcript-level "Open question" button, so derive from it.
+          const hiddenId = slice.hiddenQuestionRequestId;
+          const sessionPending = slice.pendingQuestion;
+          const hiddenMatches = hiddenId && sessionPending && hiddenId === sessionPending.request_id && hiddenId === tc.id;
+          const derivedPending = hiddenMatches ? sessionPending : pendingQuestionById.get(tc.id);
+          return { tc, resultContent: undefined, resultIdx: undefined, pendingQuestion: derivedPending };
         });
         entries.push({ kind: "tool-group", assistant: msg, originalIndex: i, calls });
         continue;
@@ -400,7 +410,10 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       entries.push({ kind: "single", msg, originalIndex: i });
     }
     return entries;
-  }, [messages]);
+    // hiddenQuestionRequestId/pendingQuestion participate: derivedPending reads
+    // them, and a recompute must happen when X/Escape flips the hidden state
+    // (messages do not change then — otherwise the button never appears).
+  }, [messages, slice.hiddenQuestionRequestId, slice.pendingQuestion]);
   renderEntriesRef.current = renderEntries;
 
   // The last thinking block in the latest assistant turn is always expanded,
@@ -616,6 +629,58 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     return item.start < offset;
   };
 
+  // --- Reader anchor across window slides -------------------------------------
+  // The loaded window is not fixed: the turn-end `messages` broadcast can
+  // replace a 100-row tail page with the capped 400-row window (300 rows land
+  // ABOVE the reader), the reconcile MERGE_SNAPSHOT later shrinks it back to a
+  // tail page, and once the window sits at MAX_SLICE_MESSAGES every appended
+  // message trims one row off the head. None of those moves scrollTop, so a
+  // reader who scrolled up sees their content jump by the height of the rows
+  // that came or went above them — and the shrink then read as a "transcript
+  // reset" and yanked them to the bottom. Keys are global transcript positions,
+  // so the row the reader was on can be found again after any slide: remember
+  // it (with the pixel offset inside it) on every scroll while unpinned, and
+  // put it back at the same place in a LAYOUT effect, before paint.
+  const readerAnchorRef = useRef<{ key: number; index: number; distance: number } | null>(null);
+  const prevWindowRef = useRef<{ start: number; count: number } | null>(null);
+  // Set by the layout effect below when the anchored row survived a shrink, so
+  // the [messages, live] effect does not mistake the slide for a reset.
+  const anchorSurvivedShrinkRef = useRef(false);
+  // The scroll-up pagination path restores its own offset (scrollHeight delta
+  // in a rAF, see handleScroll); it flags the prepend so this effect stays out.
+  const prependRestoreRef = useRef(false);
+  useLayoutEffect(() => {
+    const prev = prevWindowRef.current;
+    prevWindowRef.current = { start: windowStartServerIndex, count: renderEntries.length };
+    if (!prev || !initialized) return;
+    if (prependRestoreRef.current) {
+      prependRestoreRef.current = false;
+      return;
+    }
+    // Pinned: the tail pin is the only writer of the offset.
+    if (atBottomRef.current) return;
+    const anchor = readerAnchorRef.current;
+    if (!anchor) return;
+    // Nothing above the reader moved: same window start and rows only appended.
+    if (prev.start === windowStartServerIndex && renderEntries.length >= prev.count) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const index = renderEntries.findIndex(
+      (entry) => transcriptItemKey(windowStartServerIndex, entry.originalIndex) === anchor.key,
+    );
+    if (index < 0) {
+      // The row the reader was on is gone (truncate/rewind): the old position
+      // no longer refers to this content, so let the follow re-arm.
+      readerAnchorRef.current = null;
+      return;
+    }
+    anchorSurvivedShrinkRef.current = true;
+    if (index === anchor.index) return;
+    restoreChatDisplayAnchor(el, { index, distance: anchor.distance }, virtualizer);
+    lastScrollTopRef.current = el.scrollTop;
+    readerAnchorRef.current = { ...anchor, index };
+  }, [renderEntries, windowStartServerIndex, initialized, virtualizer]);
+
   const lastPolicyRevisionRef = useRef(chatPolicyRevision);
   useEffect(() => {
     if (lastPolicyRevisionRef.current === chatPolicyRevision) return;
@@ -631,7 +696,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       ? captureChatDisplayAnchor(
           el.scrollTop,
           firstVisible?.index,
-          (index) => virtualizer.getOffsetForIndex(index),
+          (index, align) => virtualizer.getOffsetForIndex(index, align),
         )
       : null;
     const pinned = atBottomRef.current;
@@ -946,7 +1011,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     // the transcript was reset/replaced under the reader.
     const prev = prevMessagesRef.current;
     prevMessagesRef.current = { count: messages.length };
-    if (prev && messages.length < prev.count) {
+    // A window SLIDE also shrinks the list (the reconcile snapshot replacing the
+    // 400-row window with a tail page); the layout effect above has already put
+    // the reader's row back in that case and says so — only a genuine reset
+    // (their row is gone) re-arms the follow.
+    const anchorSurvived = anchorSurvivedShrinkRef.current;
+    anchorSurvivedShrinkRef.current = false;
+    if (prev && messages.length < prev.count && !anchorSurvived) {
       atBottomRef.current = true;
     }
     // Only meaningful while the panel has a layout box: a hidden (display:none)
@@ -1477,8 +1548,32 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       if (atBottom || isRecentUserScrollIntent(userScrollIntentAtRef.current)) {
         atBottomRef.current = atBottom;
       }
+      // Remember the row under the top edge (and the offset inside it) while
+      // the reader is away from the tail, so a window slide can put it back.
+      if (atBottomRef.current) {
+        readerAnchorRef.current = null;
+      } else {
+        const top = el.scrollTop;
+        const first = virtualizer.getVirtualItems().find((item) => item.end > top);
+        readerAnchorRef.current = first
+          ? { key: first.key as number, index: first.index, distance: top - first.start }
+          : null;
+      }
       setShowJumpToBottom(!atBottom);
       setShowJumpToTop(el.scrollTop > 200);
+      // Publish "the reader is away from the tail" to the composer, which is a
+      // SIBLING component (App.tsx) and cannot see this scroll state. Uses the
+      // same measured `!atBottom` as the jump-to-bottom affordance above, NOT
+      // the intent-gated `atBottomRef`: the intent gate exists to protect the
+      // autoscroll follow from a clamped pin, whereas this signal wants to be
+      // honest about the viewport — if a clamped pin really did leave the tail
+      // off-screen, the composer's "recent inputs" strip SHOULD appear. Deriving
+      // it from the existing measurement (rather than adding a second
+      // scroll-distance computation) also keeps the two affordances in lockstep.
+      //
+      // The reducer's identity guard makes the per-frame dispatch free when the
+      // boolean has not actually flipped.
+      dispatch({ type: "SET_TRANSCRIPT_SCROLLED_UP", sessionId, scrolledUp: !atBottom });
     });
 
     setReachedTop(el.scrollTop < 5);
@@ -1499,6 +1594,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
         .then((detail) => {
           if (detail.messages.length > 0) {
             const scrollHeightBefore = el.scrollHeight;
+            prependRestoreRef.current = true;
             dispatch({
               type: "PREPEND_MESSAGES",
               sessionId,
@@ -1517,7 +1613,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           dispatch({ type: "SET_LOADING_MORE", sessionId, loading: false });
         });
     }
-  }, [hasMore, loadingMore, messages.length, windowStartServerIndex, totalMessages, sessionId, host, dispatch]);
+  }, [hasMore, loadingMore, messages.length, windowStartServerIndex, totalMessages, sessionId, host, dispatch, virtualizer]);
 
   // Role "tool" messages carry only tool_call_id, not the tool's name — resolve
   // it here from the assistant message that issued the call, so replayed
@@ -1797,6 +1893,15 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                 ) : null;
               if (part.kind === "status")
                 return <StatusBlock key={`live-${i}`} text={part.text} />;
+              if (part.kind === "user")
+                return (
+                  <MessageBubble
+                    key={`live-${i}`}
+                    message={{ role: "user", content: part.content, user_seq: part.user_seq }}
+                    sessionId={sessionId}
+                    entryKey={`live:${i}:user`}
+                  />
+                );
               return (
                 <ToolBlock
                   key={liveKey}
@@ -1804,6 +1909,23 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                   command={part.command}
                   stream={part.stream}
                   output={part.output}
+                  // Mid-turn the ask's tool card lives ONLY in the live buffer
+                  // (the committed snapshot lands at turn end, and an ask pauses
+                  // the turn), so without this an X/Escape hide leaves no reopen
+                  // affordance — the committed path below stays unreachable while
+                  // the ask is pending. Same QUESTION_SHOW dispatch.
+                  onOpenQuestion={
+                    part.tool === "question" &&
+                    slice.pendingQuestion &&
+                    (part.callId == null || part.callId === slice.pendingQuestion.request_id)
+                      ? () =>
+                          dispatch({
+                            type: "QUESTION_SHOW",
+                            sessionId,
+                            requestId: slice.pendingQuestion!.request_id,
+                          })
+                      : undefined
+                  }
                   callKey={`${liveKey}:call:${part.callId ?? "tool"}`}
                   outputKey={`${liveKey}:output:${part.callId ?? "tool"}`}
                 />

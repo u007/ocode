@@ -12,6 +12,7 @@ vi.mock("../api/client", () => ({
     getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
     getSession: (...a: unknown[]) => mockGetSession(...a),
   },
+  apiPath: (p: string) => p,
 }));
 
 function Wrapper({ children }: { children: ReactNode }) {

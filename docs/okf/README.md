@@ -65,6 +65,7 @@ implemented — derived skills are synced into the embed tree by
 | `conduct/` | 45 | **universal** (any repo) |
 | `hallucination/` | 31 | **universal** (any repo) |
 | `pdf/` | 36 | `*.pdf` at repo root or ≤2 dirs deep |
+| `webforms/` | 27 | **universal** (any repo; filling web forms with htrcli) |
 | `docx/` | 29 | `*.docx` / `*.doc` at repo root or ≤2 dirs deep |
 | `pptx/` | 27 | `*.pptx` / `*.ppt` at repo root or ≤2 dirs deep |
 

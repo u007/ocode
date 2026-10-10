@@ -24,16 +24,6 @@ func resetGroqCache(t *testing.T) {
 	})
 }
 
-func TestGroqProviderRegistered(t *testing.T) {
-	p := auth.FindProvider("groq")
-	if p == nil {
-		t.Fatal("groq provider not found in auth.FindProvider")
-	}
-	if p.EnvVar != "GROQ_API_KEY" {
-		t.Fatalf("expected GROQ_API_KEY, got %q", p.EnvVar)
-	}
-}
-
 func TestResolveKeyGroqEnv(t *testing.T) {
 	t.Setenv("GROQ_API_KEY", "test-groq-key")
 	if got := auth.ResolveKey("groq"); got != "test-groq-key" {

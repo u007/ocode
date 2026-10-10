@@ -207,13 +207,17 @@ func buildPulseRows(inputs []PulseInput, scope string, now time.Time) []PulseRow
 	// child that appears before its parent in the slice still counts.
 	childrenOf := map[string]int{}
 	for _, in := range inputs {
+		if isPulseSession(in.SessionID) {
+			continue
+		}
 		if parent := parentSessionID(in); parent != "" {
 			childrenOf[parent]++
 		}
 	}
 
 	for _, in := range inputs {
-		if parentSessionID(in) != "" {
+		// The Pulse assistant is the observer, not a row on its own board.
+		if isPulseSession(in.SessionID) || parentSessionID(in) != "" {
 			continue
 		}
 		status := derivePulseStatus(in)

@@ -109,3 +109,27 @@ func TestFileStoredRevisionMovesWithContent(t *testing.T) {
 		t.Fatalf("file token did not move with content (%q)", before)
 	}
 }
+
+// TestStoredTitleForDirReadsMetaOnly covers the lazy tab-hydration read: the
+// persisted title comes back from the meta row, and an absent session reports
+// "" without an error.
+func TestStoredTitleForDirReadsMetaOnly(t *testing.T) {
+	_, dir := isolatedProjectRoot(t)
+	id := "ses_title-only"
+
+	title, err := storedTitleForDir(dir, id)
+	if err != nil || title != "" {
+		t.Fatalf("missing session title = %q, %v; want empty, nil", title, err)
+	}
+
+	if err := saveToDir(dir, id, "Fix the widget", liveMsgs("q0", "a0"), nil, false, 0); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	title, err = storedTitleForDir(dir, id)
+	if err != nil {
+		t.Fatalf("title: %v", err)
+	}
+	if title != "Fix the widget" {
+		t.Fatalf("title = %q, want %q", title, "Fix the widget")
+	}
+}

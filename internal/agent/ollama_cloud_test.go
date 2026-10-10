@@ -7,34 +7,43 @@ import (
 	"github.com/u007/ocode/internal/config"
 )
 
-// TestOllamaCloudProviderRegistered pins the ollama-cloud registration in both
-// registries plus its base URL. A silent drift in the map key, env var, or base
-// URL would otherwise break the provider with no failing test (mirrors
-// TestGrokProviderRegistered).
-func TestOllamaCloudProviderRegistered(t *testing.T) {
-	p := auth.FindProvider("ollama-cloud")
-	if p == nil {
-		t.Fatal("ollama-cloud provider not registered in auth.Providers")
-	}
-	if p.EnvVar != "OLLAMA_API_KEY" {
-		t.Errorf("EnvVar = %q, want OLLAMA_API_KEY", p.EnvVar)
-	}
-
-	info, ok := providers["ollama-cloud"]
-	if !ok {
-		t.Fatal("ollama-cloud not present in client providers map")
-	}
-	if info.envKey != "OLLAMA_API_KEY" {
-		t.Errorf("providers envKey = %q, want OLLAMA_API_KEY", info.envKey)
-	}
-	if info.baseURL != "https://ollama.com/v1" {
-		t.Errorf("providers baseURL = %q, want https://ollama.com/v1", info.baseURL)
-	}
-}
-
 // TestNewClientOllamaCloud covers model parsing for the new provider, including
 // the tag-bearing model id ("gemma4:31b") whose colon must not be mistaken for
 // a provider separator.
+// TestProvidersRegistered pins that each provider is registered in BOTH
+// registries (auth.Providers for the key prompt, the client providers map for
+// transport) with the same env var, plus the base URL where one is fixed.
+func TestProvidersRegistered(t *testing.T) {
+	cases := []struct {
+		name, envVar, baseURL string
+	}{
+		{"groq", "GROQ_API_KEY", ""},
+		{"grok", "XAI_API_KEY", ""},
+		{"ollama-cloud", "OLLAMA_API_KEY", "https://ollama.com/v1"},
+	}
+	for _, tc := range cases {
+		p := auth.FindProvider(tc.name)
+		if p == nil {
+			t.Errorf("%s not registered in auth.Providers", tc.name)
+			continue
+		}
+		if p.EnvVar != tc.envVar {
+			t.Errorf("%s auth EnvVar = %q, want %q", tc.name, p.EnvVar, tc.envVar)
+		}
+		info, ok := providers[tc.name]
+		if !ok {
+			t.Errorf("%s not present in client providers map", tc.name)
+			continue
+		}
+		if info.envKey != tc.envVar {
+			t.Errorf("%s providers envKey = %q, want %q", tc.name, info.envKey, tc.envVar)
+		}
+		if tc.baseURL != "" && info.baseURL != tc.baseURL {
+			t.Errorf("%s providers baseURL = %q, want %q", tc.name, info.baseURL, tc.baseURL)
+		}
+	}
+}
+
 func TestNewClientOllamaCloud(t *testing.T) {
 	t.Setenv("OLLAMA_API_KEY", "ollama-test-key")
 	cfg := &config.Config{}

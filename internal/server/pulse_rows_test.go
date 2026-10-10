@@ -334,3 +334,19 @@ func pulseRowIDsInOrder(rows []PulseRow) []string {
 	}
 	return out
 }
+
+func TestBuildPulseRowsExcludesAssistant(t *testing.T) {
+	now := time.Now()
+	inputs := []PulseInput{
+		{SessionID: "ses_a", ProjectPath: "/p", Running: true, UpdatedAt: now, TurnStartedAt: now},
+		{SessionID: pulseSessionPrefix + "2026-10-08-000000-aaaa", ProjectPath: "/pulse", Running: true, UpdatedAt: now, TurnStartedAt: now},
+		// A child of the assistant must not count toward anything either.
+		{SessionID: pulseSessionPrefix + "2026-10-08-000000-aaaa_child_x_1", ProjectPath: "/pulse", UpdatedAt: now},
+	}
+	for _, scope := range []string{pulseScopeLive, pulseScopeAll} {
+		rows := buildPulseRows(inputs, scope, now)
+		if len(rows) != 1 || rows[0].SessionID != "ses_a" {
+			t.Fatalf("scope %s: rows = %+v, want only ses_a", scope, rows)
+		}
+	}
+}

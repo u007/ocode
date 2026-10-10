@@ -412,7 +412,7 @@ func newVerifierAgent(t *testing.T) (*Agent, string) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.Permissions().SetWorkDir(resolved)
 	return a, resolved
 }
@@ -555,8 +555,12 @@ func TestVerifyInterpreterEffects(t *testing.T) {
 		}
 	})
 	t.Run("allowed webfetch domain with port auto-allows", func(t *testing.T) {
-		a.permissions.webfetchDomains["api.example.com"] = PermissionAllow
-		defer delete(a.permissions.webfetchDomains, "api.example.com")
+		a.permissions.webfetchDomains.mutate(func(m map[string]PermissionLevel) {
+			m["api.example.com"] = PermissionAllow
+		})
+		defer a.permissions.webfetchDomains.mutate(func(m map[string]PermissionLevel) {
+			delete(m, "api.example.com")
+		})
 		r := base()
 		r.Effects.Writes = nil
 		r.Effects.Network = []string{"api.example.com:443", "https://api.example.com/v1"}
@@ -649,7 +653,7 @@ func mockModelJSON(t *testing.T, body string) func() {
 
 func newConsultAgent(t *testing.T) (*Agent, string) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	dir := t.TempDir()
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -666,7 +670,7 @@ func newConsultAgent(t *testing.T) (*Agent, string) {
 	})
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6", AllowDestructive: true, MinConfidence: 0.85}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.Permissions().SetWorkDir(resolved)
 	a.Permissions().SetAutoPermissionEnabled(true)
 	return a, resolved
@@ -1160,5 +1164,43 @@ func TestSetAutoPermissionConfigReplacesGrants(t *testing.T) {
 	pm.AddAutoGrant(grant)
 	if !pm.Clone().MatchInterpreterGrant(ie, "abc", true) {
 		t.Fatal("cloned manager should carry runtime grant")
+	}
+}
+
+func TestPersistInterpreterScriptGrant(t *testing.T) {
+	root := t.TempDir()
+	script := filepath.Join(root, "job.py")
+	if err := os.WriteFile(script, []byte("print('hi')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(root)
+	cmd := "python3 job.py"
+
+	var saved []config.AutoGrant
+	save := func(g config.AutoGrant) error { saved = append(saved, g); return nil }
+	if err := pm.PersistInterpreterScriptGrant(cmd, save); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	if len(saved) != 1 || saved[0].Kind != "interpreter_exact" {
+		t.Fatalf("expected one interpreter_exact grant saved, got %+v", saved)
+	}
+
+	ie, ok := classifyInterpreterExecution(cmd)
+	if !ok {
+		t.Fatal("command not classified as interpreter execution")
+	}
+	data, _ := os.ReadFile(script)
+	if !pm.MatchInterpreterGrant(ie, hashBytes(data), false) {
+		t.Fatal("saved grant must match the approved script")
+	}
+	if pm.MatchInterpreterGrant(ie, hashBytes([]byte("print('changed')\n")), false) {
+		t.Fatal("grant must not match once the script contents change")
+	}
+
+	before := len(saved)
+	err := pm.PersistInterpreterScriptGrant("python3 - <<'EOF'\nprint(1)\nEOF", save)
+	if err == nil || len(saved) != before {
+		t.Fatalf("heredoc must be refused without saving, err=%v saved=%d", err, len(saved))
 	}
 }

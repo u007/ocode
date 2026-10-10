@@ -73,4 +73,9 @@ func AttachScheduler(srv *server.Server, workDir string) {
 	if store, derr := reminders.DefaultStorePath(wd); derr == nil {
 		log.Printf("ocode-desktop: reminders attached (store: %s)", store)
 	}
+
+	// Arm every saved local project: cron is per PROJECT, and a reminder in a
+	// project the user has not opened yet still has to fire. A failure here is
+	// logged and non-fatal for the same reason the scheduler is.
+	srv.WarmCronProjects()
 }

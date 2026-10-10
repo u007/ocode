@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
@@ -162,6 +163,8 @@ func TestHandleSendMessageAppliesProxiedActiveProfile(t *testing.T) {
 	as.profile = "remoteprof"
 	as.credVersion = auth.ProfileCredentialVersion()
 	h.tryClaimTitleGen(id)
+	sub := h.bus.Subscribe(nil)
+	defer h.bus.Unsubscribe(sub)
 
 	body, _ := json.Marshal(map[string]any{"content": "hi", "windowId": windowID, "async": true})
 	r := httptest.NewRequest("POST", "/api/sessions/"+id+"/message", bytes.NewReader(body))
@@ -175,6 +178,12 @@ func TestHandleSendMessageAppliesProxiedActiveProfile(t *testing.T) {
 	}
 	if got := h.getWindowProfile(windowID); got != "remoteprof" {
 		t.Fatalf("window profile = %q, want remoteprof (handler did not apply the proxied profile)", got)
+	}
+	// The turn is async and persists the session under the temp HOME; returning
+	// while it is still writing made the TempDir cleanup fail intermittently.
+	// Liveness bound only: the turn's first Step builds the prompt cold.
+	if !waitForBusEvent(sub, "turn_done", 20*time.Second) {
+		t.Fatal("turn_done not observed")
 	}
 }
 

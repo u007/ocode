@@ -100,8 +100,25 @@ type Server struct {
 	schedulerRuns    *scheduler.RunHistory
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
 	reminders        *reminders.Service // optional; set via SetReminders
+	// cronScopeMu guards the per-project cron registry (cron_scope.go). It is a
+	// MAP lock, never held while an engine starts or while an agent turn runs.
+	cronScopeMu sync.Mutex
+	cron        *cronScope
+	// cronHasReminders records that a reminders engine was attached, which is
+	// what makes the per-project machinery eligible to start anything at all.
+	cronHasReminders bool
 	frontendStats    *frontendStatsRing
 	startedAt        time.Time
+
+	// shareTokenMu guards shareToken, an OPTIONAL second credential accepted
+	// alongside password. The desktop shell installs one so the link it hands
+	// to another device stays valid across restarts (see
+	// internal/desktop.ShareTokenStore). It is never the webview's own
+	// per-launch token, so rotating it revokes outstanding share links without
+	// logging the local window out. Empty means "no share token configured",
+	// which is every non-desktop server.
+	shareTokenMu sync.RWMutex
+	shareToken   string
 
 	// remoteMode is true when the process was launched as `ocode serve
 	// --remote` (see Run). It forces loopback-only binding, requires a
@@ -117,7 +134,11 @@ type Server struct {
 	// EnableBrowse, before the server starts serving.
 	browse     *browse.Server
 	browseBase string
-	htrNotice  string
+	// htrNotice is written at boot and then, from background goroutines owned by
+	// the shared HTR daemon, for the lifetime of the server. Guarded by
+	// htrNoticeMu — see SetHTRNotice.
+	htrNoticeMu sync.RWMutex
+	htrNotice   string
 
 	// procSup supervises long-lived child processes owned by the server (e.g.
 	// the headless Chrome backing the browser panel). Created in New, shut
@@ -163,6 +184,8 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.portMaps = newPortMapRegistry(s.procSup)
 	h.remoteHosts = newRemoteHostRegistry(s.procSup)
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
+	// Let the config handlers report exposure state without starting one.
+	h.tailscaleShareSnapshot = s.tsShare.status
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
 	return s
@@ -188,7 +211,26 @@ func (s *Server) ProcessSupervisor() *tool.ProcessSupervisor {
 // SetHTRNotice stores a startup failure for the browser UI. The notice is
 // intentionally persistent for the lifetime of this server so a later browser
 // panel mount cannot hide a best-effort HTR failure.
-func (s *Server) SetHTRNotice(notice string) { s.htrNotice = notice }
+//
+// It is now also written from a background goroutine — the shared daemon's
+// readiness verifier, and its death watcher, both outlive the StartBrowse call
+// that installed them (see cdp.SetStatusFunc) — so the field needs a lock. An
+// empty notice CLEARS it: a dead daemon must leave the Settings row reading
+// Stopped rather than a stale claim from boot, and nothing healthy-looking is
+// written in its place.
+func (s *Server) SetHTRNotice(notice string) {
+	s.htrNoticeMu.Lock()
+	s.htrNotice = notice
+	s.htrNoticeMu.Unlock()
+}
+
+// HTRNotice reads the cached daemon notice. Callers are HTTP handlers, so this
+// must not block on anything but this lock.
+func (s *Server) HTRNotice() string {
+	s.htrNoticeMu.RLock()
+	defer s.htrNoticeMu.RUnlock()
+	return s.htrNotice
+}
 
 func isLoopbackBind(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
@@ -230,6 +272,16 @@ func (s *Server) registerRoutes() {
 	// session routes because every row is a session; it is a global view
 	// (no project_path filter) by design, which is the whole point.
 	s.mux.HandleFunc("GET /api/pulse", s.authMiddleware(s.handlePulse))
+	// The Pulse assistant: one global chat session bound to the dashboard.
+	// Messages and streaming use the ordinary /api/sessions/{id}/... routes.
+	s.mux.HandleFunc("GET /api/pulse/assistant", s.authMiddleware(s.handlePulseAssistant))
+	s.mux.HandleFunc("PUT /api/pulse/assistant", s.authMiddleware(s.handleSelectPulseChat))
+	s.mux.HandleFunc("POST /api/pulse/assistant/new", s.authMiddleware(s.handleNewPulseChat))
+	s.mux.HandleFunc("GET /api/pulse/assistant/chats", s.authMiddleware(s.handleListPulseChats))
+	s.mux.HandleFunc("GET /api/config/pulse-model", s.authMiddleware(s.handleGetPulseModel))
+	s.mux.HandleFunc("PUT /api/config/pulse-model", s.authMiddleware(s.handleSetPulseModel))
+	s.mux.HandleFunc("GET /api/config/pulse-system-prompt", s.authMiddleware(s.handleGetPulseSystemPrompt))
+	s.mux.HandleFunc("PUT /api/config/pulse-system-prompt", s.authMiddleware(s.handleSetPulseSystemPrompt))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
@@ -273,6 +325,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/git/stage", s.authMiddleware(s.handler.HandleGitStage))
 	s.mux.HandleFunc("POST /api/git/unstage", s.authMiddleware(s.handler.HandleGitUnstage))
 	s.mux.HandleFunc("POST /api/git/discard", s.authMiddleware(s.handler.HandleGitDiscard))
+	s.mux.HandleFunc("POST /api/git/ignore", s.authMiddleware(s.handler.HandleGitIgnore))
 	s.mux.HandleFunc("POST /api/git/conflict/resolve", s.authMiddleware(s.handler.HandleGitResolveConflict))
 	s.mux.HandleFunc("POST /api/git/operation", s.authMiddleware(s.handler.HandleGitOperation))
 	s.mux.HandleFunc("POST /api/git/stash", s.authMiddleware(s.handler.HandleGitStash))
@@ -299,6 +352,32 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/raw", s.mediaAuthMiddleware(s.handleFileRaw))
 	s.mux.HandleFunc("POST /api/files/media-token", s.authMiddleware(s.handleMediaToken))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
+	// SQLite browser: browse, row CRUD, confirmed SQL writes and guided DDL.
+	// User-initiated like file save, so authMiddleware — not the agent
+	// permission gate. Remote projects reach these through the
+	// /api/remote/{host}/ catch-all proxy.
+	s.mux.HandleFunc("GET /api/db/info", s.authMiddleware(s.handler.HandleDBInfo))
+	s.mux.HandleFunc("GET /api/db/table", s.authMiddleware(s.handler.HandleDBTable))
+	s.mux.HandleFunc("POST /api/db/query", s.authMiddleware(s.handler.HandleDBQuery))
+	s.mux.HandleFunc("POST /api/db/row", s.authMiddleware(s.handler.HandleDBRow))
+	s.mux.HandleFunc("POST /api/db/schema", s.authMiddleware(s.handler.HandleDBSchema))
+	s.mux.HandleFunc("POST /api/db/maintenance", s.authMiddleware(s.handler.HandleDBMaintenance))
+	// BLOB cell upload/download. GET streams a value the grid only previews;
+	// POST replaces one cell from a raw body. Same auth wrapper as the rest of
+	// the user-initiated DB surface.
+	s.mux.HandleFunc("GET /api/db/blob", s.authMiddleware(s.handler.HandleDBBlob))
+	s.mux.HandleFunc("POST /api/db/blob", s.authMiddleware(s.handler.HandleDBBlob))
+	// Postgres connector: saved connections (encrypted in ocodeconfig.json),
+	// master-password unlock per surface, then read-only tables and queries.
+	s.mux.HandleFunc("GET /api/dbconnect/connections", s.authMiddleware(s.handler.HandleDBConnectList))
+	s.mux.HandleFunc("POST /api/dbconnect/connections", s.authMiddleware(s.handler.HandleDBConnectAdd))
+	s.mux.HandleFunc("DELETE /api/dbconnect/connections/{name}", s.authMiddleware(s.handler.HandleDBConnectRemove))
+	s.mux.HandleFunc("POST /api/dbconnect/unlock", s.authMiddleware(s.handler.HandleDBConnectUnlock))
+	s.mux.HandleFunc("POST /api/dbconnect/lock", s.authMiddleware(s.handler.HandleDBConnectLock))
+	s.mux.HandleFunc("GET /api/dbconnect/tables", s.authMiddleware(s.handler.HandleDBConnectTables))
+	s.mux.HandleFunc("POST /api/dbconnect/query", s.authMiddleware(s.handler.HandleDBConnectQuery))
+	s.mux.HandleFunc("GET /api/dbconnect/rows", s.authMiddleware(s.handler.HandleDBConnectRows))
+	s.mux.HandleFunc("POST /api/dbconnect/row", s.authMiddleware(s.handler.HandleDBConnectRow))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 	s.mux.HandleFunc("POST /api/fs/copy", s.authMiddleware(s.handler.HandleFSCopy))
 	s.mux.HandleFunc("POST /api/fs/move", s.authMiddleware(s.handler.HandleFSMove))
@@ -332,11 +411,13 @@ func (s *Server) registerRoutes() {
 
 	// Session operations
 	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.authMiddleware(s.handleCompactSession))
+	s.mux.HandleFunc("POST /api/sessions/{id}/compact/cancel", s.authMiddleware(s.handleCancelCompaction))
 	s.mux.HandleFunc("GET /api/sessions/{id}/recap", s.authMiddleware(s.handleRecapSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/export", s.authMiddleware(s.handleExportSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/export-claude", s.authMiddleware(s.handleExportClaudeSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/share", s.authMiddleware(s.handleShareSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/btw", s.authMiddleware(s.handleBtw))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}/btw", s.authMiddleware(s.handleBtwCancel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/title/generate", s.authMiddleware(s.handleGenerateSessionTitle))
 	s.mux.HandleFunc("POST /api/sessions/{id}/speech-summary", s.authMiddleware(s.handleSessionSpeechSummary))
@@ -370,7 +451,9 @@ func (s *Server) registerRoutes() {
 
 	// Config
 	s.mux.HandleFunc("GET /api/network-ip", s.authMiddleware(s.handleGetNetworkIP))
-	s.mux.HandleFunc("GET /api/tailscale-url", s.authMiddleware(s.handleGetTailscaleURL))
+	s.mux.HandleFunc("GET /api/tailscale-share", s.authMiddleware(s.handleGetTailscaleShare))
+	s.mux.HandleFunc("POST /api/tailscale-share/start", s.authMiddleware(s.handleStartTailscaleShare))
+	s.mux.HandleFunc("POST /api/tailscale-share/stop", s.authMiddleware(s.handleStopTailscaleShare))
 	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
 	s.mux.HandleFunc("GET /api/config/thinking-budget", s.authMiddleware(s.handleGetThinkingBudget))
@@ -433,10 +516,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/config/ocode/htr/start", s.authMiddleware(s.handleStartHTR))
 	s.mux.HandleFunc("POST /api/config/ocode/htr/stop", s.authMiddleware(s.handleStopHTR))
 	s.mux.HandleFunc("GET /api/config/ocode/htr/tabs", s.authMiddleware(s.handleListHTRTabs))
+	s.mux.HandleFunc("GET /api/config/ocode/auto-share", s.authMiddleware(s.handleGetAutoShareConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/auto-share", s.authMiddleware(s.handleSetAutoShareConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/chat-verbosity", s.authMiddleware(s.handler.HandleGetChatVerbosityConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/chat-verbosity", s.authMiddleware(s.handler.HandleSetChatVerbosityConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/quick-actions", s.authMiddleware(s.handler.HandleGetQuickActionsConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/quick-actions", s.authMiddleware(s.handler.HandleSetQuickActionsConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/profile-debug", s.authMiddleware(s.handleGetProfileDebugConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/profile-debug", s.authMiddleware(s.handleSetProfileDebugConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleGetPluginsEnabledConfig))
@@ -451,6 +538,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/terminal/ws", s.authMiddleware(s.handleTerminalWS))
 	s.mux.HandleFunc("GET /api/terminal/processes", s.authMiddleware(s.handleTerminalProcesses))
 	s.mux.HandleFunc("GET /api/terminal", s.authMiddleware(s.handler.HandleTerminalList))
+	s.mux.HandleFunc("GET /api/pulse/terminals", s.authMiddleware(s.handler.HandlePulseTerminals))
 	s.mux.HandleFunc("DELETE /api/terminal/{id}", s.authMiddleware(s.handleTerminalKill))
 	s.mux.HandleFunc("GET /api/terminal/{id}/history", s.authMiddleware(s.handleTerminalHistory))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
@@ -491,6 +579,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
 	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
 	s.mux.HandleFunc("POST /api/permissions/bash-rule", s.authMiddleware(s.handleSetBashRule))
+	// Batch delta write behind the Settings → Permissions rule editor. Same
+	// authMiddleware as its sibling: these endpoints mutate the live permission
+	// state of every agent, so they must never be reachable unauthenticated.
+	s.mux.HandleFunc("PUT /api/permissions/bash-rules", s.authMiddleware(s.handleSetBashRules))
 	s.mux.HandleFunc("POST /api/questions", s.authMiddleware(s.handleAnswerQuestion))
 	s.mux.HandleFunc("POST /api/questions/cancel", s.authMiddleware(s.handleDismissQuestion))
 	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
@@ -578,6 +670,18 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/window/{id}/activeProfile", s.authMiddleware(s.handler.handleGetWindowActiveProfile))
 	s.mux.HandleFunc("PUT /api/window/{id}/activeProfile", s.authMiddleware(s.handler.handleSetWindowActiveProfile))
 
+	// Connector settings (TUI /connect parity): base-store credential
+	// management for the web/desktop settings. Per-profile credentials
+	// stay under /api/profiles above.
+	s.mux.HandleFunc("GET /api/auth/connect", s.authMiddleware(s.handler.handleConnectList))
+	s.mux.HandleFunc("PUT /api/auth/connect/{provider}", s.authMiddleware(s.handler.handleConnectSet))
+	s.mux.HandleFunc("DELETE /api/auth/connect/{provider}", s.authMiddleware(s.handler.handleConnectRemove))
+	s.mux.HandleFunc("POST /api/auth/connect/{provider}/oauth/start", s.authMiddleware(s.handler.handleConnectOAuthStart))
+	s.mux.HandleFunc("POST /api/auth/connect/{provider}/test", s.authMiddleware(s.handler.handleConnectTest))
+	s.mux.HandleFunc("GET /api/auth/connect/flows/{flowId}", s.authMiddleware(s.handler.handleConnectFlowStatus))
+	s.mux.HandleFunc("POST /api/auth/connect/flows/{flowId}/input", s.authMiddleware(s.handler.handleConnectFlowInput))
+	s.mux.HandleFunc("DELETE /api/auth/connect/flows/{flowId}", s.authMiddleware(s.handler.handleConnectFlowCancel))
+
 	// Open-session tab state (server-side persistence; survives desktop restarts)
 	s.mux.HandleFunc("GET /api/tabs", s.authMiddleware(s.handleGetTabs))
 	s.mux.HandleFunc("PUT /api/tabs", s.authMiddleware(s.handleSetTabs))
@@ -653,19 +757,25 @@ func remoteWSToken(header string) string {
 func (s *Server) checkAuth(r *http.Request) bool {
 	// Bearer token header (used by frontend fetch calls)
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		return auth[7:] == s.password
+		return s.tokenMatches(auth[7:])
 	}
 	// ?token= query param (used by EventSource, which can't set headers).
 	// Forbidden in --remote mode: query strings reach access logs and
 	// intermediary proxies, which the remote token model treats as a leak.
 	if !s.remoteMode {
 		if tok := r.URL.Query().Get("token"); tok != "" {
-			return tok == s.password
+			return s.tokenMatches(tok)
 		}
 	}
 	// WebSocket subprotocol token (remote mode only — the browser WebSocket
 	// API can't set Authorization or use ?token= safely under the remote
 	// token model, but it can offer a Sec-WebSocket-Protocol list).
+	//
+	// Compared against the launch token ONLY: the remote token model is a
+	// single per-launch credential, and a remote session never carries a
+	// durable share token (sharing is refused there — see the SPA's
+	// ShareDialog remote branch). Accepting the share token here would let a
+	// share link outlive the launch model it was minted for.
 	if s.remoteMode {
 		if tok := remoteWSToken(r.Header.Get("Sec-WebSocket-Protocol")); tok != "" {
 			return tok == s.password
@@ -869,8 +979,18 @@ type BrowseOptions struct {
 	HTRPort            int
 	HTRSocketPath      string
 	HTRNativeHostName  string
-	NoSandbox          bool
-	Supervisor         *tool.ProcessSupervisor
+	// HTRShared selects the shared htrcli daemon (true, the default); false
+	// keeps the ocode-managed private daemon. HTRToken overrides the bearer
+	// token ocode would otherwise read from htrcli's own config.
+	//
+	// Both fields exist here because StartBrowse re-materialises a
+	// config.BrowserConfig from these options. Dropping either silently
+	// resolves every session to the private daemon on 3846, so any change to
+	// this struct must be mirrored in LoadBrowseOptions and StartBrowse.
+	HTRShared  bool
+	HTRToken   string
+	NoSandbox  bool
+	Supervisor *tool.ProcessSupervisor
 }
 
 // LoadBrowseOptions loads the complete embedded-browser configuration while
@@ -893,8 +1013,32 @@ func LoadBrowseOptions(supervisor *tool.ProcessSupervisor) *BrowseOptions {
 		HTRPort:            browser.HTRPort,
 		HTRSocketPath:      browser.HTRSocketPath,
 		HTRNativeHostName:  browser.HTRNativeHostName,
+		HTRShared:          browser.HTRShared,
+		HTRToken:           browser.HTRToken,
 		NoSandbox:          browser.NoSandbox,
 		Supervisor:         supervisor,
+	}
+}
+
+// browserConfigFromBrowseOptions re-materialises the config.StartBrowse needs
+// from the flat options it is handed.
+//
+// It exists as a named function so the relay is testable and so it stays visibly
+// paired with LoadBrowseOptions: both spell out every HTR field, and a field
+// added to one and forgotten in the other silently downgrades the shared daemon
+// to the private one rather than failing. Add new fields here and there
+// together.
+func browserConfigFromBrowseOptions(opts *BrowseOptions) config.BrowserConfig {
+	return config.BrowserConfig{
+		ChromePath:        opts.ChromePath,
+		HTREnabled:        opts.HTREnabled,
+		HTRExtensionPath:  opts.HTRExtensionPath,
+		HTRCliPath:        opts.HTRCliPath,
+		HTRPort:           opts.HTRPort,
+		HTRSocketPath:     opts.HTRSocketPath,
+		HTRNativeHostName: opts.HTRNativeHostName,
+		HTRShared:         opts.HTRShared,
+		HTRToken:          opts.HTRToken,
 	}
 }
 
@@ -914,15 +1058,7 @@ func LoadBrowseOptions(supervisor *tool.ProcessSupervisor) *BrowseOptions {
 func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOptions) error {
 	var bOpts browse.Options
 	if opts != nil {
-		htr, htrNotice := resolveManagedHTROptions(config.BrowserConfig{
-			ChromePath:        opts.ChromePath,
-			HTREnabled:        opts.HTREnabled,
-			HTRExtensionPath:  opts.HTRExtensionPath,
-			HTRCliPath:        opts.HTRCliPath,
-			HTRPort:           opts.HTRPort,
-			HTRSocketPath:     opts.HTRSocketPath,
-			HTRNativeHostName: opts.HTRNativeHostName,
-		})
+		htr, htrNotice := resolveManagedHTROptions(browserConfigFromBrowseOptions(opts))
 		bOpts = browse.Options{
 			ChromePath:        opts.ChromePath,
 			IdleTimeout:       time.Duration(opts.IdleTimeoutMinutes) * time.Minute,
@@ -966,7 +1102,15 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	// HTR companion (non-fatal): supervised `htrcli serve` daemon. Enabled by
 	// default for managed Chrome; shared leases keep it alive while another
 	// ocode process is using it. A healthy existing daemon is reused.
+	//
+	// EnsureHTRServe confirms only that a daemon it spawned is alive and returns
+	// immediately; health is verified on a background goroutine. That means a
+	// daemon which never becomes healthy is reported AFTER this function has
+	// returned, so the notice is wired through cdp.SetStatusFunc rather than
+	// being decided here. The sink writes into srv.htrNotice under its own lock
+	// and never takes srv's map lock or the handler's.
 	if opts != nil && bOpts.HTR.Enabled {
+		cdp.SetStatusFunc(srv.SetHTRNotice)
 		if st, err := cdp.EnsureHTRServe(srv.ProcessSupervisor(), bOpts.HTR, log.Default()); err != nil {
 			notice := "HTR automation is unavailable: " + err.Error() + ". Browsing continues without the HTR extension."
 			srv.SetHTRNotice(notice)
@@ -996,7 +1140,7 @@ func (s *Server) browsePort() int {
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"base_url":    sameSiteBrowseBase(s.browseBase, r.Host),
-		"htr_notice":  s.htrNotice,
+		"htr_notice":  s.HTRNotice(),
 		"remote_mode": s.remoteMode,
 	})
 }
@@ -1268,6 +1412,38 @@ func (s *Server) handleListSessionUserMessages(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandlePulse(w, r)
+}
+
+func (s *Server) handlePulseAssistant(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandlePulseAssistant(w, r)
+}
+
+func (s *Server) handleSelectPulseChat(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSelectPulseChat(w, r)
+}
+
+func (s *Server) handleNewPulseChat(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleNewPulseChat(w, r)
+}
+
+func (s *Server) handleListPulseChats(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListPulseChats(w, r)
+}
+
+func (s *Server) handleGetPulseModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseModel(w, r)
+}
+
+func (s *Server) handleSetPulseModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseModel(w, r)
+}
+
+func (s *Server) handleGetPulseSystemPrompt(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseSystemPrompt(w, r)
+}
+
+func (s *Server) handleSetPulseSystemPrompt(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseSystemPrompt(w, r)
 }
 
 func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
@@ -1643,6 +1819,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.tsShare != nil {
 		s.tsShare.cleanup()
 	}
+	// Stop every per-project cron engine this server started. Before cron became
+	// project-scoped there was a single scheduler that was never stopped at all;
+	// now there is one engine pair per project, so leaving them running would
+	// leak a run loop and a drainer goroutine per project the user ever opened.
+	s.stopAllCronServices()
 	s.shutdownMu.Lock()
 	hs := s.httpServer
 	ln := s.ln
@@ -1969,6 +2150,9 @@ func (s *Server) handleShareSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBtw(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleBtw(w, r, r.PathValue("id"))
 }
+func (s *Server) handleBtwCancel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleBtwCancel(w, r, r.PathValue("id"))
+}
 func (s *Server) handleSetSessionTitle(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSessionTitle(w, r, r.PathValue("id"))
 }
@@ -1986,6 +2170,10 @@ func (s *Server) handleSessionDiscovery(w http.ResponseWriter, r *http.Request) 
 }
 func (s *Server) handleCancelSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleCancelSession(w, r, r.PathValue("id"))
+}
+
+func (s *Server) handleCancelCompaction(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleCancelCompaction(w, r, r.PathValue("id"))
 }
 
 func (s *Server) handleRetrySession(w http.ResponseWriter, r *http.Request) {
@@ -2176,6 +2364,9 @@ func (s *Server) handleSetAutoContinue(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetBashRule(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetBashRule(w, r)
 }
+func (s *Server) handleSetBashRules(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetBashRules(w, r)
+}
 func (s *Server) handleGetLimitsConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetLimitsConfig(w, r)
 }
@@ -2198,6 +2389,14 @@ func (s *Server) handleSetBrowserConfig(w http.ResponseWriter, r *http.Request) 
 }
 func (s *Server) handleGetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetFeaturesConfig(w, r)
+}
+
+func (s *Server) handleGetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAutoShareConfig(w, r)
+}
+
+func (s *Server) handleSetAutoShareConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAutoShareConfig(w, r)
 }
 func (s *Server) handleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetFeaturesConfig(w, r)

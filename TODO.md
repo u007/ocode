@@ -1,5 +1,887 @@
 # TODO
 
+## Open: review-fix follow-ups (2026-10-09)
+
+- **FIXED (2026-10-09): Pulse `session_send` raced a synchronous turn.** Every turn
+  now counts in `turnInFlight`: `runSyncTurn` wraps the sync `runTurn` callers via
+  `beginSyncTurn`, so `dispatchTurn(refuseIfBusy)` refuses behind it under the same
+  lock. Release clears a stale `pendingCancel` once the last turn ends, so a Stop
+  during a sync turn cannot cancel the next message. The `IsTurnActive` pre-read
+  stays as a second check. Tests: `handler_sync_turn_test.go`.
+- **FIXED (2026-10-09): `Handler.dbWriteGuard` now fails closed** when the data dir
+  cannot be resolved, matching `sqliteWriteGuard`. The failure branch has no test:
+  the only trigger is an unresolvable `HOME`, and the test rules forbid overriding
+  `HOME` directly. Add one through `setHomeTree` if that rule ever changes.
+- **Reviewed (2026-10-09): `internal/config/storage_connectors.go`.** The file is
+  tracked (landed in 73891a62), not untracked as this entry said. It has no production
+  caller, only tests, and stores non-secret metadata only. Plaintext is acceptable
+  while nothing secret is stored there. Encryption and the `CONNECTOR_SESSION_KEY_REF`
+  wiring remain unbuilt. Its loader comment still mentions an "encrypted envelope"
+  path that does not exist.
+- **Possible pulse-assistant orphaning (2026-10-09, not explained).** `state.json` in the
+  pulse root named `pulse_2026-10-09-001143-26275806` until about 00:15, then
+  `pulse_2026-10-09-001531-a3c7bbd3`. The first transcript still existed on disk with 11
+  messages, so `pulseAssistantID`'s existence check should have kept it. Find out why the
+  id was re-minted. Until then, the 11-message chat is a candidate for loss. The read-only
+  listing of `GET /api/pulse/assistant/chats` was not confirmed against the real data dir,
+  because test `TestMain` redirects the data dir.
+- **Partly done (2026-10-09): `file.go:NNN` anchors in `docs/`.** Re-derived:
+  `docs/concepts/compaction-cancellation.md`, and the `server.go` anchors in
+  `compaction-config.md`, `git-ignore-toplevel-and-quoting.md`,
+  `files-tab-preview-only-routing.md`, `port-forwards-url-composition-and-supervisor-restart.md`
+  and `auto-share-on-start.md`. Those were checked by reading the live line, not by the
+  identifier script. `agent_session.go` gained `beginSyncTurn`/`runSyncTurn` above
+  `dispatchTurn` this round, so any `agent_session.go` anchor below about line 1720 may
+  have moved again and needs the same check. Still stale, pending re-derivation by
+  content: `docs/concepts/compaction-config.md` (about 20 anchors, several into
+  `configuredProviderIDs`/`HandleCompactSession`), `docs/concepts/per-chat-mcp-toggle.md`
+  (`agent_session.go:566`, `handler.go:508`), `docs/gotchas/auto-continue-turn-transcript-rebase.md`
+  (4 ranges in `agent_session.go`), `docs/gotchas/session-writers-conflict-recovery.md`
+  (`agent_session.go:1453`), `docs/gotchas/web-ask-dialog-resolved-before-continuation.md`
+  (`agent_session.go:1683`), `docs/gotchas/remote-project-path-trust-boundary.md`
+  (`handler.go:662`), `docs/gotchas/session-snapshot-stale-derived-fields.md`
+  (`handler.go:1243`), `docs/gotchas/files-tab-preview-only-routing.md` (`handler.go:226`),
+  `docs/gotchas/pending-ask-recovery-live-session-state.md` (`handler.go:1583`),
+  `docs/gotchas/speech-summary-turn-lock-wait.md` and `project-endpoint-isolation.md`
+  (`agent_session.go` ranges), and `docs/gotchas/derived-title-label-must-be-bounded.md`
+  (`session.go`, ambiguous). The `reconcileProfileAgent` anchors at `agent_session.go:668`
+  are correct: line 668 is the quoted comment. Historical `docs/superpowers/` specs and
+  plans were out of scope and have not been checked.
+
+## DONE: Remote Git tab: C-quoted non-ASCII names and unquoted specs (2026-10-09)
+
+Remote listings decode git's C-quoting per line, remote command args that embed a spec are
+shell-quoted, and remote untracked patches are read despite `diff --no-index` exiting 1.
+Details and regression tests: `docs/gotchas/git-status-c-quoted-paths.md`.
+
+Still open, from the same work:
+- Remote git pathspecs with `*`, `?`, `[`, a leading `:` or a drive prefix are still refused
+  (git glob and pathspec syntax, which quoting does not neutralize). Metacharacters such as
+  `& ' " ; $ # ( )` are accepted since 2026-10-09; see the gotcha.
+- `nonEmptyLines` trims trailing spaces from listed names on the remote side.
+- The ignore endpoint's `gitignoreUnquotePath` decode still mis-decodes a raw name that begins
+  and ends with `"`. Removing it needs sign-off, together with `TestGitIgnoreUnquotesCPath`.
+
+## Test suite speed: remaining work (2026-10-08)
+
+Done this pass (`skills/test-suite-cleanup`, see its plan/verify artifacts in
+`.test-doctor/`): `internal/tui` 206s → ~104s and `internal/agent` 584s → ~144s,
+both `-race` green, by (a) `newTestAgent`/`newTestModel` preloading a stub context so
+`BasePromptMessages` no longer spawns git ~5× per sidebar render / `Step`, (b)
+bounding the two permission race tests by a 300ms deadline instead of 300/400 rounds
+against hot-spinning writers (123s and 413s → ~3s), (c) deleting two committed
+`zz_tmp_probe*_test.go` probes, (d) moving the five env-gated live evals behind
+`//go:build integration`, (e) folding 35 data-variant tests into 8 table tests.
+Per-test coverage isolation found ~40% of both packages coverage-redundant, but
+those are pure-function assertions costing microseconds: deleting them buys no time.
+
+- **Environment, not code:** `/usr/bin/git` is the Xcode shim at ~130–270ms per
+  spawn; no homebrew git on PATH. `internal/server`'s git-fixture tests
+  (`TestResolveConflict*`, `TestGitOperation*`, 10–30s each) are bound by it. A
+  `brew install git` first on PATH should roughly halve that package; measure with
+  `testdoctor.py timing --go ./internal/server` before touching tests there.
+- **Prod perf, needs a decision:** every TUI sidebar render before the first turn
+  calls `agent.LoadContext` via `currentContextEstimate` → `BasePromptMessages`
+  (git show/diff per context file + rev-parse). Either cache the loaded context on
+  the agent for a short TTL or stat the file before shelling out to git; both change
+  prod semantics slightly, so not done here.
+- **Order-dependent / flaky in `internal/agent`, found by isolation runs:**
+  `TestPermissionJudgeLog_RegistrationIsIdempotent` fails alone (expects
+  `permission-judge.log` another test created); `TestChatWithContext_CancellationInterruptsRetry`
+  fails alone on timing (826ms > 500ms budget). Both pass in the full suite.
+- **`internal/server` and `web/` not pruned.** Server needs the git fix first;
+  web's `plan` needs `@vitest/coverage-v8` added as a pinned devDependency.
+- **Pre-existing failure:** `internal/version TestVersionMatchesChangelog` fails
+  because `CHANGES.md` has no bump entry for 0.8.128. Unrelated to tests.
+- Optional further merges (`.test-doctor/all/smells.json` → `same_shape_groups`):
+  ~45 remaining 2–4-member data-variant groups across `internal/`; LOC only.
+
+## Web/desktop `/btw` side query — live checks partly run (2026-10-07)
+
+Verified live against a REAL provider on the local server (`ocode serve`, session
+`ses_2026-10-07-210953-33e2cb79`): `POST /api/sessions/{id}/btw` → `202`; the bus
+delivered `started` → `delta:"pong"` → `done:"pong"` from the real model; the
+aside did NOT appear in the transcript; and `DELETE .../btw` → `200`
+`{"status":"cancelled"}`. See `CHANGES.md` and `skills/ocode-web` gotcha 62.
+
+Still NOT live-verified (all covered by unit/integration tests):
+- `/btw` while the MAIN turn is streaming (the mid-turn path).
+- Cancelling a run MID-FLIGHT and confirming its frames stop.
+- A remote (SSH/WSL) project.
+- The rendered `BtwPanel` in a real browser (no browser pass was run).
+
+- **Desktop:** the running `.app` must be rebuilt/restarted to pick this up
+  (`web/dist` is embedded in the binary).
+
+## OKF bundle: known defects left unfixed (2026-10-07)
+
+Found while fixing the `docs/index.md` corruption. These are recorded rather than
+fixed because each needs a decision or belongs to a file another session owns.
+
+- **Two bundle pages have an EMPTY body** — `gotchas/desktop-subprocess-path-trap.md`
+  (1 byte) and `gotchas/auto-permission-prompt-load-semantics-flip.md`. Their index
+  entries and frontmatter descriptions are fine, but the pages themselves are
+  stubs: opening one from the index shows a title and nothing else. Filling them is
+  content authoring, not repair, so it needs someone who can write the body — the
+  description of the PATH-trap page already contains the full explanation and is
+  the natural source. (The PATH-trap page's frontmatter was repaired mechanically
+  as part of the index fix; its empty body is separate and still empty.)
+- **Nine `docs/okf/*/derived/*.SKILL.md` files are not valid strict YAML**, so their
+  index entries carry no description (bare links), unlike their strict-YAML
+  siblings. This is NOT an accident: `docs/okf/_tools/sync-derived-skills.py`
+  documents that their frontmatter values deliberately carry unquoted colons so it
+  can mirror the Go loader's lenient line-based `parseFrontmatter`
+  (`internal/skill/loader.go`). So the two readers disagree: the skill loader is
+  lenient and reads them, the index builder appears to require strict YAML and can
+  only emit the link. Fixing it means choosing one contract — either quote the
+  values in `gen-prompt-sheets.py` (which authors those files, and which another
+  session was editing at the time) so they are valid as well as lenient-parseable,
+  or make the index builder use the same lenient parse. Do NOT hand-edit the nine
+  files: they are generated and a hand-fix will be reverted on the next sync.
+- **`docs/log.md` has ~44 blank lines between its heading and its first entry.**
+  Cosmetic, pre-existing, emitted by whatever writes the log.
+
+## Oversized-content rendering: remaining gaps (2026-10-06)
+
+Session titles derived from an oversized first user message are now bounded at
+every write/read/render boundary, and oversized USER message bodies fold behind
+a "Show full message" expander (`MessageBubble.OVERSIZED_MESSAGE_CHARS`). Two
+follow-ups remain:
+
+- **Assistant message bodies are NOT folded.** `AssistantText` renders the whole
+  `content` through react-markdown, so a model that emits a multi-megabyte reply
+  still forces a full-document render. Not folded because that component also
+  drives the LIVE stream (capping mid-stream would hide the tail the user is
+  watching) and truncating markdown can split a fenced block. Needs a
+  streaming-aware guard (e.g. fold only committed messages over the threshold).
+- **503 local sessions still have stored titles over 80 chars** (worst 21,201;
+  the 1.4 MB one was remote and has been renamed). The read cap
+  (`session.StoredTitleForDir`) renders them bounded, but the on-disk row is
+  unchanged, and a pre-fix binary (an un-rebuilt desktop app, an old remote
+  `serve --remote`) still transmits the full value. No bulk migration is planned
+  — the cap is a label bound, and rewriting 503 transcripts' meta rows risks
+  more than it fixes. Re-check if a large one appears.
+
+## `window` tool: unverified platforms (2026-10-06)
+
+- macOS JXA ops (`windows`, `window-focus`, `window-bounds`, `window-state` in
+  `internal/computer/cgevent_darwin.js`) were written without a live run: the
+  dev shell lacked Accessibility. Add an `OCODE_COMPUTER_LIVE=1` darwin live
+  test (list, move a scratch window, minimize/restore) and run it.
+- Windows ops in `input_windows.ps1` (`OcodeWin`) were cross-vetted only
+  (`GOOS=windows go vet`); never executed. Needs a live run, including the
+  Alt-press foreground workaround and 32-bit (`GetWindowLongPtrW` is 64-bit only).
+- Linux Wayland is unsupported by design (explicit error); revisit with
+  compositor-specific backends (sway/hyprland IPC, KWin scripting) if wanted.
+- `ListWindows` on Linux spawns one `xprop` per window; batch if it proves slow.
+
+## SQLite browser / DB IDE follow-ups (2026-10-06)
+
+The DB IDE pass is in (`CHANGES.md`). These were deliberately left out.
+
+- **No one-click restore from the snapshot.** Every row mutation now writes a
+  `VACUUM INTO` sibling at `<file>.db.bak`, but the only way back is to copy that
+  file over the database by hand. A restore endpoint is a mutation that
+  OVERWRITES the live file, so it needs its own guard (which file, confirm,
+  re-probe afterwards) — deferred rather than shipped unguarded. The snapshot is
+  still useful as-is: it is plain SQLite sitting next to the database.
+- **The two BLOB upload entry points disagree on the maximum file size, so the
+  advertised 64 MB limit is not uniformly enforced.**
+  - The grid chip's *Replace* posts a raw body to `/api/db/blob`
+    (`blobUploadMaxBytes` = 64 MiB) → **max file 64 MiB**.
+  - The row dialog's file picker posts base64 inside `/api/db/row`'s JSON body
+    (`dbRowMaxBodyBytes` = 96 MiB; base64 inflates 4/3) → **max file ~72 MiB**,
+    i.e. 8 MiB *more* permissive than the raw path.
+  So a 65–72 MiB file is accepted by the row dialog and refused with 413 by the
+  grid chip. Fix by picking one ceiling and enforcing it in both places (or by
+  routing the dialog through the raw endpoint, which also drops the 4/3
+  inflation). Raising either number should come with a decision about streaming
+  to a temp file rather than buffering in memory.
+- **The grid still DISPLAYS a rounded value for an integer id past 2^53**, even
+  though the KEY path is now exact (see `CHANGES.md`). The cell arrives as a JSON
+  number, so `Cell` renders `String(float64)` and shows 9007199254740992 for a
+  row whose real id is 9007199254740993 — the user sees an id that is not the one
+  they are editing. Only the key was fixed; fixing the display means sending
+  integer cell values as strings, which ripples through `Cell`, the row dialog's
+  value codec, CSV export and any client-side ordering, so it is a separate
+  change. Worth doing because "the id I can see" disagreeing with "the id on disk"
+  is the same class of confusion the key fix removed.
+- **A BLOB (or other unexpressible) key component falls back to the lossy path.**
+  `RowKeys` reports a nil entry rather than inventing a representation it cannot
+  guarantee matches the stored value, so such a row keeps the old cell-derived
+  key. A BLOB primary key is exotic, but the fallback is silent: the UI gives no
+  hint that this row's key is approximate.
+- **No query history or saved queries.** The Query tab is a plain textarea with
+  in-memory state; a history would need a per-database key and a place to live,
+  and `localStorage` is wrong for a remote host.
+- **The grid has no keyboard navigation** (arrow keys between cells). Inline edit
+  is double-click + Enter only, which is DB Browser for SQLite's noisiest gap.
+- **`dir` is validated at the HTTP layer, not in `dbbrowse`.** `sortClause`
+  takes a bool, so a caller that builds `PageOptions` directly cannot express an
+  invalid direction — worth keeping in mind if another caller appears.
+
+## Contributor on-ramp: deferred items (2026-10-05)
+
+The clean-clone build, CI, and contribution templates landed (see CHANGES.md
+2026-10-05). These are the deliberate follow-ups.
+
+- **Three pre-existing `internal/agent` permission tests fail in a tree outside the
+  repo, and will make CI red.** `TestAllowedRootsIncludesGlobalConfigDir`,
+  `TestVerifyAutoGrantAcceptsGlobalConfigDir` and
+  `TestAllowedRootsIncludesGitIgnoreFiles` all fail identically at **pristine
+  HEAD** (verified in a `git archive HEAD` export), so they are not caused by the
+  build-tag work. The assertion is that an isolated home at
+  `<checkout>/internal/agent/.isolated-home-*` must stay OUTSIDE the allowed
+  roots, but the test's own temp home is nested inside the checkout, so it reads
+  as in-scope. Fix by pointing the isolated home at `t.TempDir()` (outside the
+  repo) rather than a directory under the package, or by resolving the checkout
+  root before comparing. This will be the first red thing CI reports.
+- **CI ran for the first time (run 37344285998, all 3 jobs red) — three fixes
+  shipped, one large problem found.** Diagnosis is in CHANGES.md. Two were
+  workflow bugs, both fixed and locally verified: `cmd/ocode-desktop` (wails v3)
+  cannot compile on `ubuntu-latest` without GTK/WebKit dev headers, and
+  `pnpm/action-setup` had no version and died before any real step. The third is
+  the real one:
+
+- **FIXED (2026-10-06): ~50 `internal/config` and `internal/agent` tests assumed
+  ocode ignores `XDG_CONFIG_HOME`, which is true ONLY on darwin — they had never
+  run on Linux.** Every `t.Setenv("HOME", …)` site in both packages now goes
+  through a `setHomeTree` helper that points `HOME`, `USERPROFILE`, the XDG
+  variables and the Windows `APPDATA`/`LOCALAPPDATA` at the matching
+  subdirectory of one temp home, and both `TestMain`s stop pointing
+  `XDG_CONFIG_HOME` and `XDG_DATA_HOME` at the same directory (on Linux that
+  collapse put `GlobalConfigDir` and `GlobalDataDir` on one path, so the sandbox
+  self-escalation guard covered the whole data dir). Verified in a linux/arm64
+  `golang:1.26` container: `internal/config` 44 failures → **0**, no macOS
+  regression. The rule is now in CLAUDE.md § Coding Standards. Original
+  diagnosis kept below for the record.
+  - *Missing file.* `TestLoadCreatesOcodeConfigFiles`,
+    `TestChatVerbosityConfigFile*`, `TestSaveOcodeChatVerbosity*`,
+    `TestComputerUseConfig_RoundTrip`, `TestSaveTUITheme*`, `TestBrowserConfigHTR*`,
+    `TestEditorModeLoadSave`, `TestIDEModeLoadSave`, `TestSaveAutoGrantRoundTrip`,
+    `TestSaveAndGetLastThinkingBudget`, `TestExtraAllowedPaths*`,
+    `TestLoadAutoPermissionPromptBody*` — all failed with
+    `open …/.config/opencode/ocodeconfig.json: no such file or directory`.
+  - *Cross-test leakage.* Every such test shared ONE config dir on Linux, so a
+    write in one test was visible to the next:
+    `TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant` saw a
+    grant belonging to a different test. On macOS each `t.Setenv("HOME", …)`
+    gave a private dir, which is why it never surfaced.
+- **`cmd/ocode-desktop`'s four tests no longer run in CI** (the wails exclusion
+  in `.github/workflows/ci.yml`). `TestDesktopCodexPluginRegistered` guards a real
+  regression — the desktop blank-importing the codex provider plugin — and
+  `TestSessionIDFromArgs` covers `-session` parsing. Install the GTK/WebKit dev
+  headers in CI, or move those tests to a package that builds without them.
+- **FIXED (2026-10-06): `internal/agent` never finished on Linux.**
+  `TestSandboxOSBoundaryGrantsSharedProjectWrites` blocked forever in
+  `cmd.CombinedOutput()` because the Linux sandbox confines by re-executing
+  `os.Executable()` with the hidden `sandbox-confine` subcommand — and inside a
+  library package's test binary `os.Executable()` IS the test binary, which had
+  no dispatch for it, so the re-exec fell through to Go's testing main and
+  re-ran the whole suite in a child process, recursively. `TestMain` now
+  dispatches it first. Package goes from never-returning to **102s, zero
+  failures** on Linux (macOS 328s), and the boundary test itself to PASS in
+  0.10s — so it now genuinely verifies the Landlock boundary.
+  **Consequence for the timeouts:** `-timeout 45m` was firing on this hang while
+  the job reported ZERO test failures, so the number was never the problem and
+  is deliberately unchanged. Raising it would have hidden the hang.
+  `TestReexecBinariesDispatchConfiner` still checks only MAIN packages, so any
+  future test binary that runs the Linux sandbox has the same trap.
+- **`internal/browse/cdp` fails under `-race` on Linux, pre-existing and
+  unrelated to the above.** `TestWatchHTRExitReportsDeathWithoutRestarting`
+  takes 120.20s and fails on the duplicate status publish
+  (`got ["" ""]`, wants exactly one empty publish), and
+  `TestNetworkRowMarksProxyBlockedResponses` fails too — the latter IS in the
+  workflow's flaky quarantine, but that quarantine step runs only in the plain
+  job, so a quarantined flake still fails the `race` job with no retry.
+  The 120s is the stub daemon's own `sleep 120`: `cmd.Wait()` did not return
+  until it expired, whereas on macOS the same test passes in 0.4s (3 runs in
+  1.36s). Suspect the supervisor's kill/reap path, not the test.
+- **Linux CI: the darwin-only test failures in the remaining packages (2026-10-06).**
+  Fixed so far: the fake-`ssh` shims used bash arrays (dash rejects them);
+  `confinedPath` used the eager normalizer for the lazily-created managed caches;
+  and `internal/server` had two isolation bugs — TestMain pointed all three XDG
+  variables at ONE directory (so `GlobalConfigDir() == GlobalDataDir()` on Linux,
+  which the self-escalation guard reads as a data-dir write), and tests isolated
+  with a bare `t.Setenv("HOME", …)` which the XDG variables override on Linux,
+  leaking a persisted `sandbox` mode into every later test in the binary.
+  `internal/server` went from 12 failures to 1 on Linux and is unchanged on
+  darwin (commit 332da63c).
+  Still red on a fresh Linux runner:
+  - `internal/tui`: the same XDG/`$HOME` class; it has no `setHomeTree` helper
+    yet, which is the prerequisite for the fix `internal/config`, `internal/agent`
+    and `internal/server` have now received.
+  - `internal/remote`: `serve_test.go` has three `got`/`want` assertions that
+    print byte-identically yet compare unequal — consistent with a monotonic
+    clock field in the compared struct.
+  - `web`: `TestFSContainsIndexHTML` fails in 0.002s because a clean checkout has
+    only `web/dist/.gitkeep`. Needs a decision: skip when the SPA is unbuilt, or
+    build the web app before the Go job.
+  - `internal/browse/cdp`: two `-race` failures, pre-existing and unrelated.
+  Last measured: 67 distinct failures across browse/cdp, remote, server, tool,
+  tui and web. `internal/tool`, `internal/config` and `internal/agent` are fixed.
+- **Two `internal/server` failures are CI-configuration questions, not bugs.** Both
+  are outside the portability class and need a policy decision:
+  - `TestEnsureSharedHTRDaemonReachesTheEnsureWithResolvedOptions` fails on BOTH
+    darwin and Linux because `go test` builds without the `htr` tag, so the binary
+    legitimately has no HTR bundle. Either the Go job builds with
+    `-tags "htr models"` (and generates the assets first) or the test needs a
+    skip guard for the no-bundle case.
+  - `TestRequestSystemPermissionsReconcilesEnabled` asserts macOS permission ids
+    (`macos.files.documents`, `macos.accessibility`) while running on Linux, so it
+    reconciles 3 requests where it expects 2. It needs a GOOS guard or a
+    platform-neutral expectation.
+- **`internal/server` has other bare `t.Setenv("HOME", …)` sites** (e.g.
+  `handler_auto_share_test.go`, `tailscale_auto_share_test.go` — both being edited
+  by another session, so deliberately not touched). They do not currently leak,
+  because the full Linux package run is green apart from the `htr`-tag test, but
+  they carry the same latent trap: a bare HOME is overridden by the XDG variables
+  on Linux. Convert them to `setHomeTree` opportunistically.
+- **`docs/file-edit-snapshot.md` disagrees with the source on the undo age.**
+  The page cites `internal/tool/undo.go:14` as `undoMaxAgeDelta = 2`, but the
+  source defines `defaultUndoMaxAgeDelta = 10` (line 16; the effective value is
+  overridden via `ocode.undo_max_age_delta`, which is where a "2" may have come
+  from). Left uncorrected during the 2026-10-06 anchor sweep because the correct
+  wording is a content decision, not a line number.
+- **`internal/server` per-package runtime is unmeasured.** 1200+ test functions
+  in one package against Go's 10m default per-package timeout. The `-timeout 30m`
+  (plain) and `5m` (retry) values are **guards approved by the user, not measured
+  fixes** — they can only prevent a spurious panic, never reveal a real one.
+  Replace with measured numbers once a run reports timings.
+- **The remote SSH tests are verified hermetic, but have no skip guards.**
+  `TestRemoteShellCommandRunsOnHost` and the rest of
+  `internal/server/handler_remote_*_test.go` need no real `sshd`, no `htrcli`,
+  and no pty: they run against an `ssh` shim prepended to `PATH`, contain zero
+  `t.Skip` calls, and pass (not skip) under a stripped environment
+  (`env -i` with only PATH/HOME/TMPDIR/GOCACHE and a cold module cache) in
+  ~0.5s per test while asserting `200`, `exitCode 0` and the `remote-ok` output.
+  Worth adding explicit environment probes anyway, so a future runner
+  requirement hard-fails loudly instead of by timeout.
+- **Flaky-retry step is APPROVED (user sign-off, 2026-10-05) but is debt.**
+  `.github/workflows/ci.yml` retries `TestNetworkRowMarksProxyBlockedResponses`
+  and `TestReadinessFailsLoudlyWhenDaemonDiesDuringExec` once before failing;
+  both were confirmed flaky on unmodified HEAD, so the quarantine is not hiding
+  a regression. **Still fix the two tests and delete the retry** — a
+  permanently retried test is a silent hole in the gate, and the step comment
+  says as much.
+- **`internal/agent/models-snapshot.json` is now committed (3.3 MB) — needs an
+  explicit decision.** The `.gitignore` entry was removed because
+  `TestLoadFromSnapshotPopulated` requires a populated embedded copy, so a
+  generated-only file cannot pass tests on a fresh clone. It is public
+  models.dev data and refreshes with `make models-snapshot`. If the repo should
+  stay lean instead, revert the `.gitignore` hunk and add a `make bootstrap`
+  target that fetches it, accepting that `go test ./...` then needs bootstrap
+  first.
+- **Repository front door is still unaddressed.** Deliberately held pending
+  approval: tracked scratch files at the repo root (`compare_chat_input.py`,
+  `edit_chat_input*.py` ×5, `restore_chat.py`, `restore_isactive_ue.py`,
+  `fix_isactive.py`, `receipt_temp.jpg`, `ocode-telegram.exe`,
+  `gen-models-snapshot.exe`), plus the GitHub repo `description`, `topics`, and
+  social preview, which are still unset. `.git` is ~349 MB locally / ~221 MB on
+  GitHub, with 32 historical `bin/ocode` blobs; shrinking it means rewriting
+  history, which needs explicit approval.
+- **No `good-first-issue` backlog exists yet.** The issue template links
+  Discussions, but the repository has no labelled starter tasks, so a new
+  contributor who wants to help has nothing to pick up.
+
+## SQLite browser: remaining work (2026-10-05)
+
+Phases 1–4 shipped — browse, row CRUD, confirmed SQL writes and guided DDL. See
+CHANGES.md and `skills/ocode-web/SKILL.md` #64. Remaining:
+
+- **Remote live validation.** The endpoints are proxy-able via the
+  `/api/remote/{host}/api/{rest...}` catch-all, but a real SSH-host DB browse and
+  write has not been exercised end-to-end.
+- **Bundle doc page.** `docs/concepts/sqlite-browser.md` was not written (the
+  bundle is context-agent-owned); the design spec lives at
+  `.opencode/plans/2026-10-05-sqlite-browser-spec.md`.
+- **Foreign keys are not enforced on write.** The write connection does not set
+  `_pragma=foreign_keys(1)`, matching the sqlite3 CLI default, so a delete that
+  orphans child rows succeeds. Revisit if users expect FK enforcement.
+- **BLOB cells are read-only in the UI.** A BLOB renders as a marker and cannot
+  be edited from the row dialog (text/number/NULL only). The API already accepts
+  `{"$blob":true,"data":<base64>}` for a future BLOB editor.
+- **Optimistic concurrency is key-based, not version-based.** An update requires
+  the original key to still match exactly one row; it does not compare the whole
+  original row, so a concurrent edit to a non-key column is overwritten.
+
+## Auto-share-on-start: deferred items (2026-10-04)
+
+- **Turning the toggle OFF does not un-share the running instance.** `PUT
+  /api/config/ocode/auto-share` persists the flag and the response says so, but
+  the live `tailscaleShare` exposure survives until `Server.Shutdown` or the
+  Share dialog's own reset flow. Deliberate for now: `cleanup()` removes the
+  `--set-path` mount, so a mid-session un-share would also need to decide
+  whether to kill the `serve --bg` child (which would break an in-use shared
+  URL). The UI states "takes effect on the next launch". If asked for an
+  immediate un-share, add `Server.StopAutoShare()` and call it from the PUT
+  handler — do NOT call `cleanup()` directly from the config handler, it resets
+  the shared cache the Share dialog also reads.
+- **The web toggle shows the exposure URL but the TUI command does not.** `/rc`
+  in the TUI owns its own tailscale mount, so surfacing the desktop exposure URL
+  there would need the same `peek` seam plumbed into the TUI model. Low value:
+  the URL is in the desktop log line and the Share dialog.
+- **`auto_share_on_start` has no per-project scope.** It is machine-level by
+  design (a profile switch must never publish/unpublish), so a project-scoped
+  opt-in would need a different key and a decision about which wins.
+- **No live end-to-end run against a real tailnet.** Verified by unit tests,
+  route tests through the real mux, and mutation checks; the tailscale CLI was
+  never exercised live in this session (doing so mutates the node-wide serve
+  config). Worth one manual pass: enable the toggle, restart the desktop app,
+  confirm `desktop: auto-share active at ...` in the log and that the tailnet URL
+  opens from a second device.
+
+## DONE: `docs/concepts/tui-slash-command-queuing.md` — web instant-command path documented (2026-10-04)
+
+**RESOLVED** — amended via the `context` sub-agent's `doc_write` once the weekly
+quota freed. It was blocked for hours first: `docs/` is an active OKF bundle
+(`docs/index.md` carries `okf_version: "0.1"`) and `CLAUDE.md`'s
+sole-automated-writer invariant bars any path outside the `context` sub-agent.
+Two early dispatches failed with `429 GoUsageLimitError` (`limitName: weekly`) —
+a hard weekly cap, not transient.
+
+**Correction worth keeping (my error, not the page's).** The first amendment
+instructed the sub-agent that "compaction still queues every command, instant
+ones included" was FALSE. That was wrong — it is TRUE for the web SPA. I had
+inferred it from the TUI gate alone (`model.go:9055`'s `!isInstantCmd` guard)
+without reading the web's own condition, where `compactionActive || (...)` puts
+compaction FIRST and unconditional in `handleSend`
+(`web/src/components/Chat/ChatInput.tsx:893`). A second amendment corrected it.
+**The real fact is a platform difference:** the web queues everything during
+compaction; the TUI does not. The source comment at `ChatInput.tsx:889-891` was
+right all along and needs no change. Lesson: I over-corrected a recorded fact on
+the strength of one code path when the claim under test was about a second one —
+verify the path the claim is actually about before overturning it. Retry via `doc_write` on path **`concepts/tui-slash-command-queuing.md`**
+(doc_write prepends `docs/` itself; passing `docs/concepts/…` creates
+`docs/docs/concepts/…`). Do not hand-edit `docs/index.md` / `docs/log.md` — they
+are auto-managed.
+
+What the page needs to say:
+
+- The web SPA has its OWN per-tab queue (`web/src/lib/tabQueue.ts`, mirroring the
+  TUI's `queuedItems`), decided in `handleSend` in `ChatInput.tsx`. It had no
+  instant-command list at all, so every `/command` and `!shell` typed while busy
+  was queued. `/btw` and `/by-the-way` now bypass it, for TUI parity.
+- **`HandleBtw` injects into a live turn** via `h.tryEnqueueInjection` — the same
+  path a mid-turn message uses — instead of appending to the transcript. With no
+  turn live it falls through to the unchanged `AppendUserMessageForDir` tail-insert.
+  This is not an optimisation: a mid-turn transcript append makes the stored
+  transcript stop being a prefix of the in-memory snapshot, so
+  `session.liveAppendStart` → `samePrefix` drops every later live snapshot AND
+  the turn-end save returns `ErrTranscriptConflict`. Both are only logged, so the
+  rest of the turn silently vanishes on reload.
+- **Compaction still queues every command, instant ones included** —
+  `applyCompactResult` persists via `h.replaceSession`, replacing the transcript
+  wholesale and dropping a concurrently recorded aside.
+- Membership in the web instant list (`web/src/lib/instantCommands.ts`) is a
+  persistence-safety predicate: add a command only once its handler has a
+  mid-turn path keeping the message inside `as.messages`.
+- **Superseded 2026-10-07:** web `/btw` no longer records the aside into the
+  conversation. It runs the SAME independent side query as the TUI
+  (`internal/server/handler_btw.go` → `agent.AskLoopAsync`), streams progress
+  over the session-scoped `btw` bus event, and renders a docked `BtwPanel`
+  (`lib/btwStore.ts`); `DELETE /api/sessions/{id}/btw` cancels. The "differ in
+  MECHANISM on purpose" bullet this replaces is now FALSE.
+- Tests: `internal/server/handler_btw_test.go`,
+  `web/src/lib/instantCommands.test.ts`,
+  `web/src/components/Chat/ChatInput.instantCommands.test.tsx`.
+
+Fallback if the quota has not reset: the `context` sub-agent's model is
+configurable independently of the session, so it can be moved off the
+rate-limited provider. `injectPurposeModelIfEligible` (`internal/agent/small_model.go`)
+reads `cfg.Ocode.ContextModel` / `ContextModelEnabled`, set by the
+`/context-model` slash command (config keys `context_model` +
+`context_model_enabled` under `ocode`). This is a persistent, global change that
+affects every future doc write, so it needs the user's choice of provider — it
+was deliberately not changed unilaterally.
+
+The invariant is already captured for agents in `skills/ocode-web/SKILL.md`
+(gotcha 62 + file-map entry), so the knowledge gap is documentation-only until
+the cap resets.
+
+## DONE: `docs/concepts/compaction-config.md` re-attributes the retry logic to `runSummaryCall` (2026-10-04)
+
+Pure prose-attribution fix; **no code change**. **RESOLVED** — applied via the `context`
+sub-agent's `doc_write` on the 7th dispatch, once the weekly quota freed. It was blocked
+for hours first: `docs/` is an active OKF bundle, the sole-automated-writer invariant bars
+any path outside `context`, and six dispatches all failed with `429 GoUsageLimitError`
+(`limitName: weekly`, `workspace wrk_01KT4GWHKSJRS52H5VQPW5NN8R`) — the same cap already
+logged in the entry above, so one quota problem had two victims, not two bugs.
+
+Verified after the fact rather than trusting the sub-agent's report: **exactly 9 lines
+changed** against the pre-dispatch copy (the 6 target passages + `doc_write`'s own
+`timestamp` bump) — no structural churn, and the `summary_max_retries` table row plus the
+historical `runSummary` amendment notes were left alone as instructed. All **124**
+line-anchor endpoints on the page re-resolve to real source lines, `compact.go:888` now
+backs the "Semantics live entirely in…" claim, and `docs/index.md` + `docs/log.md` carry
+the write. The rest of this entry is kept as the record of the anchor trap below.
+
+**The full patch is staged and ready to apply verbatim** at
+`.opencode/plans/2026-10-04-compaction-config-runsummarycall-rename.md` — it carries the
+exact before/after text for all six edits, extracted mechanically from the page. Apply it
+with `doc_write` on path **`concepts/compaction-config.md`** (no `docs/` prefix, or it lands
+at `docs/docs/concepts/…`). Pre-edit blob: `506ef0a0eac4c2091fce2e5f619e6e3c7844d708`.
+
+Verified source facts (`internal/agent/compact.go`):
+
+- `runSummary` is at `:856`. It caps `max_tokens` and delegates at `:877`. It owns **no**
+  retry or cancellation logic.
+- `runSummaryCall` is at `:888`; its own doc comment says it "owns the retry, validation and
+  cancellation handling shared by the batched summary (runSummary) and the inline summary
+  (runInlineSummary)".
+- The inline path calls it directly at `:1334`.
+
+All 84 unique `\w+\.go:\d+` anchors on the page were checked mechanically (87 occurrences)
+by printing the actual source line behind each: every `compact.go:88x`–`101x` anchor already
+resolves INSIDE `runSummaryCall`, so the line anchors are right and only the prose names are
+wrong. **One exception, and it is the trap:** `internal/agent/compact.go:856` backs the
+"Semantics live entirely in…" claim, so that one anchor must move `:856` → `:888` when the
+subject is renamed. It is the ONLY anchor change permitted — do not renumber anything else.
+
+The six edits: re-attribute the §2 retry-semantics sentence to `runSummaryCall` (noting the
+batched and inline paths share it while `runSummary` only caps max_tokens and delegates);
+§4's `summaryContextErr` labelling sentence; §4's "exactly four places in `runSummary` that
+can report a dead context"; §4's "`runSummary` parks on that channel and on `ctx.Done()`";
+§8's "not deterministically reproducible from outside `runSummary`"; and a 2026-10-04
+amendment note appended to the frontmatter `description:`, the `**Description:**` line and
+the `- **Status:**` line.
+
+Deliberately left alone: the `summary_max_retries` config-table row ("Retries per summary
+batch inside `runSummary`" — still true from the caller's perspective), the historical
+2026-09-25/09-27/09-30/10-01 amendment notes that name `runSummary` (they are a changelog),
+and §7, which already names `runSummaryCall` correctly.
+
+Fallback is the `/context-model` route documented in the entry above — same knob, same
+deliberate non-change. **Note `git status docs/` showed ~70 concurrently-modified bundle
+pages**, so a hand edit without `knowledge.WithBundleLock` would race a live `doc_write` and
+most likely clobber its `GenerateIndex` output; that is why this is logged rather than
+applied. If that route is ever approved, the safe shape is
+`WithBundleLock` → edit → `GenerateIndex` → `AppendLog`, not a plain file write.
+
+## Auto-permission judge — findings from the live eval (2026-10-02)
+
+**Further optimisation is deferred (user decision, 2026-10-02).** State: 65% of
+173 should-allow commands auto-allowed, all 31 hand-written must-ask cases held
+(after the temp-root and local-test-server rules).
+Resume from `docs/concepts/auto-permission-judge-eval.md` ("Deferred") when this
+is picked up again; the open items below are the starting points.
+
+Measured with `internal/agent/testdata/permission_judge_eval/` (171 mined cases).
+Checked items are done; the unchecked ones each need a decision.
+
+- [x] **"Command analysis" labelled most commands "(unknown command)".**
+      `explainBashCommand` describes only the first word of the line, so every
+      `cd … && …` or `python3 …` command was reported as unknown. Fixed
+      2026-10-02: an unlisted head gets no Command analysis block. Auto-allows of
+      commands the user went on to approve rose from 14-17% to 55-56% of 165 at
+      the unchanged 0.85 floor; all hand-written must-ask cases still defer.
+      `project_context` itself stays: the scope fixtures (`k-scope-*`,
+      `s-scope-*`) score better with it than without.
+- [ ] **No single state field explains the remaining deferrals.** Ablation
+      (2 runs, worst kept, 165 should-allow): removing any one of allowed
+      prefixes, banned prefixes, user policy, temp aliases, relaxed concerns,
+      project_context or the concern question moves the count by at most 6
+      (87 shipped). Removing project_context or temp aliases LOSES 6.
+- [x] **Three rubric lines adopted 2026-10-02** (compound commands, ordinary git
+      writes, temp-root backup/edit/restore) in `typesafeJudgeInstructions`.
+      Measured 104/165 (63%) against 87 (53%) with no hand-written must-ask leak.
+      The chat judge's prose prompt is unchanged and unmeasured.
+- [ ] **Four user-denied mined cases are now allowed by the judge** (`m040`,
+      `m048`, `m098`, `m116`). Review whether they are label noise or real misses.
+- [ ] **Raising the context budget does not help and can break the call.** With
+      `max_context_bytes` 60000 / sources 20 / lines 2000 the auto-allow rate is
+      unchanged (15-17%), and one 98 KB state came back
+      `400 max_tokens_exceeded`. The state needs a cap that fits the judge.
+- [ ] **The permission dialog shows a fragment, the judge scores the whole line.**
+      A deferral reported as `git log --oneline -1 main` was a five-part compound
+      command; the fragment alone scores 1.00, the whole line 0.75-0.78
+      (`s-git-log-compound` in `should_allow.yaml`). Show the whole judged line
+      next to "leaned allow but confidence … is below the floor".
+- [ ] **`allowed_command_prefixes` holds persisted command substitutions.**
+      Entries such as `$(mktemp -d)`, `$(date +%s)` and
+      `$(grep '^DATABASE_URL=' .env | cut -d= -f2-)` are stored as always-allow
+      prefixes (about 3 KB of the judge state). They name no program. Find the
+      path that persists them and stop it; decide whether to prune existing ones.
+- [ ] **The judge log lost its real history.** It is capped at 2 MB, one
+      generation; test rows rotated the real ones out, so `mine.py` now returns 15
+      cases instead of 171. `mined.json` is the only copy. Fixing the item below
+      stops it recurring.
+- [ ] **Unit tests write to the real `permission-judge.log`.** 2,852 of its 3,188
+      rows came from `go test` in `internal/agent` with a fake judge. Point the
+      log at a temp dir under test.
+
+## Content guardrail — follow-ups (2026-10-02)
+
+- [ ] **The bash tool's own post-start text is still judged.** A backgrounded
+      network command returns `Started background process … Poll with
+      bash_output(…)`, which is ocode's text addressed to the agent. The live eval
+      scores it clean at 0.68 against the 0.60 floor (`host-2-background-started`
+      in `internal/agent/testdata/contentguard_eval/cases.yaml`), so it can
+      escalate. `guardExecutedToolResult` does not cover it because the tool did
+      start. Fix by keeping a `run_in_background` bash call out of
+      `contentGuardSourceFor`'s scope.
+- [ ] **`bash_output` of a backgrounded network command is never vetted.**
+      `contentGuardSourceFor` returns nil for `bash_output`, so remote text that a
+      background `curl` printed reaches the model unjudged. Decide whether the
+      background process should carry its command's in-scope flag to `bash_output`.
+- [ ] **Line anchors in `docs/concepts/inbound-content-guardrail.md` are stale.**
+      They had drifted before 2026-10-02 (the page cites `contentGuardSourceFor` at
+      `:214`) and the execution-gating change moved them again. Re-derive every
+      `file.go:NNN` on that page.
+
+## Bash prefix rules — remaining follow-ups (2026-10-02)
+
+_Done this round: the Settings rule editor, all eight tables converted to
+copy-on-write (`internal/agent/cowmap.go`), and both the HTTP and TUI write paths routed
+through `agent.ValidateBashPrefixRule` so no surface can claim a rule it did not store._
+
+
+- [ ] **A `/ban` deny rule does not apply in yolo mode.** `Decide` returns
+      `PermissionAllow` for bash when the mode is yolo, *before*
+      `decideSingleCommand` (which holds the deny-prefix check) is ever reached.
+      Sandbox re-checks deny prefixes per compound fragment; normal reaches them;
+      yolo does not. This is documented behaviour and the new Settings panel warns
+      when the startup default is yolo, but "bans silently stop applying in yolo" is
+      a security-policy decision, not a UI bug — decide whether yolo should honour
+      explicit user denies, and if so move the check above the yolo shortcut
+      (it already runs above the sandbox one at `permissions.go:1885`).
+- [ ] **`/ban remove` leaves an inert `"prefix": "ask"` entry in the config file.**
+      The Settings Remove is a true delete; the TUI/web slash command is not, for
+      parity with its own history. Every unbanned command accumulates a dead rule
+      that still shows up in `/permissions` and `/ban list` as "other bash rules".
+      Either give `/ban remove` the delete semantic (via the new
+      `agent.RemoveBashPrefixRule` / `config.DeleteBashPrefixRule`) or document the
+      difference where users will look for it.
+- [ ] **The `docs/` bundle's `internal/agent/permissions.go:NNN` anchors are broadly
+      stale and need a repair pass.** 54 anchors across 8 bundle pages; a symbol-based
+      sweep found 34 pointing at the wrong line. Most were already stale BEFORE this
+      change (concurrent sessions added `PermissionScopeContent`, the `Untrusted*`
+      fields, the loopback hardening and others without re-deriving anchors), so this
+      is not a single-session regression — but the bash-rule work adds a further
+      **+108 lines** to that file, shifting every anchor below `permissions.go:194`.
+      `docs/` is owned by the `context` sub-agent, so route the re-derivation there
+      (or do the mechanical pass by hand: print the real line for every
+      `file.go:NNN` and eyeball it — a text-matching script resolves `}`, `i++` and
+      `return false` to their FIRST occurrence and silently corrupts anchors).
+
+## Permission / connect-flow hardening — deferred follow-ups (2026-10-02)
+
+Five defects fixed this session (loopback port proof, `isLocalhostURL`, connect-flow
+cancel persistence, input double-submit, credential masking). Two things were
+deliberately NOT done and must not be forgotten:
+
+- [ ] **Thread a `context.Context` into the three OAuth exchanges that take none.**
+      `auth.AnthropicExchange` (`internal/auth/anthropic.go:109`),
+      `auth.StartGoogleOAuth` (`internal/auth/google.go:41`) and
+      `auth.ExchangeOpenAIManual` (`internal/auth/openai_oauth_manual.go:69`) are all
+      shaped without a context. `runConnectExchange` in
+      `internal/server/handler_connect.go` makes cancel *return promptly* and
+      *discard* the credential, but it cannot interrupt the in-flight HTTP request —
+      the goroutine still runs to completion. Real callers are few: one each
+      (`internal/tui/connect.go:831` for Anthropic; the others only via the server's
+      package-var seams). Adding the parameter makes cancel actually abort the call
+      instead of just ignoring its result.
+- [ ] **Cap the auto-injected skill list.** A concurrent session (2026-10-02) changed
+      `a.disco.autoInject` from a single slot to a slice appended per selection, so a
+      newer skill no longer evicts an older one. That is correct, but the slice is
+      unbounded for the life of a session: every qualifying skill's full body is
+      re-rendered into the single volatile tail message on every request
+      (`autoInjectBlock`), so a long session can accumulate a large tail. Needs a cap
+      (drop the oldest) plus a decision on eviction. Interaction to preserve: the
+      sticky `autoInjected` name set must stay, or an evicted skill could re-inject
+      forever. `docs/gotchas/loopback-curl-shell-port-variable.md` and
+      `docs/concepts/discovery-typesafe-judge.md` cover the surrounding rules.
+
+Not deferred, for the record: the loopback-port numeric proof is now an allowlist
+("every write to the variable must be `name=<digits>`") and `isLocalhostURL` keeps a
+hand-rolled authority parser OR-ed with `net/url`. Both are deliberate — narrowing
+either one fails OPEN.
+
+## Concurrency hazard: another ocode session owns part of this feature's files (2026-10-01)
+
+While building the Connectors settings, a **second session was writing the same feature at
+the same time**. The split, as of 2026-10-01:
+
+- Written by the other session, untracked (`??`), **not yet committed**:
+  `internal/server/handler_connect.go` (782 lines, 16 tests), the connector methods +
+  `Connect*` types in `web/src/api/client.ts`, `web/src/components/Settings/ConnectorsForm.tsx`
+  and its two test files. Also `internal/auth/google.go` / `openai_oauth.go` (an
+  unrelated OAuth refactor).
+- Written by this session: `internal/auth/methods.go` + the shared catalog it replaced,
+  `auth.CredentialVersion()`, `internal/auth/openai_oauth_manual.go`, the manual-mode
+  server wiring, and the parity / leak / invalidation tests.
+
+Two things this cost, both worth not repeating:
+
+- [ ] **`git add -A` is unsafe in this repo right now.** It would sweep another agent's
+      in-flight, uncommitted work into a commit under this session's name, and untracked
+      files have no git history to recover from. Commit by explicit path list, or not at
+      all, until the other session lands.
+- [ ] **Two writers in one Go file means one silently loses the work.** `handler_connect.go`
+      was being edited at 19:40 when I first went to wire the manual flow, so that step
+      waited. When it was finally safe (stable ~3.75h), the fix was a **new file**
+      (`openai_oauth_manual.go`) rather than extending the file the other session had
+      just refactored — zero collision surface. Prefer a new file over an edit when
+      someone else may be mid-change in the same package.
+- [ ] **Check ownership before touching a file another session may own:**
+      `stat -f "%Sm" <file>` plus `find ~/.local/share/opencode/project/<slug>/sessions
+      -maxdepth 1 -newermt "-6 minutes" -name "*.sqlite" | wc -l`. mtime vs your own
+      session's start time is the fastest tell.
+
+## FIXED: `-race` failure in `TestConnectFlowCancelRacesInputHandler` (2026-10-03)
+
+**Fixed (2026-10-09):** `handleConnectFlowInput`'s cookies branch now captures
+`grokSubscriptionLoginFn` on the request goroutine before `crashguard.Go`. `-race
+-count=200` on the test is clean; the `Connect` group passes under `-race`.
+
+Found while running the `go test -race` gate over the ten review fixes. **Not
+caused by that work** — verified by reverting `handler_connect.go` and the new
+`handler_connect_cancel_atomic_test.go` and re-running: the race still fires.
+
+```
+WARNING: DATA RACE
+Write at ... by goroutine:  stubConnectSeam[...].func1()      handler_connect_test.go:83
+                           testing.(*common).Cleanup.func1()
+Previous read at ...:       (*Handler).handleConnectFlowInput.func3()
+                                                        handler_connect.go:1054
+                           internal/crashguard.Go.func1()
+```
+
+**Cause.** `handleConnectFlowInput` reads the package-level seam
+`grokSubscriptionLoginFn` from INSIDE a `crashguard.Go` body (line 1054).
+`TestConnectFlowCancelRacesInputHandler` stubs that seam with a function that
+blocks on `<-ctx.Done()`, then joins only the two `connectDo` calls with
+`wg.Wait()`. The handler answers 200 immediately after spawning, so `wg.Wait()`
+returns while the spawned goroutine is still starting or parked — and the test's
+`t.Cleanup` then writes the seam back. The spawn is never joined.
+
+**Reproduces deterministically:** `go test -race -count=20 -run
+TestConnectFlowCancelRacesInputHandler ./internal/server/` fails ~1 run in 20.
+
+**Fix direction (not taken — it is another session's file).** Join the spawned
+goroutine (or have the stub signal completion and the test wait on it) so the
+seam outlives every reader; alternatively read the seam into a local BEFORE
+`crashguard.Go`, which is the cheaper and more robust change since it removes the
+window entirely rather than narrowing it. `handler_connect.go` currently carries
+other sessions' in-flight work — check ownership before editing.
+
+**Also pre-existing and unrelated:** `TestPermissionTablesConcurrentWriteDuringDecide`
+(internal/agent) is flaky — `-count=5` fails ~1 run in 5 with
+`read rule = "ask", want the default allow to survive`. Reproduced with my
+`internal/agent` changes fully reverted, so it belongs to the concurrent
+permission-tables work in `permissions.go` (an 868-line unstaged diff adding
+`bashPrefixSnapshot` / `mutateBashPrefixes` to the very tables this test hammers).
+
+## BLOCKED: docs/ update for the ten review fixes — the bundle's sole writer is rate-limited (2026-10-03)
+
+The fixes are landed and tested, but **`docs/` could not be updated**: `doc_write`
+is reachable only through the `context` sub-agent (sole-automated-writer
+invariant), and every dispatch now fails with
+`opencode-go 429 {"type":"GoUsageLimitError","limitName":"weekly"}`. Two attempts
+were made; both failed after 6 attempts each. Hand-editing is not an option — it
+would desync the auto-managed `docs/index.md` / `docs/log.md`, which is exactly
+the hazard recorded below.
+
+**Re-run this once the quota resets.** A `context` agent was already dispatched
+and produced the findings below, so the work is scoped, not speculative.
+
+### 1. `superpowers/specs/2026-09-09-embedded-htr-extension-design.md` — AMEND, it now contradicts the code
+
+- `:121` — "`stopManagedHTR` reads `bcfg.HTRPort` and acts on it" is **false**.
+  It now resolves the descriptor (`resolveHTRShared()`) and calls
+  `stopHTRServeFn(h.procSup, shared.Port, …)`.
+- `:122` — "the managed daemon listens on `3846` by default … standalone on
+  `3845` is never stopped by them" is **stale**: under the shipped default
+  `browser.htr_shared: true` the managed daemon is on **3845**
+  (`cdp.DefaultHTRCLIPort`); 3846 is now the private-mode port only.
+- `:78-79` — the status example JSON shows `"port": 3846` / `"addr":
+  "127.0.0.1:3846"`; under the shared default it would be 3845.
+- Status and list-tabs were addressed at `bcfg.HTRPort` too, and are now on the
+  resolved descriptor. Amend as corrections so the approved-design history stays
+  readable.
+
+### 2. `concepts/htr-shared-daemon.md` — ADD only, nothing here is wrong
+
+Its claim that `resolveManagedHTROptions` resolves "for every caller (browse
+server, **Settings API**, TUI)" was false until this fix and is now true; keep it
+and note the Settings path goes through `resolveHTRShared()`. Add the new test
+files to its regression-test listing (`internal/server/handler_config_htr_port_test.go`,
+`internal/browse/cdp/htr_verify_outcome_test.go`), plus three facts: the
+`browser.htr_token` precedence (wins over a present config token; stale value →
+401 against an adopted daemon), the death-path `resetHTRVerifyOutcome`, and the
+two un-tested marker-retraction halves.
+
+### 3. `concepts/inbound-content-guardrail.md` — AMEND one wrong citation, ADD two facts
+
+- **The citation was itself the bug.** The page claims an approved content result
+  "still goes through `TruncateToolResult` on the normal path (TUI comment
+  `model.go:15366`), so approving a 192 KB result does not inject 192 KB". The
+  comment ASSERTED it; neither host did it. Cite the code, not the comment.
+- ADD: the server must not `Step` on a content ask raised by an approved
+  re-execution (the TUI already stopped on the sentinel prefix).
+- ADD, only if the page covers server ask plumbing: the connect-flow cancel race.
+- If the placement section cites `contentGuardStepCtxCtx`, drop it (deleted).
+
+## HTR daemon-death marker cleanup: both halves are correct but UNTESTED (2026-10-03)
+
+Fixing review finding #7 added two complementary guards against a marker being
+written for a pid that died mid-startup: a second marker sweep in
+`watchHTRExitNotify` AFTER the death signal, and a post-write `<-died` check in
+`EnsureHTRServe`. Together they close the interleaving in either order.
+
+Neither is test-pinned, and a mutation run says so plainly:
+
+- **"drop the post-signal sweep" SURVIVES.** `TestDaemonDeathRetractsAMarkerWrittenForIt`
+  writes the marker BEFORE calling the watcher, so the watcher's ORIGINAL
+  pre-signal sweep already removes it. Only the gap between the two sweeps — a
+  marker written by a racing ensure while the death is being accounted for — is
+  untested.
+- **The boot-path `select { case <-died: }` check is untested entirely.**
+  `sharedSpawnConfirmBudget` is a `const`, so a test cannot shrink the window,
+  and landing a real death inside it is not schedulable.
+
+Closing this needs a second production test hook in `internal/browse/cdp`
+(the connect-flow cancel got `connectFlowCancelHook` for exactly this reason).
+Not done: a hook purely for a LOW-severity race is more production surface than
+the defect warrants, and the alternative — leaving the code with no test at all —
+was judged worse. Revisit if the marker ever shows up stale in the field.
+
+## A stale `browser.htr_token` makes every probe 401 against an ADOPTED daemon (2026-10-03)
+
+Review finding #8 was reported as a code defect but is a **documentation** one:
+the resolver's precedence is `browser.htr_token` if set, else htrcli's config
+token, which matches the spec and is deliberate (ocode spawns a shared daemon
+with `HTR_MANAGED_ID` set to that token). The code comment and
+`skills/ocode-web/SKILL.md` both claimed it only applies when htrcli's config is
+tokenless; both are corrected. **The underlying hazard is real and unfixed:**
+
+With a stale `browser.htr_token` set and a user-run `htrcli serve` adopted,
+ocode presents a bearer the daemon does not hold, every authenticated probe
+401s, and a later `EnsureHTRServe` can find the port busy and unable to
+authenticate. The fix is "clear `browser.htr_token`", which is undiscoverable
+from the symptom. A preflight that compares the configured token against the one
+a healthy daemon accepts, and refuses to adopt with a clear notice, would close
+it — but that changes adoption semantics, so it needs a decision rather than a
+patch.
+
+## Discovery skill auto-injection: two open decisions (2026-10-01)
+
+Ships the top-1 Jev-scored skill body into the prompt (`internal/agent/discovery_autoinject.go`).
+Two things were deliberately left out of the change rather than decided unilaterally:
+
+- [ ] **Auto-injected skills are invisible in `/discovery` status.** `DiscoveryStatusInfo`
+      (`internal/agent/discovery_glue.go`) reports `AttachedSkills` and `judgeVetoed` but
+      nothing about the auto-inject, so the feature is observable only via the `DISCOVERY`
+      debug line. Adding it means touching the TUI status snapshot and the web
+      `/api/discovery` consumer, so it was scoped out of the original change.
+- [ ] **The 0.8 floor has never been observed firing.** It is a reasoned guess, and a high
+      one. `maybeAutoInjectSkill` now logs the best skill's real noul on every judged turn
+      (`auto-inject: no skill qualified (best %q noul=%.3f < floor %.2f)`) precisely so it
+      can be tuned against real numbers. If real scores cluster well below 0.8 the feature
+      will look dead; check the debug log before concluding it is broken, then adjust
+      `discoveryAutoInjectFloor` and the value pinned in
+      `TestAutoInjectFloorIsDeliberatelyDecoupled`.
+
 ## Skill-doc audit follow-ups: four deferred items (2026-09-30)
 
 A read-only audit of `skills/` found 17 stale line anchors and ~10 false claims across the
@@ -80,7 +962,7 @@ Neither is a bug; both are calls the user has not made yet.
 
 - **In YOLO mode the guardrail is the only egress guard, and it fails open.**
   `PermissionManager.Decide` returns a bare `PermissionAllow` for bash at
-  `internal/agent/permissions.go:1639` and for every tool at `:1793` — both BEFORE
+  `internal/agent/permissions.go:1657` and for every tool at `:1793` — both BEFORE
   `isExfiltrationRiskBash` (`:1695`, `:1723`) and before the webfetch domain check (`:1905`). So in
   YOLO neither the exfiltration detector nor the domain policy ever runs. Separately, a persisted
   `curl` bash-prefix allow only trips `isExfiltrationRiskCurl` (`:920`) on its risky flag forms, so a
@@ -91,7 +973,7 @@ Neither is a bug; both are calls the user has not made yet.
   only (safer, but prompts users who asked never to be prompted). Do not resolve this by editing the
   fail-open table without the user's answer — the table is the shipped contract.
 - **`handleToolCallWithImages` takes no context, so no tool is cancellable on an ordinary turn.**
-  It hardcodes `context.Background()` at `internal/agent/agent.go:3181`, and the main dispatch sites
+  It hardcodes `context.Background()` at `internal/agent/agent.go:3190`, and the main dispatch sites
   (`:1756`, `:1852`, `:1910`) all route through it. The guardrail honours a caller ctx and is
   cancellable on the orphan-recovery path (`:6209`), but an abort on a normal turn does not reach an
   in-flight call — it runs to its own timeout instead. This is **pre-existing and agent-wide**, not
@@ -100,11 +982,101 @@ Neither is a bug; both are calls the user has not made yet.
   `executeToolCallWithContext`. That changes cancellation semantics for ALL tools, so it needs its
   own PR and its own tests — it must not ride along on a guardrail change.
 
+## Bundle code anchors are badly rotted, and a mechanical remap cannot detect it (2026-09-30)
+
+Found while doing the mandatory anchor maintenance for the cron change. **Pre-existing and much
+wider than that change** — recorded here because the maintenance tooling that would fix it is the
+useful part.
+
+- **A HEAD-relative remap audit is structurally incapable of catching a stale anchor.** The
+  per-project cron work (and most changes before it) shifts line numbers, and the rule in `CLAUDE.md`
+  is to re-derive the bundle's `file.go:NNN` anchors. The obvious way to do that — map HEAD line
+  numbers through the diff, then check each doc anchor points at the mapped line — only proves the
+  numbers moved *consistently with the diff*. It says nothing about whether the ORIGINAL number was
+  right. I ran exactly that audit, got "91 verified / 1 hand-corrected", and it was worthless: on the
+  same page, `isReminderDeliveryID` was cited as `internal/server/scheduler.go:482` and actually
+  lives at **513**. The remap dutifully shifted 482 to 488, the audit confirmed 488 was "correct",
+  and both were wrong. **Any anchor audit must be SEMANTIC — does the cited line contain what the
+  prose says it does — never diff-relative.**
+- **Scale — measured, not estimated.** 90 bundle anchors point into the 6 files this change
+  touched. I read 56 of them side by side (doc claim vs the real source line, both range
+  endpoints) and **30 of those 56 (54%) already pointed at unrelated code at HEAD.** Verified
+  wrong examples (cited → actual):
+  `reconcileProfileAgent` `agent_session.go:668` → **657** (4 pages);
+  `persistTurnTranscript` `:933-959` and `:1153` → **1425**;
+  `reconcileTurnSave` `:963-968` → **1475**; `dispatchTurn` `:1623` → **1655**;
+  `runTurn` `:1092` → **1049**; `turnBaseLen` capture `:623-629` → **1073**;
+  `buildAgentSession` `:566` → **437**; `ensureAgentSession` `:47-66` → **772**;
+  `allowedProjectRoots` `handler.go:632` → **644**; `SetWorkDir` `handler.go:1243` → **676**.
+  A bundle-wide sweep flagged 399 of 814 resolvable anchors as suspicious, but that number is
+  inflated — many legitimate anchors cite a line *inside* a function rather than its definition, so
+  the sweep is a triage aid, not a fix list.
+- **What was done about it.** Only the three anchors on `docs/scheduled-jobs.md` — the page the cron
+  change actually documents — were corrected, because that was in scope. The rest were deliberately
+  left alone: mass-rewriting ~30 anchors across unrelated gotcha/spec pages, several of which cite a
+  line *inside* a function, would very likely make the docs worse, and it belongs in its own change.
+- **Suggested fix, for whoever picks this up.** Per page, read each anchor's sentence and check the
+  cited line against the claim. The two mechanical aids worth keeping: resolve a bare basename
+  (`scheduler.go:NNN` is ambiguous across `internal/{server,scheduler,desktop}`) by reading the
+  sentence, and note that a `go test -overlay` JSON gives a pristine-HEAD baseline without touching
+  the working tree. Beware also that `docs/` is concurrently edited by other agents, so a
+  `git diff -- docs/` review mixes in other people's edits — check the FAIL/anchor sets, not the
+  diff.
+
+## Idle eviction silently killed Telegram/RC delivery for the boot project (2026-09-30, fixed)
+
+Found while scoping the LLM `cron` tool; a real regression in the per-project cron work committed
+earlier the same day (4a1c5a0c), not in the tool change.
+
+- **`evictIdleCronProjects` had no exemption for the host-seeded default project.** `SetScheduler`
+  deliberately seeds that entry with the HOST's own engines because they carry the Telegram drainer
+  sink and the RC-bridge fan-out, and its own comment says starting "a twin for the same project
+  would silently drop that wiring". But the idle sweeper iterated every entry, so ~30 minutes after
+  server start it stopped those engines and set `svcs = nil`; the next resolve then called
+  `startProjectServices` and produced exactly that sinkless twin — which nothing ever re-seeds,
+  since `setCronScopeConfig` only runs at wiring. **Net effect: Telegram and RC delivery for the boot
+  project died ~30 min after launch and never recovered, with no error anywhere.**
+  Fix: `cronProjectEntry.pinned` (`atomic.Bool` — the writer holds the ENTRY mutex while the sweeper
+  holds the REGISTRY one, and this file's lock order is `entry.mu -> scope.mu`, so the sweeper cannot
+  take `entry.mu` to read it). Set in `setCronScopeConfig`, honoured only by the idle sweeper;
+  `stopAllCronServices` still stops pinned entries, or every restart would leak a run loop and a
+  drainer. Tests: `internal/server/cron_scope_eviction_test.go`, 4 mutations all caught — including
+  "never evict anything", which the non-default half of the test exists to reject.
+- **`TestCronTargetsEndpoints` is not idempotent under `-count>1`** (pre-existing; **proved at HEAD**
+  with a `go test -overlay` baseline, identical failure). `setCronScopeConfig` seeds the default
+  entry under `canonicalCronProject("")` — which returns `""` — while a no-param request resolves to
+  `"."` and so canonicalises to the process CWD. The keys never match, so the handler lazily starts
+  engines against `DefaultStorePath(".")`: a real on-disk store under the per-process `TestMain`
+  data dir, shared by every `-count` iteration. Iteration 1 writes `/x:99`, iteration 2 reads it
+  back and fails "want empty initial targets". Harmless in production (a real server has a non-empty
+  `workDir`, so the seed key and the resolved key agree) but it means a `-count=2` run is not a valid
+  gate on this file. Fix when someone touches it: seed under the same key `resolveCronProject`
+  produces for a no-param request.
+
 ## Reminders and the task list are web/desktop-only (2026-09-30)
 
 Deferred from the Cron tab reminders/tasks work, deliberately, to keep that change contained. The
 engine (`internal/reminders`), its store, its REST surface and the web UI are all done.
 
+- **DONE 2026-09-30 — the LLM-facing `cron` tool is now bound to the SESSION's project.** `Handler`
+  gained `cronServices func(root string) (*scheduler.Service, error)`, installed by
+  `Server.SetScheduler` from `Server.cronServiceResolver()`. `buildAgentSession` normalises
+  `projectRoot` (`"" -> h.workDir`) *before* every consumer keys off it, then hands the tool registry
+  a `tool.ProjectCronService{Root, Resolve}` instead of the single `h.scheduler`.
+  Three decisions worth keeping:
+  1. **The tool holds a RESOLVER, not a service pointer, and resolves on every `Execute`.** The
+     per-project engines are stopped by the idle sweeper, so a pointer captured at build time
+     outlives its engine for the rest of the session's life. Re-resolving also keeps the entry warm.
+  2. **A resolution failure is surfaced, never satisfied from another project.** Falling back to
+     `h.scheduler` would file the job in the boot project — the exact bug being fixed. The only
+     fallback is for a host with NO per-project scope at all, which keeps the tool absent rather than
+     stripping it from single-project hosts.
+  3. **A project that cannot start its engines gets no cron tool rather than a broken one** (the
+     pre-existing `if svc != nil` registration rule is unchanged).
+  Tests: `internal/server/cron_tool_scope_test.go` (7 tests, incl. per-call re-resolution, the
+  no-fallback rule, and the `h.scheduler` fallback for scope-less hosts), all mutation-verified. `scheduler.Service.Stopped()` was added so a test can
+  assert shutdown genuinely stopped an engine instead of asserting on registry bookkeeping that
+  `stopAllCronServices` clears unconditionally.
 - **The TUI has no way to see or change a reminder or task.** `/cron list|add|remove|describe`
   (`internal/tui/command_cron.go`) still knows only `scheduler.Job`. A user living in the TUI cannot
   add a reminder, and cannot tick off a task the web UI created. Fix: add `/reminder` and `/task`
@@ -132,13 +1104,13 @@ engine (`internal/reminders`), its store, its REST surface and the web UI are al
 ## A below-floor `allow` that names no concern reports nothing (2026-09-29)
 
 - **The hesitant-but-unexplained deferral is unreported, not just un-granted.** In
-  `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:280`) the concern suffix is
+  `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:290`) the concern suffix is
   appended only when `concernKey != "" && concernKey != "none"`. Observed live: Jev leaned ALLOW at
   0.72 against the 0.85 floor and answered the concern question `none`, so the human saw only
   "TypeSafe judge leaned allow but confidence 0.72 is below the 0.85 floor" — no category, no
   indication of what the judge was unsure about. Two costs in one answer: the prompt explains
   nothing, and because the concern is not `truncated_or_unknown` the opaque 0.75 relief
-  (`resolveAutoJudgeOpaqueMinConfidence`, `permissions.go:6422`) never engages. The rubric already
+  (`resolveAutoJudgeOpaqueMinConfidence`, `permissions.go:6457`) never engages. The rubric already
   instructs against this ("Reserve \"none\" for a call that gives you no pause", line 202) and the
   model ignored it, so prompting harder is not the fix. Fix belongs in the FALLBACK reason: when an
   `allow` lands below the floor, treat the absence of a usable concern as its own signal and say so
@@ -166,15 +1138,15 @@ engine (`internal/reminders`), its store, its REST surface and the web UI are al
   contains `auto_typesafe_verdict`).
 - **The real defect: for any command containing `&&`, `||`, `;`, `|`, `` ` ``, `$(`, `>` or
   `<`, NO deterministic scope check runs anywhere.** `shellCompound`
-  (`permissions.go:4849`) makes `canAutoAllowInRoot` return false (`:4929`) and
+  (`permissions.go:4884`) makes `canAutoAllowInRoot` return false (`:4929`) and
   `firstOutOfScopePath` return `""` (`:4989`). So `req.OutOfScopePath` is never populated
-  and `verifyAutoGrant`'s scope guard (`agent.go:4051`) is **structurally unreachable**.
+  and `verifyAutoGrant`'s scope guard (`agent.go:4060`) is **structurally unreachable**.
   The command takes a generic bash Ask and the LLM's scope reading is the *only* scope
   signal before a human. The bail is deliberate (a substitution's path is runtime-only, so
   a static path would falsely reject), but the consequence is that compound commands are
   entirely dependent on the judge for path scope.
 - **Compounding it: the floor check returns before `verifyAutoGrant` runs**
-  (`permission_typesafe.go:288` returns, `:291` verifies). A below-floor `allow` is
+  (`permission_typesafe.go:310` returns, `:312` verifies). A below-floor `allow` is
   therefore **unverified** — for compound commands *no* deterministic guard has run at
   all, yet the banner presents the objection as model confidence alone.
 - Fix, in order: (1) resolve `cd` targets and substitution outputs to a concrete path set
@@ -267,9 +1239,9 @@ recovers 0.85 on its own.
 ## Permission prompt hides the env assignment that triggered the ask (2026-09-29)
 
 - **A `bash.env.*` ask renders a command with the assignment stripped.** `envVarPermissionRequest`
-  (`internal/agent/permissions.go:6360`) sets `Command: rebuildCommandLine(cmd.cmdWords)`, and
+  (`internal/agent/permissions.go:6395`) sets `Command: rebuildCommandLine(cmd.cmdWords)`, and
   `cmdWords` excludes the leading `NAME=value` tokens (they are folded into `cmd.envVars`,
-  `permissions.go:6024‑6043`). So an ask whose rule is `bash.env.out_of_scope` is shown as the bare
+  `permissions.go:6059‑6043`). So an ask whose rule is `bash.env.out_of_scope` is shown as the bare
   remaining command, with no hint of which variable/path pushed it out of scope. Observed live:
   `SQLACC_IT_DB=/var/lib/firebird/data/ods12.fdb … SQLACC_IT_PASSWORD=masterkey go test … ./internal/runner/`
   surfaced as `go test -p 1 -count=1 -v -run Integration ./internal/runner/`, which reads as an
@@ -448,13 +1420,13 @@ path-scoped tools (see CHANGES.md 2026-09-24):
 - **Other explicit tool denies are still not hard.** `bash: "deny"` (`Decide`
   ~:1692), `computer: "deny"` (~:1868) and the bottom-of-`Decide` deny
   (~:1874) return a non-`HardDeny`, so the auto-permission judge can override
-  them (`agent.go:3216-3234`). The path-scoped deny is now `HardDeny`; align
+  them (`agent.go:3225-3243`). The path-scoped deny is now `HardDeny`; align
   the rest, or document why they differ.
 - **YOLO ignores explicit tool denies.** `Decide` returns Allow for YOLO
   (~:1719) before the path-scoped rule check, so `write: "deny"` is not
   enforced in YOLO mode. Pre-existing and arguably intended (YOLO = allow all),
   but worth stating.
-- **`ExportConfig` emits every rule, including defaults** (permissions.go:4493),
+- **`ExportConfig` emits every rule, including defaults** (permissions.go:4511),
   so a config-sourced `allow` is indistinguishable from a built-in default after
   the TUI `ExportConfig` → `LoadFromOcode` round-trip (tui/model.go:9012). That
   is why a persisted allow cannot be marked user-confirmed without laundering
@@ -1174,7 +2146,7 @@ treat the terminal-tab item above as a separate, lower-priority finding.
   count stayed ~10–16 throughout; no growth, no hang. So the minimal
   "inject one message mid-tool-call" path is *not* itself the bug.
 - **False lead, worth recording so it isn't retried:** `GET /api/chat/messages`
-  (`HandleSessionMessages`, `internal/server/handler_sse.go:281`) is an SSE
+  (`HandleSessionMessages`, `internal/server/handler_sse.go:311`) is an SSE
   endpoint (`Content-Type: text/event-stream`) that intentionally never closes
   — it streams the initial history then blocks forever on `<-sub`/`<-ctx.Done()`.
   A plain `curl` against it (no `-N`, no client timeout) looks exactly like a
@@ -2656,13 +3628,12 @@ Plan: `docs/superpowers/plans/2026-09-21-persistent-shell-session.md`
   both the operation state and the conflict list), so a revert is a deliberate
   act rather than a cleanup.
 
-- [ ] **Remote conflicted paths containing `:` cannot be resolved.**
-  `remoteSafeSpec` (`internal/server/handler_remote_work.go:409`) rejects `:`
-  among many other characters, but a colon is legal in a git path, so such a
-  file is unresolvable on a remote project. The endpoint surfaces the
-  validator's error rather than skipping the file silently. Fixing it means
-  replacing the broad denylist with a strict allowlist — a deliberate security
-  change, not a drive-by edit.
+- [x] **Remote conflicted paths containing `:` cannot be resolved.** Resolved 2026-10-09 for
+  git endpoints, conflict resolve included: they validate with `remoteGitSpec`, which allows a
+  colon inside a path and shell-quotes the spec at the command site
+  (`remoteQuoteSpecPath`). Still refused: a leading `:` (pathspec magic), a drive prefix, and
+  glob characters. File operations keep `remoteSafeSpec`. See
+  `docs/gotchas/git-status-c-quoted-paths.md`.
 
 
 Plan: `.opencode/plans/2026-09-25-git-conflicts-and-operations/` (INDEX.md
@@ -2805,22 +3776,16 @@ open below.
   the `gitOperationCommand(kind, action)` arguments — the last is a real bug
   this phase actually had, and it failed 3 tests.
 - [ ] **Remote conflict-resolution limitation (real, by design, not a bug).**
-  `remoteSafeSpec` rejects the characters `'";` + backtick + `$&|<>\!*?[](){}#:`
-  and control chars, so a remote conflict on a file whose name contains any of
-  them **cannot be resolved** through the web UI, even though the same file
-  resolves fine locally (the local path uses `GIT_LITERAL_PATHSPECS=1` plus
-  `resolveRepoPath`). This blocks common paths such as `app/[slug]/page.tsx`,
-  `(group)/layout.tsx` and any name with a colon.
-  **The validator is deliberately NOT relaxed here:** it is shared by every
-  remote git mutation, so loosening it for conflicts would widen the
-  shell-injection guard for unrelated endpoints. The current behavior is a
-  clear 400 carrying the validator's reason, with the file left untouched —
-  pinned by `TestRemoteGitResolveConflictRefusesPathspecMagicName`.
-  To actually fix this, the right change is a *transport* that passes the path
-  via stdin or argv rather than interpolating it into a shell string (as
-  `remoteGitHunk` already does for its patch), not a weaker character filter.
-  Until then the honest options for a user are to resolve that one file in a
-  terminal on the host, or to rename it.
+  Git endpoints validate with `remoteGitSpec` (2026-10-09): shell metacharacters such as
+  `'";$&|<>!(){}#` pass because the spec is shell-quoted at the command site. Still refused:
+  `*`, `?`, `[`, a leading `:` and a drive prefix. So `(group)/layout.tsx` and mid-path colons
+  now resolve, while `app/[slug]/page.tsx` still cannot.
+  The remaining refusals are deliberate: glob characters and a leading `:` change what git
+  matches, and quoting does not neutralize them. The current behavior is a clear 400 carrying
+  the validator's reason, with the file left untouched, pinned by
+  `TestRemoteGitResolveConflictRefusesPathspecMagicName`. Relaxing the globs would need
+  `GIT_LITERAL_PATHSPECS=1` on the remote command, which the conflict commands already set.
+  Until then, a `[slug]` file is resolved in a terminal on the host or renamed.
 - [x] **Phase 06 — web UI.** Conflicts section + operation banner, and
   rebase-aware button labels (ours/theirs are swapped during a rebase).
   **DONE + VERIFIED 2026-09-25.** `api.gitResolveConflict` + `api.gitOperation`
@@ -3338,6 +4303,25 @@ was written to `skills/`. Partial work left open, deliberately:
   `review-changes` may be consolidatable; `use-modern-go` may not match the Go
   version in `go.mod`. None were inspected.
 
+## Paradee local TTS engine — known limitations (2026-10-09)
+
+The `paradee` engine is registered, pinned, installable and verified end to end on
+`darwin/arm64` (real download, SHA-256 + size verify, pip install with the staged
+spaCy wheel, probe synthesis, WAV out via `PARADEE_TTS_E2E=1`). These are the
+boundaries it shipped with:
+
+- [ ] **Host matrix is `darwin/arm64` only.** Other hosts report `unavailable`. Before
+  adding `linux/*`, `windows/amd64` or `darwin/amd64`: pin the same set there, check
+  that `en_core_web_sm-3.8.0` and `spacy==3.8.16` have wheels for that host, and run
+  `PARADEE_TTS_E2E=1` on that platform. The `en_core_web_sm` wheel is `py3-none-any`,
+  so it is shared across hosts.
+- [ ] **Single voice.** The model has one built-in voice (`af_heart`). The Paradee
+  config has no speaker table, so there is nothing for `model_voice` to select.
+- [ ] **Upstream is pinned, not maintained.** The model repository is pinned by commit
+  and the spaCy model by wheel SHA-256. An upstream fix cannot arrive on its own;
+  revisiting the engine means re-verifying `misaki==0.9.4` (its `[en]` extra is
+  deliberately left off because it pulls PyTorch) and the spaCy 3.8 line together.
+
 ## MeloTTS local TTS engine — known limitations (2026-09-30)
 
 The `melo` engine is registered, pinned, installable and verified end to end on
@@ -3473,3 +4457,1485 @@ The `melo` engine is registered, pinned, installable and verified end to end on
   cause is this file's setup, not the component. Left alone rather than
   restructuring the composer's mount effects; worth a cleanup pass on the harness if
   the noise starts masking a real warning.
+
+## Recap contract ([ocode:recap]) — follow-ups (2026-10-01)
+
+Shipped the recap format as a static system-prompt fragment
+(`internal/agent/prompt.go::recapPromptContent`), on for primary agents and
+explicitly off for sub-agents / `/btw` side queries / the advisor.
+
+- [ ] **No config toggle — deliberate, and NOT to be tied to `/recap`.** The
+      `SetRecapPromptEnabled`/`RecapPromptEnabled` pair exists and the TUI rebuild
+      path (`model.go`) carries the flag across, but there is no user-facing
+      switch, because the fragment is meant to be unconditional for the main loop.
+      **`/recap enable|disable` (-> `handleRecapCmd` -> `handleRecapEnable`) already
+      exists and toggles a DIFFERENT feature — the automatic one-line auto-recap
+      (`RecapAsyncShort`). Do not repurpose it for this fragment.** If a switch is
+      ever wanted, add a separate `recap_prompt_enabled` key (mirroring
+      `doc_prompt_enabled`) plus its own subcommand; the flag plumbing is already
+      in place.
+- [ ] **THREE SEPARATE RECAP MECHANISMS — keep them separate (do NOT "unify").**
+      An earlier note in this file proposed folding these onto one shared format
+      constant. That was WRONG and is retracted; the user corrected it explicitly
+      (2026-10-01). They are distinct features with distinct consumers:
+      1. **Auto-recap** — `RecapAsyncShort` (`agent.go`), fired automatically from
+         the TUI after every turn; one line; toggled by `/recap enable|disable`.
+      2. **`/recap` command** — user-invoked; `runRecap` (`agent.go`) fires a
+         side-query LLM call and formats its own sections (`WHAT USER WANT / WHAT
+         FIND / DECISION / DO / TASKS`).
+      3. **This fragment (`[ocode:recap]`)** — the odd one out: NOT a side query and
+         NOT a trigger. It is a static system-prompt instruction telling the
+         **main LLM loop** to close its OWN response with the recap, in
+         `ASKED/WORKED/FOUND/DECIDED/NEXT` shape.
+      (1) and (2) both GENERATE text via a separate small-model call; (3) SHAPES
+      what the main model writes. Different producers, different consumers — so
+      (3) is main-loop-only and must not be described as, or merged with, (1)/(2).
+- [ ] **No runtime observation yet.** The contract is enforced only by prompt
+      text. Nothing verifies the model actually emits the five sections, that
+      `WORKED` picks the right label, or that the skip rule suppresses the block
+      on conversational turns. A transcript check (or an eval against a handful of
+      recorded sessions) would confirm the prompt is actually load-bearing rather
+      than merely present.
+- [ ] **Bundle anchors describe the COMMITTED tree (HEAD + the recap change), not the
+      live working tree — deliberately.** My insertions to `internal/agent/agent.go`
+      (+22) and `prompt.go` (+34) shifted every `file.go:NNN` anchor in the bundle.
+      All 121 anchor endpoints and all 26 `file.go:A-B` spans are now verified
+      against HEAD + the recap change, width-preserving, 0 stale. Another session
+      has +4 further UNCOMMITTED lines in `runCompact` (old line 2781), so those
+      anchors are 4 short of the live tree; they are NOT shifted to chase it,
+      because CLAUDE.md's own rule is that a tracked file with unstaged
+      modifications is read from HEAD — docs must not describe uncommitted code.
+      **If that runCompact work is committed, re-derive every `agent.go:NNNN` at or
+      above old line 2782 with +4** (scripts kept at
+      `/tmp/recapbk/rewrite_spans_from_head.py` and `verify_anchors.py`; the
+      `--mine` shift table is at the top of `verify_anchors.py`). A span must
+      shift BOTH endpoints by the same amount — an earlier pass moved only the
+      start, which turned 18 spans backwards and lost width on 5 more; both classes
+      are now fixed and guarded.
+
+- [ ] **`TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent` fails at PRISTINE HEAD —
+      pre-existing and unrelated to the recap fragment.** Proven, not inferred:
+      a clean `git worktree add .worktrees/pristine-recap HEAD` (embeds copied)
+      fails the test 3/3 in isolation, and the full `go test -race ./internal/agent/`
+      at pristine HEAD (238s) reports it as the ONLY failure. An earlier note here
+      blamed the concurrent discovery/TypeSafe work — that guess was WRONG, the
+      failure is committed at HEAD. It polls for `RunningCount()==1 &&
+      QueuedCount()==1` on a 2s deadline, so it is timing-sensitive; needs its own
+      triage. (Worktree can be removed with `git worktree remove`.)
+
+## Changes tab: bash change-detection guards (2026-10-01)
+
+Shipped three guards for the pre/post stat-walk detector
+(`internal/changes/bash.go`), all mutation-verified, all with the skip visible
+in the debug panel:
+
+- [ ] **Adaptive walk budget.** `defaultWalkBudget` is a flat 2s. Measured on
+      this machine with a read-only probe: the ocode repo root walks in
+      **90–150ms** (4,357 files, `walkComplete` on all runs), but
+      `/Users/james/www` holds **91,410 files** and **truncated on a cold run**,
+      taking the full 2s. A session opened on a directory that large now skips
+      bash detection on *every* command (loud, not wrong — but the tab goes
+      quiet). Fix by tracking the last observed full-walk duration on the
+      recorder and scaling the budget off it, or by refusing a workDir whose
+      file count is absurd. Do NOT just raise the 2s: that is a workaround for
+      an unpruned walk.
+- [ ] **Report the trustworthy half of a truncated PRE walk.** Today a truncated
+      pre-walk drops the whole event, but only the "added" class is actually
+      unsound there — paths the pre-walk DID cover give reliable
+      modified/deleted. A truncated POST walk must still drop entirely (the
+      abort point invents deletions). Would recover coverage for large repos.
+- [ ] **`pathTokenRegex` still requires a slash, so bare filenames are never
+      tokens.** `cat >> TODO.md` yields nothing, which is why the fail-open is
+      bounded rather than absent. Widening the regex to accept single-segment
+      filenames in redirect position (`>`, `>>`) would let the common heredoc /
+      in-place-`sed` case be attributed by name and retire most of the
+      fail-open.
+- [ ] **Known residual: bounded misattribution.** A diff of ≤
+      `maxTouchesPerEvent` (200) paths with no nameable target is still
+      attributed to the command. Probed on `/Users/james/www`: a no-op reported
+      1 row for `nanobot/.parakeet.log`, written by another process during the
+      command's window. Small, and inherent to any mtime-diff detector without
+      per-writer attribution — but it is not zero.
+
+## HTR shared daemon (2026-10-01)
+
+- [ ] **Orphaned `com.ocode.htrcontrol.json` in browser families ocode no longer
+      manages.** Found while designing the shared HTR daemon: ocode writes its
+      native-host manifest only for the browser it selects (`FindChrome` prefers
+      Chromium), so `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.ocode.htrcontrol.json`
+      is a stale Sep-29 copy pointing at the 0.8.113 binary, with an
+      `allowed_origins` value matching none of the 0.8.91→0.8.120 bundled
+      extension keys. Harmless today (Chrome has no ocode extension installed),
+      but it is leftover state. Deferred add-on: prune `com.ocode.*` manifests
+      from the other known browser families when writing — never
+      `com.htrcontrol.host`. Design: `.opencode/plans/2026-10-01-htr-shared-daemon-spec.md`.
+- [ ] **The shared-daemon spec is not in the OKF bundle yet.** Design lives at
+      `.opencode/plans/2026-10-01-htr-shared-daemon-spec.md` (338 lines, section 3
+      marked PENDING USER CONFIRMATION). The bundle copy at
+      `docs/superpowers/specs/2026-10-01-htr-shared-daemon-design.md` was NOT
+      written: the context agent was cancelled after 21 min having drifted into an
+      unrelated spec (`2026-10-01-web-connector-settings-design.md`) and started
+      editing `docs/index.md` for that one instead. Retry via the context agent
+      once the other session's agent is done — it is the sole writer for `docs/`.
+      That write must also land the `docs/index.md` and `docs/log.md` entries,
+      which are auto-managed by the agent and must not be hand-edited.
+- [x] **Keep branch `htr-shared-daemon` — held deliberately by the user (2026-10-02),
+      not an oversight. Nothing blocks deleting it.** The user chose to keep it
+      rather than let a cleanup pass sweep it. It is safe to delete at any time:
+      the branch holds **zero** commits main lacks (`git rev-list --count
+      main..htr-shared-daemon` → 0; tip `26594965` is an ancestor of the merge
+      `f7318474`), so it preserves no content — it is a label, not a copy. There
+      is also no remote copy (`origin/htr-shared-daemon` does not exist).
+- [x] **Review Focus #1 of the htr-shared-daemon plan is NOT a live defect —
+      retired after investigation.** The plan's item 1 (*"user edits their token
+      in `~/.htrcli/config.json` while ocode is running"*, with named guard
+      `TestForeignProbeUsesConfigToken`) reads as a real staleness bug, and its
+      guard was indeed missing. But nothing caches a `SharedDaemon`:
+      `ResolveSharedDaemon` re-reads the file on **every** call
+      (`loadHTRcliConfig` → `os.ReadFile`), and every production entry point
+      resolves immediately before use — the TUI's `m.ensureSharedHTRDaemon`
+      (`internal/tui/model.go:2981`, at-most-once per session), and the settings
+      start button's `startManagedHTR` (`internal/server/handler_config.go:2228`),
+      which calls `htrBrowserConfig()` + `htrOptionsFn` per click. A `SharedDaemon`
+      is stored in exactly one place: a local `HTROptions` inside a single
+      `EnsureHTRServe` call. So no mid-session token or port edit can be missed.
+      **The plan's premise was wrong, not the code.** Note the plan also names
+      three other guards that were never written under those names
+      (`TestStopRuleUsesStartedByPID`, `TestSharedModeIgnoresLegacyPort`,
+      `TestStartSkipsWhenForeignDaemonRejectsToken`); equivalent coverage exists
+      under different names (`TestStopRuleUsesStartedByPIDNotOwnerPID`, …), so the
+      INDEX's guard table is unreliable as written.
+      **Replaced by real regression guards** in
+      `internal/browse/cdp/htr_shared_token_refresh_test.go` (token edit, port
+      edit, and `browser.htr_token` override precedence), mutation-verified
+      against a compiling cache mutant that both reread tests catch.
+- [ ] **Shared mode cannot tell "port held by a service that rejects our token"
+      from "port empty", so ocode spawns into an occupied port.** Found while
+      correcting the htr-shared-daemon plan's Review Focus table (2026-10-02).
+      Review Focus #5 asserted ocode "must not spawn over it and must say so";
+      the code cannot do that. The only two liveness probes are the strict
+      identity match (`htrHealthyForInstance`) and the laxer foreign token probe
+      (`htrHealthyForeign`), and a foreign service that rejects both is
+      indistinguishable from an open port. So `EnsureHTRServe` reaches the spawn
+      branch, the child fails to bind, and `confirmSharedSpawnAlive`
+      (`internal/browse/cdp/htr.go:1621`) surfaces the failure **with the child's
+      own output** — so the user does see a real error, but only after a wasted
+      process, and the diagnosis is indirect ("address already in use" from a
+      child, not "something else owns this port").
+      Existing coverage is partial: `TestReadinessFailsLoudlyWhenDaemonDiesDuringExec`
+      pins the dies-during-exec mechanism, but nothing pins the
+      port-already-occupied scenario.
+      A clean pre-spawn refusal needs a THIRD probe that distinguishes "bound by
+      something else" from "free" — e.g. a TCP dial (connect succeeds ⇒ someone
+      is listening) that does not require any credential. That is a real design
+      change, so it is recorded rather than done here.
+- [x] **The htr-shared-daemon plan amendments were UNCOMMITTED — now fixed
+      (commits `4996c37e`, `e5c1cae5`).** ~117 inserted lines across
+      `.opencode/plans/htr-shared-daemon/part-{1..4}-*.md` (the `LoadBrowseOptions`
+      field-relay trap, the shared-socket-dir trap, the "the single-case table test
+      was VACUOUS and mutation testing proved it" note, and the launch-env guards)
+      had existed only in the working tree — on no branch and in no stash, so a
+      lost working tree would have destroyed them. Committed by explicit path list;
+      `INDEX.md`'s phantom guard table went with them.
+      **This is the standing rule for this tree:** do NOT `git add -A`. It still
+      carries another session's in-flight work (`internal/browse/cdp/htr.go`'s
+      inherited-stop-rule change, `htr_shared_stop_test.go`), and a blanket add
+      would sweep it in under this session's name.
+
+## Advisor vs. pending asks — deferred follow-ups (2026-10-02)
+
+Fixed this session: the `plan`/`done` advisor checkpoints now stand down while a
+permission or question dialog is unanswered (`advisorCheckpointState.pendingAsk`,
+gated in `internal/agent/advisor_pending_ask.go`). Two adjacent gaps were
+identified and deliberately left out of that change.
+
+- [x] **The server never installed `subAgentPermAsker`, so a sub-agent's or the
+      advisor's OWN permission ask got an inert sentinel instead of a dialog.**
+      FIXED 2026-10-03. `buildAgentSession` now installs a sub-agent asker
+      (`internal/server/agent_session.go`, `ag.SetSubAgentPermAsker`), the only
+      new install site — the TUI/ACP/runcli keep theirs, and an RC-bridged
+      session's agent is owned and stepped by the TUI so the server asker never
+      fires on it. The ask is emitted as a `permission` SSE frame and the child's
+      goroutine blocks on the answer; `livePendingAsks` and
+      `PendingPermissionAsks` read a per-session registry that has its OWN mutex
+      and never takes `as.mu`, because `runTurn` holds `as.mu` for the whole turn
+      and a synchronous sub-agent dispatch parks inside it. `POST
+      /api/permissions/resolve` gained a registry-first branch BEFORE
+      `findPendingSession` (which takes a blocking `as.mu`) carrying the same
+      always-allow guards. Design + tests:
+      `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md`,
+      `internal/server/child_perm_asks_test.go`.
+
+- [ ] **Bundle docs for the sub-agent permission-ask fix are incomplete — the
+      `context` sub-agent is the only permitted writer of `docs/` and is
+      unavailable (weekly provider usage limit, then a dispatch-loop guard).**
+      Done so far: `gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md`
+      (dropped the false "server never installs `subAgentPermAsker`" claim) and
+      `gotchas/pending-ask-recovery-live-session-state.md` (TryLock rule restated
+      as sentinel-only, plus the unconditional registry read). Also updated
+      outside the bundle: `CHANGES.md`, `TODO.md`, `skills/ocode-web/SKILL.md`
+      item 14. Still owed, via the `context` agent (`doc_write`, paths WITHOUT a
+      `docs/` prefix; do not hand-edit `docs/index.md` / `docs/log.md`):
+
+  1. **NEW page `gotchas/subagent-permission-asks-park-outside-the-turn-lock.md`**,
+     same `okf` frontmatter shape as its neighbours. Cover: `runTurn` holds
+     `as.mu` for the whole turn and a synchronous sub-agent dispatch parks
+     INSIDE it, so the old `TryLock` read could not see a child ask for exactly
+     the ask's lifetime; the SECOND invisible reason (the server never wired
+     `OnSubAgentMessage` and child messages never reach the parent's `OnMessage`
+     mirror, so no `permission` frame was emitted either — fixing one reason
+     leaves it invisible); the registry-with-its-own-mutex rule ("never gate a
+     registry read on a `TryLock` of `as.mu`"); why the resolve branch sits
+     BEFORE `findPendingSession` (that helper takes a BLOCKING `as.mu`, so
+     reaching it first pins the HTTP connection); the plain-allow delivery rule
+     and why `PersistRule`/`PersistTool` are wrong (blanket
+     `SetUserConfirmedRule(toolName)` on an out-of-scope-path ask); that every
+     auto-deny arm must broadcast `permission_resolved` with the exact
+     `request_id` (an empty one dismisses the WRONG dialog); the resolved-id TTL;
+     the `as.mu → registry.mu` / `h.mu → registry.mu` orderings with `denyAll`
+     delivering after releasing the registry lock; and that the park timeout — not
+     the cancel path — bounds the exposure because parent cancellation still does
+     not reach a sub-agent mid-`Step` (pre-existing, unfixed). Link the spec, do
+     not retell it. Regression tests to name:
+     `internal/server/child_perm_asks_test.go`
+     (`TestLivePendingAsksReportsChildAskWhileTurnLockHeld`,
+     `TestResolveChildAskEnforcesAlwaysAllowGuards`,
+     `TestChildAgentAskIsVisibleAndResumable`) and
+     `internal/agent/subagent_perm_attribution_test.go`.
+
+  2. **`concepts/web-server-locking-and-liveness-rules.md`** — (a) its sentence
+     "`PendingPermissionAsks` (desktop badge watcher, quit dialog) uses `TryLock`
+     (mid-turn ⇒ not pending)" is now incomplete: `PendingPermissionAsks` reads
+     `as.childAsks` (own mutex, no `as.mu`) BEFORE the TryLock skip, so a session
+     parked on a sub-agent ask IS counted. (b) In the "a pending ask must be
+     recoverable from live session state" section, record that `pending_asks` is
+     now a MERGE (registry read unconditionally + transcript scan under TryLock)
+     and that `POST /api/permissions/resolve` gained a registry-first branch
+     placed BEFORE `findPendingSession` because that helper takes a BLOCKING
+     `as.mu`; add the third-lock rule `as.mu → registry.mu` and
+     `h.mu → registry.mu`, never the reverse.
+
+  3. **`concepts/inbound-content-guardrail.md`** — it cites
+     `handler_permissions_resolve.go:250-262` for the server-side always-allow
+     re-check; those anchors MOVED because the registry-first branch was inserted
+     above them. Add that a sub-agent content ask now arrives through the
+     per-session registry rather than the parent's transcript, that the
+     registry-first branch runs the SAME guards before delivering (delivering
+     nothing when a guard fires), and that it never re-executes the tool and
+     never rewrites a parent-transcript row — there is none, the child applies
+     `ResolveContentAsk` itself.
+
+  For all three: re-derive EVERY `file.go:NNN` anchor, both endpoints of any range,
+  by printing the real source line. A text-matching script is not acceptable — it
+  resolves `}` to its first occurrence and silently corrupts unrelated anchors.
+
+- [ ] **46 high-signal stale `file.go:NNN` anchors across 16 bundle pages, into the
+      nine Go files this change touched — and most of the drift is NOT from this
+      change.** The nine files (`internal/agent/{agent.go,subagent.go,
+      advisor_tool.go,permissions.go}`, `internal/server/{handler.go,
+      agent_session.go,handler_permissions_resolve.go,handler_session_state.go,
+      run_states.go}`) are also being edited concurrently, so their line counts
+      moved for combined reasons and this change cannot be blamed for all of it.
+      Hand-verified example: `concepts/code-search-relevance-judge.md` cites
+      `agent.go:4933` for `executeToolCallWithContext` and `:5023` for the
+      `tool.WithSearchResultJudge` attach; those lines are now **5187** and
+      **5286**, a ~263-line drift. This change's only insertion into `agent.go`
+      sits at ~6161 — BELOW 4924 — so it could only have moved that anchor to
+      ~4952. Per-page suspect counts (single anchor landing on a brace/blank, or
+      out of range): `concepts/compaction-config.md` 11,
+      `gotchas/auto-permission-judge-withholds-credentials.md` 7,
+      `concepts/compaction-cancellation.md` 5,
+      `concepts/discovery-mcp-tool-gating.md` 4,
+      `gotchas/web-ask-dialog-resolved-before-continuation.md` 3,
+      `concepts/webfetch-websearch-guardrails.md` 3, then 1-2 each in
+      `gotchas/session-snapshot-stale-derived-fields.md`,
+      `gotchas/profile-switch-window-id-divergence.md`,
+      `gotchas/auto-permission-settings-not-applied-to-live-chat.md`,
+      `gotchas/subagent-feedback-loop-guard.md`,
+      `gotchas/session-writers-conflict-recovery.md`,
+      `gotchas/auto-permission-dependency-bin-policy.md`,
+      `concepts/per-chat-mcp-toggle.md`, `concepts/inbound-content-guardrail.md`,
+      `concepts/discovery-typesafe-judge.md`, `concepts/code-search-relevance-judge.md`.
+      Re-derive against the CURRENT tree (it moves under you), and treat landing
+      on a COMMENT as not-yet-disproven — many pages cite the doc comment above a
+      function deliberately. A range endpoint landing on `}` is normal and is not
+      evidence; only single anchors and out-of-range numbers are. This list is a
+      screening result, not a verdict: every entry still needs a real read of the
+      page's claim. Owner: `context` (sole permitted writer of `docs/`).
+
+- [ ] **The model-invoked `advisor` TOOL is not gated on a pending ask** — only
+      the two loop checkpoints are. A model that calls `advisor` from inside a
+      continuation Step can still start one with a dialog open. Left alone
+      deliberately: the tool runs mid-batch where it cannot see the message list
+      (`Agent` has no message-history getter), and a deliberate model request is
+      a weaker signal than an automatic checkpoint. If it is ever wanted, the
+      minimal shape is an `atomic.Bool` on `Agent` that `Step` sets from the same
+      `messagesHavePendingAsk` scan each Step and clears on exit, with the
+      checkpoint gate reading the same field so there is one source of truth.
+- [ ] **The knowledge bundle has no page for the advisor/ask interaction.** A
+      `knowledge_lookup` for it returned nothing (2026-10-02), and no page cites
+      `internal/agent/advisor_checkpoint.go`. The invariants worth a page: the
+      checkpoints must not run under a live dialog, a skip must not consume the
+      checkpoint, `tool.UnansweredAsk` is the single "is a dialog open" predicate
+      (and why it lives in `internal/tool`), and a continuation `Step` legitimately
+      runs with another ask outstanding. Write it via the context agent — it is the
+      sole writer for `docs/`, and `docs/index.md` / `docs/log.md` are auto-managed.
+
+## Connector settings — OAuth (web/desktop) follow-ups
+
+- [ ] **Google manual mode is not started.** `oauthFlowTakesMode`
+      (`internal/server/handler_connect.go`) deliberately keys on
+      `OAuthFlow == "openai"`, so Google advertises no modes and its flow is
+      auto-only: it binds a loopback port and cannot complete from a
+      `serve --remote` host or a second device. It is harder than OpenAI's
+      because it needs user-supplied client credentials before anything else can
+      start. When it lands, add `"manual"` to the predicate — that one line also
+      makes the client render the chooser, because the client reads `modes` off
+      the wire rather than hardcoding a provider list.
+- [ ] **Grok x.com cookies + Cloudflare prompts (Phase 3).** Not started. The
+      server side of the cookie flow exists (`connectFlowCookies`, handled by
+      `startGrokConnectFlow`) and the panel renders `userCode`/device-code
+      shapes, but the browser cookie collection UI has no host-threaded path.
+      Cloudflare interstitial detection is unimplemented entirely, so the flow
+      cannot currently tell "needs a human" from "failed".
+- [x] **Remote refusal test (Phase 4, plan item 21).** DONE 2026-10-02 —
+      `TestConnectCredentialsForARemoteHostNeverComeFromTheLocalStore` in
+      `internal/server/handler_connect_remote_refusal_test.go`. Pins both halves
+      of an invariant nothing in Go enforced: `handleConnectList` has no remote
+      awareness at all, so the ONLY thing keeping a remote project's Connectors
+      view off the local `auth.json` is the web client rewriting the path to
+      `/api/remote/{host}/api/...`. The test shows a local credential is served
+      even when `?host=` is named (documenting that coupling), and that the
+      host-scoped path refuses with 403 rather than degrading to local state.
+      Verified non-vacuous by injecting a fallback into `HandleRemoteProxy`:
+      the mutant served `masked:"••••••••••••9f3a"` through the host-scoped path
+      and the test failed.
+
+- [x] **No `docs/concepts/` page for the Connectors section.** DONE 2026-10-02 —
+      `docs/concepts/web-connector-settings.md`, written through the context
+      agent (the sole writer for the bundle) and then verified independently:
+      scope/base-vs-profile boundary, the tail-only masking rule, host threading
+      and the machine-global route contract, the `modes` contract plus both of
+      its traps, why the client picks the mode, the five flow-state invariants,
+      and the two known gaps stated as gaps. Checked the page's claims against
+      the code rather than trusting the agent's summary: zero `h.mu` references
+      in `handler_connect.go`, all eight client methods taking a trailing `host`,
+      every connect route on `authMiddleware`, `ProfilesManager.tsx` and
+      `auth.profiles.json` confirmed. It carries no `file.go:NNN` anchors, so it
+      will not silently rot as lines shift. (Two earlier agent attempts died on
+      provider TLS errors; the third succeeded in 1m28s once told to skip
+      exploration and write immediately.)
+
+- [ ] **OpenAI has NO working remote sign-in path, and manual mode cannot reach
+      it — DECIDED 2026-10-02: leave the behaviour as is, keep this entry as the
+      record.** Do not re-open without a user request. The reasoning for not
+      fixing it: both candidate fixes change every install's connector list, and
+      a remote openai user has working alternatives (an API key, or `codex`),
+      whereas the plugin that shadows the flow is what makes Pro/Plus credentials
+      work at all.
+      The underlying facts, for anyone who revisits this: the built-in `codex`
+      plugin (`internal/plugin/codex/codex.go`)
+      registers for provider id `openai`, and `auth.MethodsFor` lets a plugin
+      REPLACE a provider's built-in OAuth flow. Verified against a live server:
+      `openai` offers only `apikey` + `plugin_ChatGPT Pro/Plus (browser)` +
+      `(device code)`, no `oauth` method — so the loopback flow that gained
+      manual mode is unreachable for openai in every shipped binary (it is
+      reachable via `codex`, which shares `OAuthFlow: "openai"`). Neither plugin
+      method rescues a remote user either:
+        - browser method -> `auth.OpenAILogin` binds a localhost callback on the
+          SERVER and calls `openBrowser`, so it needs the browser on the
+          server's machine (its own doc comment says so);
+        - device-code method -> host-agnostic, but `startPluginConnectFlow`
+          creates a `running` flow and never sets `userCode`/`verificationUri`,
+          so the user is never shown the code.
+      Three ways out were considered (all rejected for now), in rough order of
+      cost:
+        (a) surface `userCode`/`verificationUri` from plugin flows (needs a
+            richer `providerplugin.AuthResult`/seam) — fixes device-code, which
+            is already host-agnostic and the smaller change of the two;
+        (b) make `MethodsFor` additive so the built-in flow is offered ALONGSIDE
+            plugin methods — one-line-ish, but shows two overlapping ChatGPT
+            logins per provider and reverses a deliberate design decision;
+        (c) leave it and document that remote openai users must use an API key
+            or `codex`.  <-- CHOSEN
+      Note `internal/server` tests CANNOT catch any of this: the package does not
+      link the plugin, so tests see a catalog no shipped binary ever has. Any
+      fix needs a test at a level that links `main.go`.
+- [ ] **The corpus side of that disagreement is still open.** `docs/okf/` is
+      context-agent-owned, so the scorecard was deliberately left alone. Whoever owns it
+      may still want a line in
+      `docs/okf/tanstack/scores/space-bunny-free.md` noting that a NON-derived skill
+      ships for this model and is hand-authored (protected via `HAND_AUTHORED`), so the
+      next reader does not read the absence of a `derived/` file as a bug.
+      **Also still latent in that tool:** an `illustrative: true` source is skipped and
+      so never enters `wanted` — harmless today only because `react-tuning-claude-opus-4-8`
+      correctly has no shipped dir either. Flipping a real derived skill to
+      `illustrative: true` while its dir exists would prune it on the next run.
+- [x] **RESOLVED (user decision: "the eval was real") — `claude-opus-4-8` now ships its React
+      corrections.** The `illustrative: true` flag is gone from
+      `docs/okf/react/derived/react.claude-opus-4-8.SKILL.md`, replaced by a comment
+      recording why (the flag predated the eval; while it stood, the sync tool refused
+      to promote the skill and the model ran with zero React tuning on a stack where it
+      has three documented blind spots). Ran `sync-derived-skills.py`, which promoted
+      `skills/kaizen/react-tuning-claude-opus-4-8/SKILL.md` (byte-identical to source).
+      **Dry-ran the destructive tool on a copy first: 1 written, 38 unchanged, 0 pruned,
+      removed/changed both `none`** — zero removals before touching the checkout.
+      Now 39 synced skills + 1 hand-authored = 40 dirs, and the audit is **green:
+      0 violations across all 105 baseline scorecards.** Delivery is pinned by
+      `internal/skill/kaizen_react_test.go` (both axes mutation-verified: a `tuned_for`
+      typo and emptying `stack:` each fail it), because `react` is a DETECTED stack —
+      a `react` dep in package.json or a .jsx/.tsx importing react — so admission needs
+      the model id AND a React repo. Note this skill has no `<!-- kaizen:digest -->`
+      block, so it reaches the model through the catalogue/Skill tool rather than the
+      cached prompt prefix, unlike the universal-stack corpora.
+- [x] **The sweep is now automated — `docs/okf/_tools/audit-derived-skills.py`.**
+      Enforces `(∃ tag < threshold) ⇔ derived skill ⇔ promoted dir` across all **105
+      baseline scorecards** and reports UNDER-DERIVED (a silent blind spot),
+      OVER-DERIVED (prompt budget spent on a model that aced the stack), and
+      NOT-PROMOTED. Exit 1 on violations, **2 when it cannot parse the corpus** — a
+      checker that silently reads zero tags would report "clean" forever, which is worse
+      than no checker. Current real-corpus result: **1 violation** (the react item
+      above), everything else consistent; 23 skills have `.with-skill` re-benchmark
+      evidence on file. Three traps it handles, each of which had already bitten it:
+      (1) `.with-skill`/`.rerun` scorecards are re-runs that have NO weak tag by
+      construction, so treating one as a baseline **inverts** the verdict and reports a
+      shipped skill as unwarranted; (2) `illustrative: true   # comment` must have its
+      comment stripped — my first version compared the raw line and produced a false
+      positive on a deliberately-unshipped skill; (3) the threshold is **per-model**
+      (docx/pdf/pptx are 0.9, everything else 0.75) and `react/scores/README.md` is not
+      a scorecard. Tests in `docs/okf/_tools/test_audit_derived_skills.py` (17 checks,
+      all mutation-verified: dropping the `.with-skill` exclusion, the comment-strip, or
+      the exit-2 guard each fails).
+- [ ] **Re-benchmark this skill the way longcat was** so there is proof it works, not
+      just proof it ships. `scores/longcat-2.5-preview-free.with-skill.md` re-ran the
+      corpus with the skill loaded and went 79.0% → 93.4%; that artifact is the only
+      evidence in the repo that a tuning skill changed a score. Do the same for
+      space-bunny-free. Expect a small delta on `suspense` (the only benchmark-warranted
+      claim) — the generated-route-tree half is NOT measurable by this corpus, which is
+      an argument for scoring it in-repo instead.
+- [ ] **Generalize the "ask about the un-linted generated code" question shape.** The
+      mechanism landed in the skill: do not ask the broad "do you know TanStack
+      Router?", pick one concrete spot in a region *no linter or formatter covers*,
+      and ask a single question carrying a recommended answer ("`/posts` is generated
+      with `loaderDeps` but no `staleTime`, so its loader data is stale on every
+      navigation — add one, yes or no?"). Generated-and-ignored code is the one region
+      where nobody has already answered, so it is the highest-information question
+      available and it can never degenerate into a formatting nit. Worth carrying into
+      the other stacks' skills and the conduct corpus, where the equivalent regions are
+      lockfiles, protobuf/OpenAPI/ORM client output, and i18n catalogs.
+- [ ] **Extend the inbound content guardrail to the four remaining untrusted-content
+      surfaces** (2026-10-02, from the content-guardrail audit). The guardrail that
+      shipped covers MCP + webfetch/websearch + bash network output. It deliberately does
+      NOT cover these, and each is a live injection path:
+      - **`md_discovery` summaries** — the sharpest of the four. Project `.md` files are
+        summarised by a *small model* (`mdSummarySystemPrompt`, `md_discovery.go:46`) and
+        the cached summaries re-enter context as the discovery TOC in
+        `.ocode/md-summaries.json`. A poisoned `README.md` is therefore laundered through
+        a second model and re-injected as a compact, quotable instruction. This is the
+        highest-value target.
+      - **Subdirectory `CLAUDE.md` / `AGENTS.md`** — `injectDirMDTail` (`dir_docs.go:169`)
+        queues a user-role `[ocode:discovery]` block per directory. Provenance-marked, not
+        trust-marked.
+      - **`doc_search` results** — `judgeDocSearchResults`
+        (`doc_search_typesafe.go:86`) is a **relevance** judge, not a trust filter. A
+        poisoned doc that is topically on-point passes it. Relevance ≠ trust.
+      - **LSP / hook / plugin `SessionStart` output and browser/CDP page text** — same
+        gap; all already carry a provenance marker or nothing.
+      Note the local-file exemption the user chose is what makes these out of scope, so
+      each needs its own decision rather than being folded into the existing scope.
+- [ ] **Calibrate `contentGuardMinSuspicionDefault` (0.6) against real traffic.** The floor
+      is chosen from TypeSafe's documented `confidence`-vs-`probabilities[choice]` gap and
+      the noise argument, not from measurement. There is no false-positive rate data. The
+      debug stream already emits `tier=contentguard_flag` with confidence and concern, so a
+      day of real use would say whether 0.6 is right — and whether the rubric's `none`
+      examples are enough to keep documentation and source code clean.
+- [ ] **Decide whether the guardrail should also fire on the tool ARGUMENTS.** It vets
+      results only. An injected instruction in a *tool result* that the model then echoes
+      into a later call's arguments is caught at egress, but a hostile MCP tool *name or
+      description* (which lands in the cached tools prefix) is not vetted at all. Widening
+      scope risks the prompt-cache stability rule (tools must stay byte-stable per session),
+      so this needs care rather than a one-line change.
+- [ ] **Fix 4 blank-line anchors in `docs/concepts/inbound-content-guardrail.md`.**
+      (2026-10-02, cosmetic, found by the mechanical sweep). 116 of the page's
+      anchors resolve in-range and correct; these four cite a BLANK line, which is
+      unverifiable and rot silently — CLAUDE.md's rule is that a wrong anchor is
+      worse than a stale one, so they need real lines:
+      - `truncate.go:14` → `truncate.go:15` (`const maxToolResultLines = 100`)
+      - `model.go:14846` → `model.go:14843` (`cacheReadTokens := int64(0)`)
+      - `model.go:16950` → `model.go:16947` (`func permAlwaysRuleAvailable(`)
+      - `handler_content_guard_test.go:76` → `handler_content_guard_test.go:77`
+        (`sub := h.subscribeHeadless()`)
+
+      Left undone deliberately: the knowledge bundle has a **sole-writer
+      invariant** (`context` sub-agent only), and that agent failed to complete a
+      doc_write three times (45 min, 12 min, 12 min) before succeeding on the
+      fourth once I handed it the verified anchors instead of asking it to derive
+      them. Spending another agent run on four cosmetic anchors is a poor trade —
+      hence recording the exact fix here rather than leaving it invisible. Sweep
+      command to re-verify the whole page: `python3` over
+      `([A-Za-z0-9_./-]+\.(?:go|ts|tsx)):(\d+)` matching each line and flagging
+      blanks/out-of-range.
+- [ ] **`internal/server` TempDir-cleanup flakes under load (pre-existing, found 2026-10-02
+      while validating the content guardrail).** Symptom is NOT an assertion failure but a
+      cleanup error:
+      `testing.go:1617: TempDir RemoveAll cleanup: unlinkat .../sessions: directory not empty`
+      plus `session: live write ses_...: disk I/O error (1802)`. Cause: the async
+      session-save goroutine outlives the test and writes into that test's `t.TempDir()`
+      AFTER `RemoveAll` starts, so cleanup races the writer. Load-sensitive — it appears
+      in full-suite runs (334s) and passes in isolation 3/3.
+      Seen in `TestChatRemoteProjectPathNotExpandedLocally` and
+      `TestHandleSendMessageAppliesProxiedActiveProfile`.
+      **Verified NOT caused by the content guardrail:** zero overlap between either test
+      and the added symbols (`IsContentAsk`, `UntrustedScores`, `UntrustedFailure`, checked
+      by grep); neither test lives in a file that change touches; neither file is under
+      concurrent edit (`handler_remote_profile_test.go` mtime Sep 21, `agent_session.go`
+      Oct 1); no `DATA RACE` reported anywhere under `-race`; and three consecutive
+      non-race full-suite runs passed (268s/257s/212s).
+      Same class as the `internal/agent` TempDir races already noted for
+      TestStreamedToolOutput*. Fix direction is test hygiene, not production code: the
+      test needs to wait for the session's async save to drain (or the save path needs a
+      per-test cancellation) before `t.TempDir()` cleanup. Do NOT "fix" this by deleting
+      or weakening either test.
+
+- [ ] **Fix 4 REMAINING stale anchors in `docs/concepts/inbound-content-guardrail.md`**
+      (2026-10-02). A second `context` doc_write landed the first 4 blank-line fixes; the
+      re-sweep then surfaced these, all caused by `HandleApprovedToolCall` gaining a doc
+      comment and a new `contextGuardBackground` helper, which shifted that region down.
+      The four `scanToolResult` call-site rows and the `agent.go:1461` `guardCtx` anchor in
+      the SAME table are already correct — leave them alone.
+      - Table row 4: `agent.go:5153` -> `agent.go:5171`; `agent.go:5156` -> `agent.go:5174`;
+        `agent.go:5148` -> `agent.go:5166` (the `HandleApprovedToolCall` decl).
+      - Prose directly under that table: `contextGuardBackground()` (`agent.go:5154`) ->
+        `agent.go:5172`.
+      Verified targets: `5157` = the `func` decl, `5162` = `a.scanToolResult(name, ...)`,
+      `5163` = `ctx, cancel := contextGuardBackground()`, `5165` = `a.guardToolResult(ctx, ...)`.
+      The old cited lines are now blank or inside an unrelated comment block, which is why
+      they must move. This is 4 number substitutions in an existing file; two `context`
+      attempts were made, the first succeeded and the second burned 10m35s composing a temp
+      file and returned WITHOUT writing (mtime unchanged). Hand-editing would desync the
+      auto-managed `docs/index.md` / `docs/log.md`, so it is left tracked rather than forced
+      — unless the sole-writer rule is relaxed for mechanical number fixes.
+- [ ] **Build `activeCwd` so the agent can actually work in a worktree** (2026-10-04).
+      Research + design only; NO implementation code written. Design doc:
+      `.opencode/plans/2026-10-04-agent-active-cwd-worktree-design.md` (read it first — it
+      records the reproduced evidence and the load-bearing constraint).
+      Problem: ocode has no worktree support beyond one prompt line at
+      `internal/agent/prompt.go:328`, AND no persistent shell cwd — `BashTool` spawns a fresh
+      process per call with `cmd.Dir = workDirFromContext(ctx)` (`internal/tool/exec.go:225`).
+      Verified by reproduction: `cd .worktrees/x && pwd` then `pwd` in the next call returns the
+      REPO ROOT. It fails SILENTLY because the worktree is inside `workDir`, so containment
+      passes. Now pinned by `internal/tool/exec_workdir_test.go` (mutation-verified).
+      THE CONSTRAINT THAT DECIDES THE ARCHITECTURE: do NOT reuse `Agent.SetWorkDir`
+      (`internal/agent/agent.go:3156`) — it calls `projectSnapshotsDir()` ->
+      `paths.ProjectSlug(a.workDir)`, so moving workDir into a worktree relocates the snapshot
+      store to a different slug than the web Changes tab resolves from => empty Changes tab +
+      broken undo. Add a SEPARATE mutable `activeCwd` with its own narrow setter; keep
+      `workDir` as the immutable home root. Session storage/`ProjectSlug`/tabs/termtabs/
+      `project_path` stay pinned to the home root.
+      Also: `paths.ProjectSlug` uses `git rev-parse --show-toplevel`
+      (`internal/paths/paths.go:104`), which returns the WORKTREE path inside a linked worktree
+      — so per-worktree session/snapshot/todo isolation already works for free (verified:
+      `dcd5a911f8bd` vs `c15722e4677b` vs `b4d81cd01366`). Claude Code's transcript relocation
+      is therefore unnecessary; the open product question is whether a worktree session should
+      APPEAR under the main project.
+      ANSWER THESE BEFORE CODING: (1) does the transcript move to the worktree slug or stay at
+      the home root? (2) does `EnterWorktree` relocate or create-and-enter? (3) cleanup policy on
+      exit — ocode has neither Claude Code's prompt nor opencode's reset/remove API. (4) subagent
+      `isolation: worktree` — in or out of scope for v1? (5) prompt cache: `<env>` sits in the
+      cached system prompt, so emit a user-role `[ocode:worktree]` tail notice (the
+      `injectLSPDelta` pattern) and never rewrite `<env>` per turn.
+      Interim mitigation ALREADY SHIPPED: both `using-git-worktrees` skill copies corrected so
+      the manual fallback at least works (see next-but-one entry).
+
+- [ ] **`Agent` project-context race fix — LANDED, needs follow-ups** (2026-10-04).
+      The fix IS IN THE MAIN TREE AND COMMITTED — but accidentally: a peer session's all-files
+      commit `259dfcc4 "feat(perms): sub-agent asks + judge hardening"` swept this uncommitted
+      working-tree fix into itself, so it is durable but carries a message that does not describe it.
+      Verified present in `HEAD`: all 13 swept sites (`a.WorkDir()` x12 + `a.ProjectHost()` x1 across
+      agent.go/prompt.go/md_discovery.go/ask.go/discovery_glue.go/dir_docs.go/discovery_autoinject.go)
+      plus the committed regression test `internal/agent/envprompt_race_test.go`.
+      WHAT WAS FIXED: one dedicated `Agent.projectCtxMu sync.Mutex` guards `workDir`, `projectHost`
+      and the six `envPrompt*` fields (NOT `compactMu` — wrong scope). `environmentPrompt` snapshots
+      its inputs under the lock, computes UNLOCKED, stores under the lock. `clearEnvironmentPromptCache`
+      is split into a locking wrapper + `clearEnvironmentPromptCacheLocked` so `SetWorkDir`/
+      `SetProjectHost` hold the lock once without self-deadlocking. Lock order is safe — `projectCtxMu`
+      is NEVER held while acquiring another lock (`SetWorkDir` unlocks before touching
+      `snapshotStore`/`permissions`; accessors lock→return→unlock), so no inversion with
+      `agentSession.mu` → `h.mu`.
+      TEST EVIDENCE (all in `.worktrees/race-fix`, pristine 9a22eb37 + fix; the working tree is at
+      259dfcc4 which already contains the fix):
+        - `go test -race -count=10 -timeout 1500s ./internal/agent/ -run
+          'TestPrepareMessagesConcurrentWithCacheInvalidation|TestSubagent|TestSubAgent|TestDirDocs|
+          TestDirMD|TestDiscoveryAutoinject|TestEffectiveWorkDir|TestWorkDir'
+          -skip 'TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent'` → **ok, 51.9s, 0 races, 0 failures**.
+        - One FULL `-race` pass over `./internal/agent/` (timeout 900s) → **0 DATA RACE occurrences**;
+          1 failure, `TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent`, which reproduces IDENTICALLY
+          at pristine HEAD with the fix reverted — pre-existing, not caused here. NOT verified on the
+          main tree (it does not compile — see below), so treat that as unconfirmed rather than fixed.
+        - `TestPrepareMessagesConcurrentWithCacheInvalidation` alone: 5/5 green.
+      CORRECTIONS I OWE THE NEXT READER: (1) an early revision of this entry claimed a clean RED/GREEN
+      with only five sites guarded — FALSE POSITIVE, `-race` only reports races it observes; the
+      broader subset then failed at an unguarded `a.workDir` in `BasePromptMessages` (prompt.go:202),
+      and the 11-site sweep is what actually fixes it. (2) I next called
+      `TestPermissionTablesConcurrentWriteDuringDecide` a "pre-existing HANG in DarwinUserDirs" — also
+      WRONG; it PASSES alone in 96.1s with the fix applied. It is slow, not hung: every `pm.Decide`
+      calls `AllowedRoots` → `DarwinUserDirs` → `filepath.Glob` (measured 669µs/glob). No deadlock
+      from `projectCtxMu`.
+      REMAINING FOLLOW-UPS (none block the fix, which is committed):
+        - The commit message does not describe this change. Split or re-message it if that matters
+          (it is pushed/shared history now, so weigh that first).
+        - `a.client` — same class, NOT fixed: read in `environmentPrompt` (prompt.go ~305-307) and
+          written unlocked at agent.go ~5740 just before `clearEnvironmentPromptCache()`. Not
+          reproduced; different subsystem. Should be its own entry if you want it tracked separately.
+        - No lock-order note in `CLAUDE.md`/`docs/concepts` — the invariant lives only in the
+          `projectCtxMu` code comment. `CLAUDE.md` has unrelated peer edits; `docs/` is bundle-owned
+          (context agent only).
+        - `.worktrees/race-fix` still exists — remove it once satisfied. `/tmp/racefix/` holds logs.
+        - The main tree does NOT compile for a reason unrelated to this fix: `internal/config/
+          ocodeconfig.go:2235 undefined: applyJudgeModelConfig` (peer WIP file). Re-run the full
+          suite once that clears.
+      ```
+      WARNING: DATA RACE
+      Write at 0xc0003a80d0 by goroutine 24:
+        agent.(*Agent).SetWorkDir()  internal/agent/agent.go:3157
+      Previous read at 0xc0003a80d0 by goroutine 22:
+        agent.(*Agent).WorkDir()     internal/agent/agent.go:3135
+      ```
+      So `a.workDir = dir` is written while `(*Agent).WorkDir` reads it — 21 read sites across
+      `internal/agent/`. CORRECTION: an earlier revision of this entry said the write was "without
+      holding `a.mu` (declared at agent.go:59)". That was WRONG on both counts — `Agent` has no
+      generic `a.mu` field at all (it has purpose-specific mutexes: `dirMDMu`, `preloadedContextMu`,
+      `compactMu`, `recapMu`, `subagentDispatchMu`, …), and agent.go:59 is `injectionQueue.mu`, a
+      nested struct's field. The accurate statement is simply: **no lock guards `workDir`.**
+      NOTE: line numbers WILL drift — a peer session is editing `agent.go` — so locate the race by
+      FUNCTION NAME (`(*Agent).SetWorkDir`'s `a.workDir = dir` write vs `(*Agent).WorkDir`'s read),
+      not by line, and re-derive the numbers before acting.
+      WIDER FINDING — ALSO PROVEN, and independent of `SetWorkDir`: the env-prompt cache is
+      unsynchronized in BOTH directions. `(*Agent).environmentPrompt` (prompt.go) READS the six
+      `envPrompt*` fields to decide cache validity (~line 284) and WRITES them to store the result
+      (~lines 367-372); `clearEnvironmentPromptCache` (agent.go ~5728-5733) writes the same six.
+      Nothing guards them — `preloadedContextMu` guards `preloadedContext`, a DIFFERENT field (all
+      its sites are agent.go 1140-1188). A second throwaway `-race` probe (4 goroutines looping
+      `environmentPrompt()` + 1 looping `clearEnvironmentPromptCache()`) reports SIX races,
+      including `environmentPrompt` racing WITH ITSELF:
+      ```
+      prompt.go:284 (read) vs agent.go:5728 (clear write)
+      prompt.go:367 (write) vs prompt.go:284 (read)
+      prompt.go:368 (write) vs prompt.go:285 (read)
+      prompt.go:369 (write) vs prompt.go:284 (read)
+      prompt.go:370 (write) vs prompt.go:284 (read)
+      prompt.go:372 (write) vs prompt.go:284 (read)
+      ```
+      Readers are on the system-prompt path: `BasePromptMessages` -> `environmentPrompt()`
+      (prompt.go:153) and `PrepareMessages` reads `envPromptDate` (prompt.go:91). Probe deleted
+      after capturing the report (same reason as above: it asserts races exist).
+      ONE DEFECT, SIX FIELDS — the six reports are not six independent bugs. `envPromptDate`,
+      `envPromptStr`, `envPromptCwd`, `envPromptRoot`, `envPromptEnvHash`, `envPromptHarness`
+      (agent.go:777-782) are six adjacent strings, so the detector reports one race per distinct
+      memory location. All six share one cause: no lock on the cluster.
+      PRODUCTION REACHABILITY — CONFIRMED BY READING (concrete two-goroutine chain, not a guess),
+      but still not reproduced end-to-end. The vector is ASYNC COMPACTION, not `/context` (both
+      `/context` paths turned out to be guarded — see the corrections below):
+        - Goroutine A (turn): `(*Agent).Step` -> `PrepareMessages` -> `environmentPrompt()`, which
+          WRITES the six fields (prompt.go:367-372) and READS them for validity (prompt.go:284).
+        - Goroutine B (compaction): `MaybeCompactAsync` (agent.go:2214) -> `startCompactAsync`
+          (agent.go:2289) takes `a.compactMu.TryLock()` then spawns `crashguard.Go`
+          (agent.go:2315-2316) -> `runInlineSummary` -> `a.PrepareMessages(messages, "")`
+          (compact.go:1298) which READS `a.envPromptDate` (prompt.go:91).
+        - Nothing serializes them: `compactMu` is documented as serialising "async compaction
+          passes" against EACH OTHER (agent.go:726), and neither `PrepareMessages` nor
+          `environmentPrompt()` takes it. `MaybeCompactAsync` returns immediately after spawning,
+          so the caller proceeds while compaction runs in the background.
+      So the race surface is three call sites over one unguarded cluster: the read at prompt.go:91,
+      the read+write in `environmentPrompt` (284, 367-372), and the write in
+      `clearEnvironmentPromptCache` (agent.go:5728-5733). A fix must cover ALL THREE, not just
+      `environmentPrompt`, or the `PrepareMessages` read stays racy.
+      An earlier draft of this entry claimed two OTHER vectors, both now DISPROVEN (kept so nobody
+      re-derives them): (1) "the web context gauge hits it during normal operation" — the server
+      `/context` endpoint is guarded by `contextReportSource`'s `IsTurnActive` (handler.go:2324)
+      and `as.mu.TryLock()` (2338) plus `runTurn` holding `as.mu` for the whole turn
+      (agent_session.go:1077-1079); (2) "the TUI has no equivalent lock" — `/context` is not in the
+      instant-command list (tui/model.go ~8993-9053) so the gate at tui/model.go:9055 QUEUES it
+      during streaming. Residual un-audited: the server's narrow TOCTOU gap where
+      `contextbudget.Build` runs at handler.go:2301 after `contextReportSource` released `as.mu`.
+      ALL SIX `envPrompt*` FIELDS ARE IN THE CACHED SYSTEM PREFIX (`BasePromptMessages` emits the
+      env block as system-role). Any fix MUST keep the emitted `<env>` text byte-stable for an
+      unchanged workdir/date, or it busts the prompt cache every turn —
+      see docs/concepts/prompt-cache-stability.md. Do not add per-turn content to make the
+      locking easier. The probe asserted the race EXISTS, so it fails once the code
+      is fixed and cannot be merged as-is; it was deleted after capturing the report. Re-create it
+      when fixing, or assert the post-fix invariant instead.
+      SCOPE — do NOT patch `workDir` alone. `SetWorkDir` mutates a whole cluster unsynchronized:
+      `workDir`, the six `envPrompt*` cache fields (`clearEnvironmentPromptCache`, agent.go:5727),
+      the four `preloadedModelContext*` fields, `mdState = nil`, plus `snapshotStore.SetBaseDir`,
+      `permissions.SetWorkDir`, `advisor.workDir` and the bash change `Recorder`. Only `workDir`
+      was exercised by the probe; the rest are structurally unsynchronized by the same method but
+      UNPROVEN — do not report them as confirmed without their own race report.
+      Fix as one unit behind a single lock (or an atomic snapshot struct), not field-by-field.
+      Constraints: never hold the new lock across an LLM call, `Step`, or compaction; check lock
+      order against `agentSession.mu` → `h.mu`; keep the `<env>` output byte-stable so the cached
+      prompt prefix does not churn (docs/concepts/prompt-cache-stability.md).
+      BLOCKED BY CONCURRENT PEER WORK: `internal/agent/agent.go` is currently modified by another
+      session (+40/-2 unstaged). Coordinate or wait rather than editing it blind — overwriting a
+      peer's in-flight file is a known failure mode in this repo.
+
+- [x] **Push the `using-git-worktrees` skill fix to `u007/superpowers`** (2026-10-04). DONE.
+      Corrected the skill so the manual `git worktree add` fallback operates on the worktree instead
+      of silently building the MAIN checkout. What changed:
+      - Removed the one-shot `cd "$path"` and added an explicit "**`cd` does not persist**" warning:
+        ocode spawns a fresh process per bash call with `cwd = <session project root>`, so the `cd`
+        died with that invocation and every later `go build` / `git add` hit the main checkout.
+      - Made the path absolute: `WT="$(cd "$LOCATION" && pwd)/$BRANCH_NAME"`.
+      - Anchored setup detection + baseline tests to the worktree (`[ -f "$WT/go.mod" ]`). This was
+        the actively-harmful part: it previously detected the MAIN checkout's manifests, so
+        `npm install` ran in the wrong tree.
+      - Fixed a latent bug, now VERIFIED BY REPRODUCTION: the skill used `path="..."` as a shell
+        variable, and in zsh `path` is an array bound to `$PATH`, so that assignment destroys the
+        command search path. Measured: `zsh -c 'path=/tmp/x; command -v rm'` -> NOT resolvable,
+        while the same line under `bash -c` leaves `rm` resolvable. It is zsh-only, and since
+        every bash tool call is a fresh shell, the skill's own `git worktree add` line was
+        self-sabotaging. Renamed the variable to `WT` (and made `WT` absolute) so nothing in the
+        snippet can collide with a zsh special parameter again.
+      Landed on the plugin copy via local commit `9a58e22` ("customize(skills): non-code plan detail
+      level; worktree only on request"), which bundled 3 unrelated skill customizations with it, and
+      was **pushed as a fast-forward `08d2529..9a58e22 main -> main`** on 2026-10-04. Verified
+      post-push: `main` in sync with `origin/main` = `9a58e2216ed557c0406b695371a9a32a21adf0be`, and
+      the corrected file is what `origin/main` actually serves.
+      Residual: the fix shares a commit with 3 unrelated skill edits under a subject that doesn't
+      mention it, so reverting that commit for the other three would also drop this fix, and a
+      future `git pull` touching this file can conflict. Giving it its own commit now means
+      rewriting a pushed commit — only worth it if you want independent revertibility.
+
+- [x] **The `~/.agents/skills` copy of `using-git-worktrees` is in no version control** (2026-10-04). DONE —
+      `~/.agents/skills/using-git-worktrees` is now a SYMLINK to
+      `/Users/james/.config/opencode/plugins/u007-superpowers/skills/using-git-worktrees`, so the
+      search-path copy and the versioned copy are the same inode and cannot drift. Nothing was lost:
+      the two files were byte-identical (sha256 `90e98278…`) before the swap, so the previously
+      local-only frontmatter `description` difference had already been aligned by the other agent.
+      A backup of the pre-symlink file is at `/tmp/using-git-worktrees.bak` (ephemeral).
+      No loader change was needed — `internal/skill/loader.go:111-120` ALREADY stats through
+      symlinks ("so skill dirs installed as symlinks … aren't skipped"), and the search path is a
+      single non-recursive `os.ReadDir`, so there is no symlink-cycle risk. That behavior was
+      untested, so it is now pinned by `TestSymlinkedSkillDirIsDiscovered`
+      (`internal/skill/loader_test.go`), mutation-verified: deleting the stat-through-symlink
+      fallback makes it fail with an actionable message.
+      Worth knowing (NOT changed, out of scope): the PLUGIN-side scan at
+      `internal/plugins/loader.go:145` uses a bare `e.IsDir()` with no symlink fallback, so a
+      symlinked *plugin* directory would be skipped. Irrelevant here (the plugin copy is a real
+      dir), but it is a latent asymmetry between the two loaders.
+      Also note the skill INSTALLER refuses to follow or overwrite a symlink even with force
+      (`installer_test.go`), so reinstalling this skill will fail loudly rather than clobber the
+      link — desirable, but it means `skill install` is no longer a way to update it.
+## The `question` prompt single-slot bug — FIXED 2026-10-04 (was deferred here)
+
+Resolved in the same session as the permission-ask queue. Kept as a record of
+what the bug was, because the same class can recur in any host that owns one
+dialog slot.
+
+What it was: `internal/tui/model.go`'s `appendAgentMessage`
+`parseQuestionPrompt` branch called `startQuestionPrompt` and assigned
+`m.rcPendingQuestion` unconditionally, so two `question` calls in ONE assistant
+message showed only the second prompt. `question` is `Parallel() == false`, so no
+parallel batch was needed. `m.rcPendingQuestion` was a second, independent
+single-slot overwrite on the same branch.
+
+Fix: `questionAskQueue` / `queuedQuestionAsk` mirroring the permission queue, plus
+`promoteNextQueuedAsk` so answering EITHER kind of ask hands the screen to the
+next waiting ask of either kind. Both slot-busy predicates now include the other
+dialog, because a question prompt and a permission ask share ONE screen slot —
+two simultaneously-open modal dialogs is a TUI layout corruption, not a cosmetic
+overlap.
+
+**Still open on the web/desktop side:** `QUESTION_REQUEST` in
+`web/src/stores/chatStore.tsx` keeps a single `pendingQuestion` (newest wins, the
+earlier one is dropped), while `PERMISSION_REQUEST` already queues into
+`permissionQueue`. Two `question` calls in one message therefore still lose the
+first prompt on web. It needs its own change because of the reopenable-dialog
+contract (`QUESTION_HIDE` / `QUESTION_SHOW`, `hiddenQuestionRequestId`,
+`QuestionDialog` X/Escape) — a queue must not resurrect a locally hidden prompt.
+Tests for the TUI half: `internal/tui/question_ask_queue_test.go` (10 cases, 10/10
+mutants caught), including lifecycle coverage: cancelling the turn drops both
+queues and both dialogs; `/reset-id` refuses while any ask is pending; and
+`handleCompactCmd` refuses too (it previously had no ask guard at all).
+
+## PART-DONE: `internal/tui/model.go` anchors — 55 fixed, 6 left, prose not written (2026-10-04)
+
+Four commits grew `internal/tui/model.go` by ~200 lines (permission-ask queue,
+question-ask queue, lifecycle hardening), moving every `model.go:NNN` anchor in the
+bundle. Base commit for all arithmetic: **`1e4b1dd1`** (= `c026089b^`); range
+`1e4b1dd1..9a22eb37`.
+
+**Done (55), applied by the `context` sub-agent and independently verified:**
+45 mechanical renumberings across 15 pages, plus 10 symbol-anchored corrections
+(the mechanical table could not verify those because their `was:` text was a bare
+`}`). Both passes were checked by a script that confirms the doc cites the new
+number AND that the named symbol is actually at that line — 10/10 on the second
+pass. Two hazards were caught and handled:
+
+- **`git_model.go` false positives.** The mechanical table matched anchors as the
+  substring `model.go:NNN`, which also matches the tail of **`git_model.go:NNN`** —
+  a different file the queue commits never touched. Six rows in
+  `docs/gotchas/git-action-errors-disappear.md` were this class; the first apply
+  corrupted them and was reverted, then redone with a boundary-aware match. That
+  file is now byte-identical to how it was found.
+- **Range anchors.** Six citations of the form `model.go:START-END` had only START
+  in the table; shifting one end alone yields nonsense (`186-139`). Both endpoints
+  were verified independently against `1e4b1dd1`.
+
+**Left (6), all on `concepts/compaction-config.md`.** Disambiguated and verified,
+but not applied — the sub-agent hit a 4-launch feedback-loop guard. Targets, all
+inside `case streamDoneMsg:`; note three of these source lines are NOT unique in
+the file, so the line number below is only correct together with its context:
+
+| Doc line | From | To | Context that disambiguates it |
+|---|---|---|---|
+| 141 | `model.go:5222` | `model.go:5294` | unique: `// chain settles (the branch at the top of this case).` |
+| 147 | `model.go:5224` | `model.go:5296` | 2 lines under 5294. There are THREE `fireAutoContinue(true)` lines (5225, 5296, 5442); 5296 is correct, 5225 is a different branch |
+| 147 | `model.go:5349-5375` | `model.go:5421-5447` | both ends +72. A second copy of the `background job(s) completed` hint exists at 5592 in `case compactFinishedMsg:` — wrong one |
+| 147 | `model.go:5434` | `model.go:5506` | unique: `case compactFinishedMsg:` |
+| 161 | `model.go:5361` | `model.go:5433` | unique: `// continuation path above has declined. Not scoped to /goal or` |
+| 161 | `model.go:5363` | `model.go:5435` | 2 lines under 5433, same comment block |
+
+Leave alone (already correct): line 141's `model.go:15814`, line 155's
+`model.go:9184` and `model.go:9210`.
+
+**Also still unwritten — the prose side of the ask-queue documentation.** These
+were specified but never applied:
+
+1. `concepts/inbound-content-guardrail.md` — the TUI allow/deny routing bullets.
+   `handlePermissionChoice` is now a wrapper over `answerPermAsk`, which returns
+   `(tea.Cmd, bool)` where the bool reports whether the outcome was terminal; every
+   content ask flows through the queue before reaching `contentAskResolved`; the
+   single promotion site is `promoteNextQueuedAsk`.
+2. `concepts/tui-slash-command-queuing.md` — state that `permAskQueue` /
+   `questionAskQueue` are a SEPARATE mechanism from `queuedItems`: they drain when
+   the user ANSWERS an ask, whereas `queuedItems` drains at a turn boundary. Say
+   it explicitly so nobody later "unifies" them.
+3. A new `docs/gotchas/` page for the bug class — *one dialog slot plus N
+   simultaneous asks equals silent replacement*. Content: `appendAgentMessage`
+   assigned one dialog slot unconditionally for both `PERMISSION_ASK:` and
+   `QUESTION_PROMPT:`; `Agent.Step` hands every result of a round to `OnMessage`
+   in order, so N asks arrive back-to-back in one frame; for `question` no parallel
+   batch is needed because it is `Parallel() == false`; the amplifier is
+   `buildAgentMessagesSnapshot` stripping the sentinels so a dropped ask's
+   `tool_call` orphans and `recoverOrphanedToolCalls` re-runs its tool; the fix is
+   two FIFOs sharing ONE screen slot, promotion from exactly one call site,
+   `anyAskPending()` guarding `/reset-id` / `handleCompactCmd` / job-resume /
+   turn-cancel; and the ordering trap that `executeApprovedTool` is a VALUE
+   receiver reading `pendingToolCallID` when called, so the queue may only advance
+   after the replacement command is built. Note `webfetch` (`web.go:38`) and
+   `websearch` (`:132`) are `Parallel() == true` AND default-ask, and that
+   `skills/ocode-tools/SKILL.md` previously claimed otherwise. Tests:
+   `internal/tui/perm_ask_queue_test.go` (11), `internal/tui/question_ask_queue_test.go`
+   (10), `internal/agent/perm_ask_fanout_test.go` (1). Note the WEB still drops the
+   first `question` (`QUESTION_REQUEST` keeps one `pendingQuestion`) — it needs its
+   own change because of the reopenable-dialog contract (`QUESTION_HIDE` /
+   `QUESTION_SHOW`, `hiddenQuestionRequestId`).
+
+**Note on the write mechanism:** the sub-agent used byte-exact in-place edits rather
+than `doc_write`, because these pages carry other sessions' uncommitted edits that
+a full-body rewrite (273KB across 16 files) would risk corrupting, and because
+`doc_write` injects frontmatter into 3 pages that deliberately have none. A side
+effect is that `docs/index.md` and `docs/log.md` were NOT updated, since those are
+normally maintained as a `doc_write` side effect. Re-run the amendments through
+`doc_write` if the index/log must reflect them.
+
+## shift +50
+
+- `docs/gotchas/git-action-errors-disappear.md:59` — `model.go:660` -> `model.go:710`  (was: `event server.SSEEvent`)
+- `docs/gotchas/git-action-errors-disappear.md:61` — `model.go:690` -> `model.go:740`  (was: `// autoRefreshTickMsg fires periodically to quietly refresh the git tab and`)
+- `docs/gotchas/git-action-errors-disappear.md:62` — `model.go:731` -> `model.go:781`  (was: `// at startup, so the sidebar can re-render and show the resolved context window`)
+- `docs/gotchas/git-action-errors-disappear.md:63` — `model.go:674` -> `model.go:724`  (was: `bridge       *server.RCBridge`)
+- `docs/gotchas/git-action-errors-disappear.md:65` — `model.go:136` -> `model.go:186`  (was: `if !m.lastTurnWasAutoContinue {`)
+- `docs/gotchas/git-action-errors-disappear.md:80` — `model.go:625` -> `model.go:675`  (was: `}`)
+- `docs/gotchas/git-action-errors-disappear.md:89` — `model.go:648` -> `model.go:698`  (was: `req server.RCRequest`)
+
+## shift +52
+
+- `docs/concepts/inbound-content-guardrail.md:236` — `model.go:3979` -> `model.go:4031`  (was: `if am.Role == "tool" && strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {`)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:19` — `model.go:1936` -> `model.go:1988`  (was: `marker, _, ok := splitTodoMarker(trimmed)`)
+- `docs/superpowers/specs/2026-09-22-laya-local-judge-evaluation.md:254` — `model.go:2757` -> `model.go:2809`  (was: `m.files.SetEditor(editor)`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:14` — `model.go:3235` -> `model.go:3287`  (was: `if mouseOverTree {`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:26` — `model.go:3235` -> `model.go:3287`  (was: `if mouseOverTree {`)
+- `docs/superpowers/specs/2026-09-28-code-search-relevance-judge-design.md:41` — `model.go:2244` -> `model.go:2296`  (was: `}`)
+- `skills/ocode-tools/SKILL.md:54` — `model.go:2270` -> `model.go:2322`  (was: `m.lspEventCh = make(chan lsp.ServerStartedEvent, 16)`)
+
+## shift +68
+
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:45` — `model.go:4767` -> `model.go:4835`  (was: `}`)
+- `docs/superpowers/specs/2026-09-25-deferred-session-rewind-design.md:30` — `model.go:4746` -> `model.go:4814`  (was: `if m.agent != nil {`)
+
+## shift +70
+
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md:7` — `model.go:6034` -> `model.go:6104`  (was: `case "ctrl+a":`)
+
+## shift +72
+
+- `docs/concepts/compaction-config.md:141` — `model.go:5222` -> `model.go:5294`  (was: `// chain settles (the branch at the top of this case).`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5224` -> `model.go:5296`  (was: `return m, m.fireAutoContinue(true)`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5349` -> `model.go:5421`  (was: `text:      hintStyle.Render("↩ background job(s) completed — resuming"),`)
+- `docs/concepts/compaction-config.md:147` — `model.go:5434` -> `model.go:5506`  (was: `case compactFinishedMsg:`)
+- `docs/concepts/compaction-config.md:161` — `model.go:5361` -> `model.go:5433`  (was: `// continuation path above has declined. Not scoped to /goal or`)
+- `docs/concepts/compaction-config.md:161` — `model.go:5363` -> `model.go:5435`  (was: `// StepLimitHit signal (free, no extra LLM call) fires`)
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:46` — `model.go:5143` -> `model.go:5215`  (was: `// Handled as its own self-contained branch, deliberately NOT falling`)
+
+## shift +75
+
+- `docs/concepts/compaction-config.md:155` — `model.go:9072` -> `model.go:9147`  (was: `}`)
+- `docs/concepts/compaction-config.md:155` — `model.go:9109` -> `model.go:9184`  (was: `func mergeQueuedIntoDraft(queued []string, draft string) (string, int) {`)
+- `docs/concepts/compaction-config.md:155` — `model.go:9135` -> `model.go:9210`  (was: `func (m *model) restoreQueuedMessagesToComposer() bool {`)
+- `docs/concepts/compaction-config.md:157` — `model.go:9173` -> `model.go:9248`  (was: `func (m *model) discardPickedUpInjections(parts []string) {`)
+- `docs/concepts/compaction-config.md:157` — `model.go:9196` -> `model.go:9271`  (was: `func (m *model) drainQueuedItems() (tea.Cmd, bool) {`)
+- `docs/gotchas/main-model-pick-also-sets-global-default.md:19` — `model.go:9765` -> `model.go:9840`  (was: `func (m *model) finishModelSwitch(modelID string) tea.Cmd {`)
+- `docs/gotchas/tui-skipllm-is-not-a-render-gate.md:47` — `model.go:8651` -> `model.go:8726`  (was: `m.gitSel.endLine = contentLine`)
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/03-ui-toggles.md:17` — `model.go:8103` -> `model.go:8178`  (was: `}{`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:14` — `model.go:8835` -> `model.go:8910`  (was: `func (m model) mouseOverChatWheelRegion(mouse tea.Mouse) bool {`)
+- `docs/superpowers/specs/2026-09-25-tui-wheel-scroll-over-composer-design.md:32` — `model.go:8611` -> `model.go:8686`  (was: `topY := m.inputAreaTopY()`)
+
+## shift +89
+
+- `docs/scheduled-jobs.md:62` — `model.go:11611` -> `model.go:11700`  (was: `m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error ex`)
+
+## shift +95
+
+- `docs/concepts/sandbox-permission-mode.md:35` — `model.go:14755` -> `model.go:14850`  (was: `}`)
+
+## shift +229
+
+- `docs/concepts/inbound-content-guardrail.md:205` — `model.go:15006` -> `model.go:15235`  (was: `func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14937` -> `model.go:15166`  (was: `if req.Scope == agent.PermissionScopeContent {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14942` -> `model.go:15171`  (was: `lines = append(lines, "🛡 Content guardrail — this tool's result was flagged:")`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:14960` -> `model.go:15189`  (was: `lines = append(lines, req.UntrustedContent)`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:15006` -> `model.go:15235`  (was: `func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {`)
+
+## shift +257
+
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15206` -> `model.go:15463`  (was: `return m.executeApprovedTool(toolName, args, pathRoot)`)
+
+## shift +260
+
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15270` -> `model.go:15530`  (was: `m.updatePermButtonRegions()`)
+
+## shift +270
+
+- `docs/concepts/compaction-config.md:141` — `model.go:15398` -> `model.go:15668`  (was: `if bashPrefixModeDirty && len(m.permDirty.bashPrefixMode) == 0 {`)
+- `docs/concepts/sandbox-permission-mode.md:33` — `model.go:15346` -> `model.go:15616`  (was: `// previously clamped sandbox to normal here so it could never become`)
+- `docs/concepts/sandbox-permission-mode.md:112` — `model.go:15346` -> `model.go:15616`  (was: `// previously clamped sandbox to normal here so it could never become`)
+- `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md:18` — `model.go:15346` -> `model.go:15616`  (was: `// previously clamped sandbox to normal here so it could never become`)
+
+## shift +279
+
+- `docs/concepts/inbound-content-guardrail.md:228` — `model.go:15535` -> `model.go:15814`  (was: `func (m *model) askAgent() tea.Cmd {`)
+- `docs/concepts/inbound-content-guardrail.md:232` — `model.go:15537` -> `model.go:15816`  (was: `// short-circuited by a stopCh that was closed by a previous Escape/Cancel.`)
+- `docs/gotchas/session-snapshot-stale-derived-fields.md:29` — `model.go:15714` -> `model.go:15993`  (was: `// Stream shared-notes bus entries to the delta channel so the`)
+
+## shift +281
+
+- `docs/superpowers/specs/2026-09-25-deferred-session-rewind-design.md:30` — `model.go:16029` -> `model.go:16310`  (was: `}`)
+
+## shift +285
+
+- `docs/architecture/sidebar-tui-parity-gaps.md:29` — `model.go:20890` -> `model.go:21175`  (was: `if i < len(filePaths) {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:17048` -> `model.go:17333`  (was: `if m.syncClient == nil || m.syncDeviceCode == "" {`)
+- `docs/concepts/inbound-content-guardrail.md:219` — `model.go:17123` -> `model.go:17408`  (was: `}`)
+- `docs/concepts/inbound-content-guardrail.md:253` — `model.go:16972` -> `model.go:17257`  (was: `defs = append(defs, b)`)
+- `docs/concepts/inbound-content-guardrail.md:253` — `model.go:16980` -> `model.go:17265`  (was: `func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string) string `)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:15` — `model.go:20957` -> `model.go:21242`  (was: `if m.agent != nil {`)
+- `docs/superpowers/specs/2026-09-09-tui-sidebar-title-expand-design.md:15` — `model.go:21356` -> `model.go:21641`  (was: `}`)
+- `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md:58` — `model.go:18557` -> `model.go:18842`  (was: `m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse `)
+- `docs/superpowers/specs/2026-10-02-subagent-permission-ask-design.md:64` — `model.go:18557` -> `model.go:18842`  (was: `m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse `)
+
+## Clef judge backend — open deferrals (2026-10-03)
+
+Plan: `docs/superpowers/plans/2026-10-03-clef-judge-backend/`. Spec:
+`docs/superpowers/specs/2026-10-03-clef-judge-backend-design.md`. Nothing implemented yet.
+
+- [ ] **Run the Jev-vs-clef agreement eval against live credentials** and paste the
+      results into the spec. Until it exists, sharing the `0.85` / `0.5` confidence
+      floors across backends rests on Cloudflare's own benchmark of its own model,
+      and the Jev latency figure comes from a competitor's measurement. The gate is
+      **directional**, not an agreement percentage: any case where clef allows and
+      Jev denies vetoes adoption for the permission slot. See `07-agreement-eval.md`.
+- [ ] **Determine whether the incumbent truncates an oversized `state` or rejects it
+      with 400.** Unverified; needs a live probe. Characterised from the code: there
+      is **no** state-size guard in `internal/agent/typesafe.go` today, and a
+      non-2xx becomes `newProviderStatusError` (line 130), which the permission judge
+      already reports as "model unavailable" and defers to the human. So a 400 is
+      already a deferral with a confusing message; silent truncation would instead
+      grade an invisible command tail, which is a safety issue rather than a UX one.
+      Either way the human is asked, which is why the guard is correct — but the
+      severity differs and should be recorded once known.
+- [ ] **Decide whether the state budget should project rather than refuse.** Asking
+      on every large `write` defeats auto-permission on its most common input. The
+      plan requires keeping security-relevant fields in full and projecting bulky
+      content fields, with rejection as the fallback; confirm that is acceptable
+      before shipping `05-state-budget.md`.
+- [ ] **Write Plan 2 — the UI.** Seven per-judge model pickers (TUI and web/desktop),
+      one per slot. Depends only on the config keys from `02-per-judge-config.md`, not
+      on `ClefClient`. The contract it consumes is written out in `INDEX.md`.
+- [ ] **Confirm the Workers AI rate limit for `clef-flash`.** The 300 req/min default
+      is *inferred* from the absence of a "Paid access required" notice on the model
+      page, not stated. Confirm against a live account before relying on it for
+      throughput planning.
+- [ ] **Re-derive every `file.go:NNN` anchor** on `CLAUDE.md` and the four judge
+      concept pages after parts 01/02/05/08 land. Those pages cite judge functions
+      whose line numbers will move, and the pages sit in a dirty shared tree.
+- [ ] **Verify the two documented Jev failure modes are actually mitigated** once the
+      seam exists: adversarial content in judge `state` (ocode puts raw tool arguments
+      there), and choice option-order bias (the permission judge's criteria are exactly
+      a two-option choice). Both are documented by the vendor and both are cheap to
+      measure with the eval above.
+- [ ] **Re-derive 215 doc anchors that resolve into Part-01-edited files.** Part 01
+      (the `Decider` seam) changed `agent.go`, `client.go`, `permission_typesafe.go`,
+      `relevance_typesafe.go`, `discovery_typesafe.go`, `discovery_glue.go`,
+      `typesafe.go`, `search_typesafe.go`, `doc_search_typesafe.go`,
+      `autocontinue_typesafe.go`, `network_guard_typesafe.go` and
+      `content_guard_typesafe.go`. A mechanical sweep found **215 distinct
+      `file.go:NNN` anchors** in `docs/concepts/*.md`, `docs/*.md` and `CLAUDE.md`
+      that resolve into those files, and at least one is already visibly stale —
+      `network_guard_typesafe.go:377` now lands on a **blank line** (it was a
+      `RecordSideUsage` site that became `deciderLabel(client)`). 215 is too many
+      to correct by hand and each needs its source line printed, not assumed.
+      **Blocked on the `context` sub-agent** (`docs/` is an active OKF bundle;
+      `CLAUDE.md`'s sole-automated-writer invariant bars a direct write). Sweep
+      script kept at `/tmp/anchor_drift.py` — it prints the resolved line for
+      every anchor rather than auto-judging drift.
+- [ ] **Update the four judge concept pages for Part 01's behaviour changes.**
+      `docs/concepts/discovery-typesafe-judge.md` describes a judge client cached
+      with `sync.Once`; that is now a mutex + model-id key, and a **nil is
+      deliberately re-resolved** so a mid-session `/connect` takes effect
+      immediately (previously it needed a `/discovery` toggle or restart).
+      `docs/concepts/auto-permission-enforced-categories.md` and
+      `docs/concepts/doc-search-relevance-judge.md` describe judge labels as a bare
+      model name; they are now **provider-qualified** via `deciderLabel(client)`.
+      `CLAUDE.md` has already been updated directly (it is not bundle content).
+      Also blocked on `context`.- [ ] **Fix 6 stale `decider.go` anchors introduced by the 2026-10-04 doc amendment.**
+      A `context` sub-agent amended four concept pages and re-derived 14 anchors;
+      I verified all 14 by printing the real source line. **13 were correct, 2
+      were wrong** — it invented anchors for the then-new `decider.go`, and my
+      Part 03 edits to that same file shifted the lines underneath it mid-run.
+      This is the "code anchors drift silently" trap, and it is the reason a
+      sub-agent's "anchors corrected" list must never be trusted.
+      Verified corrections:
+      - `decider.go:112` → **`decider.go:113`** (`func (a *Agent) resolveDecider`).
+        Cited 4x: `concepts/auto-permission-enforced-categories.md:102`,
+        `concepts/discovery-typesafe-judge.md:23`,
+        `concepts/server-auto-continue.md:47`.
+      - `decider.go:214` → **`decider.go:231`** (`func isDecisionModel`).
+        Cited 2x: `concepts/auto-permission-enforced-categories.md:104`,
+        `concepts/discovery-typesafe-judge.md:101`.
+      Apply via `context` → `doc_write` (bundle-owned). **Defer to the FINAL
+      anchor sweep**, after Parts 04–09 land — fixing now means fixing twice, since
+      `clef.go` and the guard work will move `decider.go` again. Until then these
+      two numbers are known-wrong and the surrounding prose is correct.
+- [ ] **`concepts/inbound-content-guardrail.md:38` is stale** and was NOT in the
+      2026-10-04 amendment scope. It still quotes
+      `newClientFn(a.config, contentGuardJudgeModel).(*TypesafeClient)` and
+      `content_guard_typesafe.go:51` — both removed by Part 02. It needs the same
+      treatment: `resolveDecider(slotContentGuard)` + provider-qualified labels.
+      Add it to the final sweep.
+- [ ] **Re-derive `discovery_glue.go` anchors the amendment declined to touch.**
+      The agent verified the anchors it changed and explicitly left the rest,
+      reasoning that its own amendment text was dated. But Part 01 rewrote the
+      discovery judge cache in `discovery_glue.go` (added `judgeMu`, removed
+      `judgeOnce`, changed the `st.Judge` assignment to `a.slotModel(...)`), so
+      those anchors moved independently of any doc edit. Verify every
+      `discovery_glue.go:NNN` on the judge pages against the real file.
+- [ ] **Pre-existing test-isolation gap, not introduced by this work.**
+      `internal/config/ocodeconfig_test.go:70` (and neighbours) set only `HOME`
+      before calling `LoadOcodeConfig`. `paths.GlobalConfigDir` reads
+      `XDG_CONFIG_HOME` *before* the `HOME` fallback
+      (`internal/paths/paths.go:172`), so on a machine where that variable is set
+      those tests can read the developer's real `ocodeconfig.json`. The new
+      `judge_model_config_test.go` sets BOTH via an `isolateConfigEnv` helper.
+      Worth fixing the older tests separately; left alone deliberately rather than
+      editing tests this change does not own.
+- [ ] **Doc anchor + fact sweep after the Clef work (Part 04 findings).** All verified
+      by printing the real source line, not by trusting an agent's list.
+      **(a) `typesafe.go` anchors shifted by MY Part 04 edit** (extracted
+      `marshalRequestBody`, −6 lines at :112, +19 at :153):
+      - `typesafe.go:88` cited as `DecideCtx` now points at `Decide`.
+        Correct: `Decide` = **:88**, `DecideCtx` = **:100**. Cited in
+        `concepts/code-search-relevance-judge.md:63`.
+      - `typesafe.go:76` cited as `Decide` is now a **blank line**. Correct
+        `Decide` = **:88**. Cited in `concepts/code-search-relevance-judge.md:64`.
+      - `typesafe.go:23` (`typesafeRequestTimeout`) is still correct.
+      **(b) `concepts/code-search-relevance-judge.md` was never amended.** It is
+      the 5th judge page and it was missed: it still cites
+      `discovery_typesafe.go:41` (now **:35**) and `search_typesafe.go` lines that
+      Part 01 moved. Together with `concepts/inbound-content-guardrail.md` that
+      makes **two** stale judge pages, not one.
+      **(c) The permission confidence floor is 0.80, not 0.85 — the docs are
+      stale from a 2026-10-03 change.** `autoJudgeMinConfidenceDefault = 0.80`
+      (`internal/agent/permissions.go:6811`) and the config default is also
+      `MinConfidence: 0.80` (`internal/config/ocodeconfig.go:1467`);
+      `autoJudgeOpaqueMinConfidenceDefault = 0.75`. `auto-permission-judge-eval.md`
+      correctly records "floor lowered from 0.85 to 0.80 (2026-10-03)", but three
+      pages were never updated and still assert 0.85:
+      `concepts/discovery-typesafe-judge.md:27` and `:37`,
+      `concepts/code-search-relevance-judge.md:87`.
+      This is PRE-EXISTING staleness, not caused by the Clef work — but it is why
+      my own plan part files say "shared 0.85/0.5 floors" and that wording must be
+      corrected there too. `judge_failopen_test.go` now logs the true values
+      (permission 0.8, opaque 0.75, relevance 0.5, auto-continue 0.6, network
+      guard 0.9) so a future drift shows up in test output.
+      **(d)** Re-derive every `decider.go:NNN` and `discovery_glue.go:NNN` anchor on
+      the judge pages (see the separate entries above for the verified values).
+- [ ] **FIXED (2026-10-04): the AST scan now has teeth.** It was recorded as a
+      vacuous-pass risk and closed immediately rather than deferred:
+      `agentPkgFiles` now fails if it parses 0 or fewer than 5 files, and the
+      two-value scan asserts it actually observed the accesses it polices.
+      `TestJudges_ReadAnswersWithTheTwoValueForm` logs "scanned 89 files,
+      verified 9 two-value Answers reads". A matcher that stopped matching would
+      otherwise report a clean bill of health.
+      Depends on `parser.ParseDir` accepting `.`, so the test must keep running
+      from the package directory.
+- [ ] **Two of my own mutation harnesses were wrong, and the tests they nearly
+      certified were vacuous.** Recorded because the pattern will recur.
+      (a) An M7 "demux materialises a zero answer" mutant was written as
+      `out.Answers[orig] = ans; _ = orig` — an **equivalent mutant** (a no-op). It
+      reported SURVIVED, which said nothing about coverage. The real mutant (fill
+      a zero `TypesafeAnswer` for every unanswered question) is CAUGHT.
+      (b) `TestClefQuestionPlan_IsDeterministic` originally used 40 ids that
+      collapsed to 7 **collision-free** sanitised forms. With no collision, map
+      iteration order cannot affect the mapping, so the test would have passed with
+      `sort.Strings` deleted. The strengthened fixture (3 ids that all sanitise to
+      `a_0`) now CATCHES that mutation. General rule: **a determinism test needs a
+      fixture where order is actually observable**, and it should assert the
+      fixture collides before relying on it — the same discipline as the
+      "missing fixture must fail loudly, never skip" rule.
+- [ ] **Still unmeasured: does Jev truncate or 400 on an oversized `state`?**
+      Gates Part 05 (the shared state budget). `internal/agent/typesafe.go` has no
+      existing guard, and a non-2xx already becomes `newProviderStatusError` at
+      `typesafe.go` DecideCtx, so the failure mode would be "model unavailable" →
+      human ask. Needs one live probe against a deliberately oversized payload.- [ ] **Part 05 shipped with ONE unresolved premise, deliberately not papered
+      over: nobody knows whether Jev truncates or rejects an oversized `state`.**
+      `TestOversizedStateProbe_TruncateOrReject`
+      (`internal/agent/state_budget_test.go`, gated on `OCODE_JEV_EVAL=1`
+      matching the existing live-judge eval tests) resolves it. Run it with the
+      typesafe provider connected and record the outcome.
+      Severity differs sharply between the two answers: a 4xx is a deferral to
+      the human carrying a confusing message (UX); a 200 that silently truncated
+      means the judge graded an invisible command tail (SAFETY).
+      The guard is correct either way, which is why the probe deliberately
+      asserts almost nothing — encoding either behaviour as "expected" would be
+      asserting something nobody observed. NOTE: a 200 does NOT prove the tail
+      was truncated-safe, so the probe logs that distinction explicitly.
+- [ ] **The 96 KB budget is an ESTIMATE and can still under-ask.** Derived from
+      Jev's stricter 32k `state` limit at 3 bytes/token (not 4, because a
+      chars/4 estimate under-estimates tokens for code and JSON; measured ratio
+      on the 200 KB write payload is ~3.6). A state just under 96 KB may exceed
+      32k real tokens. Tightening needs a real tokenizer, which this package
+      does not carry. `TestSharedStateBudget_WorstCaseProductionPayloads` is the
+      load-bearing safety net — if a future change grows a payload past the
+      ceiling it fails there rather than degrading auto-mode silently.
+- [ ] **PROCESS ERROR worth remembering: a mutation harness and a `go test` run
+      must never overlap on the same package.** I ran the Part 05 mutation
+      harness concurrently with a full suite over `internal/agent`. The harness
+      was writing mutants into `state_budget.go` WHILE the suite ran, so that
+      suite's green result was untrustworthy even though it passed. Caught by
+      comparing source mtimes against the log timestamp — the same check that
+      caught a stale `-race` claim last turn. Re-ran cleanly afterwards. Treat
+      "the suite passed" as unproven whenever a concurrent writer touched the
+      package.
+- [ ] **M3 survived round 1: projection mutating the caller's map.** My comment
+      claimed projection "never mutates the caller's map" and that claim had no
+      test behind it. Added
+      `TestSharedStateBudget_ProjectionDoesNotMutateTheCallersState`, which also
+      catches the NESTED case (a top-level-only copy would still share inner
+      maps); re-ran the mutant: CAUGHT. Lesson: a comment asserting a safety
+      property is a claim, not a guarantee — if it matters, mutate-test it.
+- [ ] **SAFETY FIX (2026-10-04, Part 05): projection must be signallable, and an
+      advisor review is what caught it.** I introduced a SECOND, UNSIGNALLED
+      truncation. The codebase already had a truncation protocol —
+      `interpreter.source.truncated`, `executed_scripts[].truncated`, the
+      instruction "do not approve on a partial view", and the
+      `truncated_or_unknown` concern that drops the confidence floor — but my
+      state projection clipped `arguments.content` / `file_content` with only a
+      marker buried inside the preview string and no structured flag. A model
+      explicitly taught to distrust partial views would have auto-ALLOWED a 200 KB
+      `write` on a clipped view of the very bytes that make it harmful.
+      FIX: `prepareDecisionState` now attaches a top-level `_projection`
+      `{applied, fields[]}` naming the clipped dotted paths, and a new
+      `typesafeJudgeInstructions` line teaches the rule, routing to
+      `truncated_or_unknown` so the existing opaque-floor drop applies.
+      Tests: `TestSharedStateBudget_ProjectionIsSignalledStructurally`,
+      `TestSharedStateBudget_NoProjectionMarkerOnAFittingState` (a fitting state
+      must NOT carry the marker, or every auto-allow would trip the rule),
+      `TestPermissionJudgeInstructions_TeachTheProjectionRule`.
+      **General rule this establishes: any new truncation path in this repo must
+      emit a structured signal the judge is explicitly taught to distrust.
+      A human-readable marker inside the clipped content is not a signal.**
+- [ ] **TEST-QUALITY FINDING: global-substring assertions can pass for the wrong
+      reason.** `TestPermissionJudgeInstructions_TeachTheProjectionRule`
+      originally checked the WHOLE instruction block for "_projection", "do not
+      approve on a partial view" and "truncated_or_unknown". Two mutants that
+      deleted exactly this rule SURVIVED — because the pre-existing interpreter
+      and executed_scripts rules already contain all three phrases. The test was
+      green while the rule it exists to protect was gone.
+      FIX: assert on the SPECIFIC line that mentions the marker, then assert that
+      line carries each required phrase. Both mutants now CAUGHT.
+      General rule: **when asserting that prose X teaches rule Y, scope the
+      assertion to X's own text.** A substring match against a large block only
+      proves the phrase occurs somewhere in the block.
+- [ ] **INEFFECTIVE MUTANT, recorded so it is not mistaken for a coverage gap.**
+      My round-1 "M3: delete the _projection instruction" only replaced the
+      line's opening clause. The surviving text still read "_projection.fields …
+      do not approve on a partial view: name the truncated_or_unknown concern",
+      i.e. it still taught the rule — so the test was RIGHT to pass. Redone as a
+      whole-line deletion (`/tmp/mutate_m3b.py`): CAUGHT.
+      Distinguish the three failure modes explicitly, because they look identical
+      in the output: a mutant that breaks only the build is INVALID; one that
+      changes nothing observable is INEFFECTIVE; only one that survives a real
+      behavioural change is a genuine coverage gap.
+- [ ] **Parts 06–09 of the Clef plan are NOT DONE** (plan:
+      `docs/superpowers/plans/2026-10-03-clef-judge-backend/`):
+      - **06** budget regression test — DONE as
+        `TestSharedStateBudget_WorstCaseProductionPayloads`; re-check against
+        Part 06's intent before marking the part complete.
+      - **07** the agreement eval between clef and Jev, gated on **directional**
+        disagreement (a clef-allows / Jev-denies pair vetoes adoption), plus the
+        calibration comparison and the option-order check. **Unrun — needs live
+        credentials.**
+      - **08** provider-agnostic attribution. Partially in place via
+        `deciderLabel`; confirm what remains.
+      - **09** docs. See the doc-debt entries above.
+- [ ] **`docs/concepts/*` pages still need the Part 05 write-up**, and must go
+      through the `context` agent because `docs/` is bundle-owned. Specifically:
+      - `auto-permission-enforced-categories.md` — the 96 KB budget, the
+        project-then-refuse order, and the `_projection` signal that stops an
+        auto-allow on a clipped view.
+      - `discovery-typesafe-judge.md`, `doc-search-relevance-judge.md`,
+        `code-search-relevance-judge.md` — `validateAnswer` on the per-candidate
+        path, and that a rejected answer KEEPS the candidate.
+      - Plus the anchor/fact sweep already recorded above (0.85 vs 0.80 floors,
+        `typesafe.go` anchors, six `decider.go` citations, two never-amended
+        pages).
+- [ ] **Part 06 DONE — the spec's measurement table is now reproducible, and the
+      logged numbers differ from the spec's.** `TestJudgePayloadBudgets`
+      (`internal/agent/clef_budget_test.go`) rebuilds each worst case through the
+      REAL builders at the REAL caps and prints:
+      discovery 30q/32,801B/10,933tok/34.2% · code-search 40q/25,787B/8,595tok/26.9%
+      · doc-search 40q/46,189B/15,396tok/48.1% · permission-oversized-write
+      2q/206,401B (projected to fit) · content-guard 2q/6,077B/6.3% ·
+      network-guard 2q/2,106B/2.2%. `TestJudgePayloadBudgets_RefusalIsReachable`
+      proves refusal fires (249,313B unprojectable bash command).
+      The spec's older table (discovery 83,387B/20,846tok etc.) came from a deleted
+      throwaway harness with a different fixture, so the numbers legitimately
+      differ. **Step 3 of Part 06 says to copy the logged numbers back into the
+      spec so document and test agree — that edit is still outstanding** and must
+      go through the `context` agent (bundle-owned).
+- [ ] **EXPORTED `searchJudgeMaxCandidates` -> `SearchJudgeMaxCandidates`**
+      (`internal/tool/search_judge_apply.go`, +18 references across
+      search_judge_apply.go, search_judge_grep_test.go, search_judge_glob_test.go,
+      search_judge_rgrep_test.go). It was unexported, so the agent-package budget
+      test could not reference the real ceiling BY NAME — and Part 06 explicitly
+      forbids hardcoding the literal, since a hardcoded 40 silently stops
+      protecting the real ceiling when the constant changes. Exporting is the
+      minimal change that satisfies that rule. `go test ./internal/tool/` passes.
+- [ ] **TEST-QUALITY FINDING (third instance of the same class): a tripwire with no
+      over-ceiling fixture cannot fire.** Part 06's first version asserted the
+      question-count and byte-budget ceilings inline, but every real judge request
+      sits far inside both (largest is 40 questions against a 64 ceiling; 46 KB
+      against a 96 KB budget). **All five mutants SURVIVED** — the test was green
+      while protecting nothing. FIX: extracted `checkJudgeBudget` to RETURN
+      violations instead of calling t.Errorf, and added
+      `TestJudgePayloadBudgets_TripwireFires` which drives it with synthetic
+      over-ceiling inputs (one over, exactly at, and a choice judge that must NOT
+      be held to the relevance budget). Re-run: 5/6 CAUGHT.
+      The surviving M8 (hardcoded `64` instead of `clefMaxQuestions`) is an
+      **EQUIVALENT MUTANT** — the constant IS 64, so no test can distinguish them.
+      Label it equivalent; do not chase it.
+      **This is now the third time this session** (Part 04 determinism fixture with
+      no collisions, Part 05 global-substring instruction test, Part 06 tripwire
+      with no over-ceiling case) that a test passed while its assertions were
+      unreachable. The general rule: **a regression test needs a fixture that
+      actually crosses the boundary it exists to protect**, and when the check is
+      extracted, unit-test the checker directly rather than only feeding it
+      in-bounds production data.
+- [ ] **Part 06 step 3 is still outstanding: copy the logged numbers back into the
+      spec's table.** The spec's figures (discovery 83,387B/20,846tok, etc.) came
+      from a deleted throwaway harness with a different fixture; the reproducible
+      ones are discovery 30q/32,801B/10,933tok/34.2%, code-search
+      40q/25,787B/8,595tok/26.9%, doc-search 40q/46,189B/15,396tok/48.1%,
+      permission-oversized-write 2q/206,401B (projected to fit), content-guard
+      2q/6,077B/6.3%, network-guard 2q/2,106B/2.2%. Must go through the `context`
+      agent (bundle-owned), and the spec's code anchors need re-deriving after.
+
+- [x] **`ui/scoped-dialog.tsx` — built, then wired to the permission/question asks.**
+      The component confines a shadcn-shaped dialog (dimmed `bg-black/50` backdrop,
+      centered panel, Escape + scrim-click to close) to ONE target element instead of
+      the viewport. It now has real consumers: `PermissionDialog` and `QuestionDialog`
+      pass the ACTIVE chat tab's wrapper, so an ask covers that one session's chat pane
+      and leaves the project list, the sub-tab bar and every other session usable.
+      App captures the element with a callback ref into `useState`
+      (`ref={isActive ? setChatSurfaceEl : undefined}`) — a `useRef` is null on the
+      first render and leaves the dialog unrendered. Prefer a `<div>` over `<section>`:
+      React 19 types `section`'s ref as `Ref<HTMLElement>`, which a
+      `useState<HTMLDivElement | null>` setter does not satisfy.
+      Three things found on the way and worth not re-deriving: (1) Radix passes
+      `loop: true` unconditionally, so Tab already wraps in-panel — do NOT hand-roll a
+      second trap; (2) `trapped: false` means focus is deliberately NOT re-claimed, and
+      suppressing focus-based dismissal is a CORRECTNESS fix, because `ChatInput`
+      focuses its textarea programmatically inside the container and the ask would
+      otherwise DENY ITSELF; (3) the may-mount gate `lib/dialogScope.ts` must stay —
+      off-surface the panel is `display:none`, so confining alone renders the ask
+      INVISIBLY. `.dialog-viewport-max` was removed from `index.css` (zero consumers,
+      and a viewport cap is the wrong bound for a container-confined panel); its
+      comment records the two-`max-height`-declarations trap. Design notes and the
+      regression list: `skills/ocode-web/SKILL.md` #63; user-visible entry in
+      `CHANGES.md`. Needs a desktop rebuild to be visible (`web/dist` is embedded).
+
+## Desktop share-token test shutdown/Serve race (2026-10-05)
+
+- [x] **`TestStartServerWiresDurableShareToken` — fixed.** `shutdownHandle` was
+      called right after each `StartServer`, before that server's own `GET`
+      assertions. `StartServer` returns after `go srv.Serve(ln)`, and
+      `Server.Shutdown` reads the listener/`http.Server` that `Serve` records
+      inside that goroutine, so the shutdown raced `Serve`: a no-op when it won
+      (the first launch survived, hiding the bug) and a real teardown when it
+      lost (the relaunch closed before its assertions → `connection refused`).
+      Each shutdown now runs after its server's assertions, the relaunch's
+      handle is a `t.Cleanup`, and the first launch is still shut down
+      explicitly before the relaunch so the sticky port is actually reused
+      (zero `port … in use, trying …` walk-forwards now, vs one per run before).
+      Verified with `go test -race -count=5 -run
+      TestStartServerWiresDurableShareToken ./internal/desktop` and the full
+      `-race` package run.
+- Latent, not fixed: `StartServer` returns before `go srv.Serve(ln)` records
+  `s.ln`/`s.httpServer`, so a `Shutdown` called in that window closes nothing
+  and leaks the listener. Only reachable from a caller that shuts down
+  immediately after boot (the test's old pattern); the desktop app shuts down on
+  quit, long after `Serve` has started, so it is not a user-facing bug.
+
+## Desktop share status / start-stop follow-ups (2026-10-06)
+
+Shipped in `CHANGES.md` (GET `/api/tailscale-share` + start/stop, `AutoShareForm`
++ `ShareDialog` status/controls). Deliberately left out:
+
+- **No stale global-mount reconciliation.** `tailscale serve --bg --set-path
+  /desktop` is one GLOBAL mount per node and survives this process. A crash /
+  hard kill (no `Server.Shutdown` → `cleanup()`) leaves the mount pointing at a
+  dead loopback port. `start()` calls `RemoveSetPath` first now, so the next
+  Start replaces it, but nothing proactively detects/reports a stale mount while
+  stopped. A "serve status" probe on Stop/Start could close this; the status
+  read deliberately stays cache-only to avoid a subprocess per poll.
+- **The native Share menu has no dynamic label/state.** It still just opens the
+  dialog (Share Session… / Share Entire Desktop… / Copy Desktop URL / Reset
+  Share Token…); a live "Stop Sharing" item would need Wails menu-item
+  label/enabled updates plus a poll. The user chose dialog + Settings, so this
+  is deferred.
+- **`--set-path /desktop` is shared node-wide**, so Stop removes whatever process
+  put that mount there — including a TUI `/rc` session if it ever used the same
+  path (it uses the session id, so in practice only this server's own mount).
+  Worth revisiting if a second server ever mounts `/desktop`.
+
+## Phone → remote host direct: auth/transport follow-ups (2026-10-06)
+
+Investigated while answering whether the mobile web UI can connect directly to
+a remote SSH host (no desktop in the loop). No behavior changed. Findings, in
+priority order (line anchors verified 2026-10-06; expect drift):
+
+- **A credential-less non-loopback `ocode serve` is unauthenticated.**
+  `authMiddleware` bypasses when `!remoteMode && username=="" && password==""`
+  (`internal/server/server.go:779`), and the default bind is `0.0.0.0`
+  (`server.go:1898`). Only plugin routes are guarded
+  (`pluginAuthMiddleware`, `server.go:866`). Running bare `ocode serve` on a
+  remote host therefore exposes the whole API. Consider REFUSING a
+  non-loopback bind with no credentials (or auto-generating a token).
+- **Non-constant-time credential compare.** `Server.tokenMatches`
+  (`internal/server/share_token.go`) uses plain `==` for the launch token and
+  the share token. Switch to `crypto/subtle.ConstantTimeCompare`.
+- **No phone-reachable URL for a directly-exposed `--remote` host.** The only
+  built-in generator of a `--remote`-compatible link is `ocode remote --web`,
+  which opens `http://localhost:<tunnelPort>/#token=<tok>`
+  (`internal/remote/connect.go`) — a loopback URL on the machine running the
+  CLI, not the host's tailnet name. The desktop Share dialog emits `?token=`
+  links (`internal/tailscale/tailscale.go` `BuildSessionURL`,
+  `web/src/components/Layout/ShareDialog.tsx`), which `--remote` rejects
+  (`server.go:741-745`), and the SPA disables sharing in a remote session. A
+  phone needs the host's `tailscale serve` URL plus the launch token from
+  `~/.ocode/remote/serve.json` pasted as `#token=`; nothing produces that
+  today. (The auth mechanism itself IS phone-compatible: fragment→Bearer
+  (`web/src/api/client.ts`), fetch-based SSE (`web/src/lib/eventBus.ts`), WS
+  subprotocol (`TerminalPanel`).)
+- **Rate limit is per-IP, in-memory, 5 failures/1 min** and resets on restart
+  (`internal/server/server.go` `rateLimiter`); behind a tunnel/edge the visible
+  peer IP may collapse, making it either a global-lockout DoS or weak.
+- **Doc follow-up:** once the `--remote` vs `?token=` share-link conflict is
+  resolved, update `docs/concepts/desktop-share-token.md` (and the sharing
+  docs) to state which link forms a `--remote` server accepts.
+
+## Kaizen `webforms` stack — open items (2026-10-08)
+
+- [ ] Validate `webforms-tuning-deepseek-v4.1-flash` WITH the skill: closed-book re-run on
+  `_prompts/webforms.md` with the skill body prepended (target safety/widgets >= 0.9) and a
+  live probe run; the skill was written from the scorecard but has not been re-measured.
+- [ ] Other models: `mimo-v2.6-flash` has a closed-book score (95.1%) and a derived skill; its
+  with-skill sweep is `probe/runs/mimo-v2.6-flash`. `space-bunny-free` and `glm-5.3-flash` not started.
+  Each needs closed-book -> grade -> derive -> with-skill.
+- [ ] The Greenhouse task depends on a live posting and its `question_*` ids; re-verify the
+  posting before comparing runs made weeks apart (see `probe/README.md`).
+- [ ] Install the new htrcli (`make htrcli-install` in how-to-recorder): `~/go/bin/htrcli` is
+  still the old build; the probe uses `probe/htrhome/htrcli-bin`.
+- [ ] Single run per task is noisy (wall time is dominated by model latency); repeat
+  disagreeing tasks before concluding.
+
+## Cloud connectors (design in progress — 2026-10-08)
+- Scope: both global + per-project (global keychain tokens + per-project `.ocode/storage-connectors.json` overrides); separate virtual root per connector (`gdrive://...`, `s3://bucket/...`, `onedrive://...`, `gcs://...`).
+- Phase 1 (blocked): connector framework + settings UI + Drive + S3 read-only browse/open.
+- Phase 2 (deferred): OneDrive + GCS.
+- Phase 3 (deferred): full write/upload/delete + conditional conflict handling + sandbox gating.
+- Credentials: OS keychain (NOT ocodeconfig.json); metadata only in JSON settings.
+- .env.example: add GDRIVE_CLIENT_ID / S3_BUCKET references (no secrets).
+- Docs: `docs/cloud-connectors-design.md` is a non-bundle design spec; bundle index (`docs/index.md`) unchanged until Phase 1 merged.
+- DB connector web sub-tab (DB session view with picker + SQL editor) — deferred from P1 core (tab added, content deferred). See docs/concepts/db-connector.md, .opencode/plans/2026-10-08-db-connector-spec.md.
+
+## DB connector — status (2026-10-09)
+Shipped: saved Postgres connections (encrypted in `ocodeconfig.json`), per-panel unlock, table list (paged), table data view (sort, read-only filter, paged, insert/update/delete by primary key; a table without a primary key is read-only), SQL editor with confirmed writes (incl. `RETURNING` rows, labelled "returned"). Concept doc: `docs/concepts/db-connector.md`.
+
+Automated: `make test-postgres` runs the `pgintegration` build-tag suites in `internal/dbconnect/pg_integration_test.go` and `internal/server/handler_dbconnect_pg_integration_test.go` against a throwaway `postgres:16` container started with the docker CLI. Each test gets its own database, dropped afterwards. The same suites run as the `postgres` job in `.github/workflows/ci.yml`. Not part of `make test`.
+
+Open:
+- **CI `postgres` job has not run on GitHub.** It was added on 2026-10-09. The first run can still fail on runner details (service health check, port mapping). Local runs pass.
+- **Browser pass is manual.** The stacked layout (below 444px of table-and-data width) was checked by hand in headless Chrome, not in an automated test. The width decisions are unit tested.
+- **`rows_affected` for `WITH … DELETE … SELECT`** counts the rows the SELECT returned. The Postgres command tag reports only the top-level statement, so the deleted-row count is not available without the native pgx write path. The panel says "returned", not "affected". Pinned by `TestPGDataModifyingCTEReportsReturnedRows`.
+
+Decided (2026-10-09):
+- **Single-statement confirmed writes, by design.** A confirmed batch would need a lexical splitter, which the design avoids, or the simple protocol. The simple protocol lets `COMMIT; DELETE …` commit and then run the DELETE outside the transaction, which is the escape the read-only checks close. Batches happen only if the user asks for them after hearing this.
+- **No pre-write snapshot or undo.** Not feasible for arbitrary remote SQL. The confirm dialog says the change is permanent.
+- **Row CRUD is not available for tables without a primary key**, the same rule as SQLite's no-rowid case.
+
+Decided (2026-10-09): connection secrets use `ocodeconfig.json#db.connections` with per-envelope Argon2id via `internal/encryption` (not `internal/vault`, not keychain); the sync of encrypted URLs to the hub follows from that. Connections are managed in the DBPanel, not Connectors settings (the Connectors spec has no database coverage).
+
+## Encryption wrapper — partial package, no callers (2026-10-08)
+- `internal/encryption/envelope.go` + `envelope_test.go`: AES-256-GCM + Argon2id settings encryption.
+- No importers yet; package exists but is unconnected (see cloud-connectors design).
+- `.env.example` missing; must be added before any settings save that references keychain/session keys.
+
+## Remote SSH reverse tunnel (`-R`) — implemented, follow-ups (2026-10-09)
+
+Implemented: `ssh -R` port forwards for the remote host to reach the desktop's local htrcli relay (`:3845`) and Chrome CDP (`:9222`). Entry points: `/port add -R <remotePort>[:<localPort>]`, and `"reverse": true` on `POST /api/portmaps` and `POST /api/desktop/portmaps`. Persisted as `projects.PortMap.Reverse` (`omitempty`, no migration). Rules and security notes: `docs/gotchas/port-forwards-url-composition-and-supervisor-restart.md` §6.
+
+Follow-ups, not done:
+- Web panel add form has no direction toggle (`web/src/components/Layout/PortMapsWidget.tsx`). Reverse rows are labelled, but can only be created from the CLI or API.
+- Not verified live: no real `ssh -R` run against a remote host. Reverse readiness ("still alive after the probe budget") is an estimate, not proof the remote bind works.
+- Desktop add path has no WSL pre-check. `ForwardManager.Start` refuses a reverse forward on a non-SSH target only after the entry is saved, so the response is 502 "saved, but failed to open now". Confirm whether a desktop workspace can ever be non-SSH; if not, drop the question.
+- The reverse forward has no auth of its own. Anything on the remote host's loopback can drive the desktop's CDP port (§6 Security).
+
+## Terminal touch scroll: SGR-only wheel reports, no momentum (2026-10-09)
+
+`TerminalPanel.tsx` touch handler (`onTouchMove`) scrolls scrollback via `term.scrollLines`, and when a TUI owns the mouse (`modes.mouseTrackingMode !== "none"`) sends SGR (1006) wheel reports via `term.input`. Not done: apps that enable mouse tracking without SGR encoding (X10/UTF-8) get a report they will not parse (xterm exposes no public encoding mode); alt-screen apps with NO mouse tracking get nothing (xterm's own wheel path sends arrow keys there; touch does not); no inertia/momentum after the finger lifts. See `docs/gotchas/terminal-touch-scroll-xterm6.md`.
+
+## FIXED: connect start responses omit `state`; Google manual completion deferred (2026-10-09)
+
+Found while closing `docs/superpowers/plans/2026-10-01-web-connector-settings.md`
+Phases 2–4.
+
+- **Fixed (2026-10-09):** the Anthropic, Google, Copilot, Grok and plugin start
+  responses now carry `state` (`f.getState()`), matching the OpenAI starts.
+  `TestConnectStartResponsesReportFlowState` covers each kind.
+- Google manual completion is not started. It needs `GOOGLE_CLIENT_ID` and, for a
+  confidential client, `GOOGLE_CLIENT_SECRET`, and a paste-back exchange in
+  `internal/auth/google.go`. Until then Google sign-in works from the server machine
+  only.

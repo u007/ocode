@@ -145,6 +145,7 @@ func init() {
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
 		{name: "/ban", usage: "/ban [list|add <command...>|remove <command...>|clear]", help: "List or manage banned bash command prefixes, including multi-word prefixes; no prefixes are banned by default; /ban clear confirms before wiping them", handler: runBanCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
+		{name: "/auto-share", usage: "/auto-share [on|off|status]", help: "Auto share on start: share this session's web UI over Tailscale at launch instead of opening the Share dialog (tailnet-only, never public). Takes effect on the next launch", handler: runAutoShareCmd},
 		{name: "/sandbox", usage: "/sandbox [on|off|status]", help: "Sandbox: runs shell commands without prompts, but the OS blocks writes outside the workspace/allowed dirs, and touching secrets (auth.json, ~/.ssh, .env) or config still asks. Network stays open — write protection, not full containment", handler: runSandboxCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/explorer-model", usage: "/explorer-model [status|enable|disable|model [name]]", help: "Show or switch the explorer agent (explore/scout) model; falls back to small model, then main model", handler: runExplorerModelCmd},
@@ -956,7 +957,16 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		if strings.HasPrefix(toolName, "bash:") {
-			prefix := strings.TrimPrefix(toolName, "bash:")
+			prefix := strings.TrimSpace(strings.TrimPrefix(toolName, "bash:"))
+			// Validate before the setter, not after: SetBashPrefixRule SILENTLY
+			// discards a rule it refuses (a blanket `git` allow, an empty prefix),
+			// so reporting success here used to persist nothing — the same bug
+			// the HTTP write paths just lost. Shared with the server so both
+			// surfaces accept and reject exactly the same rules.
+			if err := agent.ValidateBashPrefixRule(prefix, level); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot set bash rule %q: %v", prefix, err)})
+				return nil
+			}
 			m.agent.Permissions().SetBashPrefixRule(prefix, level)
 			if m.permDirty.bashPrefixes == nil {
 				m.permDirty.bashPrefixes = make(map[string]string)
@@ -1114,6 +1124,74 @@ func runSandboxCmd(m *model, args []string) tea.Cmd {
 	m.permDirty.mode = true
 	m.persistPermissions()
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", m.agent.Permissions().Mode())})
+	return nil
+}
+
+// runAutoShareCmd toggles auto-share-on-start: the desktop app starts the
+// tailscale share exposure at boot, so the instance is reachable on your tailnet
+// without opening the Share dialog.
+//
+// Same on|off|status shape as /sandbox and /yolo so the verb is predictable.
+// The toggle is read from and written to ocodeconfig; the live exposure is
+// unaffected either way (it is created at boot and torn down at shutdown), which
+// is why the status line says so instead of implying an immediate change.
+func runAutoShareCmd(m *model, args []string) tea.Cmd {
+	report := func(state string) {
+		verb := "off"
+		if state == "on" {
+			verb = "on"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, skipLLM: true,
+			text: fmt.Sprintf("Auto share on start: %s (takes effect on the next launch; other tailnet devices can reach this instance when on)", verb)})
+	}
+
+	current := func() bool {
+		if m.config != nil {
+			return m.config.Ocode.AutoShareOnStart
+		}
+		// No live config: fall back to disk rather than reporting a false OFF.
+		if cfg, err := config.LoadOcodeConfigCopy(); err == nil {
+			return cfg.AutoShareOnStart
+		}
+		return false
+	}
+
+	apply := func(want bool) {
+		if err := config.SaveAutoShareOnStart(want); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, skipLLM: true,
+				text: fmt.Sprintf("Could not save auto-share setting: %v", err)})
+			return
+		}
+		if m.config != nil {
+			m.config.Ocode.AutoShareOnStart = want
+		}
+		if want {
+			report("on")
+		} else {
+			report("off")
+		}
+	}
+
+	if len(args) == 0 {
+		next := !current()
+		apply(next)
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes", "enable":
+		apply(true)
+	case "off", "false", "no", "disable":
+		apply(false)
+	case "status":
+		if current() {
+			report("on")
+		} else {
+			report("off")
+		}
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, skipLLM: true,
+			text: "Usage: /auto-share [on|off|status]"})
+	}
 	return nil
 }
 
@@ -1808,8 +1886,8 @@ func autoContinueStatusText(m *model) string {
 		judgeModel = m.config.Ocode.AutoContinueModel
 	}
 	judgeKind := ""
-	if strings.HasPrefix(judgeModel, "typesafe/") {
-		judgeKind = "\nJudge kind: typesafe (decision-only triage — the transcript tail travels as structured state and Jev answers a typed continue/end choice; no chat call is made)"
+	if backend := agent.DecisionBackendName(judgeModel); backend != "" {
+		judgeKind = fmt.Sprintf("\nJudge kind: %s (decision-only triage — the transcript tail travels as structured state and the model answers a typed continue/end choice; no chat call is made)", backend)
 	}
 	return fmt.Sprintf("Auto-continue: %s (chain so far this session: %d/%d)\nJudge model: %s%s\n\n"+
 		"When enabled, any turn cut off by the /max-step cap — not just /goal — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web and headless server turns). "+

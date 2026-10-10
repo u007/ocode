@@ -84,10 +84,10 @@ func (t *AstGrepTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	if _, err := exec.LookPath(astGrepBin); err != nil {
-		notice := fmt.Sprintf("ast-grep is not installed. To install:\n"+
-			"  brew install ast-grep   # macOS\n"+
-			"  cargo install ast-grep --locked\n"+
-			"  npm i -g @ast-grep/cli\n"+
+		notice := fmt.Sprintf("ast-grep is not installed. To install:\n" +
+			"  brew install ast-grep   # macOS\n" +
+			"  cargo install ast-grep --locked\n" +
+			"  npm i -g @ast-grep/cli\n" +
 			"Then retry, or disable this plugin with /plugin disable ast.")
 		return "", &NoticedError{Err: fmt.Errorf("%s not found on PATH: %w", astGrepBin, err), Notice: notice}
 	}

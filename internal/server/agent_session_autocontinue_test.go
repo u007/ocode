@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
 )
@@ -94,7 +95,7 @@ func autoContinueTestServer(t *testing.T, sysoneURL string) (*Handler, string, *
 	cl := &scriptedAutoContinueClient{}
 	a := agent.NewAgent(cl, nil, cfg, nil)
 	a.SetWorkDir(proj)
-	as := &agentSession{agent: a, model: "fake-model"}
+	as := &agentSession{agent: a, model: "fake-model", credVersion: auth.CredentialVersion()}
 	h.mu.Lock()
 	h.agents[id] = as
 	h.mu.Unlock()

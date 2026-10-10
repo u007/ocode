@@ -12,7 +12,7 @@ tags:
   - compact
   - web
   - desktop
-timestamp: 2026-09-20T17:57:24Z
+timestamp: 2026-10-06T15:13:33Z
 ---
 ## The problem
 
@@ -90,6 +90,22 @@ state-only paths can establish the baseline and compare:
      reducer's mid-turn guard; carries authoritative `total`). Turn state is
      applied by `applyReconcileState` **only when it differs** from the client's.
      A live pending ask is hydrated from `state.pending_asks`.
+
+- **Lazy tab hydration (never-opened tabs).** A slice whose tab has not been
+  opened this page load (`sliceHydrated` false: not `initialized`, no messages)
+  never gets a transcript fetch — not from the boot/reconnect
+  `reconcileOpenSessions`, and not from a moved revision in `revalidateSession`.
+  Both take the state-only path (`hydrateSessionStateOnly`): turn state, live
+  pending asks, and the tab label from the state endpoint's new `title` field
+  (`session.StoredTitleForDir`, a meta-row read that never loads messages);
+  revalidate notes the moved revision so the next idle poll is a no-op. The
+  transcript is fetched by the ChatPanel mount on first activation, and
+  `hydrateSessionOnActivation` (SessionTabSync's activation effect) replays the
+  server's buffered `live_frames` then. Rationale: a desktop restart with a
+  dozen restored tabs used to parse, merge and render a dozen transcript pages
+  before the first click — the boot stall reported as a "hang" on WKWebView.
+  Both the persisted title and this read are bounded by
+  `session.TruncateTitle`; see `../gotchas/derived-title-label-must-be-bounded.md`.
 
 - `web/src/hooks/useSessionRevisionSync.ts`: mounted in `web/src/App.tsx`
   next to `useTurnWatchdogAll`; polls every open tab (any project, active or

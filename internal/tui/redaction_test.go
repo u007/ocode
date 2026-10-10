@@ -126,35 +126,6 @@ func TestApplyTier2Scan_NilScanner(t *testing.T) {
 	applyTier2Scan(msgs, nil, reg, "block", "full")
 }
 
-func TestApplyTier2Scan_EmptyMessages(t *testing.T) {
-	reg := redact.NewRegistry(redact.NewNonce())
-	scanner := &mockScanner{}
-	msgs := []agent.Message{}
-	applyTier2Scan(msgs, scanner, reg, "block", "full")
-	// No crash, no scan calls.
-}
-
-func TestApplyTier2Scan_NoUserMessages(t *testing.T) {
-	reg := redact.NewRegistry(redact.NewNonce())
-	scanner := &mockScanner{spans: []redact.Span{{Start: 0, End: 5, Kind: "test"}}}
-	msgs := []agent.Message{
-		{Role: "assistant", Content: "hello"},
-		{Role: "system", Content: "you are helpful"},
-	}
-	applyTier2Scan(msgs, scanner, reg, "block", "full")
-	// No user message found, so no scan should occur.
-}
-
-func TestApplyTier2Scan_WhitespaceOnlyUserMessage(t *testing.T) {
-	reg := redact.NewRegistry(redact.NewNonce())
-	scanner := &mockScanner{}
-	msgs := []agent.Message{
-		{Role: "user", Content: "   \t\n  "},
-	}
-	applyTier2Scan(msgs, scanner, reg, "block", "full")
-	// Whitespace-only message is skipped.
-}
-
 func TestApplyTier2Scan_ScannerErrorWarnMode(t *testing.T) {
 	reg := redact.NewRegistry(redact.NewNonce())
 	scanner := &mockScanner{err: fmt.Errorf("connection refused")}
@@ -364,5 +335,29 @@ func TestApplyTier1UserRedaction_SkipsNonUserMessages(t *testing.T) {
 	// System message should not be touched.
 	if redact.TokenPattern.MatchString(msgs[0].Content) {
 		t.Errorf("expected system message to remain untouched, got: %q", msgs[0].Content)
+	}
+}
+
+// TestApplyTier2Scan_NothingToScanSkipsScanner covers the inputs that must
+// not reach the scanner at all: no messages, no user message, and a
+// whitespace-only user message.
+func TestApplyTier2Scan_NothingToScanSkipsScanner(t *testing.T) {
+	cases := map[string][]agent.Message{
+		"empty":           {},
+		"no user message": {{Role: "assistant", Content: "hello"}, {Role: "system", Content: "you are helpful"}},
+		"whitespace user": {{Role: "user", Content: "   \t\n  "}},
+	}
+	for name, msgs := range cases {
+		t.Run(name, func(t *testing.T) {
+			reg := redact.NewRegistry(redact.NewNonce())
+			callCount := 0
+			scanner := &countingScanner{inner: &mockScanner{spans: []redact.Span{{Start: 0, End: 5, Kind: "test"}}}, count: &callCount}
+			if err := applyTier2Scan(msgs, scanner, reg, "block", "full"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if callCount != 0 {
+				t.Fatalf("scanner called %d times, want 0", callCount)
+			}
+		})
 	}
 }

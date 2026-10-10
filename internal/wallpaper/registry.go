@@ -35,16 +35,16 @@ const (
 var ValidModes = []string{ModeAuto, ModeLight, ModeDark}
 
 type WallpaperMeta struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Category   string `json:"category"`
-	Thumbnail  string `json:"thumbnail"`
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
-	IsBuiltin  bool   `json:"is_builtin"`
-	IsUploaded bool   `json:"is_uploaded"`
-	SupportsDark   bool `json:"supports_dark"`
-	SupportsLight  bool `json:"supports_light"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Category      string `json:"category"`
+	Thumbnail     string `json:"thumbnail"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	IsBuiltin     bool   `json:"is_builtin"`
+	IsUploaded    bool   `json:"is_uploaded"`
+	SupportsDark  bool   `json:"supports_dark"`
+	SupportsLight bool   `json:"supports_light"`
 }
 
 type WallpaperConfig struct {
@@ -307,7 +307,7 @@ func listUploads() ([]WallpaperMeta, error) {
 		}
 		meta := WallpaperMeta{
 			ID: id, Name: "Uploaded Image", Category: CategoryDeveloper,
-			Thumbnail: "data:image/svg+xml;base64," + svgBase64(data),
+			Thumbnail:  "data:image/svg+xml;base64," + svgBase64(data),
 			IsUploaded: true, SupportsDark: true, SupportsLight: true,
 			Width: 1920, Height: 1080,
 		}
@@ -343,13 +343,27 @@ func encodeBase64(dst, src []byte) int {
 	for i < len(src) {
 		a := src[i]
 		var b, c byte
-		if i+1 < len(src) { b = src[i+1] }
-		if i+2 < len(src) { c = src[i+2] }
-		dst[j] = enc[a>>2]; j++
-		dst[j] = enc[(a&0x03)<<4|(b>>4)]; j++
-		if i+1 < len(src) { dst[j] = enc[(b&0x0f)<<2|(c>>6)] } else { dst[j] = '=' }
+		if i+1 < len(src) {
+			b = src[i+1]
+		}
+		if i+2 < len(src) {
+			c = src[i+2]
+		}
+		dst[j] = enc[a>>2]
 		j++
-		if i+2 < len(src) { dst[j] = enc[c&0x3f] } else { dst[j] = '=' }
+		dst[j] = enc[(a&0x03)<<4|(b>>4)]
+		j++
+		if i+1 < len(src) {
+			dst[j] = enc[(b&0x0f)<<2|(c>>6)]
+		} else {
+			dst[j] = '='
+		}
+		j++
+		if i+2 < len(src) {
+			dst[j] = enc[c&0x3f]
+		} else {
+			dst[j] = '='
+		}
 		j++
 		i += 3
 	}
@@ -370,12 +384,24 @@ func rejectActiveSVG(data []byte) error {
 }
 
 func detectContentType(data []byte) string {
-	if len(data) < 4 { return "application/octet-stream" }
-	if strings.HasPrefix(string(data), "<?xml") || string(data[:4]) == "<svg" { return "image/svg+xml" }
-	if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 { return "image/png" }
-	if data[0] == 0xFF && data[1] == 0xD8 { return "image/jpeg" }
-	if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 { return "image/gif" }
-	if data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46 { return "image/webp" }
+	if len(data) < 4 {
+		return "application/octet-stream"
+	}
+	if strings.HasPrefix(string(data), "<?xml") || string(data[:4]) == "<svg" {
+		return "image/svg+xml"
+	}
+	if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+		return "image/png"
+	}
+	if data[0] == 0xFF && data[1] == 0xD8 {
+		return "image/jpeg"
+	}
+	if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
+		return "image/gif"
+	}
+	if data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46 {
+		return "image/webp"
+	}
 	return "application/octet-stream"
 }
 
@@ -387,18 +413,30 @@ func wrapImageInSVG(data []byte, contentType string) string {
 
 func generateSVG(id string) string {
 	switch id {
-	case "dark-gradient": return darkGradientSVG()
-	case "dark-mesh": return darkMeshSVG()
-	case "dark-grid": return darkGridSVG()
-	case "light-gradient": return lightGradientSVG()
-	case "light-pastel": return lightPastelSVG()
-	case "light-peach": return lightPeachSVG()
-	case "developer-code": return developerCodeSVG()
-	case "developer-terminal": return developerTerminalSVG()
-	case "cute-dots": return cuteDotsSVG()
-	case "cute-hearts": return cuteHeartsSVG()
-	case "cute-stars": return cuteStarsSVG()
-	default: return darkGradientSVG()
+	case "dark-gradient":
+		return darkGradientSVG()
+	case "dark-mesh":
+		return darkMeshSVG()
+	case "dark-grid":
+		return darkGridSVG()
+	case "light-gradient":
+		return lightGradientSVG()
+	case "light-pastel":
+		return lightPastelSVG()
+	case "light-peach":
+		return lightPeachSVG()
+	case "developer-code":
+		return developerCodeSVG()
+	case "developer-terminal":
+		return developerTerminalSVG()
+	case "cute-dots":
+		return cuteDotsSVG()
+	case "cute-hearts":
+		return cuteHeartsSVG()
+	case "cute-stars":
+		return cuteStarsSVG()
+	default:
+		return darkGradientSVG()
 	}
 }
 

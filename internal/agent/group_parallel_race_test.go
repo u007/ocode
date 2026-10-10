@@ -28,7 +28,7 @@ func taskArgs(agentType, prompt string) json.RawMessage {
 // Run under -race; the assertion proves attribution, the -race flag
 // proves the absence of the shared-state data race.
 func TestGroupDispatch_NoRaceAndCorrectAttribution(t *testing.T) {
-	a := NewAgent(&MockClient{Response: &Message{Role: "assistant", Content: "done"}}, nil, nil, nil)
+	a := newTestAgent(&MockClient{Response: &Message{Role: "assistant", Content: "done"}}, nil, nil, nil)
 	factory := &recordingBusFactory{}
 	a.SetNoteBusFactory(factory.New)
 
@@ -79,7 +79,7 @@ func TestGroupDispatch_NoRaceAndCorrectAttribution(t *testing.T) {
 // on the agent stop channel for the agent's lifetime, leaking one
 // goroutine + one uncancelled context per fan-out.
 func TestGroupBus_NoGoroutineLeakAfterTeardown(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	tcs := []ToolCall{
 		{ID: "t1", Function: struct {
 			Name      string `json:"name"`
@@ -115,7 +115,7 @@ func TestGroupBus_NoGoroutineLeakAfterTeardown(t *testing.T) {
 // ever reaches the log / delta / sidecar. This guards the
 // "redaction not wired in production" regression.
 func TestGroupBus_RedactorWiredInProduction(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	tcs := []ToolCall{
 		{ID: "t1", Function: struct {
 			Name      string `json:"name"`

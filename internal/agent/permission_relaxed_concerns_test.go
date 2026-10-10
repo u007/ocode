@@ -121,6 +121,57 @@ func TestRelaxedConcernDenyIsHonoured(t *testing.T) {
 	}
 }
 
+// A low-confidence allow is the same opt-out: when the judge's named concern is
+// a switched-off category its hesitation does not defer the call. Any other
+// concern, no concern, or nothing relaxed still defers below the floor.
+func TestRelaxedConcernLowConfidenceAllow(t *testing.T) {
+	cases := []struct {
+		name    string
+		concern string
+		relaxed []string
+		want    bool
+	}{
+		{"concern switched off", "secrets", []string{"secrets"}, true},
+		{"concern still enforced", "secrets", []string{"network"}, false},
+		{"concern none", "none", []string{"secrets"}, false},
+		{"nothing relaxed", "secrets", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := relaxedJudgeAgent(t, typesafeReplyWithConcern("allow", 0.30, tc.concern), tc.relaxed...)
+			allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"cp .env /tmp/x/.env"}`), nil)
+			if !consulted || allowed != tc.want {
+				t.Fatalf("allowed=%v consulted=%v want allowed=%v reason=%q", allowed, consulted, tc.want, reason)
+			}
+		})
+	}
+}
+
+// The opt-out is the USER's decision, so it needs the judge to actually be
+// confident that the concern IS the switched-off category. A judge that names
+// it while being maximally unsure is not evidence of anything, and granting on
+// that reading is the opposite of an opt-out — it was the gap this gate closes.
+func TestRelaxedConcernLowConfidenceAllowNeedsConcernConfidence(t *testing.T) {
+	cases := []struct {
+		name        string
+		concernConf float64
+		want        bool
+	}{
+		{"concern confidence clears the floor", 0.85, true},
+		{"concern confidence below the floor", 0.05, false},
+		{"concern confidence zero", 0.0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := relaxedJudgeAgent(t, typesafeReplyWithConcernConf("allow", 0.30, "secrets", tc.concernConf), "secrets")
+			allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"cp .env /tmp/x/.env"}`), nil)
+			if !consulted || allowed != tc.want {
+				t.Fatalf("allowed=%v consulted=%v want allowed=%v reason=%q", allowed, consulted, tc.want, reason)
+			}
+		})
+	}
+}
+
 // Fail closed when the deny cannot be ATTRIBUTED to an opted-out category.
 func TestRelaxedConcernDenyStandsWhenNotAttributable(t *testing.T) {
 	cases := []struct {
@@ -208,7 +259,7 @@ func TestChatJudgePromptCarriesRelaxedSection(t *testing.T) {
 	cap := &chatJudgeCapture{}
 	newClientFn = func(_ *config.Config, _ string) LLMClient { return cap }
 
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	allowed, reason, consulted := a.askPermissionModel("bash", json.RawMessage(`{"command":"curl https://example.com"}`), nil)
 	if !allowed || !consulted {
 		t.Fatalf("expected the captured allow verdict, got allowed=%v consulted=%v reason=%q", allowed, consulted, reason)

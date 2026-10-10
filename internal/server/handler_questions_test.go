@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -380,7 +381,12 @@ func TestHandleResolvePermissionReturns202BeforeContinuation(t *testing.T) {
 // continuation was ever dispatched). Fails the test on timeout.
 func waitForAskContinuation(t *testing.T, as *agentSession) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// A liveness bound, not a performance one: the continuation's first Step
+	// in a fresh process builds the prompt cold (context files, runtime
+	// probes), which under -race took longer than the 3s this used to allow
+	// about one run in five.
+	const limit = 20 * time.Second
+	deadline := time.Now().Add(limit)
 	for time.Now().Before(deadline) {
 		if as.mu.TryLock() {
 			as.mu.Unlock()
@@ -388,7 +394,7 @@ func waitForAskContinuation(t *testing.T, as *agentSession) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatal("ask continuation did not finish within 3s")
+	t.Fatalf("ask continuation did not finish within %s", limit)
 }
 
 // TestHandleAnswerQuestionContinuationEmitsHeartbeats is the regression guard
@@ -898,6 +904,10 @@ func TestDismissQuestionAllowsNextTurnAndHidesSentinel(t *testing.T) {
 		agent:    agent.NewAgent(questionFakeClient{}, nil, nil, nil),
 		model:    "fake-model",
 		messages: append([]agent.Message(nil), ask...),
+		// buildAgentSession always snapshots this; a bare literal leaves 0,
+		// which reconcileProfileAgent reads as "credentials changed" and tries
+		// to rebuild — impossible for a fake-model session. See newTestSession.
+		credVersion: auth.CredentialVersion(),
 	}
 	h.agents[id] = as
 

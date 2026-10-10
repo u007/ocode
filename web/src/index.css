@@ -80,6 +80,70 @@ html.light {
   color-scheme: light;
 }
 
+/*
+ * Scoped appearance for the file editor's rendered preview (Files-tab Edit /
+ * Preview / Split). The toggle is an OVERRIDE independent of the app theme, so
+ * it must not touch `document.documentElement` — these classes redefine the
+ * same shadcn variables on a wrapper element, and since a custom property
+ * declared on a descendant wins over the inherited `:root` value, every
+ * `bg-background` / `text-foreground` / `border-border` inside the wrapper
+ * re-resolves against the scoped palette. The palette is deliberately NEUTRAL
+ * (zinc light / zinc dark) rather than derived from the active server theme:
+ * the preview is document content, and a neutral background is what you want
+ * when proofing a README in the opposite polarity.
+ *
+ * `.editor-appearance-dark` mirrors the app's own `:root` dark defaults, so a
+ * custom (non-zinc) terminal theme still renders a predictable neutral dark
+ * preview rather than a half-themed one.
+ */
+.editor-appearance-light {
+  color-scheme: light;
+  --background: 0 0% 100%;
+  --foreground: 240 10% 3.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 3.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 3.9%;
+  --primary: 240 5.9% 10%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 240 4.8% 95.9%;
+  --secondary-foreground: 240 5.9% 10%;
+  --muted: 240 4.8% 95.9%;
+  --muted-foreground: 240 3.8% 46.1%;
+  --accent: 240 4.8% 95.9%;
+  --accent-foreground: 240 5.9% 10%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 5.9% 90%;
+  --input: 240 5.9% 90%;
+  --ring: 240 5.9% 10%;
+  --link: 221 83% 45%;
+}
+
+.editor-appearance-dark {
+  color-scheme: dark;
+  --background: 240 10% 3.9%;
+  --foreground: 0 0% 98%;
+  --card: 240 5.9% 10%;
+  --card-foreground: 0 0% 98%;
+  --popover: 240 5.9% 10%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 0 0% 98%;
+  --primary-foreground: 240 5.9% 10%;
+  --secondary: 240 3.7% 15.9%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 240 3.7% 15.9%;
+  --muted-foreground: 240 5% 64.9%;
+  --accent: 240 3.7% 15.9%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 3.7% 15.9%;
+  --input: 240 3.7% 15.9%;
+  --ring: 240 4.9% 83.9%;
+  --link: 199 89% 60%;
+}
+
 @layer utilities {
   /* Hide scrollbars on horizontal tab strips while keeping them scrollable */
   .scrollbar-hide {
@@ -91,24 +155,52 @@ html.light {
   }
 
   /*
-   * Cap a fixed, vertically-centred dialog (ask/permission prompts) to the
-   * visible viewport so tall content scrolls internally instead of painting
-   * off the top and bottom edges.
+   * `.dialog-viewport-max` (a viewport-capped `max-height` for the ask/
+   * permission prompts) was REMOVED, and must not come back.
    *
-   * `100vh` is the LARGE viewport on mobile browsers — it ignores the dynamic
-   * URL bar / home indicator, so a `calc(100vh - 2rem)` dialog still overshoots
-   * while that chrome is shown. `dvh` tracks the actual visible area. The
-   * fallback and the upgrade MUST live in separate rules: CSS minifiers drop
-   * the earlier of two same-property declarations in one rule, which would
-   * leave old browsers (no `dvh`) with no cap at all.
+   * Those dialogs are now confined to their session's chat surface
+   * (`ui/scoped-dialog.tsx`), so a WINDOW cap is the wrong bound: the chat pane
+   * is routinely shorter than the viewport, and a viewport cap lets the panel
+   * paint past the bottom of its own container. `ScopedDialogContent` supplies
+   * the container-relative `max-h-[calc(100%-2rem)]` instead.
+   *
+   * Two `max-height` declarations do NOT take the smaller value — the last one
+   * in the cascade wins — so adding a viewport cap next to the container cap
+   * silently disables one of them. That is the trap this comment replaces.
    */
-  .dialog-viewport-max {
-    max-height: calc(100vh - 2rem);
-  }
-  @supports (height: 100dvh) {
-    .dialog-viewport-max {
-      max-height: calc(100dvh - 2rem);
-    }
+
+  /*
+   * Shared height for every control in the chat composer's input row — the
+   * textarea box, the attach button's hit area, and the Send/Stop/Resume action
+   * button — so their top AND bottom edges line up instead of the action button
+   * rendering as a shorter bottom-aligned stub next to the input.
+   *
+   * This must equal the composer's border-box height for ONE line. It is
+   * written as the textarea's own box model rather than a baked `47px`,
+   * because every term scales with the user's root font size except the border:
+   *
+   *   line box  `text-sm` (0.875rem) × `leading-[1.5em]` (1.5) = 1.3125rem
+   *   padding   `p-3` (0.75rem) × 2                            = 1.5rem
+   *   border    `border` (1px) × 2 — Tailwind's border width is px,
+   *            NOT rem, so it must stay a px term
+   *                                                    total = 2.8125rem + 2px
+   *
+   * At the default 16px root that is exactly 47px, and at a 20px root both the
+   * textarea and the buttons grow together (58.25px) — a hardcoded px would have
+   * drifted and re-broken the alignment for anyone who changed their text size.
+   * If the textarea's padding or line-height changes, update the `rem` terms.
+   *
+   * A class (rather than a `h-[${SOME_CONST}px]` template literal in the TSX) is
+   * required because Tailwind's scanner reads the raw source text and cannot
+   * evaluate an interpolation — an interpolated arbitrary value is simply never
+   * emitted. The textarea carries this class too, so the two cannot drift.
+   *
+   * It lives in `@layer utilities` so `max-h-40`'s growth ceiling on the
+   * textarea still wins at equal specificity by source order. The textarea's
+   * JS auto-grow sets an INLINE height, which outranks this class entirely.
+   */
+  .composer-control {
+    height: calc(2.8125rem + 2px);
   }
 }
 

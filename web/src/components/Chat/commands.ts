@@ -287,6 +287,9 @@ export interface CommandResult {
    *  dispatches REKEY_SESSION + UPDATE_TAB_ID so the tab, draft and queue all
    *  follow the new id — the same machinery a `new-*` tab uses on first send. */
   rekeyTo?: { oldId: string; newId: string };
+  /** Run an independent /btw side query. The panel renders its progress from
+   *  the `btw` bus event; nothing is written to the transcript. */
+  btw?: { sessionId: string; question: string; host?: string };
 }
 
 /**
@@ -313,6 +316,7 @@ export interface CommandContext {
     recapSession: (id: string, host?: string) => Promise<{ recap: string }>;
     shareSession: (id: string, host?: string) => Promise<{ markdown: string }>;
     btwSession: (id: string, content: string, host?: string) => Promise<{ status: string }>;
+    cancelBtw: (id: string, host?: string) => Promise<{ status: string }>;
     getMaskConfig: () => Promise<{ enabled: boolean; mode: string; model: string }>;
     setMaskEnabled: (enabled: boolean) => Promise<{ enabled: boolean }>;
     setMaskMode: (mode: string) => Promise<{ mode: string }>;
@@ -995,11 +999,12 @@ async function handleExport(ctx: CommandContext): Promise<CommandResult> {
 
   try {
     const markdown = await api.exportSessionMarkdown(sessionId, ctx.host);
+    const filename = `ocode_export_${sessionId}.md`;
     return {
       handled: true,
-      messages: [{ role: "assistant", content: "Exported session as Markdown." }],
+      messages: [{ role: "assistant", content: `Exported session to \`${filename}\`` }],
       download: {
-        filename: `ocode_export_${sessionId}.md`,
+        filename,
         content: markdown,
         mimeType: "text/markdown;charset=utf-8",
       },
@@ -1749,12 +1754,12 @@ async function handleBtw(args: string, ctx: CommandContext): Promise<CommandResu
 
   try {
     await ctx.api.btwSession(sessionId, args, ctx.host);
+    // The server starts an independent side query; the answer streams into the
+    // docked panel via the `btw` bus event. Nothing is recorded in the
+    // transcript, so no assistant message is returned.
     return {
       handled: true,
-      messages: [{
-        role: "assistant",
-        content: `Noted: ${args}`,
-      }],
+      btw: { sessionId, question: args, host: ctx.host },
     };
   } catch (err) {
     return {

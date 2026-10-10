@@ -36,7 +36,7 @@ func (c *recordingTitleClient) GetModel() string    { return "test-model" }
 // request.
 func TestRegenerateTitleUsesLatestTask(t *testing.T) {
 	rec := &recordingTitleClient{}
-	a := agent.NewAgent(rec, nil, &config.Config{}, nil)
+	a := newTestAgent(rec, nil, &config.Config{}, nil)
 	m := &model{
 		agent:    a,
 		titleCh:  make(chan titleResult, 4),
@@ -165,7 +165,7 @@ func TestSidebarTitleGenForClickHitBoxMultiLine(t *testing.T) {
 func TestSidebarTitleGenClickEndToEnd(t *testing.T) {
 	rec := &recordingTitleClient{}
 	m := &model{
-		agent:    agent.NewAgent(rec, nil, &config.Config{}, nil),
+		agent:    newTestAgent(rec, nil, &config.Config{}, nil),
 		titleCh:  make(chan titleResult, 4),
 		messages: []message{{role: roleUser, text: "do something"}},
 	}

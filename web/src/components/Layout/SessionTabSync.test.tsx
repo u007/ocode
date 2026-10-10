@@ -1,7 +1,7 @@
 import { act, render } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { ChatProvider, useChatState } from "../../stores/chatStore";
-import { RECONCILE_PAGE_SIZE, ROUTABLE_EVENTS, LIVE_DELTA_FLUSH_MS } from "../../lib/sessionEvents";
+import { ROUTABLE_EVENTS, LIVE_DELTA_FLUSH_MS } from "../../lib/sessionEvents";
 import { getCompactionState, noteCompactionFinishedGeneration, noteCompactionGeneration, resetCompactionGenerations } from "../../lib/compactionState";
 import SessionTabSync from "./SessionTabSync";
 
@@ -12,6 +12,7 @@ vi.mock("../../api/client", () => ({
     getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
     getSession: (...a: unknown[]) => mockGetSession(...a),
   },
+  apiPath: (p: string) => p,
 }));
 
 // SessionTabSync is the only place live chat events reach the store (see
@@ -34,17 +35,19 @@ vi.mock("../../stores/projectStore", () => ({
   }),
 }));
 
-const subscribed = new Map<string, (env: unknown) => void>();
-let reconnectHandler: (() => void) | undefined;
+const bus = vi.hoisted(() => ({
+  subscribed: new Map<string, (env: unknown) => void>(),
+  reconnectHandler: undefined as (() => void) | undefined,
+}));
 vi.mock("../../lib/eventBus", () => ({
   eventBus: {
     on: (event: string, handler: (env: unknown) => void) => {
-      subscribed.set(event, handler);
-      return () => subscribed.delete(event);
+      bus.subscribed.set(event, handler);
+      return () => bus.subscribed.delete(event);
     },
     onReconnect: (handler: () => void) => {
-      reconnectHandler = handler;
-      return () => { reconnectHandler = undefined; };
+      bus.reconnectHandler = handler;
+      return () => { bus.reconnectHandler = undefined; };
     },
   },
 }));
@@ -69,8 +72,8 @@ function MessagesProbe({ sessionId }: { sessionId: string }) {
 
 describe("SessionTabSync", () => {
   beforeEach(() => {
-    subscribed.clear();
-    reconnectHandler = undefined;
+    bus.subscribed.clear();
+    bus.reconnectHandler = undefined;
     resetCompactionGenerations();
     tabsByProject = {};
     mockGetSessionState.mockReset();
@@ -88,10 +91,10 @@ describe("SessionTabSync", () => {
         <SessionTabSync />
       </ChatProvider>,
     );
-    expect(reconnectHandler).toBeDefined();
-    act(() => { reconnectHandler?.(); });
+    expect(bus.reconnectHandler).toBeDefined();
+    act(() => { bus.reconnectHandler?.(); });
     act(() => {
-      subscribed.get("compaction_started")?.({
+      bus.subscribed.get("compaction_started")?.({
         event: "compaction_started",
         project: "/proj",
         session_id: "s1",
@@ -108,17 +111,17 @@ describe("SessionTabSync", () => {
         <SessionTabSync />
       </ChatProvider>,
     );
-    expect(subscribed.has("envelope")).toBe(false);
+    expect(bus.subscribed.has("envelope")).toBe(false);
     for (const event of ROUTABLE_EVENTS) {
-      expect(subscribed.has(event)).toBe(true);
+      expect(bus.subscribed.has(event)).toBe(true);
     }
-    expect(subscribed.has("text")).toBe(true);
-    expect(subscribed.has("turn_started")).toBe(true);
+    expect(bus.subscribed.has("text")).toBe(true);
+    expect(bus.subscribed.has("turn_started")).toBe(true);
     // Explicit pin (beyond the ROUTABLE_EVENTS loop above, which would silently
     // stop checking it if the event were dropped from the set): the headless
     // agent-loop activity feed only reaches the status bar if the SSE transport
     // actually subscribes to it.
-    expect(subscribed.has("agent_activity")).toBe(true);
+    expect(bus.subscribed.has("agent_activity")).toBe(true);
   });
 
   it("routes a live 'text' envelope into the session's store slice", () => {
@@ -131,7 +134,7 @@ describe("SessionTabSync", () => {
       </ChatProvider>,
     );
     act(() => {
-      subscribed.get("text")?.({
+      bus.subscribed.get("text")?.({
         event: "text",
         session_id: "s1",
         seq: 1,
@@ -167,7 +170,7 @@ describe("SessionTabSync", () => {
 
     vi.useFakeTimers();
     act(() => {
-      subscribed.get("text")?.({
+      bus.subscribed.get("text")?.({
         event: "text",
         session_id: "s2",
         seq: 1,
@@ -179,7 +182,11 @@ describe("SessionTabSync", () => {
     vi.useRealTimers();
   });
 
-  it("load-time reconcile fetches state + transcript once restored tabs appear", async () => {
+  it("load-time reconcile fetches state only for restored tabs nobody has opened yet", async () => {
+    // Lazy tab hydration: a restored tab's transcript is fetched by its
+    // ChatPanel on first activation, never by the boot reconcile — with a
+    // dozen restored tabs that was a dozen transcript pages parsed and
+    // rendered before the user could click anything.
     tabsByProject = { "/proj": [{ id: "s1", title: "t" }] };
     render(
       <ChatProvider>
@@ -190,26 +197,18 @@ describe("SessionTabSync", () => {
 
     expect(mockGetSessionState).toHaveBeenCalledTimes(1);
     expect(mockGetSessionState).toHaveBeenCalledWith("s1", undefined);
-    expect(mockGetSession).toHaveBeenCalledWith("s1", { limit: RECONCILE_PAGE_SIZE }, undefined);
+    expect(mockGetSession).not.toHaveBeenCalled();
   });
 
-  it("refreshing mid-turn populates the transcript from disk despite turn_active=true", async () => {
-    // The exact refresh-mid-turn sequence: fresh page (empty store) →
-    // restored tab → load reconcile reports an active turn → the disk
-    // snapshot must still populate the slice (nothing in memory is newer).
+  it("refreshing mid-turn arms the running state from disk state without a transcript fetch", async () => {
+    // Fresh page (empty store) → restored, never-opened tab → the load
+    // reconcile reports an active turn: the slice must show the turn running
+    // while its transcript waits for the tab's first activation (ChatPanel).
     tabsByProject = { "/proj": [{ id: "s1", title: "t" }] };
     mockGetSessionState.mockResolvedValue({
       bootstrap_stage: "ready",
       turn_active: true,
       last_seq: 99,
-    });
-    mockGetSession.mockResolvedValue({
-      messages: [
-        { role: "user", content: "earlier question" },
-        { role: "assistant", content: "earlier answer" },
-        { role: "user", content: "follow-up" },
-      ],
-      total: 3,
     });
     const { getByTestId } = render(
       <ChatProvider>
@@ -219,9 +218,8 @@ describe("SessionTabSync", () => {
     );
     await act(async () => {}); // flush the reconcile promise chain
 
-    expect(getByTestId("messages").textContent).toBe(
-      "turnActive=true;count=3;earlier question|earlier answer|follow-up",
-    );
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(getByTestId("messages").textContent).toBe("turnActive=true;count=0;");
   });
 
   it("load-time reconcile runs once per page load, not on later tab changes", async () => {

@@ -47,7 +47,7 @@ func checkpointTestAgent(t *testing.T, checkpoints []string) (*Agent, *checkpoin
 		Model:       "deepseek-v4-pro",
 		Checkpoints: checkpoints,
 	}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	fake := &checkpointFakeAdvisor{advice: "proceed — plan looks correct"}
 	a.tools["advisor"] = fake
 	return a, fake
@@ -351,7 +351,7 @@ func TestNewAdvisorCheckpointState_ReceivesExplicitGoal(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, _ := checkpointTestAgent(t, []string{"plan"})
 
-	st := a.newAdvisorCheckpointState("explicit user goal")
+	st := a.newAdvisorCheckpointState("explicit user goal", false)
 	if st.userGoal != "explicit user goal" {
 		t.Fatalf("expected 'explicit user goal', got %q", st.userGoal)
 	}
@@ -364,7 +364,7 @@ func TestNewAdvisorCheckpointState_ReceivesExplicitGoal(t *testing.T) {
 		{Role: "assistant", Content: "thinking..."},
 		{Role: "user", Content: "[ocode:discovery] attached doc content"},
 	}
-	st2 := a.newAdvisorCheckpointState("real user request")
+	st2 := a.newAdvisorCheckpointState("real user request", false)
 	if st2.userGoal != "real user request" {
 		t.Fatalf("expected 'real user request', got %q (tail leaked into checkpoint)", st2.userGoal)
 	}
@@ -437,7 +437,7 @@ func TestRunAdvisorCheckpoint_ReportsProgress(t *testing.T) {
 // block change invalidates the provider prompt-cache prefix). The gate lives
 // at execution time instead.
 func TestAdvisorToggleKeepsToolListStable(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	if !a.AdvisorEnabled() {
 		t.Fatal("expected advisor enabled by default")
 	}

@@ -113,9 +113,75 @@ go test -v ./...
 # Specific package
 go test ./internal/tui -v
 
+# Web suite — capped at 4 workers (see Testing Notes)
+cd web && pnpm run test
+
+# Override the cap when you want the whole machine
+cd web && npx vitest run --maxWorkers=8
+
 # Coverage
 go test -cover ./...
 ```
+
+### Testing Notes
+
+**Parallelism is capped for the web suite, not the Go suite.** `pnpm run test`
+is `vitest run --maxWorkers=4`. Vitest's default is roughly one worker per core,
+which on a 10-core machine is 9 concurrent jsdom environments; 4 leaves
+headroom for the editor and the rest of the machine.
+
+**Capping the Go suite with `-p` does NOT make it green — do not reach for it
+as a fix.** Measured on a 10-core machine, full `go test ./...`:
+
+| Run | Result |
+|---|---|
+| `go test ./...` (`-p` defaults to 10) | 5 failures — 1 `browse/cdp`, 2 `server`, 2 `tui` |
+| `go test -p 4 ./...` | 7 failures — all 7 in `server` |
+| web `vitest run` (default workers) | 356 files, 0 failures, 72.41s |
+| web `vitest run --maxWorkers=4` | 356 files, 0 failures, 93.98s |
+
+Lowering `-p` did not reduce failures, it moved them. The cause is not
+oversubscription between packages: it is **fixed wall-clock deadlines inside
+tests that wait on async events**, and a slow machine or a busy one starves
+them whichever way the package concurrency is set.
+
+**When a full-suite failure is reported, re-run that test in isolation before
+believing it.** Every Go failure in the runs above passes on its own:
+
+```bash
+go test ./internal/server/ -run 'TestResolveConflictOursThenTheirs' -count=1
+go test ./internal/tui/ -run 'TestStreamStepOptsIntoFullToolOutput' -count=1
+```
+
+Treat a test as a real defect only when it fails in isolation. The full suite
+takes ~9 minutes, so the isolated re-run is much cheaper than triaging from the
+suite log alone.
+
+Deadlines that produced the observed flakes, for reference when adding new
+async-wait tests:
+
+- `git status … timed out after 10s` (`internal/server`, git-conflict tests)
+- 3s waits for a turn to start / a registry to fill
+  (`TestCancelActiveTurn*`, `TestChildAgentAskIsVisibleAndResumable`)
+- `sharedSpawnConfirmBudget = 500ms` (`internal/browse/cdp/htr.go`) — a freshly
+  spawned daemon must be observed dead within this, and measured reap latency
+  was 135–350ms, so the margin is thin on a loaded machine
+
+**Prefer event-based waits over fixed sleeps when adding tests.** Most of these
+failures share one shape: the test sleeps N seconds and hopes. A poll loop on
+the condition being true, with a generous ceiling, fails for the real reason
+when the machine is slow instead of masquerading as a logic bug.
+
+**Known-flaky quarantine.** `.github/workflows/ci.yml` has a "Retry known-flaky
+tests" step that re-runs named tests once before failing the job. When one of
+those starts failing consistently, fix it and drop it from that list — a
+permanently retried test is a silent hole in the gate.
+
+**HTR tests and the `htr` build tag.** The HTR bundle is generated from
+out-of-tree sources and is never committed, so it is embedded only under
+`-tags htr`. A plain `go test ./...` therefore has no bundle, and any test that
+needs a real HTR install fails with "this ocode binary has no HTR bundle". Use
+`make prepare-htr-assets` plus `-tags htr` when you need those paths exercised.
 
 ## How to Add Tests
 

@@ -1,0 +1,20 @@
+stack: webforms
+title: Web form filling with htrcli (HTML forms, custom widgets, multi-step, live job-board forms)
+corpus_rev: 1
+threshold: 0.9
+# Facts in the answer key were verified on 2026-10-06 against htrcli (CDP transport, headless Chrome)
+# driving the vendored httpbin pizza form, the Selenium web-form, authored hard-case pages
+# (wizard, custom widgets, iframe, validation, payment, upload) and the live Greenhouse job form.
+version_scope: "htrcli (extension + --cdp transports)"
+tags:
+  - discover        # inspect before acting: find/snapshot/eval, labels vs names, visibility, scrolling
+  - text-input      # fill vs type, formats (time/date/tel), password, textarea, pattern/maxlength
+  - choice-input    # select, radio, checkbox, datalist; state-aware check/uncheck
+  - widgets         # custom dropdowns, react-select, datepickers, switches, range/colour via eval
+  - hard-dom        # iframes, shadow DOM, off-screen elements, hidden/honeypot fields, file inputs
+  - wait-nav        # multi-step wizards, stale refs, validation errors, async options
+  - verify-submit   # read values back, submit exactly once, confirm on the server/page
+  - safety          # never submit what must not be submitted, no CAPTCHA, no card data, no invented data
+detection:
+  mode: universal
+  markers: []

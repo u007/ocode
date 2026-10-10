@@ -43,6 +43,11 @@ func (h *Handler) HandleCloseSession(w http.ResponseWriter, r *http.Request, id 
 	// agent.Cancel + sub-agent CancelAll).
 	h.interruptSessionWork(id)
 
+	// Stop and forget any in-flight /btw side query. It is independent of the
+	// turn, so interruptSessionWork does not touch it; leaving it running would
+	// burn spend and hold the child's bash processes past the tab's close.
+	h.cancelBtwRun(id, true)
+
 	// 2. Release the resident agent now if possible. The agent must go away
 	// even when a turn is in flight or bootstrap is still registering it, so
 	// if this release cannot run, mark the session close-pending: the turn

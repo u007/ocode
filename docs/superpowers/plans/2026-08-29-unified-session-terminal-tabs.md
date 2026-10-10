@@ -133,9 +133,11 @@ export function getProjectTerminals(
 
 interface TerminalContextType {
   state: TerminalStoreState;
-  /** Idempotent: restores this project's persisted terminals (or spawns one
-   *  fresh terminal if none were persisted) and marks it live. No-op if
-   *  already live. */
+  /** Idempotent: restores this project's persisted terminals and marks it
+   *  live. No-op if already live.
+   *  AMENDED 2026-09-30: with nothing persisted it now goes live with ZERO
+   *  terminals — it never spawns one. See the amendment note at the end of
+   *  this document. */
   activate: (projectPath: string) => void;
   /** Ensures the project is live (seeding from disk first if it wasn't yet
    *  live), then appends and activates one new terminal. */
@@ -329,7 +331,11 @@ describe("terminalStore", () => {
     expect(screen.getByTestId("active-id").textContent).toBe("term-1-1");
   });
 
-  it("activate() with nothing persisted creates one fresh terminal and goes live", () => {
+  // AMENDED 2026-09-30: this test asserted the seed (count "1"). activate() no
+  // longer spawns, so it now goes live with ZERO terminals; an explicit
+  // openTerminal() is what creates one. Kept, not deleted — it is the direct
+  // pin on that branch.
+  it("activate() with nothing persisted goes live with ZERO terminals and spawns none", () => {
     render(
       <TerminalProvider>
         <Harness projectPath="/proj" />
@@ -337,7 +343,7 @@ describe("terminalStore", () => {
     );
     act(() => screen.getByText("activate").click());
     expect(screen.getByTestId("live").textContent).toBe("true");
-    expect(screen.getByTestId("count").textContent).toBe("1");
+    expect(screen.getByTestId("count").textContent).toBe("0");
   });
 
   it("activate() with persisted terminals restores them and goes live", () => {
@@ -1884,3 +1890,103 @@ If any step fails, stop and report which one before considering this plan comple
 - **Spec coverage:** §1 (merged row, emoji, two `+` buttons, reorder, pinned Processes, combined badge) → Tasks 4–5. §3 (terminalStore, content-only TerminalTabs, App.tsx wiring) → Tasks 1, 3, 6. §4 (activeTabId untouched, focusedKind, order persistence, peek/live split) → Tasks 1, 2, 6. §5 (click routing, `+` buttons, Processes, close, drag, keyboard shortcuts) → Tasks 4, 6. §6 (testing) → every task's own test steps plus Task 7 manual QA.
 - **Placeholder scan:** no TBD/TODO markers; every step has literal code or an exact run command.
 - **Type consistency:** `TerminalInstance`, `getProjectTerminals`, `useTerminalState`, `PROCESSES_TAB_ID`, `UnifiedTabKey` are defined once (Tasks 1–2) and referenced with identical names/shapes in Tasks 3, 4, 6 — no renames across tasks.
+
+---
+
+## Amendment 2026-09-30 — no minimum-one terminal; closing the last one leaves the view
+
+**The reported symptom.** "ocode desktop seems to enforce a minimum of 1 terminal tab." There was never
+such a guard. The minimum was emergent from a **collapsed persisted state**: closing the last terminal
+made both persistence layers record *absence* instead of *emptiness*, so "the user closed them all"
+and "this project never had a terminal" were byte-identical.
+
+- `saveProjectTerminals` **deletes** the localStorage mirror key when the list is empty.
+- The server treats an empty `PUT /api/terminal-tabs` as a **delete** (`internal/termtabs`).
+
+`focusedKind` is persisted per project (`App.tsx` → `web/src/lib/viewPersistence.ts`), so a restart
+that restored the terminal view re-ran `activate()`, found nothing persisted, and minted a shell the
+user had deliberately closed. The in-session case was always correct — a live-but-empty entry
+short-circuits `activate`'s `?.live` guard — which is why the symptom only appeared on relaunch.
+
+**Change 1 — `activate()` never spawns.** With nothing persisted it dispatches
+`terminals: [], activeId: ""`, still `live: true`. That makes the empty state a *decided* state: the
+`live` flag stops `activate` re-entering the branch, and the content-only `TerminalTabs` renders its
+"No terminals open. Use ⌨️+ in the tab bar to start one." panel. A terminal is created only by an
+explicit `openTerminal()` (the ⌨️+ button or Cmd/Ctrl+T). No storage or wire format changed — an empty
+list meaning "delete" is now correct rather than lossy.
+
+This resolves a tension that was already latent in this plan: **Task 7's QA step below expects the
+"No terminals open" state** for a project that never had a terminal activated, which the seed made
+unreachable. That expectation is now what actually happens.
+
+**Change 2 — closing the last terminal hands back to the chat.** New pure helper
+`web/src/lib/terminalFocusExit.ts` (`shouldLeaveTerminalView`). Without it the persisted `focusedKind`
+would restore the now-empty terminal panel on every launch: the user closes the terminal to get it out
+of the way and gets an empty terminal screen instead of their chat.
+
+Wired at exactly the two user-gesture close sites: `UnifiedTabBar.doCloseTerminal` (tab X /
+middle-click) and the Cmd+W path in `App.tsx`.
+
+Deliberately **not** wired to two other paths that also empty the list — this asymmetry is the
+non-obvious part of the change:
+
+- the sidebar inventory's kill X (`RemoteProjectStatus` → the store's `killTerminal`), because the user
+  is looking at the chat or at a different project, and yanking them to a chat they did not act in
+  would be a surprise;
+- a close performed by *another* client, arriving via the `terminal_tabs_changed` refetch, for the
+  same reason — this window did not perform the gesture, and the empty state it lands in is correct
+  and stable.
+
+**The count is the POST-close count, supplied by the store — not measured by the caller.** An earlier
+revision of this change read the count at render time, before calling the close, reasoning that
+`closeTerminal` dispatches synchronously so reading afterwards "would still be the pre-close
+snapshot". That was wrong in a way that mattered, and the direction that hurts is the opposite of the
+one first assumed: if a cross-client `terminal_tabs_changed` refetch adds a terminal in the window
+between a component's last render and the click running its handler, the caller's snapshot says "1"
+while the store says "2". Closing the visible terminal then satisfies "this was the last one" and hands
+the user back to the chat **with a shell still running**.
+
+So `closeTerminal` and `TerminalTabsHandle.closeActiveTerminal` now return the remaining count
+themselves — `null` when nothing was removed, otherwise the count after the removal, `0` meaning the
+close emptied the project — and `shouldLeaveTerminalView` takes only that. The count is read from
+`store.state` *after* the synchronous removal, so it cannot be stale. This also makes the mistake
+unrepresentable rather than merely unlikely: a caller holding a pre-close snapshot no longer compiles,
+because the helper's input no longer has a field for one.
+
+Two related details fell out of the same change. `TerminalTabs.closeActiveTerminal` no longer checks
+the rendered `terminals` list before delegating (that snapshot is the stale one); it short-circuits
+only the no-active-terminal and `PROCESSES_TAB_ID` cases and lets `closeTerminal` re-check against live
+state, which already refuses to remove a neighbour — so two synchronous closes in one tick still close
+one terminal and then report `null`. And `null` is deliberately distinct from `0`: a close that removed
+nothing must not be read as "the project is now empty".
+
+Because the count comes from the store, Processes needs no special handling for correctness — it is
+simply the same `focusedKind: "terminal"`. Closing *from* Processes is a no-op (the handle
+short-circuits the sentinel), so in practice the hand-back happens when the last terminal is closed
+from the tab strip while Processes holds focus.
+
+**Regression tests.** The obvious test — close a terminal, expect zero — *passed before the fix*, so it
+proves nothing; the real defect only exists across a reload. `web/src/stores/terminalStore.test.tsx`
+gained `describe("no minimum-one terminal")`, whose main case crosses the reload boundary
+(`cleanup()` plus a fresh provider against the same persisted state) and waits past both the 200ms
+mirror and 400ms server debounces before asserting. Change 2 is covered by
+`describe("leaving the terminal view on the last close")` in
+`web/src/components/Layout/UnifiedTabBar.test.tsx` and the helper matrix in
+`web/src/lib/terminalFocusExit.test.ts`.
+
+The stale-count regression is pinned by `describe("closeTerminal reports the post-close remaining
+count")` in `terminalStore.test.tsx`: it asserts that closing one of two terminals reports `1` (not
+the `2` a pre-close read returns), that emptying the project reports `0`, that closing an absent id
+reports `null`, and that two synchronous closes report `[1, null]` rather than taking out two
+terminals. Mutation-verified: restoring a pre-close read inside `closeTerminal` fails it with
+`expected [ 2 ] to deeply equal [ 1 ]`, and the mutant compiles — a build-only failure would be
+INVALID, not CAUGHT.
+
+**Fixtures converted, not deleted.** `activate()` was widely used as a "give me a terminal" convenience,
+so 15 assertions across four suites depended on the seed. They were converted to `openTerminal()` or
+given an explicit seeded terminal. The one test that *asserted the seed* is the one amended above; it
+was rewritten to pin the new behavior and states what it used to guard. No test was deleted or weakened.
+
+*This note was written by hand after the context sub-agent spent 41 minutes without producing a write
+(observed drift, per the usual failure mode), using verified single-occurrence replacements. The
+auto-generated `docs/index.md` and `docs/log.md` therefore have no log entry for this amendment.*

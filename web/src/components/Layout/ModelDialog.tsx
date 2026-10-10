@@ -18,7 +18,7 @@ import {
 
 /** The single model-selection purpose this dialog is opened for. Each settings
  *  field opens the dialog for exactly one purpose — there are no tabs. */
-export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "speechsummary" | "permission" | "explorer" | "context" | "autocontinue";
+export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary" | "speechsummary" | "permission" | "explorer" | "context" | "autocontinue" | "pulse";
 
 const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   main: "Select Model",
@@ -34,6 +34,7 @@ const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
   explorer: "Select Explorer Model",
   context: "Select Context Model",
   autocontinue: "Select Auto-Continue Judge Model",
+  pulse: "Select Assistant Model",
 };
 
 interface Props {
@@ -554,7 +555,8 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
         }
         break;
       default:
-        // Form-owned purpose (recap/ocr/mask/commit): hand the pick to
+        // Form-owned purpose (recap/ocr/mask/commit, and the Pulse assistant's
+        // drawer, which persists through api.setPulseModel): hand the pick to
         // the owning form, which persists it via its own Save.
         onPick?.(purpose, modelId, selectedModel);
         break;

@@ -8,15 +8,6 @@ import (
 	"github.com/u007/ocode/internal/discovery"
 )
 
-// discoveryJudgeModel is the TypeSafe System One model (Jev) consulted to
-// decide whether each embedder-selected discovery candidate is in scope for the
-// current request (the lenient relevance rule — see relevance_typesafe.go).
-// There is no separate config flag for the judge: "connected" means the shared
-// client factory yields a TypesafeClient with a non-empty API key (see
-// discoveryJudgeClient, which is also the shared connected check for the
-// doc_search relevance judge).
-const discoveryJudgeModel = "typesafe/jev-latest"
-
 // discoveryJudgeSummaryCap bounds one candidate's summary in the judge state so
 // a large project-doc summary cannot blow up the request.
 const discoveryJudgeSummaryCap = 1000
@@ -29,49 +20,67 @@ const (
 	discoveryJudgeTailCap = 4000
 )
 
-// discoveryJudgeClient resolves the shared TypeSafe judge client, or nil when
-// TypeSafe is not connected. It is the sole "provider connected" check for both
-// the discovery relevance judge and the doc_search relevance judge: the factory
-// must yield a *TypesafeClient with a non-empty API key. A nil config, a
-// non-typesafe factory result, or a keyless client all mean "no judge", and the
-// caller keeps today's keep-everything behavior.
+// discoveryJudgeClient resolves the discovery relevance judge's decision
+// client, or nil when no backend is connected for this slot. It is the sole
+// "provider connected" check shared by the discovery, doc_search and code_search
+// relevance judges: the slot must resolve to a Decider with usable credentials.
+// A nil config, a client that is not a decision backend, or a keyless client all
+// mean "no judge", and the caller keeps today's keep-everything behavior.
 //
-// The factory result is cached per discoveryState (see discoveryState.judge);
-// with no discovery state the lookup is uncached.
-func (a *Agent) discoveryJudgeClient() *TypesafeClient {
+// The result is cached per discoveryState and keyed on the slot's model id (see
+// discoveryState.judge). Keying on the model rather than using a one-shot latch
+// is what lets a mid-session /connect or judge_model change take effect. A nil
+// client is NOT cached, for the same reason: "no credential yet" must become live
+// without needing a discovery reset.
+func (a *Agent) discoveryJudgeClient() Decider {
 	if a.disco == nil {
-		return a.resolveDiscoveryJudgeClient()
+		return a.resolveDecider(slotDiscovery)
 	}
-	a.disco.judgeOnce.Do(func() { a.disco.judge = a.resolveDiscoveryJudgeClient() })
-	return a.disco.judge
-}
+	// Read the model ONCE. Reading it twice lets a config reload between the reads
+	// return two different values and cache a client under the wrong key.
+	model := a.slotModel(slotDiscovery)
 
-func (a *Agent) resolveDiscoveryJudgeClient() *TypesafeClient {
-	if a.config == nil {
-		return nil
+	// Fast path for a cached client on the same model, so a credentialed session
+	// does not re-run the client factory on every turn and status read. This is
+	// NOT what keeps the debug log quiet for a keyless user — nothing is cached
+	// in that case, and NewClient dedupes its own "no API key" line per
+	// (provider, model), so the log stays quiet without pinning a nil.
+	a.disco.judgeMu.Lock()
+	cached, cachedModel := a.disco.judge, a.disco.judgeModel
+	a.disco.judgeMu.Unlock()
+	if cached != nil && cachedModel == model {
+		return cached
 	}
-	client, ok := newClientFn(a.config, discoveryJudgeModel).(*TypesafeClient)
-	if !ok || client == nil || client.APIKey == "" {
-		return nil
-	}
+
+	client := a.resolveDecider(slotDiscovery)
+
+	a.disco.judgeMu.Lock()
+	defer a.disco.judgeMu.Unlock()
+	a.disco.judgeModel = model
+	a.disco.judge = client
 	return client
 }
 
 // judgeDiscoveryCandidates asks one noul (yes-probability) question per
-// candidate in a single Decide call and returns the subset judged relevant. It
-// is pure with respect to the sticky session: the caller seeds exactly what is
-// returned.
+// candidate in a single Decide call and returns the subset judged relevant plus
+// the raw per-candidate noul scores. It is pure with respect to the sticky
+// session: the caller seeds exactly what is returned.
 //
 // The floor is the lenient shared relevance floor
 // (relevanceJudgeMinConfidenceDefault = 0.5), not the high-stakes permission
 // floor: this judge only decides whether a candidate is in scope, and the
 // product rule is "even slight relevancy should be presented; only a different
 // scope is skipped". Fail-open is handled by judgeRelevanceQuestions — a
-// transport/decode error returns (nil, err) and the caller seeds every
+// transport/decode error returns (nil, nil, err) and the caller seeds every
 // candidate; a missing or non-noul answer keeps that candidate.
-func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message, query string, candidates []discovery.Doc) ([]discovery.Doc, error) {
+//
+// The scores are the ONLY channel by which the auto-inject gate learns how
+// relevant Jev thought a skill was (see discovery_autoinject.go). They are
+// returned, never consulted here: a vetoed candidate still carries its real
+// score, and this judge's keep contract is unchanged.
+func (a *Agent) judgeDiscoveryCandidates(client Decider, tail []Message, query string, candidates []discovery.Doc) ([]discovery.Doc, map[string]float64, error) {
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	state := buildDiscoveryJudgeState(tail, query, candidates)
 	ids := make([]string, len(candidates))
@@ -84,9 +93,9 @@ func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message,
 		}
 	}
 
-	keepSet, err := a.judgeRelevanceQuestions(context.Background(), client, "DISCOVERY", "discovery_typesafe", ids, state, questions)
+	keepSet, scores, err := a.judgeRelevanceQuestions(context.Background(), client, "DISCOVERY", "discovery_typesafe", ids, state, questions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keep := make([]discovery.Doc, 0, len(candidates))
 	for _, d := range candidates {
@@ -94,7 +103,7 @@ func (a *Agent) judgeDiscoveryCandidates(client *TypesafeClient, tail []Message,
 			keep = append(keep, d)
 		}
 	}
-	return keep, nil
+	return keep, scores, nil
 }
 
 // buildDiscoveryJudgeState assembles the structured judge request: the current

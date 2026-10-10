@@ -22,7 +22,7 @@
 
 - Builds `exec.CommandContext`, captures stdout into a `tool.BoundedBuffer`-style limit of 1 MiB (reuse `internal/tool/bounded_buffer.go` if exported; otherwise a local `io.LimitReader` into a `bytes.Buffer`), stderr into a separate buffer.
 - Registers via `tool.StartSupervised` with `ID: "computer-<name>-<unix nano>"`, `Name: "computer " + name`, `Command: name + " " + strings.Join(args, " ")`, `Kind: tool.ProcessKindComputer`.
-- Waits, then `sup.MarkExited` / `sup.MarkKilled` following the `piperSynth` pattern in `internal/tts/piper.go:322-359`.
+- Waits, then `sup.MarkExited` / `sup.MarkKilled` following the `piperSynth` pattern in `internal/tts/piper.go:330-367`.
 - Non-zero exit → `fmt.Errorf("computer %s: %w: %s", name, err, trimmed stderr)`. Context deadline → return `ctx.Err()`.
 - `errors.Is(err, exec.ErrNotFound)` is preserved through wrapping so drivers can detect a missing binary.
 

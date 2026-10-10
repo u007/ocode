@@ -80,7 +80,7 @@ func TestDecideSandboxWrappersDoNotBypassHarmfulGit(t *testing.T) {
 	sandboxSupported = func() bool { return true }
 	t.Cleanup(func() { sandboxSupported = orig })
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	pm := NewPermissionManager()
@@ -125,7 +125,7 @@ func TestBannedPrefixSeesThroughWrappers(t *testing.T) {
 	sandboxSupported = func() bool { return true }
 	t.Cleanup(func() { sandboxSupported = orig })
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	for _, mode := range []PermissionMode{PermissionModeNormal, PermissionModeSandbox} {

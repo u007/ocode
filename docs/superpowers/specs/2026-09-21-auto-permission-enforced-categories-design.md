@@ -37,7 +37,7 @@ not deny a call whose only concern is that category.
    (see the follow-up section below).
 5. **Safety boundary (unchanged).** These toggles configure the judge, not Go's
    deterministic guards. `verifyAutoGrant` runs on *both* judge paths
-   (`agent.go:3746`, `permission_typesafe.go:157`), so an unticked box cannot
+   (`agent.go:3777`, `permission_typesafe.go:157`), so an unticked box cannot
    auto-grant a hard-blocked command, a dangerous `rm`, an out-of-scope bash
    target, or truncated args/scripts. `IsHarmfulRequest && !allow_destructive`
    still bypasses the judge entirely. Hard-denied `/ban` prefixes still win. Each

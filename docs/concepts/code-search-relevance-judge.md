@@ -8,7 +8,7 @@ tags:
   - relevance-judge
   - tools
   - architecture
-timestamp: 2026-09-29T04:42:31Z
+timestamp: 2026-10-05T00:45:48Z
 ---
 # Code-Search Relevance Judge
 
@@ -18,7 +18,7 @@ timestamp: 2026-09-29T04:42:31Z
 
 The three code-search tools — `grep`, `rgrep` and `glob` — return per-file result sets straight into the transcript, and a repo-wide keyword match routinely returns dozens of files that have nothing to do with what the caller was looking for. When the TypeSafe provider is connected, each matching **file** is now scored by a relevance judge (Jev, `typesafe/jev-latest`) against the caller's stated `intent` before anything is rendered: out-of-scope files are removed **together with all of their matching lines**. The judge runs between collection and formatting, so one judge call covers every `output_mode` value of the tool that made it.
 
-The judge shares its lenient core with the [doc search relevance judge](concepts/doc-search-relevance-judge.md) — the 0.5 confidence floor, per-candidate fail-open, and one `noul` (yes-probability) question per candidate — through `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:47`). The shared `noul` mechanics (decision API, floor rationale, lenient rubric) are documented once in [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) and are deliberately not restated here.
+The judge shares its lenient core with the [doc search relevance judge](concepts/doc-search-relevance-judge.md) — the 0.5 confidence floor, per-candidate fail-open, and one `noul` (yes-probability) question per candidate — through `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:57`). The shared `noul` mechanics (decision API, floor rationale, lenient rubric) are documented once in [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) and are deliberately not restated here.
 
 Its contract is **fail-open**: a judge can only ever hide a result. An error, a timeout, or a missing answer keeps results — byte-identical to an unfiltered run.
 
@@ -41,13 +41,13 @@ With no judge, `runSearchJudge` returns every result untouched (`internal/tool/s
 `grep`, `rgrep` and `glob` gained a new schema argument `intent` — one sentence stating what the caller is looking for and why — listed in `required`: glob at `internal/tool/search.go:212`, grep at `internal/tool/search.go:465`, rgrep at `internal/tool/rgrep.go:136` (field `grepParams.Intent`, `internal/tool/search.go:422`).
 
 - **`required` is a teaching device, not enforcement.** An empty `intent` skips the judge entirely and logs `intent-missing` (`internal/agent/search_typesafe.go:156`); it never returns an error demanding the argument, which would burn a turn on a formality.
-- The requirement is also reinforced in the prompt directive that already names the search tools (`internal/agent/prompt.go:51`), pinned by `TestDocPromptDirectiveRequiresSearchIntent` (`internal/agent/search_wiring_test.go:272`).
+- The requirement is also reinforced in the prompt directive that already names the search tools (`internal/agent/prompt.go:52`), pinned by `TestDocPromptDirectiveRequiresSearchIntent` (`internal/agent/search_wiring_test.go:272`).
 - Model laziness is measurable: the count of `intent-missing` debug lines is the signal for whether `required` is honoured in practice.
 - **Empty intent and replayed pre-change sessions degrade to unfiltered — correct, not broken.** A recorded tool call from before this feature has no `intent`, so a replay takes the skip path.
 
 ## The seam: the judge rides the execution context
 
-The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:4902`), gated to the three tool names (`internal/agent/agent.go:4999`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:5001`). Any other tool's dispatch never touches the judge client factory.
+The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:5396`), gated to the three tool names (`internal/agent/agent.go:5395`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:5134`). Any other tool's dispatch never touches the judge client factory.
 
 The rationale is load-bearing: sub-agents and the transient advisor are handed the **parent's** tool objects (`internal/agent/ask.go:166`, `internal/agent/subagent.go:1126`, `internal/agent/advisor_tool.go:176` all call `GetTools()`), so a judge field on the tool struct would be overwritten by each child — and the advisor is shut down after one call, leaving the parent judging against a dead agent. It would also be a data race, since the search tools are `Parallel() == true`. With the context seam each agent attaches its own judge for its own call: no shared mutable state, no clobbering.
 
@@ -61,7 +61,7 @@ Two regression tests pin this (`internal/agent/search_wiring_test.go`):
 **A judge can only ever hide a result — never create, never drop on failure.** Every failure mode keeps results, and the failure itself is disclosed rather than swallowed (the `SearchResultJudge` signature's `error` return exists precisely so "the judge errored and I kept everything" stays distinguishable from "the judge ran and everything was in scope", `internal/tool/search_judge.go:50`).
 
 - The code-search judge runs on a short budget: `searchJudgeTimeout` = **4s** (`internal/agent/search_typesafe.go:27`), applied through the context-aware `DecideCtx` (`internal/agent/typesafe.go:88`). Fail-open still *waits*, so without this a provider that accepts the connection and then stalls would add the full default timeout to every search in the session.
-- The permission, auto-continue and doc_search judges keep the 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) — they are higher-stakes and lower-frequency: `Decide` (`internal/agent/typesafe.go:76`) remains a `DecideCtx` wrapper with that fallback, used by `internal/agent/permission_typesafe.go:251` and `internal/agent/autocontinue_typesafe.go:126`; the doc_search relevance path passes a background context and inherits the same 30s fallback.
+- The permission, auto-continue and doc_search judges keep the 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) — they are higher-stakes and lower-frequency: `Decide` (`internal/agent/typesafe.go:76`) remains a `DecideCtx` wrapper with that fallback, used by `internal/agent/permission_typesafe.go:252` and `internal/agent/autocontinue_typesafe.go:126`; the doc_search relevance path passes a background context and inherits the same 30s fallback.
 
 | Condition | Behaviour |
 |---|---|
@@ -76,7 +76,7 @@ Two regression tests pin this (`internal/agent/search_wiring_test.go`):
 
 ## Candidate cap and pre-judge order
 
-`searchJudgeMaxCandidates` = **40** (`internal/tool/search_judge_apply.go:14`). Results past the cap are **kept unjudged, never dropped** — the cap is a cost control and must not decide relevance — and the footer discloses how many were not judged (`runSearchJudge`, `internal/tool/search_judge_apply.go:78`).
+`SearchJudgeMaxCandidates` = **40** (`internal/tool/search_judge_apply.go:14`). Results past the cap are **kept unjudged, never dropped** — the cap is a cost control and must not decide relevance — and the footer discloses how many were not judged (`runSearchJudge`, `internal/tool/search_judge_apply.go:78`).
 
 The pre-judge order is each tool's existing output order, so the 40 judged candidates are the first 40 in that order. For `glob` that order is **mtime descending** (`sort.Slice`, `internal/tool/search.go:291`), so on a large glob the 40 judged files are the 40 most recently touched. Because unjudged results are kept, a skewed sample costs coverage, not correctness — but on a large `glob` the cap, not relevance, decides how much judging happens, and the footer's unjudged count makes that visible.
 
@@ -84,7 +84,7 @@ The pre-judge order is each tool's existing output order, so the 40 judged candi
 
 State is built by `buildSearchJudgeState` (`internal/agent/search_typesafe.go:48`): the request (the `intent`), the tool name, a query map limited to the whitelist `searchJudgeQueryFields` = `pattern`/`path`/`include` (`internal/agent/search_typesafe.go:33`, non-secret scalars only — the decide call is a network round trip), and one candidate per file keyed by its path. Per-file summaries are capped at **400 chars** (`searchJudgeSummaryCap`, `internal/agent/search_typesafe.go:16`) — much smaller than the doc_search judge's 1000, because the question is a yes/no call — and preserve match line numbers so the judge sees *where* the file matched, not merely that it did.
 
-Each candidate gets one `noul` question in a single decide call, delegated to the shared `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:47`), which supplies the lenient floor `relevanceJudgeMinConfidenceDefault` = **0.5** (`internal/agent/relevance_typesafe.go:20`), per-candidate fail-open, side-usage accounting and debug lines. The floor is deliberately decoupled from the high-stakes permission floor (`permissions.auto.min_confidence` = 0.85) — a relevance veto only hides a retrieval result, it never grants a tool call.
+Each candidate gets one `noul` question in a single decide call, delegated to the shared `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:57`), which supplies the lenient floor `relevanceJudgeMinConfidenceDefault` = **0.5** (`internal/agent/relevance_typesafe.go:20`), per-candidate fail-open, side-usage accounting and debug lines. The floor is deliberately decoupled from the high-stakes permission floor (`permissions.auto.min_confidence` = 0.85) — a relevance veto only hides a retrieval result, it never grants a tool call.
 
 The rubric (`searchJudgeInstructions`, `internal/agent/search_typesafe.go:85`) is lenient in the same product sense as the doc rubric — answer yes when the file is even slightly relevant; answer no only for a genuinely different area of the codebase — plus two guards the doc rubric does not need:
 
@@ -116,7 +116,7 @@ Emitted under kind `TOOL`, tag `search_typesafe`:
 
 - `search_typesafe tool=<grep|rgrep|glob> intent-missing (intent empty; judge skipped, N result(s) unfiltered)` — `internal/agent/search_typesafe.go:156`.
 - `search_typesafe tool=<tool> judge=<model> failed (fail-open, all N result(s) kept): <err>` — `internal/agent/search_typesafe.go:163`.
-- `search_typesafe id=<path> noul=<score> verdict=keep|veto` per candidate, and `search_typesafe kept=<n> vetoed=<n> min=<0.50> model=<model>` per call — from `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:47`) with this path's debug kind and tag (`internal/agent/search_typesafe.go:121`).
+- `search_typesafe id=<path> noul=<score> verdict=keep|veto` per candidate, and `search_typesafe kept=<n> vetoed=<n> min=<0.50> model=<model>` per call — from `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:57`) with this path's debug kind and tag (`internal/agent/search_typesafe.go:121`).
 
 ## Scope decisions
 
@@ -131,4 +131,3 @@ Emitted under kind `TOOL`, tag `search_typesafe`:
 - [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) — the shared `noul` mechanics, floor rationale and lenient rubric.
 - [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md) — the fail-open philosophy and the bypass principle referenced in the scope decisions.
 - Design spec: `superpowers/specs/2026-09-28-code-search-relevance-judge-design.md` — the contract source (signatures, failure matrix, test list).
-- Implementation plan: `superpowers/plans/2026-09-28-code-search-relevance-judge.md` — the task-by-task record (tasks 1–8) that produced the anchors above.

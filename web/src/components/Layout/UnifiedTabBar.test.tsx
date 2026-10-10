@@ -113,6 +113,19 @@ describe("UnifiedTabBar", () => {
     expect(within(screen.getByRole("tab", { name: /chat one/i })).getByText("Chat One")).toBeTruthy();
   });
 
+  it("bounds an oversized tab title so the nowrap label cannot jank the strip", () => {
+    // A tab title can mirror a session title derived from a multi-megabyte
+    // first user message. Rendering it raw into the nowrap/ellipsis pill forces
+    // the browser to lay out the whole string on every reflow (~300ms for
+    // 1.4MB). The label must be bounded before it reaches the DOM.
+    const huge = "standup review of recent commits ".repeat(50000);
+    projectFake.tabs = [{ id: "s1", projectPath: "/proj", title: huge, activeSubTab: "chat" }];
+    renderBar();
+    const pill = screen.getByRole("tab", { name: /standup review of recent commits/i });
+    expect((pill.textContent ?? "").length).toBeLessThanOrEqual(100);
+    expect((pill.getAttribute("title") ?? "").length).toBeLessThanOrEqual(100);
+  });
+
   it("renders a Browser add button and opens a browser pill", () => {
     const { onFocusKindChange } = renderBar();
     const addBrowser = screen.getByRole("button", { name: /new browser tab/i });
@@ -498,6 +511,94 @@ describe("UnifiedTabBar", () => {
     expect(screen.queryByRole("tab", { name: "Terminal 1" })).not.toBeInTheDocument();
   });
 
+  // Closing the LAST terminal of the focused terminal view hands the user back
+  // to the chat. Without this, focusedKind stays "terminal" and — since it is
+  // persisted per project — every later launch restores an empty terminal panel
+  // where the user's chat used to be. Paired with the "no minimum-one
+  // terminal" change in terminalStore.activate (which stopped resurrecting a
+  // shell on reload), this makes "closed them all" actually mean closed.
+  describe("leaving the terminal view on the last close", () => {
+    function seedTerminals(terminals: { id: string; title: string }[], activeId: string) {
+      window.localStorage.setItem(
+        "ocode.ui.terminals.project.v1",
+        JSON.stringify({ version: 1, projects: { "/proj": { terminals, activeId } } }),
+      );
+    }
+
+    /** Renders the bar with the terminal view focused, a live project, and a
+     *  spy on the focus change so the hand-off is observable. */
+    function renderTerminalFocused(terminals: { id: string; title: string }[], activeId: string) {
+      seedTerminals(terminals, activeId);
+      const onFocusKindChange = vi.fn();
+      function ActivateTerminal() {
+        const { activate } = useTerminalState();
+        useEffect(() => {
+          activate("/proj");
+        }, [activate]);
+        return null;
+      }
+      render(
+        <ChatProvider>
+          <TerminalProvider>
+            <BrowserTabsProvider>
+              <ActivateTerminal />
+              <UnifiedTabBar focusedKind="terminal" onFocusKindChange={onFocusKindChange} />
+            </BrowserTabsProvider>
+          </TerminalProvider>
+        </ChatProvider>,
+      );
+      return onFocusKindChange;
+    }
+
+    it("hands back to the chat when the only terminal is closed", () => {
+      const onFocusKindChange = renderTerminalFocused([{ id: "term-1-1", title: "Terminal 1" }], "term-1-1");
+      fireEvent.click(screen.getByLabelText("Close Terminal 1"));
+      fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+      expect(onFocusKindChange).toHaveBeenCalledWith("chat");
+    });
+
+    it("stays in the terminal view when another terminal remains", () => {
+      const onFocusKindChange = renderTerminalFocused(
+        [
+          { id: "term-1-1", title: "Terminal 1" },
+          { id: "term-2-2", title: "Terminal 2" },
+        ],
+        "term-2-2",
+      );
+      fireEvent.click(screen.getByLabelText("Close Terminal 2"));
+      fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+      expect(screen.getByRole("tab", { name: "Terminal 1" })).toBeInTheDocument();
+      expect(onFocusKindChange).not.toHaveBeenCalled();
+    });
+
+    it("stays in the terminal view when the close happens from the chat", () => {
+      // The same close, but the user is not looking at the terminal region.
+      seedTerminals([{ id: "term-1-1", title: "Terminal 1" }], "term-1-1");
+      const onFocusKindChange = vi.fn();
+      function ActivateTerminal() {
+        const { activate } = useTerminalState();
+        useEffect(() => {
+          activate("/proj");
+        }, [activate]);
+        return null;
+      }
+      render(
+        <ChatProvider>
+          <TerminalProvider>
+            <BrowserTabsProvider>
+              <ActivateTerminal />
+              <UnifiedTabBar focusedKind="chat" onFocusKindChange={onFocusKindChange} />
+            </BrowserTabsProvider>
+          </TerminalProvider>
+        </ChatProvider>,
+      );
+      fireEvent.click(screen.getByLabelText("Close Terminal 1"));
+      fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+      expect(screen.queryByRole("tab", { name: "Terminal 1" })).not.toBeInTheDocument();
+      expect(onFocusKindChange).not.toHaveBeenCalled();
+    });
+  });
+
   it("⌨️+ creates a new terminal (visible as a pill) and switches focus to terminal", () => {
     // Terminal titles come from a module-level counter shared across this
     // whole test file (see terminalStore.tsx's bumpSeqPast) — assert a
@@ -872,5 +973,6 @@ describe("terminal alert badge auto-clear timer", () => {
     // The host should have been passed to closeSession
     expect(api.closeSession).toHaveBeenCalledWith("s-remote", "devbox");
   });
+
 
 });

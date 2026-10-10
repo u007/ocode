@@ -510,7 +510,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/thinking` | | Toggle visibility of agent thoughts | |
 | `/details` | | Toggle tool execution details | |
 | `/sound` | | Toggle terminal bell on task completion | |
-| `/connect` | | Show/Set provider API keys | |
+| `/connect` | | Show/Set provider API keys; the dialog filters providers by name, id or status | |
 | `/secret` | | Encrypt/decrypt project files | |
 | `/login` | | Log in and enable encrypted config sync | |
 | `/logout` | `/sync-logout` | Log out and stop config sync | |

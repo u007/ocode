@@ -331,6 +331,7 @@ var universalStacks = map[string]bool{
 	"conduct":       true,
 	"hallucination": true,
 	"pdf":           true,
+	"webforms":      true,
 }
 
 // kaizenAdmitted reports whether a Kaizen skill is admitted for the session:
@@ -618,14 +619,17 @@ func renderCatalog(skills []Skill) string {
 	return b.String()
 }
 
-// LoadSkill resolves a skill by name against the current working directory;
-// see LoadSkillForRoot.
+// LoadSkill resolves a skill by name for the process's current working
+// directory. Callers that know the session's project root MUST use
+// LoadSkillForRoot instead: os.Getwd() is the SERVER process's cwd, which for a
+// web/desktop server (or any session rooted at a different project) is not the
+// session's project, so a project-local skill would not be found.
 func LoadSkill(name string) (*Skill, error) {
 	root := ""
 	if cwd, err := os.Getwd(); err == nil {
 		root = cwd
 	}
-	return LoadSkillForRoot(root, name)
+	return LoadSkillForRoot(name, root)
 }
 
 // LoadSkillForRoot resolves a skill by exact name (or containing directory
@@ -639,7 +643,8 @@ func LoadSkill(name string) (*Skill, error) {
 // namespaced "<plugin>:<name>" that matched nothing — the bare "<name>". The
 // last step covers plugin skills copied into a skills dir, which lose their
 // namespace while their text still cites each other as "superpowers:<name>".
-func LoadSkillForRoot(root, name string) (*Skill, error) {
+// root may be empty, which falls back to the process cwd.
+func LoadSkillForRoot(name, root string) (*Skill, error) {
 	all := LoadSkillsForRoot(root)
 	for _, s := range all {
 		if s.Name == name {
@@ -656,7 +661,7 @@ func LoadSkillForRoot(root, name string) (*Skill, error) {
 		}
 	}
 	if i := strings.Index(name, ":"); i > 0 && i < len(name)-1 {
-		return LoadSkillForRoot(root, name[i+1:])
+		return LoadSkillForRoot(name[i+1:], root)
 	}
 	return nil, nil
 }

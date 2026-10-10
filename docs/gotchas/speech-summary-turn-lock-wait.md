@@ -28,7 +28,7 @@ Three separate locks were being held across slow work, and each one turns a
 side task into a stall for unrelated code:
 
 1. **Waiting behind the turn.** `runTurn` does `as.mu.Lock(); defer
-   as.mu.Unlock()` (`internal/server/agent_session.go:1036-1038`) and holds it
+   as.mu.Unlock()` (`internal/server/agent_session.go:1055-1057`) and holds it
    for the **entire** turn. The handler's later `as.mu.Lock()` to read
    `as.agent` therefore used to block until the turn finished — the summariser
    only started after the turn ended, with the user waiting the whole time.
@@ -103,7 +103,7 @@ nothing there and costs the whole server.
 
 If a future maintainer is here wondering **"why did the model not run for
 this click?"**, check this before suspecting any lock: since 2026-09-29,
-`SummarizeForSpeech` (`internal/agent/speech_summary.go:290`) returns `""`
+`SummarizeForSpeech` (`internal/agent/speech_summary.go:340`) returns `""`
 — the same documented "speak the original" signal — *without resolving a
 client and without reading the 24h summary cache*, when `speechTextNeedsRewrite`
 reports the text is already short plain prose: at most

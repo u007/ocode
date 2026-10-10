@@ -14,7 +14,7 @@ import (
 func permClickModel(t *testing.T) *model {
 	t.Helper()
 	m := model{
-		agent:  agent.NewAgent(nil, nil, nil, nil),
+		agent:  newTestAgent(nil, nil, nil, nil),
 		ready:  true,
 		width:  120,
 		height: 40,
@@ -110,7 +110,7 @@ func TestPermClickCycleIncludesSandbox(t *testing.T) {
 func TestSidebarPermClickCycleIncludesSandboxAuto(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // isolate persist writes
 
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	m := &model{
 		agent:       a,
 		ready:       true,
@@ -179,7 +179,7 @@ func TestSidebarPermClickCycleIncludesSandboxAuto(t *testing.T) {
 func TestSandboxCommandSetsMode(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m := model{
-		agent:  agent.NewAgent(nil, nil, nil, nil),
+		agent:  newTestAgent(nil, nil, nil, nil),
 		ready:  true,
 		width:  120,
 		height: 40,
@@ -209,7 +209,7 @@ func TestSandboxCommandSetsMode(t *testing.T) {
 func TestSandboxPersistsAsDefault(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m := model{
-		agent:  agent.NewAgent(nil, nil, nil, nil),
+		agent:  newTestAgent(nil, nil, nil, nil),
 		ready:  true,
 		width:  120,
 		height: 40,

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // runtimePathsSection returns formatted lines to append inside the <env> block.
@@ -359,8 +360,32 @@ func pythonRuntimePaths(roots []string) []string {
 	return lines
 }
 
+// toolVersionCache memoises `<tool> --version` per resolved binary path for the
+// life of the process. The <env> block is rebuilt for every agent, sub-agents
+// included, and the probes are subprocess spawns (node, bun, npm, pnpm, npx,
+// python, …): uncached, each sub-agent dispatch paid for all of them again,
+// around a second before its first request. Keyed on the resolved path, so a
+// PATH change that selects a different binary is probed afresh; a failed probe
+// is not cached.
+var toolVersionCache sync.Map
+
 func toolVersion(name string) string {
-	cmd := exec.Command(name, "--version")
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return ""
+	}
+	if v, ok := toolVersionCache.Load(path); ok {
+		return v.(string)
+	}
+	v := probeToolVersion(path)
+	if v != "" {
+		toolVersionCache.Store(path, v)
+	}
+	return v
+}
+
+func probeToolVersion(path string) string {
+	cmd := exec.Command(path, "--version")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

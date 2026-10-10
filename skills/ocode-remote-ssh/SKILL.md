@@ -108,7 +108,7 @@ Git panel go stale while every starved poll burns its own 30s bound.
 
 **A remote project's path must never enter a path-only local allowlist.**
 
-- `allowedProjectRoots` (`internal/server/handler.go:626`) contains only the
+- `allowedProjectRoots` (`internal/server/handler.go:662`) contains only the
   workdir plus projects with `Host == ""`. Project identity is
   `(host, path)` (+ port).
 - `resolveRegisteredProjectRoot` (`handler_git.go:136`) matches **verbatim
@@ -188,7 +188,7 @@ A terminal has ONE attachment slot even across clients: attaching the same
 `terminal_id` from a second client sends `{"type":"detached","reason":"superseded"}`
 on the first socket and closes it, and that client's panel parks with a **Take
 over** button rather than reconnecting. See `skills/ocode-web` (terminalStore) and
-`CLAUDE.md`.
+`docs/concepts/web-server-project-scoping.md`.
 
 ## 8. Profile and credential routing
 
@@ -197,7 +197,7 @@ Remote chat runs **on the host** (`ocode serve --remote`) — never locally.
 - `resolveSessionProfile` order: `OCODE_PROFILE` > window profile > global fallback.
 - The active profile is authoritative **only** when the local proxy stamps
   `X-Ocode-Active-Profile` + `X-Ocode-Profile-Authoritative: 1`
-  (`injectProxiedActiveProfile`, `handler_remote_proxy.go:183`).
+  (`injectProxiedActiveProfile`, `handler_remote_proxy.go:187`).
   `applyProxiedActiveProfile` (`handler_profiles.go:218`) consumes it. A bare
   client-supplied profile header is **ignored** — no forge. Nothing is persisted
   on the remote.
@@ -222,7 +222,7 @@ Remote chat runs **on the host** (`ocode serve --remote`) — never locally.
 | `docs/gotchas/remote-terminal-502-provisioning.md` | the three 502 causes above |
 | `docs/gotchas/tui-clipboard-remote-ssh-osc52.md` | `copyToClipboard` / OSC 52 |
 | `docs/concepts/remote-mcp-oauth-compat.md` | MCP credential bound to exact server URL |
-| `CLAUDE.md` §885 | `gitexec`, `GIT_OPTIONAL_LOCKS=0`, `WithLockRetry` |
+| `CLAUDE.md` § Git subprocesses | `gitexec`, `GIT_OPTIONAL_LOCKS=0`, `WithLockRetry` |
 
 **TUI clipboard (page above):** never call `clipboard.WriteAll` from a TUI view —
 route every copy through `copyToClipboard` (`internal/tui/clipboard.go:26`), which

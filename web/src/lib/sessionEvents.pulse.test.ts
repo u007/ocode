@@ -11,6 +11,7 @@ vi.mock("../api/client", () => ({
     getSession: vi.fn(),
     closeSession: vi.fn(),
   },
+  apiPath: (p: string) => p,
 }));
 
 const mockSink = vi.fn();

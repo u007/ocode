@@ -19,6 +19,8 @@ interface ShortcutHandlers {
   onCloseBrowserTab?: (id: string) => void;
   /** Toggle the Pulse dashboard. Wired to Cmd/Ctrl+J (see the handler). */
   onTogglePulse?: () => void;
+  /** Toggle the Pulse assistant window. Wired to Cmd/Ctrl+Shift+A. */
+  onToggleAssistant?: () => void;
 }
 
 /**
@@ -78,6 +80,26 @@ export function useKeyboard(handlers: ShortcutHandlers) {
         if (!e.metaKey && target instanceof Element && target.closest(".xterm")) return;
         e.preventDefault();
         ref.current.onTogglePulse?.();
+      }
+      // Cmd/Ctrl+Shift+A. Shift is required so Cmd/Ctrl+A keeps its select-all
+      // in every field, and the key is compared lowercased because Shift makes
+      // e.key "A". Ctrl+Shift+A is also the xterm and Monaco block-comment
+      // combo on Linux and Windows, so on the Ctrl path an event from either
+      // editor is left alone. Cmd+Shift+A reaches neither. An event another
+      // handler already took is never acted on again.
+      if (
+        !e.defaultPrevented &&
+        e.key.toLowerCase() === "a" &&
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        !e.altKey
+      ) {
+        const target = e.target as Element | null;
+        const inEditor = target instanceof Element && target.closest(".xterm, .monaco-editor") !== null;
+        if (!(e.ctrlKey && !e.metaKey && inEditor)) {
+          e.preventDefault();
+          ref.current.onToggleAssistant?.();
+        }
       }
       if (e.key === "Escape") {
         ref.current.onEscape?.();

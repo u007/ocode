@@ -12,11 +12,11 @@ status: active
 
 The TUI sidebar currently displays a fixed-width (38-column) sidebar with the session title always visible, wrapped to a maximum of 3 lines (`sidebarMaxTitleLines = 3`). The "✦ gen" button rides the last row of the title and is the only interactive element in the title row. The title cannot be expanded to show more content or collapsed below the 3-line limit — it either wraps at 3 lines or truncates with "...".
 
-The current `sidebarHeaderHeight()` function (model.go:20957) caps the header height at `sidebarMaxTitleLines` (3 rows), and `renderSidebar()` (model.go:20686) applies the same truncation. Clicking the title area does not toggle any expand/collapse state; only the "✦ gen" button at the far right of the last title row is a separate interactive element.
+The current `sidebarHeaderHeight()` function (model.go:21876) caps the header height at `sidebarMaxTitleLines` (3 rows), and `renderSidebar()` (model.go:21616) applies the same truncation. Clicking the title area does not toggle any expand/collapse state; only the "✦ gen" button at the far right of the last title row is a separate interactive element.
 
 ## Fixed-Width 38-Column Sidebar
 
-The sidebar column width is defined as a constant `sidebarColumnWidth = 38` (model.go:1936) and is used throughout the sidebar render pipeline for:
+The sidebar column width is defined as a constant `sidebarColumnWidth = 38` (model.go:1988) and is used throughout the sidebar render pipeline for:
 
 - Title text wrapping width (innerWidth = sidebarColumnWidth - 4)
 - Gen button hit-box positioning

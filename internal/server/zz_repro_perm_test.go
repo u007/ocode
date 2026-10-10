@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -35,7 +36,7 @@ func TestReproPermissionResolveHeadless(t *testing.T) {
 		h.cfg.Model = "fake-model"
 	}
 	ag := agent.NewAgent(&fakeClientAskBash{}, nil, nil, nil)
-	as := &agentSession{agent: ag, model: "fake-model", messages: nil}
+	as := &agentSession{agent: ag, model: "fake-model", messages: nil, credVersion: auth.CredentialVersion()}
 	h.agents["sess-1"] = as
 	// Suppress the background title-generation goroutine: it writes session
 	// files after the test body returns and races t.TempDir's RemoveAll cleanup.
@@ -78,7 +79,7 @@ func TestSecondSyncChatRefusedWhilePermissionPending(t *testing.T) {
 		h.cfg.Model = "fake-model"
 	}
 	ag := agent.NewAgent(&fakeClientAskBash{}, nil, nil, nil)
-	as := &agentSession{agent: ag, model: "fake-model", messages: nil}
+	as := &agentSession{agent: ag, model: "fake-model", messages: nil, credVersion: auth.CredentialVersion()}
 	h.agents["sess-pending"] = as
 	// Suppress the background title-generation goroutine: it writes session
 	// files after the test body returns and races t.TempDir's RemoveAll cleanup.

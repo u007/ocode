@@ -31,7 +31,7 @@ describe("/export and /export-claude", () => {
     mockExportMarkdown.mockResolvedValue("# Hi\n\n## User\n\nhello\n\n");
     const result = await dispatchCommand("/export", ctx(REAL_ID));
     expect(mockExportMarkdown).toHaveBeenCalledWith(REAL_ID, undefined);
-    expect(result.messages?.[0]?.content).toBe("Exported session as Markdown.");
+    expect(result.messages?.[0]?.content).toBe(`Exported session to \`ocode_export_${REAL_ID}.md\``);
     expect(result.download?.filename).toBe(`ocode_export_${REAL_ID}.md`);
     expect(result.download?.content).toContain("hello");
   });
@@ -159,6 +159,9 @@ describe("ctx.host threading", () => {
       api: { btwSession: mockBtw } as never,
     } as never);
     expect(mockBtw).toHaveBeenCalledWith(REAL_ID, "quick note", HOST);
-    expect(result.messages?.[0]?.content).toContain("quick note");
+    // /btw starts an independent side query and returns a `btw` effect for the
+    // docked panel; it no longer records a "Noted:" message in the transcript.
+    expect(result.btw).toEqual({ sessionId: REAL_ID, question: "quick note", host: HOST });
+    expect(result.messages ?? []).toHaveLength(0);
   });
 });

@@ -53,6 +53,40 @@ describe("restoreTerminalHistory", () => {
     expect(headers.get("Authorization")).toBe("Bearer test");
   });
 
+  it("replays only the tail of an oversized log, starting on a line boundary", async () => {
+    // 20-byte log, cap 8: restart at offset 12 ("ab\ncdefgh"), drop "ab\n".
+    const log = new TextEncoder().encode("0123456789\nxab\ncdefgh");
+    expect(log.length).toBe(21);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(page("t1", 0, log.subarray(0, 5), 21))))
+      .mockResolvedValueOnce(new Response(JSON.stringify(page("t1", 13, log.subarray(13), 21, true))));
+    vi.stubGlobal("fetch", fetchMock);
+    const texts: string[] = [];
+    const result = await restoreTerminalHistory({
+      id: "t1",
+      projectPath: "/project",
+      pageSize: 5,
+      maxBytes: 8,
+      onText: (text) => { texts.push(text); },
+    });
+
+    expect(result).toEqual({ kind: "restored", snapshotEnd: 21, state: "exited" });
+    expect(texts.join("")).toBe("cdefgh");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("offset=13");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("snapshot_end=21");
+  });
+
+  it("replays the whole log when it fits under the byte cap", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(page("t1", 0, new TextEncoder().encode("hello"), 5, true))));
+    vi.stubGlobal("fetch", fetchMock);
+    const texts: string[] = [];
+    await restoreTerminalHistory({ id: "t1", projectPath: "/project", maxBytes: 8, onText: (text) => { texts.push(text); } });
+    expect(texts.join("")).toBe("hello");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("handles an empty exact-boundary snapshot without looping", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(page("t1", 0, new Uint8Array(), 0, true))));
     vi.stubGlobal("fetch", fetchMock);

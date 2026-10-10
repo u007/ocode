@@ -53,7 +53,7 @@ func TestLoadCreatesOcodeConfigFiles(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpHome)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	cfg, err := Load()
 	if err != nil {
@@ -79,7 +79,7 @@ func TestLoadFromStringValidJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpHome)
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	cfg := &Config{
 		Tools:      make(map[string]bool),
@@ -143,7 +143,7 @@ func TestMCPConfigDefaultsToEnabledAndInfersLocal(t *testing.T) {
 func TestSaveMCPEnabledWritesOpencodeConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -174,7 +174,7 @@ func TestSaveMCPEnabledWritesOpencodeConfig(t *testing.T) {
 func TestSaveMCPServerPreservesExistingOpencodeConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -218,7 +218,7 @@ func TestSaveMCPServerPreservesExistingOpencodeConfig(t *testing.T) {
 func TestClearMCPAuthorizationPreservesExistingOpencodeConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -267,7 +267,7 @@ func TestClearMCPAuthorizationPreservesExistingOpencodeConfig(t *testing.T) {
 func TestSaveTUIThemeWritesOcodeConfig(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	if err := SaveTUITheme("catppuccin"); err != nil {
 		t.Fatalf("failed to save theme: %v", err)
@@ -293,7 +293,7 @@ func TestSaveTUIThemeWritesOcodeConfig(t *testing.T) {
 func TestSaveTUIThemePreservesExistingOcodeConfig(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	path := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -330,7 +330,7 @@ func TestLoadFromStringPartialConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpHome)
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	cfg := &Config{
 		Model:      "original-model",
@@ -358,7 +358,7 @@ func TestLoadFromStringMalformedJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpHome)
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	cfg := &Config{
 		Tools:      make(map[string]bool),
@@ -380,7 +380,7 @@ func TestLoadWithConfigDirEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpHome)
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	tmpDir, err := os.MkdirTemp("", "ocode-configdir")
 	if err != nil {
@@ -410,7 +410,7 @@ func TestLoadWithConfigContentEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpHome)
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"model": "env-inline-model"}`)
 
@@ -445,7 +445,7 @@ func TestLoadDoesNotRestoreRecentModelOverConfig(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	t.Setenv("XDG_STATE_HOME", tmpState)
 	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{"model": "config/model"}`), 0644); err != nil {
 		t.Fatal(err)
@@ -490,7 +490,7 @@ func TestLoadDoesNotRestoreRecentModelWithoutPreference(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	t.Setenv("XDG_STATE_HOME", tmpState)
 	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0644); err != nil {
 		t.Fatal(err)
@@ -526,7 +526,7 @@ func TestLoadKeepsExplicitEnvModelOverRecent(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpState)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	t.Setenv("XDG_STATE_HOME", tmpState)
 	t.Setenv("OPENCODE_MODEL", "env/model")
 	if err := SaveRecentModel("recent/model"); err != nil {
@@ -658,7 +658,7 @@ func TestLoadPrefersLastModelOverRecent(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	t.Setenv("XDG_STATE_HOME", tmpState)
 	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0644); err != nil {
 		t.Fatal(err)
@@ -688,7 +688,7 @@ func TestLoadWithOpenCodeDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpHome)
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	tmpDir, err := os.MkdirTemp("", "ocode-opencodedir")
 	if err != nil {
@@ -744,7 +744,7 @@ func TestLoadPrefersLastThinkingBudget(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	t.Setenv("XDG_STATE_HOME", tmpState)
 	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 )
 
 // fakeClientAskBashE2E: first call returns a bash tool call, second returns a plain assistant message.
@@ -42,7 +43,7 @@ func TestE2EWebPermissionFlow(t *testing.T) {
 	ag := agent.NewAgent(&fakeClientAskBashE2E{}, nil, nil, nil)
 	_ = ag
 	// Pre-register a session like the browser would after first message
-	h.agents["sess-browser"] = &agentSession{agent: ag, model: "fake-model", messages: nil}
+	h.agents["sess-browser"] = &agentSession{agent: ag, model: "fake-model", messages: nil, credVersion: auth.CredentialVersion()}
 
 	sub := h.subscribeHeadless()
 	defer h.unsubscribeHeadless(sub)

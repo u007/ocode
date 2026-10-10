@@ -14,7 +14,7 @@ import (
 // touches (no nil deref).
 func TestWriteTouches(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a1")
 	bus.SetNow(func() int64 { return 1_700_000_000 })
 	bus.Start(busBackground(t))
@@ -60,7 +60,7 @@ func TestWriteTouches(t *testing.T) {
 // TestWriteTouches_NoBusNoOp confirms that when the child has no
 // bus, the touch path is a complete no-op (no panic, no work).
 func TestWriteTouches_NoBusNoOp(t *testing.T) {
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	appendWriteTouchIfGrouped(child, "write", `{"path":"a.go","content":"x"}`)
 	// Defensive regression guard: a future change that
 	// unconditionally dereferences a.noteBus would panic here.
@@ -72,7 +72,7 @@ func TestWriteTouches_NoBusNoOp(t *testing.T) {
 // which one the caller used.
 func TestWriteTouches_ApplyPatchArgumentShapes(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a1")
 	bus.Start(busBackground(t))
 	defer func() { bus.Stop(); <-bus.Done() }()

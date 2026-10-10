@@ -99,6 +99,15 @@ func (s *Server) AttachReminders(workDir string, cfg *config.Config, notifier re
 	}
 	svc.SetOutbox(outbox)
 	svc.SetRunHistory(runs)
+	// Seed the default project's per-project entry with THIS engine, and record
+	// the config + notifier so other projects can be started on demand. Seeding
+	// (rather than letting the registry start a twin) preserves the wiring the
+	// host already did — the event-bus notifier below, and the cron drainer.
+	s.markRemindersAttached()
+	// s.scheduler is typed `any` so the server does not force a scheduler
+	// dependency on hosts that never attach one; take the concrete service
+	// through the existing typed accessor.
+	s.setCronScopeConfig(cfg, notifier, s.Scheduler(), svc, workDir, outbox, runs, s.schedulerTargets)
 
 	if notifier == nil && s.handler != nil && s.handler.bus != nil {
 		svc.SetNotifier(&busNotifier{bus: s.handler.bus, project: workDir})

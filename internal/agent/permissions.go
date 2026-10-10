@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,7 +12,9 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unicode"
 
@@ -78,6 +81,12 @@ type PermissionScope string
 const (
 	PermissionScopeTool       PermissionScope = "tool"
 	PermissionScopeBashPrefix PermissionScope = "bash_prefix"
+	// PermissionScopeContent marks an ask about a tool RESULT rather than a
+	// tool call: the content guardrail found text in an already-executed
+	// result that tries to steer the agent. It carries no rule and no args to
+	// persist — AlwaysRuleChoiceAvailable/AlwaysToolChoiceAvailable both return
+	// false for it — so the ask is always one-shot.
+	PermissionScopeContent PermissionScope = "content"
 )
 
 type PermissionRequest struct {
@@ -104,6 +113,41 @@ type PermissionRequest struct {
 	// extra_allowed_paths instead of a useless bash-prefix/tool rule, and so
 	// verifyAutoGrant refuses to silently auto-grant an out-of-scope command.
 	OutOfScopePath string `json:"out_of_scope_path,omitempty"`
+	// UntrustedContent is the flagged tool RESULT text, for a
+	// PermissionScopeContent ask. It is populated only by the content guardrail
+	// and is the whole point of that ask: the user cannot judge whether a
+	// result is safe to give the model without seeing it. It is redacted
+	// already, because the guardrail runs after scanToolResult.
+	UntrustedContent string `json:"untrusted_content,omitempty"`
+	// UntrustedSource is the human description of where the content came from
+	// (`webfetch https://example.com/x`, `MCP github.create_issue`). For bash
+	// it is the WHOLE command, unclipped and possibly multi-line.
+	UntrustedSource string `json:"untrusted_source,omitempty"`
+	// UntrustedSummary is the guardrail's headline: the concern label and
+	// confidence, or the too-large-to-verify note. Shown to the user; never
+	// echoed to the model (see contentGuardDeniedNotice).
+	UntrustedSummary string `json:"untrusted_summary,omitempty"`
+	// UntrustedScores carries the per-question judge output, one entry per
+	// judged chunk. Both questions are reported separately (verdict and its
+	// confidence, concern and its confidence, plus the verdict distribution)
+	// because the user is deciding whether to hand this content to the model and
+	// needs the underlying scores, not one collapsed verdict.
+	UntrustedScores []ContentGuardScore `json:"untrusted_scores,omitempty"`
+	// UntrustedFailure explains why the guardrail could not clear this result:
+	// judge unconfigured, transport error, timeout, no usable verdict, an
+	// unrecognized answer, a below-floor confidence, or a truncated tail.
+	// Empty when the guardrail judged the content clean. Surfaced in the dialog
+	// so a failed guardrail is visible rather than indistinguishable from a
+	// clean pass.
+	UntrustedFailure string `json:"untrusted_failure,omitempty"`
+	// AgentName names the SUB-AGENT that raised the ask, and is empty for the
+	// main agent. The permission-ask callback is installed once on the parent
+	// and shared by every child it dispatches, so the callback itself cannot
+	// know who is asking — the dispatch site stamps the name per dispatch (see
+	// attributePermAsker). Without it the prompt can only say "a sub-agent
+	// asked", which is useless when several run at once. omitempty keeps every
+	// existing frame byte-identical, same precedent as the Untrusted* fields.
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -115,7 +159,7 @@ type PermissionDecision struct {
 	// they cannot be overridden even when auto-permission is enabled.
 	HardDeny bool
 	// DenyReason is a short, user-facing explanation of which policy produced
-	// a static Deny (e.g. a Claude Code deny rule, a user bash ban, locked
+	// a static Deny (e.g. a user bash ban, locked
 	// mode, or a hard block). It is surfaced verbatim in the tool error so a
 	// blocked call names the offending rule instead of a generic "permission
 	// rules" message the user cannot act on. Empty when Level != PermissionDeny
@@ -140,17 +184,35 @@ type pathPatternEntry struct {
 	level   PermissionLevel
 }
 
+// Every rule table below is COPY-ON-WRITE (see cowmap.go). None of them is
+// confined to the agent's own goroutine: `POST /api/permissions`, the
+// permission/question continuation handlers, the TUI `/permissions` and `/ban`
+// command handlers, both HTTP bash-rule write paths and the Settings UI all
+// mutate them while turns are running — and canAutoAllowWithMode persists an
+// in-root allow from *inside* Decide. A plain map makes that a concurrent
+// read/write, which is a Go runtime FATAL ("concurrent map read and map write"),
+// not merely a race-detector warning.
+//
+// Rules of the road (cowMap / cowSlice document the mechanism):
+//   - Write only through .mutate (clone → apply → publish) so two concurrent
+//     writers cannot lose each other, or through .set on the construction/clone
+//     paths where the whole table is being replaced.
+//   - Read through .load() (one snapshot per decision) or .get(k). Never range
+//     over a field directly, and never mutate a value taken out of a snapshot —
+//     a map of slices has to copy the inner slice (SetPathRule).
 type PermissionManager struct {
-	mode               PermissionMode
-	rules              map[string]PermissionLevel
-	userConfirmedRules map[string]bool // tracks explicit "always allow" decisions
-	patterns           []patternRule
-	pathPatterns       map[string][]pathPatternEntry // toolName → path-glob patterns
-	bashPrefixes       map[string]PermissionLevel
-	bashAutoAllow      map[string]bool
-	bashPrefixModes    map[string]string
+	mode PermissionMode
+	// rules is the per-tool level table; patterns holds the glob-style entries
+	// (a tool name containing "*"), matched first.
+	rules              cowMap[string, PermissionLevel]
+	userConfirmedRules cowMap[string, bool] // tracks explicit "always allow" decisions
+	patterns           cowSlice[patternRule]
+	pathPatterns       cowMap[string, []pathPatternEntry] // toolName → path-glob patterns
+	bashPrefixes       cowMap[string, PermissionLevel]
+	bashAutoAllow      cowMap[string, bool]
+	bashPrefixModes    cowMap[string, string]
 	workDir            string
-	webfetchDomains    map[string]PermissionLevel
+	webfetchDomains    cowMap[string, PermissionLevel]
 	// autoPermissionEnabled and autoConfig are atomics because the auto-permission
 	// layer is process-wide policy that the Settings UI can change while a turn is
 	// running (PUT /api/config/ocode/permissions-auto pushes it to every live
@@ -158,14 +220,29 @@ type PermissionManager struct {
 	autoPermissionEnabled atomic.Bool
 	autoConfig            atomic.Pointer[config.AutoPermissionConfig]
 	claudeBashAllow       []string
-	claudeBashDeny        []string
 	claudeBashAsk         []string
-	claudeBareDeny        map[string]bool
 	claudeBareAsk         map[string]bool
 	// sessionID tags this manager's debug-log entries with the owning
 	// agent's session (set via Agent.SetSessionID). Empty means untagged
 	// (process-global) — see emitDebug.
 	sessionID string
+	// tempAllows tracks the in-flight RunWithTemporaryUserAllow calls per tool,
+	// guarded by tempAllowMu. See temporaryAllow.
+	tempAllowMu sync.Mutex
+	tempAllows  map[string]*temporaryAllow
+}
+
+// temporaryAllow is the saved pre-allow state for one tool plus the number of
+// RunWithTemporaryUserAllow calls currently relying on it. Only the first
+// holder snapshots and only the last one restores: a per-call snapshot let an
+// overlapping call record the OTHER call's temporary allow as "previous" and
+// restore it for good.
+type temporaryAllow struct {
+	holders       int
+	prevLevel     PermissionLevel
+	hadLevel      bool
+	prevConfirmed bool
+	hadConfirmed  bool
 }
 
 // emitDebug appends a debug-log entry tagged with the owning agent's
@@ -759,6 +836,7 @@ var pathScopedTools = map[string]bool{
 	"read": true, "write": true, "edit": true, "delete": true,
 	"multiedit": true, "multi_file_edit": true, "replace_lines": true, "glob": true, "grep": true, "rgrep": true,
 	"list": true, "lsp": true, "apply_patch": true, "format": true, "repo_overview": true,
+	"sqlite_schema": true, "sqlite_query": true, "sqlite_exec": true,
 }
 
 // harmfulBashPrefixes are git subcommand prefixes that are inherently
@@ -1168,19 +1246,107 @@ func netcatHostIsLoopback(fields []string) bool {
 	return false
 }
 
-// isLoopbackHost reports whether host is a loopback address.
+// isLoopbackHost reports whether host is a loopback address, matching
+// 127.0.0.0/8 and ::1 as parsed IP literals. It never uses a string prefix:
+// "127." also begins attacker-registrable domains such as "127.0.0.1.evil.com",
+// and this predicate gates auto-ALLOWs, so a false positive would exempt
+// off-host traffic from every gate.
 func isLoopbackHost(host string) bool {
 	h := strings.TrimPrefix(host, "[")
 	h = strings.TrimSuffix(h, "]")
-	switch h {
-	case "localhost", "::1":
+	if h == "localhost" {
 		return true
 	}
-	// 127.0.0.0/8 — all loopback per RFC 3330/6598-era conventions
-	if strings.HasPrefix(h, "127.") {
+	addr, err := netip.ParseAddr(h)
+	return err == nil && addr.IsLoopback()
+}
+
+// isLoopbackHostForPermissionGuard is the deliberately PERMISSIVE loopback test
+// used only by the self-escalation guard (isLocalhostURL -> permissionApiLoopback).
+// That guard must over-ask and never under-ask: the inet_aton-style shorthands
+// netip cannot parse still resolve to loopback, so failing to recognise one would
+// let the agent rewrite its own permission rules un-gated.
+func isLoopbackHostForPermissionGuard(host string) bool {
+	h := strings.Trim(host, "[]")
+	if isLoopbackHost(h) {
 		return true
 	}
+	// Strip userinfo and port before the address test.
+	if at := strings.LastIndex(h, "@"); at >= 0 {
+		h = h[at+1:]
+	}
+	if colon := strings.LastIndexByte(h, ':'); colon > 0 && !strings.Contains(h[:colon], "]") {
+		h = h[:colon]
+	}
+	if addr, ok := parseLooseInetAton(h); ok {
+		return addr.IsLoopback()
+	}
+	// No prefix fallback: parseLooseInetAton covers every loopback form a
+	// resolver honours, and a prefix test would also match registrable names
+	// like "127.0.0.1.evil.com".
 	return false
+}
+
+// parseLooseInetAton parses the inet_aton shorthands that netip rejects: a 1-4
+// part dotted form where each part is decimal, octal (leading 0) or hex (leading
+// 0x), or a bare 32-bit integer. It reports ok=false for anything else,
+// including hostnames — so "127.0.0.1.evil.com" is never read as an address.
+func parseLooseInetAton(host string) (netip.Addr, bool) {
+	if host == "" {
+		return netip.Addr{}, false
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) > 4 {
+		return netip.Addr{}, false
+	}
+	var vals []uint64
+	for _, p := range parts {
+		v, ok := parseInetAtonPart(p)
+		if !ok {
+			return netip.Addr{}, false
+		}
+		vals = append(vals, v)
+	}
+	// The last part absorbs the remaining bytes; earlier parts are single bytes.
+	var addr [4]byte
+	shift := len(vals) - 1
+	for i, v := range vals {
+		if i == len(vals)-1 {
+			limit := uint64(1) << (8 * (4 - shift))
+			if v >= limit {
+				return netip.Addr{}, false
+			}
+			for b := 0; b < 4-shift; b++ {
+				addr[3-b] = byte(v >> (8 * b))
+			}
+			break
+		}
+		if v >= 256 {
+			return netip.Addr{}, false
+		}
+		addr[i] = byte(v)
+	}
+	return netip.AddrFrom4(addr), true
+}
+
+// parseInetAtonPart parses one inet_aton component: decimal, octal (0-prefixed)
+// or hexadecimal (0x-prefixed).
+func parseInetAtonPart(p string) (uint64, bool) {
+	if p == "" {
+		return 0, false
+	}
+	base := 10
+	switch {
+	case strings.HasPrefix(p, "0x"), strings.HasPrefix(p, "0X"):
+		p, base = p[2:], 16
+	case len(p) > 1 && p[0] == '0':
+		p, base = p[1:], 8
+	}
+	v, err := strconv.ParseUint(p, base, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // isAllDigits reports whether s consists only of ASCII digits.
@@ -1216,20 +1382,40 @@ func isLoopbackNetcat(command string) bool {
 // localhost). Loopback connections stay on-host and cannot exfiltrate data
 // off-machine, so they are auto-allowed — same rationale as loopback nc.
 func isLoopbackNetworkCommand(command string) bool {
+	return isLoopbackNetworkCommandWithVars(command, nil)
+}
+
+// isLoopbackNetworkCommandWithVars is isLoopbackNetworkCommand with the whole
+// line's integer assignments supplied — see numericAssignedVarsFrom for why the
+// fragment alone is not enough.
+func isLoopbackNetworkCommandWithVars(command string, numericVars map[string]bool) bool {
 	fields := splitShellFields(command)
 	if len(fields) < 2 {
 		return false
 	}
 	switch fields[0] {
 	case "curl", "wget", "http", "https":
-		return subprocessTargetsLocalhost(command)
+		return subprocessTargetsLocalhostWithVars(command, numericVars)
 	}
 	return false
 }
 
-// isExfiltrationRiskCommand checks if a bash command has data exfiltration
-// risk patterns. This covers curl, wget, httpie, and netcat.
+// isExfiltrationRiskCommand judges a single command with no cross-fragment
+// context, so it derives numericVars from that command alone. Compound callers
+// that evaluate fragments one at a time must call the WithVars form with the
+// whole line's set, or a same-line "p=8080" stays invisible to the curl
+// fragment that uses "$p".
 func isExfiltrationRiskCommand(command string) bool {
+	return isExfiltrationRiskCommandWithVars(command, numericAssignedVars(command))
+}
+
+// isExfiltrationRiskCommandWithVars checks if a bash command has data
+// exfiltration risk patterns. This covers curl, wget, httpie, and netcat.
+//
+// numericVars holds the variables the WHOLE command line assigns a plain
+// integer to. It is passed in rather than recomputed because this function is
+// reached once per fragment, and a same-line "p=8080" is its own fragment.
+func isExfiltrationRiskCommandWithVars(command string, numericVars map[string]bool) bool {
 	fields := splitShellFields(command)
 	if len(fields) == 0 {
 		return false
@@ -1240,7 +1426,7 @@ func isExfiltrationRiskCommand(command string) bool {
 		// Loopback connections (127.0.0.0/8, ::1, localhost) stay on-host and
 		// cannot exfiltrate data off-machine, so secrets in headers/data sent
 		// to localhost are never harmful — same rationale as loopback nc below.
-		if subprocessTargetsLocalhost(command) {
+		if subprocessTargetsLocalhostWithVars(command, numericVars) {
 			return false
 		}
 		switch fields[0] {
@@ -1264,8 +1450,19 @@ func isExfiltrationRiskCommand(command string) bool {
 // gate checks it first only so the Ask carries an accurate rule label
 // (sandbox.exfiltration_risk) instead of sandbox.harmful_git.
 func isExfiltrationRiskBash(command string) bool {
+	return isExfiltrationRiskBashWithVars(command, nil)
+}
+
+// isExfiltrationRiskBashWithVars judges the fragments of a compound command with
+// the whole line's integer assignments supplied. Callers that iterate fragments
+// must pass them: "p=8080" is its own fragment, so without this a loopback URL
+// whose port is "$p" is misread as an unproven port and gated as exfiltration.
+func isExfiltrationRiskBashWithVars(command string, numericVars map[string]bool) bool {
+	if numericVars == nil {
+		numericVars = numericAssignedVars(command)
+	}
 	for _, words := range effectiveCommandWords(splitShellFields(strings.TrimSpace(command))) {
-		if isExfiltrationRiskCommand(rebuildCommandLine(words)) {
+		if isExfiltrationRiskCommandWithVars(rebuildCommandLine(words), numericVars) {
 			return true
 		}
 	}
@@ -1291,6 +1488,13 @@ func isExfiltrationRiskBash(command string) bool {
 // it, making the matching always-ALLOW lines in the bundled gatekeeper
 // prompt dead text.
 func IsHarmfulBashCommand(command string) bool {
+	return isHarmfulBashCommandWithVars(command, nil)
+}
+
+// isHarmfulBashCommandWithVars is IsHarmfulBashCommand with the whole line's
+// integer assignments supplied — see isExfiltrationRiskBashWithVars for why a
+// per-fragment caller must thread them.
+func isHarmfulBashCommandWithVars(command string, numericVars map[string]bool) bool {
 	fields := splitShellFields(strings.TrimSpace(command))
 	if len(fields) == 0 {
 		return false
@@ -1300,8 +1504,11 @@ func IsHarmfulBashCommand(command string) bool {
 	// shell re-exec/eval bodies are peeled by effectiveCommandWords so
 	// "bash -c 'git stash'" or "/usr/bin/git stash" is as harmful as the bare
 	// form (permissions_wrappers.go).
+	if numericVars == nil {
+		numericVars = numericAssignedVars(command)
+	}
 	for _, words := range effectiveCommandWords(fields) {
-		if isHarmfulBashFields(words) {
+		if isHarmfulBashFields(words, numericVars) {
 			return true
 		}
 	}
@@ -1310,7 +1517,7 @@ func IsHarmfulBashCommand(command string) bool {
 
 // isHarmfulBashFields is the per-command core of IsHarmfulBashCommand; it
 // expects an already-unwrapped command whose first word is the binary.
-func isHarmfulBashFields(fields []string) bool {
+func isHarmfulBashFields(fields []string, numericVars map[string]bool) bool {
 	cmd := rebuildCommandLine(fields)
 	if len(fields) < 2 {
 		return false
@@ -1358,7 +1565,7 @@ func isHarmfulBashFields(fields []string) bool {
 	}
 
 	// --- Data exfiltration risk (curl, wget, httpie, nc) ---
-	if isExfiltrationRiskCommand(cmd) {
+	if isExfiltrationRiskCommandWithVars(cmd, numericVars) {
 		return true
 	}
 
@@ -1431,6 +1638,13 @@ var ShellControlKeywords = map[string]bool{
 // (if, else, while, …) are also excluded: they are not real commands and an
 // always-allow prefix for them is meaningless.
 func AlwaysRuleChoiceAvailable(req PermissionRequest) bool {
+	// A content ask has no rule to persist: approving it means "deliver THIS
+	// result", and there is no rule that would make the next remote result safe.
+	// Persisting anything here would silently convert a one-shot judgement into
+	// a blanket allow.
+	if req.Scope == PermissionScopeContent {
+		return false
+	}
 	if req.ToolName == "bash" && req.Scope == PermissionScopeBashPrefix {
 		if strings.HasPrefix(req.Prefix, "git ") || req.Prefix == "git" {
 			return false
@@ -1447,44 +1661,48 @@ func AlwaysRuleChoiceAvailable(req PermissionRequest) bool {
 // allow blanket-approves every future shell command from one prompt, which
 // is too broad to surface as a single click.
 func AlwaysToolChoiceAvailable(req PermissionRequest) bool {
+	// Same reasoning as AlwaysRuleChoiceAvailable: a tool-level allow would let
+	// one approval exempt every future result from the same tool, which is the
+	// opposite of what "deliver this one" means.
+	if req.Scope == PermissionScopeContent {
+		return false
+	}
 	return req.ToolName != "bash"
 }
 
 func NewPermissionManager() *PermissionManager {
-	pm := &PermissionManager{
-		mode:               PermissionModeNormal,
-		rules:              make(map[string]PermissionLevel),
-		userConfirmedRules: make(map[string]bool),
-		patterns:           make([]patternRule, 0),
-		pathPatterns:       make(map[string][]pathPatternEntry),
-		bashPrefixes:       make(map[string]PermissionLevel),
-		bashAutoAllow:      make(map[string]bool),
-		bashPrefixModes:    make(map[string]string),
-		webfetchDomains:    make(map[string]PermissionLevel),
-	}
-	for k, v := range bashAutoAllowPrefixes {
-		pm.bashAutoAllow[k] = v
-	}
-	for k, v := range bashAutoAllowDefaultModes {
-		pm.bashPrefixModes[k] = v
-	}
+	pm := &PermissionManager{mode: PermissionModeNormal}
+	// Seed the copy-on-write tables explicitly (see cowMap.init for why this is
+	// not a struct literal).
+	pm.rules.init(nil)
+	pm.userConfirmedRules.init(nil)
+	pm.patterns.init(nil)
+	pm.pathPatterns.init(nil)
+	pm.webfetchDomains.init(nil)
+	pm.bashPrefixes.init(nil)
+	pm.bashAutoAllow.init(bashAutoAllowPrefixes)
+	pm.bashPrefixModes.init(bashAutoAllowDefaultModes)
 	// Read-only tools ride allow by default. rgrep is pre-registered here
 	// even though tool registration is conditional on rg availability
 	// (see LoadBuiltins): harmless when rg is missing, and keeps the
 	// rule table total (mirrors the ast/ast_grep opt-ins).
-	for _, name := range []string{"read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron"} {
-		pm.rules[name] = PermissionAllow
+	readOnlyDefaults := []string{"read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "list_processes", "ocr", "cron", "sqlite_schema", "sqlite_query"}
+	defaultRules := make(map[string]PermissionLevel, len(readOnlyDefaults))
+	for _, name := range readOnlyDefaults {
+		defaultRules[name] = PermissionAllow
 	}
+	pm.rules.set(defaultRules)
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {
 		pm.SetRule(name, PermissionAllow)
 	}
-	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer"} {
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*", "computer", "window", "sqlite_exec"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	// No bash prefixes are banned by default — bans are opt-in via
 	// `/ban add <prefix>`. The `sed` special-casing below (compound-command
 	// parsing) applies to any sed rule a user configures.
-	// Adhere to Claude Code's .claude/settings.json permissions: load global
+	// Adhere to Claude Code's .claude/settings.json allow/ask permissions (its
+	// deny list is deliberately not honoured; bans are ocode's own): load global
 	// user rules now; project-specific rules are added when workDir is set via
 	// SetWorkDir (covers /cd, desktop project switches, and per-session roots).
 	pm.LoadClaudePermissions(pm.workDir)
@@ -1492,11 +1710,11 @@ func NewPermissionManager() *PermissionManager {
 }
 
 func (pm *PermissionManager) Check(toolName string) PermissionLevel {
-	if level, ok := pm.rules[toolName]; ok {
+	if level, ok := pm.rules.get(toolName); ok {
 		return level
 	}
 
-	for _, p := range pm.patterns {
+	for _, p := range pm.patterns.load() {
 		if matchPattern(p.pattern, toolName) {
 			return p.level
 		}
@@ -1548,9 +1766,9 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 		if prefix == "" {
 			continue
 		}
-		pm.bashAutoAllow[prefix] = true
-		if _, ok := pm.bashPrefixModes[prefix]; !ok {
-			pm.bashPrefixModes[prefix] = bashPrefixModeReadOnly
+		pm.bashAutoAllow.mutate(func(m map[string]bool) { m[prefix] = true })
+		if _, ok := pm.bashPrefixModes.get(prefix); !ok {
+			pm.bashPrefixModes.mutate(func(m map[string]string) { m[prefix] = bashPrefixModeReadOnly })
 		}
 	}
 	for prefix, mode := range cfg.Bash.PrefixModes {
@@ -1558,7 +1776,7 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 		if mode != bashPrefixModeReadOnly && mode != bashPrefixModeMutating && mode != bashPrefixModeNever {
 			continue
 		}
-		pm.bashPrefixModes[prefix] = mode
+		pm.bashPrefixModes.mutate(func(m map[string]string) { m[prefix] = mode })
 	}
 }
 
@@ -1603,24 +1821,9 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			pm.emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: "hard-blocked shell command"}
 		}
-		// Claude Code settings: a matching deny is a hard block even before
-		// the dangerous-rm ask (deny > ask). Check each subcommand so
-		// compound lines like "echo hi; rm -rf /" are still caught.
 		if parsed, err := parseShellCommandLine(command); err == nil {
-			for _, cmd := range parsed {
-				sub := rebuildCommandLine(cmd.cmdWords)
-				if sub == "" {
-					continue
-				}
-				if pat, denied := pm.claudeDenyRule(sub); denied {
-					pm.emitDebug("perm", fmt.Sprintf("Decide DENY (claude deny): tool=bash command=%q", command))
-					return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: formatClaudeDenyReason(pat)}
-				}
-			}
-		}
-		if parsed, err := parseShellCommandLine(command); err == nil {
-			for _, cmd := range parsed {
-				if reason := dangerousRmReason(pm, cmd.cmdWords); reason != "" {
+			for i := range parsed {
+				if reason := dangerousRmReasonIn(pm, parsed, i); reason != "" {
 					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (dangerous rm): tool=bash command=%q reason=%s", command, reason))
 					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "rm")}
 				}
@@ -1664,8 +1867,21 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			// ("cd repo && git stash") slips through. Parse here and apply the
 			// hard policy gates per fragment, so neither a destructive git form
 			// nor an explicit user ban can ride the sandbox auto-allow.
-			parsed, perr := parseShellCommandLine(command)
+			// A quoted heredoc feeding a non-shell consumer is inert stdin:
+			// its body is dropped so markdown backticks or `$x` in a Python
+			// body are not read as commands (see sandboxGateParseTarget).
+			parsed, perr := parseShellCommandLine(sandboxGateParseTarget(command))
 			if perr == nil {
+				// Integer assignments from every fragment, PLUS a scan of the raw
+				// line: parseShellCommandLine discards the `for p in 8080 4096`
+				// header that proves a loop variable numeric, so the fragments
+				// alone cannot see it.
+				var lineTokens []string
+				for _, c := range parsed {
+					lineTokens = append(lineTokens, c.cmdWords...)
+					lineTokens = append(lineTokens, c.envVars...)
+				}
+				sandboxLineVars := numericAssignedVarsFrom(lineTokens, splitShellFields(command))
 				for _, c := range parsed {
 					sub := rebuildCommandLine(c.cmdWords)
 					if sub == "" {
@@ -1692,11 +1908,11 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					// the write-wall is blind to them. Read-only stash
 					// inspection forms ("git stash list"/"show") are excluded
 					// from IsHarmfulBashCommand and still auto-allow below.
-					if isExfiltrationRiskBash(sub) {
+					if isExfiltrationRiskBashWithVars(sub, sandboxLineVars) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox exfiltration risk): tool=bash command=%q", sub))
 						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.exfiltration_risk")}
 					}
-					if IsHarmfulBashCommand(sub) {
+					if isHarmfulBashCommandWithVars(sub, sandboxLineVars) {
 						pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sandbox harmful git): tool=bash command=%q", sub))
 						return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "sandbox.harmful_git")}
 					}
@@ -1768,10 +1984,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: level}
 		}
 
+		// Integer assignments from every fragment of this line, PLUS a scan of
+		// the raw line. parseShellCommandLine lifts "p=8080" into its own
+		// fragment's envVars and drops a `for p in 8080 4096` header entirely,
+		// so a loopback URL in a later fragment cannot see the assignment (or
+		// the numeric list) its "$p" depends on without this.
+		var lineTokens []string
+		for _, c := range parsedCmds {
+			lineTokens = append(lineTokens, c.cmdWords...)
+			lineTokens = append(lineTokens, c.envVars...)
+		}
+		lineNumericVars := numericAssignedVarsFrom(lineTokens, splitShellFields(command))
+
 		// Evaluate each constituent command, environment variable, and redirection
 		var finalDecision *PermissionDecision
 		for _, cmd := range parsedCmds {
-			dec := pm.decideSingleCommand(args, cmd)
+			dec := pm.decideSingleCommand(args, cmd, lineNumericVars)
 			if dec.Level == PermissionDeny {
 				return dec
 			}
@@ -1902,7 +2130,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch localhost): tool=%s domain=%s", toolName, domain))
 				return PermissionDecision{Level: PermissionAllow}
 			}
-			if level, exists := pm.webfetchDomains[domain]; exists {
+			if level, exists := pm.webfetchDomains.get(domain); exists {
 				pm.emitDebug("perm", fmt.Sprintf("Decide %s (webfetch domain cached): tool=%s domain=%s", level, toolName, domain))
 				if level == PermissionDeny {
 					return PermissionDecision{Level: level, DenyReason: fmt.Sprintf("webfetch domain %q is denied", domain)}
@@ -1943,6 +2171,41 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			}
 			return PermissionDecision{Level: level}
 		}
+	}
+
+	// Window tool: listing is observational; every other action changes
+	// desktop state (close can discard unsaved work) and follows the rule.
+	if toolName == "window" {
+		var params struct {
+			Action string `json:"action"`
+			ID     string `json:"id"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			params.Action = ""
+		}
+		level := pm.Check(toolName)
+		if params.Action == "list" {
+			if level == PermissionDeny {
+				pm.emitDebug("perm", "Decide DENY (window observe): action=list")
+				return PermissionDecision{Level: level, DenyReason: "permissions.tools.window = deny"}
+			}
+			pm.emitDebug("perm", "Decide ALLOW (window observe): action=list")
+			return PermissionDecision{Level: PermissionAllow}
+		}
+		pm.emitDebug("perm", fmt.Sprintf("Decide %s (window action): action=%s", level, params.Action))
+		if level == PermissionAsk {
+			cmd := "window"
+			if params.Action != "" {
+				cmd = params.Action + " " + params.ID
+			}
+			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool.window", Command: cmd,
+			}}
+		}
+		if level == PermissionDeny {
+			return PermissionDecision{Level: level, DenyReason: "permissions.tools.window = deny"}
+		}
+		return PermissionDecision{Level: level}
 	}
 
 	level := pm.Check(toolName)
@@ -3434,21 +3697,51 @@ func permissionApiLoopback(command string) bool {
 }
 
 // isLocalhostURL reports whether an http(s) URL host is loopback (localhost,
-// 127.0.0.0/8, ::1). Used for the permission-API self-escalation check: a
-// request to a *remote* /api/permissions is not our server and is harmless.
+// 127.0.0.0/8, ::1, and the inet_aton shorthands a resolver honours). Used for
+// the permission-API self-escalation check: a request to a *remote*
+// /api/permissions is not our server and is harmless.
+//
+// This guard must OVER-ask and never under-ask, so it deliberately does not
+// trust a single parser:
+//
+//   - net/url reads userinfo, a bracketed IPv6 literal with or without a port,
+//     and a scheme-less authority correctly. It is asked first.
+//   - splitURLAuthorityForLoopback is the hand-rolled fallback, because net/url
+//     REJECTS an authority whose port is an expansion ("invalid port \":$p\" after
+//     host"). A $p port is reachable here, so failing closed on that parse
+//     error would let the agent rewrite its own permission rules un-gated.
+//
+// The two verdicts are OR-ed, which can only ADD a loopback answer — the safe
+// direction for this predicate. A hand-rolled strip that was kept inline here
+// used to remove the port BEFORE the userinfo, so "http://user:pw@127.0.0.1/"
+// was read as host "user" and the guard under-asked; and it could not read
+// "[::1]" or "[::1]:4096" at all.
 func isLocalhostURL(raw string) bool {
-	host := raw
-	if at := strings.Index(host, "://"); at >= 0 {
-		host = host[at+3:]
+	u := strings.Trim(raw, `'"`)
+	if !strings.Contains(u, "://") {
+		// curl accepts a scheme-less authority and defaults to http, so
+		// "curl 127.0.0.1/api/permissions" reaches the local API. Keep
+		// recognising it rather than parsing it as a bare path.
+		u = "http://" + u
 	}
-	if slash := strings.IndexByte(host, '/'); slash >= 0 {
-		host = host[:slash]
+	if i := strings.Index(u, "://"); i >= 0 {
+		switch strings.ToLower(u[:i]) {
+		case "http", "https":
+		default:
+			return false
+		}
 	}
-	// Strip port.
-	if colon := strings.LastIndexByte(host, ':'); colon >= 0 && !strings.Contains(host[:colon], "]") {
-		host = host[:colon]
+	// net/url does not case-fold the host, but DNS does, and curl resolves
+	// "LOCALHOST" to loopback — so an uppercased spelling must not slip past.
+	if parsed, err := url.Parse(u); err == nil {
+		if isLoopbackHostForPermissionGuard(strings.ToLower(parsed.Hostname())) {
+			return true
+		}
 	}
-	return isLocalhostDomain(host)
+	if host, _, ok := splitURLAuthorityForLoopback(u); ok {
+		return isLoopbackHostForPermissionGuard(strings.ToLower(host))
+	}
+	return false
 }
 
 func extractPathFromArgs(toolName string, args json.RawMessage) string {
@@ -3462,7 +3755,7 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 		return ""
 	}
 	switch toolName {
-	case "read", "write", "delete", "edit", "multiedit", "multi_file_edit", "replace_lines", "format", "lsp", "apply_patch", "grep", "rgrep", "repo_overview":
+	case "read", "write", "delete", "edit", "multiedit", "multi_file_edit", "replace_lines", "format", "lsp", "apply_patch", "grep", "rgrep", "repo_overview", "sqlite_schema", "sqlite_query", "sqlite_exec":
 		if params.Path != "" {
 			return params.Path
 		}
@@ -4067,19 +4360,13 @@ func extractDomainFromURL(rawURL string) string {
 }
 
 // isLocalhostDomain reports whether a hostname refers to the local machine
-// (localhost, 127.x.x.x, ::1, or any [::1]-style bracket form).
+// (localhost, 127.x.x.x, ::1, or any [::1]-style bracket form). Like
+// isLoopbackHost it parses the address instead of prefix-matching, because it
+// gates auto-ALLOWs.
 func isLocalhostDomain(host string) bool {
 	// Strip brackets from IPv6 literals.
 	h := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-	switch h {
-	case "localhost", "::1":
-		return true
-	}
-	// 127.0.0.0/8 loopback range.
-	if strings.HasPrefix(h, "127.") {
-		return true
-	}
-	return false
+	return isLoopbackHost(h)
 }
 
 // matchPathPattern matches a path against a glob pattern that may contain
@@ -4170,9 +4457,11 @@ func (pm *PermissionManager) SetRule(toolName string, level PermissionLevel) {
 		return
 	}
 	if strings.Contains(toolName, "*") {
-		pm.patterns = append(pm.patterns, patternRule{pattern: toolName, level: level})
+		pm.patterns.mutate(func(s []patternRule) []patternRule {
+			return append(s, patternRule{pattern: toolName, level: level})
+		})
 	} else {
-		pm.rules[toolName] = level
+		pm.rules.mutate(func(m map[string]PermissionLevel) { m[toolName] = level })
 	}
 }
 
@@ -4184,7 +4473,7 @@ func (pm *PermissionManager) SetRule(toolName string, level PermissionLevel) {
 func (pm *PermissionManager) SetUserConfirmedRule(toolName string, level PermissionLevel) {
 	pm.SetRule(toolName, level)
 	if level == PermissionAllow && !strings.Contains(toolName, "*") {
-		pm.userConfirmedRules[toolName] = true
+		pm.userConfirmedRules.mutate(func(m map[string]bool) { m[toolName] = true })
 	}
 }
 
@@ -4192,20 +4481,26 @@ func (pm *PermissionManager) SetUserConfirmedRule(toolName string, level Permiss
 // user (as opposed to a default allow rule). Used by Decide() to decide
 // whether to bypass out-of-scope / sensitive-path gates.
 func (pm *PermissionManager) IsUserConfirmedRule(toolName string) bool {
-	return pm.userConfirmedRules[toolName]
+	return pm.userConfirmedRules.load()[toolName]
 }
 
 func (pm *PermissionManager) SetPathRule(toolName, pattern string, level PermissionLevel) {
 	if toolName == "" || pattern == "" || !validPermissionLevel(level) {
 		return
 	}
-	pm.pathPatterns[toolName] = append(pm.pathPatterns[toolName], pathPatternEntry{pattern: pattern, level: level})
+	// Copy the inner slice: the clone shares its backing array with the version a
+	// live reader may still be ranging over, so an in-place append would mutate
+	// a snapshot that is supposed to be immutable.
+	pm.pathPatterns.mutate(func(m map[string][]pathPatternEntry) {
+		entries := append([]pathPatternEntry(nil), m[toolName]...)
+		m[toolName] = append(entries, pathPatternEntry{pattern: pattern, level: level})
+	})
 }
 
 // CheckPathPatterns returns the first matching permission level from path-based
 // rules for the given tool and target path, or empty string if no rule matches.
 func (pm *PermissionManager) CheckPathPatterns(toolName, targetPath string) PermissionLevel {
-	entries, ok := pm.pathPatterns[toolName]
+	entries, ok := pm.pathPatterns.get(toolName)
 	if !ok {
 		return ""
 	}
@@ -4215,7 +4510,7 @@ func (pm *PermissionManager) CheckPathPatterns(toolName, targetPath string) Perm
 		}
 	}
 	// Also check wildcard tool entries (e.g., "mcp_*" → matches any MCP tool)
-	for pattern, entries := range pm.pathPatterns {
+	for pattern, entries := range pm.pathPatterns.load() {
 		if matchPattern(pattern, toolName) {
 			for _, entry := range entries {
 				if matchPathPattern(entry.pattern, targetPath) {
@@ -4227,21 +4522,142 @@ func (pm *PermissionManager) CheckPathPatterns(toolName, targetPath string) Perm
 	return ""
 }
 
+// ValidateBashPrefixRule reports whether a user-supplied bash prefix rule can
+// be stored at all. SetBashPrefixRule silently DISCARDS an invalid rule (it has
+// no return value and predates the HTTP surfaces), which turns a rejected write
+// into an apparent success — the caller sees 200 and the rule is simply absent.
+// Every write path that can be handed user input MUST validate first with this
+// helper so the rejection is reported instead of swallowed.
+func ValidateBashPrefixRule(prefix string, level PermissionLevel) error {
+	trimmed := strings.TrimSpace(prefix)
+	if trimmed == "" {
+		return errors.New("bash prefix rule must not be empty")
+	}
+	if !validPermissionLevel(level) {
+		return fmt.Errorf("level must be allow, ask, or deny (got %q)", level)
+	}
+	if strings.HasPrefix(trimmed, bashInRootPersistPrefix) {
+		return fmt.Errorf("prefix %q is reserved for internal in-root rules", bashInRootPersistPrefix)
+	}
+	// Reject always-allow for the bare git prefix — it would auto-approve every
+	// git subcommand, including harmful ones like revert and stash.
+	if trimmed == "git" && level == PermissionAllow {
+		return errors.New(`"git" cannot be always-allowed: use a two-word rule such as "git status"`)
+	}
+	return nil
+}
+
+// bashPrefixSnapshot returns the current rule map. The map behind the pointer
+// is treated as immutable: writers never mutate it in place, they swap a fresh
+// copy (mutateBashPrefixes), so a caller may hold or range over the returned map
+// for as long as it likes. A nil result means "no rules yet" (a zero-value
+// PermissionManager) and is safe to read.
+func (pm *PermissionManager) bashPrefixSnapshot() map[string]PermissionLevel {
+	return pm.bashPrefixes.load()
+}
+
+// mutateBashPrefixes clones the current rules, applies fn to the clone and
+// publishes it. Writers are serialised by bashPrefixMu so two concurrent
+// writers cannot lose each other's change; readers are lock-free, so a fn that
+// itself reads a snapshot cannot deadlock.
+func (pm *PermissionManager) mutateBashPrefixes(fn func(rules map[string]PermissionLevel)) {
+	pm.bashPrefixes.mutate(fn)
+}
+
+// RunWithTemporaryUserAllow installs a user-confirmed allow for tool, runs fn,
+// then restores the previous state. The auto-permission judge uses it to
+// execute an approved call with the gates a human "always allow" would have
+// lifted (out-of-scope paths, sensitive paths).
+//
+// Each transition is a single atomic mutate, so a reader never observes a
+// half-applied state. Overlapping calls for the SAME tool (parallel tool calls
+// the judge approved) share one saved state: the first installs the allow, the
+// last restores it. tempAllowMu covers only that bookkeeping, never fn, so no
+// permission decision waits on a tool call. A settings/TUI write to the same
+// tool key inside the window is still overwritten by the restore (last write
+// wins); the window is the tool calls themselves.
+func (pm *PermissionManager) RunWithTemporaryUserAllow(tool string, fn func() error) error {
+	if pm == nil || tool == "" || fn == nil {
+		if fn != nil {
+			return fn()
+		}
+		return nil
+	}
+	pm.tempAllowMu.Lock()
+	ta := pm.tempAllows[tool]
+	if ta == nil {
+		ta = &temporaryAllow{}
+		ta.prevLevel, ta.hadLevel = pm.rules.get(tool)
+		ta.prevConfirmed, ta.hadConfirmed = pm.userConfirmedRules.get(tool)
+		if pm.tempAllows == nil {
+			pm.tempAllows = make(map[string]*temporaryAllow)
+		}
+		pm.tempAllows[tool] = ta
+		pm.SetUserConfirmedRule(tool, PermissionAllow)
+	}
+	ta.holders++
+	pm.tempAllowMu.Unlock()
+
+	defer func() {
+		pm.tempAllowMu.Lock()
+		defer pm.tempAllowMu.Unlock()
+		ta.holders--
+		if ta.holders > 0 {
+			return
+		}
+		delete(pm.tempAllows, tool)
+		pm.rules.mutate(func(m map[string]PermissionLevel) {
+			if ta.hadLevel {
+				m[tool] = ta.prevLevel
+			} else {
+				delete(m, tool)
+			}
+		})
+		pm.userConfirmedRules.mutate(func(m map[string]bool) {
+			if ta.hadConfirmed {
+				m[tool] = ta.prevConfirmed
+			} else {
+				delete(m, tool)
+			}
+		})
+	}()
+	return fn()
+}
+
 func (pm *PermissionManager) SetBashPrefixRule(prefix string, level PermissionLevel) {
-	if prefix == "" || !validPermissionLevel(level) || strings.HasPrefix(prefix, bashInRootPersistPrefix) {
+	// Validate first (and share the same checks the HTTP write paths run) so the
+	// git-allow case is rejected here for the same reason it is reported there.
+	if ValidateBashPrefixRule(prefix, level) != nil {
 		return
 	}
-	// Reject always-allow for git prefix — this would auto-approve all git
-	// subcommands, including harmful operations like revert, stash, etc.
-	if prefix == "git" && level == PermissionAllow {
-		return
+	prefix = strings.TrimSpace(prefix)
+	pm.mutateBashPrefixes(func(rules map[string]PermissionLevel) {
+		rules[prefix] = level
+	})
+}
+
+// RemoveBashPrefixRule deletes a user bash prefix rule entirely (it is not
+// downgraded to "ask"). It reports whether a rule was actually removed, so a
+// caller can distinguish a delete from a no-op. Removing an absent prefix, an
+// internal in-root key, or an empty prefix is a no-op.
+func (pm *PermissionManager) RemoveBashPrefixRule(prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || strings.HasPrefix(prefix, bashInRootPersistPrefix) {
+		return false
 	}
-	pm.bashPrefixes[prefix] = level
+	removed := false
+	pm.mutateBashPrefixes(func(rules map[string]PermissionLevel) {
+		if _, ok := rules[prefix]; ok {
+			delete(rules, prefix)
+			removed = true
+		}
+	})
+	return removed
 }
 
 func (pm *PermissionManager) BashAutoAllowPrefixes() []string {
-	result := make([]string, 0, len(pm.bashAutoAllow))
-	for k, v := range pm.bashAutoAllow {
+	result := make([]string, 0, len(pm.bashAutoAllow.load()))
+	for k, v := range pm.bashAutoAllow.load() {
 		if strings.HasPrefix(k, bashInRootPersistPrefix) {
 			continue
 		}
@@ -4258,7 +4674,7 @@ func (pm *PermissionManager) BashAutoAllowPrefixes() []string {
 // are always allowed and only add noise to the sidebar.
 func (pm *PermissionManager) ExtraBashAutoAllowPrefixes() []string {
 	result := make([]string, 0)
-	for k, v := range pm.bashAutoAllow {
+	for k, v := range pm.bashAutoAllow.load() {
 		if !v {
 			continue
 		}
@@ -4279,18 +4695,18 @@ func (pm *PermissionManager) SetBashAutoAllowPrefix(prefix string, enabled bool)
 		return
 	}
 	if enabled {
-		pm.bashAutoAllow[prefix] = true
-		if _, ok := pm.bashPrefixModes[prefix]; !ok {
-			pm.bashPrefixModes[prefix] = bashPrefixModeReadOnly
+		pm.bashAutoAllow.mutate(func(m map[string]bool) { m[prefix] = true })
+		if _, ok := pm.bashPrefixModes.get(prefix); !ok {
+			pm.bashPrefixModes.mutate(func(m map[string]string) { m[prefix] = bashPrefixModeReadOnly })
 		}
 		return
 	}
-	delete(pm.bashAutoAllow, prefix)
+	pm.bashAutoAllow.mutate(func(m map[string]bool) { delete(m, prefix) })
 }
 
 func (pm *PermissionManager) BashPrefixModes() map[string]string {
-	result := make(map[string]string, len(pm.bashPrefixModes))
-	for k, v := range pm.bashPrefixModes {
+	result := make(map[string]string, len(pm.bashPrefixModes.load()))
+	for k, v := range pm.bashPrefixModes.load() {
 		if strings.HasPrefix(k, bashInRootPersistPrefix) {
 			continue
 		}
@@ -4306,9 +4722,9 @@ func (pm *PermissionManager) SetBashPrefixMode(prefix, mode string) bool {
 	if mode != bashPrefixModeReadOnly && mode != bashPrefixModeMutating && mode != bashPrefixModeNever {
 		return false
 	}
-	pm.bashPrefixModes[prefix] = mode
-	if _, ok := pm.bashAutoAllow[prefix]; !ok && mode != bashPrefixModeNever {
-		pm.bashAutoAllow[prefix] = true
+	pm.bashPrefixModes.mutate(func(m map[string]string) { m[prefix] = mode })
+	if _, ok := pm.bashAutoAllow.get(prefix); !ok && mode != bashPrefixModeNever {
+		pm.bashAutoAllow.mutate(func(m map[string]bool) { m[prefix] = true })
 	}
 	return true
 }
@@ -4398,6 +4814,47 @@ func (pm *PermissionManager) AddAutoGrant(g config.AutoGrant) {
 	}
 	cp.Grants = append(append([]config.AutoGrant(nil), cp.Grants...), g)
 	pm.autoConfig.Store(&cp)
+}
+
+// PersistInterpreterScriptGrant turns a user's "always allow" on a
+// bash.interpreter.<lang> ask into an exact grant keyed to the script that was
+// approved (language, normalized command, resolved path, cwd, sha256 of the
+// file). A blanket per-language prefix rule is never stored: Decide routes every
+// interpreter execution through the judge and the effect verifier, so such a
+// rule would be written and never read. Only script_file executions can be
+// saved; heredoc and inline-eval source is transient, so the caller must tell
+// the user the approval covers this call only. save performs the durable write.
+func (pm *PermissionManager) PersistInterpreterScriptGrant(command string, save func(config.AutoGrant) error) error {
+	ie, ok := classifyInterpreterExecution(command)
+	if !ok || ie.SourceMode != "script_file" {
+		return fmt.Errorf("only script-file interpreter runs can be saved as an always-allow grant")
+	}
+	if ie.Entrypoint == "" || !pm.IsPathWithinAllowedRoots(ie.Entrypoint) {
+		return fmt.Errorf("script %q is outside the allowed roots", ie.Entrypoint)
+	}
+	cwd := pm.effectiveWorkDir()
+	resolved := resolvedInterpreterEntrypoint(ie, cwd)
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return fmt.Errorf("read script %q: %w", resolved, err)
+	}
+	if _, valid := sanitizeSource(string(data)); !valid {
+		return fmt.Errorf("script %q is binary or not valid UTF-8", resolved)
+	}
+	grant := config.AutoGrant{
+		Kind:              "interpreter_exact",
+		Language:          ie.Language,
+		SourceMode:        ie.SourceMode,
+		NormalizedCommand: normalizeGrantCommand(command),
+		EntrypointPath:    resolved,
+		EntrypointSHA256:  hashBytes(data),
+		CWD:               cwd,
+	}
+	if err := save(grant); err != nil {
+		return err
+	}
+	pm.AddAutoGrant(grant)
+	return nil
 }
 
 // normalizeGrantCommand canonicalizes a shell command enough for exact grant
@@ -4494,7 +4951,7 @@ func (pm *PermissionManager) effectiveWorkDir() string {
 
 func (pm *PermissionManager) SetWebfetchDomain(domain string, level PermissionLevel) {
 	if validPermissionLevel(level) {
-		pm.webfetchDomains[domain] = level
+		pm.webfetchDomains.mutate(func(m map[string]PermissionLevel) { m[domain] = level })
 	}
 }
 
@@ -4504,11 +4961,11 @@ func (pm *PermissionManager) SetWebfetchDomain(domain string, level PermissionLe
 // would read to the egress guardrail as permission. The set is in-memory and
 // per-session — a domain appears here only after an "always allow" click.
 func (pm *PermissionManager) AllowedWebfetchDomains() []string {
-	if pm == nil || len(pm.webfetchDomains) == 0 {
+	if pm == nil || len(pm.webfetchDomains.load()) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(pm.webfetchDomains))
-	for domain, level := range pm.webfetchDomains {
+	out := make([]string, 0, len(pm.webfetchDomains.load()))
+	for domain, level := range pm.webfetchDomains.load() {
 		if level == PermissionAllow {
 			out = append(out, domain)
 		}
@@ -4531,50 +4988,46 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 
 	clone := &PermissionManager{
 		mode:            pm.Mode(),
-		rules:           make(map[string]PermissionLevel, len(pm.rules)),
-		patterns:        append([]patternRule(nil), pm.patterns...),
-		pathPatterns:    make(map[string][]pathPatternEntry, len(pm.pathPatterns)),
-		bashPrefixes:    make(map[string]PermissionLevel, len(pm.bashPrefixes)),
-		bashAutoAllow:   make(map[string]bool, len(pm.bashAutoAllow)),
-		bashPrefixModes: make(map[string]string, len(pm.bashPrefixModes)),
 		workDir:         pm.workDir,
-		webfetchDomains: make(map[string]PermissionLevel, len(pm.webfetchDomains)),
 		claudeBashAllow: append([]string(nil), pm.claudeBashAllow...),
-		claudeBashDeny:  append([]string(nil), pm.claudeBashDeny...),
 		claudeBashAsk:   append([]string(nil), pm.claudeBashAsk...),
 	}
 	clone.autoPermissionEnabled.Store(pm.autoPermissionEnabled.Load())
 	clone.autoConfig.Store(pm.autoConfig.Load())
-	for k, v := range pm.rules {
-		clone.rules[k] = v
-	}
-	for k, v := range pm.bashPrefixes {
-		clone.bashPrefixes[k] = v
-	}
-	for k, v := range pm.bashAutoAllow {
+	// Every rule table gets its OWN copy-on-write store: sharing one map between
+	// two managers would mean both mutating it, which is the hazard the swap
+	// exists to remove. A clone is a point-in-time snapshot, so writes made after
+	// the clone do not appear in it.
+	clone.rules.set(pm.rules.load())
+	clone.userConfirmedRules.set(pm.userConfirmedRules.load())
+	clone.patterns.set(pm.patterns.load())
+	clone.webfetchDomains.set(pm.webfetchDomains.load())
+	clone.bashPrefixes.set(pm.bashPrefixSnapshot())
+	// The auto-allow and mode tables drop the internal in-root keys; the user
+	// tables keep everything (bashPrefixes filters them at read time).
+	cloneBashAutoAllow := make(map[string]bool, len(pm.bashAutoAllow.load()))
+	for k, v := range pm.bashAutoAllow.load() {
 		if strings.HasPrefix(k, bashInRootPersistPrefix) {
 			continue
 		}
-		clone.bashAutoAllow[k] = v
+		cloneBashAutoAllow[k] = v
 	}
-	for k, v := range pm.bashPrefixModes {
+	clone.bashAutoAllow.set(cloneBashAutoAllow)
+	cloneBashPrefixModes := make(map[string]string, len(pm.bashPrefixModes.load()))
+	for k, v := range pm.bashPrefixModes.load() {
 		if strings.HasPrefix(k, bashInRootPersistPrefix) {
 			continue
 		}
-		clone.bashPrefixModes[k] = v
+		cloneBashPrefixModes[k] = v
 	}
-	for k, v := range pm.webfetchDomains {
-		clone.webfetchDomains[k] = v
+	clone.bashPrefixModes.set(cloneBashPrefixModes)
+	// Inner slices copied too: the clone's table would otherwise share backing
+	// arrays with a snapshot the original can still append into.
+	clonePathPatterns := make(map[string][]pathPatternEntry, len(pm.pathPatterns.load()))
+	for toolName, entries := range pm.pathPatterns.load() {
+		clonePathPatterns[toolName] = append([]pathPatternEntry(nil), entries...)
 	}
-	for toolName, entries := range pm.pathPatterns {
-		clone.pathPatterns[toolName] = append([]pathPatternEntry(nil), entries...)
-	}
-	if pm.claudeBareDeny != nil {
-		clone.claudeBareDeny = make(map[string]bool, len(pm.claudeBareDeny))
-		for k, v := range pm.claudeBareDeny {
-			clone.claudeBareDeny[k] = v
-		}
-	}
+	clone.pathPatterns.set(clonePathPatterns)
 	if pm.claudeBareAsk != nil {
 		clone.claudeBareAsk = make(map[string]bool, len(pm.claudeBareAsk))
 		for k, v := range pm.claudeBareAsk {
@@ -4586,10 +5039,10 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 
 func (pm *PermissionManager) Rules() map[string]PermissionLevel {
 	result := make(map[string]PermissionLevel)
-	for k, v := range pm.rules {
+	for k, v := range pm.rules.load() {
 		result[k] = v
 	}
-	for _, p := range pm.patterns {
+	for _, p := range pm.patterns.load() {
 		result[p.pattern] = p.level
 	}
 	return result
@@ -4597,7 +5050,7 @@ func (pm *PermissionManager) Rules() map[string]PermissionLevel {
 
 func (pm *PermissionManager) BashPrefixRules() map[string]PermissionLevel {
 	result := make(map[string]PermissionLevel)
-	for k, v := range pm.bashPrefixes {
+	for k, v := range pm.bashPrefixSnapshot() {
 		if strings.HasPrefix(k, bashInRootPersistPrefix) {
 			continue
 		}
@@ -4628,8 +5081,9 @@ func (pm *PermissionManager) matchBashPrefixRuleWords(cmdWords []string, level P
 	if len(cmdWords) == 0 {
 		return "", false
 	}
-	keys := make([]string, 0, len(pm.bashPrefixes))
-	for prefix, prefixLevel := range pm.bashPrefixes {
+	snapshot := pm.bashPrefixSnapshot()
+	keys := make([]string, 0, len(snapshot))
+	for prefix, prefixLevel := range snapshot {
 		if prefixLevel != level {
 			continue
 		}
@@ -4673,6 +5127,14 @@ func (pm *PermissionManager) matchBashPrefixRuleWords(cmdWords []string, level P
 	return "", false
 }
 
+// InternalBashPrefix reports whether a bash prefix rule KEY is an internal
+// in-root auto-allow key (machine-written, per-workdir, not a user rule)
+// rather than something the user configured. Surfaces that list rules for
+// editing must skip these — they are neither editable nor meaningful to show.
+func InternalBashPrefix(prefix string) bool {
+	return strings.HasPrefix(prefix, bashInRootPersistPrefix)
+}
+
 func (pm *PermissionManager) BashBannedPrefixes() []string {
 	return pm.bashPrefixesAt(PermissionDeny)
 }
@@ -4684,7 +5146,7 @@ func (pm *PermissionManager) BashAllowedPrefixes() []string {
 
 func (pm *PermissionManager) bashPrefixesAt(want PermissionLevel) []string {
 	result := make([]string, 0)
-	for prefix, level := range pm.bashPrefixes {
+	for prefix, level := range pm.bashPrefixSnapshot() {
 		if strings.HasPrefix(prefix, bashInRootPersistPrefix) {
 			continue
 		}
@@ -4705,8 +5167,8 @@ func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 	for k, v := range pm.BashPrefixRules() {
 		prefixes[k] = string(v)
 	}
-	autoAllow := make([]string, 0, len(pm.bashAutoAllow))
-	for k, v := range pm.bashAutoAllow {
+	autoAllow := make([]string, 0, len(pm.bashAutoAllow.load()))
+	for k, v := range pm.bashAutoAllow.load() {
 		if strings.HasPrefix(k, bashInRootPersistPrefix) {
 			continue
 		}
@@ -4714,8 +5176,8 @@ func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 			autoAllow = append(autoAllow, k)
 		}
 	}
-	modes := make(map[string]string, len(pm.bashPrefixModes))
-	for k, v := range pm.bashPrefixModes {
+	modes := make(map[string]string, len(pm.bashPrefixModes.load()))
+	for k, v := range pm.bashPrefixModes.load() {
 		if strings.HasPrefix(k, bashInRootPersistPrefix) {
 			continue
 		}
@@ -4758,7 +5220,7 @@ func validPermissionLevel(level PermissionLevel) bool {
 
 func isReadOnlyTool(name string) bool {
 	switch name {
-	case "read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite":
+	case "read", "glob", "grep", "rgrep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "load_skill", "question", "todoread", "todowrite", "sqlite_schema", "sqlite_query":
 		return true
 	default:
 		return false
@@ -4907,14 +5369,19 @@ func canAutoAllowWithMode(pm *PermissionManager, command, prefix string) bool {
 	if !canAutoAllowInRoot(pm, command, prefix) {
 		return false
 	}
-	mode := pm.bashPrefixModes[prefix]
+	mode := pm.bashPrefixModes.load()[prefix]
 	switch mode {
 	case bashPrefixModeNever:
 		return false
 	case bashPrefixModeMutating:
 		return true
 	default:
-		pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)] = PermissionAllow
+		// Persist the in-root allow through the copy-on-write writer: this runs
+		// from inside Decide (a turn goroutine) while a settings save or a /ban
+		// may be swapping the same map on another goroutine.
+		pm.mutateBashPrefixes(func(rules map[string]PermissionLevel) {
+			rules[bashInRootKey(prefix, pm.workDir)] = PermissionAllow
+		})
 		return true
 	}
 }
@@ -4923,7 +5390,7 @@ func canAutoAllowInRoot(pm *PermissionManager, command, prefix string) bool {
 	if pm == nil || pm.workDir == "" {
 		return false
 	}
-	if !pm.bashAutoAllow[prefix] {
+	if !pm.bashAutoAllow.load()[prefix] {
 		return false
 	}
 	if shellCompound(command) {
@@ -5116,6 +5583,118 @@ func isLikelyPathArg(arg string) bool {
 // ALLOW with no scope check at all. Returns "" when the command isn't a
 // scope-violating rm.
 func dangerousRmReason(pm *PermissionManager, fields []string) string {
+	return dangerousRmReasonWith(pm, fields, nil)
+}
+
+// dangerousRmReasonIn is dangerousRmReason for the idx-th fragment of a parsed
+// line: a target that is a variable the SAME line earlier bound to a fresh
+// `mktemp -d` is scope-checkable (see mktempVarsBefore).
+func dangerousRmReasonIn(pm *PermissionManager, parsed []parsedShellCommand, idx int) string {
+	return dangerousRmReasonWith(pm, parsed[idx].cmdWords, mktempVarsBefore(parsed, idx))
+}
+
+// mktempVarsBefore returns the shell variables that fragments [0,idx) bind to a
+// fresh scratch directory, i.e. a lone `NAME=$(mktemp -d)` (or backticks). Such
+// a variable names a directory that did not exist before the command ran, so
+// removing it (or a path below it) can never reach project files, whatever
+// TMPDIR points at. A name assigned more than once, or touched by any other
+// fragment (`export NAME=…`, a second assignment), is excluded: its value at
+// the rm is then unknown.
+func mktempVarsBefore(parsed []parsedShellCommand, idx int) map[string]bool {
+	assigns := map[string]int{}
+	for _, c := range parsed {
+		for _, e := range c.envVars {
+			if name, _, ok := strings.Cut(e, "="); ok {
+				assigns[name]++
+			}
+		}
+		for _, w := range c.cmdWords {
+			if name, _, ok := strings.Cut(w, "="); ok && isShellVarName(name) {
+				assigns[name]++
+			}
+		}
+		for _, v := range c.loopVars {
+			assigns[v] += 2
+		}
+		if len(c.cmdWords) > 0 && shellRebindingBuiltins[filepath.Base(c.cmdWords[0])] {
+			// `read t`, `printf -v t`, `for t in`, `unset t` … rebind a name
+			// without a NAME= word. Any bare identifier argument may be the
+			// target, so count each one twice to exclude it.
+			for _, w := range c.cmdWords[1:] {
+				if isShellVarName(w) {
+					assigns[w] += 2
+				}
+			}
+		}
+	}
+	vars := map[string]bool{}
+	for _, c := range parsed[:idx] {
+		if len(c.cmdWords) != 0 || len(c.envVars) != 1 {
+			continue
+		}
+		name, val, ok := strings.Cut(c.envVars[0], "=")
+		if !ok || assigns[name] != 1 || !isShellVarName(name) {
+			continue
+		}
+		if val == "$(mktemp -d)" || val == "`mktemp -d`" {
+			vars[name] = true
+		}
+	}
+	return vars
+}
+
+// shellRebindingBuiltins are builtins/keywords that change a variable's value
+// (or remove it) through a bare name argument rather than a NAME=value word.
+var shellRebindingBuiltins = map[string]bool{
+	"read": true, "printf": true, "mapfile": true, "readarray": true,
+	"getopts": true, "unset": true, "for": true, "select": true,
+	"declare": true, "typeset": true, "local": true, "export": true,
+	"readonly": true, "let": true, "eval": true,
+}
+
+func isShellVarName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || unicode.IsLetter(r) || (i > 0 && unicode.IsDigit(r)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// mktempVarTarget reports whether t is exactly `$NAME` or `${NAME}` for a NAME
+// in vars. A subpath (`$NAME/x`) is deliberately NOT covered: if mktemp failed,
+// NAME is empty and `rm -rf "$NAME/etc"` would become `rm -rf /etc`, whereas a
+// bare empty `$NAME` is just `rm -rf ""`, which removes nothing.
+func mktempVarTarget(t string, vars map[string]bool) bool {
+	if len(vars) == 0 || !strings.HasPrefix(t, "$") {
+		return false
+	}
+	rest := t[1:]
+	var name string
+	if strings.HasPrefix(rest, "{") {
+		end := strings.IndexByte(rest, '}')
+		if end < 0 {
+			return false
+		}
+		name, rest = rest[1:end], rest[end+1:]
+	} else {
+		end := 0
+		for end < len(rest) && (rest[end] == '_' || rest[end] >= '0' && rest[end] <= '9' || rest[end] >= 'a' && rest[end] <= 'z' || rest[end] >= 'A' && rest[end] <= 'Z') {
+			end++
+		}
+		name, rest = rest[:end], rest[end:]
+	}
+	if !vars[name] {
+		return false
+	}
+	return rest == ""
+}
+
+func dangerousRmReasonWith(pm *PermissionManager, fields []string, tempVars map[string]bool) string {
 	if len(fields) == 0 || filepath.Base(fields[0]) != "rm" {
 		return ""
 	}
@@ -5155,12 +5734,93 @@ func dangerousRmReason(pm *PermissionManager, fields []string) string {
 		return ""
 	}
 	for _, t := range targets {
+		if mktempVarTarget(t, tempVars) {
+			continue
+		}
+		// A glob, variable or substitution has no single path to scope-check:
+		// the shell decides the real targets, so the judge's "inside the roots"
+		// reading cannot be verified. Refuse rather than guess.
+		if strings.ContainsAny(t, "*?[]{}$`~") {
+			return fmt.Sprintf("rm target %q is a glob, variable or substitution and cannot be scope-checked", t)
+		}
 		resolved := resolvePath(t, pm.workDir)
 		if !isWithinAllowedScope(pm, resolved) {
 			return fmt.Sprintf("rm target %q resolves outside allowed scope", t)
 		}
+		// Deleting INSIDE a root is in scope; deleting the root itself, the
+		// project directory (or a parent of it), or repository metadata is not
+		// something a judge's word or a prefix rule should grant. Paths are
+		// symlink-resolved and compared with the filesystem's own case rules,
+		// so neither a symlink nor ".GIT"/"/Users/X" spelling slips past.
+		clean := canonicalPath(resolved)
+		wd := canonicalPath(pm.workDir)
+		if pathsEqual(clean, wd) || pathUnder(wd, clean) {
+			return fmt.Sprintf("rm target %q is the project directory or a parent of it", t)
+		}
+		scopeRoot := ""
+		for _, root := range pm.AllowedRoots() {
+			cr := canonicalPath(root)
+			if pathsEqual(clean, cr) {
+				return fmt.Sprintf("rm target %q is an allowed root itself", t)
+			}
+			if pathUnder(clean, cr) && len(cr) > len(scopeRoot) {
+				scopeRoot = cr
+			}
+		}
+		// Only components BELOW the owning root count: a project checked out
+		// under a directory that happens to be named ".git" is still deletable.
+		below := clean
+		if scopeRoot != "" {
+			below = clean[len(scopeRoot):]
+		}
+		for _, part := range strings.Split(below, string(filepath.Separator)) {
+			if strings.EqualFold(part, ".git") {
+				return fmt.Sprintf("rm target %q is repository metadata", t)
+			}
+		}
 	}
 	return ""
+}
+
+// canonicalPath cleans p and resolves symlinks. A path that does not exist yet
+// resolves through its nearest existing ancestor, so rm of a missing target is
+// still judged by where it WOULD live.
+func canonicalPath(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if real, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(real, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// pathsEqual compares cleaned paths, case-insensitively on the platforms whose
+// default filesystems are case-insensitive.
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// pathUnder reports whether child is strictly inside parent. The root "/" is
+// handled explicitly: parent+sep would be "//" and match nothing.
+func pathUnder(child, parent string) bool {
+	prefix := parent
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	if len(child) <= len(prefix) {
+		return false
+	}
+	return pathsEqual(child[:len(prefix)], prefix)
 }
 
 func isHardBlockedCommand(command string) bool {
@@ -5393,6 +6053,7 @@ type parsedShellCommand struct {
 	cmdWords          []string // command and its arguments (e.g. ["go", "test", "./..."])
 	redirections      []string // target paths
 	stdinRedirections []string // target paths feeding stdin (e.g. "< file", "0< file")
+	loopVars          []string // for/select loop variables bound by a header dropped just before this fragment
 }
 
 func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
@@ -5403,11 +6064,18 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 
 	var commands []parsedShellCommand
 	var currentTokens []shellToken
+	// Loop variables of for/select headers, which the state machine drops. They
+	// are re-attached to the next emitted fragment so mktempVarsBefore sees the
+	// rebinding.
+	var pendingLoopVars []string
+	forVarSeen := false
 
 	emitCommand := func() {
 		if len(currentTokens) > 0 {
 			cmd := parseSingleCommandTokens(currentTokens)
 			if cmd != nil {
+				cmd.loopVars = pendingLoopVars
+				pendingLoopVars = nil
 				commands = append(commands, *cmd)
 			}
 			currentTokens = nil
@@ -5489,6 +6157,9 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 			// (`for f; do ...`) or a malformed one.
 			if tok.typ == tokOp || (tok.typ == tokWord && tok.value == "do") {
 				state = stNormal
+			} else if !forVarSeen && tok.typ == tokWord {
+				pendingLoopVars = append(pendingLoopVars, tok.value)
+				forVarSeen = true
 			}
 			continue
 		case stCaseHeader:
@@ -5543,6 +6214,7 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 			switch tok.value {
 			case "for", "select":
 				state = stForHeader
+				forVarSeen = false
 				continue
 			case "case":
 				caseDepth++
@@ -6130,7 +6802,11 @@ func resolvePath(path string, workDir string) string {
 	return path
 }
 
-func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parsedShellCommand) PermissionDecision {
+// lineNumericVars holds the integer assignments from every fragment of the
+// command line being judged (see the caller). It is threaded in because a
+// loopback URL's "$p" port depends on an assignment the parser put in a
+// different fragment — or in a `for` header it discarded.
+func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parsedShellCommand, lineNumericVars map[string]bool) PermissionDecision {
 	// Check env variables for path values
 	for _, env := range cmd.envVars {
 		parts := strings.SplitN(env, "=", 2)
@@ -6215,21 +6891,12 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("user-defined bash ban %q", deniedPrefix)}
 	}
 
-	// Claude Code settings: deny takes precedence over everything (mirrors
-	// Claude's deny > ask > allow evaluation order). A matching deny in
-	// .claude/settings.json or .claude/settings.local.json is a hard block
-	// that no allow rule or auto-allow can bypass.
-	if pat, denied := pm.claudeDenyRule(command); denied {
-		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (claude deny): command=%q", command))
-		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: formatClaudeDenyReason(pat)}
-	}
-
 	// Harmful operations (git revert/stash/reset/clean/checkout/restore/switch,
 	// git push/pull --force, exfiltration) always require explicit human
 	// approval and must never auto-allow — even when a broader prefix rule or a
 	// tool-level "bash" allow would otherwise permit them (e.g. a persisted
 	// "git push" rule must not auto-approve "git push --force").
-	if IsHarmfulBashCommand(command) {
+	if isHarmfulBashCommandWithVars(command, lineNumericVars) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 	}
@@ -6257,7 +6924,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// Loopback curl, wget, and httpie (targeting 127.0.0.0/8, ::1, localhost)
 	// stay on-host and cannot exfiltrate data off-machine, so they are
 	// auto-allowed without prompting — same rationale as loopback nc.
-	if isLoopbackNetworkCommand(command) {
+	if isLoopbackNetworkCommandWithVars(command, lineNumericVars) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback network): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}
@@ -6269,8 +6936,13 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
+	// One immutable snapshot for every prefix lookup below, so the five
+	// lookups in this section all agree on the same rule set even if a
+	// concurrent settings save or /ban swaps the map mid-decision.
+	rules := pm.bashPrefixSnapshot()
+
 	// 2. Persisted in-root rule
-	if level, exists := pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)]; exists {
+	if level, exists := rules[bashInRootKey(prefix, pm.workDir)]; exists {
 		if level == PermissionAllow && canAutoAllowInRoot(pm, command, prefix) {
 			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (in-root): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAllow}
@@ -6279,12 +6951,12 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 
 	// 3. Explicit prefix rule. A broad single-word deny (e.g. "git" => deny)
 	// governs every subcommand and must win over any granular allow.
-	if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionDeny {
+	if level, exists := rules[prefix]; exists && level == PermissionDeny {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (broad prefix rule): prefix=%s", prefix))
 		return PermissionDecision{Level: PermissionDeny, HardDeny: true, DenyReason: fmt.Sprintf("user-defined bash ban %q", prefix)}
 	}
 	// Then the granular rulePrefix (e.g. "git push"), which carries always-allow.
-	if level, exists := pm.bashPrefixes[rulePrefix]; exists {
+	if level, exists := rules[rulePrefix]; exists {
 		// A "git stash" deny bans the mutating family only; the read-only
 		// inspection forms are carved out of the ban (the same condition
 		// matchBashPrefixRule applies) and fall through to the subcommand
@@ -6305,14 +6977,14 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	}
 	// A path-qualified binary in a trusted location inherits its bare-name
 	// allow rule (./node_modules/.bin/vp under a "vp" rule).
-	if bin := trustedToolBasename(prefix, pm.workDir); bin != "" && pm.bashPrefixes[bin] == PermissionAllow {
+	if bin := trustedToolBasename(prefix, pm.workDir); bin != "" && rules[bin] == PermissionAllow {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (trusted path prefix rule): prefix=%s path=%s", bin, prefix))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 	// Finally a broad single-word ask rule (only reached when rulePrefix differs,
 	// i.e. git; a broad "git" allow cannot persist so only Ask remains here).
 	if rulePrefix != prefix {
-		if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionAsk {
+		if level, exists := rules[prefix]; exists && level == PermissionAsk {
 			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (broad prefix rule): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 		}
@@ -6400,7 +7072,7 @@ func envVarPermissionRequest(args json.RawMessage, command, resolved string, isS
 // the interpreter-effects verifier (permission_interpreter.go), and the
 // auto-continue triage (autocontinue_typesafe.go). A configured
 // permissions.auto.min_confidence overrides it.
-const autoJudgeMinConfidenceDefault = 0.85
+const autoJudgeMinConfidenceDefault = 0.80
 
 // configuredAutoJudgeMinConfidence returns the explicit permissions.auto
 // min_confidence and whether it was set (a positive value). Both the normal

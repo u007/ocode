@@ -27,18 +27,35 @@ const (
 // opens the browser, blocks until the user completes login (or `ctx` cancels),
 // then exchanges the code for tokens.
 func OpenAILogin(ctx context.Context) (Credential, error) {
-	pkce, err := NewPKCE()
+	authURL, finish, err := StartOpenAIOAuth(ctx)
 	if err != nil {
 		return Credential{}, err
 	}
+	openBrowser(authURL)
+	return finish()
+}
+
+// StartOpenAIOAuth prepares the ChatGPT OAuth flow without opening a
+// browser: it starts the localhost callback server and returns the
+// authorize URL the user must visit plus a finish func that blocks until
+// the user completes login (or `ctx` cancels), then exchanges the code
+// for tokens. Callers that render their own sign-in UI (the web/desktop
+// connector settings) open the returned URL themselves. The callback
+// still lands on the machine running ocode, so the browser and ocode
+// must be on the same host.
+func StartOpenAIOAuth(ctx context.Context) (string, func() (Credential, error), error) {
+	pkce, err := NewPKCE()
+	if err != nil {
+		return "", nil, err
+	}
 	state, err := RandomState()
 	if err != nil {
-		return Credential{}, err
+		return "", nil, err
 	}
 
 	authURL, err := buildOpenAIAuthorizeURL(pkce.Challenge, state)
 	if err != nil {
-		return Credential{}, err
+		return "", nil, err
 	}
 
 	codeCh := make(chan string, 1)
@@ -46,7 +63,7 @@ func OpenAILogin(ctx context.Context) (Credential, error) {
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", openaiLoopbackPort))
 	if err != nil {
-		return Credential{}, fmt.Errorf("bind localhost:%d for openai callback: %w", openaiLoopbackPort, err)
+		return "", nil, fmt.Errorf("bind localhost:%d for openai callback: %w", openaiLoopbackPort, err)
 	}
 
 	mux := http.NewServeMux()
@@ -75,22 +92,24 @@ func OpenAILogin(ctx context.Context) (Credential, error) {
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
 
-	openBrowser(authURL)
+	finish := func() (Credential, error) {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(shutdownCtx)
+		}()
 
-	select {
-	case <-ctx.Done():
-		return Credential{}, ctx.Err()
-	case err := <-errCh:
-		return Credential{}, err
-	case code := <-codeCh:
-		return openaiExchangeCode(code, pkce.Verifier)
+		select {
+		case <-ctx.Done():
+			return Credential{}, ctx.Err()
+		case err := <-errCh:
+			return Credential{}, err
+		case code := <-codeCh:
+			return openaiExchangeCode(code, pkce.Verifier)
+		}
 	}
+	return authURL, finish, nil
 }
 
 func buildOpenAIAuthorizeURL(challenge, state string) (string, error) {

@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, forwardRef } from "react";
+import { useEffect, useImperativeHandle, useRef, forwardRef } from "react";
 import TerminalPanel from "./TerminalPanel";
 import ProcessesPanel from "./ProcessesPanel";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
@@ -7,9 +7,13 @@ import { focusTerminalById } from "./terminalFocus";
 
 export interface TerminalTabsHandle {
   openTerminal: () => void;
-  /** Close the active terminal instance. Returns false when there is none,
-   *  so the caller (Cmd/Ctrl+W) can fall through to closing the session tab. */
-  closeActiveTerminal: () => boolean;
+  /** Close the active terminal instance. Returns `null` when there was none to
+   *  close (no active terminal, or the Processes sentinel), so the caller
+   *  (Cmd/Ctrl+W) can fall through to closing the session tab; otherwise the
+   *  number of terminals the project has LEFT, `0` meaning this close emptied
+   *  it. The count comes from the store after the removal, so callers never
+   *  have to reconcile it against a pre-close snapshot. */
+  closeActiveTerminal: () => number | null;
   /** Focus the xterm of the given terminal id, or the currently active one if omitted. */
   focusTerminal: (id?: string) => void;
 }
@@ -43,10 +47,15 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
     useImperativeHandle(ref, () => ({
       openTerminal: () => openTerminal(projectPath, host),
       closeActiveTerminal: () => {
-        if (!activeId || !terminals.some((t) => t.id === activeId)) return false;
-        // `closeTerminal` (the store action) returns false if the live terminal
-        // is already gone — so a second synchronous call (same render tick)
-        // falls through to false instead of removing a neighbour.
+        // Only the Processes sentinel (and "no active terminal") short-circuits
+        // here. Whether the id is actually still open is deliberately NOT
+        // checked against the rendered `terminals`: that snapshot can be one
+        // commit behind the store when a cross-client refetch lands just before
+        // the click, and `closeTerminal` re-checks against live state anyway
+        // (returning null rather than removing a neighbour). Two synchronous
+        // calls in one tick therefore behave the same: the first closes, the
+        // second returns null.
+        if (!activeId || activeId === PROCESSES_TAB_ID) return null;
         return closeTerminal(projectPath, activeId, host);
       },
       focusTerminal: (id?: string) => {
@@ -55,6 +64,16 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
         focusTerminalById(target);
       },
     }));
+
+    // Lazy panel mount: a TerminalPanel attaches a WebSocket, restores its
+    // history and creates a WebGL context, and TerminalTabs is mounted
+    // (hidden) for EVERY project with terminals — so mounting every panel up
+    // front is what turned a restart with a dozen persisted terminals into a
+    // boot stall. A panel mounts the first time its terminal is the active
+    // one while this project's terminal pane is shown, and stays mounted
+    // (hidden) afterwards so switching back never re-restores it.
+    const shownRef = useRef<Set<string>>(new Set());
+    if (active && activeId && activeId !== PROCESSES_TAB_ID) shownRef.current.add(activeId);
 
     if (loading || (available && scrollbackLines <= 0)) {
       return <div className="p-4 text-sm text-muted-foreground">Checking terminal availability…</div>;
@@ -81,7 +100,7 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
           </div>
         )}
 
-        {terminals.map((t) => (
+        {terminals.filter((t) => shownRef.current.has(t.id)).map((t) => (
           <div key={t.id} className={t.id === activeId ? "absolute inset-0" : "absolute inset-0 hidden"}>
             <TerminalPanel
               id={t.id}

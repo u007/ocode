@@ -9,7 +9,7 @@ tags:
   - question
   - design
   - state
-timestamp: 2026-09-25T11:47:33Z
+timestamp: 2026-10-09T02:48:01Z
 ---
 # Reopen a locally hidden question dialog — design
 
@@ -21,7 +21,8 @@ Status: **implemented (2026-09-25).** The request-ID-scoped hidden state, the lo
 - Store: `SessionSlice.hiddenQuestionRequestId` (`web/src/stores/chatStore.tsx:240`) with `QUESTION_HIDE` / `QUESTION_SHOW` actions (`:446-447`) and stale-ID guards in the reducer (`:890-916`). `QUESTION_REQUEST` preserves a hide for the same `request_id` (`:890-894`); `QUESTION_ANSWERED` / `QUESTION_DISMISSED` / `QUESTION_RESOLVED` clear only the matching id (`:966`, `:1004`); reset clears it (`:1146`) and `REKEY_SESSION` drops it (`:1020`).
 - App: visibility is derived as designed (`web/src/App.tsx:185`, `:1901` — `pendingQuestion && hiddenQuestionRequestId !== pendingQuestion.request_id && sessionAskVisible`).
 - Dialog: `QuestionDialog` takes separate `onHide` (X/Escape, local, no network) and `onCancel` ("Don't answer", still server-final) (`web/src/components/Chat/QuestionDialog.tsx:35`, `:188-197`, `:324`); overlay clicks stay suppressed (`:273-276`).
-- Reopen: the transcript's existing **Open question** action dispatches `QUESTION_SHOW` (`web/src/components/Chat/ChatPanel.tsx:1310`).
+- Reopen: the transcript's existing **Open question** action dispatches `QUESTION_SHOW` (`web/src/components/Chat/ChatPanel.tsx:1831`).
+- **Amendment (2026-10-09) — reopen affordance for a hidden mid-turn ask.** A question ask pauses the turn, so the committed turn-end `messages` broadcast never lands while the ask is pending; the ask's tool card then exists only in the live buffer, which had no reopen affordance. Three `ChatPanel.tsx` changes shipped: (1) the render-entries memo (~`:385`) derives an entry-level `pendingQuestion` from the session's `hiddenQuestionRequestId`/`pendingQuestion` when the transcript sentinel is absent or unparseable, so the committed transcript-level Open question button still renders after an X/Escape hide; (2) that memo's dependency list is now `[messages, slice.hiddenQuestionRequestId, slice.pendingQuestion]` (was `[messages]` only) so the hide triggers the recompute; (3) the live-buffer `ToolBlock` (~`:1912–1928`) now passes `onOpenQuestion` (the same `QUESTION_SHOW` dispatch) when the live part is the pending question's call. No store, server, or approved-behavior change.
 - Tests: `web/src/App.askDialogScope.test.tsx`, `web/src/components/Chat/QuestionDialog.test.tsx`, and the `QUESTION_HIDE`/`QUESTION_SHOW` cases in `web/src/stores/chatStore.test.tsx`.
 - No backend change, as the design required.
 

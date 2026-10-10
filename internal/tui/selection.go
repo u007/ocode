@@ -410,11 +410,25 @@ func ansiEscapeIdx(s string) [2]int {
 
 // extractSelectionText returns the plain-text substring for the selection.
 func extractSelectionText(rawLines []string, startLine, startCol, endLine, endCol int) string {
+	return extractSelectionTextCont(rawLines, nil, startLine, startCol, endLine, endCol)
+}
+
+// extractSelectionTextCont is extractSelectionText with hard-wrap
+// continuation flags (parallel to rawLines, see wrapViewMarked): a line whose
+// flag is set is glued to the previous one without a newline, so a URL the
+// renderer split across visual rows copies as one token. A nil or
+// mismatched cont behaves like extractSelectionText.
+func extractSelectionTextCont(rawLines []string, cont []bool, startLine, startCol, endLine, endCol int) string {
 	startLine, startCol, endLine, endCol = normaliseSelection(startLine, startCol, endLine, endCol)
-	var parts []string
+	if len(cont) != len(rawLines) {
+		cont = nil
+	}
+	var b strings.Builder
 	for lineIdx := startLine; lineIdx <= endLine; lineIdx++ {
+		if lineIdx > startLine && !(cont != nil && lineIdx >= 0 && lineIdx < len(cont) && cont[lineIdx]) {
+			b.WriteByte('\n')
+		}
 		if lineIdx < 0 || lineIdx >= len(rawLines) {
-			parts = append(parts, "")
 			continue
 		}
 		line := rawLines[lineIdx]
@@ -429,7 +443,7 @@ func extractSelectionText(rawLines []string, startLine, startCol, endLine, endCo
 		if cs > ce {
 			cs = ce
 		}
-		parts = append(parts, line[cs:ce])
+		b.WriteString(line[cs:ce])
 	}
-	return strings.Join(parts, "\n")
+	return b.String()
 }

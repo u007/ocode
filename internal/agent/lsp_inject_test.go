@@ -23,7 +23,7 @@ func lspTestDiag(uri, path, msg string, line int) lsp.Diagnostic {
 // builder and would bust the cache on each change.
 func TestInjectLSPDelta_UserRoleOnlyWhenChanged(t *testing.T) {
 	mgr := lsp.NewManager(t.TempDir())
-	a := NewAgent(nil, nil, nil, mgr)
+	a := newTestAgent(nil, nil, nil, mgr)
 	base := []Message{
 		{Role: "system", Content: "STABLE-SYS"},
 		{Role: "user", Content: "hello"},
@@ -74,7 +74,7 @@ func TestInjectLSPDelta_UserRoleOnlyWhenChanged(t *testing.T) {
 }
 
 func TestInjectLSPDelta_NilManagerIsNoop(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	base := []Message{{Role: "user", Content: "hi"}}
 	if out := a.injectLSPDelta(base); len(out) != 1 {
 		t.Fatalf("nil manager appended: %d", len(out))
@@ -83,7 +83,7 @@ func TestInjectLSPDelta_NilManagerIsNoop(t *testing.T) {
 
 func TestAppendEditDiagnostics_AttachesFreshAndSuppressesDelta(t *testing.T) {
 	mgr := lsp.NewManager(t.TempDir())
-	a := NewAgent(nil, nil, nil, mgr)
+	a := newTestAgent(nil, nil, nil, mgr)
 	uri := "file:///tmp/b.go"
 	diags := []lsp.Diagnostic{lspTestDiag(uri, "/tmp/b.go", "missing return", 9)}
 	var gotPath string
@@ -110,7 +110,7 @@ func TestAppendEditDiagnostics_AttachesFreshAndSuppressesDelta(t *testing.T) {
 }
 
 func TestAppendEditDiagnostics_SkipsNonEditNoServerAndStale(t *testing.T) {
-	a := NewAgent(nil, nil, nil, lsp.NewManager(t.TempDir()))
+	a := newTestAgent(nil, nil, nil, lsp.NewManager(t.TempDir()))
 	calls := 0
 	a.lspWait = func(ctx context.Context, path string, since time.Time) ([]lsp.Diagnostic, bool, error) {
 		calls++

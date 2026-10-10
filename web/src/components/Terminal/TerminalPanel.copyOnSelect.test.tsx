@@ -1,4 +1,4 @@
-import { render, fireEvent, act, waitFor, screen } from "@testing-library/react";
+import { render, fireEvent, act, waitFor, screen, cleanup } from "@testing-library/react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel, { writeClipboardText } from "./TerminalPanel";
@@ -20,6 +20,8 @@ const h = vi.hoisted(() => ({
     _selectionChange: (() => void) | null;
     _customKeyHandler: ((ev: KeyboardEvent) => boolean) | null;
     selectionText: string;
+    selectionRange: { start: { x: number; y: number }; end: { x: number; y: number } } | undefined;
+    element: HTMLElement | undefined;
     paste: (text: string) => void;
     selectAll: ReturnType<typeof vi.fn>;
   }>,
@@ -45,6 +47,8 @@ vi.mock("@xterm/xterm", () => {
     rows = 24;
     options: Record<string, unknown> = {};
     selectionText = "";
+    selectionRange: { start: { x: number; y: number }; end: { x: number; y: number } } | undefined = undefined;
+    element: HTMLElement | undefined = undefined;
     _selectionChange: (() => void) | null = null;
     _customKeyHandler: ((ev: KeyboardEvent) => boolean) | null = null;
     constructor() {
@@ -61,6 +65,7 @@ vi.mock("@xterm/xterm", () => {
     });
     getSelection = vi.fn(() => this.selectionText);
     hasSelection = vi.fn(() => this.selectionText.length > 0);
+    getSelectionPosition = vi.fn(() => this.selectionRange);
     selectAll = vi.fn();
     onBell = vi.fn(() => ({ dispose: vi.fn() }));
     onTitleChange = vi.fn(() => ({ dispose: vi.fn() }));
@@ -312,14 +317,191 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
     expect(writeText).not.toHaveBeenCalled();
   });
 
-  it("pastes via the async Clipboard API on Cmd/Ctrl+V and blocks xterm (no \\x16)", async () => {
+  // ── Cmd/Ctrl+V: the browser's `paste` event is the ONLY paste path ────
+  //
+  // A browser's Cmd/Ctrl+V default action is to dispatch a `paste`
+  // ClipboardEvent on the focused editable element — for a terminal that is
+  // xterm's hidden textarea. xterm 6 listens for that event on BOTH the
+  // textarea and the element and pastes the clipboard itself, and its
+  // `_keyDown` returns early WITHOUT preventDefault as soon as a custom key
+  // handler answers false. So a clipboard read in the keydown handler is a
+  // second paste of the same text: one from the read, one from xterm's own
+  // listener. The helpers below model the real DOM shape — a focused
+  // descendant (xterm's textarea) carrying its own paste listener, inside the
+  // panel container that owns the event.
+  function withXtermPasteListener(
+    host: HTMLElement,
+    term: { element: HTMLElement | undefined; paste: (text: string) => void },
+  ) {
+    // xterm's own shape: term.open(host) appends its element, and the hidden
+    // textarea that both receives the browser's paste event and carries
+    // xterm's own paste listener lives inside that element.
+    const xtermEl = document.createElement("div");
+    const textarea = document.createElement("textarea");
+    textarea.addEventListener("paste", (e) => {
+      const data = (e as ClipboardEvent).clipboardData?.getData("text/plain") ?? "";
+      // Exactly what xterm's handlePasteEvent does with the event.
+      if (data) term.paste(data);
+    });
+    xtermEl.appendChild(textarea);
+    host.appendChild(xtermEl);
+    term.element = xtermEl;
+    return textarea;
+  }
+
+  function firePaste(target: HTMLElement, text: string) {
+    const store = new Map<string, string>([["text/plain", text]]);
+    const dt = {
+      getData: (type: string) => store.get(type) ?? "",
+      setData: (type: string, value: string) => void store.set(type, value),
+    };
+    const ev = new Event("paste", { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(ev, "clipboardData", { value: dt });
+    fireEvent(target, ev);
+    return { defaultPrevented: ev.defaultPrevented };
+  }
+
+  it("Cmd/Ctrl+V keydown blocks xterm (no \\x16) and leaves the paste to the browser's paste event", async () => {
     const readText = vi.fn(() => Promise.resolve("pasted text"));
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText, readText },
       configurable: true,
       writable: true,
     });
-    render(<Panel />);
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    const paste = vi.fn();
+    term.paste = paste;
+    const host = container.firstElementChild as HTMLElement;
+    const textarea = withXtermPasteListener(host, term);
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    const mac = fireKey({ key: "v", metaKey: true });
+    expect(mac.allowed).toBe(false); // xterm must not emit \x16
+    expect(mac.defaultPrevented).toBe(false); // …but the browser must still fire `paste`
+    const win = fireKey({ key: "v", ctrlKey: true });
+    expect(win.allowed).toBe(false);
+    expect(win.defaultPrevented).toBe(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // The keydown must not paste by itself: the browser's own paste event
+    // does, so a clipboard read here is the double paste.
+    expect(readText).not.toHaveBeenCalled();
+    expect(paste).not.toHaveBeenCalled();
+    // Never a raw socket write: paste goes through term.paste (bracketed-paste aware).
+    expect(h.sockets[0]?.send).not.toHaveBeenCalled();
+
+    // …and that one event pastes exactly once, even though xterm has a paste
+    // listener of its own on the focused element.
+    firePaste(textarea, "pasted text");
+    expect(paste).toHaveBeenCalledTimes(1);
+    expect(paste).toHaveBeenCalledWith("pasted text");
+  });
+
+  it("pastes a native paste event once and keeps xterm's own paste listener from seeing it", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    const paste = vi.fn();
+    term.paste = paste;
+    const host = container.firstElementChild as HTMLElement;
+    const textarea = withXtermPasteListener(host, term);
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    const ev = firePaste(textarea, "hello from the clipboard");
+    expect(paste).toHaveBeenCalledTimes(1);
+    expect(paste).toHaveBeenCalledWith("hello from the clipboard");
+    // The panel owns the paste: the event is consumed at the container, so the
+    // terminal cannot paste the same text a second time.
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("drops a duplicate paste event for one physical paste (shell menu role + keydown default action)", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    const paste = vi.fn();
+    term.paste = paste;
+    const host = container.firstElementChild as HTMLElement;
+    const textarea = withXtermPasteListener(host, term);
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    // The desktop shell's Edit ▸ Paste role and the Cmd+V keydown default
+    // action are separate routes for one keystroke (the copy path has the
+    // same dual route, see the dedupe above). One keystroke, one paste.
+    firePaste(textarea, "pasted once");
+    const dup = firePaste(textarea, "pasted once");
+    expect(paste).toHaveBeenCalledTimes(1);
+    expect(dup.defaultPrevented).toBe(true);
+  });
+
+  // 100ms pins the window as SHORT: the two deliveries of one physical paste
+  // land within a few ms, so anything near the copy window's 250ms would start
+  // swallowing a user's own rapid repeat.
+  it("still pastes the same text again 100ms later — the dedupe window stays short", async () => {
+    vi.useFakeTimers();
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    const paste = vi.fn();
+    term.paste = paste;
+    const host = container.firstElementChild as HTMLElement;
+    const textarea = withXtermPasteListener(host, term);
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    firePaste(textarea, "again");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    firePaste(textarea, "again");
+    expect(paste).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves a paste aimed at another input inside the panel (the find bar) alone", async () => {
+    const readText = vi.fn(() => Promise.resolve("should not reach the shell"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText, readText },
+      configurable: true,
+      writable: true,
+    });
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    const paste = vi.fn();
+    term.paste = paste;
+    const host = container.firstElementChild as HTMLElement;
+    withXtermPasteListener(host, term);
+
+    // TerminalFindBar renders its own search input inside the same container,
+    // and this listener runs in the capture phase on that container — so it
+    // sees a paste aimed at the find field too. A capture-phase hijack is
+    // invisible in the shell and just breaks the find box.
+    const findInput = document.createElement("input");
+    host.appendChild(findInput);
+    const ev = firePaste(findInput, "query text");
+
+    expect(paste).not.toHaveBeenCalled();
+    expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it("pastes the right-click menu Paste through term.paste, never a raw socket write", async () => {
+    const readText = vi.fn(() => Promise.resolve("menu paste"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText, readText },
+      configurable: true,
+      writable: true,
+    });
+    const { container } = render(<Panel />);
     const term = h.terminals[0];
     const paste = vi.fn();
     term.paste = paste;
@@ -328,17 +510,39 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
       h.sockets[0]?.onopen?.();
     });
 
-    const mac = fireKey({ key: "v", metaKey: true });
-    expect(mac.allowed).toBe(false);
-    const win = fireKey({ key: "v", ctrlKey: true });
-    expect(win.allowed).toBe(false);
-
-    await waitFor(() => {
-      expect(readText).toHaveBeenCalledTimes(2);
-      expect(paste).toHaveBeenCalledWith("pasted text");
+    // The context menu's Paste is a distinct action (not a delivery of the
+    // Cmd/Ctrl+V keystroke, so it is deliberately not deduped) but it must
+    // use the same path: a raw sock.send would skip bracketed-paste wrapping
+    // and the attach handshake that term.onData guards.
+    fireEvent.contextMenu(container.firstElementChild as HTMLElement);
+    const menuItem = await screen.findByText("Paste");
+    await act(async () => {
+      fireEvent.click(menuItem);
+      await Promise.resolve();
     });
-    // Never a raw socket write: paste goes through term.paste (bracketed-paste aware).
+
+    expect(readText).toHaveBeenCalled();
+    expect(paste).toHaveBeenCalledWith("menu paste");
     expect(h.sockets[0]?.send).not.toHaveBeenCalled();
+  });
+
+  it("never drops a paste of different text inside the duplicate window", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    const paste = vi.fn();
+    term.paste = paste;
+    const host = container.firstElementChild as HTMLElement;
+    const textarea = withXtermPasteListener(host, term);
+
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+
+    firePaste(textarea, "first");
+    firePaste(textarea, "second");
+    expect(paste).toHaveBeenCalledTimes(2);
+    expect(paste).toHaveBeenNthCalledWith(1, "first");
+    expect(paste).toHaveBeenNthCalledWith(2, "second");
   });
 
   it("does not send \\x03 or \\x16 through onData for clipboard shortcuts", async () => {
@@ -430,6 +634,33 @@ describe("terminal clipboard shortcuts (Cmd/Ctrl+C copy, Cmd/Ctrl+V paste)", () 
       input.remove();
     }
   });
+
+  it("leaves a copy from the find bar's input alone when xterm shows no selection", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+    // A drag leaves a snapshot behind; xterm then drops its own selection.
+    term.selectionText = "stale snapshot";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("stale snapshot"));
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+
+    const input = document.createElement("input");
+    host.appendChild(input);
+    input.focus();
+    const setData = vi.fn();
+    const event = new Event("copy", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { setData } });
+    fireEvent(input, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(setData).not.toHaveBeenCalled();
+  });
 });
 
 describe("terminal copy under a redrawing program (claude code over ssh)", () => {
@@ -438,7 +669,7 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
   // selection every frame, so a later live read of getSelection() returns a
   // partial/mutated line set. The text the user saw at release must be what
   // every later copy path (Cmd+C, Edit-menu copy event) writes.
-  function fireKey(init: { key: string; metaKey?: boolean }) {
+  function fireKey(init: { key: string; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean }) {
     const term = h.terminals[0];
     const { key, ...modifiers } = init;
     const e = new KeyboardEvent("keydown", { key, ...modifiers, bubbles: true, cancelable: true });
@@ -552,6 +783,256 @@ describe("terminal copy under a redrawing program (claude code over ssh)", () =>
     term.selectionText = "released outside";
     act(() => term._selectionChange?.());
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("released outside"));
+  });
+
+  it("right-click → Copy copies the word xterm selected even though the mouse-up report cleared it (mouse-tracking app)", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    // claude code has ?1000/?1006 on: xterm's contextmenu listener selects
+    // the word under the cursor, then the button-release mouse report counts
+    // as user input and xterm clears that selection again before the user
+    // can reach the menu.
+    fireEvent.mouseDown(host, { button: 2, clientX: 20, clientY: 20 });
+    term.selectionText = "word";
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+    fireEvent.mouseUp(host, { button: 2, clientX: 20, clientY: 20 });
+
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(false);
+    fireEvent.mouseDown(copy);
+    fireEvent.mouseUp(copy);
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("word");
+    expect(screen.queryByText("Copy")).toBeNull();
+  });
+
+  it("right-click → Copy after a scrollback trim dropped the selection still copies the dragged text", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "scrolled away";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("scrolled away"));
+    writeText.mockClear();
+    await new Promise((r) => setTimeout(r, 300));
+
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("scrolled away");
+    expect(screen.queryByText("Copy")).toBeNull();
+  });
+
+  it("a plain left click in the terminal drops the snapshot (user deselected)", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "old";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("old"));
+    writeText.mockClear();
+
+    term.selectionText = "";
+    fireEvent.mouseDown(host, { clientX: 30, clientY: 30 });
+    act(() => term._selectionChange?.());
+    fireEvent.mouseUp(host, { clientX: 30, clientY: 30 });
+
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    expect(copy.disabled).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("a key that reaches the pty drops the snapshot; bare modifiers and Cmd-combos do not", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "typed over";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("typed over"));
+    writeText.mockClear();
+    term.selectionText = "";
+    act(() => term._selectionChange?.());
+
+    fireKey({ key: "Shift" });
+    fireKey({ key: "ArrowUp", metaKey: true });
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    fireKey({ key: "a" });
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("right-click over the dragged range keeps the mouse-up snapshot, not the rewritten rows", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "line one\nline two\nline three";
+    term.selectionRange = { start: { x: 0, y: 1 }, end: { x: 10, y: 3 } };
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 40 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 40 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("line one\nline two\nline three"));
+    writeText.mockClear();
+    // Past the same-text duplicate-copy window, so the Copy below is a real write.
+    await new Promise((r) => setTimeout(r, 300));
+
+    // The Ink redraw rewrote the rows under the still-highlighted range.
+    term.selectionText = "line one\n\n";
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("line one\nline two\nline three");
+  });
+
+  it("right-click that selects a word over a NEW range replaces the snapshot", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "dragged";
+    term.selectionRange = { start: { x: 0, y: 1 }, end: { x: 7, y: 1 } };
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("dragged"));
+    writeText.mockClear();
+
+    term.selectionText = "word";
+    term.selectionRange = { start: { x: 3, y: 9 }, end: { x: 7, y: 9 } };
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 90 });
+    const copy = screen.getByText("Copy").closest("button")!;
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith("word");
+  });
+
+  it("a right-button press/release never copies the word rightClickSelectsWord picked", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    fireEvent.mouseDown(host, { button: 2, clientX: 20, clientY: 20 });
+    term.selectionText = "wordUnderCursor";
+    act(() => term._selectionChange?.());
+    fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+    fireEvent.mouseUp(host, { button: 2, clientX: 20, clientY: 20 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(writeText).not.toHaveBeenCalled();
+    // The word is still offered to the menu's Copy.
+    expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("a press on the panel's own chrome leaves the snapshot alone", async () => {
+    const { container } = render(<Panel />);
+    const term = h.terminals[0];
+    await act(async () => {
+      h.sockets[0]?.onopen?.();
+    });
+    const host = container.firstElementChild as HTMLElement;
+
+    term.selectionText = "keep across chrome click";
+    fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+    fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("keep across chrome click"));
+    writeText.mockClear();
+    await new Promise((r) => setTimeout(r, 300));
+
+    fireKey({ key: "f", metaKey: true });
+    const findInput = await screen.findByRole("search");
+    fireEvent.mouseDown(findInput, { clientX: 300, clientY: 10 });
+    fireEvent.mouseUp(findInput, { clientX: 300, clientY: 10 });
+
+    term.selectionText = "keep\n\n";
+    expect(fireKey({ key: "c", metaKey: true })).toBe(false);
+    expect(writeText).toHaveBeenCalledWith("keep across chrome click");
+  });
+
+  it("Ctrl+C as SIGINT, Cmd+V and Shift+Enter all drop the snapshot", async () => {
+    for (const key of [
+      { key: "c", ctrlKey: true },
+      { key: "v", metaKey: true },
+      { key: "Enter", shiftKey: true },
+    ]) {
+      // Distinct text per iteration: same-text writes inside the duplicate
+      // window are dropped.
+      const text = `typed over ${key.key}`;
+      cleanup();
+      writeText.mockClear();
+      h.terminals.length = 0;
+      h.sockets.length = 0;
+      const { container } = render(<Panel />);
+      const term = h.terminals[0];
+      await act(async () => {
+        h.sockets[0]?.onopen?.();
+      });
+      const host = container.firstElementChild as HTMLElement;
+
+      term.selectionText = text;
+      fireEvent.mouseDown(host, { clientX: 10, clientY: 10 });
+      fireEvent.mouseMove(host, { clientX: 60, clientY: 12 });
+      fireEvent.mouseUp(host, { clientX: 60, clientY: 12 });
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(text));
+      term.selectionText = "";
+      act(() => term._selectionChange?.());
+
+      fireKey(key);
+      fireEvent.contextMenu(host, { clientX: 20, clientY: 20 });
+      expect((screen.getByText("Copy").closest("button") as HTMLButtonElement).disabled, JSON.stringify(key)).toBe(true);
+    }
   });
 
   it("drops the snapshot once the selection is cleared so Ctrl+C sends SIGINT again", async () => {
@@ -761,5 +1242,67 @@ describe("writeClipboardText fallback", () => {
       delete (document as unknown as Record<string, unknown>).execCommand;
       writeText.mockClear();
     }
+  });
+});
+
+// Claude Code (mouse-tracking), tmux and vim copy their own selections by
+// emitting OSC 52; over ssh it is the only copy path. xterm ignores it unless
+// a handler is registered.
+describe("terminal OSC 52 clipboard write", () => {
+  type OscMock = { mock: { calls: Array<[number, (data: string) => boolean]> } };
+  function osc52Handler() {
+    const reg = (h.terminals[0] as unknown as { parser: { registerOscHandler: OscMock } }).parser.registerOscHandler;
+    const call = reg.mock.calls.find(([ident]) => ident === 52);
+    expect(call).toBeTruthy();
+    return call![1];
+  }
+
+  function setUserActivation(isActive: boolean | undefined) {
+    Object.defineProperty(navigator, "userActivation", {
+      configurable: true,
+      value: isActive === undefined ? undefined : { isActive, hasBeenActive: isActive },
+    });
+  }
+  beforeEach(() => setUserActivation(true));
+  afterEach(() => setUserActivation(undefined));
+
+  it("refuses a write with no user activation or an oversized payload", async () => {
+    render(<Panel />);
+    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
+    await act(async () => {
+      h.sockets[0].onopen?.();
+    });
+    const handler = osc52Handler();
+    setUserActivation(false);
+    expect(handler(`c;${btoa("hijack")}`)).toBe(true);
+    setUserActivation(true);
+    expect(handler(`c;${"A".repeat(100_004)}`)).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("writes the decoded payload to the system clipboard once the socket is live", async () => {
+    render(<Panel />);
+    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
+    await act(async () => {
+      h.sockets[0].onopen?.();
+    });
+    const handler = osc52Handler();
+    const b64 = btoa(String.fromCharCode(...new TextEncoder().encode("héllo from ssh")));
+    expect(handler(`c;${b64}`)).toBe(true);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("héllo from ssh"));
+  });
+
+  it("ignores clipboard read queries and replayed scrollback", async () => {
+    render(<Panel />);
+    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
+    const handler = osc52Handler();
+    // Before the socket opens the terminal is replaying history.
+    expect(handler(`c;${btoa("old")}`)).toBe(true);
+    await act(async () => {
+      h.sockets[0].onopen?.();
+    });
+    expect(handler("c;?")).toBe(true);
+    expect(handler("c;!!not-base64!!")).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
   });
 });

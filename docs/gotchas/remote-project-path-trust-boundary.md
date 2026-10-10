@@ -19,8 +19,8 @@ A saved remote project has two identity components: `(host, path)`. Its `path` i
 
 The exploit chain described below **no longer applies**. The fix:
 
-- `allowedProjectRoots` (`internal/server/handler.go:626`) now **skips every saved project with `Host != ""`**, so the local allowlist contains only the server workdir and local (`Host == ""`) project roots.
-- The second path-only allowlist, `isRegisteredProjectRoot` (`internal/server/handler_git.go:156`), had the same bug and was fixed at the same time — it now `continue`s on `proj.Host != ""`, so git/fs-mutation admission (`mutationProjectDir`) ignores remote records too.
+- `allowedProjectRoots` (`internal/server/handler.go:662`) now **skips every saved project with `Host != ""`**, so the local allowlist contains only the server workdir and local (`Host == ""`) project roots.
+- The second path-only allowlist, `isRegisteredProjectRoot` (`internal/server/handler_git.go:164`), had the same bug and was fixed at the same time — it now `continue`s on `proj.Host != ""`, so git/fs-mutation admission (`mutationProjectDir`) ignores remote records too.
 - Regression coverage: `internal/server/remote_project_trust_boundary_test.go` (6 tests, all mutation-verified to fail against the pre-fix code). See "Regression coverage" below.
 - CHANGES.md: "2026-09-28 — Security: a remote project's path is no longer a local filesystem root".
 
@@ -28,7 +28,7 @@ The analysis below is retained as the historical record of the failure mode and 
 
 ## Confirmed failure mode and exploit chain (historical — fixed 2026-09-28)
 
-The review confirmed a concrete trust-boundary vulnerability in the implementation as it stood at the time. `allowedProjectRoots` (`internal/server/handler.go:626`) builds the allowlist from the server workdir and every saved project's `Path`, but did not filter out saved projects whose `Host` is non-empty — that gap is closed (see "Status: fixed 2026-09-28" above).
+The review confirmed a concrete trust-boundary vulnerability in the implementation as it stood at the time. `allowedProjectRoots` (`internal/server/handler.go:662`) builds the allowlist from the server workdir and every saved project's `Path`, but did not filter out saved projects whose `Host` is non-empty — that gap is closed (see "Status: fixed 2026-09-28" above).
 
 An attacker or untrusted web client could exploit that by:
 

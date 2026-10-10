@@ -56,7 +56,7 @@ func TestStepKeepsWorkDoneBeforeMidTurnError(t *testing.T) {
 		errs: []error{nil, errors.New("stream closed by provider")},
 	}
 
-	a := NewAgent(client, nil, nil, nil)
+	a := newTestAgent(client, nil, nil, nil)
 	msgs, err := a.Step([]Message{{Role: "user", Content: "review changes"}})
 
 	if err == nil {

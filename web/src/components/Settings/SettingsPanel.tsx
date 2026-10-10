@@ -16,6 +16,7 @@ import TUIForm from "./TUIForm";
 import EditorModeForm from "./EditorModeForm";
 import PathsForm from "./PathsForm";
 import FeaturesForm from "./FeaturesForm";
+import AutoShareForm from "./AutoShareForm";
 import LimitsForm from "./LimitsForm";
 import ImageGenForm from "./ImageGenForm";
 import OcodePluginsForm from "./OcodePluginsForm";
@@ -29,12 +30,17 @@ import BrowserForm from "./BrowserForm";
 import VaultForm from "./VaultForm";
 import TTSForm from "./TTSForm";
 import ChatDisplayForm from "./ChatDisplayForm";
+import QuickActionsForm from "./QuickActionsForm";
+import ConnectorsForm from "./ConnectorsForm";
+import PulseAssistantForm from "./PulseAssistantForm";
+import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "../../lib/pulseAssistant";
 
 export type SettingsGroupId =
   | "backend"
   | "browser"
   | "vault"
   | "tts"
+  | "connectors"
   | "profiles"
   | "profile-debug"
   | "model-defaults"
@@ -42,7 +48,9 @@ export type SettingsGroupId =
   | "compact"
   | "speech-summary"
   | "chat-display"
+  | "quick-actions"
   | "advisor"
+  | "pulse-assistant"
   | "permissions"
   | "system-permissions"
   | "security"
@@ -57,6 +65,7 @@ export type SettingsGroupId =
   | "paths"
   | "limits"
   | "features"
+  | "auto-share"
   | "plugins"
   | "theme"
   | "opencode-mcp"
@@ -73,6 +82,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "browser", label: "Browser" },
   { id: "vault", label: "Passwords" },
   { id: "tts", label: "Speech playback" },
+  { id: "connectors", label: "Connectors" },
   { id: "profiles", label: "Profiles" },
   { id: "profile-debug", label: "Profile Debug" },
   { id: "model-defaults", label: "Model Defaults & Recap" },
@@ -80,7 +90,9 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "compact", label: "Compact" },
   { id: "speech-summary", label: "Speech Summary" },
   { id: "chat-display", label: "Chat display" },
+  { id: "quick-actions", label: "Quick actions" },
   { id: "advisor", label: "Advisor" },
+  { id: "pulse-assistant", label: "Pulse assistant" },
   { id: "permissions", label: "Permissions" },
   { id: "system-permissions", label: "System Permissions" },
   { id: "security", label: "Security & Redaction" },
@@ -95,6 +107,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "paths", label: "Paths & Uploads" },
   { id: "limits", label: "Limits" },
   { id: "features", label: "Features" },
+  { id: "auto-share", label: "Auto Share" },
   { id: "plugins", label: "Plugins & Local Models" },
   { id: "theme", label: "Theme" },
 ];
@@ -118,6 +131,12 @@ function renderGroup(id: SettingsGroupId) {
       return <VaultForm />;
     case "tts":
       return <TTSForm />;
+    case "connectors":
+      // No `host`: the Settings panel is a GLOBAL surface by convention (see
+      // the same choice in PermissionsForm), so this manages THIS machine's
+      // base credentials. ConnectorsForm still accepts a host for a future
+      // project-scoped surface — do not delete the prop as "unused".
+      return <ConnectorsForm />;
     case "profiles":
       return <ProfilesManager />;
     case "profile-debug":
@@ -132,8 +151,12 @@ function renderGroup(id: SettingsGroupId) {
       return <SpeechSummaryForm />;
     case "chat-display":
       return <ChatDisplayForm />;
+    case "quick-actions":
+      return <QuickActionsForm />;
     case "advisor":
       return <AdvisorForm />;
+    case "pulse-assistant":
+      return <PulseAssistantForm />;
     case "permissions":
       return <PermissionsForm />;
     case "system-permissions":
@@ -158,6 +181,8 @@ function renderGroup(id: SettingsGroupId) {
       return <PathsForm />;
     case "features":
       return <FeaturesForm />;
+    case "auto-share":
+      return <AutoShareForm />;
     case "limits":
       return <LimitsForm />;
     case "imagegen":
@@ -233,6 +258,11 @@ export default function SettingsPanel() {
     const h = () => setActive("profiles")
     window.addEventListener("ocode:open-settings-profiles", h)
     return () => window.removeEventListener("ocode:open-settings-profiles", h)
+  }, [])
+  useEffect(() => {
+    const h = () => setActive("pulse-assistant")
+    window.addEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
+    return () => window.removeEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
   }, [])
 
   return (

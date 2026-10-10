@@ -15,13 +15,13 @@ import (
 // because the composer textarea's internal viewport is only initialised there,
 // and the restore path writes to the composer.
 func compactFailureModel() model {
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	if resized, ok := sized.(model); ok {
 		m = resized
 	}
-	m.agent = agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil)
+	m.agent = newTestAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil)
 	m.messages = []message{{role: roleUser, text: "one"}, {role: roleAssistant, text: "two"}}
 	m.pendingCompactUIIdx = []int{-1, 0, 1}
 	m.pendingCompactResume = true

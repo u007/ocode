@@ -98,6 +98,50 @@ func storedTranscriptStateForDir(dir, id string) (string, []agent.Message, error
 	return "", nil, nil
 }
 
+// StoredTitleForDir returns id's persisted title without loading its
+// transcript: one DDL-free sqlite open reading the meta row. It exists for the
+// web client's lazy tab hydration — a never-opened tab needs its label (and
+// turn state) at boot but not its messages. A legacy .ojsonl/.json session, a
+// missing session, or a schema-less sqlite file reports "" (the client keeps
+// the tab's persisted label), never an error the caller must branch on.
+func StoredTitleForDir(wd, id string) (string, error) {
+	if id == "" {
+		return "", nil
+	}
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		return "", err
+	}
+	return storedTitleForDir(dir, id)
+}
+
+func storedTitleForDir(dir, id string) (string, error) {
+	for _, candidate := range sessionCandidateIDs(id) {
+		sqlitePath := sqliteSessionPath(dir, candidate)
+		if !fileExists(sqlitePath) {
+			continue
+		}
+		db, err := openDBRaw(sqlitePath)
+		if err != nil {
+			return "", err
+		}
+		var title string
+		err = db.QueryRow(`SELECT title FROM meta WHERE id = ?`, candidate).Scan(&title)
+		_ = db.Close()
+		if err != nil {
+			// Schema-less / unreadable sqlite: same fail-open as the revision
+			// reader — the client falls back to the tab's persisted label.
+			return "", nil
+		}
+		// Cap defensively on read so a session whose title was stored verbatim
+		// before the write-path cap (multi-megabyte) does not ride every
+		// /state poll and /api/tabs fetch. This bounds the label without
+		// rewriting the stored row.
+		return TruncateTitle(title, MaxStoredTitleRunes), nil
+	}
+	return "", nil
+}
+
 // storedRevisionForDir is the revision-only wrapper over
 // storedTranscriptStateForDir, kept so the existing revision callers and tests
 // need no change.

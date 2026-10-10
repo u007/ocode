@@ -800,6 +800,13 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow, handl
 	// CustomEvents to the React frontend (same mechanism as Settings…) so the
 	// SPA can show the share dialog / copy the token URL without duplicating
 	// dialog logic in Go.
+	//
+	// The URL those dialogs build carries the DURABLE share token
+	// (internal/desktop.ShareTokenStore), not this launch's token, so a link
+	// already in someone's hands keeps working across restarts. That makes
+	// revocation the counterpart: "Reset Share Token…" rotates it, which
+	// invalidates every outstanding link immediately while leaving this
+	// window's own session untouched.
 	shareMenu := menu.AddSubmenu("Share")
 	shareMenu.Add("Share Session…").
 		SetAccelerator("CmdOrCtrl+Shift+S").
@@ -814,6 +821,10 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow, handl
 	shareMenu.Add("Copy Desktop URL").
 		OnClick(func(*application.Context) {
 			window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:copy-desktop-url"))`)
+		})
+	shareMenu.Add("Reset Share Token…").
+		OnClick(func(*application.Context) {
+			window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:reset-share-token"))`)
 		})
 
 	// Window menu. The macOS role is fine (Minimise/Zoom/Front, no Cmd+W).

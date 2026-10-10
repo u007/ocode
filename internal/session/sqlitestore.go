@@ -326,6 +326,13 @@ func writeSqliteSessionFull(dir string, s Session) error {
 	}
 	defer db.Close()
 
+	// Titles are labels, not transcripts: bound the value we PERSIST (see
+	// MaxStoredTitleRunes) so a title derived from an oversized first message is
+	// never written verbatim in the first place — the read-path cap then has
+	// nothing to heal. Intra-function only: `s` is a value copy, so the caller's
+	// in-memory Session keeps its original title until reload.
+	s.Title = TruncateTitle(s.Title, MaxStoredTitleRunes)
+
 	metaJSON, err := json.Marshal(s.Metadata)
 	if err != nil {
 		return fmt.Errorf("session: marshal metadata %s: %w", s.ID, err)
@@ -498,6 +505,12 @@ func appendSqliteSessionOnce(dir, id, title string, messages []agent.Message, me
 		resolvedTitle = title
 		titleGenerated = true
 	}
+	// Bound the title on every meta UPDATE. This covers BOTH an explicit title
+	// (e.g. a manual rename) and a value carried over from an already-stored
+	// row, so a session poisoned before the write-path cap was added is healed
+	// on its next save — no migration needed. Intentional silent truncation
+	// (the user asked for a hard limit); it is a label, never the transcript.
+	resolvedTitle = TruncateTitle(resolvedTitle, MaxStoredTitleRunes)
 
 	var metaJSON string
 	if metadata == nil {

@@ -4,6 +4,7 @@ import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
 import PortMapsWidget from "./PortMapsWidget";
+import { AssistantToggleButton } from "../Pulse/PulseAssistantWindow";
 import { useProjectState } from "../../stores/projectStore";
 import { loadProjectTerminals } from "../Terminal/terminalPersistence";
 import { basename } from "@/lib/utils";
@@ -350,6 +351,9 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
       )}
 
       <div className="ml-auto flex items-center shrink-0">
+        {/* The assistant window's toggle lives here, not in the sidebar: the top
+            bar is always visible, and the sidebar collapses. One control only. */}
+        <AssistantToggleButton />
         <PortMapsWidget />
         <SyncStatusWidget />
       </div>

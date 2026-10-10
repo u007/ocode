@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import { render, screen, fireEvent, act, within, cleanup } from "@testing-library/react";
-import { useLayoutEffect, useEffect } from "react";
+import { useLayoutEffect, useEffect, useRef } from "react";
 import ChatPanel from "./ChatPanel";
 import { ChatProvider, useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { dropPrefetchedSession, prefetchSession } from "../../lib/sessionPrefetch";
@@ -309,6 +309,26 @@ function LiveSeed({
 }
 
 /** Exposes the store dispatch so tests can drive live/append mutations. */
+/** Exposes a live read of one session slice's `transcriptScrolledUp` so a test
+ *  can assert what ChatPanel PUBLISHED to the store. Defaults to the same
+ *  session the panel under test uses. */
+function SliceRead({
+  sessionId,
+  onRead,
+}: {
+  sessionId: string;
+  onRead: (read: () => boolean) => void;
+}) {
+  const value = useChatSelector((s) => getSessionSlice(s, sessionId).transcriptScrolledUp);
+  const ref = useRef(value);
+  ref.current = value;
+  useEffect(() => {
+    onRead(() => ref.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
+
 function DispatchCapture({ onCapture }: { onCapture: (d: (a: unknown) => void) => void }) {
   const dispatch = useChatDispatch();
   useEffect(() => {
@@ -947,6 +967,83 @@ describe("ChatPanel", () => {
     });
   });
 
+  describe("publishes transcriptScrolledUp for the composer's recent-inputs strip", () => {
+    /** ChatInput is a SIBLING of ChatPanel under App.tsx, so the per-session
+     *  slice is the only channel between the transcript's scroll state and the
+     *  composer. This pins the publish half of that contract: without it the
+     *  composer's strip can never appear (and the store field would be dead
+     *  code that only its own reducer test exercises). */
+    async function renderSignal(sessionId: string) {
+      let read: (() => boolean) | null = null;
+      const utils = render(
+        <ChatProvider>
+          <SliceRead sessionId={sessionId} onRead={(fn) => (read = fn)} />
+          <LiveSeed sessionId={sessionId} messages={[mk("user", "an earlier ask"), mk("assistant", "b")]} />
+          <ChatPanel sessionId={sessionId} />
+        </ChatProvider>,
+      );
+      await tick();
+      act(() => {
+        hoisted.resolve.current({ messages: [], total: 0, title: "" });
+      });
+      await tick();
+      await advanceFrame();
+      return { ...utils, scrolledUp: () => read!() };
+    }
+
+    it("flips to true when the reader is more than 200px above the tail", async () => {
+      const { container, scrolledUp } = await renderSignal("sess-scrolled-up");
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 0, 5000); // 5000 - 0 - 600 = 4400px below the fold
+      expect(scrolledUp()).toBe(false);
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(true);
+      f.set(4400); // exactly 0px below the fold
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(false);
+    });
+
+    it("flips back to false when the reader returns to the tail", async () => {
+      const { container, scrolledUp } = await renderSignal("sess-scrolled-back");
+      const el = scrollElOf(container);
+      const f = fakeScroll(el, 0, 5000);
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(true);
+      f.set(5000); // pinned at the bottom
+      fireEvent.scroll(el);
+      await advanceFrame();
+      expect(scrolledUp()).toBe(false);
+    });
+
+    it("does not publish for a DIFFERENT session's slice", async () => {
+      // Per-session, or one tab's scroll would light up every other composer's
+      // strip (every tab keeps its composer mounted, hidden via CSS).
+      const sessionId = "sess-scoped";
+      let readOther: (() => boolean) | null = null;
+      const { container } = render(
+        <ChatProvider>
+          <SliceRead sessionId="sess-other" onRead={(fn) => (readOther = fn)} />
+          <LiveSeed sessionId={sessionId} messages={[mk("user", "ask"), mk("assistant", "b")]} />
+          <ChatPanel sessionId={sessionId} />
+        </ChatProvider>,
+      );
+      await tick();
+      act(() => {
+        hoisted.resolve.current({ messages: [], total: 0, title: "" });
+      });
+      await tick();
+      await advanceFrame();
+      const el = scrollElOf(container);
+      fakeScroll(el, 0, 5000);
+      userScrollsUp(el);
+      await advanceFrame();
+      expect(readOther!()).toBe(false);
+    });
+  });
+
   describe("per-message Speak", () => {
     it("offers Speak on the assistant text of a tool-group turn", async () => {
       const msgs: Message[] = [
@@ -1509,6 +1606,119 @@ describe("ChatPanel", () => {
     expect(hiddenQuestionRequestId).toBeNull();
   });
 
+  it("offers 'Open question' on the LIVE tool card while a mid-turn ask is hidden", async () => {
+    // Mid-turn ask: the authoritative transcript snapshot lands only at turn
+    // end (agent_session.go turn-end broadcast), so the question's tool card
+    // is still rendered from the LIVE buffer — and the live ToolBlock used to
+    // receive no onOpenQuestion, leaving no reopen affordance after X/Escape.
+    let probeDispatch: ReturnType<typeof useChatDispatch> | null = null;
+    let hiddenLiveRequestId: string | null | undefined;
+    function LiveProbe() {
+      probeDispatch = useChatDispatch();
+      hiddenLiveRequestId = useChatSelector(
+        (s) => getSessionSlice(s, "sess-liveq").hiddenQuestionRequestId,
+      );
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-liveq" messages={[mk("user", "pick one")]} />
+        <ChatPanel sessionId="sess-liveq" />
+        <LiveProbe />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+
+    act(() => {
+      probeDispatch!({
+        type: "LIVE_TOOL_START",
+        sessionId: "sess-liveq",
+        tool: "question",
+        callId: "q-live-1",
+        command: "{}",
+      });
+      probeDispatch!({
+        type: "LIVE_TOOL_RESULT",
+        sessionId: "sess-liveq",
+        callId: "q-live-1",
+        output:
+          "QUESTION_PROMPT:\n" +
+          JSON.stringify([{ header: "Deploy", question: "Where?", options: [] }]) +
+          "\nWAITING_FOR_USER_RESPONSE",
+      });
+      probeDispatch!({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-liveq",
+        question: {
+          request_id: "q-live-1",
+          questions: [{ header: "Deploy", question: "Where?", options: [] }],
+        },
+      });
+      probeDispatch!({ type: "QUESTION_HIDE", sessionId: "sess-liveq", requestId: "q-live-1" });
+    });
+    await tick();
+
+    // The hidden state is what makes the button the ONLY reopen affordance.
+    expect(hiddenLiveRequestId).toBe("q-live-1");
+    const btn = screen.getByRole("button", { name: "Open question" });
+    fireEvent.click(btn);
+    expect(hiddenLiveRequestId).toBeNull();
+  });
+
+  it("derives the 'Open question' button from session state when the sentinel is absent", async () => {
+    // The persisted sentinel may be missing even though the server still holds
+    // the ask (sentinel-less paused save — sessionEvents.ts livePendingAsks):
+    // SSE set pendingQuestion, but parseQuestionFromMessage has nothing to
+    // parse, so the entry-level map is empty. After X/Escape the session state
+    // is the only source left for the reopen button.
+    const msgs: Message[] = [
+      mk("user", "deploy"),
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "q-nosent", function: { name: "question", arguments: "{}" } }],
+      },
+      // deliberately NO sentinel tool message
+    ];
+    let probeDispatch: ReturnType<typeof useChatDispatch> | null = null;
+    let hiddenRequestId: string | null | undefined;
+    function NoSentinelProbe() {
+      probeDispatch = useChatDispatch();
+      hiddenRequestId = useChatSelector(
+        (s) => getSessionSlice(s, "sess-nosent").hiddenQuestionRequestId,
+      );
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-nosent" messages={msgs} />
+        <ChatPanel sessionId="sess-nosent" />
+        <NoSentinelProbe />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+
+    act(() => {
+      probeDispatch!({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-nosent",
+        question: {
+          request_id: "q-nosent",
+          questions: [{ header: "Env", question: "Which env?", options: [] }],
+        },
+      });
+      probeDispatch!({ type: "QUESTION_HIDE", sessionId: "sess-nosent", requestId: "q-nosent" });
+    });
+    await tick();
+
+    expect(hiddenRequestId).toBe("q-nosent");
+    const btn = screen.getByRole("button", { name: "Open question" });
+    fireEvent.click(btn);
+    expect(hiddenRequestId).toBeNull();
+  });
+
   it("renders orphan tool result as single when parent not loaded", async () => {
     const msgs: Message[] = [
       mk("user", "hello"),
@@ -1810,5 +2020,75 @@ describe("ChatPanel", () => {
       expect(screen.queryByText(/total,/)).toBeNull();
       warn.mockRestore();
     });
+  });
+});
+
+describe("ChatPanel keeps an un-pinned reader's row across window slides", () => {
+  /** A 4-row tail page of a 104-message transcript (window start 100), with
+   *  the reader locked at the top of the page. */
+  async function renderSlidingWindow(sessionId: string) {
+    let captured: ((a: unknown) => void) | null = null;
+    const tail = [mk("user", "u1"), mk("assistant", "a1"), mk("user", "u2"), mk("assistant", "a2")];
+    const utils = render(
+      <ChatProvider>
+        <DispatchCapture onCapture={(d) => (captured = d)} />
+        <LiveSeed sessionId={sessionId} messages={tail} hasMore total={104} />
+        <ChatPanel sessionId={sessionId} />
+      </ChatProvider>,
+    );
+    await tick();
+    act(() => {
+      hoisted.resolve.current({ messages: [], total: 0, title: "" });
+    });
+    await tick();
+    await advanceFrame();
+    const el = scrollElOf(utils.container);
+    // Pinned first (same shape as the wheel-up test above), then a real
+    // gesture drags the reader to the top of the page.
+    // (A tall fake scrollHeight: virtual-core clamps scrollToIndex against the
+    // element's scrollHeight, and the restore must land at 100 * 96.)
+    const f = fakeScroll(el, 49400, 50000);
+    fireEvent.scroll(el);
+    await advanceFrame();
+    // 300px down: past the scroll-up pagination trigger (< 100px), so only
+    // the slide moves the offset. Row 3 (global key 103) is under the top edge,
+    // 12px into it.
+    f.set(300);
+    userScrollsUp(el);
+    await advanceFrame();
+    expect(f.get()).toBe(300);
+    return { ...utils, el, f, tail, dispatch: (a: unknown) => captured!(a) };
+  }
+
+  it("moves the offset by the height of the rows the turn-end snapshot inserts above the reader", async () => {
+    const sessionId = "sess-slide-grow";
+    const { f, tail, dispatch } = await renderSlidingWindow(sessionId);
+    // The turn-end `messages` broadcast carries the WHOLE transcript: 100 older
+    // rows land above the reader's row (global key 100, local index 0 → 100).
+    const older = Array.from({ length: 100 }, (_, i) => mk(i % 2 ? "assistant" : "user", `older${i}`));
+    act(() => {
+      dispatch({ type: "SET_MESSAGES", sessionId, messages: [...older, ...tail] });
+    });
+    // 100 rows at the 96px estimate now sit above the same row (index 103).
+    expect(f.get()).toBe(103 * 96 + 12);
+  });
+
+  it("does not treat the reconcile snapshot shrinking the window back to a tail page as a reset", async () => {
+    const sessionId = "sess-slide-shrink";
+    const { f, tail, dispatch } = await renderSlidingWindow(sessionId);
+    const older = Array.from({ length: 100 }, (_, i) => mk(i % 2 ? "assistant" : "user", `older${i}`));
+    act(() => {
+      dispatch({ type: "SET_MESSAGES", sessionId, messages: [...older, ...tail] });
+    });
+    expect(f.get()).toBe(103 * 96 + 12);
+    // The watchdog's MERGE_SNAPSHOT replaces the 104-row window with the same
+    // 4-row tail page: the reader's row is back at local index 3 and the list
+    // shrank — which used to read as "transcript reset" and pinned the reader
+    // to the bottom (50000).
+    act(() => {
+      dispatch({ type: "MERGE_SNAPSHOT", sessionId, messages: tail, total: 104 });
+    });
+    await advanceFrame();
+    expect(f.get()).toBe(300);
   });
 });

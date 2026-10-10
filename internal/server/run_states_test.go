@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/tool"
@@ -96,5 +97,29 @@ func TestRunStatesSortsSessions(t *testing.T) {
 	}
 	if states[0].SessionID != "sess-a" || states[1].SessionID != "sess-b" {
 		t.Fatalf("sessions not sorted: %+v", states)
+	}
+}
+
+// A session whose as.mu is held (runTurn holds it for the whole turn) must not
+// block the poll: the desktop badge watcher and quit dialog call this, and a
+// blocking Lock froze the app until the running turn finished.
+func TestPendingPermissionAsksDoesNotBlockOnRunningTurn(t *testing.T) {
+	h := NewHandler()
+	ask := agent.Message{Role: "tool", Content: tool.SentinelPermissionAsk + `{"toolName":"bash"}`}
+	busy := &agentSession{messages: []agent.Message{ask}}
+	busy.mu.Lock()
+	defer busy.mu.Unlock()
+	h.agents["busy"] = busy
+	h.agents["parked"] = &agentSession{messages: []agent.Message{ask}}
+
+	done := make(chan int, 1)
+	go func() { done <- h.PendingPermissionAsks() }()
+	select {
+	case got := <-done:
+		if got != 1 {
+			t.Fatalf("PendingPermissionAsks = %d, want 1 (mid-turn session is not pending)", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PendingPermissionAsks blocked on a session whose turn holds as.mu")
 	}
 }

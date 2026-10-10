@@ -113,7 +113,7 @@ func BenchmarkAssemblyPlusSet(b *testing.B) {
 // suspected cause of the real-world 33ms stall.
 func BenchmarkResize_Pairs17(b *testing.B) {
 	m := buildHeavyTranscriptModel(17, 8*1024) // ~51 messages, matches the real log
-	m.renderTranscript()                        // prime cache at width=100
+	m.renderTranscript()                       // prime cache at width=100
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Alternate between two widths so every iteration is a full bulk cache miss.

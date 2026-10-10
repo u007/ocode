@@ -5,6 +5,13 @@ export interface TerminalHistoryRestoreOptions {
   projectPath: string;
   host?: string;
   pageSize?: number;
+  /**
+   * Upper bound on replayed bytes. When the log is longer, the restore starts
+   * at `snapshot_end - maxBytes` (advanced to the next line break so no
+   * partial escape sequence is painted) instead of byte zero. Unset replays
+   * the whole log.
+   */
+  maxBytes?: number;
   signal?: AbortSignal;
   /** Share decoder state with the following WebSocket byte stream. */
   decoder?: TextDecoder;
@@ -69,8 +76,8 @@ function parsePage(raw: unknown): TerminalHistoryPage {
 }
 
 /**
- * Replays the server's append-only terminal log from byte zero in bounded
- * pages. The server snapshot cursor is sent back on every later request so a
+ * Replays the server's append-only terminal log in bounded pages, from byte
+ * zero or (with `maxBytes`) from the log's tail. The server snapshot cursor is sent back on every later request so a
  * live log can grow without changing the restore boundary. The callback is
  * invoked only after each page has passed all progression and base64 checks.
  */
@@ -79,6 +86,7 @@ export async function restoreTerminalHistory({
   projectPath,
   host,
   pageSize = 64 * 1024,
+  maxBytes,
   signal,
   onSnapshotEnd,
   onText,
@@ -87,12 +95,18 @@ export async function restoreTerminalHistory({
   if (!Number.isSafeInteger(pageSize) || pageSize <= 0) {
     throw new TerminalHistoryError("terminal history page size must be positive");
   }
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)) {
+    throw new TerminalHistoryError("terminal history byte cap must be positive");
+  }
 
   const decoder = suppliedDecoder ?? new TextDecoder();
   let offset = 0;
   let snapshotEnd: number | undefined;
   let state: "active" | "exited" | undefined;
   let first = true;
+  // True for the first page after jumping to the tail: its leading bytes up to
+  // the first newline are dropped so the replay begins on a line boundary.
+  let skipToLineStart = false;
 
   for (;;) {
     const params = new URLSearchParams({ offset: String(offset), limit: String(pageSize) });
@@ -127,15 +141,27 @@ export async function restoreTerminalHistory({
       state = page.state;
       onSnapshotEnd?.(snapshotEnd);
       first = false;
+      if (maxBytes !== undefined && snapshotEnd > maxBytes) {
+        // The log exceeds the cap: discard this head page and restart from
+        // the tail. Every later request stays pinned to this snapshot.
+        offset = snapshotEnd - maxBytes;
+        skipToLineStart = true;
+        continue;
+      }
     } else if (page.snapshot_end !== snapshotEnd) {
       throw new TerminalHistoryError("terminal history snapshot changed during restore");
     }
-    const bytes = decodeBase64(page.data);
+    let bytes = decodeBase64(page.data);
     if (page.next_offset !== offset + bytes.length || page.next_offset > page.snapshot_end) {
       throw new TerminalHistoryError("terminal history returned invalid byte progression");
     }
     if (page.eof !== (page.next_offset === page.snapshot_end)) {
       throw new TerminalHistoryError("terminal history returned inconsistent eof metadata");
+    }
+    if (skipToLineStart) {
+      skipToLineStart = false;
+      const newline = bytes.indexOf(0x0a);
+      if (newline >= 0) bytes = bytes.subarray(newline + 1);
     }
     if (bytes.length > 0) {
       const text = decoder.decode(bytes, { stream: true });

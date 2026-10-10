@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { recentUserInputs } from "../lib/recentInputs";
 import {
   useChatSelector,
   useChatDispatch,
@@ -11,6 +12,7 @@ import { api, ApiError } from "../api/client";
 import { resolveSessionHost } from "./useSessionHost";
 import { clearPendingRewind, loadPendingRewind } from "../lib/pendingRewindStore";
 import { reportActionError, reportActionErrorMessage } from "../lib/actionErrors";
+import { clearSessionActivity } from "../lib/commandActivity";
 import type { PermissionDecision, QuestionAnswerPayload } from "../api/types";
 import type { PermissionDecideResult } from "../components/Chat/PermissionDialog";
 
@@ -78,6 +80,22 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   );
   const hiddenQuestionRequestId = useChatSelector(
     (s) => getSessionSlice(s, sessionId).hiddenQuestionRequestId,
+  );
+  // True while this session's transcript is scrolled away from its tail.
+  // Written by ChatPanel's scroll handler (they are siblings under App.tsx, so
+  // the per-session slice is the only channel between them).
+  const transcriptScrolledUp = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).transcriptScrolledUp,
+  );
+  // The last couple of REAL typed inputs, oldest → newest, for the composer's
+  // recall strip. `recentUserInputs` allocates a fresh array per call, so the
+  // shallow comparator is load-bearing: without it every store update (a
+  // streamed token, a status frame) would hand the composer a new array and
+  // re-render it for unchanged text. The walk stops at 2, so the comparator is
+  // O(1)-ish regardless of transcript length.
+  const recentInputs = useChatSelector(
+    (s) => recentUserInputs(getSessionSlice(s, sessionId).messages),
+    (a, b) => a.length === b.length && a.every((text, i) => text === b[i]),
   );
   // The assistant message (prose + reasoning) behind the pending ask, shown
   // inside the permission/question dialogs. Shallow-compared so streamed
@@ -270,6 +288,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const stop = useCallback(() => {
     if (!sessionId) return;
     dispatch({ type: "INTERRUPT", sessionId });
+    // A cancelled turn never emits turn_done/turn_error, so the skill/command
+    // bar has to be dropped here or it would hang for the rest of the session.
+    clearSessionActivity(sessionId);
     // Don't block UI on the cancel RPC; fire and forget. If the session is
     // a temp `new-*` id with no server session yet, skip the call.
     if (!sessionId.startsWith("new-")) {
@@ -482,6 +503,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     resolvePermission,
     submitQuestionAnswers,
     cancelQuestion,
+    hydratePendingAsks,
     projectHost,
     // isStreaming derives from the per-session turn state (Part 05): set
     // optimistically on 202 (SET_STREAMING), confirmed by turn_started
@@ -492,6 +514,12 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     pendingQuestion,
     hiddenQuestionRequestId,
     askContext,
+    // Consumed by the composer's "recent inputs" strip. Both are narrow
+    // selectors: `transcriptScrolledUp` is a boolean that only flips when the
+    // reader crosses the tail threshold, and `recentInputs` is shallow-compared
+    // so streamed deltas never hand the composer a new array.
+    transcriptScrolledUp,
+    recentInputs,
     hideQuestion,
     showQuestion,
   };

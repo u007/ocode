@@ -5,9 +5,11 @@ import {
   type ReactNode,
 } from "react";
 import { useProjectState } from "../stores/projectStore";
+import { useTerminalState } from "../stores/terminalStore";
 import type { Project } from "../api/types";
 import { browserActions } from "./browserStore";
 import { sideChatKey } from "./sidePaneState";
+import { tabFocusActions } from "./tabFocus";
 
 /**
  * jumpToSession — open a session from outside the current project.
@@ -69,10 +71,8 @@ function usePulseJumpContext(): { exitPulse: (targetPath: string) => void } {
   return ctx;
 }
 
-function findProject(projects: Project[], target: JumpTarget): Project | undefined {
-  return projects.find(
-    (p) => p.path === target.projectPath && (p.host || "") === target.host,
-  );
+function findProject(projects: Project[], projectPath: string, host: string): Project | undefined {
+  return projects.find((p) => p.path === projectPath && (p.host || "") === host);
 }
 
 /** Shared body: activate the project, open the tab, leave the dashboard.
@@ -83,7 +83,7 @@ function useJump(openSidePane: boolean) {
 
   return useCallback(
     async (target: JumpTarget) => {
-      const project = findProject(state.projects, target);
+      const project = findProject(state.projects, target.projectPath, target.host);
       if (!project) {
         // Refuse loudly: opening a tab for a project the store does not know
         // would create a session bound to no project — a wrong tab the user
@@ -103,6 +103,62 @@ function useJump(openSidePane: boolean) {
       exitPulse(target.projectPath);
     },
     [state.projects, selectProject, openSessionTab, exitPulse, openSidePane],
+  );
+}
+
+export interface TerminalJumpTarget {
+  /** A LOCAL project path. Pulse terminals come from the server's own process
+   *  table, so there is no host to carry. */
+  projectPath: string;
+  terminalId: string;
+  /** The terminal's title, or "" for the placeholder name. */
+  title: string;
+}
+
+/**
+ * Jump to a live terminal of a local project, landing on the terminal tab.
+ *
+ * Same contract as `useJump`, in this order:
+ *   1. selectProject(project)               — the terminal belongs to the active project
+ *   2. attachTerminal(...)                  — makes the terminal a tab in this window
+ *   3. tabFocusActions.request({kind:"terminal"}) — queues the reveal
+ *   4. exitPulse(path)                      — leaves the dashboard
+ *
+ * The reveal is a queued request, not a direct view change, because App owns
+ * `activeView`/`focusedKind`. App's consumer is a passive effect, which runs
+ * after exitPulse's `setFocusedKind("chat")` in the same batch, so the terminal
+ * reveal wins.
+ *
+ * attachTerminal returns early for a terminal the project already lists, so it
+ * never activates one by itself; App activates the requested id from the request.
+ */
+export function useJumpToTerminal() {
+  const { state, selectProject } = useProjectState();
+  const { attachTerminal } = useTerminalState();
+  const { exitPulse } = usePulseJumpContext();
+
+  return useCallback(
+    async (target: TerminalJumpTarget) => {
+      const project = findProject(state.projects, target.projectPath, "");
+      if (!project) {
+        // Same refusal as useJump: a terminal bound to no project is a tab the
+        // user cannot diagnose from what they see.
+        console.error(
+          `jumpToSession: no local project matches path=${target.projectPath}; not opening terminal ${target.terminalId}`,
+        );
+        return;
+      }
+      await selectProject(project);
+      attachTerminal(target.projectPath, "", target.terminalId, target.title);
+      tabFocusActions.request({
+        kind: "terminal",
+        projectPath: target.projectPath,
+        host: "",
+        terminalId: target.terminalId,
+      });
+      exitPulse(target.projectPath);
+    },
+    [state.projects, selectProject, attachTerminal, exitPulse],
   );
 }
 

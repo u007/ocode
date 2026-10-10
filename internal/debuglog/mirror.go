@@ -42,7 +42,9 @@ func (l *log) mirror(path string, e Entry) {
 			return
 		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// 0600, not 0644: these files carry turn and command text, which can include a
+	// credential literal. A debug log does not need to be world-readable.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		l.mirrorFailOnce.Do(func() {
 			l.Append(Entry{Kind: KindError, Message: fmt.Sprintf("debuglog: open mirror %s: %v", path, err)})

@@ -9,12 +9,12 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 
 ## Context and inputs available
 
-- `SessionManager.Snapshot()` (`internal/server/session_manager.go:574`) →
+- `SessionManager.Snapshot()` (`internal/server/session_manager.go:679`) →
   live entries: session id, project root, `turnActive`, `turnStartedAt`,
   `turnEndedAt`, `lastActivity`, `lastTurnErr` (field added earlier:
   `sessionEntry.lastTurnErr string`, "" = no error).
 - `Handler.RunStates()` (`internal/server/run_states.go:42`) → running agents.
-- `tailIsPermissionAsk(msgs)` (`run_states.go:135`) and
+- `tailIsPermissionAsk(msgs)` (`run_states.go:155`) and
   `tailIsQuestionAsk(msgs)` (`handler_questions.go:74`) on the session's
   message tail; the ask parsers `parsePermissionAsk` / `parseQuestionAsk`
   (used in `handler.go` ~790) give the summary text.
@@ -27,7 +27,7 @@ Spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
   `buildPulseRows(inputs, scope, now) []PulseRow`,
   `pagePulseRows(rows, cursor, limit) ([]PulseRow, string, error)`.
 - `scope=all` disk source: the same session-listing path used by
-  `GET /api/sessions` (`handler.go:1036`) — must NOT call the per-project
+  `GET /api/sessions` (`handler.go:1042`) — must NOT call the per-project
   list endpoint per project (see `docs/gotchas/web-all-sessions-dialog-slow.md`).
   Parent id for child detection comes from session refs (same source the
   web uses to hide children in `SessionDialog.tsx:42`).

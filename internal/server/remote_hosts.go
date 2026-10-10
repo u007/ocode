@@ -118,6 +118,11 @@ type remoteHostRegistry struct {
 	// connectTimeout overrides the default backstop on one connect attempt
 	// (remoteConnectTimeout). Tests set a short value; production leaves it 0.
 	connectTimeout time.Duration
+
+	// eventsLiveness overrides the upstream-silence bound of the /api/events
+	// relay (remoteEventsLiveness). Tests set a short value; production
+	// leaves it 0.
+	eventsLiveness time.Duration
 }
 
 // remoteHostWorkspaceConnector is the factory result used by realConnect: a

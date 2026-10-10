@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Auto-Permission Enforced Categories
-description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, and the 2026-09-29 environment-enumeration rubric carve-out.'
+description: 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, the 2026-09-29 environment-enumeration rubric carve-out, and the 2026-10-02 executed_scripts source disclosure.'
 resource: internal/agent/permission_typesafe.go
 tags:
   - permissions
@@ -12,16 +12,10 @@ tags:
   - settings
   - web
   - interpreter
-timestamp: 2026-09-29T15:56:49Z
+timestamp: 2026-10-04T12:33:27Z
 ---
 # Auto-Permission Enforced Categories
 
-**Type:** Concept  
-**Description:** 'Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, and the opaque-floor override for truncated_or_unknown.'  
-**Resource:** internal/agent/permission_typesafe.go  
-**Tags:** permissions, auto-permission, typesafe, jev, config, settings, web, interpreter  
-
----
 ## Decision
 
 Users can switch off individual concern categories that the LLM auto-permission judge **and the interpreter-effect verifier** must enforce. The control lives in **Web Settings → Permissions → "Categories the judge must enforce"** (`web/src/components/Settings/PermissionsForm.tsx`); all categories are ticked (enforced) by default.
@@ -54,7 +48,7 @@ The closed set is `typesafeConcerns` in `internal/agent/permission_typesafe.go` 
 
 The relaxed keys are rendered after the base rules on every judge path, so the user's opt-out outranks the shipping policy (which hard-codes e.g. "deny when a credential appears").
 
-- **Jev / TypeSafe path** (`askPermissionModelTypesafe`): the relaxed clause is appended to **both** the verdict and the concern question instructions (`relaxedConcernsClause`), and mirrored into `state["relaxed_concerns"]`. Deterministically, a **DENY whose single named concern is in the relaxed set is converted to an allow**, logged `tier=auto_typesafe_relaxed`. A deny that names `none`, nothing, or a still-enforced category is **not attributable and stands** (fail closed). Because the clause is appended after the bundled addendum, it wins over the shipping policy.
+- **Decision-backend path** (`askPermissionModelTypesafe`): the relaxed clause is appended to **both** the verdict and the concern question instructions (`relaxedConcernsClause`), and mirrored into `state["relaxed_concerns"]`. Deterministically, a **DENY whose single named concern is in the relaxed set is converted to an allow**, logged `tier=auto_typesafe_relaxed`. A deny that names `none`, nothing, or a still-enforced category is **not attributable and stands** (fail closed). The same holds for a **low-confidence allow**: an `allow` below the floor whose named concern is a switched-off category is granted (`outcome=relaxed_allow`, after `verifyAutoGrant`), because the hesitation is attributed to the class the user opted out of; below the floor with `none` or an enforced concern still defers. Because the clause is appended after the bundled addendum, it wins over the shipping policy.
 - **Chat judge path** (`askPermissionModel`): instruction-only, as a per-request section ("Relaxed concern categories") placed next to the banned-prefix facts. The chat verdict carries **no category**, so a chat-judge deny cannot be attributed to an opted-out class and **stands**. (Unchanged — still instruction-only.)
 - **Interpreter-effect path** (`askPermissionModelInterpreter` / `verifyInterpreterEffects` in `internal/agent/permission_interpreter.go`): `verifyInterpreterEffects` is a thin wrapper — `return a.verifyInterpreterEffectsWith(..., a.relaxedConcernSet())`. The new `verifyInterpreterEffectsWith(..., relaxed map[string]bool)` holds the gates; the pre-existing call sites and tests are unchanged, and `relaxed == nil` means **everything enforced** (that nil form is also used to ask "would this have passed strictly?"). A relaxation-load-bearing allow — one that *needed* an opt-out to pass — is granted for the invocation only and logged `tier=auto_interp_relaxed_allow`; a durable `interpreter_exact` grant is persisted **only** when the same response would also have passed strictly, so re-ticking a category takes effect on the next invocation instead of being shadowed by a saved grant.
 
@@ -88,13 +82,13 @@ Several categories carry a UI `note` (from `relaxableConcernNotes`, kept next to
 | `system_or_git_history` | Relaxes what reached the judge; hard-blocked git forms and a force-push never get here at all. |
 | `truncated_or_unknown` | Allows a call even when the judge cannot tell what it does, including interpreter sources with unresolved effects or truncated source. |
 
-## Opaque floor (TypeSafe/Jev path)
+## Opaque floor (decision-backend path)
 
 Some requests are **opaque**: the command head is something the model cannot determine the effect of — a command whose first token is an undefined shell variable (e.g. `$g --version`), an interpreter script whose source cannot be read, or any other call whose effects cannot be determined. When `askPermissionModelTypesafe` returns a concern of `truncated_or_unknown` for such a request, the confidence floor for an `allow` verdict changes.
 
 **The opaque floor is `0.75` as a DEFAULT — an explicitly configured `min_confidence` always governs:**
 
-- If `permissions.auto.min_confidence` is **unset**, the effective floor becomes the opaque default `0.75` (the normal default `0.85` is relaxed for opaque requests).
+- If `permissions.auto.min_confidence` is **unset**, the effective floor becomes the opaque default `0.75` (the normal default `0.80` is relaxed for opaque requests; the default was `0.85` until 2026-10-03).
 - If `min_confidence` is configured (any positive value — `0.70`, `0.85`, `0.95`), the configured value governs the opaque request too. A permissive configured value is never raised and a stricter configured value is never lowered: the opaque relaxation can never silently change the user's own bar.
 
 This is the **only** category that triggers the opaque relaxation. Every other concern (`outside_allowed_roots`, `destructive`, `secrets`, `banned_prefix`, `network`, `subprocess_or_dynamic_code`, `system_or_git_history`) keeps the normal `permissions.auto.min_confidence` floor (default `0.85`). The opaque relaxation does not apply when those categories are the concern, even if `truncated_or_unknown` is also present (the relaxation applies when `truncated_or_unknown` is the judge's concern answer, not when it merely appears elsewhere).
@@ -102,6 +96,31 @@ This is the **only** category that triggers the opaque relaxation. Every other c
 **What the opaque floor does and does not do:** it only lowers the threshold for an `allow` verdict — a `deny` from the judge still defers to the human in full. The concern answer `truncated_or_unknown` does **not** decide the verdict; it only selects which floor applies. Deterministic `verifyAutoGrant` still runs after the floor check, so a hard-blocked command, dangerous `rm`, or other Go guard refusal still wins regardless of the lower floor.
 
 `resolveAutoJudgeOpaqueMinConfidence()` (`internal/agent/permissions.go`) returns the configured value when `permissions.auto.min_confidence` is set, and the `autoJudgeOpaqueMinConfidenceDefault = 0.75` constant only when it is unset.
+
+## Executed scripts ship their source (2026-10-02 amendment)
+
+`buildTypesafePermissionState` now ships the source of the scripts a bash command **executes** under a new state key, **`executed_scripts`**. This is judge context, not a gate: **the key decides nothing.** No permission gate was added, removed, or relaxed — the worst outcome of an omitted entry is the pre-existing `truncated_or_unknown` deferral described under *Opaque floor* above, which fails closed.
+
+**The incident it fixes.** The TypeSafe judge has no `read_file` tool. The chat judge's prose context already inlines these files as `Executed custom script: …` sections, but the structured state builder did not, so a script reached Jev as a bare opaque path. Real record from the durable judge log (`permission-judge.log`):
+
+```
+command: chmod +x /tmp/aimssearch/gsearch.sh && /tmp/aimssearch/gsearch.sh "novita" 2>&1 | head -5
+{"choice":"allow","confidence":0.3,"probabilities":{"allow":0.65,"deny":0.35},"concern":"truncated_or_unknown","concern_confidence":0.84,"floor":0.85,"outcome":"deferred_below_floor"}
+```
+
+Jev could not determine what the script did (`truncated_or_unknown` at 0.84), so it returned `allow` at only 0.30 — under the 0.85 floor — and an ordinary command was forwarded to a human for no safety gain.
+
+**What travels.** `executedScriptsForJudge(command, maxLines, maxSources)` (`internal/agent/script_detection.go`) returns an `executedScriptContext{Path, Text, SHA256, TotalLines, Truncated}` per script; the state builder stores them as `{path, sha256, total_lines, truncated, text}` and **omits the key entirely** when no entry survives, so an absent key always means "could not read", never "found but nothing to show". It **reuses `detectExecutedCustomScripts`** — the same detector the chat judge and `verifyAutoGrant`'s truncation guard use — so the three paths can never disagree about which files run. Every constituent of a compound is inspected, so `chmod +x S && S args | head` is covered: `classifyInterpreterExecution` only inspects the FIRST command word, which is why that shape previously shipped no source at all.
+
+**Bounds mirror `verifyAutoGrant` exactly.** Executed scripts are **not line-limited** (`executedScriptLineCap` is unbounded; `permissions.auto.max_context_lines_per_source` governs only generic referenced-file snippets). The binding bound is the per-source byte ceiling `maxInterpreterSourceBytes` (48 KiB, raised from 16 KiB so a ~1000-line script ships whole), and the entry count comes from `permissions.auto.max_context_sources` (default 3). Both the judge's view and the guard read the same cap, so what the judge is shown and what the deterministic guard enforces cannot diverge. The decision-backend state ships each script **once**, in `executed_scripts`: `project_context` is built without script sections (`buildPermissionContextScripts(..., false)`), because duplicating 48 KiB scripts would spend the shared 96 KB state budget (`decisionStateBudgetBytes`) twice. If sources still exceed the budget, `prepareDecisionState` projects them to flagged previews or refuses, and the human is asked.
+
+**Why shipping bounded source is safe.** `verifyAutoGrant` still **refuses a truncated script** ("partial content cannot be auto-granted"), so a `truncated: true` entry can never produce an auto-grant — it preserves the very Ask this change exists to avoid for scripts that fit. A new bullet in `typesafeJudgeInstructions` (inherited by `typesafeConcernInstructions`) tells the judge to judge a script's effects from its text as **untrusted data**, never to approve a `truncated: true` entry, and to name `truncated_or_unknown` — not `none` — when a plainly-executed script has NO entry.
+
+**Disclosure guards.** Entries are skipped for secret-material / sensitive paths (`redact.IsSensitiveFile` || `isSecretMaterialPath`); text passes through `redactFileText` with the `/mask` registry, exactly like `interpreter.source`; scope is enforced inside `resolveCustomScript` (`IsPathWithinAllowedRoots`); and an interpreter entrypoint already travelling in the `interpreter` block is not shipped twice.
+
+**Known fail-closed limitation.** A relative script path that only resolves after a top-level `cd` is resolved against the **pre-fold** working directory by `resolveCustomScript`, so it is usually omitted rather than mis-attributed.
+
+**Tests** — `internal/agent/permission_typesafe_script_test.go` (11, green): direct / shell-wrapper / `chmod`-then-run / relative / multi-script compounds, an oversized script marked `truncated`, a sensitive path omitted, non-script binaries and missing files omitted, interpreter source never double-shipped, and `TestTypesafeJudgeSourceDoesNotBypassTruncationGuard` (a truncated entry still fails `verifyAutoGrant`).
 
 ## Shell-variable expansion for the judges
 
@@ -117,13 +136,13 @@ Neither judge can run anything, so a bash command built from variables (`MOD=$(g
 The judges are separate model calls, so the main conversation's masking never reached them. With `/mask` on (`judgeMaskRegistry`, `internal/agent/redaction_helpers.go`):
 
 - **Arguments** are masked in chat mode (`redactText`), like the conversation. Tool args usually already carry OCSEC tokens: they are resolved back to raw values only in `executeToolCallWithContext`, after the permission check.
-- **Project context** and **interpreter source** (Jev) are masked in file mode (`redactFileText`: known formats only, no keyword/entropy heuristics).
+- **Project context**, **interpreter source** and **executed-script source** (`executed_scripts`) (Jev) are masked in file mode (`redactFileText`: known formats only, no keyword/entropy heuristics).
 - **Chat judge `read_file` results** are masked by the session `NetHook`, which `askPermissionModel` attaches to the per-request judge client.
 - Both rubrics tell the judge that `[[OCSEC:xxxxxx:N]]` is a masked secret, to be treated as the credential it stands for.
 
 `user_policy` is the user's own text and is sent as-is.
 
-Jev gets `expanded_command` and `resolved_variables` in its state plus a rubric line telling it to judge paths from the expanded form. The chat judge gets the same as an "Expanded command" section under `Arguments`. The expansion is judge context only: the command that runs is unchanged, and `verifyAutoGrant` still checks the original.
+Jev gets `expanded_command` and `resolved_variables` in its state plus a rubric line telling it to judge paths from the expanded form. The chat judge gets the same as an "Expanded command" section under `Arguments`. The expansion is judge context only: the command that runs is unchanged, and `verifyAutoGrant` still checks the original. Jev's state also carries `interpreter` source and `executed_scripts` (the source of scripts the command executes — see *Executed scripts ship their source* above).
 
 ## `cd` is resolved in Go, not by the judge (2026-09-30 amendment)
 
@@ -143,7 +162,34 @@ Shell-variable expansion above resolves *names*. It never resolved a `cd`, and t
 
 **It fails closed, and that is the load-bearing property.** Folding converts an ask into an allow, so it happens only for a literal, in-scope, unconditional top-level target. Everything else returns the command byte-identical, so the judge still sees the `cd` and a human decides. Refused: `cd -`, bare `cd`, `cd $VAR`, `cd ~/x`, globs, `$(…)`/backtick and quoted targets, out-of-scope targets, `..` escapes, multi-line commands, and any `cd` following a pipeline, `||`, or control flow. Control flow is a *freeze*, not a blanket refusal: `cd`s before a `for`/`if` still fold (the reported command's own `for` loop must not defeat it), a `cd` after one does not.
 
+**Quoted parens are data.** `stripSubstitutions` blanks all double-quoted literal text (substitutions inside are blanked separately) so a label like `echo "=== git status (short) ==="` is not mistaken for a bare subshell. Before this, such a label made the fold refuse and the judge saw the raw cross-project `cd` (allow@0.70 < 0.80 floor → `deferred_below_floor`). A real bare `( … )`/`{ … }` outside quotes still refuses.
+
+**Interpreter source is judged by a five-fact checklist.** The rubric bullet for `interpreter.source` (`typesafeJudgeInstructions`) is a decision procedure, not a list of denials: check truncated, subprocess/dynamic code, network, path outside the roots, credential printed or sent; all no means allow. Jev's confidence is high when each fact is checkable from the text and low when it has to weigh "ordinary vs risky" itself. Live Jev (2026-10-07, 8 runs per cell, 18 harmless scripts incl. real corpus ones and 20 must-ask/adversarial scripts): the old negative-framed rule allowed 13 of 50 harmless scripts, the checklist 132 of 144 (median confidence 0.91), with 0 of 160 must-ask grants. Full corpus eval 133 → 137 of 186, interpreter commands wrongly deferred 22 → 18 of 34, hand-written leaks 0. Wording lessons: name the dynamic-code vectors (`pickle`, unsafe `yaml.load`, `ctypes`, computed imports) or they leak; do NOT say "home-directory path" or "expanduser pointing outside" (Jev then distrusts `~/.config/opencode` and `/Users/james/www/...` reads that are inside the roots, m059 0.77 → 0.45); state that `~` resolves and that scratch deletes under a temp root are in scope; do NOT add "if you cannot tell, deny" (it pushed harmless `/tmp` writes and a project `package.json` read to 0/8). Four must-ask fixtures (`k-python-read-outside`, `k-python-sqlite-outside`, `k-python-read-then-post`, `k-python-print-env`) guard it. Neither `/tmp` nor the script language was the cause. Also found: `expanded_command` is only emitted when the line has a shell variable to expand (a heredoc scored ~0.1 above the identical `-c` string by accident); always emitting it did not move the eval, so it was not shipped.
+
 **Not fixed here.** `OutOfScopePath` is still never populated for compound commands, because `shellCompound` (`internal/agent/permissions.go`) makes `firstOutOfScopePath` bail, so `verifyAutoGrant`'s scope guard remains unreachable for them. Folding improves what the judge sees; it does not add a deterministic scope check. Tracked in `TODO.md`.
+
+## Durable judge log (PERMJUDGE, 2026-09-30)
+
+Every auto-permission decision writes one JSON record to `permission-judge.log` under the global logs dir, so a below-floor deferral is diagnosable after the fact instead of arriving as a bare banner with no category and no evidence.
+
+**Path and shape.** `ensurePermissionJudgeLog` mirrors the `PERMJUDGE` debug kind through the existing `debuglog.MirrorKindToFile` (2 MB, single generation — no hand-rolled rotation), and `logPermissionJudge` appends to `debuglog.Log` *directly* rather than only via `emitDebug`, so the file does not depend on the debug sink being wired. The file is created **0600**: it carries command text, which can include a credential literal. Records are append-only and every branch is a terminal outcome, so exactly one record exists per judge call.
+
+**`outcome` is the field to read first** — it is what the deferral banner does not tell you:
+
+| `outcome` | meaning |
+|---|---|
+| `granted` | allow at/above the floor, `verifyAutoGrant` passed |
+| `granted_relaxed_concern` | allow under a relaxed concern, on the opaque floor |
+| `deferred_below_floor` | **leaned allow, confidence below the floor** — the case that produced the unexplained 0.21 |
+| `refused_deterministic_guard` | the judge allowed, but a Go guard refused |
+| `denied_by_judge` | the judge denied |
+| `transport_error` / `no_verdict` / `unknown_choice` | never reached a decision |
+
+Supporting fields: `choice`, `confidence`, `probabilities`, `concern`, `concern_confidence`, `floor`, `resolved_cd`, `working_directory`, `allow_destructive`, `rule`, `scope`, `error`. `reason` carries the human-readable string the banner shows, so the log and the prompt cannot disagree.
+
+**Secrets are withheld, not logged in the clear.** A command containing detected secret material is replaced by `command_withheld` plus a `reason`; `command` is then empty. Detection uses `redact.Detect` (keyword + entropy, so it catches `Bearer …` and `https://user:pass@host` shapes that a fixed vendor-format list misses) plus the `/mask` registry.
+
+**`allowed_roots` is trimmed, and the total is preserved.** Logging all ~100 roots made each record ~100 KB, which left only ~20 records inside the 2 MB cap — a log that cannot hold a session. `relevantAllowedRoots` keeps the roots relevant to the workdir and to the paths the command names, capped at 12, and reports `allowed_roots_total` and `allowed_roots_omitted` so "the target was in none of the N roots" stays answerable. Comparison runs through `resolveForScopeCheck`, not `EvalSymlinks` directly: roots are symlink-resolved by construction, and `EvalSymlinks` fails outright on a path that does not exist yet (on macOS `/var/folders/…` is a link to `/private/var/folders/…`). Candidates are collected from **both** the original and the folded command, since the folded-away `cd` target is precisely the path whose containment decides the outcome.
 
 ## UI
 
@@ -154,8 +200,10 @@ For the interpreter path the judge prompt gained a guidance bullet (opt-out cate
 ## Tests
 
 - `internal/agent/permission_relaxed_concerns_test.go` — catalog/rubric parity, clause emptiness when nothing is relaxed, wire state + both question instructions, relaxed-deny honoured, deny stands when not attributable, out-of-scope guard still wins, dangerous rm refused on both the relaxed-deny and plain judge-allow routes (`TestRelaxedDestructiveCannotGrantDangerousRm`), chat prompt carries the section.
-- `internal/agent/permission_typesafe_opaque_test.go` — opaque allow@0.80 grants; boundary 0.75 grants / 0.74 defers; none/secrets/network at 0.80 still defer at 0.85; a configured 0.95 still governs an opaque allow that would otherwise clear 0.75; resolver table (unset uses the 0.75 default, 0.5/0.75/0.85/0.95 configured values all govern); mutation-verified.
+- `internal/agent/permission_typesafe_opaque_test.go` — opaque allow@0.80 grants; boundary 0.75 grants / 0.74 defers; none/secrets/network at 0.79 still defer at the 0.80 default floor; a configured 0.95 still governs an opaque allow that would otherwise clear 0.75; resolver table (unset uses the 0.75 default, 0.5/0.75/0.85/0.95 configured values all govern); mutation-verified.
 - `internal/agent/permission_interpreter_relaxed_test.go` — per-category strict-refuses / relaxed-allows table (plus "a different category must not allow it"), safety-floor subtests (model decision ask, confidence floor, hard-blocked raw command, hard-blocked/harmful subprocesses), config wiring via the `verifyInterpreterEffectsWith` wrapper, and the end-to-end grant rule through the `OnPermissionGrant` sink (`TestInterpreterRelaxedAllowDoesNotPersistGrant` — a relaxation-load-bearing allow does **not** persist a durable grant; `TestInterpreterStrictPathStillRefusesAndPersists` — strict refusal refuses and a clean strict allow persists its grant). Two mutations were verified to fail: removing the network relaxation, and letting relaxed grants persist.
+- `internal/agent/permission_judge_log_test.go` — record carries its diagnostic fields; the fold is recorded (`resolved_cd`); a secret-bearing command is withheld; a **benign command is kept verbatim** (anti-vacuity: without it a test asserting only "redacted" passes while the log records nothing); nil agent does not panic; mirror registration is idempotent; `allowed_roots` is trimmed to the cap with the total preserved and a record under 4 KB; a URL-credential command is withheld.
+- `internal/agent/permission_typesafe_test.go` — `TestPermissionJudgeLog_RecordsOutcomeEndToEnd` drives the real `askPermissionModelTypesafe` over a stubbed transport and asserts exactly one record with the right `outcome` for granted / below-floor / denied. This is what proves the log is *wired*, not merely constructible.
 - `internal/config/relaxed_concerns_test.go` — round-trip, replace-not-merge, explicit-empty clear, nil-safety.
 - `internal/server/handler_config_test.go` — catalog endpoint and `permissions-auto` PUT round-trip.
 - `web/src/components/Settings/PermissionsForm.concerns.test.tsx` — default-all-ticked, unticking sends the negative set.
@@ -182,7 +230,7 @@ A single new bullet was added to the `typesafeJudgeInstructions` raw-string gate
 **What did NOT change:**
 
 - **No code path changed.** The concern vocabulary, the floor resolvers, the `secrets` concern **label**, and the deny backstop are all untouched — this was rubric prose only.
-- `permissions.auto.min_confidence` still defaults to **0.85** and an explicitly configured value still governs; the opaque **0.75** relief remains gated on the judge naming `truncated_or_unknown`, which it did not here. See *Opaque floor* above — unchanged.
+- `permissions.auto.min_confidence` defaulted to **0.85** at the time (now **0.80**) and an explicitly configured value still governs; the opaque **0.75** relief remains gated on the judge naming `truncated_or_unknown`, which it did not here. See *Opaque floor* above — unchanged.
 - The **`none`-but-hesitant** case (a below-floor `allow` with no named concern, hence no explanation in the banner) is a **KNOWN REMAINING GAP**, deliberately NOT addressed in this change: the fix belongs in the fallback reasoning, not in the rubric. Recorded here as open.
 - The bullet contains the words `sed` and quoted fragments but is plain text inside a **Go raw string literal** — a backtick anywhere in it would terminate the literal. That is now pinned by a test.
 
@@ -192,3 +240,35 @@ A single new bullet was added to the `typesafeJudgeInstructions` raw-string gate
 - `TestTypesafeEnvironmentCarveOutIsInVerdictRubric` — asserts the clause is in the **verdict** rubric (not only the concern rubric, since the verdict answer is the one gated by the floor) and that the raw string contains no backtick.
 
 **Prose mirror.** The rubric's prose copy gained a parallel bullet right after the `.env`/psql carve-out: `skills/ocode-permissions/SKILL.md` (the source; the `Makefile` copies `skills/` into `cmd/ocode-desktop/embedded-assets/skills/` at build time, and that mirrored copy carries the same bullet).
+
+## Amendment (2026-10-04): The permission judge resolves through `resolveDecider(slotPermission)`
+
+The permission judge now resolves its decision backend through the same `Decider` seam as the other judges. `askPermissionModelTypesafe` (`internal/agent/permission_typesafe.go:229`) takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotPermission)` (`internal/agent/decider.go:112`), which reads the `permissions.auto.model` config key (unchanged; not moved or renamed).
+
+`isTypesafeModel` was **deleted** from `internal/agent/permission_typesafe.go`. It tested a literal `typesafe/` prefix and had exactly one caller — `consultPermissionModel`'s decision-model gate — which now uses `isDecisionModel` (`internal/agent/decider.go:214`) instead. `isDecisionModel` is the single place that decides which provider/model ids route to a decision backend, so a new decision provider is taught there once.
+
+The fail-open contract, the confidence floors, and the opaque-floor override are unchanged. The **deterministic Go safety boundary did change** — see the amendment below.
+
+## Amendment (2026-10-04): `rm` inside the allowed roots is in scope; the boundary refuses the rest
+
+`dangerousRmReason` (`internal/agent/permissions.go`) — the pre-existing "does this `rm` destroy something it must not?" check — gained four refusals so the boundary agrees with what the rubric now tells the judge:
+
+- **Glob / variable / substitution targets are refused outright.** A target containing any of `*?[]{}$\`~` has no single path to scope-check; the shell decides the real targets, so the judge's "inside the roots" reading cannot be verified. Refused rather than guessed (`rm -rf build/*`, `rm -rf $DIR`).
+  **One exception: a scratch directory the same line created.** `tmp=$(mktemp -d) && … && rm -rf "$tmp"` is allowed. `mktempVarsBefore` collects variables an EARLIER fragment of the same line binds to exactly `$(mktemp -d)` (or backticks), and `mktempVarTarget` accepts only the bare `$NAME` / `${NAME}`, never a subpath: if mktemp failed NAME is empty, and `rm -rf "$NAME/etc"` would be `rm -rf /etc` while a bare empty `$NAME` removes nothing (security review 2026-10-07). A fresh `mktemp -d` directory did not exist before the command, so removing it cannot reach project files whatever `TMPDIR` is. A name assigned more than once, rebound by a builtin that takes a bare name (`read t`, `printf -v t`, `mapfile`, `getopts`, `unset`, `declare`, … — `shellRebindingBuiltins`) or by a `for`/`select` loop header (the parser attaches the dropped loop variable to the next fragment as `loopVars`), touched by `export NAME=…`, assigned only AFTER the rm, bound to anything else (`$HOME`, `mktemp -d -p /`), or only a prefix of a longer name stays refused. Both callers (`Decide` and `verifyAutoGrant`) go through `dangerousRmReasonIn`; the two-argument `dangerousRmReason` keeps the strict no-context behaviour. Found 2026-10-07 when a judge allow (0.83) was refused by this guard on `rm -rf "$tmp"`.
+
+  **The judge is told the same fact.** `buildTypesafePermissionState` adds `scratch_dir_vars` (the sorted names `mktempVarsBefore` proves) and `scratch_dir_note` to the judge state ONLY when such a variable exists: "judge assuming the mktemp step succeeds; the deterministic guard checks failure after your decision; never deny for that reason". The instruction therefore costs nothing on any other call and the rubric carries only a one-line pointer. Windows PowerShell equivalents are temp roots by the rubric's temp-root rule and are never listed (the rm guard is POSIX `rm` only). Only a bare `mktemp -d` is recognised; templates (`mktemp -d -t x.XXXX`, which differs between BSD and GNU) and `-p` stay unlisted and refused. Eval fixture: `s-temp-mktemp-var-cleanup-after-semicolon` (0.99).
+- **The project directory, or any parent of it, is refused.** Deleting *inside* the workdir is ordinary development; deleting the workdir itself is not something a judge's word or a prefix rule should grant.
+- **An allowed root itself is refused** — deleting a whole configured root is a different act from deleting a file inside one.
+- **Anything under `.git` is refused**, matched per path component *below the owning root only*, so a project that merely happens to be checked out under a directory named `.git` is still deletable. Comparison is `strings.EqualFold`, so `.GIT` on a case-insensitive filesystem is caught too.
+
+Path handling: `canonicalPath` (`filepath.Clean` + `filepath.EvalSymlinks`, resolving through the nearest existing ancestor so a not-yet-created target is judged by where it WOULD live) and `pathsEqual` (case-insensitive on darwin/windows) mean neither a symlink nor a spelling difference slips past. `pathUnder` treats `/` explicitly, because `parent + sep` would be `//` and match nothing.
+
+**Tests:** `internal/agent/rm_guard_paths_test.go`, plus the `TestPermissions_*` cases in `permission_overwrites_test.go`.
+
+## Amendment (2026-10-09): "always allow" on an interpreter ask saves an exact script grant
+
+`Decide` routes every `python`/`node`/… execution to Ask with rule `bash.interpreter.<lang>` *before* the bash-prefix checker, so a persisted `permissions.bash.prefixes["bash.interpreter.python"] = "allow"` was written by "always allow" and **never read** — the same prompt returned on the next call. The TUI (`setPermissionRule`) and the server (`persistAlwaysAllow`) now call `PermissionManager.PersistInterpreterScriptGrant`, which stores an `interpreter_exact` grant (language, normalized command, resolved script path, cwd, sha256 of the file). It is matched by `MatchInterpreterGrant` inside `askPermissionModelInterpreter`.
+
+- Only `script_file` runs can be saved. Heredoc and inline-eval source is transient; the call is allowed once and the user is told the rule was not saved.
+- Editing the script changes the hash, so the grant stops matching and the call asks again. The match is on the whole normalized command, so different arguments also ask again.
+- Never reintroduce a per-language prefix rule for `bash.interpreter.*`.

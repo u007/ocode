@@ -36,8 +36,135 @@
 
 
 
+
+
+
+
+
+
+
+
+## 2026-10-09
+
+* **Update**: Chat Verbosity Display — Design Spec ([superpowers/specs/2026-09-24-chat-verbosity-display-design.md](/superpowers/specs/2026-09-24-chat-verbosity-display-design.md))
+* **Update**: Web UI Global Keyboard Shortcuts ([concepts/web-keyboard-shortcuts.md](/concepts/web-keyboard-shortcuts.md))
+* **Update**: Reopen a locally hidden question dialog ([superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md](/superpowers/specs/2026-09-25-reopen-hidden-question-dialog-design.md))
+## 2026-10-07
+
+* **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
+* **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Creation**: "Add to .gitignore" — toplevel targeting, C-quoting, and append-not-truncate ([gotchas/git-ignore-toplevel-and-quoting.md](/gotchas/git-ignore-toplevel-and-quoting.md))
+* **Update**: Auto-Permission Judge — Credential Material Is Withheld from the Judge Context ([gotchas/auto-permission-judge-withholds-credentials.md](/gotchas/auto-permission-judge-withholds-credentials.md))
+* **Update**: Auto-Permission Judge — Credential Material Is Withheld from the Judge Context ([gotchas/auto-permission-judge-withholds-credentials.md](/gotchas/auto-permission-judge-withholds-credentials.md))
+* **Update**: Desktop subprocess PATH trap — bare CLI names fail under Finder/Dock-launched .app ([gotchas/desktop-subprocess-path-trap.md](/gotchas/desktop-subprocess-path-trap.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Update**: File-Edit Snapshot &amp; Undo Mechanism ([file-edit-snapshot.md](/file-edit-snapshot.md))
+* **Update**: A derived title/label must be bounded before it is persisted or rendered ([gotchas/derived-title-label-must-be-bounded.md](/gotchas/derived-title-label-must-be-bounded.md))
+* **Update**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+* **Creation**: SQLite Browser / DB IDE (preview pane) ([concepts/sqlite-browser.md](/concepts/sqlite-browser.md))
+## 2026-10-06
+
+* **Update**: Cross-process session activity sync (revision revalidation) ([concepts/cross-process-session-sync.md](/concepts/cross-process-session-sync.md))
+* **Creation**: A derived title/label must be bounded before it is persisted or rendered ([gotchas/derived-title-label-must-be-bounded.md](/gotchas/derived-title-label-must-be-bounded.md))
+* **Update**: Desktop durable share token (two-credential model) ([concepts/desktop-share-token.md](/concepts/desktop-share-token.md))
+* **Update**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
+## 2026-10-05
+
+* **Update**: Clef decision-judge backend + per-judge model selection — design ([superpowers/specs/2026-10-03-clef-judge-backend-design.md](/superpowers/specs/2026-10-03-clef-judge-backend-design.md))
+* **Update**: Code-Search Relevance Judge ([concepts/code-search-relevance-judge.md](/concepts/code-search-relevance-judge.md))
+## 2026-10-04
+
+* **Update**: Pulse — cross-project live-sessions dashboard ([concepts/pulse-dashboard.md](/concepts/pulse-dashboard.md))
+* **Update**: Server-Side Auto-Continue Loop ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Doc Search Relevance Judge ([concepts/doc-search-relevance-judge.md](/concepts/doc-search-relevance-judge.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Update**: Pulse — cross-project live-sessions dashboard ([concepts/pulse-dashboard.md](/concepts/pulse-dashboard.md))
+* **Creation**: Auto-share-on-start (tailnet-only boot exposure) ([concepts/auto-share-on-start.md](/concepts/auto-share-on-start.md))
+* **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Update**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Update**: 'TUI User Interaction: Slash Command Queuing' ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+## 2026-10-03
+
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Shared HTR daemon (htrcli serve) ([concepts/htr-shared-daemon.md](/concepts/htr-shared-daemon.md))
+* **Update**: Pending ask recovery from live session state (sentinel-less transcript) ([gotchas/pending-ask-recovery-live-session-state.md](/gotchas/pending-ask-recovery-live-session-state.md))
+* **Update**: Advisor checkpoints must wait for a pending permission/question ask ([gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md](/gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md))
+## 2026-10-02
+
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Creation**: Settings → Connectors (web/desktop) ([concepts/web-connector-settings.md](/concepts/web-connector-settings.md))
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Creation**: Inbound Content Guardrail ([concepts/inbound-content-guardrail.md](/concepts/inbound-content-guardrail.md))
+* **Update**: Auto-Permission Enforced Categories ([concepts/auto-permission-enforced-categories.md](/concepts/auto-permission-enforced-categories.md))
+* **Update**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Update**: Web/Desktop "Connectors" settings — TUI /connect parity — design ([superpowers/specs/2026-10-01-web-connector-settings-design.md](/superpowers/specs/2026-10-01-web-connector-settings-design.md))
+* **Update**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Creation**: Shared HTR daemon (htrcli serve) ([concepts/htr-shared-daemon.md](/concepts/htr-shared-daemon.md))
+* **Creation**: Advisor checkpoints must wait for a pending permission/question ask ([gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md](/gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md))
+* **Update**: Local Model Instance Manager Implementation Plan ([superpowers/plans/2026-08-01-local-model-instance-manager.md](/superpowers/plans/2026-08-01-local-model-instance-manager.md))
+* **Update**: Local Model Instance Manager Implementation Plan ([superpowers/plans/2026-08-01-local-model-instance-manager.md](/superpowers/plans/2026-08-01-local-model-instance-manager.md))
+* **Update**: Local Model Instance Manager Implementation Plan ([superpowers/plans/2026-08-01-local-model-instance-manager.md](/superpowers/plans/2026-08-01-local-model-instance-manager.md))
+* **Update**: Discovery Corpus Cache ([concepts/discovery-corpus-cache.md](/concepts/discovery-corpus-cache.md))
+* **Update**: Web/Desktop Connectors settings — implementation plan ([superpowers/plans/2026-10-01-web-connector-settings.md](/superpowers/plans/2026-10-01-web-connector-settings.md))
+* **Update**: Web/Desktop Connectors settings — implementation plan ([superpowers/plans/2026-10-01-web-connector-settings.md](/superpowers/plans/2026-10-01-web-connector-settings.md))
+* **Update**: Web/Desktop "Connectors" settings — TUI /connect parity — design ([superpowers/specs/2026-10-01-web-connector-settings-design.md](/superpowers/specs/2026-10-01-web-connector-settings-design.md))
+* **Update**: Web/Desktop "Connectors" settings — TUI /connect parity — design ([superpowers/specs/2026-10-01-web-connector-settings-design.md](/superpowers/specs/2026-10-01-web-connector-settings-design.md))
+* **Update**: Loopback curl with a shell-variable port asked as exfiltration — and the 127. host-match hole beside it ([gotchas/loopback-curl-shell-port-variable.md](/gotchas/loopback-curl-shell-port-variable.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
+* **Update**: Discovery MCP Tool Gating ([concepts/discovery-mcp-tool-gating.md](/concepts/discovery-mcp-tool-gating.md))
+* **Update**: Session-tagged snapshot: override base fields but recompute ALL derived fields ([gotchas/session-snapshot-stale-derived-fields.md](/gotchas/session-snapshot-stale-derived-fields.md))
+* **Update**: Discovery Corpus Cache ([concepts/discovery-corpus-cache.md](/concepts/discovery-corpus-cache.md))
+## 2026-10-01
+
+* **Update**: Loopback curl with a shell-variable port asked as exfiltration — and the 127. prefix host-match hole ([gotchas/loopback-curl-shell-port-variable.md](/gotchas/loopback-curl-shell-port-variable.md))
+* **Creation**: Loopback curl with a shell-variable port asked as exfiltration — and the 127. prefix host-match hole ([gotchas/loopback-curl-shell-port-variable.md](/gotchas/loopback-curl-shell-port-variable.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Update**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Design Spec: Reliable Large-Context Compaction (web/desktop /compact) ([superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md](/superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md))
+* **Update**: Cross-Client Compaction Indicator — Design Spec ([superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md](/superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md))
+* **Update**: Compaction Cancellation: User-Initiated Cancel of an In-Flight Pass ([concepts/compaction-cancellation.md](/concepts/compaction-cancellation.md))
+* **Creation**: Desktop durable share token (two-credential model) ([concepts/desktop-share-token.md](/concepts/desktop-share-token.md))
+* **Update**: Cross-Client Compaction Indicator — Design Spec ([superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md](/superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md))
+* **Update**: Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification ([concepts/compaction-config.md](/concepts/compaction-config.md))
+* **Creation**: Compaction Cancellation: User-Initiated Cancel of an In-Flight Pass ([concepts/compaction-cancellation.md](/concepts/compaction-cancellation.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Changes Tab ([changes-tab.md](/changes-tab.md))
+* **Update**: Web Chat Composer Input History (↑/↓ Navigation) ([concepts/web-chat-input-history.md](/concepts/web-chat-input-history.md))
+* **Update**: Web ask dialogs: 202 + background continuation (broadcast *_resolved before Step) ([gotchas/web-ask-dialog-resolved-before-continuation.md](/gotchas/web-ask-dialog-resolved-before-continuation.md))
+* **Update**: Web Chat Composer Input History (↑/↓ Navigation) ([concepts/web-chat-input-history.md](/concepts/web-chat-input-history.md))
+* **Update**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Update**: Pulse — cross-project live-sessions dashboard ([concepts/pulse-dashboard.md](/concepts/pulse-dashboard.md))
+* **Update**: Discovery TypeSafe Relevance Judge ([concepts/discovery-typesafe-judge.md](/concepts/discovery-typesafe-judge.md))
 ## 2026-09-30
 
+* **Update**: Scheduled Jobs / Cron Dispatch ([scheduled-jobs.md](/scheduled-jobs.md))
+* **Creation**: Environment Prompt ([concepts/environment-prompt.md](/concepts/environment-prompt.md))
+* **Update**: Sandbox Permission Mode ([concepts/sandbox-permission-mode.md](/concepts/sandbox-permission-mode.md))
+* **Creation**: TUI User Interaction: Slash Command Queuing ([concepts/tui-slash-command-queuing.md](/concepts/tui-slash-command-queuing.md))
+* **Creation**: Knowledge System (OKF Bundle): Agents, Tools and Maintenance ([concepts/okf-knowledge-system.md](/concepts/okf-knowledge-system.md))
+* **Creation**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Creation**: Data Storage Layout ([concepts/data-storage-layout.md](/concepts/data-storage-layout.md))
+* **Creation**: Backend and Sync URL Split (2026-09-03) ([concepts/backend-sync-url-split.md](/concepts/backend-sync-url-split.md))
+* **Creation**: Web/Desktop Context Gauge Resolution ([concepts/web-context-gauge-resolution.md](/concepts/web-context-gauge-resolution.md))
+* **Creation**: Web/Desktop Server Project Scoping ([concepts/web-server-project-scoping.md](/concepts/web-server-project-scoping.md))
+* **Creation**: Web/Desktop Server Locking and Liveness Rules ([concepts/web-server-locking-and-liveness-rules.md](/concepts/web-server-locking-and-liveness-rules.md))
+* **Creation**: In-batch Task DAG (id / depends_on) ([concepts/task-dag.md](/concepts/task-dag.md))
+* **Creation**: Sub-agent Transcripts: OnSubAgentMessage and Child Sessions ([concepts/subagent-transcripts-child-sessions.md](/concepts/subagent-transcripts-child-sessions.md))
+* **Creation**: Persistent Todo Plan (todowrite / todoread / todo_update) ([concepts/persistent-todo-plan.md](/concepts/persistent-todo-plan.md))
+* **Creation**: Task Output Contracts (expected_output) ([concepts/task-output-contracts.md](/concepts/task-output-contracts.md))
 * **Creation**: Sidebar row stopPropagation breaks mobile drawer dismiss ([gotchas/sidebar-row-propagation-breaks-drawer-dismiss.md](/gotchas/sidebar-row-propagation-breaks-drawer-dismiss.md))
 * **Update**:  ([superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](/superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md))
 * **Update**: Remote Persistent Sessions and Terminals Design ([superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md](/superpowers/specs/2026-09-18-remote-persistent-sessions-terminals-design.md))

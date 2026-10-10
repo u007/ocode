@@ -261,7 +261,7 @@ func TestBtwIsInstantWhileStreaming(t *testing.T) {
 	m := model{
 		streaming: true,
 		input:     textarea.New(),
-		agent:     agent.NewAgent(nil, nil, &config.Config{}, nil),
+		agent:     newTestAgent(nil, nil, &config.Config{}, nil),
 		btwCh:     make(chan btwResultMsg, 64),
 	}
 	t.Cleanup(func() {

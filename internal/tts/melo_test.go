@@ -171,7 +171,7 @@ func TestMeloCatalogSitsBetweenPiperAndKokoro(t *testing.T) {
 	for _, e := range Catalog() {
 		ids = append(ids, e.ID)
 	}
-	want := []EngineID{EngineBrowserNative, EnginePiper, EngineMelo, EngineKokoro}
+	want := []EngineID{EngineBrowserNative, EnginePiper, EngineParadee, EngineMelo, EngineKokoro}
 	if len(ids) != len(want) {
 		t.Fatalf("catalog has %d engines, want %d: %v", len(ids), len(want), ids)
 	}

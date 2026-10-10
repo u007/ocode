@@ -11,7 +11,7 @@ func TestUserWritableRoots_ContainsCacheAndBins(t *testing.T) {
 	// Use a real temp home so EvalSymlinks / resolveForScopeCheck canonicalization is consistent.
 	// /home is a symlink to /System/Volumes/Data/home on macOS, which breaks pathUnderRoot when HOME is /home/testuser.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", "")
 	t.Setenv("CARGO_HOME", "")
 	t.Setenv("GOBIN", "")

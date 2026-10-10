@@ -202,7 +202,7 @@ devtools). The local streaming path therefore uses a **short-lived, single-file
 capability** in `?media_token=`:
 
 - **Store** — `internal/server/media_tokens.go`, an in-memory `mediaTokenStore`
-  held on the `Handler` (`internal/server/handler.go:220`, initialized `:382`).
+  held on the `Handler` (`internal/server/handler.go:226`, initialized `:382`).
   `mediaTokenTTL = 6h`, `mediaTokenMaxLen = 128`, and tokens are 32 bytes of
   `crypto/rand` base64url (**256 bits**). A `mediaGrant` is bound to the exact
   `(path, project_root, host)` triple and authorizes nothing else. Pruning is
@@ -210,7 +210,7 @@ capability** in `?media_token=`:
   with the server — no on-disk store to leak; a restart drops them by design.
 - **Issue endpoint** — `POST /api/files/media-token` → `Handler.HandleMediaToken`
   (`internal/server/handler_files.go:1105`), registered as
-  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:252`), i.e.
+  `s.authMiddleware(s.handleMediaToken)` (`internal/server/server.go:353`), i.e.
   issuing **requires the normal credential**. Validation: non-empty `path`;
   `host` must be empty (`"media streaming is local-only"` — remote is
   blob-only); the extension must be media (`previewExtIsMedia`); `project_root`,
@@ -218,12 +218,12 @@ capability** in `?media_token=`:
   `..`. Returns `{"token": "..."}`; a 500 (never a predictable token) if the
   system RNG fails.
 - **Grant validation happens at use time, in the middleware**, against the exact
-  triple (`server.go:655`) — the token is a capability, never a substitute for
+  triple (`server.go:823`) — the token is a capability, never a substitute for
   the raw handler's own anchoring/containment checks.
 
 ## `mediaAuthMiddleware` — the rejection policy is load-bearing
 
-`mediaAuthMiddleware` (`server.go:632`) wraps `handleMediaToken` and enforces
+`mediaAuthMiddleware` (`server.go:823`) wraps `handleMediaToken` and enforces
 three constraints that make the capability safe even if leaked:
 
 - **No cross-host reuse.** A token granted for `(path, root, host_A)` fails

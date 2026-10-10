@@ -1049,3 +1049,98 @@ describe("project session-list cache (snappy project switching)", () => {
     expect(result.current.state.projectSessions.map((s) => s.id)).toEqual(["s1"]);
   });
 });
+
+describe("projectStore keeps one tab per session across projects", () => {
+  it("ADD_TAB refuses a second copy of a session under another project and focuses the existing one", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-x", projectPath: "/proj-b", title: "x", activeSubTab: "chat" },
+      });
+      // A deep link / picker opens the same session while /proj-a is active.
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" },
+      });
+    });
+    await act(async () => {});
+    expect(result.current.state.tabsByProject["/proj-a"]).toBeUndefined();
+    expect(result.current.state.tabsByProject["/proj-b"].map((t) => t.id)).toEqual(["sess-x"]);
+    expect(result.current.state.activeTabByProject["/proj-b"]).toBe("sess-x");
+  });
+
+  it("RESTORE_TABS drops a session the server holds under two projects", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({
+        type: "RESTORE_TABS",
+        tabsByProject: {
+          "/proj-a": [{ id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" }],
+          "/proj-b": [
+            { id: "sess-x", projectPath: "/proj-b", title: "x", activeSubTab: "chat" },
+            { id: "sess-y", projectPath: "/proj-b", title: "y", activeSubTab: "chat" },
+          ],
+        },
+        activeTabByProject: { "/proj-a": "sess-x", "/proj-b": "sess-x" },
+      });
+    });
+    await act(async () => {});
+    expect(result.current.state.tabsByProject["/proj-a"].map((t) => t.id)).toEqual(["sess-x"]);
+    expect(result.current.state.tabsByProject["/proj-b"].map((t) => t.id)).toEqual(["sess-y"]);
+  });
+
+  // The dedupe pass runs AFTER the active ids are resolved, so a project whose
+  // active tab was the one dropped was left pointing at a tab that no longer
+  // exists anywhere it can reach. `mergeExternalTabs` already re-points after
+  // deduping; RESTORE_TABS has to agree, or the two paths disagree about which
+  // tab the user is looking at.
+  it("RESTORE_TABS re-points an active id whose tab was dropped as a duplicate", async () => {
+    const { result } = setup();
+    // Wait for the provider's OWN restore to land first. It dispatches
+    // RESTORE_TABS asynchronously on mount, and a late second pass happens to
+    // re-point the stale id — which would make this test pass for the wrong
+    // reason (the reducer output is what is under test, and in production this
+    // dispatch IS the only pass).
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({
+        type: "RESTORE_TABS",
+        tabsByProject: {
+          "/proj-a": [{ id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" }],
+          "/proj-b": [
+            { id: "sess-x", projectPath: "/proj-b", title: "x", activeSubTab: "chat" },
+            { id: "sess-y", projectPath: "/proj-b", title: "y", activeSubTab: "chat" },
+          ],
+        },
+        activeTabByProject: { "/proj-a": "sess-x", "/proj-b": "sess-x" },
+      });
+    });
+    await act(async () => {});
+    // /proj-b lost sess-x to /proj-a, so its active id must move to a tab that
+    // still exists — not stay on the dropped one.
+    expect(result.current.state.activeTabByProject["/proj-b"]).toBe("sess-y");
+    expect(result.current.state.activeTabByProject["/proj-a"]).toBe("sess-x");
+  });
+
+  it("RESTORE_TABS forgets the active id of a project left with no tabs", async () => {
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({
+        type: "RESTORE_TABS",
+        tabsByProject: {
+          "/proj-a": [{ id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" }],
+          "/proj-b": [{ id: "sess-x", projectPath: "/proj-b", title: "x", activeSubTab: "chat" }],
+        },
+        activeTabByProject: { "/proj-a": "sess-x", "/proj-b": "sess-x" },
+      });
+    });
+    await act(async () => {});
+    // /proj-b's only tab was the duplicate, so the project is gone entirely and
+    // must not keep an active id.
+    expect(result.current.state.tabsByProject["/proj-b"]).toBeUndefined();
+    expect(result.current.state.activeTabByProject["/proj-b"]).toBeUndefined();
+  });
+});

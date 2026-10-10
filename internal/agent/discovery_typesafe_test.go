@@ -46,7 +46,7 @@ func newDiscoveryJudgeAgent(t *testing.T, reply string, status int) (*Agent, *di
 	}))
 	t.Cleanup(srv.Close)
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -139,7 +139,7 @@ func TestDiscoveryJudgeKeepsAboveThreshold(t *testing.T) {
 	if client == nil {
 		t.Fatal("judge client should resolve with a keyed typesafe factory")
 	}
-	keep, err := a.judgeDiscoveryCandidates(client, []Message{{Role: "user", Content: "do a"}}, "do a", discoveryJudgeCandidates())
+	keep, _, err := a.judgeDiscoveryCandidates(client, []Message{{Role: "user", Content: "do a"}}, "do a", discoveryJudgeCandidates())
 	if err != nil {
 		t.Fatalf("judge error: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestDiscoveryJudgeMissingAnswerKept(t *testing.T) {
 		// md:c omitted
 	}), 0)
 	client := a.discoveryJudgeClient()
-	keep, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
+	keep, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
 	if err != nil {
 		t.Fatalf("judge error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestDiscoveryJudgeMissingAnswerKept(t *testing.T) {
 func TestDiscoveryJudgeTransportError(t *testing.T) {
 	a, _ := newDiscoveryJudgeAgent(t, "", http.StatusInternalServerError)
 	client := a.discoveryJudgeClient()
-	keep, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
+	keep, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
 	if err == nil {
 		t.Fatal("expected an error from a 500 response")
 	}
@@ -208,7 +208,7 @@ func TestDiscoveryJudgeRecordsSideUsage(t *testing.T) {
 	var in, out int64
 	a.OnSideUsage = func(p, c, _, _ int64, _ *float64) { in, out = p, c }
 	client := a.discoveryJudgeClient()
-	if _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:1]); err != nil {
+	if _, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:1]); err != nil {
 		t.Fatal(err)
 	}
 	if in != 11 || out != 3 {
@@ -220,7 +220,7 @@ func TestDiscoveryJudgeClientNilWhenNotConnected(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("", "jev-latest", "http://127.0.0.1:1")
@@ -242,11 +242,30 @@ func TestDiscoveryJudgeClientNilWhenNotConnected(t *testing.T) {
 	}
 }
 
-func TestDiscoveryJudgeClientResolvedOncePerDiscoveryState(t *testing.T) {
+// TestDiscoveryJudgeClientCachesCredentialedOnly pins the judge's caching
+// contract, which is deliberately asymmetric:
+//
+//   - A RESOLVED client is cached per discovery state, so a credentialed session
+//     does not re-run the client factory on every turn and /discovery status read.
+//   - A NIL client is NOT cached. It used to be pinned by a sync.Once, which meant
+//     a /connect only took effect after a /discovery toggle or a restart — a real
+//     bug the old doc comment acknowledged as a known limitation.
+//
+// The reason the nil case was cached in the first place was log noise: NewClient
+// logs "no API key ... refusing to build client" on every call. That noise is now
+// suppressed at the source (warnedNoAPIKey dedupes per provider+model), so the
+// caller no longer has to pay for a stale nil to keep the log quiet. The log
+// property itself is asserted by TestDiscoveryJudgeClient_KeylessDoesNotSpamDebug,
+// which exercises the real NewClient rather than a stubbed factory.
+//
+// This replaced TestDiscoveryJudgeClientResolvedOncePerDiscoveryState, which
+// asserted the call count directly and so pinned the old mechanism rather than the
+// behaviour that mattered.
+func TestDiscoveryJudgeClientCachesCredentialedOnly(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.disco = &discoveryState{enabled: true}
 
 	calls := 0
@@ -259,18 +278,40 @@ func TestDiscoveryJudgeClientResolvedOncePerDiscoveryState(t *testing.T) {
 			t.Fatalf("keyless typesafe client must not be the judge: %+v", got)
 		}
 	}
-	if calls != 1 {
-		t.Fatalf("factory must run once per discovery state (its no-key refusal is logged every call), got %d", calls)
+	if calls != 3 {
+		t.Errorf("a nil client must NOT be cached (otherwise /connect stays dead until a reset); want a resolve per call, got %d factory calls", calls)
 	}
 
+	// Now a client that DOES resolve: it must be cached, so the factory runs once.
+	calls = 0
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		calls++
+		return newTypesafeClient("k", "jev-latest", "https://api.typesafe.ai/v1")
+	}
+	for i := 0; i < 3; i++ {
+		if got := a.discoveryJudgeClient(); got == nil {
+			t.Fatalf("credentialed client must resolve (call %d)", i)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("a resolved client must be cached per discovery state; got %d factory calls, want 1", calls)
+	}
+
+	// Model-change invalidation is not asserted here: slotModel currently ignores
+	// its argument (part 02 makes it read config), so there is no way to change a
+	// slot's model without a test-only hook. That case becomes testable when the
+	// per-slot config lands.
+
 	// ResetDiscovery drops the state, so the next lookup re-resolves.
+	calls = 0
 	a.ResetDiscovery()
 	a.disco = &discoveryState{enabled: true}
-	if a.discoveryJudgeClient() != nil {
-		t.Fatal("still keyless after reset")
+	a.disco.judge = nil
+	if a.discoveryJudgeClient() == nil {
+		t.Fatal("still nil after reset")
 	}
-	if calls != 2 {
-		t.Fatalf("new discovery state must re-resolve the judge, got %d factory calls", calls)
+	if calls != 1 {
+		t.Errorf("new discovery state must re-resolve the judge, got %d factory calls", calls)
 	}
 }
 
@@ -283,7 +324,7 @@ func TestDiscoveryJudgeKeepsSlightlyRelevantCandidate(t *testing.T) {
 	if client == nil {
 		t.Fatal("judge client should resolve with a keyed typesafe factory")
 	}
-	keep, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:2])
+	keep, _, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates()[:2])
 	if err != nil {
 		t.Fatalf("judge error: %v", err)
 	}
@@ -291,5 +332,33 @@ func TestDiscoveryJudgeKeepsSlightlyRelevantCandidate(t *testing.T) {
 	want := []string{"skill:a"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("keep = %v want %v (0.60 must survive the lenient relevance floor)", got, want)
+	}
+}
+
+// The auto-inject gate needs "how relevant", not just "is it in scope", so the
+// judge must hand back the raw noul. The two easy mistakes this pins down:
+// dropping a VETOED candidate's score (the caller then cannot tell "scored 0.10"
+// from "never scored", and loses the tuning signal for the floor), and
+// defaulting a MISSING answer to 0.0 (which reads as a confident zero instead
+// of the unknown it is).
+func TestDiscoveryJudgeReturnsNoulScores(t *testing.T) {
+	a, _ := newDiscoveryJudgeAgent(t, typesafeNoulReply(map[string]float64{
+		"skill:a": 0.93,
+		"skill:b": 0.10, // below the relevance floor -> vetoed
+		// md:c omitted entirely -> no answer
+	}), 0)
+	client := a.discoveryJudgeClient()
+	_, scores, err := a.judgeDiscoveryCandidates(client, nil, "q", discoveryJudgeCandidates())
+	if err != nil {
+		t.Fatalf("judge error: %v", err)
+	}
+	if got, ok := scores["skill:a"]; !ok || got != 0.93 {
+		t.Fatalf("skill:a score = %v (ok=%v), want 0.93", got, ok)
+	}
+	if got, ok := scores["skill:b"]; !ok || got != 0.10 {
+		t.Fatalf("a vetoed candidate must still report its real score: got %v (ok=%v)", got, ok)
+	}
+	if _, ok := scores["md:c"]; ok {
+		t.Fatal("a missing answer must be ABSENT from scores, never defaulted to 0")
 	}
 }

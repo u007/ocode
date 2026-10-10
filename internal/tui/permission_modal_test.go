@@ -11,9 +11,8 @@ import (
 // These test the PermissionModal as a Modal that wraps a Dialog,
 // before full integration with model.go.
 
-func TestPermissionModalImplementsModal(t *testing.T) {
-	var _ Modal = (*PermissionModal)(nil)
-}
+// PermissionModal must satisfy Modal; checked at compile time.
+var _ Modal = (*PermissionModal)(nil)
 
 func TestPermissionModalRender(t *testing.T) {
 	pm := NewPermissionModal(PermissionModalConfig{

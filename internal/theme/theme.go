@@ -459,7 +459,7 @@ var builtinThemes = map[string]ThemeDefinition{
 		},
 	},
 	"lcars": {
-		Label:  "lcars (Star Trek OS)",
+		Label: "lcars (Star Trek OS)",
 		Colors: ThemeColors{
 			User:       "#FF9F1C",
 			Assistant:  "#77C8FF",

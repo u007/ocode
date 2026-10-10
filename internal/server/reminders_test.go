@@ -30,6 +30,13 @@ func newRemindersTestServer(t *testing.T) (*Server, *reminders.Service) {
 
 	srv := &Server{mux: http.NewServeMux(), workDir: dir}
 	srv.attachReminders(svc)
+	// The cron surface is project-scoped now, so the default project's engines
+	// are resolved through the registry. Opt in and seed THIS service, so these
+	// tests exercise the reminder engine without a scheduler (and without an
+	// agent runner that could never run a turn).
+	srv.markCronEnabled()
+	srv.setCronScopeConfig(nil, nil, nil, svc, dir, nil, nil, nil)
+	t.Cleanup(srv.stopAllCronServices)
 	return srv, svc
 }
 

@@ -208,7 +208,7 @@ func TestForceCompactAsyncIgnoresDisabledAutoCompaction(t *testing.T) {
 	cfg.Ocode.Compact.SummaryMaxRetries = 0
 	cfg.Ocode.Compact.MaxSummaryInputTokens = 1000
 
-	a := NewAgent(fakeCompactClient{}, nil, cfg, nil)
+	a := newTestAgent(fakeCompactClient{}, nil, cfg, nil)
 	results := make(chan CompactResult, 1)
 	a.OnCompact = func(res CompactResult) {
 		results <- res
@@ -917,7 +917,7 @@ func TestResolveCompactRuntimeDefaultsKeepRecentTokens(t *testing.T) {
 	// Sandbox the models cache and swap in a fresh synthetic snapshot so this
 	// test never depends on the developer's real cache or network access.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home)
 	t.Setenv(envModelsPath, "")

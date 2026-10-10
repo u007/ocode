@@ -11,7 +11,7 @@ okf_version: 0.1
 - [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
 - [Scheduled Jobs / Cron Dispatch](scheduled-jobs.md) - Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics. Also covers the reminders/tasks engine behind the Cron tab's Reminders and Tasks sub-views.
 - [Session Title Generation & UI Update Root Cause Analysis](title-generation-analysis.md) - Root cause analysis of session title delay/mismatch between generation and UI rendering, covering regex anchoring, Anthropic thinking blocks, and rendering cycle timing.
-- [Speech playback](tts-speech-playback.md) - Speech playback — user-facing doc covering engine availability (Browser Native, Piper, MeloTTS, Kokoro), installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key. Amended 2026-09-30: added the MeloTTS local engine (id `melo`, darwin/arm64 only, card order Piper → MeloTTS → Kokoro), its per-host Python range, install specifics (unpacked source, shared offline import check) and child-process environment (set by ocode, no .env entry).
+- [Speech playback](tts-speech-playback.md) - Speech playback — user-facing doc covering engine availability (Browser Native, Piper, Paradee, MeloTTS, Kokoro), installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key. Amended 2026-09-30: added the MeloTTS local engine (id `melo`, darwin/arm64 only, card order Piper → MeloTTS → Kokoro), its per-host Python range, install specifics (unpacked source, shared offline import check) and child-process environment (set by ocode, no .env entry).
 - [Terminal History Persistence and Restore](terminal-history-persistence-and-restore.md) - Accurate guide to ocode's terminal history persistence and restore mechanism, aligning with source implementation
 - [Using ocode with Zed](zed.md) - Setup guide and feature matrix for integrating ocode with the Zed editor via ACP (Agent Client Protocol).
 - [Web/Desktop UI Parity — Current Status](web-desktop-parity-todo.md) - Current web/desktop vs TUI parity status — achieved items and remaining gaps, including the Cron tab's Jobs/Reminders/Tasks sub-views and dated correction notes for stale plans.
@@ -30,31 +30,50 @@ okf_version: 0.1
 # concepts
 
 - [Advisor Claude Code CLI backend on web/desktop](concepts/advisor-claude-code-backend.md) - How the web/desktop advisor model picker exposes Claude Code CLI models via a sentinel provider, how claude_code is derived from the provider on PUT /api/advisor, and the picker parity with the TUI.
-- [Auto-Permission Enforced Categories](concepts/auto-permission-enforced-categories.md) - Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, and the 2026-09-29 environment-enumeration rubric carve-out.
+- [Auto-Permission Enforced Categories](concepts/auto-permission-enforced-categories.md) - Per-category enforcement toggles for the LLM auto-permission judge AND the interpreter-effect verifier: the negative relaxed_concerns config set, the GET /api/config/ocode/permissions-concerns catalog, the deterministic Go safety boundary, the opaque-floor override for truncated_or_unknown, the 2026-09-29 environment-enumeration rubric carve-out, and the 2026-10-02 executed_scripts source disclosure.
+- [Auto-Permission Judge Live Eval](concepts/auto-permission-judge-eval.md) - The live benchmark for the TypeSafe (Jev) auto-permission judge: a corpus mined from permission-judge.log and the session databases (labelled by what the user did next) plus committed must-ask and should-allow fixtures, replayed per variant against the real judge. Records the 2026-10-02 findings: the "(unknown command)" Command analysis bug, why project_context must stay (scope signal), the flat field-by-field ablation, the rejected context-budget increase (400 max_tokens_exceeded), the three adopted rubric rules, and the deferred remainder.
+- [Auto-share-on-start (tailnet-only boot exposure)](concepts/auto-share-on-start.md) - Desktop feature that starts the tailscale serve exposure at boot so the instance is reachable on the tailnet without opening the Share dialog. Opt-in, serve-only, fail-safe-off.
+- [Backend and Sync URL Split (2026-09-03)](concepts/backend-sync-url-split.md) - backend_url is local-dev only; sync_url is the dedicated config/auth sync channel. Migration steps for existing hub users.
 - [Code-Search Relevance Judge](concepts/code-search-relevance-judge.md) - TypeSafe/Jev relevance judge for grep/rgrep/glob — per-file judging against a required intent, carried on the tool-execution context, fail-open with disclosed footers. As-built record (v1 landed 2026-09-28); `list` deferred.
-- [Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification](concepts/compaction-config.md) - Amended 2026-09-27: runSummary cancel-vs-timeout label split (summaryContextErr), completed-summary drain race (usableSummary), rewritten §4 classification + strengthened sentinel invariant (then §7, now §8). Amended 2026-09-30: stop-after-failure latch + queued-message restore (§5), summary_max_retries documented (§1), stale code anchors re-verified against source.
+- [Compaction Cancellation: User-Initiated Cancel of an In-Flight Pass](concepts/compaction-cancellation.md) - User-initiated cancellation of in-flight conversation compaction: the compact/cancel endpoint, the ErrCompactionCanceled sentinel vs bare context.Canceled, Stop-also-cancels without poisoning pendingCancel, register-before-OnCompactStart ordering, and the web/desktop Cancel button.
+- [Compaction Config: First-Token/Idle Timeouts, Operation Cap, and Timeout Classification](concepts/compaction-config.md) - Amended 2026-09-27: runSummary cancel-vs-timeout label split (summaryContextErr), completed-summary drain race (usableSummary), rewritten §4 classification + strengthened sentinel invariant (then §7, now §8). Amended 2026-09-30: stop-after-failure latch + queued-message restore (§5), summary_max_retries documented (§1), stale code anchors re-verified against source. Amended 2026-10-01: user-initiated cancel classified as its own §4 row (ErrCompactionCanceled → clean 200), cross-link to concepts/compaction-cancellation.md, all code anchors re-derived. Amended 2026-10-04: retry/cancellation attribution corrected from `runSummary` to `runSummaryCall` (shared by the batched and inline paths); the §2 anchor moved `compact.go:856` → `compact.go:888`.
 - [Cross-process session activity sync (revision revalidation)](concepts/cross-process-session-sync.md) - How the web/desktop UI converges on session transcript changes made by another ocode server process (desktop + make dev + TUI) via an opaque stored-transcript revision token and a 15s revalidation poll.
+- [Data Storage Layout](concepts/data-storage-layout.md) - Cross-platform global data directory, its sub-directories, and how the project slug keys sessions.
+- [Desktop durable share token (two-credential model)](concepts/desktop-share-token.md) - Desktop durable share token: two-credential model, revocable share URLs, auth scoping, persistence.
 - [Discovery Corpus Cache](concepts/discovery-corpus-cache.md) - BuildCorpusCached persists the per-model discovery corpus to corpus-<model>.json with a cross-instance filelock: why a machine-global corpus needs one (process-local warming cannot coordinate), lock-free fast probe, re-check+write in one critical section, ErrCorpusLocked skip with zero edits outside internal/discovery, corpusLockWaitFor deadline clamp + 1ms floor, the pidlock fixed-port asymmetry, and the five cache_lock_test.go pins.
 - [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md) - Why the MCP tool gate (discoveryAllows) never fails open: the names-only index vs. callable schema split, the single surviving escape, the cold-turn zero-tools contract, the failed-Select rules, the judged attach paths, turn-tail capture, and the debug lines to check.
-- [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) - Amended to record discover_more as a second judged attach path (identical fail-open matrix, shared veto counter, turn-tail snapshot, veto-all reply) and to separate the corpus-warm gate from the judge's fail-open.
+- [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) - TypeSafe relevance judge that vets discovery candidates per-turn (fail-open attach, shared with doc_search) plus the fail-closed auto-injection of the top-scoring skill body with its own 0.8 floor; score plumbing, selection, dedupe, bounding, user-role injection.
 - [Discovery Web Surfaces](concepts/discovery-web-surfaces.md) - Discovery visibility in the web UI: live transient notices via SSE and runtime status endpoint, with map-race safety rule.
 - [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md) - TypeSafe/Jev relevance judge for doc_search results — filters out-of-scope knowledge docs before get_top body inlining.
+- [Environment Prompt](concepts/environment-prompt.md) - The env block the LLM receives at session start via internal/agent/prompt.go, including the extra Project host line for remote (SSH/WSL) projects and why there is no git branch line.
 - [File search result ordering: shortest path first](concepts/file-search-shortest-path-ordering.md) - How file-name search results are ordered: relevance first, then shortest path as tiebreak, with shared Go/TS helpers and explicit carve-outs for content search.
 - [Git conflicts and halted-operation recovery (web Git tab)](concepts/git-conflicts-and-operations.md) - Shipped server behavior for conflicted files and halted git operations (phases 01-05): shared transport-neutral state parser/probe, ours/theirs stage semantics and the rebase relabel rule, per-file resolve + operation action matrix, HTTP status-code contract, literal-pathspec + editor suppression, 60s operation timeout, remote SSH/WSL parity, the shipped Git-tab UI (phase 06) and badge sweep (phase 07), and the completed phase 07 consumer sweep.
 - [Git stash UI: list, per-file restore, delete](concepts/git-stash-ui.md) - The Git tab's stash surface, per-file/multi-file stash, multi-select, and the server endpoints behind them.
 - [Host and project scoping for web session/project reads](concepts/web-session-host-scoping.md) - Every session/project-scoped web read must carry host and project path; command context, resolved surfaces, and the threading rule
+- [In-batch Task DAG (id / depends_on)](concepts/task-dag.md) - Wave scheduler for parallel task batches that declare id/depends_on: validation, scheduling, dependency output injection, failure and cancellation semantics, group-bus interaction and scope.
+- [Inbound Content Guardrail](concepts/inbound-content-guardrail.md) - TypeSafe System One (Jev) inbound-content guardrail as-built: the mirror of the egress guard, sitting between tool execution and the model's context. Covers the verbatim-ingestion hole (webfetch/websearch/MCP/bash-network), the remote-content-only scope with the a.mcpTools discriminator and the delegated isNetworkSubprocessBinary bash predicate, the load-bearing redact→vet→truncate placement at all five scanToolResult call sites (and the TruncateToolResult read-back bypass it closes), the sentinel-truncation fix (an unresolved ask is control flow, not tool output — it is returned unchanged at any size so its JSON payload stays parseable), the 6000/4/32 chunking with the fail-SAFE cap and the corrected truncated-flag boundary (exactly-cap-sized content is judged in full; the capped path reports ScannedChunks=0), the full fail-open contract table plus the Failure string that reports every non-clearing path instead of failing silently, the deliberately-0.6 confidence floor (Jev's distribution-shape confidence, the false-positive "learned click-through" failure mode, the explicit clean list for docs/source/logs/snippets), the 9-entry content concern catalog separate from networkGuardConcerns, per-chunk ContentGuardScore rows (verdict/concern confidences and the probability distribution) surfaced in both dialogs, the PermissionScopeContent escalation carried by the existing PERMISSION_ASK sentinel with both hosts' scrollable renderers, approval that does NOT re-execute (and now goes through TruncateToolResult in BOTH hosts after the dialog, never before), the no-Step guard when an approved re-execution raises a fresh content ask (parsePermissionAsk, not the bare prefix; explicit permission frame on the reused tool-call id), one-shot enforcement (409 server-side), taxonomy-hiding denial, coverage limits (local files, md_discovery, injectDirMDTail, LSP/hook/plugin, browser/CDP, github_*/repo_clone, images), the test suites including truncate_sentinel_test.go and handler_content_guard_reask_test.go, and the 15/15 mutation harness.
 - [Interrupted Turn Notice](concepts/interrupted-turn-notice.md) - How ocode detects a turn cut off after an answered ask and surfaces a Continue action to the user.
+- [Knowledge System (OKF Bundle): Agents, Tools and Maintenance](concepts/okf-knowledge-system.md) - Activation gates, the context and explore agents, knowledge tools, /docs subcommands, maintenance worker and the code-line-anchor drift rule.
 - [Outbound-Network Guardrail](concepts/webfetch-websearch-guardrails.md) - TypeSafe System One (Jev) outbound-network guardrail as-built: the last automatic gate before egress — three-tool scope (webfetch/websearch/bash), the 6-entry egress concern catalog separate from typesafeConcerns, the effectiveCommandWords + isNetworkSubprocessBinary bash peel, non-loopback-only with the subprocessTargetsLocalhost proof (free, no Jev call), secret masking before clip, the tighten-only fail-open contract table with its YOLO caveat (in YOLO the guardrail is the only egress guard), the wiring after Decide that preserves the original rule, cancellation semantics, explicit coverage limits, the pinned 31-test suite, and the two deliberate non-actions (Deny untouched, sub-agent human-allow unguarded).
 - [PDF viewer zoom, Space navigation, and find](concepts/pdf-viewer-zoom-find.md) - PDF viewer zoom-at-cursor, Space zoom+pan modifier, cross-page find with overlays, Print/Download, per-file view-state persistence across project switches, and jsdom test gotchas.
 - [Per-Chat MCP Toggle](concepts/per-chat-mcp-toggle.md) - Per-chat MCP server on/off toggle in the web/desktop chat sidebar: session-scoped list/toggle, process-wide persist + per-session override, and the mcpCache rebuild gotcha.
 - [Persistent per-session shell for exclamation-mark commands](concepts/persistent-shell-session.md) - How the web/desktop composer's exclamation-mark commands run in a persistent pty-backed interactive shell per chat tab, with prompt-hook marker framing, pty cleanliness, lifecycle, and the one-shot fallback.
-- [Pulse — cross-project live-sessions dashboard](concepts/pulse-dashboard.md) - Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, jump sequence, entry points (no client router), desktop wiring, and known limits.
+- [Persistent Todo Plan (todowrite / todoread / todo_update)](concepts/persistent-todo-plan.md) - Per-session durable todo plan file format, revision-token concurrency, destructive-replacement guard, cache-safe user-role re-anchor injection, and resume semantics.
+- [Prompt Cache Stability](concepts/prompt-cache-stability.md) - Anthropic prompt-cache prefix order and the rules for any change that touches tools or the base prompt: deterministic tool order, sticky sets, role-determines-caching, tail injection by volatility, breakpoints.
+- [Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)](concepts/pulse-assistant.md) - Server side of the Pulse assistant: one global chat session (pulse_ id, dedicated root, state.json) that reads every local session and terminal and, through permission-gated write tools, sends messages, runs allowlisted slash commands and resolves asks. Endpoints (assistant, pulse-model, pulse-system-prompt), config keys, model slot, system-prompt override and per-turn board plus memory injection (user-role, never system-role), the twelve tools with caps, the permission design, assistant-owned memory files, recap deadline, exclusion from the board, and known limits.
+- [Pulse — cross-project live-sessions dashboard](concepts/pulse-dashboard.md) - Assistant drawer (docked chat, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.
 - [Remote MCP OAuth Compatibility](concepts/remote-mcp-oauth-compat.md) - Implemented remote MCP OAuth compatibility: dual-schema mcp-auth.json reads with merge-safe writes, URL-bound token attachment, RFC 9728/8414 discovery refresh with a single retry, status-before-decode HTTP errors, CLI list status fix; per-chat toggle/cache semantics unchanged.
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, the live (open∪running) sidebar chat inventory and tab reveal, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
 - [Server-Side Auto-Continue Loop](concepts/server-auto-continue.md) - Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, typesafe/chat judge dispatch, the decisive awaiting_user stop, and visible end-of-turn status.
 - [Session Re-key via /reset-id](concepts/session-rekey-reset-id.md) - How /reset-id re-keys a conversation to a fresh session id while preserving the transcript, and the coordinated disk/registry/web rekey path.
 - [Session-bound dialogs scope to their chat session](concepts/session-bound-dialog-scoping.md) - Rule: session-owned ask dialogs only mount when that session's Chat sub-tab is on screen; pending asks persist invisibly via sidebar Bell + attention chime when off-surface.
+- [Settings → Connectors (web/desktop)](concepts/web-connector-settings.md) - The web/desktop Settings → Connectors surface: base auth.json credentials, masked secrets, host threading, OAuth auto/manual completion modes, flow-state invariants, and known gaps.
+- [Shared HTR daemon (htrcli serve)](concepts/htr-shared-daemon.md) - Why one shared htrcli daemon serves both ocode and the user's extension: coordinates from ~/.htrcli/config.json, browser.htr_shared/htr_token config keys (incl. htr_token precedence over htrcli's config), AdoptOnly, the StartedByPID stop rule, Settings endpoints addressing the resolved port, and lifecycle limits.
+- [SQLite Browser / DB IDE (preview pane)](concepts/sqlite-browser.md) - Design decisions and invariants for the web/desktop SQLite browser: server-side modernc.org/sqlite engine, containment and read-only allowlist, rowid row identity, BLOB prefix vs full-byte handling, pre-write snapshots, and grid/IDE behaviors that must not regress. Fuller implementation checklist in skills/ocode-web/SKILL.md item 64.
+- [Sub-agent Transcripts: OnSubAgentMessage and Child Sessions](concepts/subagent-transcripts-child-sessions.md) - Why dispatched child messages never reach the parent's OnMessage/OnDelta and how each run is persisted under its own child session.
+- [Task Output Contracts (expected_output)](concepts/task-output-contracts.md) - How a task dispatch's optional expected_output contract is resolved, verified by a small-model check, and retried once in place; includes the CheckFailed-versus-not-satisfied distinction.
+- [TUI User Interaction: Slash Command Queuing](concepts/tui-slash-command-queuing.md) - How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-07: web/desktop /btw no longer records the aside into the conversation — both surfaces now run the same independent side query and neither writes the transcript.
 - [User-Message Jump (Alt+↑ / Alt+↓)](concepts/user-message-jump.md) - Alt+↑/Alt+↓ jump between the user's own messages in a chat transcript (TUI + web), with msg N/M readout; distinct from composer input history and the find bar.
 - [Web Ask Dialog LLM Context Preview](concepts/web-ask-dialog-llm-context.md) - Permission/question ask dialogs now show the LLM's last message and thinking for user context
 - [Web Chat Composer Input History (↑/↓ Navigation)](concepts/web-chat-input-history.md) - Per-tab ↑/↓ history navigation in the web/desktop chat composer, parity with the TUI's Up/Down : Navigate input history. Local per-tab list, append-on-submit, caret-gated walk, queue precedence, rekey/clear lifecycle.
@@ -62,19 +81,25 @@ okf_version: 0.1
 - [Web List-Dialog Keyboard Navigation](concepts/web-list-dialog-keyboard-navigation.md) - Shipped shared list-navigation helper/hook and its six web dialog integrations: keys, focus contract, per-surface preservation, deferred surfaces, tests.
 - [Web tab loading indicators](concepts/web-tab-loading-indicators.md) - Concept: keyed tab loading indicators in the web UI — identity, store, guards, wiring, and the independent Git badge poll.
 - [Web UI Global Keyboard Shortcuts](concepts/web-keyboard-shortcuts.md) - Concept: web UI keyboard shortcuts
+- [Web/Desktop Context Gauge Resolution](concepts/web-context-gauge-resolution.md) - Provider-reported context occupancy first, transcript estimate only as fallback; the shared resolution chain for status snapshots and the /context endpoint.
+- [Web/Desktop Server Locking and Liveness Rules](concepts/web-server-locking-and-liveness-rules.md) - Rules for internal/server: Handler.mu is a map lock never a work lock, lock order, pending-ask recovery, async turns, per-project subprocess bounds, SSE event registration, turn heartbeat, routes and middleware.
+- [Web/Desktop Server Project Scoping](concepts/web-server-project-scoping.md) - Project dirs are per-session not per-process: session project roots, project-scoped endpoint params, remote project proxying rules and the server-side terminal tab list.
 
 # gotchas
 
+- ["Add to .gitignore" — toplevel targeting, C-quoting, and append-not-truncate](gotchas/git-ignore-toplevel-and-quoting.md) - Gotchas behind the web/desktop Git tab's right-click "Add to .gitignore": entries MUST resolve against the repo toplevel (git status porcelain paths are toplevel-relative, so a nested ?project= subdir double-prefixes), C-quoted porcelain names must be decoded before pattern-building, patterns are anchored/escaped, and the file is appended to (O_APPEND local / read-modify-write remote) rather than rewritten. Also records the latent remoteReadFile MISSING-sentinel bug fixed in the same change.
+- [Git tab stage failed on non-ASCII filenames — C-quoted names from non-`-z` listings](gotchas/git-status-c-quoted-paths.md) - The web/desktop Git tab could not stage files with non-ASCII names, locally or over SSH/WSL: listings without `-z` returned git's C-quoted form, and remote command args were joined unquoted so a space split the name. Listings must use `-z` or decode; every spec that becomes a remote argument must be shell-quoted.
 - ["git commit failed: exit status 1" with no reason (git explains on stdout, not stderr)](gotchas/git-commit-opaque-exit-status.md) - git commit writes its reason on stdout; capturing only stderr hides the explanation
+- [A derived title/label must be bounded before it is persisted or rendered](gotchas/derived-title-label-must-be-bounded.md) - A session title auto-derived from a multi-megabyte first user message was stored verbatim, poisoning every metadata endpoint and the shared tabs.json, and the raw label forced a full-string browser layout. Rule and fix pattern: cap on write AND on read, and bound the truncation work itself.
 - [A failed git probe is not the same answer as "not a repository" - rev-parse exit 128 hides git-missing and safe.directory faults](gotchas/git-probe-failure-is-not-a-non-repo.md) - Gotcha: git rev-parse exits 128 both for a plain non-repo and for a real fault (git missing from PATH, safe.directory / dubious-ownership refusal, unreadable .git), so gitStatusForDir classified on the exit code alone and a server with no git on PATH reported every project as a plain directory with nothing logged. The decision now rests on stderr text, which forces two things: pin LC_ALL=C, and classify on the RAW cmd.Output() error before runRaw wraps it with fmt.Errorf and discards the *exec.ExitError and with it Stderr.
 - [A module-scope model/corpus fetch turns a "local" Python engine into a networked one](gotchas/python-module-scope-network-fetch.md) - Gotcha: a Python dependency that loads a Hugging Face model or NLTK corpus at module-import time turns a "local" engine into a networked one with silent failure modes — how to detect (blocked network + empty cache, execute don't grep), the classmethod-redirection and bare-id traps, the shared install/runtime offline preamble, and the raise-named-error rule.
+- [Advisor checkpoints must wait for a pending permission/question ask](gotchas/advisor-checkpoints-must-wait-for-a-pending-ask.md) - Advisor loop checkpoints must skip (not block or run) while a permission/question ask dialog is pending; root cause, invariants, and scope limits — including that the headless server now installs a real sub-agent/advisor permission asker (bounded, auto-denied park).
 - [After Compaction: Publish Status Snapshot + Record Estimate or Context Gauge Goes Stale](gotchas/compaction-context-gauge-stale-after-splice.md) - Gotcha: after compaction the server must publish a status snapshot and the agent must record a post-splice estimate, else the Context gauge goes stale; the compaction notice is the persisted [ocode:compaction-summary] system message
 - [Agent Replacement — Input Queuing & Stream Event Epochs](gotchas/agent-replacement-input-queuing.md) - Architectural decision and solution pattern for queuing user input during agent replacement and using stream event epochs to prevent stale events from mutating the new session.
 - [AIHubMix Test — Global Cache State Leakage](gotchas/aihubmix-test-cache-leak.md) - AIHubMix tests leak global cache state between runs — missing t.Cleanup snapshot/restore causes test pollution and flaky failures
 - [Auto-continue turn transcript rebase: capture base length before the loop](gotchas/auto-continue-turn-transcript-rebase.md) - Gotcha: turn transcript persistence silently fails if turnBaseLen is not captured before the auto-continue loop, because resume prompts grow the messages length and cause hard-diverge on reconcile.
 - [Auto-Permission Dependency Binaries — Policy Decision](gotchas/auto-permission-dependency-bin-policy.md) - Deliberate security-policy expansion in bundled auto-permission gatekeeper prompt v1.9.x that auto-allows direct invocation of project/toolchain dependency binaries, with accepted residual risk and maintainer rules.
-- [Auto-Permission Judge — Credential Material Is Withheld from the Judge Context](gotchas/auto-permission-judge-withholds-credentials.md) - buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).</description>
-<parameter name="tags">["security", "permissions", "auto-permission", "secrets", "judge", "gotcha", "redaction", "side-task"]
+- [Auto-Permission Judge — Credential Material Is Withheld from the Judge Context](gotchas/auto-permission-judge-withholds-credentials.md) - buildPermissionContext never embeds credential-bearing file contents in the LLM permission judge's prompt: a sensitive target file gets a "(contents withheld: sensitive file)" marker, while executed custom scripts and referenced files are skipped entirely. Documents the full judge context inventory (project_context), the withholding invariant, and the side-task-client redaction chokepoint Agent.bindSideClient (nine call sites, the askPermissionModel registry-gated exception, the open permission_interpreter.go leak).
 - [Auto-Permission Prompt Prose Code Audit Gap](gotchas/auto-permission-prompt-prose-code-audit-gap.md) - The bundled gatekeeper prompt v1.9.0 enumerated non-existent git config forms (e.g., --set) and omitted real ones. Resolved in v1.9.2: prose synced with the –c dangerous-key list and a code backstop (`gitConfigWriteArgs` in IsHarmfulBashCommand, internal/agent/permissions.go) hard-blocks git config writes; ~25 regression cases in TestIsHarmfulBashCommand_GitConfigWrites (internal/agent/permissions_test.go). Prose and code must be audited together.
 - [Auto-Permission Prompt — Load-Semantics Flip](gotchas/auto-permission-prompt-load-semantics-flip.md) - The load-semantics flip from self-healing to pure-read introduces a silent stale-gatekeeper trap with no proactive surfacing, distinct from the existing TOCTOU race gotcha.
 - [Auto-Permission Prompt — TOCTOU Install Race](gotchas/auto-permission-prompt-atomic-race.md) - TOCTOU race in auto-permission prompt install: concurrent older build can downgrade the bundled gatekeeper prompt.
@@ -89,7 +114,7 @@ okf_version: 0.1
 - [Browser Panel — Documentation vs. Landed Behavior Mismatch](gotchas/browser-panel-transition-inconsistency.md) - Inconsistency between browser panel docs (showConnecting overlay) and actual implementation (indeterminate progress bar + everLoaded flag).
 - [Bubble Tea Cleanup Race — Orphaned Goroutines on Shutdown](gotchas/bubbletea-cleanup-race.md) - Bubble Tea runs tea.Cmd in untracked goroutines and does not wait for them during Program.Run shutdown, causing cleanup races with model-switch or /new commands that orphan agents or supervisors.
 - [Chat Input — Queued Messages Lost on Submission Failure](gotchas/chat-input-message-loss.md) - Queued messages are lost when submission fails — sendMessage returns false but the message is already shifted from the queue
-- [Chat transcript scroll-bounce: clamped pin vs. user intent](gotchas/chat-scroll-bounce-clamped-pin-vs-user-intent.md) - Chat transcript scroll-bounce: four stacked root causes (object-identity virtual keys, live→committed height hole, clamped pin mistaken for user intent, competing scrollTop writers) and the durable fix rules.
+- [Chat transcript scroll-bounce: clamped pin vs. user intent](gotchas/chat-scroll-bounce-clamped-pin-vs-user-intent.md) - Chat transcript scroll-bounce: six stacked root causes (object-identity virtual keys, live→committed height hole, clamped pin mistaken for user intent, competing scrollTop writers, un-anchored window slides for a scrolled-up reader, duplicate pane keys from a session open under two projects) and the durable fix rules.
 - [ChatPanel & LogPanel Autoscroll Bounce / Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position. Updated with virtualizer-growth follow-up (2026-09-17), threshold correction (120→200px per code), synchronous scroll lock + lock re-arm on transcript reset (2026-09-18), and LogPanel parity (2026-09-18).
 - [Chrome Tab Hang — Unbounded CDP Calls, JS Dialogs, Invisible Popups](gotchas/chrome-tab-hang-unbounded-cdp-call.md) - Gotcha: an embedded Chrome tab froze permanently when a CDP command never got a reply (alert() blocking the renderer, dead session); popups and middle-click tabs were never surfaced because page-level auto-attach does not cover them.
 - [Concurrent File Editing Risk — Multiple Writers in Same Checkout](gotchas/concurrent-file-editing-risk.md) - Gotcha: multiple writers (agents + manual edits) on the same files within a single checkout can corrupt both streams. Covers the concurrent modification problem, affected scenarios, mitigation strategies, and recovery.
@@ -98,18 +123,6 @@ okf_version: 0.1
 - [Debug Instrumentation Ships Unconditionally](gotchas/debug-instrumentation-ships-unconditionally.md) - Process gotcha: temporary Date.prototype instrumentation ships unconditionally in production builds, causing global prototype mutation, altered date behavior, and authenticated network requests.
 - [Desktop quit guard for unsaved drafts (pending + failed) + sticky-port fallback no longer re-saves](gotchas/desktop-quit-guard-and-sticky-port-fallback.md) - Desktop unsaved-draft quit guard (two-state pending/failed, bounded debounce) and sticky-port drift no longer re-saves — 2026-09-25 fixes, follow-up hardening.
 - [Desktop subprocess PATH trap — bare CLI names fail under Finder/Dock-launched .app](gotchas/desktop-subprocess-path-trap.md) - Desktop .app processes inherit launchd's minimal PATH; bare argv[0] resolves via exec.LookPath against the process PATH before cmd.Env is consulted, so cmd.Env cannot fix it. Absolute path alone is not enough — the child's PATH must resolve its own runtime. A second, complementary trap: interactive rc files (~/.zshrc) are not sourced by login shells, so directories only on ~/.zshrc (e.g. ~/.local/bin) are invisible to every shell ocode spawns.
-tags:
-  - gotcha
-  - desktop
-  - subprocess
-  - PATH
-  - exec.LookPath
-  - cmd.Dir
-  - claude
-  - cli
-  - zshrc
-  - login shell
-resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_build.go; internal/config/user_path.go; main.go; cmd/ocode-desktop/main.go
 - [Desktop webview has no Wails event system — shell→page signals must use ExecJS + DOM CustomEvent](gotchas/desktop-shell-webview-no-wails-events.md) - Desktop webview is served over plain http:// (embed.FS), so Wails window._wails/EmitEvent never exist — shell→page signals must use win.ExecJS + DOM CustomEvent with a React receiver.
 - [Desktop webview uses HTTPS + HTTP/2 to escape the six-connection cap](gotchas/desktop-webview-http2.md) - Gotcha: the desktop webview loads https://127.0.0.1:PORT (per-launch self-signed cert pinned in-app) so it negotiates HTTP/2; plain HTTP stays on the same port via first-byte TLS sniffing; one-time localStorage migration from the old http origin.
 - [Desktop/Web Terminal Wheel Scroll Chains to the App Page (xterm.js Escape Gestures)](gotchas/terminal-wheel-scroll-chaining.md) - Wheel gestures over the terminal that xterm.js cannot use (scrollback at an edge, deltaY===0) escape to the browser and scroll the whole app window instead of the terminal. Fixed with a container-level non-passive wheel guard + overscroll-contain on the terminal container and overscroll-behavior:none on html/body.
@@ -129,6 +142,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Linux Sandbox Lockout: Confiner Shell Path, /dev/null, and Binary Dispatch](gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md) - Gotcha: four independent Landlock bugs caused total sandbox lockout on Linux — bare shell name execve, /dev/null not writable, desktop binary missing dispatch, and test binary recursion trap
 - [Local Model Auto-Start Hijacks the Controlling Terminal](gotchas/local-model-tty-hijack.md) - A locally-spawned model server (Setpgid only, same session as ocode) can grab the terminal foreground process group via TIOCSPGRP, crashing the TUI and corrupting the whole shell session
 - [Local Model Limiter — Stale-Slot Reclamation Race](gotchas/local-model-limiter-stale-slot-race.md) - TOCTOU race in local model slot-lock stale reclamation: reaper can delete a live lock between Stat and Remove, breaking MaxParallel limits
+- [Loopback curl with a shell-variable port asked as exfiltration — and the 127. host-match hole beside it](gotchas/loopback-curl-shell-port-variable.md) - A loopback health check whose port came from a shell variable lost the loopback carve-out (url.Parse rejects non-numeric ports, the empty domain fell through to the env-var exfiltration gate, and the harmful verdict runs before every allow rule, so a persisted curl allow looked inert). Fixed by honoring the port only when the line proves it numeric (same-line integer assignment or a numeric-literal for list) — because "only the port may be a variable" is NOT enforceable by text matching. A bare $p with nothing to prove it still asks. Same change closed a 127. string-prefix match that treated attacker-registrable domains as loopback. A 2026-10-02 follow-up closed two more bypasses — a compound assignment (p+=…) hid a non-numeric write from the per-name scan, and a numeric for header overrode a hostile body — so numericAssignedVarsFrom is now an all-writes-numeric allowlist, and rewrote isLocalhostURL (self-escalation guard) to ask net/url first (userinfo, IPv6, case-fold) with the hand-rolled fallback OR-ed in: never url.Parse alone, because it rejects a $p port.
 - [LSP Diagnostics Marked Reported Before Emission](gotchas/lsp-diagnostics-marked-reported-before-emission.md) - Confirmed regression: LSP delta injection fingerprints URIs before cap checks and emission, permanently suppressing diagnostics that were never delivered.
 - [macOS Headless Chrome Freezes on Page-Unhandled Keys (nativeVirtualKeyCode)](gotchas/chrome-headless-mac-key-redispatch-freeze.md) - Gotcha: in the embedded Chrome tab, a second Escape/Tab/Enter or a letter typed outside an input froze the whole browser process (all tabs, screencast, every CDP call) until a real mouse move. Cause: Input.dispatchKeyEvent with nativeVirtualKeyCode makes Chrome re-dispatch unhandled keys to its hidden AppKit window, which blocks in SLSObscureCursor.
 - [Main model pick also sets the global default](gotchas/main-model-pick-also-sets-global-default.md) - Picking a main model in the sidebar writes it globally; resolution order, persistence, and caveats.
@@ -140,7 +154,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [opencode-go per-model protocol routing & Anthropic tool schema flatness](gotchas/opencode-go-per-model-protocol-and-anthropic-tool-schemas.md) - Retry policy: 500, thinking-mode 400, and non-standard 529 "Endpoint is unavailable" now retried (2026-09-29); opencode-go per-model protocol routing & Anthropic flat tool schemas
 - [PATH Shadowing Can Bypass Sandbox Discovery](gotchas/shell-sandbox-path-shadowing.md) - Gotcha: PATH-based sandbox-exec/bwrap discovery can be shadowed by user-writable executables, requiring hardening to prevent security bypasses.
 - [PDF preview fails on WebKit with `undefined is not a function (near '...e of t...')`](gotchas/pdf-preview-webkit-async-iterator.md) - WebKit ReadableStream async-iterator gap kills pdf.js text layer — feature-detected shim fix
-- [Pending ask recovery from live session state (sentinel-less transcript)](gotchas/pending-ask-recovery-live-session-state.md) - Added async turn_error bus event as a fourth recovery trigger for pending-ask hydration, updated sentinel names, updated timestamp.
+- [Pending ask recovery from live session state (sentinel-less transcript)](gotchas/pending-ask-recovery-live-session-state.md) - Added async turn_error bus event as a fourth recovery trigger for pending-ask hydration, updated sentinel names, updated timestamp; livePendingAsks now merges the child permission-ask registry (own mutex, read unconditionally) with the TryLock-gated transcript scan.
 - [Per-session LLM spend accumulator](gotchas/per-session-llm-spend-accumulator.md) - Per-session LLM spend and token totals — persistence keys, seeding, carry-on-replace, and the daily-total fallback
 - [Permission Evaluation and Unknown Tool Guard](gotchas/permission-evaluation-and-unknown-tool-guard.md) - Documenting established permission-path invariants for unknown tool rejection and safe permission evaluation, including read-target existence checks to avoid TOCTOU issues (deprecated)
 - [Pinned pip requirement sets need an upper Python bound, not just a minimum](gotchas/tts-pinned-python-upper-bound-needed.md) - Gotcha: pinned pip requirement sets need an upper Python bound — an unconstrained upper lets pip resolve against an interpreter whose wheels don't satisfy the most restrictive Requires-Python, producing a misleading resolver dump.
@@ -169,6 +183,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Session Storage Critical Issues](gotchas/session-storage-critical-issues.md) - Critical issues discovered in session storage code review
 - [Session-scoped config helpers must pass the session's remote host](gotchas/remote-session-config-host-routing.md) - Session-scoped config helpers in web/src/api/client.ts must pass the session's remote host so they route to /api/remote/<host>/…; omitting it writes the local server's config and the remote sidebar refetch shows no change.
 - [Session-tagged snapshot: override base fields but recompute ALL derived fields](gotchas/session-snapshot-stale-derived-fields.md) - Durable rule: every session-tagged TUIStatus snapshot must pin MainModel/CWD AND recompute derived fields (ModelPrompt) — overriding without recomputing leaves stale .OCODE.md/Kaizen banner in the web sidebar.
+- [Share URL lag — plain-HTTP browsers hit the six-connection cap](gotchas/share-url-http1-connection-cap.md) - Gotcha: a browser on a share URL or `ocode serve` speaks HTTP/1.1 (six connections per origin); per-host SSE streams pinned them. /api/events now fans remote hosts in over one stream, and a caller-cancelled proxied request no longer drops the host tunnel.
 - [Shared tabs.json is written by every ocode server process — whole-map replace dropped projects](gotchas/shared-tabs-json-multi-writer-clobber.md) - Multiple ocode server processes share one tabs.json. A whole-map PUT on a debounced write clobbered another process's projects; the fix is merge + explicit empty-list deletion under a cross-process file lock.
 - [Shell Execution Must Set cmd.Dir to Agent Workdir](gotchas/shell-sandbox-working-directory-not-set.md) - Gotcha: shell execution must set cmd.Dir to the agent/session workdir for both foreground and background commands, not relying on inherited process cwd.
 - [Side Pane StateKey Convention: Per-Session Scoping](gotchas/side-pane-statekey-convention.md) - "The right-hand Browser/Preview side pane's open state and previewed shell state are keyed per session surface (`side:chat:<id>` / `side:term:<id>`), not per project. Opening the pane in one chat never opens it in another; returning to a session restores its own pane state. When a session id changes (new chat → real ses_ id, or /reset-id), the pane state is rekeyed to follow it."
@@ -179,6 +194,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Subagent Feedback-Loop Guard (task tool)](gotchas/subagent-feedback-loop-guard.md) - The task/subagent dispatch refuses consecutive same-type launches without new user input to break runaway feedback loops; vary the agent type or wait for user input.
 - [Symlink Escape in Plugin Removal Validation](gotchas/plugin-removal-symlink-escape.md) - Security gotcha: filepath.EvalSymlinks must resolve both the target dir and all approved roots to prevent symlink-based path traversal in plugin removal.
 - [Terminal close semantics and OSC title source](gotchas/terminal-close-and-osc-title.md) - Close-vs-detach-vs-app-exit matrix, ghost-socket disposed flag, OSC title parsing and fallback chain for remote terminal rows.
+- [Terminal Does Not Scroll On Touch Devices (xterm.js 6 Has No Touch Scrolling)](gotchas/terminal-touch-scroll-xterm6.md) - xterm.js 6.0.0 bundles VS Code's touch Gesture class but never registers the viewport as a target, so a one-finger drag does nothing on phones/tablets. Synthetic wheel events do not work around it (xterm ignores untrusted wheels). Fixed with touch listeners that drive term.scrollLines / SGR wheel reports, plus touch-none on the container.
 - [Terminal find bar stuck on "No matches"](gotchas/terminal-find-stuck-no-matches.md) - SearchAddon find() throws because allowProposedApi was unset on the xterm Terminal.
 - [TTS License Acceptance Must Validate the Exact License Text Hash](gotchas/tts-license-acceptance-hash-validation.md) - TTS license acceptance must validate engine and exact license text/hash instead of trusting client-supplied or synthetic metadata.
 - [TUI copy over SSH never reaches the local clipboard — route every copy through OSC 52 (`copyToClipboard`)](gotchas/tui-clipboard-remote-ssh-osc52.md) - A TUI that copies via a local clipboard utility (pbcopy/xclip/xsel/wl-copy) silently fails on a remote SSH host; route every TUI copy through copyToClipboard → tea.SetClipboard (OSC 52) with the local utility as fallback.
@@ -205,6 +221,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/conduct/scores/deepseek-v4.1-flash.md](okf/conduct/scores/deepseek-v4.1-flash.md)
 - [okf/conduct/scores/glm-5.3-flash.md](okf/conduct/scores/glm-5.3-flash.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.md](okf/conduct/scores/longcat-2.5-preview-free.md)
+- [okf/conduct/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/conduct/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.rerun.md](okf/conduct/scores/longcat-2.5-preview-free.rerun.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.with-skill.md](okf/conduct/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
@@ -213,12 +230,15 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/conduct/scores/space-bunny-free.with-skill.md](okf/conduct/scores/space-bunny-free.with-skill.md)
 - [okf/conduct/scores/tencent__hy3.md](okf/conduct/scores/tencent__hy3.md)
 - [okf/conduct/scores/tencent__hy3.with-skill.md](okf/conduct/scores/tencent__hy3.with-skill.md)
+- [okf/csharp/derived/csharp.longcat-2.5-preview-free.SKILL.md](okf/csharp/derived/csharp.longcat-2.5-preview-free.SKILL.md) - Corrective C# knowledge for longcat-2.5-preview-free, targeting its nullability/value-vs-reference-type gaps and its async gaps (ValueTask consumption rules, async-all-the-way, CancellationToken and IAsyncEnumerable API names).
+
 - [okf/csharp/derived/csharp.mimo-v2.5.SKILL.md](okf/csharp/derived/csharp.mimo-v2.5.SKILL.md) - Corrective C# knowledge for mimo-v2.5, targeting the nullable-reference/ record-equality and pattern-matching gaps this model showed on the closed-book csharp benchmark (record class mutability, switch expression exhaustiveness, property-pattern syntax, `is` binding scope).
 
 - [okf/csharp/derived/csharp.space-bunny-free.SKILL.md](okf/csharp/derived/csharp.space-bunny-free.SKILL.md) - Corrective C# knowledge for space-bunny-free, targeting the nullable-reference-type / value-vs-reference / record gaps this model showed on the closed-book csharp benchmark (record class positional members are init-only by default, value-type vs reference-type defaults, the `!!` parameter-null-check that never shipped).
 
 - [okf/csharp/scores/glm-5.3-flash.md](okf/csharp/scores/glm-5.3-flash.md)
 - [okf/csharp/scores/longcat-2.5-preview-free.md](okf/csharp/scores/longcat-2.5-preview-free.md)
+- [okf/csharp/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/csharp/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
 - [okf/csharp/scores/muse-spark-1.2.md](okf/csharp/scores/muse-spark-1.2.md)
 - [okf/csharp/scores/space-bunny-free.md](okf/csharp/scores/space-bunny-free.md)
@@ -228,6 +248,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/docx/derived/docx.glm-5.3-flash.SKILL.md](okf/docx/derived/docx.glm-5.3-flash.SKILL.md) - Corrective Word-editing guidance for glm-5.3-flash: cell.text wipes paragraph formatting too, doc.add_table already sets widths, field totals are cached, carrying a vMerge restart down, and removing the old image relationship after a picture swap.
 
+- [okf/docx/derived/docx.longcat-2.5-preview-free.SKILL.md](okf/docx/derived/docx.longcat-2.5-preview-free.SKILL.md) - Corrective Word-editing guidance for longcat-2.5-preview-free: merged-cell indexing, unique row matching, vertical-merge and field-total handling on row delete, run-preserving cell edits, table/column layout, default table width, and replacing one picture without touching shared parts.
+
 - [okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md](okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md) - Corrective Word-editing guidance for mimo-v2.6-flash: field results are cached (Word does not recompute SUM(ABOVE) on open), what row deletion and value changes need afterwards, the real python-docx call for replacing one picture and when its old relationship may go, and shading new column cells like their row.
 
 - [okf/docx/derived/docx.space-bunny-free.SKILL.md](okf/docx/derived/docx.space-bunny-free.SKILL.md) - Corrective Word-editing guidance for space-bunny-free: what doc.add_table, add_row and add_column really set for widths, making a new table match an existing one, inserting a column across merged cells, and replacing one picture without touching others that share its image part.
@@ -235,6 +257,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/docx/scores/deepseek-v4.1-flash.md](okf/docx/scores/deepseek-v4.1-flash.md)
 - [okf/docx/scores/deepseek-v4.1-flash.with-skill.md](okf/docx/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/docx/scores/glm-5.3-flash.md](okf/docx/scores/glm-5.3-flash.md)
+- [okf/docx/scores/longcat-2.5-preview-free.md](okf/docx/scores/longcat-2.5-preview-free.md)
+- [okf/docx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/docx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/docx/scores/mimo-v2.6-flash.md](okf/docx/scores/mimo-v2.6-flash.md)
 - [okf/docx/scores/mimo-v2.6-flash.with-skill.md](okf/docx/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/docx/scores/space-bunny-free.md](okf/docx/scores/space-bunny-free.md)
@@ -243,6 +267,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/dotnet/scores/glm-5.3-flash.md](okf/dotnet/scores/glm-5.3-flash.md)
 - [okf/dotnet/scores/longcat-2.5-preview-free.md](okf/dotnet/scores/longcat-2.5-preview-free.md)
+- [okf/dotnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/dotnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md](okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
 - [okf/dotnet/scores/muse-spark-1.2.md](okf/dotnet/scores/muse-spark-1.2.md)
@@ -256,6 +281,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/elixir/scores/glm-5.3-flash.md](okf/elixir/scores/glm-5.3-flash.md)
 - [okf/elixir/scores/longcat-2.5-preview-free.md](okf/elixir/scores/longcat-2.5-preview-free.md)
+- [okf/elixir/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/elixir/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/elixir/scores/longcat-2.5-preview-free.with-skill.md](okf/elixir/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/elixir/scores/mimo-v2.5.md](okf/elixir/scores/mimo-v2.5.md)
 - [okf/elixir/scores/muse-spark-1.2.md](okf/elixir/scores/muse-spark-1.2.md)
@@ -265,13 +291,19 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
 - [okf/golang/scores/glm-5.3-flash.md](okf/golang/scores/glm-5.3-flash.md)
 - [okf/golang/scores/longcat-2.5-preview-free.md](okf/golang/scores/longcat-2.5-preview-free.md)
+- [okf/golang/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/golang/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/golang/scores/mimo-v2.5.md](okf/golang/scores/mimo-v2.5.md)
 - [okf/golang/scores/muse-spark-1.2.md](okf/golang/scores/muse-spark-1.2.md)
 - [okf/golang/scores/space-bunny-free.md](okf/golang/scores/space-bunny-free.md)
 - [okf/golang/scores/tencent__hy3.md](okf/golang/scores/tencent__hy3.md)
+- [okf/hallucination/scores/longcat-2.5-preview-free.md](okf/hallucination/scores/longcat-2.5-preview-free.md)
+- [okf/nestjs/derived/nestjs.longcat-2.5-preview-free.SKILL.md](okf/nestjs/derived/nestjs.longcat-2.5-preview-free.SKILL.md) - Corrective NestJS knowledge for longcat-2.5-preview-free, targeting its gaps in lifecycle hooks (shutdown order, v11 reverse ordering, what triggers init) and guards/interceptors (guard usage, interceptor Observable mechanics).
+
 - [okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md](okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md) - Corrective NestJS guidance for the exact area mimo-v2.5 tests weak on (shutdown/lifecycle hook order and triggers). Loaded only in NestJS repos when this exact model is active.
 - [okf/nestjs/scores/glm-5.3-flash.md](okf/nestjs/scores/glm-5.3-flash.md)
 - [okf/nestjs/scores/longcat-2.5-preview-free.md](okf/nestjs/scores/longcat-2.5-preview-free.md)
+- [okf/nestjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nestjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [okf/nestjs/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/nestjs/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/nestjs/scores/mimo-v2.5.md](okf/nestjs/scores/mimo-v2.5.md)
 - [okf/nestjs/scores/muse-spark-1.2.md](okf/nestjs/scores/muse-spark-1.2.md)
 - [okf/nestjs/scores/space-bunny-free.md](okf/nestjs/scores/space-bunny-free.md)
@@ -280,6 +312,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md](okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md) - Corrective Next.js App Router guidance for the exact area mimo-v2.5 tests weak on (metadata). Loaded only in Next.js repos when this exact model is active.
 - [okf/nextjs/scores/glm-5.3-flash.md](okf/nextjs/scores/glm-5.3-flash.md)
 - [okf/nextjs/scores/longcat-2.5-preview-free.md](okf/nextjs/scores/longcat-2.5-preview-free.md)
+- [okf/nextjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nextjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md](okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/nextjs/scores/mimo-v2.5.md](okf/nextjs/scores/mimo-v2.5.md)
 - [okf/nextjs/scores/muse-spark-1.2.md](okf/nextjs/scores/muse-spark-1.2.md)
@@ -289,6 +322,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md](okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md) - Corrective PDF-editing guidance for glm-5.3-flash: PyMuPDF's apply_redactions removes covered table rules and shading by default, painting boxes is not removal, redact before you move a region, where insert_text puts the baseline, growing and re-laying tables without broken rules, replace_image is global, and scripts must check return values.
 
+- [okf/pdf/derived/pdf.longcat-2.5-preview-free.SKILL.md](okf/pdf/derived/pdf.longcat-2.5-preview-free.SKILL.md) - Corrective PDF-editing guidance for longcat-2.5-preview-free: move regions with show_pdf_page after redacting, keep grid lines when redacting a cell, insert_textbox writes nothing on overflow, re-laying out columns and rows, replace_image is global, and verify the saved text layer.
+
 - [okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md](okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md) - Corrective PDF-editing guidance for mimo-v2.6-flash: PyMuPDF's real apply_redactions defaults and constants, keeping a cell's rules and shading, moving regions without duplicates, APIs that do not exist, subset fonts, rotated-page coordinates, and image replace/dedup details.
 
 - [okf/pdf/derived/pdf.space-bunny-free.SKILL.md](okf/pdf/derived/pdf.space-bunny-free.SKILL.md) - Corrective PDF-editing guidance for space-bunny-free: move table regions as vectors (show_pdf_page clip), never as rasters; PyMuPDF's real apply_redactions defaults; insert_textbox's negative return; baseline placement; bold flag bits and subset-font glyph coverage; image reuse and overlay; rotated-page coordinates; relayout and make-room procedures.
@@ -297,12 +332,17 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/pdf/scores/deepseek-v4.1-flash.with-skill.md](okf/pdf/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pdf/scores/glm-5.3-flash.md](okf/pdf/scores/glm-5.3-flash.md)
 - [okf/pdf/scores/glm-5.3-flash.with-skill.md](okf/pdf/scores/glm-5.3-flash.with-skill.md)
+- [okf/pdf/scores/longcat-2.5-preview-free.md](okf/pdf/scores/longcat-2.5-preview-free.md)
+- [okf/pdf/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pdf/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/pdf/scores/mimo-v2.6-flash.md](okf/pdf/scores/mimo-v2.6-flash.md)
 - [okf/pdf/scores/mimo-v2.6-flash.with-skill.md](okf/pdf/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/pdf/scores/space-bunny-free.md](okf/pdf/scores/space-bunny-free.md)
 - [okf/pdf/scores/space-bunny-free.with-skill.md](okf/pdf/scores/space-bunny-free.with-skill.md)
+- [okf/php/derived/php.longcat-2.5-preview-free.SKILL.md](okf/php/derived/php.longcat-2.5-preview-free.SKILL.md) - Corrective PHP knowledge for longcat-2.5-preview-free, targeting its gaps in OOP (readonly, late static binding), closures (first-class callable syntax, Closure::bind) and match vs switch control flow.
+
 - [okf/php/scores/glm-5.3-flash.md](okf/php/scores/glm-5.3-flash.md)
 - [okf/php/scores/longcat-2.5-preview-free.md](okf/php/scores/longcat-2.5-preview-free.md)
+- [okf/php/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/php/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/php/scores/mimo-v2.5.md](okf/php/scores/mimo-v2.5.md)
 - [okf/php/scores/muse-spark-1.2.md](okf/php/scores/muse-spark-1.2.md)
 - [okf/php/scores/space-bunny-free.md](okf/php/scores/space-bunny-free.md)
@@ -311,6 +351,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md](okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md) - Corrective pptx-editing guidance for glm-5.3-flash: locate tables by header text (searching groups) with a unique-row assert, drop replaced image rels safely (drop_rel does not see r:embed), sync the graphic frame height after XML row edits, and re-band explicit row fills.
 
+- [okf/pptx/derived/pptx.longcat-2.5-preview-free.SKILL.md](okf/pptx/derived/pptx.longcat-2.5-preview-free.SKILL.md) - Corrective pptx-editing guidance for longcat-2.5-preview-free: finish row deletes/inserts (frame height, totals, banding), pick tables by header text, drop replaced image rels safely, never overwrite the original, and know the OOXML repair causes.
+
 - [okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md](okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md) - Corrective pptx-editing guidance for mimo-v2.6-flash: locate tables by header text and assert a unique matching row, python-pptx has no row/column add or delete API (deepcopy/remove the a:tr), sync the frame and totals, content placeholders lack insert_table, drop_rel ignores r:embed, and verify content rather than structure.
 
 - [okf/pptx/derived/pptx.space-bunny-free.SKILL.md](okf/pptx/derived/pptx.space-bunny-free.SKILL.md) - Corrective pptx-editing guidance for space-bunny-free: locate tables by header text with a unique-row assert, python-pptx merge and placeholder model, widening merged cells when inserting a column, and syncing the frame height.
@@ -318,12 +360,15 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/pptx/scores/deepseek-v4.1-flash.md](okf/pptx/scores/deepseek-v4.1-flash.md)
 - [okf/pptx/scores/deepseek-v4.1-flash.with-skill.md](okf/pptx/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pptx/scores/glm-5.3-flash.md](okf/pptx/scores/glm-5.3-flash.md)
+- [okf/pptx/scores/longcat-2.5-preview-free.md](okf/pptx/scores/longcat-2.5-preview-free.md)
+- [okf/pptx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pptx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/pptx/scores/mimo-v2.6-flash.md](okf/pptx/scores/mimo-v2.6-flash.md)
 - [okf/pptx/scores/mimo-v2.6-flash.with-skill.md](okf/pptx/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/pptx/scores/space-bunny-free.md](okf/pptx/scores/space-bunny-free.md)
 - [okf/pptx/scores/space-bunny-free.with-skill.md](okf/pptx/scores/space-bunny-free.with-skill.md)
 - [okf/python/scores/glm-5.3-flash.md](okf/python/scores/glm-5.3-flash.md)
 - [okf/python/scores/longcat-2.5-preview-free.md](okf/python/scores/longcat-2.5-preview-free.md)
+- [okf/python/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/python/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/python/scores/mimo-v2.5.md](okf/python/scores/mimo-v2.5.md)
 - [okf/python/scores/muse-spark-1.2.md](okf/python/scores/muse-spark-1.2.md)
 - [okf/python/scores/space-bunny-free.md](okf/python/scores/space-bunny-free.md)
@@ -332,6 +377,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/react/scores/claude-opus-4-8.md](okf/react/scores/claude-opus-4-8.md)
 - [okf/react/scores/glm-5.3-flash.md](okf/react/scores/glm-5.3-flash.md)
 - [okf/react/scores/longcat-2.5-preview-free.md](okf/react/scores/longcat-2.5-preview-free.md)
+- [okf/react/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/react/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/react/scores/mimo-v2.5.md](okf/react/scores/mimo-v2.5.md)
 - [okf/react/scores/muse-spark-1.2.md](okf/react/scores/muse-spark-1.2.md)
 - [okf/react/scores/space-bunny-free.md](okf/react/scores/space-bunny-free.md)
@@ -339,12 +385,14 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/ror/derived/ror.mimo-v2.5.SKILL.md](okf/ror/derived/ror.mimo-v2.5.SKILL.md) - Corrective Rails migrations/schema guidance for the exact gaps mimo-v2.5 tests weak on — the purpose of the schema.rb/structure.sql dump, and the two classic dangerous-migration patterns on large production tables (locking column defaults/NOT NULL, and index builds). Loaded only in Rails repos when this exact model is active.
 - [okf/ror/scores/glm-5.3-flash.md](okf/ror/scores/glm-5.3-flash.md)
 - [okf/ror/scores/longcat-2.5-preview-free.md](okf/ror/scores/longcat-2.5-preview-free.md)
+- [okf/ror/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ror/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/ror/scores/mimo-v2.5.md](okf/ror/scores/mimo-v2.5.md)
 - [okf/ror/scores/muse-spark-1.2.md](okf/ror/scores/muse-spark-1.2.md)
 - [okf/ror/scores/space-bunny-free.md](okf/ror/scores/space-bunny-free.md)
 - [okf/ror/scores/tencent__hy3.md](okf/ror/scores/tencent__hy3.md)
 - [okf/ruby/scores/glm-5.3-flash.md](okf/ruby/scores/glm-5.3-flash.md)
 - [okf/ruby/scores/longcat-2.5-preview-free.md](okf/ruby/scores/longcat-2.5-preview-free.md)
+- [okf/ruby/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ruby/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/ruby/scores/mimo-v2.5.md](okf/ruby/scores/mimo-v2.5.md)
 - [okf/ruby/scores/muse-spark-1.2.md](okf/ruby/scores/muse-spark-1.2.md)
 - [okf/ruby/scores/space-bunny-free.md](okf/ruby/scores/space-bunny-free.md)
@@ -357,6 +405,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/rust/scores/glm-5.3-flash.md](okf/rust/scores/glm-5.3-flash.md)
 - [okf/rust/scores/longcat-2.5-preview-free.md](okf/rust/scores/longcat-2.5-preview-free.md)
+- [okf/rust/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/rust/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/rust/scores/longcat-2.5-preview-free.with-skill.md](okf/rust/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
 - [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
@@ -369,6 +418,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 
 - [okf/tanstack/scores/glm-5.3-flash.md](okf/tanstack/scores/glm-5.3-flash.md)
 - [okf/tanstack/scores/longcat-2.5-preview-free.md](okf/tanstack/scores/longcat-2.5-preview-free.md)
+- [okf/tanstack/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/tanstack/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md](okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/tanstack/scores/mimo-v2.5.md](okf/tanstack/scores/mimo-v2.5.md)
 - [okf/tanstack/scores/muse-spark-1.2.md](okf/tanstack/scores/muse-spark-1.2.md)
@@ -379,19 +429,27 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md](okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md) - Corrective VB.NET guidance for the exact area muse-spark-1.2 tests weak on (WithEvents/Handles and AddHandler/RemoveHandler event-wiring edge cases). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/scores/glm-5.3-flash.md](okf/vbnet/scores/glm-5.3-flash.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.md](okf/vbnet/scores/longcat-2.5-preview-free.md)
+- [okf/vbnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/vbnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.rerun.md](okf/vbnet/scores/longcat-2.5-preview-free.rerun.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md](okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/vbnet/scores/mimo-v2.5.md](okf/vbnet/scores/mimo-v2.5.md)
 - [okf/vbnet/scores/muse-spark-1.2.md](okf/vbnet/scores/muse-spark-1.2.md)
 - [okf/vbnet/scores/space-bunny-free.md](okf/vbnet/scores/space-bunny-free.md)
 - [okf/vbnet/scores/tencent__hy3.md](okf/vbnet/scores/tencent__hy3.md)
+- [okf/webforms/derived/webforms.deepseek-v4.1-flash.SKILL.md](okf/webforms/derived/webforms.deepseek-v4.1-flash.SKILL.md) - Corrective web-form-filling guidance for deepseek-v4.1-flash driving a browser with htrcli: what a live third-party form with test data may and may not receive, CAPTCHA and card-data limits, and the widget recipes (react-select/autocomplete via `pick`, datepickers via `type`, range/colour via eval + events) that cost it the most calls.
+
+- [okf/webforms/derived/webforms.mimo-v2.6-flash.SKILL.md](okf/webforms/derived/webforms.mimo-v2.6-flash.SKILL.md) - Corrective web-form-filling guidance for mimo-v2.6-flash driving a browser with htrcli: what a live third-party form with test data may and may not receive, CAPTCHA and card-data limits, and how to reach form fields inside iframes.
+
+- [okf/webforms/scores/deepseek-v4.1-flash.md](okf/webforms/scores/deepseek-v4.1-flash.md)
+- [okf/webforms/scores/mimo-v2.6-flash.md](okf/webforms/scores/mimo-v2.6-flash.md)
 - [OKF Naming Convention Enforcement](okf/_schema/naming-convention-enforcement.md) - OKF naming conventions for question IDs, bundle entries, and index format to maintain bundle integrity.
 - [Stack Detection](okf/_schema/stack-detection.md) - How ocode detects repo stacks from meta.yaml markers, and how derived Kaizen skills are gated — marker types, universal corpora (conduct/hallucination/pdf), canonical model ids, and delivery/admission rules.
 
 # superpowers
 
-- [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md](superpowers/plans/2026-09-24-pulse-dashboard/07-pulse-card.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
 - [superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md](superpowers/plans/2026-09-18-remote-persistent-sessions-terminals/04-frontend-sidebar-inventory.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/01-crypto.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/02-store-lock.md)
@@ -403,27 +461,28 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/08-vault-form.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/09-settings-group.md)
 - [superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md](superpowers/plans/2026-09-24-browser-password-vault-phase1/10-docs-gates.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md](superpowers/plans/2026-09-24-pulse-dashboard/10-docs.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md](superpowers/plans/2026-09-24-pulse-dashboard/02-last-turn-error.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md](superpowers/plans/2026-09-24-pulse-dashboard/09-desktop-open-pulse.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md](superpowers/plans/2026-09-24-pulse-dashboard/08-pulse-view-entry.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md](superpowers/plans/2026-09-24-pulse-dashboard/04-pulse-endpoint.md)
-- [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md](superpowers/plans/2026-09-24-pulse-dashboard/03-pulse-rows.md)
 - [superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md](superpowers/plans/2026-09-24-pulse-dashboard/06-jump-helper.md)
+- [superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md](superpowers/plans/2026-09-24-pulse-dashboard/05-pulse-store.md)
 - [Browser Password Vault — Phase 1 Implementation Plan](superpowers/plans/2026-09-24-browser-password-vault-phase1/INDEX.md) - Phase 1 implementation plan (INDEX.md + parts 01–10) for the browser password vault: internal/vault encrypted store (Argon2id KEK wrapping a random 32-byte AES-256-GCM data key with AAD "ocode-vault-key", each item sealed whole with its id as AAD, vault.json 0600, atomic temp+rename writes under a cross-process OS file lock with load-modify-write merge, ChangeMaster re-wraps the same DK leaving item blobs byte-identical), /api/vault/* handlers in handler_vault.go with per-surface unlock grants (surface is UX state, not a security boundary; malformed sort/limit/offset → 400), generator + URL match, and web api.vault* client with the Settings → Passwords VaultForm. Phase 1 implemented; local-iframe autofill (Phase 2) and Chrome/CDP autofill (Phase 3) deferred to their own plans and tracked in TODO.md under (password-vault).
 - [Chat Verbosity Display — Design Spec](superpowers/specs/2026-09-24-chat-verbosity-display-design.md) - Approved design spec for chat verbosity display, implemented 2026-09-25 (local web/desktop SPA only): chat_verbosity config (full/balanced/quiet presets + per-category overrides), GET/PUT /api/config/ocode/chat-verbosity with chat_verbosity_changed as an invalidation-only event (payload never applied, reconnect refetch), Settings → Chat display form, ChatPanel-owned virtualized disclosure state with policy revision, single ToolBlock outer/inner gate model, latest-thinking invariant, and strict no-silent-normalization failure handling. Design record with as-built status notes.
+- [Clef decision-judge backend + per-judge model selection — design](superpowers/specs/2026-10-03-clef-judge-backend-design.md) - Design spec for adding Cloudflare Clef/Clef-Flash as a second decision-judge backend behind a Decider seam, with per-judge model selection. Measurement table (2026-10-05) rebuilt from the permanent TestJudgePayloadBudgets regression test against the 96 KB decisionStateBudgetBytes budget; the oversized permission write is projected to fit.
 - [Code-Search Relevance Judge (v1)](superpowers/specs/2026-09-28-code-search-relevance-judge-design.md) - Approved design spec (awaiting implementation): extend the doc_search TypeSafe/Jev relevance judge to the code-search tools grep/rgrep/glob — per-file judging carried on the execution context, required intent argument, 4s DecideCtx budget, 40-candidate cap, vetoes disclosed in output footers. `list` deferred per user decision 2026-09-28.
 - [Code-Search Relevance Judge Implementation Plan](superpowers/plans/2026-09-28-code-search-relevance-judge.md) - Approved implementation plan for extending the TypeSafe/Jev relevance judge to grep/rgrep/glob behind a required intent argument (tasks 1–8).
-- [Cross-Client Compaction Indicator — Design Spec](superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md) - Implemented design spec for server-authoritative, session-scoped compaction indicator visible across clients (SSE events + /state reconcile), rev 3: monotonic compaction_generation on both lifecycle events and /state, client-side stale-done generation guard for out-of-lock publish reordering, compaction_error only for real failure/timeout with a live client (cancellation clears silently), plus overlap-safe counter, stale /state request-version guard, and older-server compatibility.
+- [Cross-Client Compaction Indicator — Design Spec](superpowers/specs/2026-09-25-cross-client-compaction-indicator-design.md) - Implemented design spec for server-authoritative, session-scoped compaction indicator visible across clients (SSE events + /state reconcile), rev 3: monotonic compaction_generation on both lifecycle events and /state, client-side stale-done generation guard for out-of-lock publish reordering, compaction_error only for real failure/timeout with a live client (cancellation clears silently), plus overlap-safe counter, stale /state request-version guard, and older-server compatibility. Rev 4 (2026-10-01): user-initiated cancellation cross-linked from concepts/compaction-cancellation.md; stale code anchors re-derived.
 - [Deferred, durable message rewind for ocode Web/Desktop](superpowers/specs/2026-09-25-deferred-session-rewind-design.md) - Design spec for deferred, durable message rewind in ocode Web/Desktop — IMPLEMENTED: server pending_rewinds resource + endpoints, commit-before-202 turn path (resident/no-resident/TUI /rc), localStorage recovery and cancel, lost-response probe.
 - [Delayed Chat Input Consolidation](superpowers/specs/2026-09-09-chat-input-consolidation-design.md)
-- [Design Spec: Reliable Large-Context Compaction (web/desktop /compact)](superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md) - Design spec for reliable large-context /compact on web/desktop (2026-09-25); IMPLEMENTED — per-batch first-token/idle windows, fixed 30-min cap, context-scoped delta callback, ErrCompactionTimeout→504, sticky inline + app-wide web errors.
+- [Design Spec: Reliable Large-Context Compaction (web/desktop /compact)](superpowers/specs/2026-09-25-web-compact-large-context-reliability-design.md) - Design spec for reliable large-context /compact on web/desktop (2026-09-25); IMPLEMENTED — per-batch first-token/idle windows, fixed 30-min cap, context-scoped delta callback, ErrCompactionTimeout→504, sticky inline + app-wide web errors. Code anchors re-derived 2026-10-01.
 - [Duplicate Project as Remote (SSH/WSL)](superpowers/specs/2026-09-28-duplicate-project-as-remote-design.md) - Design record: duplicate any project row into a new remote (SSH/WSL) entry via create-only POST /api/projects/duplicate and Store.DuplicateAsRemote.
 - [Embedded Browser Password Vault — Design](superpowers/specs/2026-09-24-browser-password-vault-design.md) - Approved-for-planning design for a Bitwarden-like password vault in ocode's embedded browser (full browser tab + sidebar). Server-side Go crypto: Argon2id-derived KEK wrapping a random AES-256-GCM data key; per-item blobs sealed whole with the item id as AAD; file at <GlobalDataDir>/browse/vault.json (0600). Per-surface unlock (UX-only, not a security boundary). Autofill in local iframe mode via capture.js and in Chrome/CDP mode via vaultFill/vaultCollect + Page.addScriptToEvaluateOnNewDocument observer + Runtime.addBinding. New Settings > Passwords page. Phased: vault core+API+settings, then local autofill, then Chrome autofill.
 - [Embedded HTR Extension and Managed Daemon Design](superpowers/specs/2026-09-09-embedded-htr-extension-design.md) - Design for embedding the HTR NControl extension and a platform-matched htrcli daemon in ocode's managed Chrome flow, including the HTTP lifecycle API exposed from Settings > Browser.
 - [Last-dispatched model in the status bar — design](superpowers/specs/2026-09-25-last-dispatched-model-status-design.md) - Implemented design spec: per-session last-dispatched model shown in the web/desktop bottom status bar, captured from every dispatch-acknowledging 202 (send, command/continue, retry, permission/question continuation, rewind) plus turn_started.model as the headless server-event fallback; all bridged RC response branches report RCBridge.ModelForDispatch (live TUIStatus.MainModel with registration Model fallback) while the browser captures only async 202 dispatch acknowledgements; rewind 202 reports the queued job's model; StatusBar renders only lastDispatchedModel and never falls back to snap.main_model (absent until first dispatch).
 - [Laya as a local permission / auto-continue judge — evaluation](superpowers/specs/2026-09-22-laya-local-judge-evaluation.md) - Measured evaluation (2026-09-22) of the Laya System-1 model (3 checkpoints) as a local replacement for typesafe/jev-latest in the auto-permission and auto-continue judges: memory/latency per checkpoint, context budgets, and accuracy on 16 real bash tool calls + 13 real transcript tails pulled from ocode sessions. Verdict: not usable zero-shot; fine-tune or cascade required.
 - [List Dialog Keyboard Navigation — Design Spec](superpowers/specs/2026-09-25-list-dialog-keyboard-navigation-design.md) - Approved design spec for shared Up/Down keyboard navigation across web list-based popup dialogs (ModelDialog, SessionDialog, DirectoryBrowser, QuestionDialog, and phase-2 selector popovers): shared reducer/hook, per-dialog contracts, a11y, testing, docs impact.
+- [Local Model Instance Manager Implementation Plan](superpowers/plans/2026-08-01-local-model-instance-manager.md) - Implementation plan for /localmodel local chat/completion model instances (starting with Bonsai 8B 1-bit): ServerManifest.Kind embed/chat split, chat manifest entries, instance registry with deterministic port assignment and supervised spawn, LocalModels config plumbing, the /localmodel slash command, and end-to-end verification (Tasks 1-6).
 - [Local Speech-to-Text (In-App Dictation) — Design](superpowers/specs/2026-09-21-speech-to-text-design.md) - Design spec for adding local, offline speech-to-text dictation to ocode: mic button in chat composer, Settings surface for engine/model selection, reusing internal/tts machinery.
 - [Makefile Version Bump Targets (up-patch / up-minor) — Design Spec](superpowers/specs/2026-09-24-make-version-bump-targets-design.md) - Approved design spec for Makefile up-patch/up-minor version bump targets with POSIX-shell helper.
 - [Multi-Use Preview — Design Spec (Draft, 2026-09-10)](superpowers/specs/2026-09-10-preview-multipurpose-design.md) - Decision: Historical draft for sidebar PreviewHost + session Preview sub-tab, updated 2026-09-21 for .mdx support in extension lists.
@@ -446,11 +505,16 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [Web Chat Message Copy Menu — Design](superpowers/specs/2026-09-25-web-chat-message-copy-design.md) - Design spec for the web chat per-block copy menu: split Copy control, rendered-vs-raw clipboard paths, shared clipboard helper.
 - [Web Compact Feedback Design](superpowers/specs/2026-09-18-web-compact-feedback-design.md) - Approved design for web/desktop /compact feedback beside composer: queued/running/complete/error states, queue semantics, test plan. Implementation complete. (deprecated)
 - [Web Compact Feedback — Final Implementation](superpowers/specs/2026-09-19-web-compact-feedback-final.md) - Superseding spec for the web compact feedback design — final implementation with backend status snapshot, transcript-persisted notice, and simplified composer states
+- [Web/Desktop "Connectors" settings — TUI /connect parity — design](superpowers/specs/2026-10-01-web-connector-settings-design.md) - Design spec for web/desktop Connectors settings (TUI /connect parity): shared auth method catalog, credential-version invalidation, OAuth completion modes (auto/manual), security rules, and the as-built 2026-10-02 connect-flow fixes (committing gate, atomic beginInput, cancel-discards-credential, tail-only masking, 409 input authority).
+- [Web/Desktop Connectors settings — implementation plan](superpowers/plans/2026-10-01-web-connector-settings.md) - Implementation plan for web/desktop Connectors settings (TUI /connect parity): shared method catalog, credential-version invalidation, client methods/forms, OAuth flow wiring; records the 2026-10-02 connect-flow correctness fixes (commit gate, beginInput single authority, cancel-drops-credential, tail-only masking). Phase 0–1 done; Phase 2 partial.
 - [Zoho MCP OAuth Compatibility — Design Spec](superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md) - Approved design spec for Zoho MCP OAuth compatibility: dual-schema auth storage, token attachment, RFC 9728 refresh, error surfacing, CLI status fix.
 
 # Unclassified
 
 - [desktop-single-instance.md](architecture/desktop-single-instance.md)
+- [cloud-connectors-design.md](cloud-connectors-design.md)
+- [cloud-connectors-encryption.md](cloud-connectors-encryption.md)
+- [db-connector.md](concepts/db-connector.md)
 - [HOW-TO-EVALUATE.md](okf/HOW-TO-EVALUATE.md)
 - [README.md](okf/README.md)
 - [conduct.md](okf/_prompts/conduct.md)
@@ -472,6 +536,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [rust.md](okf/_prompts/rust.md)
 - [tanstack.md](okf/_prompts/tanstack.md)
 - [vbnet.md](okf/_prompts/vbnet.md)
+- [webforms.md](okf/_prompts/webforms.md)
 - [question-format.md](okf/_schema/question-format.md)
 - [rubric-guide.md](okf/_schema/rubric-guide.md)
 - [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
@@ -479,6 +544,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.md](okf/conduct/answers/deepseek-v4.1-flash.md)
 - [glm-5.3-flash.md](okf/conduct/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/conduct/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/conduct/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.rerun.md](okf/conduct/answers/longcat-2.5-preview-free.rerun.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/conduct/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
@@ -499,6 +565,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/conduct/questions.md)
 - [glm-5.3-flash.md](okf/csharp/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/csharp/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/csharp/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/csharp/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/csharp/answers/space-bunny-free.md)
@@ -508,6 +575,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.md](okf/docx/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/docx/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/docx/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/docx/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/docx/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/docx/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/docx/answers/mimo-v2.6-flash.with-skill.md)
 - [space-bunny-free.md](okf/docx/answers/space-bunny-free.md)
@@ -516,6 +585,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/docx/questions.md)
 - [glm-5.3-flash.md](okf/dotnet/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/dotnet/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/dotnet/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/dotnet/answers/longcat-2.5-preview-free.with-skill.md)
 - [longcat-2.5-preview-free.with-skill.run2.md](okf/dotnet/answers/longcat-2.5-preview-free.with-skill.run2.md)
 - [mimo-v2.5.md](okf/dotnet/answers/mimo-v2.5.md)
@@ -525,6 +595,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/dotnet/questions.md)
 - [glm-5.3-flash.md](okf/elixir/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/elixir/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/elixir/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/elixir/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/elixir/answers/muse-spark-1.2.md)
@@ -535,14 +606,19 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/elixir/questions.md)
 - [glm-5.3-flash.md](okf/golang/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/golang/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/golang/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/golang/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/golang/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/golang/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/golang/answers/tencent__hy3.md)
 - [questions.md](okf/golang/questions.md)
+- [longcat-2.5-preview-free.md](okf/hallucination/answers/longcat-2.5-preview-free.md)
+- [hallucination.longcat-2.5-preview-free.SKILL.md](okf/hallucination/derived/hallucination.longcat-2.5-preview-free.SKILL.md)
 - [questions.md](okf/hallucination/questions.md)
 - [glm-5.3-flash.md](okf/nestjs/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/nestjs/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nestjs/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/nestjs/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.5.md](okf/nestjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nestjs/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/nestjs/answers/space-bunny-free.md)
@@ -550,6 +626,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/nestjs/questions.md)
 - [glm-5.3-flash.md](okf/nextjs/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/nextjs/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nextjs/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/nextjs/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/nextjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nextjs/answers/muse-spark-1.2.md)
@@ -560,6 +637,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.with-skill.md](okf/pdf/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pdf/answers/glm-5.3-flash.md)
 - [glm-5.3-flash.with-skill.md](okf/pdf/answers/glm-5.3-flash.with-skill.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/pdf/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pdf/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/pdf/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/pdf/answers/mimo-v2.6-flash.with-skill.md)
 - [space-bunny-free.md](okf/pdf/answers/space-bunny-free.md)
@@ -568,6 +647,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/pdf/questions.md)
 - [glm-5.3-flash.md](okf/php/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/php/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/php/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/php/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/php/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/php/answers/space-bunny-free.md)
@@ -576,6 +656,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [deepseek-v4.1-flash.md](okf/pptx/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/pptx/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pptx/answers/glm-5.3-flash.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/pptx/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
+- [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pptx/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/pptx/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/pptx/answers/mimo-v2.6-flash.with-skill.md)
 - [space-bunny-free.md](okf/pptx/answers/space-bunny-free.md)
@@ -584,6 +666,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/pptx/questions.md)
 - [glm-5.3-flash.md](okf/python/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/python/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/python/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/python/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/python/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/python/answers/space-bunny-free.md)
@@ -591,6 +674,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/python/questions.md)
 - [glm-5.3-flash.md](okf/react/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/react/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/react/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/react/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/react/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/react/answers/space-bunny-free.md)
@@ -599,6 +683,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [README.md](okf/react/scores/README.md)
 - [glm-5.3-flash.md](okf/ror/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/ror/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ror/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/ror/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ror/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/ror/answers/space-bunny-free.md)
@@ -606,6 +691,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/ror/questions.md)
 - [glm-5.3-flash.md](okf/ruby/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/ruby/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ruby/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/ruby/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ruby/answers/muse-spark-1.2.md)
 - [space-bunny-free.md](okf/ruby/answers/space-bunny-free.md)
@@ -613,6 +699,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/ruby/questions.md)
 - [glm-5.3-flash.md](okf/rust/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/rust/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/rust/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/rust/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/rust/answers/muse-spark-1.2.md)
@@ -622,6 +709,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/rust/questions.md)
 - [glm-5.3-flash.md](okf/tanstack/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/tanstack/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/tanstack/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/tanstack/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/tanstack/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/tanstack/answers/muse-spark-1.2.md)
@@ -630,6 +718,7 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [questions.md](okf/tanstack/questions.md)
 - [glm-5.3-flash.md](okf/vbnet/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/vbnet/answers/longcat-2.5-preview-free.md)
+- [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/vbnet/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.rerun.md](okf/vbnet/answers/longcat-2.5-preview-free.rerun.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/vbnet/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/vbnet/answers/mimo-v2.5.md)
@@ -637,6 +726,11 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [space-bunny-free.md](okf/vbnet/answers/space-bunny-free.md)
 - [tencent__hy3.md](okf/vbnet/answers/tencent__hy3.md)
 - [questions.md](okf/vbnet/questions.md)
+- [deepseek-v4.1-flash.md](okf/webforms/answers/deepseek-v4.1-flash.md)
+- [mimo-v2.6-flash.md](okf/webforms/answers/mimo-v2.6-flash.md)
+- [README.md](okf/webforms/probe/README.md)
+- [questions.md](okf/webforms/questions.md)
+- [2026-10-08-cloud-connectors-phase1.md](plans/2026-10-08-cloud-connectors-phase1.md)
 - [2026-07-21-session-storage-ojsonl.md](superpowers/plans/2026-07-21-session-storage-ojsonl.md)
 - [2026-07-24-web-changes-parity.md](superpowers/plans/2026-07-24-web-changes-parity.md)
 - [2026-07-24-web-cron-parity.md](superpowers/plans/2026-07-24-web-cron-parity.md)
@@ -644,7 +738,6 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [2026-07-24-web-editor-core.md](superpowers/plans/2026-07-24-web-editor-core.md)
 - [2026-07-28-account-login-config-sync.md](superpowers/plans/2026-07-28-account-login-config-sync.md)
 - [2026-07-30-terminal-bench-harness.md](superpowers/plans/2026-07-30-terminal-bench-harness.md)
-- [2026-08-01-local-model-instance-manager.md](superpowers/plans/2026-08-01-local-model-instance-manager.md)
 - [2026-08-02-resume-cancelled-subagent.md](superpowers/plans/2026-08-02-resume-cancelled-subagent.md)
 - [2026-08-06-web-agents-tab.md](superpowers/plans/2026-08-06-web-agents-tab.md)
 - [2026-08-08-per-tab-chat-state.md](superpowers/plans/2026-08-08-per-tab-chat-state.md)
@@ -731,6 +824,18 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [06-storage-migration.md](superpowers/plans/2026-09-28-desktop-http2/06-storage-migration.md)
 - [07-docs.md](superpowers/plans/2026-09-28-desktop-http2/07-docs.md)
 - [INDEX.md](superpowers/plans/2026-09-28-desktop-http2/INDEX.md)
+- [2026-10-01-quick-actions-config.md](superpowers/plans/2026-10-01-quick-actions-config.md)
+- [01-decider-seam.md](superpowers/plans/2026-10-03-clef-judge-backend/01-decider-seam.md)
+- [02-per-judge-config.md](superpowers/plans/2026-10-03-clef-judge-backend/02-per-judge-config.md)
+- [03-clef-client.md](superpowers/plans/2026-10-03-clef-judge-backend/03-clef-client.md)
+- [04-clef-guards.md](superpowers/plans/2026-10-03-clef-judge-backend/04-clef-guards.md)
+- [05-state-budget.md](superpowers/plans/2026-10-03-clef-judge-backend/05-state-budget.md)
+- [06-budget-regression-test.md](superpowers/plans/2026-10-03-clef-judge-backend/06-budget-regression-test.md)
+- [07-agreement-eval.md](superpowers/plans/2026-10-03-clef-judge-backend/07-agreement-eval.md)
+- [08-model-attribution.md](superpowers/plans/2026-10-03-clef-judge-backend/08-model-attribution.md)
+- [09-docs.md](superpowers/plans/2026-10-03-clef-judge-backend/09-docs.md)
+- [INDEX.md](superpowers/plans/2026-10-03-clef-judge-backend/INDEX.md)
+- [2026-10-07-web-btw-side-query.md](superpowers/plans/2026-10-07-web-btw-side-query.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)
@@ -750,5 +855,8 @@ resource: internal/agent/advisor_tool.go; internal/shell; internal/tool/bash_bui
 - [2026-09-21-interrupted-turn-notice-design.md](superpowers/specs/2026-09-21-interrupted-turn-notice-design.md)
 - [2026-09-21-persistent-shell-session-design.md](superpowers/specs/2026-09-21-persistent-shell-session-design.md)
 - [2026-09-25-desktop-quit-guard-design.md](superpowers/specs/2026-09-25-desktop-quit-guard-design.md)
+- [2026-10-01-quick-actions-config-design.md](superpowers/specs/2026-10-01-quick-actions-config-design.md)
+- [2026-10-02-subagent-permission-ask-design.md](superpowers/specs/2026-10-02-subagent-permission-ask-design.md)
+- [2026-10-07-web-btw-side-query-design.md](superpowers/specs/2026-10-07-web-btw-side-query-design.md)
 - [telegram-bot.md](telegram-bot.md)
 

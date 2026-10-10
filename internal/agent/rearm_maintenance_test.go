@@ -8,7 +8,7 @@ import "testing"
 // panic with "close of closed channel" — Go's testing package fails the test
 // on any panic, so no explicit assertion is needed for that half.
 func TestRearmMaintenanceAllowsSecondShutdown(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 
 	a.shutdownTransient() // mirrors what happens when a dispatch goes terminal
 	a.RearmMaintenance()
@@ -16,7 +16,7 @@ func TestRearmMaintenanceAllowsSecondShutdown(t *testing.T) {
 }
 
 func TestRearmMaintenanceReopensStopChannel(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 
 	// Use shutdownTransient (not a bare Cancel) to mirror the terminal-dispatch
 	// path: Cancel() alone leaves the maintenance workers alive, so

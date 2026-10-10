@@ -150,7 +150,7 @@ func TestRgrepJudgeCapBoundaryAndFooter(t *testing.T) {
 		t.Skip("rg unavailable")
 	}
 	dir := t.TempDir()
-	n := searchJudgeMaxCandidates + 5
+	n := SearchJudgeMaxCandidates + 5
 	for i := 0; i < n; i++ {
 		writeFixture(t, dir, fmt.Sprintf("f%02d.txt", i), "Add\n")
 	}
@@ -170,11 +170,11 @@ func TestRgrepJudgeCapBoundaryAndFooter(t *testing.T) {
 	mu.Lock()
 	gotReceived := received
 	mu.Unlock()
-	if gotReceived != searchJudgeMaxCandidates {
-		t.Fatalf("judge received %d candidates, want %d", gotReceived, searchJudgeMaxCandidates)
+	if gotReceived != SearchJudgeMaxCandidates {
+		t.Fatalf("judge received %d candidates, want %d", gotReceived, SearchJudgeMaxCandidates)
 	}
 	wantFooter := fmt.Sprintf("[relevance judge: 1 of %d result(s) omitted as out of scope for this intent]; %d beyond the judge cap were not judged",
-		searchJudgeMaxCandidates, n-searchJudgeMaxCandidates)
+		SearchJudgeMaxCandidates, n-SearchJudgeMaxCandidates)
 	if !strings.Contains(out, wantFooter) {
 		t.Fatalf("footer missing:\n--- want ---\n%s\n--- got ---\n%s", wantFooter, out)
 	}

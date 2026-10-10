@@ -127,5 +127,3 @@ func TestReconcileHandoff_Deterministic(t *testing.T) {
 		t.Errorf("render is not deterministic:\n--- r1 ---\n%s\n--- r2 ---\n%s", r1, r2)
 	}
 }
-
-

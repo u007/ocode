@@ -73,6 +73,8 @@ New `tokArith` token + `parseArithmetic` handle `$((...))` so arithmetic operand
 
 `explainBashCommand` now describes control-flow constructs (new `controlFlowExplanation`) instead of "unknown command".
 
+Since 2026-10-02 the same applies to every unlisted head: `explainBashCommand` returns nothing for a first word that is not in its table (`cd`, `python3`, a variable assignment), and `buildPermissionContext` then omits the Command analysis block. The "(unknown command)" text no longer exists. Measured against the live judge, that one line held auto-allows at about 16% of commands the user went on to approve, against 53% without it — see [Auto-Permission Judge Live Eval](../concepts/auto-permission-judge-eval.md).
+
 ### Rulebook
 
 `BundledAutoPermissionPromptBody` gained a "Shell control-flow constructs" section and `BundledAutoPermissionPromptVersion` bumped 1.9.3 → 1.9.4. The new section tells the judge that `for`/`while`/`until`/`case`/`select` are syntax, not executables, and that loops with safe bodies should be approved.

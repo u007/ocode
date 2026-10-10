@@ -89,6 +89,15 @@ export function buildTerminalWsConnection(opts: {
   return { url, protocols };
 }
 
+/**
+ * Keys whose keydown never becomes pty input (see the custom key handler):
+ * bare modifiers and lock/layout keys.
+ */
+const MODIFIER_KEYS = new Set([
+  "Shift", "Control", "Alt", "AltGraph", "Meta", "CapsLock", "NumLock", "ScrollLock",
+  "Fn", "Hyper", "Super", "OS", "ContextMenu",
+]);
+
 // Debounce window for duplicate clipboard writes of the SAME text. In the
 // desktop shell one physical Cmd+C can legitimately take two copy paths: the
 // native Edit ▸ Copy menu role (bound to CmdOrCtrl+c, firing the WKWebView
@@ -100,6 +109,12 @@ export function buildTerminalWsConnection(opts: {
 const DUPLICATE_COPY_WINDOW_MS = 250;
 let lastCopyText = "";
 let lastCopyAt = 0;
+
+/** Buffer range of xterm's current selection, as a comparable string. */
+function selectionRangeKey(term: Pick<Terminal, "getSelectionPosition">): string {
+  const p = term.getSelectionPosition();
+  return p ? `${p.start.x},${p.start.y}-${p.end.x},${p.end.y}` : "";
+}
 
 function isDuplicateCopy(text: string): boolean {
   const now = Date.now();
@@ -120,6 +135,20 @@ function markCopySeen(text: string): void {
   lastCopyText = text;
   lastCopyAt = Date.now();
 }
+
+// Debounce window for a duplicate PASTE of the same text, the mirror of
+// DUPLICATE_COPY_WINDOW_MS. One physical paste can reach the terminal twice:
+// the desktop shell's native Edit ▸ Paste role and the Cmd/Ctrl+V keydown
+// default action are separate routes, and only the first is a paste the user
+// asked for. Deliberately much tighter than the copy window: the two
+// deliveries of one paste land within a few ms, while a longer window would
+// start swallowing a user's own rapid repeat (a held/repeated Cmd+V). A
+// dropped duplicate is the cheap mistake to make here; a swallowed paste
+// reads as "paste is broken".
+const DUPLICATE_PASTE_WINDOW_MS = 50;
+
+/** Max base64 chars accepted from an OSC 52 clipboard write (~75 KB of text). */
+const OSC52_MAX_PAYLOAD_CHARS = 100_000;
 
 /**
  * Writes text to the system clipboard, falling back to the deprecated
@@ -185,6 +214,18 @@ const TERMINAL_MOUSE_RESET =
 const TERMINAL_HISTORY_RESTORE_TIMEOUT_MS = 15000;
 
 /**
+ * Upper bound on history bytes replayed into xterm on (re)open. The on-disk
+ * log is unbounded (TUI redraws push a single terminal past 10 MB), and the
+ * restore used to grow `scrollback` to fit every row: each page re-allocated
+ * xterm's whole CircularList (O(n²) over the log), the buffer ignored the
+ * user's scrollback setting, and the 30s SerializeAddon snapshot copied the
+ * multi-MB result into localStorage — which is what drove the desktop
+ * renderer past 3 GB and hung it. Replaying only the tail keeps the buffer
+ * bounded by the user's scrollback; older output stays on disk.
+ */
+const TERMINAL_HISTORY_RESTORE_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
  * A single interactive terminal: one xterm.js instance bridged to one
  * pty-backed shell over /api/terminal/ws. Each panel owns its own WebSocket;
  * the server keys the shell by `id`, so a socket drop (reload, remount) only
@@ -245,8 +286,22 @@ export default function TerminalPanel({
   // ssh stream) rewrites the rows under those coordinates every frame, so a
   // later getSelection() returns a partial/mutated line set. Every copy path
   // that runs after release (Cmd+C, Edit-menu copy event, context menu)
-  // writes this snapshot instead. Cleared when xterm drops the selection.
+  // writes this snapshot instead.
+  //
+  // It deliberately OUTLIVES xterm's own selection. xterm clears a selection
+  // on its own in three ways the user never asked for: a scrollback trim that
+  // pushes the selected rows off the top (a busy redraw loop does this within
+  // seconds), any "user input" — which includes the mouse-button reports a
+  // mouse-tracking program (claude code enables ?1000/?1006) receives for the
+  // very right-click that opened the context menu, so the selection is gone
+  // before Copy can be clicked — and an alt-screen switch. Only a new left
+  // pointer gesture in the terminal, a keystroke that reaches the pty, or
+  // Select All replaces or drops it.
   const selectionSnapshotRef = useRef("");
+  // Buffer range of the snapshotted selection (see selectionRangeKey). A
+  // right-click over the SAME range is the mutated-rows case and keeps the
+  // snapshot; a different range is a new selection (rightClickSelectsWord).
+  const selectionRangeRef = useRef("");
   // True from a mousedown in the container until the resulting selection has
   // been copied. Gates the debounced onSelectionChange copy: xterm also fires
   // that event on scrollback trim (every scroll while a selection exists),
@@ -340,11 +395,39 @@ export default function TerminalPanel({
   }, [projectPath, host]);
 
   // ── Context menu (right-click) — Supacode-style ────────────────
+  // A pointer gesture in the terminal proper: left button only (the right
+  // button opens the context menu, and on mac xterm's rightClickSelectsWord
+  // has selected a word under it that must NOT be copied before the user
+  // picks a menu item), and not on the panel's own chrome. The context menu
+  // is portaled to <body> but React still bubbles its events through this
+  // container, and the find bar / take-over overlay render inside it; a
+  // press on any of those leaves xterm's selection untouched.
+  const isTerminalPress = useCallback((e: React.MouseEvent): boolean => {
+    if (e.button !== 0) return false;
+    const target = e.target as Element;
+    if (ctxMenuRef.current?.contains(target)) return false;
+    return !target.closest("[data-terminal-chrome]");
+  }, []);
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    const sel = termRef.current?.getSelection() ?? "";
-    setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: sel.length > 0 });
+    // xterm's own contextmenu listener has already run (rightClickSelectsWord
+    // on mac): a selection over a NEW range is what the user sees under the
+    // menu, so snapshot it before the mouse-up report that follows clears it.
+    // A live selection over the range already snapshotted at mouse-up is the
+    // same drag whose rows a redrawing program may have rewritten since; the
+    // snapshot stays (see selectionSnapshotRef).
+    const term = termRef.current;
+    if (term) {
+      const live = term.getSelection();
+      const range = selectionRangeKey(term);
+      if (live && (!selectionSnapshotRef.current || range !== selectionRangeRef.current)) {
+        selectionSnapshotRef.current = live;
+        selectionRangeRef.current = range;
+      }
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: selectionSnapshotRef.current.length > 0 });
   }, []);
 
   useEffect(() => {
@@ -369,28 +452,30 @@ export default function TerminalPanel({
   }, [ctxMenu]);
 
   // Text every post-release copy path writes: the snapshot taken when the
-  // user finished selecting, while xterm still holds that selection. Falls
-  // through to a live read only for selections made without a pointer
-  // gesture (selectAll, API), which never took a snapshot.
+  // user finished selecting (or right-clicked), even if xterm has since
+  // dropped the selection on its own. Falls through to a live read only for
+  // selections made without a pointer gesture (selectAll, API), which never
+  // took a snapshot.
   const selectedTextForCopy = useCallback((): string => {
     const term = termRef.current;
-    if (!term || !term.hasSelection()) return "";
+    if (!term) return "";
     return selectionSnapshotRef.current || term.getSelection();
   }, []);
 
   const handleCopy = useCallback(async () => {
+    // The menu closes whether or not there was anything to copy: a Copy that
+    // silently left the menu open is how an empty selection used to surface.
+    setCtxMenu(null);
     const sel = selectedTextForCopy();
     if (!sel) return;
     await writeClipboardText(sel);
-    setCtxMenu(null);
   }, [selectedTextForCopy]);
 
   const handleSpeakSelection = useCallback(() => {
-    const selection = termRef.current?.getSelection() ?? "";
-    const text = sanitizeSpeechText(selection);
+    const text = sanitizeSpeechText(selectedTextForCopy());
     if (text) requestSpeech(text);
     setCtxMenu(null);
-  }, []);
+  }, [selectedTextForCopy]);
 
   const handleSpeakVisible = useCallback(() => {
     setCtxMenu(null);
@@ -404,12 +489,15 @@ export default function TerminalPanel({
   }, []);
 
   const handlePaste = useCallback(async () => {
-    const sock = socketRef.current;
-    // Prefer async clipboard; fall back to letting the browser handle paste if denied.
+    // Read the clipboard, but feed it through term.paste like every other
+    // paste path: a raw sock.send skips bracketed-paste wrapping (a multiline
+    // payload would run line by line in a bracketed-paste app) and bypasses
+    // the attach-handshake and socket-state guard term.onData already applies.
+    // Not deduped against a clipboard event, and it must not be: this is a
+    // context-menu action, not a delivery of the Cmd/Ctrl+V keystroke.
     try {
       const text = await navigator.clipboard.readText();
-      if (text && sock && sock.readyState === WebSocket.OPEN) sock.send(text);
-      else if (text) termRef.current?.paste(text);
+      if (text) termRef.current?.paste(text);
     } catch {
       // Clipboard read requires a secure context / permission; hint the user.
       // As a fallback we focus the terminal so Ctrl+V / Cmd+V still works.
@@ -433,9 +521,11 @@ export default function TerminalPanel({
       clearTimeout(copyDebounceRef.current);
       copyDebounceRef.current = null;
     }
-    const sel = termRef.current?.getSelection() ?? "";
-    if (!sel) return false;
+    const term = termRef.current;
+    const sel = term?.getSelection() ?? "";
+    if (!term || !sel) return false;
     selectionSnapshotRef.current = sel;
+    selectionRangeRef.current = selectionRangeKey(term);
     void writeClipboardText(sel);
     return true;
   }, []);
@@ -653,33 +743,21 @@ export default function TerminalPanel({
   //   - Cmd/Ctrl+C with a selection → copy (returning false from the key
   //     handler also stops xterm from emitting \x03 for that keydown). No
   //     selection → falls through so Ctrl+C still sends SIGINT.
-  //   - Cmd/Ctrl+V → blocked in keydown (no 0x16), pasted via the async
-  //     Clipboard API in pasteFromClipboard. The container `copy` listener
-  //     below is the extra fallback for native Edit-menu-driven copies.
+  //   - Cmd/Ctrl+V → return false only, to stop that \x16. The paste itself
+  //     comes from the browser's own `paste` event (see the container
+  //     listener below): the keydown must NOT read the clipboard as well, or
+  //     one Cmd/V pastes twice.
   const copyViaShortcut = useCallback(() => {
+    // Gated on the VISIBLE selection, not the snapshot: once nothing is
+    // highlighted, Ctrl+C must reach the pty as SIGINT again. The snapshot
+    // only decides WHAT is copied while a selection is still showing.
+    const term = termRef.current;
+    if (!term?.hasSelection()) return false;
     const sel = selectedTextForCopy();
     if (!sel) return false;
     void writeClipboardText(sel);
     return true;
   }, [selectedTextForCopy]);
-
-  // Paste needs a Clipboard API read, which requires a user gesture and (in
-  // WebKit) can be denied; on denial the terminal is focused so the user's
-  // next native Cmd+V still works. term.paste() (not a raw socket write) so
-  // bracketed-paste mode is honored for multiline payloads; it flows through
-  // onData → the pty socket as usual.
-  const pasteFromClipboard = useCallback(async () => {
-    const term = termRef.current;
-    if (!term) return;
-    let text = "";
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      term.focus();
-      return;
-    }
-    if (text) term.paste(text);
-  }, []);
 
   // Container-level `copy` listener — the desktop-shell fallback. In the
   // Wails webview the native Edit-menu Copy role can consume Cmd+C before a
@@ -697,6 +775,11 @@ export default function TerminalPanel({
     const el = containerRef.current;
     if (!el) return;
     const onCopy = (e: ClipboardEvent) => {
+      // Same gate as copyViaShortcut: only a VISIBLE xterm selection claims
+      // the event. Without it a copy from the find bar's input (inside this
+      // container) or the desktop Edit ▸ Copy role with nothing highlighted
+      // would be answered with a stale snapshot.
+      if (!termRef.current?.hasSelection()) return;
       const sel = selectedTextForCopy();
       if (!sel) return;
       // Record this copy EVEN when xterm's element-level handler already
@@ -712,6 +795,54 @@ export default function TerminalPanel({
     el.addEventListener("copy", onCopy);
     return () => el.removeEventListener("copy", onCopy);
   }, [selectedTextForCopy]);
+
+  // Container-level `paste` listener, CAPTURE phase — the single paste path.
+  //
+  // A browser's Cmd/Ctrl+V default action is to dispatch a `paste`
+  // ClipboardEvent on the focused editable element, which for a terminal is
+  // xterm's hidden textarea, and xterm 6 listens for that event on BOTH the
+  // textarea and the element, pasting the clipboard itself. So the event
+  // arrives whether or not the keydown handler touches the clipboard — which
+  // is exactly why the keydown handler (below) must not read it: the read and
+  // xterm's listener each pasted the same text, so one Cmd+V pasted twice.
+  //
+  // Owning the event here (capture phase, so it runs BEFORE xterm's own
+  // target-phase listener, and stopPropagation keeps that listener from ever
+  // running) means this function is the only thing that turns a paste into
+  // terminal input. It also absorbs the desktop shell's second delivery route
+  // for a single physical paste — the native Edit ▸ Paste role plus the
+  // keydown default action, the same dual route the copy path has to dedupe —
+  // so a same-text paste inside a short window is dropped instead of reaching
+  // the pty twice.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let lastText = "";
+    let lastAt = 0;
+    const onPaste = (e: ClipboardEvent) => {
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (!text) return;
+      // Only pastes aimed at the TERMINAL. The container also holds the find
+      // bar's own search input, and a capture-phase listener on the panel root
+      // runs for that too — without this guard a Cmd+V into the find field
+      // would land in the shell.
+      const term = termRef.current;
+      if (!term?.element || !(e.target instanceof Node) || !term.element.contains(e.target)) return;
+      // Consume in both branches: xterm's own paste listener must never see
+      // the event, whether we paste it or drop it as a duplicate.
+      e.preventDefault();
+      e.stopPropagation();
+      const now = performance.now();
+      if (text === lastText && now - lastAt < DUPLICATE_PASTE_WINDOW_MS) return;
+      lastText = text;
+      lastAt = now;
+      // term.paste (not a raw socket write) so bracketed-paste mode is
+      // honored for multiline payloads; it flows through onData to the pty.
+      term.paste(text);
+    };
+    el.addEventListener("paste", onPaste, true);
+    return () => el.removeEventListener("paste", onPaste, true);
+  }, []);
 
   // Keep host in this lifecycle's dependencies. HomeApp gates startup on a
   // successful project-metadata snapshot, while a deliberate host identity
@@ -742,10 +873,14 @@ export default function TerminalPanel({
     try {
       // Open http(s) URLs on any left click (the addon's default only fires on
       // ctrl/cmd+click). Only left-click (button 0) opens; right-click pastes.
+      // xterm's Linkifier activates a link from its MOUSEUP listener (there is
+      // no click listener), so the event here is a mouseup, never a click — a
+      // `type === "click"` guard silently disabled every URL in the terminal.
+      // A drag that moved is a selection, not a click.
       // Route through openExternalURL so the desktop shell opens them in the
       // OS browser instead of losing the webview to a navigation.
       webLinks = new WebLinksAddon((event, uri) => {
-        if (event.type === "click" && event.button === 0 && /^https?:\/\//.test(uri) && !dragMovedRef.current) {
+        if ((event.type === "mouseup" || event.type === "click") && event.button === 0 && /^https?:\/\//.test(uri) && !dragMovedRef.current) {
           openExternalURL(uri);
         }
       });
@@ -802,16 +937,23 @@ export default function TerminalPanel({
           ev.preventDefault();
           return false;
         }
+        // Ctrl+C with nothing highlighted is SIGINT: pty input (see the
+        // fall-through rule at the end of this handler).
+        if (!ev.metaKey) selectionSnapshotRef.current = "";
         return true;
       }
-      // Cmd/Ctrl+V (and Ctrl+Shift+V): paste. Return false unconditionally so
-      // xterm's keydown never converts the key to a literal 0x16; the actual
-      // clipboard read runs in pasteFromClipboard (async Clipboard API).
+      // Cmd/Ctrl+V (and Ctrl+Shift+V): return false so xterm's keydown never
+      // converts the key into a literal \x16. Deliberately NOT preventDefault:
+      // the browser's default action (dispatching the `paste` event the
+      // container listener above owns) is what pastes. Reading the clipboard
+      // here too is the double paste — the event arrives either way.
       if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && ev.key.toLowerCase() === "v") {
-        void pasteFromClipboard();
+        // The paste is pty input: drop the snapshot as any typed key would.
+        selectionSnapshotRef.current = "";
         return false;
       }
       if (ev.key === "Enter" && ev.shiftKey) {
+        selectionSnapshotRef.current = "";
         const sock = socketRef.current;
         if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
         // Returning false skips xterm's own cancel(), so the browser still
@@ -840,6 +982,11 @@ export default function TerminalPanel({
           return false;
         }
       }
+      // A key xterm will turn into pty input ends the selection the user made
+      // (xterm clears its own on user input); drop the snapshot with it so a
+      // later Copy never resurrects text typed over. Bare modifiers and
+      // Cmd-combos (left to the browser on mac) produce no input.
+      if (!ev.metaKey && !MODIFIER_KEYS.has(ev.key)) selectionSnapshotRef.current = "";
       return true;
     });
 
@@ -855,20 +1002,6 @@ export default function TerminalPanel({
       markAlerted(projectPath, id, host);
       playAlertSound();
     };
-    // ── Cmd/Ctrl+C copy & Cmd/Ctrl+V paste ────────────────────────────
-    // xterm 6 never handles copy/paste shortcuts in keydown. Copy relies on
-    // the DOM `copy` event firing over a *browser text selection* — but
-    // xterm's selection is canvas-rendered with no DOM Selection, so browsers
-    // are not obliged to fire it (WKWebView in the desktop shell doesn't).
-    // And xterm's keyboard layer converts Ctrl+V to a literal 0x16 byte sent
-    // to the pty on non-mac. So the clipboard shortcuts are intercepted
-    // explicitly:
-    //   - Cmd/Ctrl+C with a selection → copy (returning false from the key
-    //     handler also stops xterm from emitting \x03 for that keydown). No
-    //     selection → falls through so Ctrl+C still sends SIGINT.
-    //   - Cmd/Ctrl+V → blocked in keydown (no 0x16), pasted via the async
-    //     Clipboard API in pasteFromClipboard. The container `copy` listener
-    //     below is the extra fallback for native Edit-menu-driven copies.
 
     // Copy-on-selection debounce: xterm fires onSelectionChange continuously
     // during a drag, so each event restarts the timer and the copy fires once
@@ -882,10 +1015,10 @@ export default function TerminalPanel({
         clearTimeout(copyDebounceRef.current);
         copyDebounceRef.current = null;
       }
-      if (!term.hasSelection()) {
-        selectionSnapshotRef.current = "";
-        return;
-      }
+      // A cleared selection leaves the snapshot alone: xterm clears on
+      // scrollback trim, mouse-report input and buffer switch, none of which
+      // is the user deselecting (that is the mouse-down / keydown paths).
+      if (!term.hasSelection()) return;
       if (!userSelectingRef.current) return;
       copyDebounceRef.current = setTimeout(() => {
         copyDebounceRef.current = null;
@@ -924,6 +1057,42 @@ export default function TerminalPanel({
       onAttention();
       return true;
     });
+    // OSC 52 clipboard write. Claude Code (mouse-tracking mode), tmux and vim
+    // handle a drag-selection themselves and "copy" it by emitting
+    // ESC ] 52 ; <targets> ; <base64> BEL — the only copy path that works
+    // through ssh. xterm.js ignores it unless handled. Write-only: a "?" query
+    // would let remote programs read the local clipboard, so it is refused.
+    // Replayed scrollback (readyRef false) must not overwrite the clipboard.
+    // Hijack guard: a program that merely prints (`cat hostile`, a remote host)
+    // has no user gesture behind it, so the write is honoured only inside the
+    // browser's transient user-activation window (a drag-select mouseup or a
+    // keypress that triggered the copy), and oversized payloads are dropped
+    // before they are decoded on the UI thread.
+    const osc52Disp = term.parser.registerOscHandler(52, (data) => {
+      if (!readyRef.current) return true;
+      const sep = data.indexOf(";");
+      if (sep < 0) return true;
+      const payload = data.slice(sep + 1);
+      if (payload === "?" || payload === "") return true;
+      if (payload.length > OSC52_MAX_PAYLOAD_CHARS) {
+        console.warn("Terminal OSC 52 payload exceeds size cap; clipboard write refused");
+        return true;
+      }
+      if (navigator.userActivation?.isActive !== true) {
+        console.warn("Terminal OSC 52 write without user activation refused");
+        return true;
+      }
+      let text: string;
+      try {
+        const bin = atob(payload);
+        text = new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+      } catch (err) {
+        console.warn("Terminal OSC 52 payload was not valid base64:", err);
+        return true;
+      }
+      void writeClipboardText(text);
+      return true;
+    });
 
     // onWriteParsed runs even for hidden keep-alive terminals, unlike render
     // events. Never acknowledge queued bytes before xterm has parsed them.
@@ -958,6 +1127,49 @@ export default function TerminalPanel({
       event.preventDefault();
     };
     el.addEventListener("wheel", onWheelGuard, { passive: false });
+    // xterm 6 dropped touch scrolling: it bundles VS Code's touch Gesture but
+    // never registers the viewport as a target, so a finger drag on a phone or
+    // tablet (mobile browser pointed at a shared desktop server) does nothing.
+    // Synthetic wheel events cannot stand in for it: xterm ignores untrusted
+    // ones. Drive it through the API instead — whole cell rows of drag become
+    // `scrollLines`, or, when a TUI owns the mouse (mouse tracking on), one SGR
+    // wheel report per row sent to the app. The container is `touch-none`, so
+    // the browser never claims the pan and these listeners can stay passive.
+    let touchY: number | null = null;
+    let touchRemainder = 0;
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+      touchRemainder = 0;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const screen = term.element?.querySelector(".xterm-screen");
+      if (touchY === null || event.touches.length !== 1 || !screen) return;
+      const touch = event.touches[0];
+      const rect = screen.getBoundingClientRect();
+      const cellHeight = rect.height / term.rows;
+      touchRemainder += touchY - touch.clientY;
+      touchY = touch.clientY;
+      // Drag down = finger pulls older content into view = scroll up (negative).
+      const rows = Math.trunc(touchRemainder / cellHeight);
+      if (rows === 0) return;
+      touchRemainder -= rows * cellHeight;
+      if (term.modes.mouseTrackingMode === "none") {
+        term.scrollLines(rows);
+        return;
+      }
+      const col = Math.min(term.cols, Math.max(1, Math.floor(((touch.clientX - rect.left) / rect.width) * term.cols) + 1));
+      const row = Math.min(term.rows, Math.max(1, Math.floor((touch.clientY - rect.top) / cellHeight) + 1));
+      const report = `\x1b[<${rows < 0 ? 64 : 65};${col};${row}M`;
+      term.input(report.repeat(Math.abs(rows)), true);
+    };
+    const onTouchEnd = () => {
+      touchY = null;
+      touchRemainder = 0;
+    };
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("touchend", onTouchEnd, { passive: true });
+    el.addEventListener("touchcancel", onTouchEnd, { passive: true });
     el.addEventListener("keydown", snapshot.input, true);
     el.addEventListener("pointerdown", onSnapshotPointerDown, true);
     window.addEventListener("pointerup", snapshot.endSelection, true);
@@ -1260,31 +1472,6 @@ export default function TerminalPanel({
       };
     };
 
-    // xterm's scrollback is a row count, while the history cursor is a byte
-    // count. Do not use snapshotEnd as scrollback: xterm allocates its
-    // CircularList to that size immediately, so a large byte log would cause
-    // a large, mostly empty allocation. Grow by the page's estimated row
-    // count before replaying it, then release unused headroom while retaining
-    // every row already rendered. Counting each code unit as up to two cells
-    // is conservative for wide characters and keeps the estimate bounded by
-    // the page size rather than the complete history size.
-    const prepareHistoryPage = (text: string) => {
-      const cols = Math.max(1, term.cols);
-      let newlineRows = 1;
-      for (let i = 0; i < text.length; i++) {
-        if (text[i] === "\n") newlineRows++;
-      }
-      const wrappedRows = Math.ceil((text.length * 2) / cols);
-      const pageRows = Math.max(1, newlineRows, wrappedRows);
-      const currentLines = term.buffer.active.length;
-      const requiredScrollback = currentLines - term.rows + pageRows;
-      term.options.scrollback = Math.max(scrollbackLines, requiredScrollback);
-    };
-    const trimHistoryHeadroom = () => {
-      const requiredScrollback = term.buffer.active.length - term.rows;
-      term.options.scrollback = Math.max(scrollbackLines, requiredScrollback);
-    };
-
     // The live socket is only opened after the REST restore settles, so a
     // restore that never settles would leave the terminal blank forever. Bound
     // it; each page re-arms the timer (see armRestoreTimeout below).
@@ -1316,21 +1503,17 @@ export default function TerminalPanel({
       projectPath,
       host,
       decoder: terminalDecoder,
+      maxBytes: TERMINAL_HISTORY_RESTORE_MAX_BYTES,
       signal: restoreController.signal,
       onText: (text) => {
         if (restoreCancelled || restoreController.signal.aborted) return;
         // Progress: the restore is alive, so give it another full window.
         armRestoreTimeout();
         serverHistoryPartial = true;
-        prepareHistoryPage(text);
-        // xterm parses writes asynchronously. Wait for the page callback
-        // before trimming headroom; doing it immediately would observe the
-        // pre-page buffer length and could evict the page just queued.
+        // xterm parses writes asynchronously; wait for the page callback so
+        // at most one page is queued in the parser at a time.
         return new Promise<void>((resolve) => {
-          term.write(text, () => {
-            trimHistoryHeadroom();
-            resolve();
-          });
+          term.write(text, () => resolve());
         });
       },
     }).then((result) => {
@@ -1423,6 +1606,10 @@ export default function TerminalPanel({
       resizeDisp?.dispose();
       el.removeEventListener("wheel", snapshot.input);
       el.removeEventListener("wheel", onWheelGuard);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchEnd);
       el.removeEventListener("keydown", snapshot.input, true);
       el.removeEventListener("pointerdown", onSnapshotPointerDown, true);
       window.removeEventListener("pointerup", snapshot.endSelection, true);
@@ -1445,6 +1632,7 @@ export default function TerminalPanel({
       osc9Disp.dispose();
       osc777Disp.dispose();
       osc99Disp.dispose();
+      osc52Disp.dispose();
       searchDisp.dispose();
       search.dispose();
       try {
@@ -1604,9 +1792,16 @@ export default function TerminalPanel({
       // auto": a scrollbar appears only when content genuinely overflows
       // (font resize before refit, tiny windows where even one row doesn't
       // fit). Horizontal overflow belongs to xterm, hence overflow-x-hidden.
-      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden overscroll-contain [&_.xterm]:p-2"
+      className="relative h-full w-full bg-card overflow-y-auto overflow-x-hidden overscroll-contain touch-none [&_.xterm]:p-2"
       onContextMenu={handleContextMenu}
       onMouseDown={(e) => {
+        // The context menu is portaled to <body>, but React still bubbles its
+        // events through this container: a press on a menu item is not a
+        // gesture in the terminal.
+        if (!isTerminalPress(e)) return;
+        // A fresh left press starts a new selection or deselects; either way
+        // the previous drag's text is no longer what the user sees selected.
+        selectionSnapshotRef.current = "";
         dragStartedRef.current = true;
         userSelectingRef.current = true;
         dragMovedRef.current = false;
@@ -1619,7 +1814,8 @@ export default function TerminalPanel({
         const dy = Math.abs(e.clientY - dragStartYRef.current);
         if (dx > 2 || dy > 2) dragMovedRef.current = true;
       }}
-      onMouseUp={() => {
+      onMouseUp={(e) => {
+        if (!isTerminalPress(e)) return;
         dragStartedRef.current = false;
         // Copy-on-selection at release, inside the user-gesture handler (see
         // copySelectionNow above for the TUI-parity rationale). No-op on a
@@ -1634,6 +1830,7 @@ export default function TerminalPanel({
       {takenOver && (
         <div
           role="status"
+          data-terminal-chrome=""
           className="absolute inset-x-0 bottom-2 z-10 mx-auto flex w-fit max-w-[90%] items-center gap-3 rounded-md border border-amber-500/40 bg-card/95 px-3 py-1.5 text-xs text-amber-200 shadow-lg"
         >
           <span>Taken over by another client — reconnecting is paused.</span>

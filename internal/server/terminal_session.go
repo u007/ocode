@@ -39,7 +39,7 @@ const terminalKillGrace = 2 * time.Second
 //     tunnels which traverse many hops).
 //   - Dead connection detection: if a ping write fails, the connection is
 //     considered dead and the shell is detached — much faster than waiting
-//     for the 30-minute detach TTL or a stuck TCP half-open state.
+//     for the detach TTL (terminalDetachTTL) or a stuck TCP half-open state.
 const terminalPingInterval = 30 * time.Second
 
 // terminalPingWriteTimeout bounds a single ping control-frame write so a
