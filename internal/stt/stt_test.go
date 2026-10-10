@@ -193,3 +193,21 @@ func TestLiveParakeetUnifiedTranscribes(t *testing.T) {
 		t.Fatalf("transcript = %q, want it to contain \"hello world\"", res.Text)
 	}
 }
+
+// A model's extra modules are part of its availability: an interpreter that
+// has onnx_asr but lacks sentencepiece must not report the unified model ready.
+func TestProbeLocalChecksExtraModules(t *testing.T) {
+	py, err := resolvePython("")
+	if err != nil {
+		t.Skip("no python3 on PATH")
+	}
+	if ok, _ := probeLocal(py, []string{"ocode_no_such_module_xyz"}); ok {
+		t.Fatalf("probe passed with a module that does not exist")
+	}
+	st := StatusFor(Options{Python: "/nonexistent/python"})
+	for _, m := range st.Models {
+		if m.ID == "parakeet-unified-en-0.6b" && !strings.Contains(m.Reason, "sentencepiece") {
+			t.Fatalf("unified reason %q does not name sentencepiece", m.Reason)
+		}
+	}
+}

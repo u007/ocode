@@ -33,7 +33,9 @@ type spec struct {
 	Engine   Engine
 	Upstream string
 	// Repo is the Hugging Face repo holding the ONNX export (local engines).
-	Repo        string
+	Repo string
+	// Extra lists Python modules the local model needs besides onnx_asr.
+	Extra       []string
 	Languages   string
 	SizeMB      int
 	Description string
@@ -66,6 +68,7 @@ var catalog = []spec{
 		Engine:      EngineLocal,
 		Upstream:    "nemo-parakeet-rnnt-0.6b",
 		Repo:        "bobNight/parakeet-unified-en-0.6b-onnx",
+		Extra:       []string{"sentencepiece"},
 		Languages:   "English",
 		Description: "NVIDIA Parakeet Unified EN (RNNT), ONNX conversion by bobNight (CC-BY-4.0). Offline, English only.",
 	},

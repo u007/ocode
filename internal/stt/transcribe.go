@@ -77,7 +77,6 @@ func (s Status) ModelAvailable(id string) bool {
 func StatusFor(opts Options) Status {
 	selected := ResolveModel(opts.Model)
 	out := Status{Selected: selected, Models: make([]ModelInfo, 0, len(catalog))}
-	pyOK, pyReason := probeOnnxASR(opts.Python)
 	for _, s := range catalog {
 		m := ModelInfo{
 			ID:          s.ID,
@@ -90,9 +89,9 @@ func StatusFor(opts Options) Status {
 		}
 		switch s.Engine {
 		case EngineLocal:
-			if !pyOK {
+			if ok, reason := probeLocal(opts.Python, s.Extra); !ok {
 				m.Available = false
-				m.Reason = pyReason
+				m.Reason = reason
 			}
 		case EngineOpenAI:
 			if opts.OpenAIKey == nil || opts.OpenAIKey() == "" {
@@ -303,43 +302,50 @@ func normaliseToWAV(ctx context.Context, in, tempDir string) (string, func(), er
 	return out, cleanup, nil
 }
 
-// pythonCache remembers the onnx-asr probe for a short time, so polling the
-// settings UI does not spawn an interpreter on every request.
-var pythonCache struct {
+// probeCache remembers each interpreter/module-set probe for a short time, so
+// polling the settings UI does not spawn Python on every request.
+var probeCache = struct {
 	mu      sync.Mutex
-	at      time.Time
-	ok      bool
-	reason  string
-	python  string
-	present bool
+	entries map[string]probeEntry
+}{entries: map[string]probeEntry{}}
+
+type probeEntry struct {
+	at     time.Time
+	ok     bool
+	reason string
 }
 
 const probeTTL = 60 * time.Second
 
-func probeOnnxASR(python string) (bool, string) {
-	pythonCache.mu.Lock()
-	defer pythonCache.mu.Unlock()
-	if pythonCache.present && pythonCache.python == python && time.Since(pythonCache.at) < probeTTL {
-		return pythonCache.ok, pythonCache.reason
+// probeLocal reports whether the local engine can run with python and the
+// extra modules a model needs on top of onnx_asr.
+func probeLocal(python string, extra []string) (bool, string) {
+	key := python + "\x00" + strings.Join(extra, ",")
+	probeCache.mu.Lock()
+	defer probeCache.mu.Unlock()
+	if e, ok := probeCache.entries[key]; ok && time.Since(e.at) < probeTTL {
+		return e.ok, e.reason
 	}
-	ok, reason := doProbe(python)
-	pythonCache.at = time.Now()
-	pythonCache.present = true
-	pythonCache.python = python
-	pythonCache.ok = ok
-	pythonCache.reason = reason
+	ok, reason := doProbe(python, extra)
+	probeCache.entries[key] = probeEntry{at: time.Now(), ok: ok, reason: reason}
 	return ok, reason
 }
 
-func doProbe(python string) (bool, string) {
+func doProbe(python string, extra []string) (bool, string) {
+	need := append([]string{"onnx_asr"}, extra...)
+	install := `pip install "onnx-asr[cpu,hub]"`
+	if len(extra) > 0 {
+		install += " " + strings.Join(extra, " ")
+	}
 	py, err := resolvePython(python)
 	if err != nil {
-		return false, "needs Python 3 with onnx-asr (pip install \"onnx-asr[cpu,hub]\")"
+		return false, "needs Python 3 with " + strings.Join(need, ", ") + " (" + install + ")"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(ctx, py, "-I", "-c", "import onnx_asr").Run(); err != nil {
-		return false, "needs onnx-asr in " + py + " (pip install \"onnx-asr[cpu,hub]\")"
+	probe := "import " + strings.Join(need, ", ")
+	if err := exec.CommandContext(ctx, py, "-I", "-c", probe).Run(); err != nil {
+		return false, "needs " + strings.Join(need, ", ") + " in " + py + " (" + install + ")"
 	}
 	return true, ""
 }
