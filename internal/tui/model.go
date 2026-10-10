@@ -9124,7 +9124,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		if matched := findSkillByName(skill.LoadSkillsForRoot(m.workDir), skillName); matched != nil {
 			if m.agent != nil {
 				m.agent.ResetSubagentDispatch()
-				skillPrompt := fmt.Sprintf("Run the **%s** skill.\n\n%s", matched.Name, matched.Content)
+				skillPrompt := fmt.Sprintf("Run the **%s** skill.\n\n%s", matched.Name, matched.ForModel())
 				if len(args) > 0 {
 					userArgs := strings.Join(args, " ")
 					skillPrompt += "\n\n<user instruction>\n" + userArgs + "\n</user instruction>"
