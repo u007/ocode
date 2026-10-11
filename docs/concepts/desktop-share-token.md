@@ -39,7 +39,7 @@ timestamp: 2026-10-01T08:26:05Z
 # Desktop durable share token (2026-10-01)
 
 The desktop app mints a **fresh random auth token on every launch** (the "launch
-token": `internal/desktop/boot.go:74` `StartServer` → `hex.EncodeToString` over 16
+token": `internal/desktop/boot.go:76` `StartServer` → `hex.EncodeToString` over 16
 random bytes, handed to `server.New` as the server password). The Share dialog's
 "Share Entire Desktop" URL embeds that token as `?token=…`, and the *port* half of
 the URL was already made sticky earlier (`desktop-port`), so before this change any
@@ -112,7 +112,7 @@ and the old one fails the byte-equality check.
 The share token exists **only in the desktop shell**. A plain `ocode serve` (headless
 or TUI) never calls `SetShareToken`, so `shareToken == ""` and the second branch
 of `tokenMatches` is inert. The desktop shell calls it during `StartServer`
-(`internal/desktop/boot.go:150`), after the server is constructed but before it
+(`internal/desktop/boot.go:154`), after the server is constructed but before it
 starts listening.
 
 The token file lives at `~/.config/opencode/desktop-share-token` (or
@@ -135,7 +135,7 @@ server from starting.
   (`ShareDialog.tsx:192`) uses the launch token — **prior behaviour**, including
   "expires on next restart", and no reset button is offered (`shareToken` falsy).
 - **Remote-workspace desktop sessions:** `StartServer` returns into
-  `startRemoteServer` before any of this code runs (`boot.go:82`), so no store, no
+  `startRemoteServer` before any of this code runs (`boot.go:84`), so no store, no
   routes, no token.
 - **Remote (SSH) sessions in the SPA:** the Share dialog refuses entirely
   (`ShareDialog.tsx:184` resolve gate; `ShareDialog.tsx:324` renders
@@ -148,9 +148,9 @@ server from starting.
 - **The token is plaintext at rest** in `~/.config/opencode/desktop-share-token`,
   written `0600` (`ShareTokenStore.write`, `internal/desktop/share_token.go:112`)
   next to `desktop-port` — the path reuses `portFilePath()`
-  (`internal/desktop/share_token.go:51`, defined `boot.go:191`) so the config dir
+  (`internal/desktop/share_token.go:51`, defined `boot.go:264`) so the config dir
   has a single source of truth. This is **the same exposure class as the
-  pre-existing `desktop-debug-handle` file** (`saveDebugHandle`, `boot.go:133`),
+  pre-existing `desktop-debug-handle` file** (`saveDebugHandle`, `boot.go:335`),
   which already stores the launch token in plaintext — except the share token is an
   **intentional, revocable** credential rather than debug plumbing.
 - **Rotating is not an escalation.** Anyone who can call the reset endpoint already

@@ -220,19 +220,19 @@ flag. Reads are side-effect free and safe to poll.
 
 ## Boot trigger
 
-The gate is `startAutoShareIfEnabled()` (`internal/desktop/boot.go:215`), called
-from `StartServer` at `internal/desktop/boot.go:176`. It consults
-`autoShareEnabledAtBoot()` (`internal/desktop/boot.go:247`) and returns **before**
+The gate is `startAutoShareIfEnabled()` (`internal/desktop/boot.go:217`), called
+from `StartServer` at `internal/desktop/boot.go:178`. It consults
+`autoShareEnabledAtBoot()` (`internal/desktop/boot.go:249`) and returns **before**
 launching anything when the config does not opt in, which is what makes
 "no config => zero spawns" a testable property. The exposure itself runs under
-`crashguard.Go` (`internal/desktop/boot.go:219`) so a panic cannot kill the
+`crashguard.Go` (`internal/desktop/boot.go:221`) so a panic cannot kill the
 process; `tailscale serve` waits up to 2s, and blocking `StartServer` would
 delay the window appearing.
 
 The outcome is logged (active URL / setup hint / tailscale absent) at
-`internal/desktop/boot.go:220`.
+`internal/desktop/boot.go:225-229`.
 
-Only the local branch has it: `startRemoteServer` (`internal/desktop/boot.go:440`)
+Only the local branch has it: `startRemoteServer` (`internal/desktop/boot.go:442`)
 binds `127.0.0.1` and returns at `internal/desktop/boot.go:84` before the
 auto-share code runs.
 
@@ -242,7 +242,7 @@ auto-share code runs.
 corrupt JSON, truncated JSON, a wrong-typed value, and unreadable paths.
 `autoShareEnabledAtBoot` treats ANY such error as OFF, so a malformed
 `ocodeconfig.json` can never be the reason the instance is published. The trade-off:
-the error is only logged (`internal/desktop/boot.go:235`), never surfaced in the UI
+the error is only logged (`internal/desktop/boot.go:255`), never surfaced in the UI
 — a deliberate narrowing of the fail-fast rule, scoped to this single read. Do NOT
 propose changing the shared loader.
 

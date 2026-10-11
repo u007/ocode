@@ -260,6 +260,34 @@ func TestTerminalDetachTTLKillsShell(t *testing.T) {
 	})
 }
 
+// Desktop mode (terminalDetachTTLNever) must keep a detached shell alive: a
+// zero TTL must mean "no reaper", not "reap immediately".
+func TestTerminalDetachTTLNeverKeepsShell(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	requirePTY(t)
+	h, _, wsURL := terminalTestHandler(t)
+	h.SetTerminalDetachTTL(terminalDetachTTLNever)
+
+	conn, _ := dialTerminal(t, wsURL, "term-never")
+	readUntil(t, conn, "$")
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// Give a (buggy) immediate reaper ample time to fire before asserting.
+	time.Sleep(time.Second)
+	sess := h.terminalSessions.lookup("term-never")
+	if sess == nil {
+		t.Fatal("detached shell was reaped despite terminalDetachTTLNever")
+	}
+	sess.mu.Lock()
+	timer := sess.detachTimer
+	sess.mu.Unlock()
+	if timer != nil {
+		t.Fatal("no detach timer should be armed when the TTL is disabled")
+	}
+	sess.kill()
+}
+
 // A socket without a terminal_id has nothing to reattach to, so its shell is
 // killed on disconnect exactly as before.
 func TestTerminalWSNoIDKillsOnClose(t *testing.T) {

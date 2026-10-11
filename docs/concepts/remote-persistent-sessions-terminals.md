@@ -48,7 +48,7 @@ The remote server runs in `--remote` mode where query-string tokens are forbidde
 
 ### Detach TTL
 
-`terminalDetachTTL` is 2 hours locally (`internal/server/terminal_session_table.go`). In `--remote` mode it becomes `terminalDetachTTLRemote` = 24 hours. The shell survives its websocket going away for that window.
+`terminalDetachTTL` is 2 hours for a plain web server (`internal/server/terminal_session_table.go`). In `--remote` mode it becomes `terminalDetachTTLRemote` = 24 hours. The shell survives its websocket going away for that window. The desktop app sets `terminalDetachTTLNever` (`Server.SetDesktopMode`), so a detached desktop shell is never reaped on a timer; see `docs/architecture/terminal-detach-reattach.md` ("Desktop never reaps").
 
 ### Reattach
 

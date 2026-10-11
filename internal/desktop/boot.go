@@ -93,6 +93,7 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 	srv := server.New(bindAddr, "ocode", token, webFS)
 	srv.SetWorkDir(workDir)
 	srv.SetLocalTLS(cert)
+	srv.SetDesktopMode()
 
 	ln, err := srv.Listen()
 	if err != nil && savedPort > 0 {
@@ -104,6 +105,7 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 		srv = server.New("0.0.0.0:0", "ocode", token, webFS)
 		srv.SetWorkDir(workDir)
 		srv.SetLocalTLS(cert)
+		srv.SetDesktopMode()
 		ln, err = srv.Listen()
 	}
 	if err != nil {

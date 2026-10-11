@@ -250,7 +250,7 @@ Detection alone only clears the lie; something has to re-open the forward. One
   (`entry.policy.forget`, `internal/server/handler_portmaps.go:243` and `:265`) so a
   disabled forward is never revived by the watchdog.
 - **Where it runs:** started in `Serve` right beside the idle-agent evictor —
-  `internal/server/server.go:1761` (`go s.handler.evictIdleLoop(stop)` /
+  `internal/server/server.go:1771-1772` (`go s.handler.evictIdleLoop(stop)` /
   `go s.handler.portMapWatchdogLoop(stop)`), stopped by the same `stop` channel.
 
 ### Deliberately out of scope
@@ -301,7 +301,7 @@ verified against the working tree on 2026-09-30.
   (`internal/desktop/portmaps.go:64` — its doc comment says it is deliberately NOT fast and
   that latency-path callers must run it through `RunAsync`) and invoked as
   `remote.RunAsync("desktop port maps auto-start", pmHandler.autoStartEnabled)`
-  (`internal/desktop/boot.go:380`), off the critical path before `net.Listen`.
+  (`internal/desktop/boot.go:474`), off the critical path before `net.Listen`.
 - **Deliberately still synchronous:** the user-initiated Add and Enable paths. Their 502
   carries `saved, but failed to open now: …` / `enabled, but failed to open now: …`
   (`internal/server/handler_portmaps.go:234`, `:324`) to the panel, which is worth the

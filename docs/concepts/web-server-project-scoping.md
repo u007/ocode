@@ -63,7 +63,7 @@ and closed at shutdown; the proxy builder is
 `internal/desktop/proxy.go` also uses. Terminal pty's are therefore children of
 the **host's** server, not the local one: a remote project's shell survives a
 laptop sleep or a desktop restart (24 h detach TTL in `--remote` mode; 2 h
-local). The Files tab, git, `!` commands, and port forwards keep their existing
+in plain web mode; none in the desktop app). The Files tab, git, `!` commands, and port forwards keep their existing
 per-request ssh/wsl.exe paths — they are not proxied.
 
 Terminal routes (`/api/remote/{host}/api/terminal/{ws,…}`), the `ocode.bearer.*`
