@@ -174,6 +174,22 @@ export function dropCrossProjectDuplicateTabs(
   return changed ? out : tabsByProject;
 }
 
+/** Make every project's active tab id name a tab that still exists. A project
+ *  with no tabs left loses its entry; one whose active tab is gone falls back to
+ *  its last tab. Returns a new map. */
+export function repointActiveTabs(
+  tabsByProject: Record<string, Tab[]>,
+  activeTabByProject: Record<string, string | null>,
+): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const [path, active] of Object.entries(activeTabByProject)) {
+    const list = tabsByProject[path];
+    if (!list) continue;
+    out[path] = list.some((t) => t.id === active) ? active : list[list.length - 1].id;
+  }
+  return out;
+}
+
 /** The Tab bound to a session id, across every project. Lets host resolution
  *  read the tab's own host instead of re-deriving it from the (possibly
  *  ambiguous) project path. */
@@ -381,10 +397,15 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         if (localActive && merged.some((m) => m.id === localActive)) activeTabByProject[path] = localActive;
         else if (!activeTabByProject[path]) activeTabByProject[path] = merged[merged.length - 1].id;
       }
+      const dedupedTabs = dropCrossProjectDuplicateTabs(tabsByProject);
       return {
         ...state,
-        tabsByProject: dropCrossProjectDuplicateTabs(tabsByProject),
-        activeTabByProject,
+        tabsByProject: dedupedTabs,
+        // Only when a duplicate was actually dropped: the active id may name the
+        // copy that was removed (or its project may have no tabs left), which
+        // would leave the project pointing at a tab that no longer exists.
+        activeTabByProject:
+          dedupedTabs === tabsByProject ? activeTabByProject : repointActiveTabs(dedupedTabs, activeTabByProject),
         tabsRestored: true,
       };
     }
@@ -581,11 +602,9 @@ function mergeExternalTabs(prev: ProjectState, external: RestoredTabs): Restored
   const dedupedByProject = dropCrossProjectDuplicateTabs(mergedByProject);
   // Remove projects that were deleted externally (no real nor new tabs), and
   // re-point an active id whose tab was dropped as a cross-project duplicate.
-  for (const path of Object.keys(mergedActive)) {
-    const list = dedupedByProject[path];
-    if (!list) delete mergedActive[path];
-    else if (!list.some((t) => t.id === mergedActive[path])) mergedActive[path] = list[list.length - 1].id;
-  }
+  const repointedActive = repointActiveTabs(dedupedByProject, mergedActive);
+  for (const path of Object.keys(mergedActive)) delete mergedActive[path];
+  Object.assign(mergedActive, repointedActive);
   const prevStr = JSON.stringify({ tbp: prev.tabsByProject, atb: prev.activeTabByProject });
   const nextStr = JSON.stringify({ tbp: dedupedByProject, atb: mergedActive });
   if (prevStr === nextStr) return null;

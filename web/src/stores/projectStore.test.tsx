@@ -1090,4 +1090,39 @@ describe("projectStore keeps one tab per session across projects", () => {
     expect(result.current.state.tabsByProject["/proj-a"].map((t) => t.id)).toEqual(["sess-x"]);
     expect(result.current.state.tabsByProject["/proj-b"].map((t) => t.id)).toEqual(["sess-y"]);
   });
+
+  it("RESTORE_TABS re-points an active tab whose duplicate copy was dropped", async () => {
+    const { result } = setup();
+    // Let the provider's own initial restore settle first: it dispatches a
+    // RESTORE_TABS of its own whose merge branch would otherwise repair the
+    // active ids behind this test's back and hide the reducer's behaviour.
+    await act(async () => {});
+    await act(async () => {
+      result.current.dispatch({
+        type: "RESTORE_TABS",
+        tabsByProject: {
+          "/proj-a": [
+            { id: "sess-w", projectPath: "/proj-a", title: "w", activeSubTab: "chat" },
+            { id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" },
+          ],
+          "/proj-b": [
+            { id: "sess-x", projectPath: "/proj-b", title: "x", activeSubTab: "chat" },
+            { id: "sess-y", projectPath: "/proj-b", title: "y", activeSubTab: "chat" },
+          ],
+          // Only holds the duplicate, so dropping it empties the project.
+          "/proj-c": [{ id: "sess-x", projectPath: "/proj-c", title: "x", activeSubTab: "chat" }],
+        },
+        activeTabByProject: { "/proj-a": "sess-w", "/proj-b": "sess-x", "/proj-c": "sess-x" },
+      });
+    });
+    await act(async () => {});
+    const { tabsByProject, activeTabByProject } = result.current.state;
+    // sess-x stays under /proj-a (first path wins).
+    expect(tabsByProject["/proj-b"].map((t) => t.id)).toEqual(["sess-y"]);
+    expect(tabsByProject["/proj-c"]).toBeUndefined();
+    // Every remaining active id names a tab that still exists.
+    expect(activeTabByProject["/proj-a"]).toBe("sess-w");
+    expect(activeTabByProject["/proj-b"]).toBe("sess-y");
+    expect(activeTabByProject["/proj-c"]).toBeUndefined();
+  });
 });

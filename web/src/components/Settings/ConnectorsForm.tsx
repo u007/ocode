@@ -200,6 +200,9 @@ export default function ConnectorsForm({ host }: { host?: string }) {
                   <Input
                     aria-label="API key"
                     placeholder="API key"
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                   />
