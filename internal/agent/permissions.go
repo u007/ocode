@@ -3594,19 +3594,35 @@ func isLocalhostURL(raw string) bool {
 	if at := strings.Index(host, "://"); at >= 0 {
 		host = host[at+3:]
 	}
-	if slash := strings.IndexByte(host, '/'); slash >= 0 {
-		host = host[:slash]
+	// The authority ends at the first '/', '?' or '#'.
+	if end := strings.IndexAny(host, "/?#"); end >= 0 {
+		host = host[:end]
 	}
-	// Strip port.
-	if colon := strings.LastIndexByte(host, ':'); colon >= 0 && !strings.Contains(host[:colon], "]") {
-		host = host[:colon]
-	}
-	// Userinfo: "http://user@127.0.0.1/" still reaches loopback, so strip it
-	// before testing (this guard asks, so over-matching is the safe direction).
+	// Userinfo FIRST, then port: "http://user:pw@127.0.0.1/" holds a colon in
+	// the userinfo, so stripping the port first reads the host as "user". The
+	// real host is whatever follows the LAST '@' (curl's rule). Over-matching
+	// is the safe direction for this guard.
 	if at := strings.LastIndex(host, "@"); at >= 0 {
 		host = host[at+1:]
 	}
-	return isLoopbackHostForPermissionGuard(host)
+	return isLoopbackHostForPermissionGuard(stripAuthorityPort(host))
+}
+
+// stripAuthorityPort removes a ":port" suffix from a userinfo-free authority.
+// A bracketed IPv6 literal keeps its brackets ("[::1]:8080" -> "[::1]"); a bare
+// host:port has exactly one colon; anything with more colons and no brackets is
+// an unbracketed IPv6 literal and has no port to strip.
+func stripAuthorityPort(authority string) string {
+	if strings.HasPrefix(authority, "[") {
+		if end := strings.IndexByte(authority, ']'); end >= 0 {
+			return authority[:end+1]
+		}
+		return authority
+	}
+	if strings.Count(authority, ":") == 1 {
+		return authority[:strings.IndexByte(authority, ':')]
+	}
+	return authority
 }
 
 func extractPathFromArgs(toolName string, args json.RawMessage) string {

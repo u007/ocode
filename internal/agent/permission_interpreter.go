@@ -973,26 +973,37 @@ func numericAssignedVars(command string) map[string]bool {
 // out of the curl fragment into parsedShellCommand.envVars, so judging the curl
 // fragment alone would not see the assignment its "$p" depends on.
 func numericAssignedVarsFrom(tokens, envVars []string) map[string]bool {
-	// LAST assignment wins, as in the shell. Collecting the first numeric one
-	// would be exploitable: "p=8080; p='1@evil.com'" must not be trusted
-	// because an earlier fragment happened to assign a number to p.
-	values := map[string]string{}
-	for _, group := range [][]string{tokens, envVars} {
-		for _, tok := range group {
+	// A variable is numeric only if EVERY write to it on the line is provably a
+	// plain integer. This is order-independent on purpose: the token groups here
+	// are not in textual order (fragments, then the raw line), so "last
+	// assignment wins" cannot be computed from them, and a later non-numeric
+	// write ("p=8080; p+=@evil.com", "for p in 8080; do p=1@evil.com") must void
+	// an earlier numeric one. Anything that can write a variable in a way this
+	// scan cannot read (read, eval, declare -n, printf -v, ...) voids them all.
+	numeric := map[string]bool{}
+	poisoned := map[string]bool{}
+	groups := [][]string{tokens, envVars}
+	for _, group := range groups {
+		for i, tok := range group {
+			if shellWriterVoidsAllVars(group, i) {
+				return map[string]bool{}
+			}
+			m := shellAssignmentRe.FindStringSubmatch(tok)
+			if m == nil {
+				continue
+			}
+			name, subscript, plus := m[1], m[2], m[3]
 			// splitShellFields does not split on ';', so a trailing separator
 			// stays attached to the value ("p=8080;") and must be trimmed
 			// before the digits test.
-			name, value, ok := strings.Cut(tok, "=")
-			if !ok || name == "" || strings.ContainsAny(name, `:"'$`) {
+			value := strings.TrimRight(m[4], ";")
+			if subscript != "" || plus != "" || !isAllDigits(value) {
+				// Array element writes ("p[0]=x") and appends ("p+=x") change
+				// what "$p" expands to without being a plain integer.
+				poisoned[name] = true
 				continue
 			}
-			values[name] = strings.TrimRight(value, ";")
-		}
-	}
-	out := map[string]bool{}
-	for name, value := range values {
-		if isAllDigits(value) {
-			out[name] = true
+			numeric[name] = true
 		}
 	}
 	// A numeric-literal `for` list is the other provably-numeric way a port
@@ -1002,13 +1013,42 @@ func numericAssignedVarsFrom(tokens, envVars []string) map[string]bool {
 	// asks. It must be scanned on the RAW line (envVars), never on parsed
 	// fragments: parseShellCommandLine reduces `for p in 8080 4096; do curl …`
 	// to a bare `curl …$p…` fragment and discards the header entirely.
-	for name, numeric := range numericForLoopVars(envVars) {
-		out[name] = numeric
+	for _, group := range groups {
+		for name, allNumeric := range numericForLoopVars(group) {
+			if allNumeric {
+				numeric[name] = true
+			} else {
+				poisoned[name] = true
+			}
+		}
 	}
-	for name, numeric := range numericForLoopVars(tokens) {
-		out[name] = numeric
+	out := map[string]bool{}
+	for name := range numeric {
+		if !poisoned[name] {
+			out[name] = true
+		}
 	}
 	return out
+}
+
+// shellAssignmentRe matches a "NAME=value" word, with the optional array
+// subscript ("NAME[i]=") and append ("NAME+=") forms captured so the caller can
+// refuse them.
+var shellAssignmentRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?(\+?)=(.*)$`)
+
+// shellWriterVoidsAllVars reports whether tokens[i] starts a construct that can
+// write an arbitrary variable in a way numericAssignedVarsFrom cannot read: the
+// builtins that assign by NAME ARGUMENT or run text as code. It is deliberately
+// coarse — a false positive only makes a loopback URL ask, a false negative is
+// the exfiltration bypass.
+func shellWriterVoidsAllVars(tokens []string, i int) bool {
+	switch tokens[i] {
+	case "read", "mapfile", "readarray", "getopts", "eval", "declare", "typeset":
+		return true
+	case "printf":
+		return i+1 < len(tokens) && tokens[i+1] == "-v"
+	}
+	return false
 }
 
 // numericForLoopVars reports, for each `for VAR in …` header in the token
