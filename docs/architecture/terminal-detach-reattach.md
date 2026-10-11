@@ -38,7 +38,11 @@ Server (`internal/server/terminal_session.go`, `terminal_session_table.go`,
   The disk log survives shell exit and server restart.
 - **Socket close = detach**, not kill. A 2 h TTL timer
   (`terminalDetachTTL`) arms; if nobody reattaches, the shell is reaped via
-  `terminateProcessTree` (SIGTERM → 2 s → SIGKILL).
+  `terminateProcessTree` (SIGTERM → 2 s → SIGKILL). The TTL is per server
+  mode: 2 h for a plain web server, 24 h for `--remote`
+  (`terminalDetachTTLRemote`), and **no timer at all in the desktop app**
+  (`terminalDetachTTLNever`, see "Desktop never reaps" below). A TTL `<= 0`
+  means "no reaper"; `detachLocked` returns before arming the timer.
 - A new `GET /api/terminal/ws?terminal_id=X` for a live session
   **reattaches**: the old socket (if any) is closed, the timer cancelled, and
   the replay buffer sent. When the frontend has restored a disk-history
@@ -122,5 +126,33 @@ stall. A panel now mounts the first time its terminal is the active one while
 the project's terminal pane is shown (`shownRef` in `TerminalTabs.tsx`) and
 stays mounted (hidden) afterwards, so switching back never re-restores it. A
 restored terminal nobody selects is never attached by the browser; its shell
-stays alive server-side only for the detach TTL, exactly like the terminals of
-a project the user never switches to.
+stays alive server-side only for the detach TTL (never reaped on desktop), exactly
+like the terminals of a project the user never switches to.
+
+## Desktop never reaps (2026-10-11)
+
+**Problem.** A dropped websocket armed the 2 h timer even in the desktop app. A
+phone viewing the desktop server over Tailscale that slept or was backgrounded
+for 2 h therefore got its shell SIGTERM/SIGKILLed, and everything running in it
+(for example a Claude Code session waiting on a question) died with no message.
+The user only saw a fresh shell prompt under the restored scrollback.
+
+**Decision.** `desktop.StartServer` calls `Server.SetDesktopMode()` on both the
+saved-port and the random-port-fallback server, which sets the detach TTL to
+`terminalDetachTTLNever` (`0`). The desktop app owns the in-process server, so
+the timer is redundant there: closing a tab kills its shell explicitly
+(`DELETE /api/terminal/{id}`) and app exit sweeps every pty
+(`shutdownTerminals`). Web mode (2 h) and `--remote` (24 h) are unchanged.
+
+**Invariants.**
+
+- **Zero means "never", not "immediately".** `time.AfterFunc(0, …)` fires at
+  once, so the `s.detachTTL <= 0` guard in `detachLocked` is load-bearing.
+  `TestTerminalDetachTTLNeverKeepsShell` fails without it.
+- **This does not survive an app crash or restart.** The shell is a child of the
+  desktop process; when that process dies the kernel closes the pty master and
+  sends SIGHUP to the foreground process group, so the shell and its children
+  exit. A desktop crash is still a loss. To keep shells alive across an app
+  crash, run the server as a separate `ocode serve --remote` process.
+- **Idle shells now accumulate until their tab is closed or the app quits.** The
+  only other reaper is a shell exiting on its own.
