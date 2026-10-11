@@ -29,6 +29,7 @@ import BackendForm from "./BackendForm";
 import BrowserForm from "./BrowserForm";
 import VaultForm from "./VaultForm";
 import TTSForm from "./TTSForm";
+import SttForm from "./SttForm";
 import ChatDisplayForm from "./ChatDisplayForm";
 import QuickActionsForm from "./QuickActionsForm";
 import ConnectorsForm from "./ConnectorsForm";
@@ -40,6 +41,7 @@ export type SettingsGroupId =
   | "browser"
   | "vault"
   | "tts"
+  | "stt"
   | "connectors"
   | "profiles"
   | "profile-debug"
@@ -82,6 +84,7 @@ const OCODE_GROUPS: GroupDef[] = [
   { id: "browser", label: "Browser" },
   { id: "vault", label: "Passwords" },
   { id: "tts", label: "Speech playback" },
+  { id: "stt", label: "Speech to text" },
   { id: "connectors", label: "Connectors" },
   { id: "profiles", label: "Profiles" },
   { id: "profile-debug", label: "Profile Debug" },
@@ -131,6 +134,8 @@ function renderGroup(id: SettingsGroupId) {
       return <VaultForm />;
     case "tts":
       return <TTSForm />;
+    case "stt":
+      return <SttForm />;
     case "connectors":
       // No `host`: the Settings panel is a GLOBAL surface by convention (see
       // the same choice in PermissionsForm), so this manages THIS machine's

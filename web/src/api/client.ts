@@ -61,6 +61,8 @@ import type {
   TTSConfig,
   TTSStatus,
   TTSPlayback,
+  STTSettings,
+  STTTranscribeResult,
   TTSInstallState,
   PortMapView,
   PortMapTarget,
@@ -1035,6 +1037,42 @@ function dbBlobQuery(
   return q.toString();
 }
 
+/** Reads a non-2xx body into a readable message. The server answers errors as
+ *  JSON `{"error": "..."}`; a proxy or an older build may answer plain text, so
+ *  fall back to the raw text, then to the status line. */
+async function readErrorMessage(res: Response): Promise<string> {
+  const text = (await res.text().catch(() => "")).trim();
+  if (text) {
+    try {
+      const body = JSON.parse(text) as { error?: unknown; message?: unknown };
+      const msg = body.error ?? body.message;
+      if (typeof msg === "string" && msg.trim()) return msg;
+    } catch {
+      // not JSON: the plain-text body is the message
+    }
+    return text;
+  }
+  return res.statusText || `request failed (${res.status})`;
+}
+
+async function transcribeAudio(
+  audio: Blob,
+  filename: string,
+): Promise<STTTranscribeResult> {
+  const form = new FormData();
+  form.append("audio", audio, filename);
+  const res = await fetch(apiPath("/api/stt/transcribe"), {
+    method: "POST",
+    headers: authHeaders(),
+    body: form,
+  });
+  if (!res.ok) {
+    reportAuthFailure(res.status);
+    throw new ApiError(await readErrorMessage(res), res.status);
+  }
+  return (await res.json()) as STTTranscribeResult;
+}
+
 export const api = {
   listSessions: (opts?: { limit?: number; offset?: number }, host?: string) => {
     const params = new URLSearchParams();
@@ -1654,6 +1692,19 @@ export const api = {
       body: JSON.stringify({ text, model }),
     }),
   ttsStop: () => fetchJSON<TTSPlayback>("/api/tts/stop", { method: "POST" }),
+
+  // Speech-to-text (voice input). The selected model is server config; PUT
+  // returns the refreshed list so the form never shows a stale selection.
+  getSTT: () => fetchJSON<STTSettings>("/api/stt"),
+  setSTTModel: (model: string) =>
+    fetchJSON<STTSettings>("/api/stt", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  /** Uploads one recording as multipart field `audio`. No Content-Type header:
+   *  the browser must set the multipart boundary itself. */
+  transcribeSpeech: (audio: Blob, filename: string) =>
+    transcribeAudio(audio, filename),
 
   getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
   setTUISettings: (cfg: TUISettings) =>

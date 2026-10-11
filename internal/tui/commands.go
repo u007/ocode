@@ -125,6 +125,7 @@ func init() {
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
 		{name: "/effort", usage: "/effort [off|low|med|high|xhigh|max]", help: "Show or set the reasoning effort (thinking budget) level", handler: runEffortCmd},
 		{name: "/sound", usage: "/sound [on|off|test]", help: "Show status / toggle terminal bell on task completion", handler: runSoundCmd},
+		{name: "/voice", usage: "/voice [status|list|model <id>]", help: "Voice input status, models, and the transcription model (ctrl+x v records)", handler: runVoiceCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", usage: "/init [focus]", help: "Analyze project and generate AGENTS.md", handler: runInitCmd},
 		{name: "/learn", usage: "/learn [focus]", help: "List project-root skills and guide skill creation/update", handler: runLearnCmd},

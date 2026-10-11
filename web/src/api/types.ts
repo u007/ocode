@@ -1421,3 +1421,32 @@ export interface PulseSystemPrompt {
   prompt: string;
   default: string;
 }
+
+// Speech-to-text (voice input). Mirrors internal/stt's catalog JSON. `engine`
+// is "local" (runs on this machine) or "openai" (hosted).
+export type STTEngine = "local" | "openai";
+
+export interface STTModel {
+  id: string;
+  label: string;
+  engine: STTEngine;
+  /** Human-readable language coverage, e.g. "English" or "99 languages". */
+  languages: string;
+  size_mb?: number;
+  description: string;
+  available: boolean;
+  /** Why the model cannot be selected right now; set when available is false. */
+  reason?: string;
+}
+
+/** GET /api/stt and PUT /api/stt both return this shape. */
+export interface STTSettings {
+  selected: string;
+  models: STTModel[];
+}
+
+/** POST /api/stt/transcribe response. An empty `text` means nothing was heard. */
+export interface STTTranscribeResult {
+  text: string;
+  model: string;
+}

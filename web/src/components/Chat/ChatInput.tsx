@@ -6,7 +6,7 @@ import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
-import { Paperclip, RotateCcw, X } from "lucide-react";
+import { Loader2, Mic, MicOff, Paperclip, RotateCcw, Square, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
 import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError } from "@/api/client";
@@ -27,6 +27,7 @@ import { isInstantCommand } from "../../lib/instantCommands";
 import CompactionStatus from "./CompactionStatus";
 import CommandActivityBar from "./CommandActivityBar";
 import RecentInputsStrip from "./RecentInputsStrip";
+import { useVoiceRecorder, VOICE_UNAVAILABLE_MESSAGE } from "./useVoiceRecorder";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. */
@@ -862,13 +863,17 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     : [];
   const filteredCount = filteredCommandNames.length;
 
-  const handleSend = async () => {
+  // Shared send path for the Enter key, the Send button and voice input. With
+  // `voiceText`, the transcript is the message: the composer's own draft is left
+  // in place so speaking never wipes what the user had typed.
+  const submitComposer = async (voiceText?: string) => {
+    const isVoice = voiceText !== undefined;
     // In-flight guard — must run before any async gap and before reading
     // `input`, so a duplicate physical submit (same tick) is dropped instead of
     // sending the same text twice. Distinct later submits (different tick, after
     // this send settles) are never blocked.
     if (submittingRef.current) return;
-    const trimmed = input.trim();
+    const trimmed = (isVoice ? voiceText : input).trim();
     if (!trimmed) return;
     submittingRef.current = true;
     // Record the submitted input for ↑/↓ recall. This is the single submit
@@ -881,9 +886,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     historyDraftRef.current = "";
     let delayedSubmission = false;
     try {
-      setInput("");
-      clearDraft(sessionTabId);
-      setShowSlashMenu(false);
+      if (!isVoice) {
+        setInput("");
+        clearDraft(sessionTabId);
+        setShowSlashMenu(false);
+      }
 
     // While a turn is busy (streaming, shell, permission, or interrupted
     // barrier), queue instead of blocking — mirrors the TUI's unified
@@ -921,7 +928,8 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           queueMicrotask(() => { submittingRef.current = false; });
         }
         const outcome = await pending;
-        if (!outcome.accepted) {
+        // A rejected voice command must not overwrite a draft the user is typing.
+        if (!outcome.accepted && (!isVoice || !getDraft(sessionTabId).trim())) {
           setInput(trimmed);
           setDraft(sessionTabId, trimmed);
         }
@@ -1014,6 +1022,31 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       }
     }
   };
+
+  const handleSend = () => submitComposer();
+
+  // Transcript from voice input. If a send is still settling, keep the words in
+  // the composer instead of dropping them (submitComposer would ignore them).
+  const onVoiceTranscript = (text: string) => {
+    if (submittingRef.current) {
+      const current = getDraft(sessionTabId);
+      updateDraft(current.trim() ? `${current.trimEnd()} ${text}` : text);
+      return;
+    }
+    void submitComposer(text);
+  };
+  const voice = useVoiceRecorder({
+    transcribe: (audio, filename) => api.transcribeSpeech(audio, filename),
+    onTranscript: onVoiceTranscript,
+    // Previews re-upload the whole clip, so they run only for a local engine.
+    canPreview: () =>
+      api
+        .getSTT()
+        .then((s) => s.models.find((m) => m.id === s.selected)?.engine === "local")
+        .catch(() => false),
+  });
+  const voiceRecording = voice.state === "recording";
+  const voiceTranscribing = voice.state === "transcribing";
 
   // Recall the most recently queued item into the input box for editing —
   // web equivalent of the TUI's up-arrow queue restore.
@@ -1267,6 +1300,30 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           {pendingRewindError}
         </div>
       )}
+      {voice.state !== "idle" && (
+        <div role="status" className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          {voiceRecording ? (
+            <span aria-hidden="true" className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-destructive" />
+          ) : (
+            <Loader2 aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin" />
+          )}
+          <span className="shrink-0 whitespace-nowrap">
+            {voiceRecording ? "Recording… click to stop" : "Transcribing…"}
+          </span>
+          {voiceRecording && voice.partialText && (
+            // aria-hidden: a live preview that changes every few seconds would
+            // make the status region announce constantly. The final text is announced by the send.
+            <span aria-hidden="true" title={voice.partialText} className="min-w-0 flex-1 truncate italic text-muted-foreground/80">
+              {voice.partialText}
+            </span>
+          )}
+        </div>
+      )}
+      {voice.error && (
+        <div role="alert" className="mb-2 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {voice.error}
+        </div>
+      )}
       <input
         type="file"
         multiple
@@ -1289,6 +1346,37 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           aria-label="Attach files"
         >
           <Paperclip className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={voice.toggle}
+          disabled={!voice.supported || voiceTranscribing}
+          aria-pressed={voiceRecording}
+          aria-label={voiceRecording ? "Stop recording" : "Start voice input"}
+          title={
+            !voice.supported
+              ? VOICE_UNAVAILABLE_MESSAGE
+              : voiceRecording
+                ? "Stop recording and send"
+                : voiceTranscribing
+                  ? "Transcribing…"
+                  : "Voice input"
+          }
+          className={`composer-control flex w-8 shrink-0 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 ${
+            voiceRecording
+              ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          }`}
+        >
+          {voiceTranscribing ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : voiceRecording ? (
+            <Square className="h-4 w-4" />
+          ) : voice.supported ? (
+            <Mic className="h-4 w-4" />
+          ) : (
+            <MicOff className="h-4 w-4" />
+          )}
         </button>
         <textarea
           ref={textareaRef}
