@@ -63,6 +63,9 @@ type connectFlow struct {
 	// copilot device-code scratch state
 	copilotDevice auth.CopilotDevice
 
+	// cancel interrupts the flow's background work. Guarded by mu: the input
+	// handler installs it (Grok) while the cancel handler and the registry's
+	// expiry sweep read it from other goroutines.
 	cancel context.CancelFunc
 
 	mu              sync.Mutex
@@ -122,19 +125,65 @@ func (f *connectFlow) isTerminal() bool {
 	return false
 }
 
-func (f *connectFlow) succeed(cred auth.Credential) {
+// claimInput atomically moves a waiting_input flow to running, so two
+// concurrent submissions (a double click) cannot both start an exchange: only
+// the caller that sees true may launch the work. A non-nil cancel is installed
+// in the same critical section, so a cancel that lands right after the claim
+// always finds it.
+func (f *connectFlow) claimInput(cancel context.CancelFunc) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.state = connectFlowComplete
-	f.account = cred.Account
+	if f.state != connectFlowWaitingInput {
+		return false
+	}
+	f.state = connectFlowRunning
+	if cancel != nil {
+		f.cancel = cancel
+	}
 	f.updatedAt = time.Now()
+	return true
 }
 
-func (f *connectFlow) fail(msg string) {
+// markCancelled cancels a non-terminal flow: it interrupts the background work
+// (when the flow owns any) and records the cancelled state. It reports whether
+// this call performed the cancellation; a flow that already reached a terminal
+// state is left untouched.
+func (f *connectFlow) markCancelled() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.state = connectFlowFailed
-	f.errMsg = msg
+	switch f.state {
+	case connectFlowComplete, connectFlowFailed, connectFlowCancelled:
+		return false
+	}
+	if f.cancel != nil {
+		f.cancel()
+	}
+	f.state = connectFlowCancelled
+	f.updatedAt = time.Now()
+	return true
+}
+
+// finish records the outcome of the flow's background work. The whole
+// check-store-record sequence holds the flow lock, so it is atomic with
+// markCancelled: a flow cancelled before the exchange returned never stores
+// the credential it was cancelled to prevent, and a late result can never
+// overwrite the cancelled state.
+func (f *connectFlow) finish(providerID string, cred auth.Credential, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state == connectFlowCancelled {
+		return
+	}
+	if err == nil {
+		err = auth.Set(providerID, cred)
+	}
+	if err != nil {
+		f.state = connectFlowFailed
+		f.errMsg = err.Error()
+	} else {
+		f.state = connectFlowComplete
+		f.account = cred.Account
+	}
 	f.updatedAt = time.Now()
 }
 
@@ -218,9 +267,40 @@ func (r *connectFlowRegistry) pruneLocked() {
 		expired := now.Sub(f.updatedAt) > ttl
 		f.mu.Unlock()
 		if expired {
+			// Dropping the entry is not enough: an expired flow may still own a
+			// loopback listener (the ChatGPT auto flow binds 127.0.0.1:1455 and
+			// waits on its context alone), which would stay bound for the life of
+			// the process and fail every later attempt. Cancel it first.
+			f.markCancelled()
 			delete(r.flows, id)
 		}
 	}
+}
+
+// supersede cancels every flow of the given provider and kind that is waiting on
+// the browser and reports how many it cancelled. A flow abandoned without a cancel (the tab was
+// closed) would otherwise keep its loopback port until it expires, failing the
+// user's retry with "address already in use".
+func (r *connectFlowRegistry) supersede(provider string, kind connectFlowKind) int {
+	r.mu.Lock()
+	var stale []*connectFlow
+	for id, f := range r.flows {
+		// waiting_browser only: that is the state of a flow that owns a loopback
+		// listener. A manual-mode flow (waiting_input) binds nothing and is left
+		// alone.
+		if f.provider == provider && f.kind == kind && f.getState() == connectFlowWaitingBrowser {
+			stale = append(stale, f)
+			delete(r.flows, id)
+		}
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, f := range stale {
+		if f.markCancelled() {
+			n++
+		}
+	}
+	return n
 }
 
 // Seams for the network-bound auth flows, so handler tests can drive
@@ -519,8 +599,17 @@ func (h *Handler) startOpenAIConnectFlow(w http.ResponseWriter, p *auth.Provider
 		h.startOpenAIManualFlow(w, p)
 		return
 	}
+	// A previous attempt that was never cancelled still owns the callback port.
+	superseded := connectFlows.supersede(p.ID, connectFlowLocalCallback)
 	ctx, cancel := context.WithCancel(context.Background())
 	authURL, finish, err := openaiStartFn(ctx)
+	// The superseded flow releases its listener asynchronously (its goroutine
+	// shuts the server down once its context is done), so a bind failure right
+	// after a supersede is retried briefly instead of reported.
+	for attempt := 0; err != nil && superseded > 0 && attempt < 20; attempt++ {
+		time.Sleep(50 * time.Millisecond)
+		authURL, finish, err = openaiStartFn(ctx)
+	}
 	if err != nil {
 		cancel()
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to start OAuth: %v", err))
@@ -613,10 +702,14 @@ func (h *Handler) startCopilotConnectFlow(w http.ResponseWriter, p *auth.Provide
 	f.cancel = cancel
 	f.instructions = "Open the URL, enter the code, and authorize ocode."
 	connectFlows.add(f)
+	// Resolve the seams on the handler goroutine: the flow's goroutine outlives
+	// the request, and reading the package vars from it races with a test (or
+	// any caller) that swaps them once the handler has returned.
+	pollFn, fetchAccountFn := copilotPollFn, copilotFetchAccountFn
 	crashguard.Go(func() {
-		cred, err := copilotPollFn(ctx, dev)
+		cred, err := pollFn(ctx, dev)
 		if err == nil && cred.AccessToken != "" {
-			cred.Account = copilotFetchAccountFn(cred.AccessToken)
+			cred.Account = fetchAccountFn(cred.AccessToken)
 		}
 		completeConnectFlow(f, p.ID, cred, err)
 	})
@@ -701,15 +794,7 @@ func pluginAuthResultCredential(result providerplugin.AuthResult) auth.Credentia
 // (the same one the TUI uses); on failure it records the error. It
 // never returns tokens to any caller.
 func completeConnectFlow(f *connectFlow, providerID string, cred auth.Credential, err error) {
-	if err != nil {
-		f.fail(err.Error())
-		return
-	}
-	if setErr := auth.Set(providerID, cred); setErr != nil {
-		f.fail(setErr.Error())
-		return
-	}
-	f.succeed(cred)
+	f.finish(providerID, cred, err)
 }
 
 // handleConnectFlowInput supplies the interactive input for a
@@ -747,10 +832,14 @@ func (h *Handler) handleConnectFlowInput(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "state mismatch — possible CSRF; restart the flow.")
 			return
 		}
-		f.setState(connectFlowRunning)
+		if !f.claimInput(nil) {
+			writeError(w, http.StatusConflict, "flow is already processing input")
+			return
+		}
 		verifier := f.anthropicVerifier
+		exchangeFn := anthropicExchangeFn
 		crashguard.Go(func() {
-			cred, err := anthropicExchangeFn(code, state, verifier)
+			cred, err := exchangeFn(code, state, verifier)
 			completeConnectFlow(f, f.provider, cred, err)
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowRunning})
@@ -767,10 +856,14 @@ func (h *Handler) handleConnectFlowInput(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "paste the URL your browser was redirected to.")
 			return
 		}
-		f.setState(connectFlowRunning)
+		if !f.claimInput(nil) {
+			writeError(w, http.StatusConflict, "flow is already processing input")
+			return
+		}
 		flowState, pasted := f.openaiManual, req.Code
+		exchangeFn := openaiManualExchangeFn
 		crashguard.Go(func() {
-			cred, err := openaiManualExchangeFn(flowState, pasted)
+			cred, err := exchangeFn(flowState, pasted)
 			completeConnectFlow(f, f.provider, cred, err)
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowRunning})
@@ -780,12 +873,16 @@ func (h *Handler) handleConnectFlowInput(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "Both x.com cookies (auth_token and ct0) are required.")
 			return
 		}
-		f.setState(connectFlowRunning)
 		ctx, cancel := context.WithCancel(context.Background())
-		f.cancel = cancel
+		if !f.claimInput(cancel) {
+			cancel()
+			writeError(w, http.StatusConflict, "flow is already processing input")
+			return
+		}
 		authToken, ct0 := req.AuthToken, req.Ct0
+		loginFn := grokSubscriptionLoginFn
 		crashguard.Go(func() {
-			cred, err := grokSubscriptionLoginFn(ctx, authToken, ct0)
+			cred, err := loginFn(ctx, authToken, ct0)
 			completeConnectFlow(f, f.provider, cred, err)
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowRunning})
@@ -815,14 +912,13 @@ func (h *Handler) handleConnectFlowCancel(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "unknown flow")
 		return
 	}
-	if f.isTerminal() {
+	// markCancelled is atomic with the flow's own completion: a flow that
+	// finished first keeps its outcome, and one cancelled first never stores a
+	// credential (see finish).
+	if !f.markCancelled() {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": f.getState()})
 		return
 	}
-	if f.cancel != nil {
-		f.cancel()
-	}
-	f.setState(connectFlowCancelled)
 	connectFlows.remove(flowID)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"flowId": f.id, "state": connectFlowCancelled})
 }
