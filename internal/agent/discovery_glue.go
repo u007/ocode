@@ -54,11 +54,14 @@ type discoveryState struct {
 	// writes it while /api status reads run on another goroutine.
 	tailMu sync.Mutex
 	tail   []Message
-	// autoInject is the skill whose body is inlined into the prompt this turn
-	// (nil when nothing is selected). It is a request-time injection, never
-	// persisted, and is re-rendered on each Step of the turn by
-	// injectDiscoveryContext.
-	autoInject *autoInjectSkill
+	// autoInject holds the skills whose bodies are inlined into the prompt,
+	// oldest first, bounded by discoveryAutoInjectMaxSkills. It is a request-time
+	// injection, never persisted, and every entry is re-rendered on each Step
+	// until compaction (injectDiscoveryContext). It is a list, not a single slot:
+	// a second selection used to overwrite the first while the first stayed in
+	// autoInjected, so its body vanished from the prompt and could never be
+	// staged again.
+	autoInject []*autoInjectSkill
 	// autoInjected is the set of skills already auto-injected this session. It
 	// is what makes a selection happen at most once per skill, and it is cleared
 	// at the compaction splice (resetAutoInjected) because the blocks were never

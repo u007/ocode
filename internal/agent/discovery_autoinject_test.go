@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,9 +221,9 @@ func TestChatAlreadyHasSkillFalseOnUnrelatedChat(t *testing.T) {
 func TestInjectDiscoveryContextEmitsAutoInjectBlock(t *testing.T) {
 	a := newAutoInjectAgent(t)
 	base := []Message{{Role: "user", Content: "hi"}}
-	a.disco.autoInject = &autoInjectSkill{
+	a.disco.autoInject = []*autoInjectSkill{{
 		Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF WORKFLOW BODY", Noul: 0.93,
-	}
+	}}
 
 	got := a.injectDiscoveryContext(base)
 	last := got[len(got)-1]
@@ -248,9 +249,9 @@ func TestInjectDiscoveryContextAutoInjectKeepsSystemBlockByteIdentical(t *testin
 	base := []Message{{Role: "user", Content: "hi"}}
 
 	without := a.injectDiscoveryContext(base)
-	a.disco.autoInject = &autoInjectSkill{
+	a.disco.autoInject = []*autoInjectSkill{{
 		Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF WORKFLOW BODY", Noul: 0.93,
-	}
+	}}
 	with := a.injectDiscoveryContext(base)
 
 	sysBefore := systemBlockOf(t, without)
@@ -296,7 +297,7 @@ func TestRecordAutoInjectMarksStickyAndDedupeReplays(t *testing.T) {
 
 	// First selection is recorded and emitted.
 	if a.recordAutoInject(sel, []Message{{Role: "user", Content: "hi"}}) {
-		if a.disco.autoInject == nil || a.disco.autoInject.Name != "best" {
+		if len(a.disco.autoInject) != 1 || a.disco.autoInject[0].Name != "best" {
 			t.Fatalf("selected skill not staged for emission: %+v", a.disco.autoInject)
 		}
 	} else {
@@ -319,7 +320,7 @@ func TestRecordAutoInjectRefusedWhenChatAlreadyHasSkill(t *testing.T) {
 	if a.recordAutoInject(sel, msgs) {
 		t.Fatal("a skill the chat already loaded must not be injected again")
 	}
-	if a.disco.autoInject != nil {
+	if len(a.disco.autoInject) != 0 {
 		t.Fatal("nothing may be staged for emission")
 	}
 }
@@ -336,7 +337,7 @@ func TestResetAutoInjectedClearsStickyAndStaged(t *testing.T) {
 	if len(a.disco.autoInjected) != 0 {
 		t.Fatalf("sticky set must be cleared by compaction, got %v", a.disco.autoInjected)
 	}
-	if a.disco.autoInject != nil {
+	if len(a.disco.autoInject) != 0 {
 		t.Fatal("a compacted-away skill must not keep being emitted")
 	}
 	// And it can be selected again, because after the splice the model no
@@ -416,5 +417,60 @@ func TestLoadAutoInjectBodyMissingSkillIsNil(t *testing.T) {
 
 	if got := a.loadAutoInjectBody("definitely-not-a-real-skill-xyz"); got != nil {
 		t.Fatalf("a missing skill must yield nil, got %+v", got)
+	}
+}
+
+// A second selection must ADD to the staged set, not replace the first. It used
+// to overwrite a single slot while the first skill stayed in the sticky set, so
+// the first body silently left the prompt and could never be staged again.
+func TestRecordAutoInjectKeepsEarlierSkillWhenAnotherIsSelected(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	chat := []Message{{Role: "user", Content: "hi"}}
+	first := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF WORKFLOW BODY", Noul: 0.93}
+	second := &autoInjectSkill{Name: "xlsx", Source: "/x/xlsx/SKILL.md", Content: "XLSX WORKFLOW BODY", Noul: 0.91}
+	if !a.recordAutoInject(first, chat) || !a.recordAutoInject(second, chat) {
+		t.Fatal("setup: both selections should be staged")
+	}
+
+	got := a.injectDiscoveryContext(chat)
+	last := got[len(got)-1]
+	for _, want := range []string{"PDF WORKFLOW BODY", "XLSX WORKFLOW BODY"} {
+		if !strings.Contains(last.Content, want) {
+			t.Errorf("auto-inject block lost %q after a second selection: %q", want, last.Content)
+		}
+	}
+	if strings.Index(last.Content, "PDF WORKFLOW BODY") > strings.Index(last.Content, "XLSX WORKFLOW BODY") {
+		t.Error("blocks must render oldest first so the order is stable across requests")
+	}
+	// Still exactly one extra message: the cache-safe tail shape is unchanged.
+	if base := a.injectDiscoveryContext(chat); len(base) != len(got) {
+		t.Fatalf("message count changed between calls: %d vs %d", len(base), len(got))
+	}
+}
+
+// The staged set is bounded: past the cap the oldest body is evicted so a long
+// session cannot grow the uncached tail without limit.
+func TestRecordAutoInjectEvictsOldestPastCap(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	chat := []Message{{Role: "user", Content: "hi"}}
+	for i := 0; i < discoveryAutoInjectMaxSkills+2; i++ {
+		sel := &autoInjectSkill{Name: fmt.Sprintf("skill%d", i), Source: fmt.Sprintf("/x/%d/SKILL.md", i), Content: fmt.Sprintf("BODY-%d", i), Noul: 0.9}
+		if !a.recordAutoInject(sel, chat) {
+			t.Fatalf("selection %d refused", i)
+		}
+	}
+	if got := len(a.disco.autoInject); got != discoveryAutoInjectMaxSkills {
+		t.Fatalf("staged %d skills, want the cap %d", got, discoveryAutoInjectMaxSkills)
+	}
+	block := a.autoInjectBlock()
+	for _, gone := range []string{"BODY-0", "BODY-1"} {
+		if strings.Contains(block, gone) {
+			t.Errorf("oldest body %q survived past the cap", gone)
+		}
+	}
+	for _, kept := range []string{"BODY-2", "BODY-3", "BODY-4"} {
+		if !strings.Contains(block, kept) {
+			t.Errorf("recent body %q was evicted", kept)
+		}
 	}
 }

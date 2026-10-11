@@ -63,6 +63,13 @@ const (
 	// sections, which is what makes the model follow the procedure. The rest
 	// stays one skill-tool call away, and the block says so.
 	discoveryAutoInjectMaxBytes = 8 << 10
+
+	// discoveryAutoInjectMaxSkills bounds how many bodies stay inlined at once.
+	// Each is re-sent on every request until compaction, so an unbounded list
+	// would let a long session grow the uncached tail by 8KB per selection. When
+	// a new selection would exceed it the OLDEST is evicted (the name index still
+	// advertises it and the skill tool still loads it).
+	discoveryAutoInjectMaxSkills = 3
 )
 
 // autoInjectMarker labels the block so the model reads it as system-origin (the
@@ -269,20 +276,27 @@ func (a *Agent) logAutoInjectMiss(keep []discovery.Doc, scores map[string]float6
 	a.emitDebug("DISCOVERY", fmt.Sprintf("auto-inject: no skill qualified (best %q noul=%.3f < floor %.2f)", bestName, best, discoveryAutoInjectFloor))
 }
 
-// autoInjectBlock renders the staged auto-inject block, or "" when there is
-// none. Read under the mutex because a status read can run on another
-// goroutine.
+// autoInjectBlock renders every staged auto-inject block as one message body,
+// oldest first, or "" when there is none. Read under the mutex because a status
+// read can run on another goroutine.
 func (a *Agent) autoInjectBlock() string {
 	if a.disco == nil {
 		return ""
 	}
 	a.disco.autoInjectMu.Lock()
-	sel := a.disco.autoInject
+	staged := append([]*autoInjectSkill(nil), a.disco.autoInject...)
 	a.disco.autoInjectMu.Unlock()
-	return renderAutoInjectBlock(sel)
+	blocks := make([]string, 0, len(staged))
+	for _, sel := range staged {
+		if block := renderAutoInjectBlock(sel); block != "" {
+			blocks = append(blocks, block)
+		}
+	}
+	return strings.Join(blocks, "\n")
 }
 
-// recordAutoInject stages sel for emission unless the chat already has it or this
+// recordAutoInject stages sel for emission (alongside any skill already staged
+// this session, up to discoveryAutoInjectMaxSkills) unless the chat already has it or this
 // session already auto-injected that skill. It reports whether the skill was
 // staged.
 //
@@ -304,7 +318,13 @@ func (a *Agent) recordAutoInject(sel *autoInjectSkill, messages []Message) bool 
 		return false
 	}
 	a.disco.autoInjected[sel.Name] = true
-	a.disco.autoInject = sel
+	a.disco.autoInject = append(a.disco.autoInject, sel)
+	if over := len(a.disco.autoInject) - discoveryAutoInjectMaxSkills; over > 0 {
+		for _, old := range a.disco.autoInject[:over] {
+			a.emitDebug("DISCOVERY", fmt.Sprintf("auto-inject: evicting %q from the inlined set (cap %d); it stays loadable via the skill tool", old.Name, discoveryAutoInjectMaxSkills))
+		}
+		a.disco.autoInject = append([]*autoInjectSkill(nil), a.disco.autoInject[over:]...)
+	}
 	return true
 }
 
