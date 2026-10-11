@@ -126,4 +126,13 @@ describe("StatusBar context segment", () => {
     expect(el.className).toContain("text-muted-foreground");
     expect(el.textContent).not.toContain("%");
   });
+
+  it("never prints \"null%\" in the tooltip when the window size is unknown", () => {
+    state.slice.tuiStatus = { context_current_tokens: 12000, context_max_tokens: 0 };
+    const { container } = render(<StatusBar />);
+    const titles = Array.from(container.querySelectorAll("[title]")).map((el) => el.getAttribute("title") ?? "");
+    const ctxTitle = titles.find((t) => t.startsWith("Context:"));
+    expect(ctxTitle).toBe("Context: 12000 / unknown tokens");
+    expect(titles.join(" ")).not.toContain("null");
+  });
 });

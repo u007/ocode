@@ -107,6 +107,18 @@ describe("ConnectorsForm — listing and status", () => {
 });
 
 describe("ConnectorsForm — saving an API key", () => {
+  it("masks the key as it is typed and opts out of autofill", async () => {
+    render(<ConnectorsForm host="host-a" />);
+    await waitFor(() => expect(listProviders).toHaveBeenCalled());
+
+    fireEvent.click(within(rowFor("openai")).getByRole("button", { name: /connect/i }));
+    const input = screen.getByLabelText(/api key/i) as HTMLInputElement;
+    // The TUI uses password echo for the same field; a plain-text box shows the
+    // secret on screen, in screenshots and over a shared screen.
+    expect(input.type).toBe("password");
+    expect(input.getAttribute("autocomplete")).toBe("off");
+  });
+
   it("PUTs the typed key with the host threaded, then refreshes the list", async () => {
     render(<ConnectorsForm host="host-a" />);
     await waitFor(() => expect(listProviders).toHaveBeenCalled());

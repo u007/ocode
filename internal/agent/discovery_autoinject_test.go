@@ -503,3 +503,31 @@ func TestLoadAutoInjectBodyMissingSkillIsNil(t *testing.T) {
 		t.Fatalf("a missing skill must yield nil, got %+v", got)
 	}
 }
+
+// A second selection must ADD to the staged set, not replace the first. It used
+// to overwrite a single slot while the first skill stayed in the sticky set, so
+// the first body silently left the prompt and could never be staged again.
+func TestRecordAutoInjectKeepsEarlierSkillWhenAnotherIsSelected(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	chat := []Message{{Role: "user", Content: "hi"}}
+	first := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF WORKFLOW BODY", Noul: 0.93}
+	second := &autoInjectSkill{Name: "xlsx", Source: "/x/xlsx/SKILL.md", Content: "XLSX WORKFLOW BODY", Noul: 0.91}
+	if !a.recordAutoInject(first, chat) || !a.recordAutoInject(second, chat) {
+		t.Fatal("setup: both selections should be staged")
+	}
+
+	got := a.injectDiscoveryContext(chat)
+	last := got[len(got)-1]
+	for _, want := range []string{"PDF WORKFLOW BODY", "XLSX WORKFLOW BODY"} {
+		if !strings.Contains(last.Content, want) {
+			t.Errorf("auto-inject block lost %q after a second selection: %q", want, last.Content)
+		}
+	}
+	if strings.Index(last.Content, "PDF WORKFLOW BODY") > strings.Index(last.Content, "XLSX WORKFLOW BODY") {
+		t.Error("blocks must render oldest first so the order is stable across requests")
+	}
+	// Still exactly one extra message: the cache-safe tail shape is unchanged.
+	if base := a.injectDiscoveryContext(chat); len(base) != len(got) {
+		t.Fatalf("message count changed between calls: %d vs %d", len(base), len(got))
+	}
+}

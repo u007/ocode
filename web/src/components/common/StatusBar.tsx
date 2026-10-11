@@ -411,7 +411,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
               }
               title={
                 ctxCur > 0
-                  ? `Context: ${ctxCur} / ${ctxMax} tokens (${ctxPct}% of window)`
+                  ? `Context: ${ctxCur} / ${ctxMax > 0 ? ctxMax : "unknown"} tokens${ctxPct !== null ? ` (${ctxPct}% of window)` : ""}`
                   : `Context: unknown / ${ctxMax} tokens (no provider reading yet)`
               }
             >
