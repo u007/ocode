@@ -29,7 +29,7 @@ func TestPermDialogNeverExceedsShortTerminal(t *testing.T) {
 		{80, 15},
 		{80, 10},
 	} {
-		m := newModel()
+		m := newTestModel()
 		m.ready = true
 		upd, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
 		m = upd.(model)
@@ -78,7 +78,7 @@ func TestPermDialogNeverExceedsShortTerminal(t *testing.T) {
 // emit a frame taller than the terminal — over-tall frames scroll the real
 // terminal and the corruption persists until a resize.
 func TestRenderContentNeverTallerThanTerminal(t *testing.T) {
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 12})
 	m = upd.(model)

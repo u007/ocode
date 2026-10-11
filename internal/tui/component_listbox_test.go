@@ -238,7 +238,7 @@ func TestListBoxSingleLineGuarantee(t *testing.T) {
 	})
 	rendered := lb.Render()
 	lines := strings.Split(rendered, "\n")
-	
+
 	// Each line should be exactly width (20) or less
 	for i, line := range lines {
 		lineWidth := visualLineWidth(line)

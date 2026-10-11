@@ -34,6 +34,16 @@ func (h *Handler) HandleTerminalList(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotImplemented, "interactive terminal is not supported on Windows")
 }
 
+// terminalAccessAllowed is closed on Windows: there are no terminals to expose,
+// so the Pulse board and terminal tools must not list any.
+func (h *Handler) terminalAccessAllowed() bool { return false }
+
+// HandlePulseTerminals mirrors the other terminal stubs: no pty sessions exist
+// on Windows, so there is no live terminal to list.
+func (h *Handler) HandlePulseTerminals(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "interactive terminal is not supported on Windows")
+}
+
 // HandleTerminalHistory mirrors the other terminal stubs so the history route
 // remains present in the Windows build even though no pty log is created.
 func (h *Handler) HandleTerminalHistory(w http.ResponseWriter, r *http.Request) {

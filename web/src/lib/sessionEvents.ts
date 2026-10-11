@@ -11,6 +11,7 @@ import { rekeySidePaneState } from "./sidePaneState";
 import { clearPendingRewind, rekeyPendingRewind } from "./pendingRewindStore";
 import { browserActions, type NavEvent, type TitleEvent, type NewTabEvent, type StateKey } from "./browserStore";
 import { sessionRevisionMoved, clearSessionRevision, noteSessionRevision } from "./sessionRevision";
+import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "./title";
 import {
   clearCompaction,
   getCompactionEventVersion,
@@ -22,6 +23,7 @@ import {
   setCompactionState,
 } from "./compactionState";
 import { clearSessionActivity, setSkillActivity } from "./commandActivity";
+import { closeBtw, rekeyBtw } from "./btwStore";
 import { skillNameFromArgs } from "../components/Chat/toolHint";
 
 /**
@@ -132,6 +134,10 @@ export function closeSessionBackend(sessionId: string, host?: string): void {
   // The tab is gone: drop its cross-process revision baseline so the map does
   // not retain every session ever viewed over a long-lived desktop session.
   clearSessionRevision(sessionId, host);
+  // A closed tab's /btw panel must not linger: its server-side run is cancelled
+  // by HandleCloseSession, and a retained store entry would render a dead panel
+  // if the id were ever reused.
+  closeBtw(sessionId, host);
   // A closed tab's pending rewind must not linger: reopening the session should
   // start from the persisted transcript, not a stale draft/capability pair.
   clearPendingRewind(host, sessionId);
@@ -384,6 +390,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       rekeyQueue(oldId, newId);
       rekeyInputHistory(oldId, newId);
       rekeySidePaneState(oldId, newId);
+      rekeyBtw(oldId, newId);
       rekeyPendingRewind(r.hostFor?.(oldId), oldId, r.hostFor?.(newId), newId);
       r.projectDispatch({ type: "UPDATE_TAB_ID", oldId, newId });
       r.openSessionIds.delete(oldId);
@@ -402,7 +409,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         r.projectDispatch({
           type: "UPDATE_TAB_TITLE",
           id: eventSessionId,
-          title: status.session_title,
+          title: truncateTitle(status.session_title, MAX_TITLE_TOOLTIP_CHARS),
         });
       }
     }
@@ -624,13 +631,22 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         const already =
           !!user_seq &&
           slice !== undefined &&
-          slice.messages.some((m) => m.role === "user" && m.user_seq === user_seq);
+          (slice.messages.some((m) => m.role === "user" && m.user_seq === user_seq) ||
+            slice.live.some((p) => p.kind === "user" && p.user_seq === user_seq));
         if (!already) {
-          r.dispatch({
-            type: "ADD_MESSAGE",
-            sessionId,
-            message: { role: "user", content, user_seq },
-          });
+          if (slice !== undefined && slice.live.length > 0) {
+            // Mid-turn injection: assistant output already streamed into the
+            // live buffer precedes this message, and live renders after
+            // `messages`. Appending to `messages` would hoist the user line
+            // above that output; keep it in the live buffer in order.
+            r.dispatch({ type: "LIVE_USER", sessionId, content, user_seq });
+          } else {
+            r.dispatch({
+              type: "ADD_MESSAGE",
+              sessionId,
+              message: { role: "user", content, user_seq },
+            });
+          }
         }
         r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         // Mid-turn injection pickup: a message typed while the turn was
@@ -870,7 +886,9 @@ function applySessionTabTitle(
 ): void {
   const t = (title || "").trim();
   if (!t || t === sessionId || t === "New session") return;
-  r.projectDispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: t });
+  // Bound the label: an auto-title can mirror a multi-megabyte first user
+  // message, and the tab strip lays out the whole string on every reflow.
+  r.projectDispatch({ type: "UPDATE_TAB_TITLE", id: sessionId, title: truncateTitle(t, MAX_TITLE_TOOLTIP_CHARS) });
 }
 
 /**

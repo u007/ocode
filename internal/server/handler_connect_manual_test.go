@@ -166,8 +166,13 @@ func TestConnectFlowInputRejectsAutoModeCallback(t *testing.T) {
 	_, code = connectDo(t, h.handleConnectFlowInput, "POST", "/api/auth/connect/flows/"+flowID+"/input",
 		map[string]string{"flowId": flowID},
 		map[string]string{"code": "http://localhost:1455/auth/callback?code=c&state=s"})
-	if code != http.StatusBadRequest {
-		t.Errorf("pasted input to an auto flow returned %d, want 400", code)
+	// 409, not 400. The auto flow is not malformed input — it exists and has
+	// already started (waiting_browser with a live loopback listener), so the
+	// paste is a conflict. beginInput refuses every state but waiting_input,
+	// which is what keeps a paste from driving an auto flow; this pins the
+	// rejection, and the status code with it.
+	if code != http.StatusConflict {
+		t.Errorf("pasted input to an auto flow returned %d, want 409", code)
 	}
 }
 

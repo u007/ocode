@@ -111,10 +111,10 @@ func TestSearchJudgeIsPerAgentOnSharedTools(t *testing.T) {
 		return nil // cfgOff: not connected
 	}
 
-	parent := NewAgent(nil, nil, cfgParent, nil)
-	child := NewAgent(nil, nil, cfgChild, nil)
-	advisor := NewAgent(nil, nil, cfgAdvisor, nil)
-	off := NewAgent(nil, nil, cfgOff, nil)
+	parent := newTestAgent(nil, nil, cfgParent, nil)
+	child := newTestAgent(nil, nil, cfgChild, nil)
+	advisor := newTestAgent(nil, nil, cfgAdvisor, nil)
+	off := newTestAgent(nil, nil, cfgOff, nil)
 
 	probe := &judgeCaptureTool{}
 	parent.tools["grep"] = probe

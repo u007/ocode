@@ -16,7 +16,7 @@ func TestRekeySessionChangesProviderConversationID(t *testing.T) {
 
 	for _, provider := range []string{"opencode", "opencode-go"} {
 		client := &GenericClient{Provider: provider, Model: "gpt-test", BaseURL: "https://example.test/v1"}
-		a := NewAgent(client, nil, nil, nil)
+		a := newTestAgent(client, nil, nil, nil)
 		a.SetSessionID(oldID)
 		if got := a.OpenCodeSessionID(); got != oldID {
 			t.Fatalf("%s: pre-rekey OpenCodeSessionID = %q, want %q", provider, got, oldID)
@@ -39,7 +39,7 @@ func TestRekeySessionChangesProviderConversationID(t *testing.T) {
 // (empty) exactly as SetOpenCodeSessionID leaves it.
 func TestRekeyOpenCodeSessionLeavesDebugTagEmpty(t *testing.T) {
 	client := &GenericClient{Provider: "opencode", Model: "gpt-test", BaseURL: "https://example.test/v1"}
-	a := NewAgent(client, nil, nil, nil)
+	a := newTestAgent(client, nil, nil, nil)
 	a.SetOpenCodeSessionID("ses_old")
 	a.RekeyOpenCodeSession("ses_old", "ses_new")
 	if got := a.OpenCodeSessionID(); got != "ses_new" {
@@ -61,7 +61,7 @@ func TestRekeySessionOutboundHeaderChanges(t *testing.T) {
 	}))
 
 	client := &GenericClient{Provider: "opencode", Model: "gpt-test", BaseURL: "https://example.test/v1"}
-	a := NewAgent(client, nil, nil, nil)
+	a := newTestAgent(client, nil, nil, nil)
 	msgs := []Message{{Role: "user", Content: "hi"}}
 
 	a.SetSessionID("ses_before")

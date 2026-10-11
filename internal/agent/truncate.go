@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/u007/ocode/internal/tool"
 )
 
 const maxToolResultLines = 100
@@ -37,8 +39,24 @@ func toolResultCacheDir() (string, error) {
 // output budget. Otherwise it writes the full result to a per-tool-call file
 // and returns a bounded prefix plus a notice describing how the model can
 // retrieve the remaining content.
+//
+// An unresolved ask sentinel is returned unchanged, whatever its size. A
+// sentinel is CONTROL FLOW, not tool output: its payload is JSON that every host
+// parses (the TUI's parsePermissionRequest, the server's parsePermissionAsk,
+// livePendingAsks), so cutting it anywhere produces an unparseable prefix and the
+// ask silently DISAPPEARS — the host reports "no ask here" and the model is handed
+// mangled sentinel text instead of a decision. The content guardrail made this
+// reachable by design, because its ask carries the full flagged result for review
+// and a whole fetched page or MCP response routinely exceeds the 12k budget.
+//
+// The size bound is not lost, only deferred: an ask is transient (the host
+// replaces the sentinel in place when answered), whereas a tool result is
+// permanent context the model keeps reading.
 func TruncateToolResult(toolUseID, result string) string {
 	if toolUseID == "" {
+		return result
+	}
+	if tool.UnansweredAsk(result) {
 		return result
 	}
 	totalChars := utf8.RuneCountInString(result)

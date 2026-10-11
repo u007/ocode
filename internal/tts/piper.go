@@ -237,6 +237,9 @@ func (p *piperInstaller) Install(ctx context.Context) error {
 	}
 	p.progress(60, "installing "+p.installLabel())
 	pipArgs := append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--quiet"}, rt.Requirements...)
+	for _, wheel := range rt.Wheels {
+		pipArgs = append(pipArgs, filepath.Join(dir, wheel))
+	}
 	if out, err := runCmd(ctx, []string{venvPython(venv)}, pipArgs...); err != nil {
 		return fmt.Errorf("pip install: %w: %s", err, pipResolutionHint(out, py, rt))
 	}
@@ -263,6 +266,8 @@ func (p *piperInstaller) installLabel() string {
 		return "piper-tts"
 	case EngineKokoro:
 		return "kokoro-onnx"
+	case EngineParadee:
+		return "Paradee runtime"
 	case EngineMelo:
 		return "MeloTTS runtime"
 	default:
@@ -284,6 +289,9 @@ func (p *piperInstaller) installLabel() string {
 // install; the preamble is shared with meloSynth so the check and the runtime
 // cannot drift apart.
 func (p *piperInstaller) verifyRuntime(ctx context.Context, venv, dir string) (string, error) {
+	if p.manifest.Engine == EngineParadee {
+		return paradeeVerifyRuntime(ctx, venv, dir)
+	}
 	if p.manifest.Engine == EngineMelo {
 		scriptPath := filepath.Join(dir, "melo_import_check.py")
 		if err := os.WriteFile(scriptPath, []byte(meloImportCheckScript), 0o644); err != nil {

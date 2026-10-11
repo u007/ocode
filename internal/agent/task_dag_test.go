@@ -797,7 +797,7 @@ func TestDAGStepValidationErrorProducesNoNodesLaunched(t *testing.T) {
 			}{Name: "task", Arguments: `{"prompt":"b","agent":"general","id":"x"}`}},
 		}},
 	}
-	a := NewAgent(client, nil, nil, nil)
+	a := newTestAgent(client, nil, nil, nil)
 	before := len(a.Runs().Snapshot())
 	resp, err := a.Step([]Message{{Role: "user", Content: "go"}})
 	if err != nil {
@@ -845,3 +845,52 @@ func (c *scriptedToolCallClient) Chat(messages []Message, tools []map[string]int
 
 func (c *scriptedToolCallClient) GetProvider() string { return "mock" }
 func (c *scriptedToolCallClient) GetModel() string    { return "mock-model" }
+
+// The scheduler's content-guardrail ctx lives for the WHOLE DAG run, so its
+// cancel cannot be deferred at construction the way the Step path's is. It used
+// to be built by contentGuardStepCtxCtx, which dropped the cancel on the
+// grounds that "a live ctx there is not a leak" — it was: the cancel is what
+// unparks the crashguard.Go goroutine contentGuardStepCtx starts on stopCh, so
+// dropping it parked one goroutine and kept one context alive per DAG batch for
+// as long as the session's stopCh stayed open. A long session runs many batches.
+//
+// Two assertions, because either alone is weak: the cancel must EXIST (the old
+// helper never produced one) and it must WORK when run releases it.
+func TestDAGSchedulerReleasesItsGuardContext(t *testing.T) {
+	parsed, _, dispatch, stopCh, isCancelled := dagTestSetup(t, []ToolCall{dagToolCall("a", nil)})
+
+	sched := newDAGScheduler(parsed, stopCh, isCancelled, dispatch, nil)
+
+	if sched.cancelGuard == nil {
+		t.Fatal("newDAGScheduler must keep the guard cancel; dropping it parks a goroutine per batch")
+	}
+	if sched.ctx == nil {
+		t.Fatal("newDAGScheduler must build a guard ctx")
+	}
+	if err := sched.ctx.Err(); err != nil {
+		t.Fatalf("guard ctx must start live, got %v", err)
+	}
+
+	// run owns the release: by the time it returns every node has resolved, so
+	// nothing can still be waiting on a judge round trip.
+	sched.run(nil, nil, nil)
+
+	if err := sched.ctx.Err(); err == nil {
+		t.Fatal("run must release the guard ctx; a live ctx here outlives the DAG by the rest of the session")
+	}
+}
+
+// The cancel must survive being called once — a nil cancel would panic in run's
+// defer, and a scheduler built with a nil stopCh must not skip the release.
+func TestDAGSchedulerReleasesGuardContextWithNilStopCh(t *testing.T) {
+	parsed, _, dispatch, _, isCancelled := dagTestSetup(t, []ToolCall{dagToolCall("a", nil)})
+
+	sched := newDAGScheduler(parsed, nil, isCancelled, dispatch, nil)
+	if sched.cancelGuard == nil {
+		t.Fatal("a nil stopCh must still yield a usable cancel (it is deferred in run)")
+	}
+	sched.run(nil, nil, nil)
+	if err := sched.ctx.Err(); err == nil {
+		t.Fatal("run must release the guard ctx even when stopCh is nil")
+	}
+}

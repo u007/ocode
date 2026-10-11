@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { ProjectProvider, useProjectState } from "../stores/projectStore";
-import { useSessionHost } from "./useSessionHost";
+import { resolveSessionHost, useSessionHost } from "./useSessionHost";
 
 vi.mock("../api/client", async () => {
   const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
@@ -109,3 +109,16 @@ describe("useSessionHost", () => {
     });
     expect(result.current.host).toBeUndefined();
   });
+
+describe("resolveSessionHost for the Pulse assistant", () => {
+  const remoteActive = {
+    projects: [remoteProject],
+    activeProject: remoteProject,
+    tabsByProject: {},
+  } as unknown as import("../stores/projectStore").ProjectState;
+
+  it("never falls back to a remote active project, which would route it off this server", () => {
+    expect(resolveSessionHost(remoteActive, "ses_draft", { fallbackToActive: true })).toBe("devbox");
+    expect(resolveSessionHost(remoteActive, "pulse_abc", { fallbackToActive: true })).toBeUndefined();
+  });
+});

@@ -30,10 +30,10 @@ The `sandbox` permission mode is the fourth mode alongside `normal`, `yolo`, and
 
 ## Persistence (Decision 2 superseded)
 
-Sandbox was originally per-session only: `persistPermissions()` (`internal/tui/model.go:14734`) clamped `sandbox` to `normal` on the persist path (Decision 2 in `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md`). This has been superseded: sandbox now persists like any other mode.
+Sandbox was originally per-session only: `persistPermissions()` (`internal/tui/model.go:15616`) clamped `sandbox` to `normal` on the persist path (Decision 2 in `docs/superpowers/plans/2026-08-31-shell-sandbox/INDEX.md`). This has been superseded: sandbox now persists like any other mode.
 
-- `persistPermissions()` calls `config.SavePermissionModeSwitch(string(pm.Mode()))` (`model.go:14755`) — writes the mode verbatim, no clamp.
-- `SavePermissionModeSwitch` (`internal/config/ocodeconfig.go:3164`) sets `cfg.Permissions.Mode = mode` with no sandbox-specific logic.
+- `persistPermissions()` calls `config.SavePermissionModeSwitch(string(pm.Mode()))` (`model.go:15600`) — writes the mode verbatim, no clamp.
+- `SavePermissionModeSwitch` (`internal/config/ocodeconfig.go:3671`) sets `cfg.Permissions.Mode = mode` with no sandbox-specific logic.
 - TUI: `/sandbox` bare toggles, `/sandbox on|off|status`, permission-mode click cycle.
 - Web: the chat sidebar's Permission pill and `/yolo` + `/sandbox` commands, scoped to the active chat session; the Settings→Permissions form owns only the persisted default.
 - Cron is unaffected: each job resolves its own per-job permission mode independently via `resolveCronPermissionMode` (`internal/server/scheduler_runner.go:172`); blank → `normal`.
@@ -61,7 +61,7 @@ In `PermissionManager.Decide` (`internal/agent/permissions.go`), three guards fi
 
 Rationale: the OS write-wall confines file writes to classified roots but is blind to repo mutations that stay inside the allowed workdir — history rewrite, branch switch, stash create/drop, untracked removal all mutate the repo within the writable boundary. Normal mode is unchanged (already Ask via `IsHarmfulBashCommand`); YOLO remains the promptless escape hatch.
 
-Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:577`) and still auto-allow.
+Read-only forms (`git stash list`/`show`) are excluded via `isReadOnlyGitStashForm` (`permissions.go:595`) and still auto-allow.
 
 ## Sensitive-path carve-outs
 
@@ -69,7 +69,7 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Predicate split
 
-`isSensitivePath` (`permissions.go:2790`) is the OR of two named predicates:
+`isSensitivePath` (`permissions.go:2808`) is the OR of two named predicates:
 
 - **`isSecretMaterialPath()`** (line 2799) — credential-bearing material: `.env` + `.env.*` variants (safe templates excluded), `.netrc`/`.npmrc`/`.pypirc`, SSH private-key filenames (`id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`), certificate/key suffixes (`.pem`/`.key`/`.p12`/`.pfx`/`.secrets`), and `.aws/`. **Ask on read OR write** — a read can exfiltrate a credential.
 
@@ -77,11 +77,11 @@ Sandbox mode does **not** bypass the existing sensitive-path Ask guards, but it 
 
 ### Per-target write classification
 
-`sandboxSensitiveTargets` (`permissions.go:2919`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
+`sandboxSensitiveTargets` (`permissions.go:2937`) returns a per-target write map (`map[target]bool`) instead of a single command-wide bool. It is **fail-closed**: a target counts as written unless the fragment is provably read-only over its path args (`commandReadsPathsOnly`), or is copy-like (`cp`/`install`/`ln` destination only; `mv` marks every positional, since it deletes its sources). Unrecognized commands (`truncate`, `chmod`, `dd`, custom scripts) mark their path args as writes; parse failure marks every target as a write.
 
 ### Carve-out rules
 
-`sandboxSensitivePath` (`permissions.go:3227`) classifies a resolved path against the sandbox sensitive set:
+`sandboxSensitivePath` (`permissions.go:3245`) classifies a resolved path against the sandbox sensitive set:
 
 - **auth.json / auth.profiles.json** (read or write) → Ask
 - **ocode config dir** (write only) → Ask — guards self-escalation via config rewrite
@@ -107,20 +107,20 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 
 ## Code references
 
-- Mode constants: `internal/agent/permissions.go:36-44`
+- Mode constants: `internal/agent/permissions.go:37-45`
 - `Decide` path: `internal/agent/permissions.go:~1430-1505`
-- `persistPermissions`: `internal/tui/model.go:14734`
-- `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3164`
-- `runSandboxCmd`: `internal/tui/commands.go:1056`
+- `persistPermissions`: `internal/tui/model.go:15616`
+- `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
+- `runSandboxCmd`: `internal/tui/commands.go:1092`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`
-- `isHarmfulForceCommand`: `internal/agent/permissions.go:723`
-- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1414`
-- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:577`
-- `isSensitivePath`: `internal/agent/permissions.go:2790`
-- `isSecretMaterialPath`: `internal/agent/permissions.go:2799`
-- `isRepoMetadataPath`: `internal/agent/permissions.go:2852`
-- `sandboxSensitiveTargets`: `internal/agent/permissions.go:2919`
-- `sandboxSensitivePath`: `internal/agent/permissions.go:3227`
+- `isHarmfulForceCommand`: `internal/agent/permissions.go:874`
+- `IsHarmfulBashCommand`: `internal/agent/permissions.go:1489`
+- `isReadOnlyGitStashForm`: `internal/agent/permissions.go:678`
+- `isSensitivePath`: `internal/agent/permissions.go:3204`
+- `isSecretMaterialPath`: `internal/agent/permissions.go:3213`
+- `isRepoMetadataPath`: `internal/agent/permissions.go:3266`
+- `sandboxSensitiveTargets`: `internal/agent/permissions.go:3339`
+- `sandboxSensitivePath`: `internal/agent/permissions.go:3501`
 
 ## Enforcement details (moved from CLAUDE.md)
 
@@ -184,6 +184,17 @@ write map and full carve-out list are in "Sensitive-path carve-outs" above.
   both the harmful gate and `/ban` prefix denies. A command whose binary is a
   shell expansion (`$g stash`, `$(which git) stash`) → Ask in sandbox
   (`sandbox.opaque_command`), since nothing static can resolve it.
+- the body of a **quoted, terminated heredoc** (`<<'EOF'`, `<<"EOF"`) fed to a
+  non-shell program is not parsed by the sandbox gate
+  (`sandboxGateParseTarget`, `permissions_wrappers.go`): the shell never
+  expands it, so markdown backticks or `$x` inside a `python3 - <<'PY'` body
+  are data, not commands. The body stays gated line by line when the heredoc
+  is unquoted or unterminated, when its operator may sit inside a quote,
+  comment or `$((…))`, when two heredocs share a line, or when any command in
+  the line is a shell or shell-like consumer (`bash`, `sh`, `cat … | sh`,
+  `ssh`, `source`, `eval`). Lines after the terminator are always gated.
+  Consequence: an interpreter heredoc body is not inspected in sandbox mode
+  (previously a body line that happened to read `git reset …` asked).
 - writes to permission-defining files (`.ocode/settings.json`,
   `.claude/settings.json`, ocode config gating files) and loopback requests to
   `/api/permissions*` → Ask (self-escalation guard, all modes)

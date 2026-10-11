@@ -1,0 +1,30 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Membership signup</title>
+<style>body{font:16px sans-serif;max-width:520px;margin:2rem auto}.step{display:none}.step.on{display:block}.err{color:#b00}label{display:block;margin:.6rem 0}</style></head><body>
+<h1>Membership signup</h1>
+<form id="f" method="post" action="/submit" novalidate>
+<div class="step on" data-step="1"><h2>Step 1 of 3: You</h2>
+<label>Full name <input name="fullname" required></label>
+<label>Email <input name="email" type="email" required></label>
+<p class="err" id="e1"></p><button type="button" id="next1">Next</button></div>
+<div class="step" data-step="2"><h2>Step 2 of 3: Plan</h2>
+<fieldset><legend>Plan</legend>
+<label><input type="radio" name="plan" value="basic"> Basic ($5)</label>
+<label><input type="radio" name="plan" value="pro"> Pro ($15)</label>
+<label><input type="radio" name="plan" value="team"> Team ($40)</label></fieldset>
+<fieldset><legend>Add-ons</legend>
+<label><input type="checkbox" name="addon" value="backup"> Cloud backup</label>
+<label><input type="checkbox" name="addon" value="support"> Priority support</label></fieldset>
+<p class="err" id="e2"></p><button type="button" id="back2">Back</button> <button type="button" id="next2">Next</button></div>
+<div class="step" data-step="3"><h2>Step 3 of 3: Review</h2>
+<p id="summary"></p>
+<label><input type="checkbox" name="terms" value="yes"> I accept the terms</label>
+<p class="err" id="e3"></p><button type="button" id="back3">Back</button> <button type="submit" id="go">Join</button></div>
+</form>
+<script>
+var f=document.getElementById('f');
+function show(n){document.querySelectorAll('.step').forEach(function(s){s.classList.toggle('on',s.dataset.step==n)});}
+document.getElementById('next1').onclick=function(){var ok=f.fullname.value.trim()&&/^\S+@\S+\.\S+$/.test(f.email.value);document.getElementById('e1').textContent=ok?'':'Enter a name and a valid email.';if(ok)show(2)};
+document.getElementById('next2').onclick=function(){var ok=f.plan.value;document.getElementById('e2').textContent=ok?'':'Choose a plan.';if(ok){document.getElementById('summary').textContent=f.fullname.value+' / '+f.plan.value;show(3)}};
+document.getElementById('back2').onclick=function(){show(1)};document.getElementById('back3').onclick=function(){show(2)};
+f.onsubmit=function(e){if(!f.terms.checked){e.preventDefault();document.getElementById('e3').textContent='You must accept the terms.'}};
+</script></body></html>

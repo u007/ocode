@@ -1,0 +1,8 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Appointment request</title></head><body>
+<h1>Appointment request</h1>
+<form method="post" action="/submit">
+<p><label>Email <input type="email" name="email" required></label></p>
+<p><label>Phone (format 555-123-4567) <input name="phone" required pattern="[0-9]{3}-[0-9]{3}-[0-9]{4}" title="Use the format 555-123-4567"></label></p>
+<p><label>Age <input type="number" name="age" min="18" max="120" required></label></p>
+<p><label>Preferred day <select name="day" required><option value="">--</option><option>Monday</option><option>Tuesday</option><option>Wednesday</option></select></label></p>
+<button type="submit">Request</button></form></body></html>

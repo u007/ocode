@@ -119,3 +119,11 @@ scoping.
 - The desktop remote-workspace mode keeps its own route family; the widget
   prefers project-scoped routing when a host is active and falls back
   otherwise.
+
+## Addendum (2026-10-09): reverse forwards
+
+This spec covers `-L` only. Reverse (`-R`) forwards, which let the remote host reach a desktop
+service such as the htrcli relay or Chrome CDP, are documented in
+`docs/gotchas/port-forwards-url-composition-and-supervisor-restart.md` §6: the `Reverse` field,
+loopback-pinned argv, readiness as an estimate, and the rule that every persisted-to-runtime
+conversion goes through `PortMap.Runtime()`.

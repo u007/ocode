@@ -8,6 +8,7 @@ import { api } from "../../api/client";
 const engines = [
   { id: "browser-native", label: "Browser Native", availability: "ready", browser_only: true },
   { id: "piper", label: "Piper", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "en_US-joe-medium", manifest_version: "piper-1.8.0-joe-1", license_name: "piper-tts GPL-3.0-or-later", license_text: "piper-tts GPL-3.0-or-later", license_hash: "piper-license-hash" },
+  { id: "paradee", label: "Paradee", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "af_heart", voices: ["af_heart"], manifest_version: "paradee-1.0-f662642", license_name: "Paradee Apache-2.0", license_text: "Paradee model and inference code: Apache-2.0", license_hash: "paradee-license-hash" },
   { id: "melo", label: "MeloTTS", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "EN-US", voices: ["EN-US", "EN-BR", "EN_INDIA", "EN-AU", "EN-Default"], manifest_version: "melo-0.1.2-en-v2-2091453", license_name: "MeloTTS MIT", license_text: "MeloTTS: MIT", license_hash: "melo-license-hash" },
   { id: "kokoro", label: "Kokoro", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "af_sarah", voices: ["af_sarah", "af_bella"], manifest_version: "kokoro-v1.0-voices-v1.0", license_name: "kokoro-onnx MIT; kokoro model Apache-2.0", license_text: "kokoro-onnx: MIT\nkokoro model: Apache-2.0", license_hash: "kokoro-license-hash" },
 ];
@@ -57,13 +58,13 @@ describe("TTSForm licensing and selection", () => {
     expect(kokoro.getByRole("button", { name: "Accept License" })).toBeDefined();
   });
 
-  it("renders MeloTTS between Piper and Kokoro", async () => {
+  it("renders Paradee and MeloTTS between Piper and Kokoro", async () => {
     // The engine order comes straight from the server catalog (internal/tts
     // Catalog()) because TTSForm maps the response without re-sorting, so the
     // rendered order is the presentation contract.
     renderTTSForm();
     await screen.findByTestId("tts-engine-melo");
-    const order = ["tts-engine-browser-native", "tts-engine-piper", "tts-engine-melo", "tts-engine-kokoro"];
+    const order = ["tts-engine-browser-native", "tts-engine-piper", "tts-engine-paradee", "tts-engine-melo", "tts-engine-kokoro"];
     const positions = await Promise.all(
       order.map(async (testid) => {
         const card = await screen.findByTestId(testid);
@@ -74,6 +75,13 @@ describe("TTSForm licensing and selection", () => {
     const sorted = [...positions].sort((a, b) => a - b);
     expect(positions).toEqual(sorted);
     expect(positions.every((p) => p >= 0)).toBe(true);
+  });
+
+  it("offers the Paradee license before install", async () => {
+    renderTTSForm();
+    const paradee = within(await screen.findByTestId("tts-engine-paradee"));
+    expect(paradee.getByText(/License: Paradee model and inference code: Apache-2.0/i)).toBeDefined();
+    expect(paradee.getByRole("button", { name: "Accept License" })).toBeDefined();
   });
 
   it("offers the MeloTTS license, manifest and accent voices", async () => {

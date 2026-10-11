@@ -53,6 +53,12 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
       scope: (req["scope"] as string) || undefined,
       prefix: (req["prefix"] as string) || undefined,
       out_of_scope_path: (req["out_of_scope_path"] as string) || undefined,
+      untrusted_content: (req["untrusted_content"] as string) || undefined,
+      untrusted_source: (req["untrusted_source"] as string) || undefined,
+      untrusted_summary: (req["untrusted_summary"] as string) || undefined,
+      untrusted_scores: (req["untrusted_scores"] as ContentGuardScore[]) || undefined,
+      untrusted_failure: (req["untrusted_failure"] as string) || undefined,
+      agent_name: (req["agent_name"] as string) || undefined,
     };
   } catch {
     return null;
@@ -201,6 +207,32 @@ export interface PermissionRequest {
   prefix?: string;
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
+  /** Content-guardrail ask (scope "content"): the flagged result text. */
+  untrusted_content?: string;
+  /** Content-guardrail ask: one-line origin of the flagged content. */
+  untrusted_source?: string;
+  /** Content-guardrail ask: the guardrail's headline (concern + confidence). */
+  untrusted_summary?: string;
+  /** Content-guardrail ask: the per-question judge scores, one per judged chunk. */
+  untrusted_scores?: ContentGuardScore[];
+  /** Content-guardrail ask: why the guardrail could not clear this result. */
+  untrusted_failure?: string;
+  /** Name of the sub-agent that raised the ask; absent for a main-agent ask.
+   *  Without it the dialog can only say "a sub-agent asked", which is useless
+   *  when several are parked at once. */
+  agent_name?: string;
+}
+
+/** One chunk's judge output. Both questions are reported separately so the
+ *  dialog can show the raw scores instead of one collapsed verdict. */
+export interface ContentGuardScore {
+  chunk: number;
+  total: number;
+  verdict: string;
+  verdict_confidence: number;
+  concern?: string;
+  concern_confidence?: number;
+  probabilities?: Record<string, number>;
 }
 
 export interface QuestionRequest {
@@ -466,6 +498,7 @@ export type ChatAction =
   /** A transient informational line appended to the live buffer (discovery
    *  notices mirrored from the TUI). Append-only: unlike a permission/advisor
    *  status part it is never removed on completion. */
+  | { type: "LIVE_USER"; sessionId: string; content: string; user_seq?: number }
   | { type: "LIVE_NOTICE"; sessionId: string; text: string }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
@@ -797,6 +830,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           hasMore: capped.hasMore || s.hasMore,
         };
       });
+    case "LIVE_USER":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        live: [...s.live, { kind: "user", content: action.content, user_seq: action.user_seq }],
+      }));
     case "LIVE_DELTA":
       return updateSession(state, action.sessionId, (s) => {
         const live = [...s.live];

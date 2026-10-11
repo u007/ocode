@@ -2,6 +2,8 @@ import { lazy, Suspense } from "react";
 import ImageViewer from "./ImageViewer";
 import MediaViewer from "./MediaViewer";
 import type { PreviewKind } from "../../lib/previewKind";
+import { cn } from "../../lib/utils";
+import { editorAppearanceClass, type EditorAppearance } from "../../lib/editorAppearance";
 
 // Heavy viewers are code-split. pdf.js, xlsx, docx-preview and mermaid (and,
 // transitively through TextViewer/MarkdownViewer → FileEditor, all of Monaco)
@@ -21,6 +23,7 @@ const MarkdownViewer = lazy(() => import("./MarkdownViewer"));
 const HtmlViewer = lazy(() => import("./HtmlViewer"));
 const JsonViewer = lazy(() => import("./JsonViewer"));
 const TextViewer = lazy(() => import("./TextViewer"));
+const SQLiteViewer = lazy(() => import("./SQLiteViewer"));
 
 /** Minimal placeholder while a heavy viewer's chunk downloads. Intentionally
  *  chrome-free so it does not flash a layout the viewer then replaces. */
@@ -68,6 +71,11 @@ export interface PreviewSurfaceProps {
    *  it to keep tail-following armed so streaming file growth stays visible
    *  (the "auto scroll" half of the sidebar preview behaviour). */
   followTail?: boolean;
+  /** Light/dark override for the rendered preview (Files-tab Edit/Preview/Split
+   *  toggle). When set, the surface is wrapped in a scoped palette class and the
+   *  polarity-aware viewers (markdown prose, mermaid) follow it. Omitted by the
+   *  sidebar/Preview-tab hosts so they keep inheriting the app theme. */
+  appearance?: EditorAppearance;
 }
 
 export default function PreviewSurface({
@@ -84,22 +92,24 @@ export default function PreviewSurface({
   active,
   revision,
   followTail,
+  appearance,
 }: PreviewSurfaceProps) {
   const handlePageChange = onPageChange ?? (() => {});
   const handleSlideChange = onSlideChange ?? (() => {});
   const handleOpenFile = onOpenFile ?? (() => {});
   return (
-    <div className="min-h-0 flex-1">
+    <div className={cn("min-h-0 flex-1", editorAppearanceClass(appearance), appearance && "bg-background text-foreground")}>
       <Suspense fallback={<ViewerLoading />}>
         {kind === "pdf" && <PdfViewer path={path} projectRoot={projectRoot} projectHost={projectHost} page={page ?? 1} onPageChange={handlePageChange} active={active} />}
         {kind === "docx" && <DocxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} />}
         {kind === "pptx" && <PptxViewer path={path} projectRoot={projectRoot} projectHost={projectHost} slide={slide ?? 1} onSlideChange={handleSlideChange} />}
         {kind === "excel" && <ExcelViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} />}
-        {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} />}
-        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} />}
+        {kind === "mermaid" && <MmdViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} revision={revision} content={content} appearance={appearance} />}
+        {kind === "markdown" && <MarkdownViewer path={path} projectRoot={projectRoot} projectHost={projectHost} onOpenFile={handleOpenFile} content={content} revision={revision} followTail={followTail} appearance={appearance} />}
         {kind === "html" && <HtmlViewer content={content ?? ""} />}
         {kind === "json" && <JsonViewer content={content ?? ""} />}
         {kind === "text" && <TextViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
+        {kind === "sqlite" && <SQLiteViewer path={path} projectRoot={projectRoot} projectHost={projectHost} revision={revision} />}
         {kind === "image" && <ImageViewer path={path} projectRoot={projectRoot} projectHost={projectHost} content={content} />}
         {kind === "audio" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="audio" active={active} />}
         {kind === "video" && <MediaViewer path={path} projectRoot={projectRoot} projectHost={projectHost} kind="video" active={active} />}

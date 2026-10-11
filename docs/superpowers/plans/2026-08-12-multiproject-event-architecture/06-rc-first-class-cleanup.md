@@ -13,7 +13,7 @@ paths are deleted, along with all legacy SSE endpoints and dead client code.
   headless events when a bridge is attached
   (`internal/server/agent_session.go:184-232`, `headless := h.RCBridge() ==
   nil`). The TUI registers with the server via
-  `RegisterExternalSession` (`internal/server/server.go:495`).
+  `RegisterExternalSession` (`internal/server/server.go:1825`).
 - Parts 01–05 provide: `SessionManager.Register(sessionID, projectRoot)` and
   `Resolve`; `EventBus.Publish(event, project, sessionID, data)`; turn
   lifecycle events (`turn_started`/`turn_heartbeat`/`turn_done`/`turn_error`);

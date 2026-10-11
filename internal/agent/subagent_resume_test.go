@@ -12,7 +12,7 @@ import (
 // "dispatcher" identity that resumeEligibleRun checks against.
 func buildResumeCallerAgent(t *testing.T, dispatcherName string) *Agent {
 	t.Helper()
-	caller := NewAgent(&MockClient{}, nil, nil, nil)
+	caller := newTestAgent(&MockClient{}, nil, nil, nil)
 	caller.SetSpec(&AgentSpec{Name: dispatcherName})
 	return caller
 }
@@ -35,7 +35,7 @@ func TestTaskToolResumeWrongDispatcher(t *testing.T) {
 	run := caller.runs.New("explore")
 	run.Dispatcher = "build"
 	run.tryFinishCancelled()
-	sub := NewAgent(&MockClient{}, nil, nil, nil)
+	sub := newTestAgent(&MockClient{}, nil, nil, nil)
 	run.Sub = sub
 
 	tool := TaskTool{mainAgent: caller, registry: DefaultAgentRegistry, runs: caller.runs}
@@ -52,7 +52,7 @@ func TestTaskToolResumeRejectsRunningStatus(t *testing.T) {
 	caller := buildResumeCallerAgent(t, "build")
 	run := caller.runs.New("explore") // New() leaves status RunRunning
 	run.Dispatcher = "build"
-	run.Sub = NewAgent(&MockClient{}, nil, nil, nil)
+	run.Sub = newTestAgent(&MockClient{}, nil, nil, nil)
 
 	tool := TaskTool{mainAgent: caller, registry: DefaultAgentRegistry, runs: caller.runs}
 	_, err := tool.Execute(json.RawMessage(`{"prompt":"continue","resume_task_id":"` + run.ID + `"}`))
@@ -69,7 +69,7 @@ func TestTaskToolResumeRejectsFailedStatus(t *testing.T) {
 	run := caller.runs.New("explore")
 	run.Dispatcher = "build"
 	run.finishErr("boom")
-	run.Sub = NewAgent(&MockClient{}, nil, nil, nil)
+	run.Sub = newTestAgent(&MockClient{}, nil, nil, nil)
 
 	tool := TaskTool{mainAgent: caller, registry: DefaultAgentRegistry, runs: caller.runs}
 	_, err := tool.Execute(json.RawMessage(`{"prompt":"continue","resume_task_id":"` + run.ID + `"}`))
@@ -90,7 +90,7 @@ func TestTaskToolResumeCancelledSucceedsSync(t *testing.T) {
 	run.tryFinishCancelled()
 
 	capture := &captureClient{}
-	sub := NewAgent(capture, nil, nil, nil)
+	sub := newTestAgent(capture, nil, nil, nil)
 	sub.shutdownTransient() // mirrors the real teardown that ran when this run first went terminal
 	run.markTeardownDone()  // ...and the signal runBackgroundDispatch/runSyncDispatch send once it's done
 	run.Sub = sub
@@ -140,7 +140,7 @@ func TestTaskToolResumeDoneSucceedsBackground(t *testing.T) {
 	run.finishOK("original result")
 
 	capture := &captureClient{}
-	sub := NewAgent(capture, nil, nil, nil)
+	sub := newTestAgent(capture, nil, nil, nil)
 	sub.shutdownTransient()
 	run.markTeardownDone()
 	run.Sub = sub
@@ -188,7 +188,7 @@ func TestTaskToolResumeChainResumeResume(t *testing.T) {
 	run.finishOK("first result")
 
 	capture := &captureClient{}
-	sub := NewAgent(capture, nil, nil, nil)
+	sub := newTestAgent(capture, nil, nil, nil)
 	sub.shutdownTransient()
 	run.markTeardownDone()
 	run.Sub = sub

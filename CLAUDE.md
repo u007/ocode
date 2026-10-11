@@ -30,6 +30,51 @@ two when both exist, so a second file would never be seen. Do not recreate it.
   All send the request as structured state. Each judge has its own confidence
   floor, scaled to the cost of a wrong decision, and an explicitly configured
   `permissions.auto.min_confidence` always governs the opaque relaxation.
+  **Every decision request passes one shared state budget**
+  (`prepareDecisionState`, `internal/agent/state_budget.go`): measure the
+  MARSHALLED state against `decisionStateBudgetBytes` (96 KB, from Jev's
+  stricter 32k `state` limit at ~3 bytes/token), then project an allowlist of
+  bulky keys to a bounded preview, then REFUSE if it still does not fit. Both
+  clients call the same function so clef and Jev cannot drift. Rules that are
+  easy to get wrong:
+  - **Measure marshalled size, never payload size.** JSON framing is real (a
+    100-byte payload marshals to 116 bytes), so a guard or test sized on the
+    payload never reaches the comparison it is meant to exercise.
+  - **The budget is an estimate and errs toward NOT asking.** There is no real
+    tokenizer here; `TestSharedStateBudget_WorstCaseProductionPayloads` is the
+    safety net.
+  - **Projection must be SIGNALLABLE.** A clipped state carries a structured
+    top-level `_projection` field naming what was cut, because the permission
+    judge already treats `interpreter.source.truncated` as "do not approve on a
+    partial view". A preview the judge is not told about lets it auto-allow a
+    `write` on the clipped bytes. Never add a truncation path here without one.
+  - **Refusal must not fall back to the other backend**, and must not silently
+    send an over-budget state: both callers already surface the error as a
+    deferral to the human.
+- **`validateAnswer`** (`state_budget.go`) gates whether a returned answer may be
+  trusted: type must match the question, `noul`/`confidence`/probabilities in
+  [0,1] and finite, a choice must be one actually offered, probabilities must sum
+  to 1 within 1e-3. **A rejected answer must KEEP the candidate** — the zero
+  value of `Noul` is 0, which reads as "definitely irrelevant" and vetoes, so a
+  rejection that fell through to the score comparison would be a fail-*closed*
+  bug inside a fail-open system. It is called from exactly one place, the
+  relevance judge's per-candidate path; `discoveryAllows` (the MCP tool gate)
+  never consults a judge and so cannot fail open.
+  **Decision backends go through the `Decider` interface** (`internal/agent/decider.go`)
+  — four methods (`Decide`, `DecideCtx`, `GetProvider`, `GetModel`), deliberately
+  narrower than `LLMClient` so a decision-only backend cannot reach the chat,
+  compaction, small-model or interpreter-effects paths. `*TypesafeClient`
+  satisfies it unchanged; `isDecisionModel` is the single place that decides
+  which ids route to a decision backend. `resolveDecider(slot)` resolves one of
+  seven `judgeSlot`s (permission, auto_continue, discovery, doc_search,
+  code_search, network_guard, content_guard); all currently default to
+  `typesafe/jev-latest`. Judges label their requests with `deciderLabel(client)`
+  — provider-qualified, never a hardcoded prefix — so the usage ledger does not
+  book one backend's tokens to another.
+  **Never** widen `Decider` with a `Chat` method, and never cache a nil decision
+  client: a nil is deliberately re-resolved each call so a mid-session `/connect`
+  takes effect immediately (`warnedNoAPIKey` in `NewClient` dedupes the "no API
+  key" debug line per provider+model, so re-resolving does not spam the log).
   Jev's `confidence` is a distribution-shape statistic that runs below
   `probabilities[choice]`, so never reuse the permission floor for a
   lower-stakes judge. Per-judge detail: `docs/concepts/auto-permission-enforced-categories.md`,
@@ -63,16 +108,32 @@ developer-local state and must never be committed.
 git worktree add .worktrees/feature-branch feature-branch
 ```
 
-A fresh worktree will not build until you copy the two **gitignored embed
-inputs** out of the main checkout. `internal/agent/models-snapshot.json` and
-`internal/browse/cdp/htr-assets.zip` are `//go:embed` targets that are
-deliberately untracked, so the worktree has no copy at all and the build
-fails with `pattern models-snapshot.json: no matching files found` — which names
-the file but not the reason (it is a build input, not a source file):
+A fresh worktree builds a plain `go build ./...` with **no copying**: the only
+embed inputs a source build needs are the committed `.gitkeep` placeholders for
+`web/dist/` and `cmd/ocode-desktop/embedded-assets/` (a `//go:embed` pattern
+matches a directory holding only `.gitkeep`, so the directive compiles while
+serving no assets).
+
+The other two embed inputs are **generated, gitignored, and gated behind build
+tags**, so a plain build never needs them:
+
+- `internal/browse/cdp/htr-assets.zip` — the `htr` build tag. Produced by
+  `make prepare-htr-assets` from out-of-tree HTR sources
+  (`htr_assets_embed.go` / `htr_assets_stub.go`).
+- `internal/agent/models-snapshot.json` — the `models` build tag. Produced by
+  `make models-snapshot`, which fetches models.dev
+  (`models_snapshot_embed.go` / `models_snapshot_stub.go`). Without the tag the
+  registry resolves from the runtime cache plus a live models.dev fetch, which is
+  the same path a stale snapshot already took (`loadRegistry` skips any snapshot
+  older than `modelsCacheTTL`).
+
+So a **tagged** build fails loudly with `pattern <file>: no matching files found`
+when its input is missing. `make install`, `make desktop`, and
+`make desktop-remote-binaries` pass `-tags "htr models"` and depend on both
+generators; copy the HTR archive into a worktree before running them:
 
 ```bash
 git worktree add .worktrees/feature-branch feature-branch
-cp internal/agent/models-snapshot.json .worktrees/feature-branch/internal/agent/
 cp internal/browse/cdp/htr-assets.zip .worktrees/feature-branch/internal/browse/cdp/
 ```
 
@@ -90,6 +151,21 @@ diff.
 - Use modular packages in `internal/`.
 - Respect `.gitignore` and `watcher.ignore`.
 - Follow Go best practices and standard formatting (`gofmt`, `go vet`).
+- **A test that overrides `HOME` must use the package's `setHomeTree(t, home)`
+  helper, never a bare `t.Setenv("HOME", …)`.** ocode's path resolution is
+  deliberately platform-split: `paths.GlobalConfigDir()` ignores
+  `XDG_CONFIG_HOME` on darwin but honours it elsewhere, and
+  `paths.OcodeGlobalDataDir()` does the mirror image for `XDG_DATA_HOME`. Both
+  packages' `TestMain` therefore points the XDG variables at ONE package-wide
+  temp dir, so a test that sets only `HOME` gets a private config dir on macOS
+  but **shares the package-wide one on Linux** — the file lands where the test
+  never looks, and one test observes another test's writes. `setHomeTree` sets
+  each XDG variable to the matching XDG-default subdirectory of the same temp
+  home, so every platform resolves identically. This cost 44 `internal/config`
+  and several `internal/agent` failures that were invisible for as long as the
+  suite only ever ran on darwin; CI (ubuntu) is where they surfaced. Never "fix"
+  it by clearing the XDG variables in `TestMain` instead — that stops the suite
+  exercising the Linux resolution path, which is the path CI runs on.
 - **Avoid `git stash` / `git reset --hard` / `git checkout -- <file>` /
   `git clean -fd` as a default coping strategy.** They destroy user state
   the user may not be unable to recover.
@@ -331,6 +407,34 @@ routes them to `run.appendTranscript`, `Agent.OnSubAgentMessage` and
 from `Agent.SetChildSessionPersistence` MUST be a live async save. Details:
 `docs/concepts/subagent-transcripts-child-sessions.md`.
 
+## Cancelling a turn: answer every tool call, cancel every nested run
+Pressing Stop (TUI `Esc`, web/desktop Stop) must leave NO trace of in-flight work.
+Two invariants, both load-bearing:
+
+- **Every `tool_call` in a cancelled round MUST get a tool message.** `Step` appends
+  the assistant message (with its `ToolCalls`) to `newMsgs` BEFORE any tool runs, but
+  the results are published much later. Every cancellation exit in between must route
+  through `finishCancelledRound`, never a bare `return newMsgs, nil` — a bare return
+  leaves an **orphan**, and an orphan is worse than cosmetic: the web `ToolBlock`
+  sets `resultContent: undefined` so `pending` lights a pulsing "running…" forever,
+  AND `recoverOrphanedToolCalls` **re-executes** it on the next turn (a tool the user
+  just stopped silently runs again). Publish results that DID complete, and fill the
+  rest with `tool.ToolCancelledResult`. It is plain prose with **no sentinel prefix**
+  on purpose — a new prefix would need threading through every consumer that
+  pattern-matches tool content (`isSentinelToolContent`, `tool.UnansweredAsk`), and a
+  miss in one would suppress the block or fake a dialog.
+  `finishCancelledRound`'s `published` count exists because the publish-loop exit has
+  already emitted a prefix of `results`; re-emitting it puts two tool messages with one
+  `tool_call_id` in the transcript.
+- **`AgentRunRegistry.CancelAll` MUST recurse into `run.Sub.Runs()`.** Each dispatched
+  sub-agent is a full `*Agent` with its own registry, and every surface renders nested
+  runs verbatim (`buildRunDTO` → `dto.Children`, `agentRunChildren` → `run.Sub.Runs()`,
+  web `AgentPreview` counting `status === "running"`). Without the recursion a nested
+  run stays `RunRunning` forever, so Stop leaves a child task displayed as running.
+  `run.Cancel` only closes the sub-agent's stop channel, so it does not reach the
+  child's own children either. A `visited map[*AgentRunRegistry]bool` guard is
+  mandatory: `run.Sub` is a live pointer, so a registry cycle is representable.
+
 ## In-batch task DAG (`id` / `depends_on`)
 Parallel `task` batches may declare `id`/`depends_on`; omitting both preserves the
 flat fan-out exactly. Scheduler: `internal/agent/task_dag.go`. Spec and semantics:
@@ -457,6 +561,40 @@ the fallback, never the reverse. Details: `docs/concepts/web-context-gauge-resol
   because it lands in the cached prompt prefix; re-running per turn would
   both spawn subprocesses and risk busting the prefix. Invalidate on plugin
   install/remove, never per turn.
+
+## Pulse assistant
+The Pulse dashboard's overview chat is one current `pulse_…` session at a time
+(New chat rotates it; earlier chats stay on disk and are listed by
+`GET /api/pulse/assistant/chats`), rooted at `<GlobalDataDir>/pulse` (not a project). Concept doc: `docs/concepts/pulse-assistant.md`.
+
+- **Terminal tools are Pulse-only.** `terminal_tabs` and `terminal_read` live in
+  `pulseTools()` and reach an agent only through `configurePulseAgent` (gated on
+  `isPulseSession`). Never add them to the builtin toolset. `TestTerminalToolsAreOnlyForThePulseAssistant`
+  enforces it. Command lines go to the model only through `pulseTerminalRows`, which checks
+  `terminalAccessAllowed`.
+- **It is never on the board.** `buildPulseRows` skips every `pulse_` id; any new
+  surface listing sessions (board text, `agent_runs`, search) must exclude it too.
+- **`allowedProjectRoots()` is a security boundary; the pulse root is not in it.**
+  Only `sessionSearchRoots` (session lookup) adds it. Never widen the boundary for it.
+- **Permission design:** read tools and `memory_write` have explicit allow rules;
+  the write tools (`pulseTool.ask`: `session_send`, `session_command`,
+  `permission_resolve`, `question_answer`) get NO rule so each call is a normal
+  permission ask. A new tool that acts outside the assistant's own files must set
+  `ask`. `memory_write` is allowed only because it touches the assistant's own
+  size-capped notes.
+- **Board and memory are user-role, never system-role.** `[ocode:pulse]` (with the
+  `[ocode:pulse-memory]` section) changes every turn; a system-role copy busts the
+  prompt cache. The system prompt is one stable `SetSystemPromptOverride` message.
+- **`session_command` is a fixed allowlist** (`pulseCommands`); an unsupported
+  command is an error. Never add a "send it as chat text" fallback.
+- **Write tools never queue.** `session_send` refuses a target that is mid-turn,
+  compacting or paused on an ask. Write tools reuse the HTTP handlers through
+  `pulseCall`; do not copy their logic.
+- **No pre-built agent on `GET /api/pulse/assistant`:** the first message builds it,
+  so profile resolution matches the message path (a pre-build forced a rebuild and
+  an illegal bootstrap transition).
+- **Recap runs under `pulseRecapTimeout` (90 s)** via `Agent.RecapCtx`; a timeout is
+  an error, never "Recap timed out." text passed off as a recap.
 
 ## Data Storage
 All persistent state lives under `internal/paths.GlobalDataDir()` (macOS

@@ -33,10 +33,34 @@ type advisorCheckpointState struct {
 	doneChecked bool
 	toolCalls   int
 	writeCalls  int
+
+	// pendingAsk records that this Step began while the client was showing an
+	// unanswered permission or question dialog. Both checkpoints stand down
+	// while it is set — see blockedByPendingAsk.
+	pendingAsk bool
 }
 
-func (a *Agent) newAdvisorCheckpointState(userGoal string) *advisorCheckpointState {
-	return &advisorCheckpointState{userGoal: userGoal}
+func (a *Agent) newAdvisorCheckpointState(userGoal string, pendingAsk bool) *advisorCheckpointState {
+	return &advisorCheckpointState{userGoal: userGoal, pendingAsk: pendingAsk}
+}
+
+// blockedByPendingAsk reports whether this Step must not consult the advisor
+// because the user is being asked something right now. It returns false
+// WITHOUT consuming the checkpoint: the state is rebuilt per Step, so a skipped
+// checkpoint is retried by the next continuation — the one that runs after the
+// remaining dialogs are answered — instead of being lost for the turn.
+//
+// Suppressing rather than waiting is deliberate. The advisor runs synchronously
+// on the loop goroutine and can take minutes (a Claude Code CLI advisor runs up
+// to 5), so blocking here would park the agent loop on a human — the same hang
+// class as pinning an HTTP connection for a turn. Skipping also leaves the turn
+// itself untouched: only the second-model review is deferred.
+func (a *Agent) blockedByPendingAsk(st *advisorCheckpointState, kind string) bool {
+	if !st.pendingAsk {
+		return false
+	}
+	a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint skipped: a permission/question dialog is still unanswered, so the advisor waits for the user", kind))
+	return true
 }
 
 func lastUserContent(messages []Message) string {
@@ -147,6 +171,9 @@ func (a *Agent) advisorPlanCheckpoint(st *advisorCheckpointState, resp *Message)
 	if st.planChecked || len(resp.ToolCalls) == 0 || !a.advisorCheckpointEnabled(checkpointPlan) {
 		return nil
 	}
+	if a.blockedByPendingAsk(st, checkpointPlan) {
+		return nil
+	}
 	hasWrite := false
 	for _, tc := range resp.ToolCalls {
 		if isWriteTool(tc.Function.Name) {
@@ -195,6 +222,9 @@ Advise: is this the right approach? Wrong files, missing prior exploration, simp
 // turn end.
 func (a *Agent) advisorDoneCheckpoint(st *advisorCheckpointState, resp *Message) *Message {
 	if st.doneChecked || !a.advisorCheckpointEnabled(checkpointDone) {
+		return nil
+	}
+	if a.blockedByPendingAsk(st, checkpointDone) {
 		return nil
 	}
 	if st.writeCalls == 0 && st.toolCalls < doneCheckpointMinToolCalls {

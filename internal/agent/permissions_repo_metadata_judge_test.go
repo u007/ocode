@@ -15,7 +15,7 @@ import (
 func TestSandboxRepoMetadataReadsReachJudgeOrAllow(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.Permissions().SetWorkDir(t.TempDir())
 	a.Permissions().SetMode(PermissionModeSandbox)
 	a.Permissions().SetAutoPermissionEnabled(true)

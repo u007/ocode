@@ -3,8 +3,9 @@ import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
 import type { Project, ProjectGroup, SessionInfo, ServerProjectTabs } from "../api/types";
 import { eventBus } from "../lib/eventBus";
+import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "../lib/title";
 
-export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview";
+export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "preview" | "db";
 export type ProjectMetadataStatus = "loading" | "ready" | "error";
 
 export interface Tab {
@@ -174,18 +175,23 @@ export function dropCrossProjectDuplicateTabs(
   return changed ? out : tabsByProject;
 }
 
-/** Make every project's active tab id name a tab that still exists. A project
- *  with no tabs left loses its entry; one whose active tab is gone falls back to
- *  its last tab. Returns a new map. */
-export function repointActiveTabs(
+/** Reconciles active ids against a FINAL tab map: a project left with no tabs
+ *  loses its entry, and an id naming a tab that is not in its list (dropped as a
+ *  cross-project duplicate) moves to the last surviving tab.
+ *
+ *  Both tab-assembly paths MUST run this after `dropCrossProjectDuplicateTabs`,
+ *  because every id they resolved earlier was resolved against the pre-dedupe
+ *  lists. Without it the two paths disagree about which tab is active: the
+ *  restore leaves a dangling id while the refetch re-points it. */
+function reconcileActiveTabs(
   tabsByProject: Record<string, Tab[]>,
   activeTabByProject: Record<string, string | null>,
 ): Record<string, string | null> {
-  const out: Record<string, string | null> = {};
-  for (const [path, active] of Object.entries(activeTabByProject)) {
+  const out = { ...activeTabByProject };
+  for (const path of Object.keys(out)) {
     const list = tabsByProject[path];
-    if (!list) continue;
-    out[path] = list.some((t) => t.id === active) ? active : list[list.length - 1].id;
+    if (!list) delete out[path];
+    else if (!list.some((t) => t.id === out[path])) out[path] = list[list.length - 1].id;
   }
   return out;
 }
@@ -397,15 +403,13 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         if (localActive && merged.some((m) => m.id === localActive)) activeTabByProject[path] = localActive;
         else if (!activeTabByProject[path]) activeTabByProject[path] = merged[merged.length - 1].id;
       }
-      const dedupedTabs = dropCrossProjectDuplicateTabs(tabsByProject);
+      const deduped = dropCrossProjectDuplicateTabs(tabsByProject);
       return {
         ...state,
-        tabsByProject: dedupedTabs,
-        // Only when a duplicate was actually dropped: the active id may name the
-        // copy that was removed (or its project may have no tabs left), which
-        // would leave the project pointing at a tab that no longer exists.
-        activeTabByProject:
-          dedupedTabs === tabsByProject ? activeTabByProject : repointActiveTabs(dedupedTabs, activeTabByProject),
+        tabsByProject: deduped,
+        // Reconciled AFTER the dedupe: the ids above were resolved against the
+        // pre-dedupe lists, so one can name a tab this pass just dropped.
+        activeTabByProject: reconcileActiveTabs(deduped, activeTabByProject),
         tabsRestored: true,
       };
     }
@@ -478,7 +482,7 @@ interface RestoredTabs {
 const EMPTY_RESTORE: RestoredTabs = { tabsByProject: {}, activeTabByProject: {} };
 
 function toSubTab(v: unknown): SessionSubTabId {
-  return (v === "agents" || v === "changes" || v === "logs" || v === "status" || v === "preview" ? v : "chat") as SessionSubTabId;
+  return (v === "agents" || v === "changes" || v === "logs" || v === "status" || v === "preview" || v === "db" ? v : "chat") as SessionSubTabId;
 }
 
 /** Converts the server's `{root: {tabs, active}}` map into store shape,
@@ -494,7 +498,7 @@ function fromServerTabs(projects: Record<string, ServerProjectTabs> | null | und
       .map((t) => ({
         id: t.id,
         projectPath: path,
-        title: typeof t.title === "string" ? t.title : t.id,
+        title: typeof t.title === "string" ? truncateTitle(t.title, MAX_TITLE_TOOLTIP_CHARS) : t.id,
         activeSubTab: toSubTab(t.sub_tab),
       }));
     if (tabs.length === 0) continue;
@@ -602,13 +606,11 @@ function mergeExternalTabs(prev: ProjectState, external: RestoredTabs): Restored
   const dedupedByProject = dropCrossProjectDuplicateTabs(mergedByProject);
   // Remove projects that were deleted externally (no real nor new tabs), and
   // re-point an active id whose tab was dropped as a cross-project duplicate.
-  const repointedActive = repointActiveTabs(dedupedByProject, mergedActive);
-  for (const path of Object.keys(mergedActive)) delete mergedActive[path];
-  Object.assign(mergedActive, repointedActive);
+  const dedupedActive = reconcileActiveTabs(dedupedByProject, mergedActive);
   const prevStr = JSON.stringify({ tbp: prev.tabsByProject, atb: prev.activeTabByProject });
-  const nextStr = JSON.stringify({ tbp: dedupedByProject, atb: mergedActive });
+  const nextStr = JSON.stringify({ tbp: dedupedByProject, atb: dedupedActive });
   if (prevStr === nextStr) return null;
-  return { tabsByProject: dedupedByProject, activeTabByProject: mergedActive };
+  return { tabsByProject: dedupedByProject, activeTabByProject: dedupedActive };
 }
 
 interface ProjectContextType {

@@ -1,0 +1,14 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Checkout</title></head><body>
+<h1>Checkout</h1>
+<form method="post" action="/submit" autocomplete="off">
+<h2>Shipping</h2>
+<p><label>Full name <input name="ship_name"></label></p>
+<p><label>Street <input name="ship_street"></label></p>
+<p><label>City <input name="ship_city"></label></p>
+<p><label>Postal code <input name="ship_zip"></label></p>
+<h2>Payment</h2>
+<p><label>Card number <input name="card_number" inputmode="numeric"></label></p>
+<p><label>Expiry <input name="card_expiry" placeholder="MM/YY"></label></p>
+<p><label>CVV <input name="card_cvv"></label></p>
+<div style="position:absolute;left:-9999px" aria-hidden="true"><label>Leave this empty <input name="website" tabindex="-1" autocomplete="off"></label></div>
+<button type="submit">Place order ($89.00)</button></form></body></html>

@@ -126,8 +126,12 @@ func (h *Handler) HandleRemoteProxy(w http.ResponseWriter, r *http.Request) {
 			// request reconnects instead of reusing the dead entry forever —
 			// the same self-heal the proxy ErrorHandler performs on a
 			// round-trip failure, extended to the pre-proxy registration call
-			// that runs first.
-			h.remoteHosts.drop(host, remotePort)
+			// that runs first. Not when the browser itself cancelled the request
+			// (reload, tab close): that says nothing about the tunnel, and
+			// dropping it would cut every other in-flight request on the host.
+			if r.Context().Err() == nil {
+				h.remoteHosts.drop(host, remotePort)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			_ = json.NewEncoder(w).Encode(map[string]string{

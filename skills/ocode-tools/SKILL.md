@@ -51,7 +51,7 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool
 func LoadBuiltins(cfg *config.Config, svc any) ([]Tool, *lsp.Manager)
 ```
 
-Called from each process entry point, not from the agent: `internal/runcli/run.go:245`, `internal/server/scheduler_runner.go:43`, `internal/cli/goal.go:126`, `internal/acp/bridge.go:54` (TUI uses `InitBuiltinToolsWithComputerDriver` via `getInitialTools`, `tui/model.go:2270`). `NewAgent` only *receives* the resulting `[]tool.Tool`. Creates one shared `lsp.Manager` (lives as long as the session) and registers built-in tools. `svc` is an optional `*scheduler.Service` — when non-nil, the `cron` tool is included.
+Called from each process entry point, not from the agent: `internal/runcli/run.go:245`, `internal/server/scheduler_runner.go:43`, `internal/cli/goal.go:126`, `internal/acp/bridge.go:54` (TUI uses `InitBuiltinToolsWithComputerDriver` via `getInitialTools`, `tui/model.go:2322`). `NewAgent` only *receives* the resulting `[]tool.Tool`. Creates one shared `lsp.Manager` (lives as long as the session) and registers built-in tools. `svc` is an optional `*scheduler.Service` — when non-nil, the `cron` tool is included.
 
 ### Complete tool registry
 

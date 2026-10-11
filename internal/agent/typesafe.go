@@ -27,6 +27,18 @@ const typesafeRequestTimeout = 30 * time.Second
 // factory, permission-model picker, and config validation can treat
 // "typesafe/<model>" like any other provider/model id, but the only useful
 // call is Decide.
+//
+// It satisfies Decider (see decider.go) with NO changes: Decide, DecideCtx,
+// GetProvider and GetModel already exist, so widening a judge from
+// *TypesafeClient to Decider is a signature change rather than a rewrite. Keep
+// it that way — adding a method to Decider would break the narrowness that stops
+// a decision backend reaching a chat path.
+//
+// On state size: TypeSafe documents Jev's limits as "64k tokens per request; 32k
+// tokens for `state` plus the longest question". That 32k is STRICTER than
+// Cloudflare clef's flat 65,536, so a shared pre-flight state budget must be
+// sized to this number, not clef's. Nothing enforces it here — an oversized
+// `state` is simply sent, and what the API then does with it is unverified.
 type TypesafeClient struct {
 	APIKey  string
 	Model   string
@@ -97,13 +109,9 @@ func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map
 		ctx, cancel = context.WithTimeout(ctx, typesafeRequestTimeout)
 		defer cancel()
 	}
-	body, err := json.Marshal(map[string]any{
-		"state":     state,
-		"model":     c.Model,
-		"questions": questions,
-	})
+	body, err := c.marshalRequestBody(state, questions)
 	if err != nil {
-		return nil, fmt.Errorf("typesafe: marshal request: %w", err)
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/systemone", bytes.NewReader(body))
 	if err != nil {
@@ -134,6 +142,33 @@ func (c *TypesafeClient) DecideCtx(ctx context.Context, state any, questions map
 		return nil, fmt.Errorf("typesafe: decode response: %w", err)
 	}
 	return &out, nil
+}
+
+// marshalRequestBody builds the System One request body.
+//
+// It is extracted from DecideCtx so the wire contract can be asserted against
+// clef's buildBody directly: clef is meant to be a drop-in replacement, and the
+// only thing that may legitimately differ between the two bodies is the model
+// selector. See ClefClient.buildBody for why that selector differs.
+func (c *TypesafeClient) marshalRequestBody(state any, questions map[string]TypesafeQuestion) ([]byte, error) {
+	// Same shared guard as ClefClient.buildBody — one definition, so the two
+	// backends cannot drift on what counts as an acceptable state.
+	prepared, projected, err := prepareDecisionState(state)
+	if err != nil {
+		return nil, fmt.Errorf("typesafe: %w", err)
+	}
+	if projected {
+		emitDebug("AGENT", fmt.Sprintf("typesafe: projected bulky state fields down to fit the %d byte decision budget", decisionStateBudgetBytes))
+	}
+	body, err := json.Marshal(map[string]any{
+		"state":     prepared,
+		"model":     c.Model,
+		"questions": questions,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("typesafe: marshal request: %w", err)
+	}
+	return body, nil
 }
 
 // Chat always fails: see ErrTypesafeDecisionOnly.

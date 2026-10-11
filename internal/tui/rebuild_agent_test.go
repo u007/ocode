@@ -17,7 +17,7 @@ func TestRebuildAgentClientRewiresCompactCallbacks(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 
 	cfg := &config.Config{Model: "deepseek/deepseek-chat"}
-	prev := agent.NewAgent(fakeCompactSummaryClient{}, nil, cfg, nil)
+	prev := newTestAgent(fakeCompactSummaryClient{}, nil, cfg, nil)
 
 	m := model{
 		config:         cfg,
@@ -54,7 +54,7 @@ func TestRebuildAgentClientClearsStalePendingSubmit(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 
 	cfg := &config.Config{Model: "deepseek/deepseek-chat"}
-	prev := agent.NewAgent(fakeCompactSummaryClient{}, nil, cfg, nil)
+	prev := newTestAgent(fakeCompactSummaryClient{}, nil, cfg, nil)
 
 	m := model{
 		config:             cfg,
@@ -79,7 +79,7 @@ func TestRebuildAgentClientClearsStalePendingSubmit(t *testing.T) {
 
 func TestRebuildAgentClientPreservesOpenCodeSessionID(t *testing.T) {
 	cfg := &config.Config{Model: "opencode-go/mimo-v2.5"}
-	prev := agent.NewAgent(&agent.GenericClient{Provider: "opencode-go"}, nil, cfg, nil)
+	prev := newTestAgent(&agent.GenericClient{Provider: "opencode-go"}, nil, cfg, nil)
 	prev.SetOpenCodeSessionID("tui-session")
 
 	m := model{
@@ -109,7 +109,7 @@ func TestRebuildAgentClientBindsChangesSession(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 
 	cfg := &config.Config{Model: "deepseek/deepseek-chat"}
-	prev := agent.NewAgent(fakeCompactSummaryClient{}, nil, cfg, nil)
+	prev := newTestAgent(fakeCompactSummaryClient{}, nil, cfg, nil)
 	m := model{
 		config:         cfg,
 		agent:          prev,
@@ -128,7 +128,7 @@ func TestRebuildAgentClientBindsChangesSession(t *testing.T) {
 }
 
 func TestInstallAgentBindsChangesSession(t *testing.T) {
-	next := agent.NewAgent(nil, nil, nil, nil)
+	next := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(next.Shutdown)
 	m := model{config: &config.Config{}, sessionID: "ses_install"}
 

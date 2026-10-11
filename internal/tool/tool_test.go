@@ -21,6 +21,9 @@ import (
 // must appear. Any addition or removal from InitBuiltinTools must update
 // this list — it is the single source of truth for "what tools exist".
 var expectedBuiltinTools = []string{
+	"sqlite_schema",
+	"sqlite_query",
+	"sqlite_exec",
 	"read",
 	"undo_file_change",
 	"write",
@@ -923,5 +926,26 @@ func TestNormalizeLazyDirResolvesMissingCacheDir(t *testing.T) {
 	strict, ok := normalizeRootPath(missing)
 	if !ok || strict != got {
 		t.Fatalf("existing dir: normalizeRootPath=%q ok=%v, normalizeLazyDir=%q", strict, ok, got)
+	}
+}
+
+func TestSetExtraAllowedPaths_ExpandsLeadingTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := filepath.Join(home, "www", "proj")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	setExtraAllowedPaths([]string{"~/www/proj"})
+	t.Cleanup(func() { setExtraAllowedPaths(nil) })
+
+	want, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := getExtraAllowedRoots()
+	if len(roots) != 1 || roots[0] != want {
+		t.Fatalf("extra roots = %v, want [%s]", roots, want)
 	}
 }

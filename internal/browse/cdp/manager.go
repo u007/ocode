@@ -136,9 +136,20 @@ type ManagerOptions struct {
 	// into ocode's headless Chrome via --load-extension (see chromeArgsFor).
 	// Empty preserves the default --disable-extensions behavior. Resolved
 	// cross-platform (absolute or ~-relative path); validated at launch.
-	HTRExtensionDir   string
-	HTRSocketPath     string
+	HTRExtensionDir string
+	HTRSocketPath   string
+	// HTRNativeHostName is the namespaced native-messaging host ocode writes a
+	// manifest for. It is NOT passed to Chrome in shared mode (see
+	// htrLaunchConfig.NativeHostName); the manifest is what the preload
+	// resolves.
 	HTRNativeHostName string
+	// HTRSharedMode is SharedDaemon.Mode ("shared" or "private"). In shared
+	// mode the launcher withholds HTR_SOCKET_PATH from Chrome so the preload's
+	// relay falls back to htrcli's own default socket and reaches the same
+	// daemon the user's browser extension attaches to. Empty means private /
+	// today's behaviour, so a caller that never threads it keeps the legacy
+	// path.
+	HTRSharedMode string
 	// ProfileDir is Chrome's --user-data-dir. When set it is created and
 	// reused across launches so cookies/logins survive an ocode restart.
 	// Empty launches with an ephemeral temp profile (removed on exit).
@@ -322,7 +333,12 @@ func (m *Manager) defaultLaunch(ctx context.Context) (*Conn, <-chan int, func(),
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return launchChromeWithOptions(ctx, path, m.opts.Supervisor, m.opts.Log, resolveExtensionDir(m.opts.HTRExtensionDir), m.opts.HTRSocketPath, m.opts.HTRNativeHostName, m.opts.ProfileDir, m.opts.NoSandbox)
+	return launchChromeWithOptions(ctx, path, m.opts.Supervisor, m.opts.Log, htrLaunchConfig{
+		ExtensionDir:   resolveExtensionDir(m.opts.HTRExtensionDir),
+		SocketPath:     m.opts.HTRSocketPath,
+		NativeHostName: m.opts.HTRNativeHostName,
+		SharedMode:     m.opts.HTRSharedMode,
+	}, m.opts.ProfileDir, m.opts.NoSandbox)
 }
 
 func (m *Manager) watchExited(exited <-chan int) {

@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -225,5 +226,34 @@ func TestEnvironmentPrompt_CacheInvalidationOnCwd(t *testing.T) {
 	p3 := a.environmentPrompt()
 	if p1 != p3 {
 		t.Fatalf("expected cache hit after returning to dir1")
+	}
+}
+
+// Catches: probing `<tool> --version` on every call. The <env> block is rebuilt
+// for every sub-agent, so an uncached probe added about a second of subprocess
+// spawns to each dispatch.
+func TestToolVersionProbesEachBinaryOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell-script fake tool")
+	}
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\necho x >> " + counter + "\necho faketool 1.2.3\n"
+	if err := os.WriteFile(filepath.Join(dir, "ocodefaketool"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	for i := 0; i < 3; i++ {
+		if got := toolVersion("ocodefaketool"); got != "faketool 1.2.3" {
+			t.Fatalf("call %d: version = %q, want faketool 1.2.3", i, got)
+		}
+	}
+	calls, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(calls), "x"); n != 1 {
+		t.Fatalf("the tool was spawned %d times for 3 lookups, want 1", n)
 	}
 }

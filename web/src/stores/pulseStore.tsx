@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { api } from "../api/client";
@@ -390,4 +391,35 @@ export function usePulse(): PulseApi {
   const ctx = useContext(PulseContext);
   if (!ctx) throw new Error("usePulse must be used within PulseProvider");
   return ctx;
+}
+
+// ── Focus mode ──
+//
+// Which session the dashboard is showing in detail, or null for the grid.
+// Module state rather than React state or per-project persistence, on purpose:
+// it must survive Cmd+J leaving and re-entering the dashboard (PulseView
+// unmounts), yet must never leak into a project's saved view state, because the
+// dashboard is global. An external store keeps that without a provider.
+
+let focusedSessionId: string | null = null;
+const focusListeners = new Set<() => void>();
+
+/** Focus a session in the dashboard, or pass null to return to the grid. */
+export function setPulseFocus(sessionId: string | null): void {
+  if (focusedSessionId === sessionId) return;
+  focusedSessionId = sessionId;
+  focusListeners.forEach((l) => l());
+}
+
+function subscribeFocus(listener: () => void): () => void {
+  focusListeners.add(listener);
+  return () => {
+    focusListeners.delete(listener);
+  };
+}
+
+/** The focused session id (null = grid) and its setter. */
+export function usePulseFocus(): [string | null, (sessionId: string | null) => void] {
+  const id = useSyncExternalStore(subscribeFocus, () => focusedSessionId);
+  return [id, setPulseFocus];
 }

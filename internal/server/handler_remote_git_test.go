@@ -20,17 +20,86 @@ import (
 // git/files pipeline is exercised end-to-end (ExecCommand → exec → parse)
 // without a network.
 
+// fakeSSHScript renders the local-exec fake `ssh` shim used by the remote
+// git/file/shell tests. A non-empty logPath records each invocation.
+//
+// It must stay POSIX: Ubuntu's /bin/sh is dash, which rejects bash arrays with
+// `Syntax error: "(" unexpected`, while macOS /bin/sh is bash and silently
+// accepted them — so every remote-git test passed on darwin and failed on
+// Linux. A `for` loop over "$@" leaves $a holding the LAST argument, which is
+// what the old array subscript did. TestFakeSSHScriptIsDashCompatible pins this.
+func fakeSSHScript(logPath string) string {
+	script := "#!/bin/sh\n"
+	if logPath != "" {
+		script += "printf '%s\\n' \"$*\" >> " + logPath + "\n"
+	}
+	// Drop our own control options, then treat the last arg as the command and
+	// run it locally.
+	return script +
+		"for a in \"$@\"; do :; done\n" +
+		"exec /bin/sh -c \"$a\"\n"
+}
+
+// posixShell returns a real POSIX shell that is NOT bash. macOS's /bin/sh is
+// bash in POSIX mode and happily accepts the bash-isms that broke Linux CI, so
+// it cannot detect them — only a genuine dash (or equivalent) can.
+func posixShell(t *testing.T) string {
+	t.Helper()
+	for _, c := range []string{"dash", "/bin/dash"} {
+		if p, err := exec.LookPath(c); err == nil {
+			return p
+		}
+	}
+	// /bin/sh is dash on Debian/Ubuntu and bash on macOS; accept it only when
+	// it reports no bash version.
+	if out, err := exec.Command("/bin/sh", "-c", "echo ${BASH_VERSION:-}").Output(); err == nil && strings.TrimSpace(string(out)) == "" {
+		return "/bin/sh"
+	}
+	t.Skip("no non-bash POSIX shell on this host; Ubuntu CI has dash at /bin/sh")
+	return ""
+}
+
+// TestFakeSSHScriptIsDashCompatible runs the rendered shim under a genuine
+// POSIX shell. Without this the shim silently regresses to bash-only syntax
+// and every remote-git/file/shell test passes on darwin while failing on Linux
+// — which is exactly what happened.
+func TestFakeSSHScriptIsDashCompatible(t *testing.T) {
+	shell := posixShell(t)
+	for _, logPath := range []string{"", filepath.Join(t.TempDir(), "ssh-invocations")} {
+		script := fakeSSHScript(logPath)
+		path := filepath.Join(t.TempDir(), "ssh")
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Parse first: this is the step that fails on dash for arrays.
+		if out, err := exec.Command(shell, "-n", path).CombinedOutput(); err != nil {
+			t.Fatalf("shim (logPath=%q) is not POSIX: %v\n%s\nrendered:\n%s", logPath, err, out, script)
+		}
+		// Then execute: the LAST argument must run as the command.
+		out, err := exec.Command(shell, path, "-o", "BatchMode=yes", "host", "echo SHIM-OK").CombinedOutput()
+		if err != nil {
+			t.Fatalf("shim (logPath=%q) failed to execute under %s: %v\n%s", logPath, shell, err, out)
+		}
+		if !strings.Contains(string(out), "SHIM-OK") {
+			t.Fatalf("shim (logPath=%q) did not forward the last argument as the command; got %q", logPath, out)
+		}
+		if logPath != "" {
+			b, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("shim (logPath=%q) did not record the invocation: %v", logPath, err)
+			}
+			if !strings.Contains(string(b), "BatchMode=yes") {
+				t.Fatalf("shim (logPath=%q) recorded %q, want the invocation args", logPath, b)
+			}
+		}
+	}
+}
+
 func installFakeSSH(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "ssh")
-	script := "#!/bin/sh\n" +
-		// Drop our own control options, then treat the last arg as the
-		// command and run it locally.
-		"args=()\n" +
-		"for a in \"$@\"; do args+=(\"$a\"); done\n" +
-		"cmd=\"${args[${#args[@]}-1]}\"\n" +
-		"exec /bin/sh -c \"$cmd\"\n"
+	script := fakeSSHScript("")
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake ssh: %v", err)
 	}

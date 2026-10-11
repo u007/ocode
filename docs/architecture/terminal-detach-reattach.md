@@ -36,7 +36,7 @@ Server (`internal/server/terminal_session.go`, `terminal_session_table.go`,
   disk history log before forwarding it, and also keeps a **256 KB replay
   buffer** (trimmed to a line boundary) for the fast no-cursor reattach path.
   The disk log survives shell exit and server restart.
-- **Socket close = detach**, not kill. A 30 min TTL timer
+- **Socket close = detach**, not kill. A 2 h TTL timer
   (`terminalDetachTTL`) arms; if nobody reattaches, the shell is reaped via
   `terminateProcessTree` (SIGTERM → 2 s → SIGKILL).
 - A new `GET /api/terminal/ws?terminal_id=X` for a live session

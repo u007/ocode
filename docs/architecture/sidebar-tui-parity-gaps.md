@@ -26,7 +26,7 @@ The TUI sidebar and the web sidebar (`CoworkSidebar`) should present equivalent 
 
 ## TUI sidebar layout
 
-The TUI sidebar (`buildSidebarRenderData` in `internal/tui/model.go:15507`) has three zones:
+The TUI sidebar (`buildSidebarRenderData` in `internal/tui/model.go:21175`) has three zones:
 
 ### Pinned top (rendered in `topLines`)
 - Mode badge (`[CODE]`/`[PLAN]`) + model name

@@ -85,7 +85,7 @@ func TestTaskSubagentLogsInheritParentSession(t *testing.T) {
 		{Role: "assistant", ToolCalls: []ToolCall{bashCall}},
 		{Role: "assistant", Content: "done"},
 	}}
-	parent := NewAgent(client, nil, nil, nil)
+	parent := newTestAgent(client, nil, nil, nil)
 	parent.SetWorkDir(workDir)
 	parent.SetSessionID("ses_tasklogs")
 	parent.Permissions().SetRule("task", PermissionAllow)

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -123,5 +124,35 @@ func TestDAGResultsCarryNoticeAndDisplayContent(t *testing.T) {
 	}
 	if msgs[0].DisplayContent != long {
 		t.Fatal("truncated DAG result must keep the full text in DisplayContent")
+	}
+}
+
+// Finding: the DAG path handed the scheduler the unkeyed content guard, so a
+// host-written result (a permission ask, a denial) was judged as remote content.
+// The guard must receive the node's tool-call id — that is what lets
+// guardExecutedToolResult skip a call whose tool never ran.
+func TestDAGGuardReceivesToolCallID(t *testing.T) {
+	calls := []ToolCall{
+		dagCall("c1", "task", `{"prompt":"p","id":"a"}`),
+		dagCall("c2", "task", `{"prompt":"p","id":"b","depends_on":["a"]}`),
+	}
+	dispatch := func(tc ToolCall, _ *taskBinding, _ string, _ string) (string, []Image, error) {
+		return "out:" + tc.ID, nil, nil
+	}
+	var mu sync.Mutex
+	seen := map[string]string{}
+	guard := func(_ context.Context, toolCallID, _, _, content string) string {
+		mu.Lock()
+		seen[toolCallID] = content
+		mu.Unlock()
+		return content
+	}
+	if _, err := runDAGFromValidated(calls, nil, func() bool { return false }, nil, nil, nil, dispatch, nil, guard); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["c1"] != "out:c1" || seen["c2"] != "out:c2" {
+		t.Fatalf("guard must be keyed on each node's tool-call id, saw %v", seen)
 	}
 }

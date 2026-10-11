@@ -22,12 +22,12 @@ const DefaultTheme = "ocode-dark"
 
 // Settings holds all configurable Monaco editor options.
 type Settings struct {
-	Theme     string `json:"theme"`      // Monaco theme ID
-	FontSize  int    `json:"font_size"`  // Editor font size in px
-	TabSize   int    `json:"tab_size"`   // Spaces per tab
-	WordWrap  bool   `json:"word_wrap"`  // Enable word wrapping
-	Minimap   bool   `json:"minimap"`    // Show minimap
-	LineNumbers bool `json:"line_numbers"`
+	Theme       string `json:"theme"`     // Monaco theme ID
+	FontSize    int    `json:"font_size"` // Editor font size in px
+	TabSize     int    `json:"tab_size"`  // Spaces per tab
+	WordWrap    bool   `json:"word_wrap"` // Enable word wrapping
+	Minimap     bool   `json:"minimap"`   // Show minimap
+	LineNumbers bool   `json:"line_numbers"`
 }
 
 // DefaultSettings returns a fresh Settings with sensible defaults.
@@ -44,10 +44,10 @@ func DefaultSettings() Settings {
 
 // Extension descibes a toggleable Monaco language service.
 type Extension struct {
-	Name        string `json:"name"`
-	Label       string `json:"label"`
-	Enabled     bool   `json:"enabled"`
-	Builtin     bool   `json:"builtin"` // true = Monaco built-in, false = custom
+	Name    string `json:"name"`
+	Label   string `json:"label"`
+	Enabled bool   `json:"enabled"`
+	Builtin bool   `json:"builtin"` // true = Monaco built-in, false = custom
 }
 
 // BuiltinExtensions returns the default set of Monaco language services.

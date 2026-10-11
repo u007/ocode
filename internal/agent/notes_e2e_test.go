@@ -44,11 +44,11 @@ func TestNotesBusE2E(t *testing.T) {
 	}
 
 	// Wire children to the bus.
-	a1 := NewAgent(&MockClient{}, nil, nil, nil)
+	a1 := newTestAgent(&MockClient{}, nil, nil, nil)
 	a1.SetNoteBus(bus, "a1")
-	a2 := NewAgent(&MockClient{}, nil, nil, nil)
+	a2 := newTestAgent(&MockClient{}, nil, nil, nil)
 	a2.SetNoteBus(bus, "a2")
-	a3 := NewAgent(&MockClient{}, nil, nil, nil)
+	a3 := newTestAgent(&MockClient{}, nil, nil, nil)
 	a3.SetNoteBus(bus, "a3")
 
 	// Tracker (orchestrator-side).
@@ -203,7 +203,7 @@ func TestNotesBusE2E_NothingNewLoopsInjectNothing(t *testing.T) {
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
 
-	a1 := NewAgent(&MockClient{}, nil, nil, nil)
+	a1 := newTestAgent(&MockClient{}, nil, nil, nil)
 	a1.SetNoteBus(bus, "a1")
 
 	// Seed an entry so the first delta is non-empty.

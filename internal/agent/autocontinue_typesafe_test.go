@@ -33,7 +33,7 @@ func newAutoContinueTypesafeJudge(t *testing.T, reply string) (*Agent, *typesafe
 	cfg := &config.Config{}
 	cfg.Ocode.AutoContinueModel = "typesafe/jev-latest"
 	cfg.Ocode.AutoContinueEnabled = true
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -136,7 +136,7 @@ func TestAutoContinueGenericJudgePromptCoversAwaitingUser(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.AutoContinueModel = "opencode-go/gpt-x"
 	cfg.Ocode.AutoContinueEnabled = true
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 
 	resume, _, err := a.AutoContinueJudgeSync([]Message{
 		{Role: "assistant", Content: "Step 1 is done. Should I proceed with step 2?"},
@@ -298,7 +298,7 @@ func TestAutoContinueJudgeAsyncContinuousJudgeDetail(t *testing.T) {
 	// The continuous judge (chat/prose path) must still work and carry a Detail naming the model.
 	cfg := &config.Config{}
 	cfg.Ocode.AutoContinueModel = "opencode-go/mimo-v2.5"
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -324,7 +324,7 @@ func TestAutoContinueJudgeAsyncContinuousJudgeDetailOnError(t *testing.T) {
 	// like a silent finish (the defect this feature exists to remove).
 	cfg := &config.Config{}
 	cfg.Ocode.AutoContinueModel = "opencode-go/mimo-v2.5"
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {

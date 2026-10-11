@@ -26,6 +26,9 @@ const h = vi.hoisted(() => ({
     container: HTMLElement | null;
     surface: HTMLElement | null;
     wheelHandler: ((e: WheelEvent) => void) | null;
+    modes: { mouseTrackingMode: string };
+    scrollLines: ReturnType<typeof vi.fn>;
+    input: ReturnType<typeof vi.fn>;
   }>,
 }));
 
@@ -48,6 +51,10 @@ vi.mock("@xterm/xterm", () => {
     rows = 24;
     options: Record<string, unknown> = {};
     buffer = { active: { length: 24 } };
+    modes = { mouseTrackingMode: "none" };
+    element: HTMLElement | null = null;
+    scrollLines = vi.fn();
+    input = vi.fn();
     container: HTMLElement | null = null;
     surface: HTMLElement | null = null;
     wheelHandler: ((e: WheelEvent) => void) | null = null;
@@ -78,6 +85,14 @@ vi.mock("@xterm/xterm", () => {
       surface.className = "xterm";
       container.appendChild(surface);
       this.surface = surface;
+      // Real xterm exposes its root as `element`, with the cell grid in
+      // `.xterm-screen`. jsdom has no layout, so pin a 480x240 grid
+      // (24 rows -> 10px per row) starting at (0, 0).
+      const screen = document.createElement("div");
+      screen.className = "xterm-screen";
+      screen.getBoundingClientRect = () => new DOMRect(0, 0, 480, 240);
+      surface.appendChild(screen);
+      this.element = surface;
       this.wheelHandler = (e: WheelEvent) => {
         if (e.defaultPrevented) return;
         e.preventDefault();
@@ -270,5 +285,71 @@ describe("TerminalPanel wheel gestures stay inside the terminal", () => {
   it("marks the container as an overscroll boundary", async () => {
     await mountPanel();
     expect(containerOf().className).toContain("overscroll-contain");
+  });
+});
+
+// xterm 6 has no touch scrolling of its own (its Gesture class is never
+// registered on the viewport), so a one-finger drag on a phone browser did
+// nothing. Synthetic wheel events are not a way out — xterm ignores untrusted
+// ones (verified in a real browser) — so the panel drives xterm's API: cell
+// rows of drag become scrollLines, or SGR wheel reports when a TUI owns the
+// mouse.
+function dispatchTouch(el: HTMLElement, type: string, touches: Array<{ clientX: number; clientY: number }>) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "touches", { value: touches });
+  act(() => {
+    el.dispatchEvent(event);
+  });
+}
+
+const at = (clientY: number, clientX = 5) => [{ clientX, clientY }];
+
+describe("TerminalPanel touch drags scroll the terminal", () => {
+  it("opts the container out of native touch panning", async () => {
+    await mountPanel();
+    expect(containerOf().className).toContain("touch-none");
+  });
+
+  it("scrolls scrollback by whole rows, carrying the remainder (drag down scrolls up)", async () => {
+    await mountPanel();
+    const surface = surfaceOf();
+    const term = h.terminals[0];
+
+    dispatchTouch(surface, "touchstart", at(100));
+    dispatchTouch(surface, "touchmove", at(125)); // 25px = 2 rows + 5px carried
+    expect(term.scrollLines).toHaveBeenLastCalledWith(-2);
+    dispatchTouch(surface, "touchmove", at(120)); // -5px more drag back: net 0 rows
+    expect(term.scrollLines).toHaveBeenCalledTimes(1);
+    dispatchTouch(surface, "touchmove", at(100)); // 20px up
+    expect(term.scrollLines).toHaveBeenLastCalledWith(2);
+    expect(term.input).not.toHaveBeenCalled();
+  });
+
+  it("sends SGR wheel reports instead when an app owns the mouse", async () => {
+    await mountPanel();
+    const surface = surfaceOf();
+    const term = h.terminals[0];
+    term.modes.mouseTrackingMode = "any";
+
+    dispatchTouch(surface, "touchstart", at(100, 245));
+    dispatchTouch(surface, "touchmove", at(70, 245)); // 30px up = 3 rows of wheel-down
+    // x=245 of 480 over 80 cols -> col 41; y=70 of 240 over 24 rows -> row 8.
+    expect(term.input).toHaveBeenCalledWith("\x1b[<65;41;8M".repeat(3), true);
+    expect(term.scrollLines).not.toHaveBeenCalled();
+  });
+
+  it("ignores multi-touch and stops after the touch ends", async () => {
+    await mountPanel();
+    const surface = surfaceOf();
+    const term = h.terminals[0];
+
+    dispatchTouch(surface, "touchstart", [...at(100), ...at(100, 50)]);
+    dispatchTouch(surface, "touchmove", [...at(140), ...at(140, 50)]);
+    expect(term.scrollLines).not.toHaveBeenCalled();
+
+    dispatchTouch(surface, "touchstart", at(100));
+    dispatchTouch(surface, "touchend", []);
+    dispatchTouch(surface, "touchmove", at(140));
+    expect(term.scrollLines).not.toHaveBeenCalled();
   });
 });

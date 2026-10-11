@@ -154,7 +154,7 @@ func TestSilenceCmdOutput(t *testing.T) {
 // a panic error instead of hanging.
 func TestStreamStepRecoversFromPanic(t *testing.T) {
 	m := model{
-		agent:  agent.NewAgent(panickingClient{}, nil, nil, nil),
+		agent:  newTestAgent(panickingClient{}, nil, nil, nil),
 		styles: ApplyThemeColors("tokyonight"),
 	}
 	batch := m.streamStep([]agent.Message{{Role: "user", Content: "hi"}})
@@ -189,7 +189,7 @@ func TestStreamStepRecoversFromPanic(t *testing.T) {
 
 func TestArmActivityListenerCancelsPrevious(t *testing.T) {
 	m := model{
-		agent:  agent.NewAgent(retryTestClient{}, nil, nil, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, nil, nil),
 		styles: ApplyThemeColors("tokyonight"),
 	}
 	cmd1 := m.armActivityListener()
@@ -593,7 +593,7 @@ func TestRenderStatusReflectsCommandRunningState(t *testing.T) {
 
 func TestRenderStatusUsesActiveAgentSpec(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
+		agent:     newTestAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -611,7 +611,7 @@ func TestRenderStatusUsesActiveAgentSpec(t *testing.T) {
 
 func TestSwitchAgentRejectsHiddenHelper(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
+		agent:     newTestAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -641,7 +641,7 @@ func TestSwitchAgentRejectsHiddenHelper(t *testing.T) {
 
 func TestHandleCommandSlashDispatchRejectsHiddenHelper(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
+		agent:     newTestAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -710,7 +710,7 @@ func TestSlashCommandExcludedFromPersistedAndLLM(t *testing.T) {
 
 func TestRunAgentCmdRejectsHiddenHelper(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
+		agent:     newTestAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -730,9 +730,9 @@ func TestRunAgentCmdRejectsHiddenHelper(t *testing.T) {
 }
 
 func TestRenderStatusShowsActiveSubagentModel(t *testing.T) {
-	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil, nil)
+	mainAgent := newTestAgent(retryTestClient{}, nil, nil, nil)
 	run := mainAgent.Runs().New("explore")
-	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil, nil)
+	run.Sub = newTestAgent(retryTestClient{}, nil, nil, nil)
 
 	m := model{
 		agent:     mainAgent,
@@ -785,7 +785,7 @@ func TestAlwaysAllowConfirmationDefersPersist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // isolate persistPermissions disk writes
 
 	newModel := func() model {
-		a := agent.NewAgent(retryTestClient{}, []tool.Tool{askOnlyTool{}}, nil, nil)
+		a := newTestAgent(retryTestClient{}, []tool.Tool{askOnlyTool{}}, nil, nil)
 		a.Permissions().SetRule("ask_tool", agent.PermissionAsk)
 		m := model{
 			agent:             a,
@@ -855,9 +855,9 @@ func TestAlwaysAllowConfirmationDefersPersist(t *testing.T) {
 }
 
 func TestRenderAgentStripShowsRunModelLabel(t *testing.T) {
-	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil, nil)
+	mainAgent := newTestAgent(retryTestClient{}, nil, nil, nil)
 	run := mainAgent.Runs().New("explore")
-	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil, nil)
+	run.Sub = newTestAgent(retryTestClient{}, nil, nil, nil)
 
 	m := model{
 		agent:  mainAgent,
@@ -1050,7 +1050,7 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 		{Role: "assistant", Content: "child complete"},
 		{Role: "assistant", Content: "parent complete"},
 	}}
-	a := agent.NewAgent(client, []tool.Tool{askOnlyTool{}}, nil, nil)
+	a := newTestAgent(client, []tool.Tool{askOnlyTool{}}, nil, nil)
 	a.Permissions().SetRule("task", agent.PermissionAllow)
 	a.Permissions().SetRule("ask_tool", agent.PermissionAsk)
 
@@ -1301,7 +1301,7 @@ func TestExecuteApprovedTool_UsesTemporaryOutOfScopePathAllowance(t *testing.T) 
 		t.Fatalf("did not expect %q to be pre-allowed", outsideRoot)
 	}
 
-	a := agent.NewAgent(nil, []tool.Tool{&tool.ReadTool{}}, nil, nil)
+	a := newTestAgent(nil, []tool.Tool{&tool.ReadTool{}}, nil, nil)
 	m := model{agent: a, pendingToolCallID: "tc-1"}
 	args := json.RawMessage(`{"path":"` + target + `"}`)
 
@@ -1587,7 +1587,7 @@ func TestCtrlBMovesForegroundBashToBackgroundBeforeTogglingSidebar(t *testing.T)
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX bash command setup")
 	}
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	cmd := exec.Command("bash", "-c", "sleep 30")
 	if _, err := a.Procs().RegisterForeground("sleep 30", cmd, time.Now(), nil); err != nil {
 		t.Fatalf("RegisterForeground error: %v", err)
@@ -1624,7 +1624,7 @@ func TestCtrlOTogglesYoloMode(t *testing.T) {
 	m := model{
 		input:    textarea.New(),
 		viewport: fastviewport.New(80, 20),
-		agent:    agent.NewAgent(nil, nil, nil, nil),
+		agent:    newTestAgent(nil, nil, nil, nil),
 	}
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
@@ -1648,7 +1648,7 @@ func TestRunOptionsYOLOSetsPermissionMode(t *testing.T) {
 	// SetMode(PermissionModeYOLO) on the constructed agent's permissions.
 	// We exercise that path on a manually-constructed model so this test
 	// is independent of NewClient's model/credential resolution.
-	m := model{agent: agent.NewAgent(retryTestClient{}, nil, nil, nil)}
+	m := model{agent: newTestAgent(retryTestClient{}, nil, nil, nil)}
 	if m.agent.Permissions() == nil {
 		t.Fatal("expected constructed agent to have permissions")
 	}
@@ -1686,7 +1686,7 @@ func TestRunOptionsPermissionModeOffDisablesAutoPermission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = newModel(RunOptions{PermissionMode: "off"})
+	_ = newTestModel(RunOptions{PermissionMode: "off"})
 
 	// Verify the change was persisted to disk; the in-memory agent wire is
 	// tested separately via PermissionManager.SetAutoPermissionEnabled.
@@ -1730,7 +1730,7 @@ func TestRunOptionsPermissionModeAutoEnablesAutoPermission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = newModel(RunOptions{PermissionMode: "auto"})
+	_ = newTestModel(RunOptions{PermissionMode: "auto"})
 
 	data, err := os.ReadFile(filepath.Join(cfgDir, "ocodeconfig.json"))
 	if err != nil {
@@ -1773,7 +1773,7 @@ func TestRunOptionsYOLODisablesAutoPermission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := newModel(RunOptions{YOLO: true})
+	m := newTestModel(RunOptions{YOLO: true})
 	if m.agent == nil || m.agent.Permissions() == nil {
 		t.Fatal("expected agent permissions to be initialized")
 	}
@@ -1807,7 +1807,7 @@ func TestRunOptionsPermissionModeInvalidDoesNotMutateConfig(t *testing.T) {
 	// defense in depth: an unknown value reaching newModel must not
 	// flip the persisted permissions.auto.enabled bit. Other fields
 	// (e.g. small_model) may be re-saved as part of normal startup.
-	_ = newModel(RunOptions{PermissionMode: "bogus"})
+	_ = newTestModel(RunOptions{PermissionMode: "bogus"})
 
 	data, err := os.ReadFile(filepath.Join(cfgDir, "ocodeconfig.json"))
 	if err != nil {
@@ -1851,7 +1851,7 @@ func TestPersistPermissionsPreservesAutoBlock(t *testing.T) {
 		t.Fatalf("LoadOcodeConfig failed: %v", err)
 	}
 
-	m := model{config: &cfg, agent: agent.NewAgent(nil, nil, &cfg, nil)}
+	m := model{config: &cfg, agent: newTestAgent(nil, nil, &cfg, nil)}
 	m.agent.Permissions().SetAutoPermissionEnabled(true)
 	m.permDirty.autoEnabled = true
 	m.setToolPermission("ask_tool", agent.PermissionAllow)
@@ -1918,7 +1918,7 @@ func TestPersistPermissionsKeepsDirtyOnSaveFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := model{config: &cfg, agent: agent.NewAgent(nil, nil, &cfg, nil)}
+	m := model{config: &cfg, agent: newTestAgent(nil, nil, &cfg, nil)}
 	m.agent.Permissions().SetAutoPermissionEnabled(true)
 	m.permDirty.autoEnabled = true
 	m.persistPermissions()
@@ -2012,7 +2012,7 @@ func TestMCPCmdListsConfiguredServers(t *testing.T) {
 		config: &config.Config{MCP: map[string]config.MCPConfig{
 			"demo": {Type: "local", Enabled: true},
 		}},
-		agent: agent.NewAgent(nil, nil, nil, nil),
+		agent: newTestAgent(nil, nil, nil, nil),
 	}
 	m.agent.RestoreMCPToolNames([]string{"demo_search"})
 
@@ -2085,7 +2085,7 @@ func TestRunExitCmdDoesNotBlockOnCleanup(t *testing.T) {
 func TestCleanupCurrentSessionDeduplicatesRepeatedCalls(t *testing.T) {
 	cleanupCalls := 0
 	shutdownCalls := 0
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	m := model{
 		agent: a,
 		cleanupState: &modelCleanupState{
@@ -3893,7 +3893,7 @@ func TestNewModelRecordsMissingSessionLoadError(t *testing.T) {
 	}
 	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
 
-	m := newModel(RunOptions{SessionID: "this-session-does-not-exist-xyz"})
+	m := newTestModel(RunOptions{SessionID: "this-session-does-not-exist-xyz"})
 	if m.sessionLoadErr == nil {
 		t.Fatal("expected sessionLoadErr to be set when the requested session is missing")
 	}
@@ -4169,7 +4169,7 @@ func TestCtrlYRetriesLastRetryableLLMError(t *testing.T) {
 	m := model{
 		input:               textarea.New(),
 		viewport:            fastviewport.New(80, 20),
-		agent:               agent.NewAgent(retryTestClient{}, nil, nil, nil),
+		agent:               newTestAgent(retryTestClient{}, nil, nil, nil),
 		lastRetryableLLMErr: errText,
 		messages: []message{
 			{role: roleUser, text: "please retry"},
@@ -4359,7 +4359,7 @@ func TestMouseWheelScrollsTranscriptOverMessagesAndComposer(t *testing.T) {
 }
 
 func TestMouseWheelScrollsAgentDetailView(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	msgs := make([]agent.Message, 0, 80)
 	for i := 0; i < 40; i++ {
@@ -4396,7 +4396,7 @@ func TestMouseWheelScrollsAgentDetailView(t *testing.T) {
 }
 
 func TestAgentDetailScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	msgs := make([]agent.Message, 0, 120)
 	for i := 0; i < 60; i++ {
@@ -4442,9 +4442,9 @@ func TestAgentDetailScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
 }
 
 func TestAgentDetailClickOpensNestedSubAgent(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
-	run.Sub = agent.NewAgent(nil, nil, nil, nil)
+	run.Sub = newTestAgent(nil, nil, nil, nil)
 	child := run.Sub.Runs().New("child")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
 	setRunTranscriptForTest(child, agent.Message{Role: "assistant", Content: "child"})
@@ -4481,11 +4481,11 @@ func TestAgentDetailClickOpensNestedSubAgent(t *testing.T) {
 // of the immediate child, because row-range metadata for nested blocks
 // drifted by one row per ancestor level.
 func TestAgentDetailClickOpensImmediateChildNotGrandchild(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	root := a.Runs().New("root")
-	root.Sub = agent.NewAgent(nil, nil, nil, nil)
+	root.Sub = newTestAgent(nil, nil, nil, nil)
 	child := root.Sub.Runs().New("child")
-	child.Sub = agent.NewAgent(nil, nil, nil, nil)
+	child.Sub = newTestAgent(nil, nil, nil, nil)
 	grandchild := child.Sub.Runs().New("grandchild")
 	setRunTranscriptForTest(root, agent.Message{Role: "assistant", Content: "root"})
 	setRunTranscriptForTest(child, agent.Message{Role: "assistant", Content: "child"})
@@ -4519,7 +4519,7 @@ func TestAgentDetailClickOpensImmediateChildNotGrandchild(t *testing.T) {
 }
 
 func TestMouseWheelScrollsAgentDetailViewport(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	msgs := make([]agent.Message, 0, 60)
 	for i := 0; i < 60; i++ {
@@ -4554,7 +4554,7 @@ func TestMouseWheelScrollsAgentDetailViewport(t *testing.T) {
 }
 
 func TestAgentDetailSuppressesHiddenInputEditing(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
 
@@ -5385,7 +5385,7 @@ func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 		width:       80,
 		height:      24,
 		streaming:   true,
-		agent:       agent.NewAgent(nil, nil, nil, nil),
+		agent:       newTestAgent(nil, nil, nil, nil),
 		input:       newTestTextarea(),
 		viewport:    fastviewport.New(76, 20),
 		styles:      ApplyThemeColors("tokyonight"),
@@ -5413,7 +5413,7 @@ func TestStreamDoneInterruptedDoesNotStartNextQueuedInput(t *testing.T) {
 		width:       80,
 		height:      24,
 		streaming:   true,
-		agent:       agent.NewAgent(nil, nil, nil, nil),
+		agent:       newTestAgent(nil, nil, nil, nil),
 		input:       newTestTextarea(),
 		viewport:    fastviewport.New(76, 20),
 		styles:      ApplyThemeColors("tokyonight"),
@@ -5682,7 +5682,7 @@ func TestConnectMouseSelectsProviderAndMethodRows(t *testing.T) {
 }
 
 func TestFlushQueuedSubmitSendsWhenReady(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { a.Shutdown() })
 	m := model{
 		input:              textarea.New(),
@@ -5706,8 +5706,8 @@ func TestFlushQueuedSubmitSendsWhenReady(t *testing.T) {
 }
 
 func TestInstallAgentClearsQueuedSubmitOnSwap(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
-	nextAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
+	nextAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() {
 		oldAgent.Shutdown()
 		nextAgent.Shutdown()
@@ -5734,7 +5734,7 @@ func TestInstallAgentClearsQueuedSubmitOnSwap(t *testing.T) {
 func TestHandleModelCmdPreservesMCPProvenance(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := model{config: &config.Config{Model: "gpt-4o"}}
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { a.Shutdown() })
 	a.RestoreMCPToolNames([]string{"demo_tool"})
 	m.agent = a
@@ -5788,7 +5788,7 @@ func TestResetSessionAgentCreatesStubAgentWhenClientMissing(t *testing.T) {
 func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 	spend := 0.5
 	cleanupCalls := 0
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
 	m := model{
 		sessionTelemetry: sidebarTelemetry{
 			inputTokens:  10,
@@ -5828,7 +5828,7 @@ func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 }
 
 func TestHandleNewCmdCancelsOldRunningAndQueuedAgentsBeforeAdmission(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, &config.Config{Ocode: config.OcodeConfig{MaxConcurrentAgents: 1}}, nil)
+	oldAgent := newTestAgent(nil, nil, &config.Config{Ocode: config.OcodeConfig{MaxConcurrentAgents: 1}}, nil)
 	newAgentReady := false
 	t.Cleanup(func() {
 		oldAgent.Shutdown()
@@ -5893,7 +5893,7 @@ func TestHandleNewCmdCancelsOldRunningAndQueuedAgentsBeforeAdmission(t *testing.
 }
 
 func TestHandleNewCmdReplacesSupervisor(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
 	oldSupervisor := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
 	oldAgent.SetSupervisor(oldSupervisor)
 	m := model{
@@ -6046,8 +6046,8 @@ func lastMessageText(msgs []message) string {
 }
 
 func TestActivityUpdateFromPreviousAgentIgnored(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
-	newAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
+	newAgent := newTestAgent(nil, nil, nil, nil)
 	m := model{agent: newAgent}
 
 	updated, _ := m.Update(activityUpdateMsg{
@@ -6062,8 +6062,8 @@ func TestActivityUpdateFromPreviousAgentIgnored(t *testing.T) {
 }
 
 func TestJobCompletionFromPreviousAgentIgnored(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
-	newAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
+	newAgent := newTestAgent(nil, nil, nil, nil)
 	m := model{agent: newAgent}
 
 	updated, _ := m.Update(jobCompletedMsg{
@@ -6138,7 +6138,7 @@ func TestHandleNewCmdFirstRequestTitlesSession(t *testing.T) {
 }
 
 func TestCountLoadedMCPToolsIgnoresCustomTools(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.AddTools([]tool.Tool{&tool.CustomTool{ToolName: "demo_tool"}})
 	if got := a.MCPToolCount(); got != 0 {
 		t.Fatalf("expected custom tools not to count as MCP tools, got %d", got)
@@ -6581,7 +6581,7 @@ func TestPrepareAgentMessagesSkipsWhenNoAgent(t *testing.T) {
 }
 
 func TestPrepareAgentMessagesIncludesSelectionContext(t *testing.T) {
-	m := model{workDir: "/proj", agent: agent.NewAgent(retryTestClient{}, nil, nil, nil)}
+	m := model{workDir: "/proj", agent: newTestAgent(retryTestClient{}, nil, nil, nil)}
 	m.files.nodes = []fileNode{{path: "/proj/main.go", name: "main.go"}}
 	m.files.selectedFiles = map[int]bool{0: true}
 	msgs := []agent.Message{{Role: "user", Content: "hello"}}
@@ -6911,7 +6911,7 @@ func TestHandleAdvisorCmdRequiresProviderPrefix(t *testing.T) {
 }
 
 func TestInstallAgentPreservesRuntimeAdvisorToggle(t *testing.T) {
-	old := agent.NewAgent(nil, nil, nil, nil)
+	old := newTestAgent(nil, nil, nil, nil)
 	old.SetAdvisorEnabled(false)
 
 	m := model{
@@ -6920,7 +6920,7 @@ func TestInstallAgentPreservesRuntimeAdvisorToggle(t *testing.T) {
 		agent:             old,
 	}
 
-	next := agent.NewAgent(nil, nil, nil, nil)
+	next := newTestAgent(nil, nil, nil, nil)
 	if !next.AdvisorEnabled() {
 		t.Fatal("test setup expected new agent to default advisor on")
 	}
@@ -6942,7 +6942,7 @@ func TestRunPermissionsCmdModelOpensPermissionPicker(t *testing.T) {
 	cfg := config.Config{}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -6969,7 +6969,7 @@ func TestRunBanCmdListsAddsAndRemovesPrefixes(t *testing.T) {
 	cfg := config.Config{}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -7031,7 +7031,7 @@ func TestRunBanCmdClearRequiresConfirmation(t *testing.T) {
 	cfg := config.Config{}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -7091,7 +7091,7 @@ func TestRunPermissionsCmdModelAutoClearsOverride(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -7115,7 +7115,7 @@ func TestRunPermissionsCmdModelRequiresProviderSlashModel(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -7143,7 +7143,7 @@ func TestRunPermissionsCmdModelRejectsProviderOnly(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -7167,7 +7167,7 @@ func TestRunPermissionsCmdModelRejectsSlashOnly(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -8115,7 +8115,7 @@ func (c *retainProbeClient) GetModel() string    { return "test-model" }
 // test is what keeps the TUI on the opted-in side.
 func TestStreamStepOptsIntoFullToolOutput(t *testing.T) {
 	c := &retainProbeClient{got: make(chan bool, 1)}
-	a := agent.NewAgent(c, nil, nil, nil)
+	a := newTestAgent(c, nil, nil, nil)
 	c.agentRef = a
 
 	if a.RetainFullToolOutput {
@@ -8136,7 +8136,7 @@ func TestStreamStepOptsIntoFullToolOutput(t *testing.T) {
 }
 
 func TestModelSwitchStaleGuardDropsOldCompletion(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { oldAgent.Shutdown() })
 	m := model{
 		agent:                   oldAgent,
@@ -8144,7 +8144,7 @@ func TestModelSwitchStaleGuardDropsOldCompletion(t *testing.T) {
 		modelSwitchPending:      true,
 		modelSwitchPendingModel: "new-model",
 	}
-	staleAgent := agent.NewAgent(nil, nil, nil, nil)
+	staleAgent := newTestAgent(nil, nil, nil, nil)
 	// stale done with gen 1 should be dropped and its agent shut down
 	msg := modelSwitchDoneMsg{gen: 1, modelID: "old-model", next: staleAgent}
 	m2, _ := m.Update(msg)
@@ -8160,7 +8160,7 @@ func TestModelSwitchStaleGuardDropsOldCompletion(t *testing.T) {
 	if m.modelSwitchPending != true {
 		t.Fatal("pending should remain true after stale drop")
 	}
-	newAgent := agent.NewAgent(nil, nil, nil, nil)
+	newAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { newAgent.Shutdown() })
 	msg2 := modelSwitchDoneMsg{gen: 2, modelID: "new-model", next: newAgent}
 	m2, _ = m.Update(msg2)
@@ -8174,7 +8174,7 @@ func TestModelSwitchStaleGuardDropsOldCompletion(t *testing.T) {
 }
 
 func TestSessionResetStaleGuardDropsOldCompletion(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { oldAgent.Shutdown() })
 	oldSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
 	m := model{
@@ -8183,7 +8183,7 @@ func TestSessionResetStaleGuardDropsOldCompletion(t *testing.T) {
 		sessionResetGen:     2,
 		sessionResetPending: true,
 	}
-	staleAgent := agent.NewAgent(nil, nil, nil, nil)
+	staleAgent := newTestAgent(nil, nil, nil, nil)
 	staleSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
 	msg := sessionResetDoneMsg{gen: 1, next: staleAgent, supervisor: staleSup, sessionID: "old-id"}
 	m2, _ := m.Update(msg)
@@ -8196,7 +8196,7 @@ func TestSessionResetStaleGuardDropsOldCompletion(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stale agent should have been shut down")
 	}
-	newAgent := agent.NewAgent(nil, nil, nil, nil)
+	newAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { newAgent.Shutdown() })
 	newSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
 	msg2 := sessionResetDoneMsg{gen: 2, next: newAgent, supervisor: newSup, sessionID: "new-id"}
@@ -8287,7 +8287,7 @@ func TestWaitForPendingSavesDoesNotBlockUpdate(t *testing.T) {
 }
 
 func TestModelSwitchWarmedMsgStaleAfterNewSession(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { oldAgent.Shutdown() })
 	m := model{
 		agent:                   oldAgent,
@@ -8314,7 +8314,7 @@ func TestModelSwitchWarmedMsgStaleAfterNewSession(t *testing.T) {
 }
 
 func TestModelSwitchDoneStaleAfterNewSession(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { oldAgent.Shutdown() })
 	m := model{
 		agent:              oldAgent,
@@ -8324,7 +8324,7 @@ func TestModelSwitchDoneStaleAfterNewSession(t *testing.T) {
 	// /new bumps modelSwitchGen
 	m.modelSwitchGen = 2
 	m.modelSwitchPending = false
-	staleAgent := agent.NewAgent(nil, nil, nil, nil)
+	staleAgent := newTestAgent(nil, nil, nil, nil)
 	msg := modelSwitchDoneMsg{gen: 1, modelID: "old/model", next: staleAgent}
 	m2, _ := m.Update(msg)
 	m = m2.(model)
@@ -8382,7 +8382,7 @@ func TestCompetingNewSessionRequestsStaleSupervisorCleaned(t *testing.T) {
 			}
 			// Verify stale handling: create a stale done with gen1 and its supervisor
 			staleSup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
-			staleAgent := agent.NewAgent(nil, nil, nil, nil)
+			staleAgent := newTestAgent(nil, nil, nil, nil)
 			staleMsg := sessionResetDoneMsg{gen: gen1, next: staleAgent, supervisor: staleSup, sessionID: "stale"}
 			m2, _ := m.Update(staleMsg)
 			m = m2.(model)

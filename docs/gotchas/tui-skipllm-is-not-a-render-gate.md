@@ -42,9 +42,9 @@ if !hasRealContent { ...m.viewport.SetContent("") or pipboy/LCARS art...; return
 | Site | File:Line |
 |------|-----------|
 | `runFakeAgentCmd` replies | `internal/tui/commands.go:1103,1108,1112,1116,1119` |
-| Cron deliveries | `model.go:4767` |
-| LLM transport errors | `model.go:5143` |
-| User slash-echo (×2) | `model.go:8651,8774` |
+| Cron deliveries | `model.go:5021` |
+| LLM transport errors | `model.go:5215` |
+| User slash-echo (×2) | `model.go:8726,8774` |
 
 On a fresh session every message is either transient ("Started new session.") or the user's own `/x` echo, so the gate evaluated `hasRealContent = false`, blanked the viewport, and returned — hiding the assistant reply (and any other `skipLLM` assistant output). LLM errors escaped only because a preceding non-`skipLLM` user message happened to exist.
 

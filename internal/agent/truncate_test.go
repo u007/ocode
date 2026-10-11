@@ -67,7 +67,7 @@ func TestToolResultCacheDirResolution(t *testing.T) {
 		}
 		home := t.TempDir()
 		t.Setenv("XDG_STATE_HOME", "")
-		t.Setenv("HOME", home)
+		setHomeTree(t, home)
 		got, err := toolResultCacheDir()
 		if err != nil {
 			t.Fatal(err)

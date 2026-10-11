@@ -27,6 +27,8 @@ import RemoteReconnect from "./components/RemoteReconnect";
 import ChatPanel from "./components/Chat/ChatPanel";
 import RemoteVersionBanner from "./components/Chat/RemoteVersionBanner";
 import AgentPreview from "./components/Chat/AgentPreview";
+import { BtwPanel } from "./components/Chat/BtwPanel";
+import DBPanel from "./components/Layout/DBPanel";
 import AgentsPanel from "./components/Agents/AgentsPanel";
 import ChatInput, { type SlashCommandResult } from "./components/Chat/ChatInput";
 import StatusBar from "./components/common/StatusBar";
@@ -45,6 +47,7 @@ import { Tabs, TabsContent } from "@/components/ui/tabs";
 import TopTabs from "./components/Layout/TopTabs";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import SettingsPanel from "./components/Settings/SettingsPanel";
+import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT } from "./lib/pulseAssistant";
 import EditorTabBar from "./components/Layout/EditorTabBar";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
@@ -84,6 +87,7 @@ import {
   rekeySessionActivity,
   setCommandActivity,
 } from "./lib/commandActivity";
+import { rekeyBtw, startBtw } from "./lib/btwStore";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { setPendingHighlight, peekPendingHighlight } from "./lib/fileSearchHighlight";
 import { eventBus } from "./lib/eventBus";
@@ -100,6 +104,8 @@ import { getTrustedTerminalProject } from "./lib/trustedProject";
 import { resolveSessionHost, useSessionHost } from "./hooks/useSessionHost";
 import { SpeechProvider } from "./components/Speech/SpeechProvider";
 import { PulseView } from "./components/Pulse/PulseView";
+import { PulseAssistantWindow } from "./components/Pulse/PulseAssistantWindow";
+import { toggleAssistantWindow } from "./components/Pulse/pulseAssistantPrefs";
 import { PulseBadge } from "./components/Pulse/PulseBadge";
 import { PulseShellSignal } from "./components/Pulse/PulseShellSignal";
 import { focusDesktopWindow } from "./lib/wails";
@@ -488,6 +494,13 @@ function HomeApp() {
     window.addEventListener("ocode:open-settings-profiles", h)
     return () => window.removeEventListener("ocode:open-settings-profiles", h)
   }, [])
+  // The Pulse assistant drawer's gear: leave the dashboard for Settings.
+  // SettingsPanel (force-mounted) selects the section from the same event.
+  useEffect(() => {
+    const h = () => setActiveView("settings")
+    window.addEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
+    return () => window.removeEventListener(OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, h)
+  }, [])
   const {
     editorTabs,
     activeEditorTabId,
@@ -857,6 +870,7 @@ function HomeApp() {
     focusedKind,
     activeBrowserId,
     onTogglePulse: togglePulse,
+    onToggleAssistant: toggleAssistantWindow,
     onCloseBrowserTab: (id) => {
       // Mirrors the browser pill's X: strip identity + page state + session.
       closeBrowserTab(id);
@@ -912,7 +926,7 @@ function HomeApp() {
         return;
       }
       if (activeView !== "sessions" || focusedKind !== "chat" || !activeTabId) return;
-      closeSessionBackend(activeTabId);
+      closeSessionBackend(activeTabId, activeSessionHost);
       closeSessionTab(activeTabId);
       cancelLiveDeltas(activeTabId);
       clearQueue(activeTabId);
@@ -945,6 +959,10 @@ function HomeApp() {
     // stranded under the deleted id. This one holds the in-flight
     // command/skill bar.
     rekeySessionActivity(tempTabId, sessionId);
+    // ...and the /btw panel (CLAUDE.md: every session-keyed map moves with the
+    // rekey). The server cancels the old run, so the moved panel simply stops
+    // receiving frames.
+    rekeyBtw(tempTabId, sessionId);
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
@@ -1062,6 +1080,7 @@ function HomeApp() {
         recapSession: (id, host?) => api.recapSession(id, host),
         shareSession: (id, host?) => api.shareSession(id, host),
         btwSession: (id, content, host?) => api.btwSession(id, content, host),
+        cancelBtw: (id, host?) => api.cancelBtw(id, host),
         getMaskConfig: () => api.getMaskConfig(),
         setMaskEnabled: (enabled) => api.setMaskEnabled(enabled),
         setMaskMode: (mode) => api.setMaskMode(mode),
@@ -1205,6 +1224,12 @@ function HomeApp() {
     if (result.download) {
       triggerDownload(result.download.filename, result.download.content, result.download.mimeType);
     }
+    if (result.btw) {
+      // /btw: the server started an independent side query. Open the docked
+      // panel for it; the answer streams over the `btw` bus event and nothing
+      // is written to the transcript.
+      startBtw(result.btw.sessionId, result.btw.host, result.btw.question);
+    }
     return { handled: true, accepted: true };
   };
 
@@ -1320,6 +1345,14 @@ function HomeApp() {
     focusedKind,
     activeSubTab: activeSessionTab?.activeSubTab,
   });
+
+  // The active session's chat surface — the element the ask dialogs are confined
+  // to, so a permission/question prompt covers THIS session's chat pane and
+  // nothing else: the project list, the sub-tab bar and every other session stay
+  // visible and clickable. Captured with a callback ref (not useRef) because
+  // `.current` is null during the first render, so a ref would leave the portal
+  // unresolvable until something else re-rendered this component.
+  const [chatSurfaceEl, setChatSurfaceEl] = useState<HTMLDivElement | null>(null);
   // Lazy display:none: keep visited tabs mounted (hidden) so scroll/virtualizer
   // state survives switches (instant CSS toggle), but avoid mounting all 40
   // panels eagerly on first load. Only tabs that have been visited once are
@@ -1737,34 +1770,58 @@ function HomeApp() {
                           className={isActive ? "absolute inset-0 flex flex-col" : "absolute inset-0 hidden"}
                         >
                           {/* Remote (SSH/WSL) server version mismatch for the
-                              active chat tab's project. One instance only. */}
+                              active chat tab's project. One instance only.
+                              Deliberately a SIBLING of the ask's container, not
+                              a child of it: this banner is interactive (expand,
+                              Update -> confirm), and covering it would make the
+                              one piece of session chrome a pending ask can act
+                              on unreachable. Same flex column as before — the
+                              wrapper's children are the banner (auto) plus this
+                              `flex-1 min-h-0` column, whose own children keep
+                              their original `flex-1` / auto sizing. */}
                           {isActive && <RemoteVersionBanner host={projectState.activeProject?.host} />}
-                          <div className="relative flex-1 min-h-0 overflow-hidden">
-                            <ChatPanel
-                              sessionId={tab.id}
-                              host={resolveSessionHost(projectState, tab.id)}
-                              onContinueInterrupted={stableHandleContinueInterrupted}
+                          {/* Only the ACTIVE chat tab is a container: the others
+                              are `hidden`, so portalling into one would render an
+                              invisible dialog. React detaches this ref with null
+                              when the active tab changes. */}
+                          <div
+                            ref={isActive ? setChatSurfaceEl : undefined}
+                            data-testid="chat-ask-surface"
+                            className="relative flex min-h-0 flex-1 flex-col"
+                          >
+                            <div className="relative flex-1 min-h-0 overflow-hidden">
+                              <ChatPanel
+                                sessionId={tab.id}
+                                host={resolveSessionHost(projectState, tab.id)}
+                                onContinueInterrupted={stableHandleContinueInterrupted}
+                              />
+                            </div>
+                            <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
+                            {isActive && (
+                              <BtwPanel
+                                sessionId={tab.id}
+                                host={resolveSessionHost(projectState, tab.id)}
+                              />
+                            )}
+                            <ChatInput
+                              ref={(handle) => {
+                                if (handle) chatInputRefs.current.set(tab.id, handle);
+                                else chatInputRefs.current.delete(tab.id);
+                              }}
+                              projectPath={tab.projectPath}
+                              onSlashCommand={stableHandleCommand}
+                              activeEditorContext={
+                                effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
+                              }
+                              contextFilePaths={contextFilePathsByProject[tab.projectPath ?? ""] ?? EMPTY_STRING_ARRAY}
+                              previewContext={
+                                previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
+                              }
+                              onClearPreviewContext={handleClearPreviewContext}
+                              sessionTabId={tab.id}
+                              onSessionCreated={stableHandleSessionCreated}
                             />
                           </div>
-                          <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
-                          <ChatInput
-                            ref={(handle) => {
-                              if (handle) chatInputRefs.current.set(tab.id, handle);
-                              else chatInputRefs.current.delete(tab.id);
-                            }}
-                            projectPath={tab.projectPath}
-                            onSlashCommand={stableHandleCommand}
-                            activeEditorContext={
-                              effectiveActiveEditorContext && (effectiveActiveEditorContext.projectRoot ?? "") === (tab.projectPath ?? "") ? effectiveActiveEditorContext : null
-                            }
-                            contextFilePaths={contextFilePathsByProject[tab.projectPath ?? ""] ?? EMPTY_STRING_ARRAY}
-                            previewContext={
-                              previewContext && (previewContext.projectRoot ?? "") === (tab.projectPath ?? "") ? previewContext : null
-                            }
-                            onClearPreviewContext={handleClearPreviewContext}
-                            sessionTabId={tab.id}
-                            onSessionCreated={stableHandleSessionCreated}
-                          />
                         </div>
                       );
                     })}
@@ -1851,6 +1908,16 @@ function HomeApp() {
                             nonce={takesActivation ? previewNonce : 0}
                             onConsumeActivation={takesActivation ? consumePreviewActivation : undefined}
                           />
+                        </div>
+                      );
+                    })}
+                    {allChatTabs.map((tab) => {
+                      const isActive = tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "db";
+                      const key = `${tab.projectPath ?? ""}:${tab.id}:db`;
+                      if (!visitedTabsRef.current.has(key) && !isActive) return null;
+                      return (
+                        <div key={key} className={isActive ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                          <DBPanel sessionId={tab.id} />
                         </div>
                       );
                     })}
@@ -2039,10 +2106,14 @@ function HomeApp() {
       />
 
       {/* Permission Dialog — only while this session's Chat sub-tab is on
-          screen, so an ask never blocks a view the user is not working in. */}
-      {pendingPermission && sessionAskVisible && (
+          screen, so an ask never blocks a view the user is not working in. The
+          surface gate AND the container are both required: off-view this panel
+          is `display:none` (ui/tabs.tsx `data-[state=inactive]:hidden`), so
+          confining alone would render an invisible dialog with no signal. */}
+      {pendingPermission && sessionAskVisible && chatSurfaceEl && (
         <PermissionDialog
           open={true}
+          container={chatSurfaceEl}
           tool={pendingPermission.tool}
           command={pendingPermission.command}
           args={pendingPermission.args}
@@ -2053,6 +2124,12 @@ function HomeApp() {
           scope={pendingPermission.scope}
           prefix={pendingPermission.prefix}
           outOfScopePath={pendingPermission.out_of_scope_path}
+          untrustedContent={pendingPermission.untrusted_content}
+          untrustedSource={pendingPermission.untrusted_source}
+          untrustedSummary={pendingPermission.untrusted_summary}
+          untrustedScores={pendingPermission.untrusted_scores}
+          untrustedFailure={pendingPermission.untrusted_failure}
+          agentName={pendingPermission.agent_name}
           context={askContext}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}
@@ -2063,10 +2140,12 @@ function HomeApp() {
           the permission dialog above, plus the request-scoped local hide. */}
       {pendingQuestion &&
         hiddenQuestionRequestId !== pendingQuestion.request_id &&
-        sessionAskVisible && (
+        sessionAskVisible &&
+        chatSurfaceEl && (
         <QuestionDialog
           key={pendingQuestion.request_id}
           open={true}
+          container={chatSurfaceEl}
           requestId={pendingQuestion.request_id}
           questions={pendingQuestion.questions}
           onSubmit={submitQuestionAnswers}
@@ -2171,6 +2250,9 @@ export default function App() {
 	                <Route path="*" element={<HomeApp />} />
 	              </Routes>
               <SpeechToolbar />
+              {/* The Pulse assistant is a floating window at app level, so it is
+                  available on every view. Mounted here, not inside PulseView. */}
+              <PulseAssistantWindow />
               {/* Settings-action failures (sidebar toggles, model picks) are
                   otherwise only console.error'd. Root-mounted so it survives
                   the ModelDialog closing on pick. */}

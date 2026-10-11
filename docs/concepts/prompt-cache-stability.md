@@ -8,7 +8,7 @@ tags:
   - anthropic
   - tools
   - discovery
-timestamp: 2026-10-01T04:50:48Z
+timestamp: 2026-10-02T02:52:33Z
 ---
 # Prompt Cache Stability
 
@@ -127,3 +127,34 @@ Rules for any change that touches tools or the base prompt:
   attached to the volatile tail only on query match. Editing a doc invalidates
   its summary on the next throttled scan (`mdScanThrottle`), so `/doc-sync` edits
   are reflected automatically.
+
+## Wire-only dedup of trailing duplicate user messages
+
+`dedupeTrailingUserMessages` (`internal/agent/message_tail_dedup.go`, called at
+the top of `GenericClient.ChatWithContext`, `client.go:786`) collapses duplicate
+sends in the trailing user-run of the transcript **in the outgoing provider
+payload only** — the UI and the persisted transcript keep every message the user
+sent.
+
+- **One funnel.** It runs in `ChatWithContext`, the single path every transport
+  passes through (Anthropic Messages, chat/completions, OpenAI Responses,
+  Google, WebSocket), so no transport needs its own call.
+- **Deliberately before the redaction safety net.** Redaction rewrites secrets to
+  a placeholder, so two genuinely different messages can become textually equal
+  *after* it; collapsing those would silently drop a real user turn.
+- **Scope: the maximal suffix of user-role messages, adjacent repeats only.** A
+  user message following a real assistant turn is a follow-up, not a repeat, and
+  `[a, b, a]` is left alone so the order the user typed survives. When a
+  duplicate pair collapses, the newest copy is kept — the content is equal, it
+  just carries the later `UserSeq`.
+- **Identity: trimmed content + every attached image.** `UserSeq`, `Notice` and
+  `DisplayContent` are deliberately excluded: none of them change what the model
+  sees, so messages differing only in them are one request.
+- **The volatile user-role tail injections join the run.** Discovery, todo
+  re-anchor, notes delta, LSP delta and selection blocks are appended *after*
+  the user's message, so they are part of that same trailing suffix: they extend
+  the run rather than separating a duplicate pair, and their distinct content
+  keeps them from being dropped.
+- **Cache-safe when there is nothing to trim.** The input slice is returned
+  unchanged, so an ordinary turn still sends a byte-identical `messages` array
+  and the Anthropic cache breakpoints above do not move.

@@ -1,12 +1,14 @@
 package remote
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"os/exec"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,7 +69,37 @@ type forwardProcess struct {
 	// stopped distinguishes a requested teardown from an unexpected exit so
 	// the supervisor record reads killed rather than exited. Set before Kill.
 	stopped atomic.Bool
+	// phase is the single claim on who reports this child's exit. Start moves
+	// it to forwardReady once the forward is proven up; the reaper moves it to
+	// forwardExited when Wait returns. An exit that lands first is reported
+	// through Start's error, and an exit after readiness through the monitor
+	// hook, so one exit is never counted from both paths.
+	phase atomic.Int32
 }
+
+const (
+	forwardStarting int32 = iota
+	forwardReady
+	forwardExited
+)
+
+// markReady is Start's claim that the forward is up. It fails when the child
+// has already exited, and that exit then belongs to Start's error.
+func (fp *forwardProcess) markReady() bool {
+	return fp.phase.CompareAndSwap(forwardStarting, forwardReady)
+}
+
+// markExited is the reaper's claim on an exit. It reports whether the child
+// had become ready first, which is what sends the exit to the monitor hook.
+func (fp *forwardProcess) markExited() (wasReady bool) {
+	return fp.phase.Swap(forwardExited) == forwardReady
+}
+
+// forwardWaitDelay bounds how long Wait waits on the child's stderr pipe after
+// ssh exits. A ProxyCommand helper (nc, cloudflared, aws ssm) inherits that pipe
+// and can outlive a killed ssh. Without this bound the reaper never returns, so
+// a dead forward stays live and Stop blocks.
+const forwardWaitDelay = 2 * time.Second
 
 // NewForwardManager returns a manager for target's extra forwards, supervised
 // under sup (the same supervisor the session's fixed tunnel/remote server use).
@@ -123,6 +155,7 @@ func (m *ForwardManager) IsLive(remotePort int) bool {
 // terminal, so a forward left ProcRunning after a crash could never restart.
 func (m *ForwardManager) reap(remotePort int, fp *forwardProcess) {
 	err := fp.cmd.Wait()
+	wasReady := fp.markExited()
 	code := processExitCode(err)
 	id := forwardRegistrationID(m.target, remotePort)
 	// The PID-qualified variants are generation-aware: a reaper left over from
@@ -150,7 +183,7 @@ func (m *ForwardManager) reap(remotePort int, fp *forwardProcess) {
 	// and let a removal resurrect retry state just cleared by forget, so the
 	// watchdog could re-open the forward. Only an unexpected exit is a
 	// monitor event.
-	if onExit != nil && !fp.stopped.Load() {
+	if onExit != nil && !fp.stopped.Load() && wasReady {
 		onExit(remotePort, code, time.Since(fp.started))
 	}
 }
@@ -173,6 +206,9 @@ func processExitCode(err error) int {
 // (not an error) when already live, so callers can call it unconditionally
 // on reconnect/enable.
 func (m *ForwardManager) Start(pm ProjectPortMap) error {
+	if pm.Reverse && m.target.Kind != KindSSH {
+		return fmt.Errorf("reverse forward for remote port %d needs an SSH target, not %s", pm.RemotePort, m.target.String())
+	}
 	m.mu.Lock()
 	if _, ok := m.live[pm.RemotePort]; ok {
 		m.mu.Unlock()
@@ -180,11 +216,13 @@ func (m *ForwardManager) Start(pm ProjectPortMap) error {
 	}
 	m.mu.Unlock()
 
-	args := tunnelArgs(pm.LocalPort, pm.RemotePort, 0, m.target.String())
-	if m.target.Port > 0 {
-		args = append(args[:len(args)-1], "-p", strconv.Itoa(m.target.Port), args[len(args)-1])
-	}
-	cmd := exec.Command("ssh", args...)
+	cmd := exec.Command("ssh", forwardArgs(pm, m.target)...)
+	// Captured, not inherited: ssh's reason for refusing a forward is the only
+	// thing that explains a failed open. It is read only after done closes,
+	// which is after Wait has finished copying it.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = forwardWaitDelay
 	if _, err := tool.StartSupervised(m.sup, cmd, tool.ProcessRegistration{
 		ID:      forwardRegistrationID(m.target, pm.RemotePort),
 		Name:    "ssh-portmap",
@@ -210,14 +248,28 @@ func (m *ForwardManager) Start(pm ProjectPortMap) error {
 	m.mu.Unlock()
 	go m.reap(pm.RemotePort, fp)
 
-	if err := waitForTunnelReady(pm.LocalPort); err != nil {
+	var readyErr error
+	if pm.Reverse {
+		readyErr = waitForReverseReady(fp)
+	} else {
+		readyErr = waitForTunnelReady(pm.LocalPort)
+	}
+	if readyErr != nil {
 		fp.stopped.Store(true)
 		_ = cmd.Process.Kill()
 		// The reaper owns Wait and the terminal record; blocking on done keeps
 		// the failure path from racing it or leaking a terminal-but-running
 		// record that the next Start would collide with.
 		<-fp.done
-		return fmt.Errorf("forward for remote port %d did not become ready: %w", pm.RemotePort, err)
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			readyErr = fmt.Errorf("%w (ssh: %s)", readyErr, detail)
+		}
+		return fmt.Errorf("forward for remote port %d did not become ready: %w", pm.RemotePort, readyErr)
+	}
+	// An exit that landed while readiness was being decided won the claim, so
+	// Start reports it here and the monitor hook stays silent.
+	if !fp.markReady() {
+		return fmt.Errorf("forward for remote port %d exited while opening", pm.RemotePort)
 	}
 	return nil
 }
@@ -250,6 +302,48 @@ type ProjectPortMap struct {
 	RemotePort int
 	LocalPort  int
 	Enabled    bool
+	// Reverse opens `ssh -R`: the remote host's 127.0.0.1:RemotePort reaches
+	// the desktop's 127.0.0.1:LocalPort. The zero value is the -L forward.
+	Reverse bool
+}
+
+// forwardArgs builds the ssh argv for one forward. The default is the -L
+// tunnelArgs builds, shared with the api/browse tunnel. Reverse is -R with
+// both ends pinned to loopback: the explicit 127.0.0.1 bind keeps the remote
+// listener off the network even when sshd allows GatewayPorts.
+// ExitOnForwardFailure makes a busy remote port exit ssh, rather than leave a
+// tunnel that is alive and forwards nothing.
+func forwardArgs(pm ProjectPortMap, target Target) []string {
+	var args []string
+	if pm.Reverse {
+		args = append([]string{"-N"}, sshKeepaliveArgs()...)
+		args = append(args, "-o", "ExitOnForwardFailure=yes",
+			"-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", pm.RemotePort, pm.LocalPort),
+			target.String())
+	} else {
+		args = tunnelArgs(pm.LocalPort, pm.RemotePort, 0, target.String())
+	}
+	if target.Port > 0 {
+		args = append(args[:len(args)-1], "-p", strconv.Itoa(target.Port), args[len(args)-1])
+	}
+	return args
+}
+
+// waitForReverseReady decides whether a -R child came up. The local port is
+// the desktop's own service, which is usually already listening, so dialing
+// it proves nothing about the remote bind. The child must instead stay alive
+// for the probe budget waitForTunnelReady uses. ExitOnForwardFailure turns a
+// busy remote port into an early exit, which closes fp.done and fails fast.
+// A later death is still reported by the reaper through IsLive.
+func waitForReverseReady(fp *forwardProcess) error {
+	budget := time.NewTimer(time.Duration(tunnelReadyAttempts) * tunnelReadyInterval)
+	defer budget.Stop()
+	select {
+	case <-fp.done:
+		return errors.New("ssh exited before the remote forward was established")
+	case <-budget.C:
+		return nil
+	}
 }
 
 // PortMapHook lets ConnectWeb's caller (internal/remotecli, which can import

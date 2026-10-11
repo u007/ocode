@@ -12,7 +12,7 @@ import (
 // this schema, but the test is the contract — if the property goes
 // missing, the toggle stops being reachable from the prompt.
 func TestSharedNotesToggle_Schema(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	taskTool, ok := a.tools["task"].(*TaskTool)
 	if !ok {
 		t.Fatalf("task tool type = %T", a.tools["task"])
@@ -70,7 +70,7 @@ func (f *recordingBusFactory) Count() int {
 // subagent calls and constructs exactly one bus.
 func TestSharedNotesToggle_GroupBusCreation(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 
 	t1 := ToolCall{ID: "t1", Type: "function", Function: struct {
@@ -102,7 +102,7 @@ func TestSharedNotesToggle_GroupBusCreation(t *testing.T) {
 // a bus exists only when 2+ child-runs are spawned concurrently.
 func TestSharedNotesToggle_NoBusForSingleCall(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 
 	t1 := ToolCall{ID: "t1", Type: "function", Function: struct {
@@ -128,7 +128,7 @@ func TestSharedNotesToggle_NoBusForSingleCall(t *testing.T) {
 // shared_notes unset (or false) does NOT create a bus.
 func TestSharedNotesToggle_NoBusWhenDisabled(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 	t1 := ToolCall{ID: "t1", Type: "function", Function: struct {
 		Name      string `json:"name"`
@@ -161,7 +161,7 @@ func TestSharedNotesToggle_NoBusWhenDisabled(t *testing.T) {
 // share", relax this test.
 func TestSharedNotesToggle_MixedBatch(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 	t1 := ToolCall{ID: "t1", Type: "function", Function: struct {
 		Name      string `json:"name"`

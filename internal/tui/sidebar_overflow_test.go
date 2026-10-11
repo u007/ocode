@@ -9,7 +9,6 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
@@ -57,7 +56,7 @@ func TestSidebarClickMatchesRenderedRowUnderOverflow(t *testing.T) {
 				styles:       ApplyThemeColors("tokyonight"),
 				input:        textarea.New(),
 				viewport:     fastviewport.New(100, h),
-				agent:        agent.NewAgent(retryTestClient{}, nil, nil, nil),
+				agent:        newTestAgent(retryTestClient{}, nil, nil, nil),
 				config:       &config.Config{Model: "gpt-4o"},
 			}
 			m.layout()

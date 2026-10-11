@@ -16,7 +16,7 @@ func newPermissionAgent(t *testing.T, responses ...string) (*Agent, *scriptedCap
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.Permissions().SetAutoPermissionEnabled(true)
 	a.AddTools([]tool.Tool{&MockTool{name: "bash", result: "ran"}})
 	client := &scriptedCaptureClient{Responses: responses}

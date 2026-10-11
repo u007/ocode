@@ -9,6 +9,7 @@ vi.mock("../api/client", () => ({
     getSession: vi.fn(),
     getSessionState: vi.fn(),
   },
+  apiPath: (p: string) => p,
 }));
 
 function envelope(data: Record<string, unknown>): BusEnvelope {

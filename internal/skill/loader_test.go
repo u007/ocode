@@ -3,6 +3,7 @@ package skill
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -154,5 +155,64 @@ func TestBundledSkillsFallbackAndDiskWins(t *testing.T) {
 	}
 	if got2.Content != "BUNDLED" {
 		t.Fatalf("expected bundled fallback, got %q", got2.Content)
+	}
+}
+
+// TestSymlinkedSkillDirIsDiscovered pins that a skill directory installed as a
+// SYMLINK is still found on the search path.
+//
+// This is not hypothetical: os.ReadDir reports a symlink-to-directory with
+// DirEntry.IsDir() == false (its Type() carries ModeSymlink, not ModeDir), so a
+// loader that trusts IsDir() alone silently SKIPS every symlinked skill. The
+// skill then vanishes from the catalog with no error anywhere — the model simply
+// stops being offered it.
+//
+// The layout this guards is the standard one for sharing one skill checkout
+// between a plugin install and a search-path root: the real files live in a
+// plugin/versioned checkout, and the search-path entry is a symlink into it (see
+// the using-git-worktrees skill, symlinked from ~/.agents/skills into the
+// u007-superpowers plugin clone). Losing the stat-through-the-link fallback
+// would therefore break discovery for real, so this test fails loudly instead.
+func TestSymlinkedSkillDirIsDiscovered(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// The real skill lives outside the search path, as a versioned checkout would.
+	checkout := t.TempDir()
+	realSkill := filepath.Join(checkout, "linked-skill")
+	if err := os.MkdirAll(realSkill, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const body = "LINKED-CONTENT"
+	if err := os.WriteFile(filepath.Join(realSkill, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Link it into ~/.agents/skills, which SkillSearchPathsForRoot includes.
+	agentsSkills := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(agentsSkills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(agentsSkills, "linked-skill")
+	if err := os.Symlink(realSkill, link); err != nil {
+		t.Fatal(err)
+	}
+
+	skills := LoadSkillsForRoot(t.TempDir())
+	got := findSkill(skills, "linked-skill")
+	if got == nil {
+		t.Fatal("symlinked skill dir was skipped by discovery; a symlink-to-directory " +
+			"must be stat'ed through before deciding it is not a dir")
+	}
+	if got.Content != body {
+		t.Fatalf("content = %q, want %q", got.Content, body)
+	}
+	// The catalog entry must point at the search path, so a later install or edit
+	// resolves the same file the user sees listed.
+	if got.Source != filepath.Join(link, "SKILL.md") {
+		t.Fatalf("Source = %q, want %q", got.Source, filepath.Join(link, "SKILL.md"))
 	}
 }

@@ -1606,6 +1606,119 @@ describe("ChatPanel", () => {
     expect(hiddenQuestionRequestId).toBeNull();
   });
 
+  it("offers 'Open question' on the LIVE tool card while a mid-turn ask is hidden", async () => {
+    // Mid-turn ask: the authoritative transcript snapshot lands only at turn
+    // end (agent_session.go turn-end broadcast), so the question's tool card
+    // is still rendered from the LIVE buffer — and the live ToolBlock used to
+    // receive no onOpenQuestion, leaving no reopen affordance after X/Escape.
+    let probeDispatch: ReturnType<typeof useChatDispatch> | null = null;
+    let hiddenLiveRequestId: string | null | undefined;
+    function LiveProbe() {
+      probeDispatch = useChatDispatch();
+      hiddenLiveRequestId = useChatSelector(
+        (s) => getSessionSlice(s, "sess-liveq").hiddenQuestionRequestId,
+      );
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-liveq" messages={[mk("user", "pick one")]} />
+        <ChatPanel sessionId="sess-liveq" />
+        <LiveProbe />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+
+    act(() => {
+      probeDispatch!({
+        type: "LIVE_TOOL_START",
+        sessionId: "sess-liveq",
+        tool: "question",
+        callId: "q-live-1",
+        command: "{}",
+      });
+      probeDispatch!({
+        type: "LIVE_TOOL_RESULT",
+        sessionId: "sess-liveq",
+        callId: "q-live-1",
+        output:
+          "QUESTION_PROMPT:\n" +
+          JSON.stringify([{ header: "Deploy", question: "Where?", options: [] }]) +
+          "\nWAITING_FOR_USER_RESPONSE",
+      });
+      probeDispatch!({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-liveq",
+        question: {
+          request_id: "q-live-1",
+          questions: [{ header: "Deploy", question: "Where?", options: [] }],
+        },
+      });
+      probeDispatch!({ type: "QUESTION_HIDE", sessionId: "sess-liveq", requestId: "q-live-1" });
+    });
+    await tick();
+
+    // The hidden state is what makes the button the ONLY reopen affordance.
+    expect(hiddenLiveRequestId).toBe("q-live-1");
+    const btn = screen.getByRole("button", { name: "Open question" });
+    fireEvent.click(btn);
+    expect(hiddenLiveRequestId).toBeNull();
+  });
+
+  it("derives the 'Open question' button from session state when the sentinel is absent", async () => {
+    // The persisted sentinel may be missing even though the server still holds
+    // the ask (sentinel-less paused save — sessionEvents.ts livePendingAsks):
+    // SSE set pendingQuestion, but parseQuestionFromMessage has nothing to
+    // parse, so the entry-level map is empty. After X/Escape the session state
+    // is the only source left for the reopen button.
+    const msgs: Message[] = [
+      mk("user", "deploy"),
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "q-nosent", function: { name: "question", arguments: "{}" } }],
+      },
+      // deliberately NO sentinel tool message
+    ];
+    let probeDispatch: ReturnType<typeof useChatDispatch> | null = null;
+    let hiddenRequestId: string | null | undefined;
+    function NoSentinelProbe() {
+      probeDispatch = useChatDispatch();
+      hiddenRequestId = useChatSelector(
+        (s) => getSessionSlice(s, "sess-nosent").hiddenQuestionRequestId,
+      );
+      return null;
+    }
+    render(
+      <ChatProvider>
+        <LiveSeed sessionId="sess-nosent" messages={msgs} />
+        <ChatPanel sessionId="sess-nosent" />
+        <NoSentinelProbe />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+
+    act(() => {
+      probeDispatch!({
+        type: "QUESTION_REQUEST",
+        sessionId: "sess-nosent",
+        question: {
+          request_id: "q-nosent",
+          questions: [{ header: "Env", question: "Which env?", options: [] }],
+        },
+      });
+      probeDispatch!({ type: "QUESTION_HIDE", sessionId: "sess-nosent", requestId: "q-nosent" });
+    });
+    await tick();
+
+    expect(hiddenRequestId).toBe("q-nosent");
+    const btn = screen.getByRole("button", { name: "Open question" });
+    fireEvent.click(btn);
+    expect(hiddenRequestId).toBeNull();
+  });
+
   it("renders orphan tool result as single when parent not loaded", async () => {
     const msgs: Message[] = [
       mk("user", "hello"),

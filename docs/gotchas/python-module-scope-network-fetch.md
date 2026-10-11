@@ -41,7 +41,7 @@ every failure mode is silent:
 - `nltk` was pinned at 3.8.1 for the same reason: from 3.9 the POS tagger
   resource was renamed `averaged_perceptron_tagger_eng` but g2p_en still
   probes the legacy name, so a newer nltk fails at synthesis *after silently
-  re-downloading* — pin it (`internal/tts/manifest.go:444`, guarded by
+  re-downloading* — pin it (`internal/tts/manifest.go:523`, guarded by
   `TestMeloRequirementsPinTheNLTKRegression`, `internal/tts/melo_test.go:413`).
 
 The engine works perfectly on the developer's machine (warm caches, open
@@ -161,11 +161,11 @@ are built from one `meloOfflinePreamble` constant
 
 - `meloImportCheckScript = meloOfflinePreamble + "import melo.api"`
   (`internal/tts/melo.go:305`), run by `verifyRuntime`
-  (`internal/tts/piper.go:286`);
+  (`internal/tts/piper.go:291`);
 - `meloSynthScript = meloOfflinePreamble + <driver>` (`internal/tts/melo.go:315`),
   run by `meloSynth` (`internal/tts/melo.go:343`).
 
-Both go through `runCmdEnv` (`internal/tts/piper.go:444`) with `meloEnv` and
+Both go through `runCmdEnv` (`internal/tts/piper.go:452`) with `meloEnv` and
 the engine cache dir as cwd. Before this was shared, the check ran a bare
 `python -c "import melo.api"`, reached the Hub, and **failed the install** —
 while with `HF_HUB_OFFLINE=1` applied everywhere the failure is a named error
@@ -218,7 +218,7 @@ venv leads `PATH`.
    and pin the requirements that guard renamed/vanished upstream resources
    (e.g. `nltk==3.8.1`).
 8. Pin hosts you have actually exercised end to end; report the others
-   unavailable **with a reason** (`internal/tts/manifest.go:407`) instead of
+   unavailable **with a reason** (`internal/tts/manifest.go:486`) instead of
    offering them and failing mid-install.
 
 ## Verification
@@ -228,8 +228,8 @@ venv leads `PATH`.
   `TestMeloRequirementsPinTheNLTKRegression`,
   `TestMeloSynthScriptRedirectsBertToStagedFiles`,
   `TestMeloSynthScriptStubsUnbundledTokenizersLoudly`.
-- Manifest anchors: `internal/tts/manifest.go:331` (the ten pinned
-  artifacts), `internal/tts/manifest.go:416` (host/Python range).
+- Manifest anchors: `internal/tts/manifest.go:410` (the ten pinned
+  artifacts), `internal/tts/manifest.go:495` (host/Python range).
 - User-facing install behavior: `tts-speech-playback.md`.
 - Closely related: `gotchas/onnx-runtime-telemetry-memory-ses.md` (child
   process cwd/env hardening).

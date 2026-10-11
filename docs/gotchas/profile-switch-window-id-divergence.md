@@ -30,12 +30,12 @@ The profile state is keyed by a **per-window id**. Three independent code paths 
 2. **API client** (`web/src/api/client.ts`) `sendMessage`/`chat` independently re-derived the window id per call: `?windowId=` → sessionStorage → else mint a random `win-xxxx`.
 3. **Desktop deep-link redirect** (`web/src/pages/SessionPage.tsx:22`) does `navigate("/", {replace:true})` which **strips the query string**.
 
-So after the redirect: the pill kept targeting `main`, but subsequent chat requests minted a fresh random id like `win-3b33dd72`. Server-side, `HandleSendMessage`/`HandleChat` bind the session to that new window id (`h.sessions.SetWindowID`), and `reconcileProfileAgent` (`internal/server/agent_session.go:430`) only rebuilds the agent on the window's active profile when `entry.WindowID != ""` — so the session stayed on a profile-less window and never picked up the new profile's credentials.
+So after the redirect: the pill kept targeting `main`, but subsequent chat requests minted a fresh random id like `win-3b33dd72`. Server-side, `HandleSendMessage`/`HandleChat` bind the session to that new window id (`h.sessions.SetWindowID`), and `reconcileProfileAgent` (`internal/server/agent_session.go:668`) only rebuilds the agent on the window's active profile when `entry.WindowID != ""` — so the session stayed on a profile-less window and never picked up the new profile's credentials.
 
 ## Why the server never fixed it
 
 - `handleSetWindowActiveProfile` (`internal/server/handler_profiles.go`, PUT `/api/window/{id}/activeProfile`) only **records** the profile and emits `profile.windowChanged` — it does **not** rebuild agents.
-- The switch lands on the **next turn** via `reconcileProfileAgent` (`internal/server/agent_session.go:430`), which compares `resolveSessionProfile(entry)` (env `OCODE_PROFILE` > window profile > global fallback) + `auth.ProfileCredentialVersion()` + model against the built agent. It is a **no-op mid-turn**.
+- The switch lands on the **next turn** via `reconcileProfileAgent` (`internal/server/agent_session.go:668`), which compares `resolveSessionProfile(entry)` (env `OCODE_PROFILE` > window profile > global fallback) + `auth.ProfileCredentialVersion()` + model against the built agent. It is a **no-op mid-turn**.
 - `buildAgentSession` builds `agent.NewClientWithProfile(effCfg, model, prof)`; profile credentials come from `~/.local/share/ocode/auth.profiles.json` via `auth.GetProfileCredential(profile, provider)`. A keys-only profile (empty delta `{}`) is valid and **does** swap the key on reconcile — but only if the session is on the right window.
 - Note: `effectiveSessionModel` (`handler_session_state.go`) ignores the window profile's `model` delta — a profile's model override does **not** currently change the session's model. That is a separate issue and was **not** changed in this fix.
 

@@ -44,9 +44,10 @@ func (h *Handler) remotePrepareGitAction(w http.ResponseWriter, r *http.Request,
 
 // remotePrepareGitActionFor validates an already-decoded request for remote
 // projects: it validates the (host, path) pair, confirms it is a git
-// repository, and converts req's paths into safe repo-relative specs. specs
-// are validated by remoteSafeSpec (no shell metacharacters) and joined onto
-// the root when relative.
+// repository, and converts req's paths into repo-relative git pathspecs
+// validated by remoteGitSpec. The specs are returned raw: callers shell-quote
+// them where they become command arguments (remoteQuoteSpecs), and compare
+// them raw against path sets.
 func (h *Handler) remotePrepareGitActionFor(w http.ResponseWriter, r *http.Request, host string, req gitActionRequest) (rw remoteWork, specs []string, ok bool) {
 	work, err := h.remoteWorkFor(host, r.URL.Query().Get("project"))
 	if err != nil {
@@ -75,7 +76,7 @@ func (h *Handler) remotePrepareGitActionFor(w http.ResponseWriter, r *http.Reque
 		if rel == "." {
 			continue
 		}
-		spec, specErr := remoteSafeSpec(rel)
+		spec, specErr := remoteGitSpec(rel)
 		if specErr != nil {
 			writeError(w, http.StatusBadRequest, specErr.Error())
 			return rw, nil, false
@@ -157,7 +158,7 @@ func (h *Handler) remoteGitHunk(w http.ResponseWriter, r *http.Request, host str
 		writeError(w, http.StatusBadRequest, "empty path")
 		return
 	}
-	if _, serr := remoteSafeSpec(spec); serr != nil {
+	if _, serr := remoteGitSpec(spec); serr != nil {
 		writeError(w, http.StatusBadRequest, serr.Error())
 		return
 	}
@@ -168,7 +169,7 @@ func (h *Handler) remoteGitHunk(w http.ResponseWriter, r *http.Request, host str
 		}
 		switch req.Action {
 		case "stage":
-			if err := remoteGitMutation(ctx, rw, remoteGitCommand(rw.Path, "add", "--", spec)); err != nil {
+			if err := remoteGitMutation(ctx, rw, remoteGitCommand(rw.Path, "add", "--", remoteQuoteSpecPath(spec))); err != nil {
 				writeError(w, http.StatusBadRequest, "git add failed: "+err.Error())
 				return
 			}
@@ -191,7 +192,7 @@ func (h *Handler) remoteGitHunk(w http.ResponseWriter, r *http.Request, host str
 	if req.Staged {
 		diffArgs = append(diffArgs, "--cached")
 	}
-	diffArgs = append(diffArgs, "--", spec)
+	diffArgs = append(diffArgs, "--", remoteQuoteSpecPath(spec))
 	out, derr := remoteRun(ctx, rw, remoteGitCommand(rw.Path, diffArgs...))
 	out = strings.TrimRight(out, "\n")
 	if derr != nil || out == "" {
@@ -234,7 +235,7 @@ func (h *Handler) remoteGitHunk(w http.ResponseWriter, r *http.Request, host str
 
 // remoteIsUntrackedPath is isUntrackedPath over the transport.
 func remoteIsUntrackedPath(ctx context.Context, rw remoteWork, spec string) bool {
-	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "status", "--porcelain", "-u", "--", spec))
+	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "status", "--porcelain", "-u", "--", remoteQuoteSpecPath(spec)))
 	if err != nil {
 		return false
 	}
@@ -274,7 +275,7 @@ func remoteGitApply(ctx context.Context, rw remoteWork, opts []string, patch str
 // remoteGitStashApply restores selected files from a stash entry into the
 // remote working tree (unstaged), mirroring gitStashApplyLocal. The stash rev
 // is built from the integer index and shell-quoted; specs are already
-// validated by remoteSafeSpec.
+// validated by remoteGitSpec.
 func (h *Handler) remoteGitStashApply(w http.ResponseWriter, r *http.Request, host string) {
 	var req gitStashApplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -334,13 +335,13 @@ func remoteRestoreStashPaths(ctx context.Context, rw remoteWork, rev string, spe
 		}
 	}
 	if len(inTree) > 0 {
-		args := append([]string{"restore", "--source=" + hash, "--worktree", "--"}, inTree...)
+		args := append([]string{"restore", "--source=" + hash, "--worktree", "--"}, remoteQuoteSpecs(inTree)...)
 		if err := remoteGitMutation(ctx, rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			return err
 		}
 	}
 	if len(inUntracked) > 0 {
-		args := append([]string{"restore", "--source=" + hash + "^3", "--worktree", "--"}, inUntracked...)
+		args := append([]string{"restore", "--source=" + hash + "^3", "--worktree", "--"}, remoteQuoteSpecs(inUntracked)...)
 		if err := remoteGitMutation(ctx, rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			return err
 		}
@@ -358,13 +359,15 @@ func remoteRestoreStashPaths(ctx context.Context, rw remoteWork, rev string, spe
 // empty set.
 func remotePathSetForRev(ctx context.Context, rw remoteWork, rev string) map[string]bool {
 	set := map[string]bool{}
-	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "ls-tree", "-r", "--name-only", rev))
+	// `-z`: without it git C-quotes names containing quotes or non-ASCII
+	// bytes, and the quoted form never matches the raw spec being looked up.
+	out, err := remoteRun(ctx, rw, remoteGitCommand(rw.Path, "ls-tree", "-r", "-z", "--name-only", rev))
 	if err != nil {
 		return set
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			set[line] = true
+	for _, name := range strings.Split(out, "\x00") {
+		if name != "" {
+			set[name] = true
 		}
 	}
 	return set

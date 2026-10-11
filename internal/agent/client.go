@@ -774,6 +774,17 @@ func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{})
 // HTTP requests are interrupted when the caller's context is cancelled (e.g.
 // when the user presses Escape).
 func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	// A user who submits the same input twice in a row, or a retried submit that
+	// re-appends the tail, leaves identical user messages side by side at the end
+	// of the transcript. Trim them here — the one place every transport (Anthropic,
+	// chat/completions, Responses, Google, WebSocket) funnels through — so the
+	// model sees the request once. The transcript keeps every message.
+	//
+	// This runs BEFORE redaction on purpose: redaction rewrites secrets to a
+	// placeholder, so two genuinely different messages can become textually equal
+	// after it, and collapsing those would silently drop a real user turn.
+	messages = dedupeTrailingUserMessages(messages)
+
 	// Chokepoint safety net: scan all messages for known-format secrets
 	if c.Redaction != nil && c.Redaction.Enabled && c.Redaction.Registry != nil {
 		messages = c.applyRedactionSafetyNet(messages)
@@ -1095,6 +1106,26 @@ func isRetryableLLMClientError(err error) bool {
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	// DNS: a name-resolution failure is transient in practice — a resolver that
+	// has not finished coming up, a VPN/Wi-Fi transition — but *net.DNSError for
+	// NXDOMAIN reports neither Timeout() nor Temporary(), and "no such host"
+	// matches none of the substrings below. It therefore classified as
+	// permanent and skipped the retry budget entirely, turning a momentary
+	// lookup failure into a hard-failed turn: agent-run-2 in
+	// ses_2026-10-02-094643-b014b5ba lost eight minutes of sub-agent work to
+	// `dial tcp: lookup opencode.ai: no such host` on a single attempt, while
+	// `connection refused` — the same class of dial blip, caught by the text arm
+	// — was retried llmMaxRetries times.
+	//
+	// Matched on the type, not the text, so an unrelated error that merely
+	// mentions a hostname is unaffected. The cost when a hostname really is
+	// wrong is llmMaxRetries wasted attempts (~1.5s at llmRetryBaseDelay); the
+	// error still surfaces with its original cause. A mistyped host is not worth
+	// optimising for at the price of a lost turn.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
 		return true
 	}
 	lower := strings.ToLower(err.Error())
@@ -4552,6 +4583,17 @@ func modelIDProvider(cfg *config.Config, id string) string {
 	return ""
 }
 
+// warnedNoAPIKey records which (provider, model) pairs have already produced a
+// "no API key ... refusing to build client" debug line, so a client that is
+// re-resolved on every turn does not flood the debug log.
+//
+// It gates LOGGING only — never client construction. That distinction is the
+// whole point: a caller that wanted to avoid the noise used to have to cache a
+// nil client for the life of the session, which also pinned "no credential" after
+// the user ran /connect. With the dedup here, a mid-session /connect takes effect
+// on the very next call.
+var warnedNoAPIKey sync.Map
+
 func NewClient(cfg *config.Config, model string) LLMClient {
 	return NewClientWithProfile(cfg, model, auth.ActiveProfile())
 }
@@ -4607,6 +4649,7 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 		if cred, ok := auth.GetProfileCredential(profile, provider); ok {
 			switch cred.Kind {
 			case auth.KindAPIKey:
+				accountID = cred.AccountID
 				if cred.Key != "" {
 					apiKey = cred.Key
 					emitDebug("AGENT", fmt.Sprintf("NewClient: profile %q credential — kind=%s apiKey=%s", profile, cred.Kind, maskKey(apiKey)))
@@ -4686,6 +4729,7 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 				switch cred.Kind {
 				case auth.KindAPIKey:
 					apiKey = cred.Key
+					accountID = cred.AccountID
 				case auth.KindOAuth:
 					if provider == "grok" {
 						// Grok subscription: SSO bearer token routes to the
@@ -4845,7 +4889,19 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	// clear failure instead of a deferred 401 on the first request. Providers in
 	// keyOptionalProviders (local servers, free tiers) are allowed through.
 	if apiKey == "" && provider != "" && !keyOptionalProviders[provider] {
-		emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q (useOAuth=%v, model=%q); refusing to build client (would 401)", provider, useOAuth, model))
+		// Emit once per (provider, model) rather than on every call. The judge
+		// slots re-resolve their client on every turn and every status read, so
+		// an unconditional line here produced one debug entry per judge per turn
+		// for every user without that provider's credential — burying the lines
+		// that matter in the log. Deduping at the source means callers no longer
+		// have to cache a nil client just to keep the log quiet: a /connect still
+		// goes live on the next call, because nothing here is cached at all.
+		// Keyed by model as well as provider so two slots pointed at the same
+		// provider but different models each report once.
+		key := provider + "\x00" + model
+		if _, seen := warnedNoAPIKey.LoadOrStore(key, struct{}{}); !seen {
+			emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q (useOAuth=%v, model=%q); refusing to build client (would 401)", provider, useOAuth, model))
+		}
 		return nil
 	}
 
@@ -4860,6 +4916,18 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	if provider == "typesafe" {
 		emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s (decision-only client)", provider, model, maskKey(apiKey)))
 		return newTypesafeClient(apiKey, model, baseURL)
+	}
+
+	// Cloudflare Workers AI serves clef from its native /ai/run/ endpoint, not the
+	// OpenAI-compatible chat path, so a clef model needs its own client even though
+	// the provider id is shared with chat models. Routing on the MODEL (via
+	// isDecisionModel) rather than the provider is what keeps every other
+	// cloudflare-workers model on GenericClient.
+	if provider == cloudflareWorkersProvider && isDecisionModel(provider+"/"+model) {
+		c := newClefClient(apiKey, accountID, model)
+		c.BaseURL = baseURL
+		emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s account=%s (decision-only client)", provider, model, maskKey(apiKey), maskKey(accountID)))
+		return c
 	}
 
 	emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s useOAuth=%v ws=%v", provider, model, maskKey(apiKey), useOAuth, cfg != nil && cfg.UseWebSocket))

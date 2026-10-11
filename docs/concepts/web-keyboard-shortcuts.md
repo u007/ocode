@@ -9,7 +9,7 @@ tags:
   - shortcuts
   - ui
   - reference
-timestamp: 2026-09-22T18:24:11Z
+timestamp: 2026-10-09T02:48:30Z
 ---
 # Web UI Global Keyboard Shortcuts
 
@@ -19,7 +19,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 
 - **Dispatch:** `web/src/hooks/useKeyboard.ts` — a single `window` `keydown` listener with one `useEffect` and an empty dep array; handlers are read through a ref so re-renders never rebind. This is the only place global shortcuts may be registered.
 - **Wiring/semantics:** `web/src/App.tsx:695-763` — an `openNewChat` helper (`:695-699`) plus the top-level `useKeyboard({...})` call (`:701-763`), which supplies `onNewSession`, `onNewTerminal`, `onCommandPalette`, `onFilePicker`, `onSave`, `onEscape`, `onCloseSession`, `onCloseBrowserTab`, and `focusedKind` / `activeBrowserId`.
-- **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:724`, guarded to the visible chat tab. The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:746`).
+- **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:1145`, guarded to the visible chat tab. The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:1167`).
 
 ## Bindings
 
@@ -33,6 +33,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 | `⌘W` / `Ctrl+W` | Close the frontmost thing (desktop shell only — see caveats) |
 | `Escape` | Close the CommandPalette / FilePicker (`onEscape`) |
 | `⌘F` / `Ctrl+F` | In-chat find bar (ChatPanel-local, not the global hook) |
+| `⌘⇧A` / `Ctrl+Shift+A` | Toggle the Pulse assistant window (`onToggleAssistant` → `toggleAssistantWindow`, `components/Pulse/pulseAssistantPrefs.ts`). Closed opens; a minimised window restores; otherwise closes. The same toggle is the top bar's "Toggle assistant" button |
 
 `e.preventDefault()` is called on every bound combo so the webview's own handling (e.g. browser find) does not also fire.
 
@@ -52,7 +53,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 
 - **⌘W is desktop-shell only.** `useKeyboard.ts:55` gates it on `isDesktopShell()` (Wails runtime present). In a plain browser the OS/webview consumes ⌘W to close the browser tab and it cannot be intercepted, so binding it would double-close. See the hook's header comment.
 - **Ctrl+W inside the embedded terminal is not stolen.** `useKeyboard.ts:55-69` (return at `:61`): if `!e.metaKey` and the event target is inside `.xterm`, the handler returns — Ctrl+W is readline's "delete previous word" while typing in the pty. Cmd+W (`metaKey`) is never sent to the pty, so it still closes the frontmost tab even when the terminal has focus (regression: `web/src/hooks/useKeyboard.test.ts` "closes via Cmd+W even when the embedded terminal has focus").
-- **⌘N and ⌘T have no native desktop menu accelerator.** The Wails webview receives the keys and `useKeyboard` handles them; `buildAppMenu` (`cmd/ocode-desktop/main.go:542`) binds only `CmdOrCtrl+,` (Settings) and `CmdOrCtrl+Shift+S` (Share). The Edit menu is the Wails role `menu.AddRole(application.EditMenu)`, whose accelerators are the standard ones (⌘Z / ⇧⌘Z, ⌘X, ⌘C, ⌘V, ⌘⇧⌥V, Backspace, ⌘A, plus the Speech submenu) — none is ⌘N or ⌘T. Adding/removing these bindings is hook-only.
+- **⌘N and ⌘T have no native desktop menu accelerator.** The Wails webview receives the keys and `useKeyboard` handles them; `buildAppMenu` (`cmd/ocode-desktop/main.go:732`) binds only `CmdOrCtrl+,` (Settings) and `CmdOrCtrl+Shift+S` (Share). The Edit menu is the Wails role `menu.AddRole(application.EditMenu)`, whose accelerators are the standard ones (⌘Z / ⇧⌘Z, ⌘X, ⌘C, ⌘V, ⌘⇧⌥V, Backspace, ⌘A, plus the Speech submenu) — none is ⌘N or ⌘T. Adding/removing these bindings is hook-only.
 - **⌘N / ⌘T are browser-chrome shortcuts in a plain browser tab.** `Ctrl+N` is "new window" and `Ctrl+T` is "new tab", both on Chrome's **non-overridable** list (`Ctrl+T`, `Ctrl+N`, `Ctrl+W`/`F4`, `Ctrl+Shift+T`, `Ctrl+Shift+N`, `Ctrl+Tab`, `F12`/`Ctrl+Shift+I`, `Ctrl+Shift+C`, `Ctrl+U`, `Ctrl+Shift+Del`), so `e.preventDefault()` cannot reliably claim them there. Contrast omnibox-family keys such as `Ctrl+K`, which pages *are* allowed to take (GitHub overrides it) — that is why ⌘K works in a browser while ⌘N/⌘T may not. The desktop shell is unaffected (its webview has no browser chrome), and outside it the reliable entry point is the tab-bar buttons.
 - **Save has a touch-path button.** The Files-tab editor header (`FileEditor.tsx:862-878`) renders a Save button (lucide `Save`, `aria-label="Save file"`) when `onSave` is provided and `dirty` is true — disabled otherwise. This is the only save mechanism on touch devices (no keyboard). Read-only surfaces (`TextViewer`/`MarkdownViewer`) pass no `onSave`, so no button renders there. Save failures surface via `reportActionError(…, "Save file")` → `ActionErrorToast`; a 409 conflict also sets the in-editor external-change banner.
 - **No raw listeners in child components.** Registering bindings outside `useKeyboard` bypasses the desktop-shell and xterm guards above.

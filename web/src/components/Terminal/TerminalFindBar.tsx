@@ -41,6 +41,7 @@ export default function TerminalFindBar({
       className="absolute right-2 top-2 z-20 flex items-center gap-2 rounded-md border border-border bg-card px-2 py-1.5 shadow-lg"
       role="search"
       aria-label="Find in terminal"
+      data-terminal-chrome=""
       onKeyDown={(e) => {
         if (e.key === "Escape") {
           e.preventDefault();

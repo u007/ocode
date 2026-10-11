@@ -34,6 +34,7 @@ export type PreviewKind =
   | "markdown"
   | "html"
   | "json"
+  | "sqlite"
   | "text";
 
 const kindByExt: Record<string, PreviewKind> = {
@@ -73,6 +74,13 @@ const kindByExt: Record<string, PreviewKind> = {
   // (react-markdown, no JSX evaluation — see isMarkdownPath); the editor
   // highlights it with Monaco's `mdx` language, which does understand JSX.
   ".mdx": "markdown",
+  // SQLite databases: browsed in the DB viewer. The server sniffs the SQLite
+  // header before rendering, so a `.db` that is not actually SQLite falls back
+  // rather than being handed to the engine.
+  ".sqlite": "sqlite",
+  ".sqlite3": "sqlite",
+  ".db": "sqlite",
+  ".db3": "sqlite",
 };
 
 /**
@@ -99,8 +107,9 @@ const NON_PREVIEWABLE_EXTS: ReadonlySet<string> = new Set([
   ".app", ".msix", ".appx", ".node", ".out", ".pdb", ".dsym",
   // Fonts.
   ".ttf", ".otf", ".woff", ".woff2", ".eot", ".ttc", ".pfb", ".pfm", ".dfont",
-  // Databases and binary indexes/dumps.
-  ".sqlite", ".sqlite3", ".db", ".db3", ".mdb", ".accdb", ".idx", ".pack",
+  // Databases and binary indexes/dumps. SQLite extensions live in kindByExt
+  // (the DB viewer); Access and the rest stay OS-open.
+  ".mdb", ".accdb", ".idx", ".pack",
   ".lmdb", ".mdbx", ".frm", ".ibd", ".myi", ".myd", ".rdb", ".ldb", ".sst",
   // Audio/video containers with no reliable browser renderer (the playable
   // ones live in `kindByExt`).
@@ -163,7 +172,7 @@ export function previewKindForPath(path: string): PreviewKind | null {
  * them in the editor only ever produced a "Binary File — Edit anyway" dead end.
  * `markdown`, `text`, and `mermaid` stay editable and are deliberately excluded.
  */
-const PREVIEW_ONLY_KINDS: ReadonlySet<PreviewKind> = new Set(["pdf", "docx", "pptx", "excel", "image", "audio", "video"]);
+const PREVIEW_ONLY_KINDS: ReadonlySet<PreviewKind> = new Set(["pdf", "docx", "pptx", "excel", "image", "audio", "video", "sqlite"]);
 
 /**
  * True for a Markdown document (`.md` / `.markdown` / `.mdx`). Markdown is

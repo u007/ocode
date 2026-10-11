@@ -193,8 +193,14 @@ func TestConnectListMasksStoredKeys(t *testing.T) {
 	if row["kind"] != "api" {
 		t.Fatalf("deepseek kind = %v, want api", row["kind"])
 	}
-	if row["masked"] != "sk-a••••mnop" {
-		t.Fatalf("deepseek masked = %v, want sk-a••••mnop", row["masked"])
+	// Only the trailing 4 characters are ever shown, and only for a key of at
+	// least 16 characters. The head used to be revealed too, which handed a
+	// client 8 of a 9-character key.
+	if row["masked"] != "••••••••••••mnop" {
+		t.Fatalf("deepseek masked = %v, want ••••••••••••mnop", row["masked"])
+	}
+	if strings.Contains(fmt.Sprint(row["masked"]), "sk-a") {
+		t.Fatalf("deepseek masked = %v leaks the head of the key", row["masked"])
 	}
 	methods, _ := row["methods"].([]any)
 	hasAPIKey, hasRemove := false, false
@@ -231,8 +237,13 @@ func TestConnectSetSavesAPIKeyAndEnvVar(t *testing.T) {
 		t.Fatalf("DEEPSEEK_API_KEY = %q, want the saved key (env outranks the store)", os.Getenv("DEEPSEEK_API_KEY"))
 	}
 	prov, _ := resp["provider"].(map[string]any)
-	if prov["masked"] != "sk-t••••5678" {
-		t.Fatalf("provider masked = %v, want sk-t••••5678", prov["masked"])
+	// "sk-test-12345678" is 16 characters, so it clears the disclosure floor and
+	// shows only its trailing 4. Never the head.
+	if prov["masked"] != "••••••••••••5678" {
+		t.Fatalf("provider masked = %v, want ••••••••••••5678", prov["masked"])
+	}
+	if strings.Contains(fmt.Sprint(prov["masked"]), "sk-t") {
+		t.Fatalf("provider masked = %v leaks the head of the key", prov["masked"])
 	}
 }
 
@@ -446,7 +457,9 @@ func TestConnectFlowCancel(t *testing.T) {
 	stubConnectSeam(t, &copilotStartFn, func() (auth.CopilotDevice, error) {
 		return auth.CopilotDevice{DeviceCode: "dc-1", UserCode: "ABCD-EFGH", VerificationURI: "https://github.com/login/device"}, nil
 	})
+	drained := make(chan struct{})
 	stubConnectSeam(t, &copilotPollFn, func(ctx context.Context, dev auth.CopilotDevice) (auth.Credential, error) {
+		defer close(drained)
 		<-ctx.Done()
 		return auth.Credential{}, ctx.Err()
 	})
@@ -456,6 +469,7 @@ func TestConnectFlowCancel(t *testing.T) {
 		t.Fatalf("start copilot flow: %d %v", code, resp)
 	}
 	flowID, _ := resp["flowId"].(string)
+	t.Cleanup(func() { cancelAndDrainConnectFlow(t, h, flowID, drained) })
 
 	resp, code = connectDo(t, h.handleConnectFlowCancel, "DELETE", "/api/auth/connect/flows/"+flowID, map[string]string{"flowId": flowID}, nil)
 	if code != http.StatusOK {
@@ -617,6 +631,28 @@ func TestConnectPluginAuthFlow(t *testing.T) {
 	}
 }
 
+// cancelAndDrainConnectFlow cancels a flow and waits for its background
+// exchange goroutine to exit.
+//
+// Tests that stub a blocking poll seam (one that waits on ctx.Done) otherwise
+// leave that goroutine running past the end of the test, and the seam's
+// t.Cleanup then restores the package var WHILE the goroutine is still reading
+// it — a data race under -race. Draining here keeps the suite honest.
+func cancelAndDrainConnectFlow(t *testing.T, h *Handler, flowID string, drained <-chan struct{}) {
+	t.Helper()
+	// 404 is fine: a test that already cancelled its flow had it dropped from
+	// the registry. The wait below is what matters either way.
+	if _, code := connectDo(t, h.handleConnectFlowCancel, "DELETE", "/api/auth/connect/flows/"+flowID,
+		map[string]string{"flowId": flowID}, nil); code != http.StatusOK && code != http.StatusNotFound {
+		t.Fatalf("cancel flow %s: %d", flowID, code)
+	}
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("connect flow %s: background exchange never returned after cancel", flowID)
+	}
+}
+
 func TestConnectFlowInputWrongKind(t *testing.T) {
 	h := NewHandler()
 	preserveConnectCredential(t, "copilot")
@@ -624,7 +660,9 @@ func TestConnectFlowInputWrongKind(t *testing.T) {
 	stubConnectSeam(t, &copilotStartFn, func() (auth.CopilotDevice, error) {
 		return auth.CopilotDevice{DeviceCode: "dc-1", UserCode: "ABCD-EFGH", VerificationURI: "https://github.com/login/device"}, nil
 	})
+	drained := make(chan struct{})
 	stubConnectSeam(t, &copilotPollFn, func(ctx context.Context, dev auth.CopilotDevice) (auth.Credential, error) {
+		defer close(drained)
 		<-ctx.Done()
 		return auth.Credential{}, ctx.Err()
 	})
@@ -633,14 +671,19 @@ func TestConnectFlowInputWrongKind(t *testing.T) {
 		t.Fatalf("start copilot flow: %d %v", code, resp)
 	}
 	flowID, _ := resp["flowId"].(string)
+	t.Cleanup(func() { cancelAndDrainConnectFlow(t, h, flowID, drained) })
 
 	// A device-code flow has no pasted-input stage.
 	resp, code = connectDo(t, h.handleConnectFlowInput, "POST", "/api/auth/connect/flows/"+flowID+"/input", map[string]string{"flowId": flowID}, map[string]string{"code": "anything"})
 	if code != http.StatusBadRequest {
 		t.Fatalf("input on device-code flow: %d %v", code, resp)
 	}
-	if !strings.Contains(fmt.Sprint(resp["error"]), "not waiting for input") {
-		t.Fatalf("error = %v, want not waiting for input", resp["error"])
+	// The message is kind-accurate now: the endpoint has no up-front
+	// waiting_input check (it was the TOCTOU half of the double-click bug), so
+	// a device-code flow falls through to the "does not accept pasted input"
+	// branch. The rejection itself is unchanged and is what this pins.
+	if !strings.Contains(fmt.Sprint(resp["error"]), "does not accept pasted input") {
+		t.Fatalf("error = %v, want does not accept pasted input", resp["error"])
 	}
 
 	// Unknown flow ids are 404s.

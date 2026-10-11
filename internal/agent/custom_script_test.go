@@ -41,7 +41,7 @@ func TestDetectExecutedCustomScripts(t *testing.T) {
 	// We use /etc/hosts which exists on macOS/Linux and is not inside any allowed root (except maybe not, but check)
 	outsideFile := "/etc/hosts"
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	tests := []struct {
@@ -135,7 +135,7 @@ func TestBuildPermissionContextIncludesCustomScriptEvenWhenBudgetExhausted(t *te
 	os.Chdir(tmp)
 	os.WriteFile(filepath.Join(tmp, "my.sh"), []byte("echo my\nrun something\n"), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	args, _ := json.Marshal(map[string]string{"command": "./my.sh --flag"})
@@ -156,16 +156,16 @@ func TestBuildPermissionContextTruncationLabel(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	// Create a file where first 40 lines already exceed maxInterpreterSourceBytes (16384).
-	// Each line ~500 bytes, 40 lines ~20000 bytes.
+	// Create a file that exceeds maxInterpreterSourceBytes.
+	// Each line ~500 bytes, 120 lines ~60000 bytes.
 	longLine := "echo " + strings.Repeat("x", 500) + "\n"
-	bigContent := strings.Repeat(longLine, 50)
+	bigContent := strings.Repeat(longLine, 120)
 	os.WriteFile(filepath.Join(tmp, "big.sh"), []byte(bigContent), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./big.sh"})
-	// Use small maxLines but large byte truncation should trigger
+	// Byte truncation must trigger regardless of the generic maxLines argument
 	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
 	if !strings.Contains(ctx, "TRUNCATED") {
 		t.Fatalf("expected TRUNCATED label for big file, got: %q", ctx[:1000])
@@ -183,7 +183,7 @@ func TestBuildPermissionContextBinaryNotIncluded(t *testing.T) {
 	binaryContent := []byte{0x7f, 'E', 'L', 'F', 0, 1}
 	os.WriteFile(filepath.Join(tmp, "binfile"), binaryContent, 0o644)
 	// also test binary via direct execution with slash
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./binfile"})
 	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
@@ -197,7 +197,7 @@ func TestDetectDoesNotReadPATHExecutables(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	got := a.detectExecutedCustomScripts("git status")
 	if len(got) != 0 {
@@ -214,14 +214,14 @@ func TestVerifyAutoGrantDeniesTruncatedScript(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	// Big script: 50 lines, each 500 chars -> truncated by both lines and bytes
+	// Big script: 120 lines, each 500 chars (~60 KB) -> over the byte ceiling
 	longLine := "echo " + strings.Repeat("x", 500) + "\n"
-	bigContent := strings.Repeat(longLine, 50)
+	bigContent := strings.Repeat(longLine, 120)
 	os.WriteFile(filepath.Join(tmp, "big.sh"), []byte(bigContent), 0o644)
 	// Small script: not truncated
 	os.WriteFile(filepath.Join(tmp, "small.sh"), []byte("echo hi\n"), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	// Truncated should be denied
@@ -241,11 +241,11 @@ func TestVerifyAutoGrantDeniesTruncatedInterpreterScript(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	bigContent := strings.Repeat("print('"+strings.Repeat("x", 500)+"')\n", 50)
+	bigContent := strings.Repeat("print('"+strings.Repeat("x", 500)+"')\n", 120)
 	os.WriteFile(filepath.Join(tmp, "big.py"), []byte(bigContent), 0o644)
 	os.WriteFile(filepath.Join(tmp, "small.js"), []byte("console.log(1)\n"), 0o644)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 
 	// Compound form bypasses the structured interpreter path (not first command),
@@ -273,7 +273,7 @@ func TestVerifyAutoGrantAllowsNonScriptCommand(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "ls -la"})
 	if ok, _ := a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: "ls -la"}); !ok {
@@ -281,24 +281,24 @@ func TestVerifyAutoGrantAllowsNonScriptCommand(t *testing.T) {
 	}
 }
 
-func TestBuildPermissionContextLineTruncation(t *testing.T) {
+func TestBuildPermissionContextManyLinesNotTruncated(t *testing.T) {
 	tmp := t.TempDir()
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 	os.Chdir(tmp)
-	// 50 lines, each short, exceeds line limit 40 but not byte limit
-	content := strings.Repeat("echo hi\n", 50)
+	// Executed scripts are not line-limited: thousands of lines under the byte
+	// ceiling reach the judge whole and pass the guard.
+	content := strings.Repeat("e\n", 5000)
 	os.WriteFile(filepath.Join(tmp, "manylines.sh"), []byte(content), 0o644)
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.Permissions().SetWorkDir(tmp)
 	args, _ := json.Marshal(map[string]string{"command": "./manylines.sh"})
 	ctx := a.buildPermissionContext("bash", args, 50000, 3, 40)
-	if !strings.Contains(ctx, "TRUNCATED") {
-		t.Fatalf("expected TRUNCATED for line-exceeded script, got: %q", ctx[:500])
+	if strings.Contains(ctx, "TRUNCATED") {
+		t.Fatalf("5000-line script under the byte ceiling must not be truncated, got: %q", ctx[:500])
 	}
-	// Also verify guard denies
-	if ok, _ := a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: "./manylines.sh"}); ok {
-		t.Fatal("expected line-truncated script to be denied by verifyAutoGrant")
+	if ok, why := a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: "./manylines.sh"}); !ok {
+		t.Fatalf("many-line script under the byte ceiling refused by guard: %s", why)
 	}
 }
 
@@ -313,7 +313,7 @@ func TestBuildPermissionContextUsesAgentWorkDirNotProcessCwd(t *testing.T) {
 	defer os.Chdir(origWd)
 	os.Chdir(elsewhere)
 
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	a.SetWorkDir(project)
 
 	args, _ := json.Marshal(map[string]string{"command": "cd web && ./node_modules/.bin/tsc --noEmit"})
@@ -324,5 +324,67 @@ func TestBuildPermissionContextUsesAgentWorkDirNotProcessCwd(t *testing.T) {
 	resolvedElsewhere, _ := filepath.EvalSymlinks(elsewhere)
 	if strings.Contains(ctx, "Working directory:\n"+resolvedElsewhere+"\n") {
 		t.Fatalf("context reported process cwd %q instead of agent workDir", elsewhere)
+	}
+}
+
+// A realistic 84-line script (over the old 40-line chat cap, far under the byte
+// cap) must reach the judge whole and pass the guard; one over the byte ceiling
+// stays truncated and refused.
+func TestExecutedScriptLongerThanChatCapIsNotTruncated(t *testing.T) {
+	tmp := t.TempDir()
+	long := strings.Repeat("echo hi\n", 84)
+	os.WriteFile(filepath.Join(tmp, "long.sh"), []byte(long), 0o755)
+	huge := strings.Repeat("echo "+strings.Repeat("x", 90)+"\n", 600)
+	os.WriteFile(filepath.Join(tmp, "huge.sh"), []byte(huge), 0o755)
+	a := newTestAgent(nil, nil, nil, nil)
+	a.SetWorkDir(tmp)
+
+	got := a.executedScriptsForJudge("./long.sh", a.executedScriptLineCap(), 3)
+	if len(got) != 1 || got[0].Truncated {
+		t.Fatalf("84-line script: want 1 untruncated entry, got %+v", got)
+	}
+	longArgs, _ := json.Marshal(map[string]string{"command": "./long.sh"})
+	if ok, why := a.verifyAutoGrant("bash", longArgs, &PermissionRequest{ToolName: "bash", Command: "./long.sh"}); !ok {
+		t.Fatalf("84-line script refused by guard: %s", why)
+	}
+	got = a.executedScriptsForJudge("./huge.sh", a.executedScriptLineCap(), 3)
+	if len(got) != 1 || !got[0].Truncated {
+		t.Fatalf("over-byte-cap script: want 1 truncated entry, got %+v", got)
+	}
+	hugeArgs, _ := json.Marshal(map[string]string{"command": "./huge.sh"})
+	if ok, _ := a.verifyAutoGrant("bash", hugeArgs, &PermissionRequest{ToolName: "bash", Command: "./huge.sh"}); ok {
+		t.Fatal("over-byte-cap script must stay refused")
+	}
+}
+
+// The chat judge must see every line of a script the truncation guard lets
+// through: with the 40-line snippet cap passed in, a marker on line 60 must
+// still reach the judge, else the guard would auto-grant on a partial view.
+func TestChatJudgeContextShowsScriptPastSnippetCap(t *testing.T) {
+	tmp := t.TempDir()
+	body := strings.Repeat("echo hi\n", 59) + "echo LINE60_MARKER\n"
+	os.WriteFile(filepath.Join(tmp, "deploy.sh"), []byte(body), 0o755)
+	a := newTestAgent(nil, nil, nil, nil)
+	a.SetWorkDir(tmp)
+
+	args, _ := json.Marshal(map[string]string{"command": "./deploy.sh"})
+	if ok, why := a.verifyAutoGrant("bash", args, &PermissionRequest{ToolName: "bash", Command: "./deploy.sh"}); !ok {
+		t.Fatalf("60-line script refused by guard: %s", why)
+	}
+	// 2048 is the production default byte budget; a script over it must still be shown.
+	os.WriteFile(filepath.Join(tmp, "big.sh"), []byte(strings.Repeat("echo hello world\n", 200)+"echo BIG_MARKER\n"), 0o755)
+	bigArgs, _ := json.Marshal(map[string]string{"command": "./big.sh"})
+	if ok, why := a.verifyAutoGrant("bash", bigArgs, &PermissionRequest{ToolName: "bash", Command: "./big.sh"}); !ok {
+		t.Fatalf("3.4KB script refused by guard: %s", why)
+	}
+	if bigCtx := a.buildPermissionContext("bash", bigArgs, 2048, 3, 40); !strings.Contains(bigCtx, "BIG_MARKER") {
+		t.Fatalf("guard-approved script dropped by the context byte budget:\n%s", bigCtx)
+	}
+	ctx := a.buildPermissionContext("bash", args, 2048, 3, 40)
+	if !strings.Contains(ctx, "LINE60_MARKER") {
+		t.Fatalf("judge context cut a guard-approved script at the 40-line chat cap:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "TRUNCATED") {
+		t.Fatalf("judge context marked a guard-approved script truncated:\n%s", ctx)
 	}
 }

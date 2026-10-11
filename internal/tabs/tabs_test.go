@@ -3,7 +3,10 @@ package tabs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/session"
 )
 
 func newTestStore(t *testing.T, path string) *Store {
@@ -121,5 +124,49 @@ func TestSaveLeavesNoTempFiles(t *testing.T) {
 		if filepath.Ext(e.Name()) == ".tmp" {
 			t.Fatalf("temp file left behind: %s", e.Name())
 		}
+	}
+}
+
+// TestStoreCapsOversizedTabTitles covers the write cap: a tab label mirrors a
+// session title, which can be multi-megabyte. GET /api/tabs echoes the store,
+// so an unbounded label would ride every tab fetch and the rendered tab strip.
+func TestStoreCapsOversizedTabTitles(t *testing.T) {
+	s := newTestStore(t, filepath.Join(t.TempDir(), "tabs.json"))
+	huge := strings.Repeat("q", 100000)
+
+	if err := s.Set("/proj", ProjectTabs{Tabs: []Tab{{ID: "s1", Title: huge}}, Active: "s1"}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got := s.Get("/proj").Tabs[0].Title
+	if n := len([]rune(got)); n > session.MaxStoredTitleRunes {
+		t.Fatalf("Set stored %d runes, want <= %d", n, session.MaxStoredTitleRunes)
+	}
+
+	// ApplyBulk must cap too (the multi-window/multi-project path).
+	if err := s.ApplyBulk(map[string]ProjectTabs{
+		"/proj2": {Tabs: []Tab{{ID: "s2", Title: huge}}, Active: "s2"},
+	}); err != nil {
+		t.Fatalf("ApplyBulk: %v", err)
+	}
+	got = s.Get("/proj2").Tabs[0].Title
+	if n := len([]rune(got)); n > session.MaxStoredTitleRunes {
+		t.Fatalf("ApplyBulk stored %d runes, want <= %d", n, session.MaxStoredTitleRunes)
+	}
+}
+
+// TestLoadCapsOversizedTabTitleFromDisk covers the read cap: an already-poisoned
+// tabs.json (written before this fix, or by an older binary sharing the same
+// data dir) must self-heal on the next load rather than jank the tab strip.
+func TestLoadCapsOversizedTabTitleFromDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tabs.json")
+	huge := strings.Repeat("w", 100000)
+	raw := `{"/proj":{"tabs":[{"id":"s1","title":"` + huge + `"}],"active":"s1"}}`
+	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
+		t.Fatalf("write poisoned tabs.json: %v", err)
+	}
+	s := newTestStore(t, path)
+	got := s.Get("/proj").Tabs[0].Title
+	if n := len([]rune(got)); n > session.MaxStoredTitleRunes {
+		t.Fatalf("load kept %d runes, want <= %d", n, session.MaxStoredTitleRunes)
 	}
 }

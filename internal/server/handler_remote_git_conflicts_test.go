@@ -412,11 +412,11 @@ func TestRemoteGitResolveConflictRefusesPathspecMagicName(t *testing.T) {
 	w := remotePostJSON(t, h, "/api/git/conflict/resolve?host=ci.local&project="+repo,
 		GitConflictResolveRequest{Path: magic, Resolution: "ours"}, nil)
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400 for a path remoteSafeSpec rejects: %s", w.Code, w.Body.String())
+		t.Fatalf("status %d, want 400 for a path remoteGitSpec rejects: %s", w.Code, w.Body.String())
 	}
 	// The refusal must be reported, not silently swallowed: the user needs to
 	// know WHY the file could not be resolved.
-	if !strings.Contains(w.Body.String(), "unsupported characters") {
+	if !strings.Contains(w.Body.String(), "pathspec magic") {
 		t.Errorf("body = %s, want the validator's reason surfaced to the user", w.Body.String())
 	}
 	if after := readFileString(t, filepath.Join(repo, magic)); after != before {

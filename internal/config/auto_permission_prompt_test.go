@@ -15,7 +15,7 @@ import (
 func setupAutoPermPromptHome(t *testing.T) string {
 	t.Helper()
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	return tmpHome
 }
 

@@ -17,7 +17,7 @@ import (
 // included.
 func TestDeltaInjection_Basic(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -67,7 +67,7 @@ func TestDeltaInjection_Basic(t *testing.T) {
 // loop.
 func TestDeltaInjection_EmptyInjectsNothing(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -102,7 +102,7 @@ func TestDeltaInjection_EmptyInjectsNothing(t *testing.T) {
 // double-counts."
 func TestDeltaInjection_OwnNotesNeverReInjected(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -136,7 +136,7 @@ func TestDeltaInjection_OwnNotesNeverReInjected(t *testing.T) {
 // prompt) would bust the cache and fail this test.
 func TestDeltaInjection_BlockAtTail(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -179,7 +179,7 @@ func TestDeltaInjection_BlockAtTail(t *testing.T) {
 // pins the wire-through to the injection layer.
 func TestDeltaInjection_ResolvedNotesExcluded(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -207,7 +207,7 @@ func TestDeltaInjection_ResolvedNotesExcluded(t *testing.T) {
 // is a no-op when the agent has no bus. The non-group path
 // must not add or alter any messages.
 func TestDeltaInjection_NoBusNoBlock(t *testing.T) {
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	// No SetNoteBus. The tail helper is a no-op.
 	base := []Message{
 		{Role: "system", Content: "STABLE"},

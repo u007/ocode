@@ -91,6 +91,56 @@ type rcPendingQuestion struct {
 	questions []tool.QuestionPrompt
 }
 
+// queuedPermAsk is one permission ask waiting for its turn in the dialog.
+//
+// A single model message can dispatch several ask-capable tool calls at once:
+// webfetch, websearch, the github_* tools and every MCP tool are
+// Parallel() == true and default-ask, and a parallel ask can also sit next to a
+// sequential one (bash, delete). Agent.Step dispatches the whole round, then
+// hands every result to OnMessage in order (internal/agent/agent.go, the
+// pauseAfterResults scan), so N asks reach the host back-to-back in one frame.
+//
+// The dialog slot (showPermDialog + pendingPermission + pendingToolCallID +
+// pendingSubAgentResp) holds exactly one ask, so without this queue the Nth ask
+// overwrote the one before it: the user answered against a transcript whose
+// visible prompt belonged to a different ask, and each dropped ask later came
+// back as a duplicate orphan-recovery ask (buildAgentMessagesSnapshot skips
+// every sentinel, so the discarded tool_call becomes an orphan and
+// recoverOrphanedToolCalls re-executes it).
+//
+// Entries keep their own identity — request, tool-call id, /rc slot and
+// sub-agent response channel — so a promoted ask resolves against the call it
+// was actually raised for.
+type queuedPermAsk struct {
+	req        agent.PermissionRequest
+	toolCallID string
+	// rc is non-nil when this ask is owned by the /rc bridge (a web/Telegram
+	// remote decision), and must be restored alongside the dialog slot.
+	rc *rcPendingPerm
+	// subResp is non-nil for a sub-agent ask; the sub-agent goroutine is parked
+	// on it and would block forever if the channel were dropped on promotion.
+	subResp chan agent.PermissionResponse
+}
+
+// queuedQuestionAsk is one question prompt waiting for its turn in the dialog.
+//
+// Same defect class as queuedPermAsk, and for the same reason: one assistant
+// message can carry TWO `question` tool calls, Step collects the whole round's
+// results and hands each to OnMessage in order, so both QUESTION_PROMPT: tool
+// messages arrive back-to-back in one frame. The dialog slot holds one prompt,
+// so the second overwrote the first and the earlier question was never shown
+// while its prompt sat in the transcript.
+//
+// Unlike the permission case this needs no parallel batch: `question` is
+// Parallel() == false, and a single message with two question calls is enough.
+type queuedQuestionAsk struct {
+	toolCallID string
+	prompts    []tool.QuestionPrompt
+	// rc is non-nil when this prompt is owned by the /rc bridge (a web/Telegram
+	// remote answer), and must be restored alongside the dialog slot.
+	rc *rcPendingQuestion
+}
+
 type scrollbarDragTarget int
 
 const (
@@ -1334,6 +1384,8 @@ type model struct {
 	showThinking   bool
 	showDetails    bool
 	leaderActive   bool
+	// voice is the ctrl+x v dictation state (see voice.go).
+	voice voiceState
 	// MCP tool loading state. mcpReady gates user chat submission until the
 	// background MCP tool enumeration (LoadMCPTools) has applied its results.
 	mcpReady            bool         // true once MCP tools are loaded (or none configured)
@@ -1451,6 +1503,8 @@ type model struct {
 	pendingToolArgs          json.RawMessage
 	pendingToolCallID        string
 	pendingPermission        agent.PermissionRequest
+	permAskQueue             []queuedPermAsk     // permission asks waiting for the dialog, in arrival order (see queuedPermAsk)
+	questionAskQueue         []queuedQuestionAsk // question prompts waiting for the dialog, in arrival order (see queuedQuestionAsk)
 	styles                   Styles
 	modalStack               *ModalStack
 	streaming                bool
@@ -1496,6 +1550,7 @@ type model struct {
 	streamWasInterrupted     bool
 	transcriptLines          []string
 	rawTranscriptLines       []string
+	rawTranscriptCont        []bool                      // parallel to rawTranscriptLines: true when the line is a hard-wrap continuation of the previous one (see wrapViewMarked)
 	urlLinkRegions           []urlLinkRegion             // clickable [text](url) markdown-link targets, indexed by absolute transcript line. Markdown links drop the URL during rendering (so rawTranscriptLines can't detect them); these regions restore clickability.
 	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for hidden messages outside the window). Used to scroll to a chat-search match.
 	transcriptWindowStart    int                         // first message index rendered in the transcript window; always >= 0 once initialized (0 = show all). Never -1: -1 is reserved for transcriptMsgStartLine entries meaning "hidden".
@@ -1604,6 +1659,15 @@ type model struct {
 	permDirty            permDirtyFlags // tracks permission fields changed by this session
 	cleanupState         *modelCleanupState
 	supervisor           *tool.ProcessSupervisor
+	// htrEnsured records that the shared HTR daemon ensure has already been
+	// kicked off for this model, so repeated startups in one process cannot
+	// re-enter it. Set synchronously by ensureSharedHTRDaemonAsync before it
+	// spawns any work.
+	htrEnsured bool
+	// ensureSharedHTRDaemonFn overrides the real shared-HTR ensure. nil in
+	// production (which falls through to ensureSharedHTRDaemon); tests set it so
+	// they can observe the call without resolving config or touching a daemon.
+	ensureSharedHTRDaemonFn func()
 	// secretSession caches unlocked project keys (internal/secretfile) for
 	// the life of the TUI process, so a passphrase is asked at most once per
 	// project regardless of how many agents get swapped in.
@@ -2907,6 +2971,88 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// ensureSharedHTRDaemonAsync kicks off the shared `htrcli serve` daemon for this
+// session, at most once, without ever blocking startup.
+//
+// Why it is here and not behind a trigger: a plain TUI session never reaches
+// server.StartBrowse, so today nothing ever starts the daemon for it — HTR is
+// only reachable via /rc (or the desktop app). A session that never opens a
+// browser has nothing to trigger a lazy ensure, and that session is exactly the
+// one whose daemon goes missing, so the ensure is eager instead. The cost is
+// that such a session still spawns a daemon, which then dies on exit; that is
+// the agreed stop rule, not an oversight.
+//
+// The work runs on a crashguard-guarded goroutine. crashguard is required, not
+// stylistic: bubbletea only recovers panics in Update/View and in goroutines it
+// starts itself, so a panic here would kill the process before bubbletea could
+// leave the alt-screen, filling the user's shell with escape-sequence garbage.
+//
+// It deliberately takes no completion channel: the caller has nothing to wait
+// for, and a test that needs to know the ensure ran gets that from the work
+// itself (see ensureSharedHTRDaemonFn), not from a signal plumbed through
+// production code.
+func (m *model) ensureSharedHTRDaemonAsync() {
+	if m.htrEnsured {
+		return
+	}
+	// Set the guard before spawning: the flag is read on the caller's goroutine
+	// and written by nobody else, so marking it here is what makes the ensure
+	// at-most-once even if two callers race into this method.
+	m.htrEnsured = true
+	ensure := m.ensureSharedHTRDaemonFn
+	if ensure == nil {
+		ensure = m.ensureSharedHTRDaemon
+	}
+	// The ensure reads m.supervisor from this goroutine. That is safe: the value
+	// handed to tea.NewProgram is a copy, and the model this method was called
+	// on is not mutated after Run hands it over.
+	crashguard.Go(ensure)
+}
+
+// ensureSharedHTRDaemonFnDefault is the package-level seam the real ensure
+// goes through, so a test can observe the call without resolving on-disk config
+// or touching a real daemon. nil in production, where it names
+// server.EnsureSharedHTRDaemon.
+var ensureSharedHTRDaemonFnDefault = server.EnsureSharedHTRDaemon
+
+// ensureSharedHTRDaemon is the real work behind ensureSharedHTRDaemonAsync: read
+// the persisted browser config the same way every other startup path does, ask
+// the server package to ensure the daemon, and report the outcome to the debug
+// log.
+//
+// It runs inline — it is only ever reached from the crashguard-guarded
+// goroutine ensureSharedHTRDaemonAsync spawns, so it must not spawn another one
+// and must never be called directly.
+//
+// Nothing here writes to the terminal. The TUI runs in bubbletea's alt-screen,
+// where a stray write paints over the frame, so every outcome — including
+// HTR being switched off — is reported through DebugLog, which lands in the log
+// tab rather than on screen.
+func (m *model) ensureSharedHTRDaemon() {
+	ensure := ensureSharedHTRDaemonFnDefault
+	if ensure == nil {
+		ensure = server.EnsureSharedHTRDaemon
+	}
+	browser := config.DefaultBrowserConfig()
+	if ocfg, err := config.LoadOcodeConfigCopy(); err == nil && ocfg != nil {
+		browser = ocfg.Browser
+	}
+	st, err := ensure(m.supervisor, browser, log.Default())
+	if err != nil {
+		// A user who switched HTR off gets an informational line, not an
+		// error: it is an expected configuration, not a failure, and an ERROR
+		// entry would surface on the log tab of every such launch.
+		if errors.Is(err, server.ErrHTRDisabled) {
+			DebugLog.Append(DebugEntry{Kind: DebugKindSession, Message: "htr: shared daemon not started (HTR is disabled)"})
+			return
+		}
+		DebugLog.Append(DebugEntry{Kind: DebugKindError, Message: fmt.Sprintf("htr: shared daemon not started: %v", err)})
+		return
+	}
+	DebugLog.Append(DebugEntry{Kind: DebugKindSession, Message: fmt.Sprintf(
+		"htr: shared daemon %s running=%v startedByOcode=%v", st.Addr, st.Running, st.StartedByOcode)})
+}
+
 // maxPasteFilterLen caps paste length for single-line filter inputs. The
 // search/filter renderers render these as one line, so longer pastes
 // would either overflow the title row or wrap. 256 runes is more than
@@ -3304,7 +3450,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty()
+	inputAllowed := m.chatComposerFree() && !m.leaderActive
 
 	// Chat search bar takes priority over the chat input and the slash popup
 	// while it's open. The bar is only available on the chat tab; other tabs
@@ -3428,6 +3574,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.leaderActive && msg.seq == m.leaderSeq {
 			m.leaderActive = false
 		}
+		return m, nil
+	case voiceStartedMsg:
+		cmd := m.onVoiceStarted(msg)
+		return m, cmd
+	case voicePartialTickMsg:
+		return m, m.onVoicePartialTick(msg)
+	case voicePartialMsg:
+		return m, m.onVoicePartial(msg)
+	case voiceTranscribedMsg:
+		if msg.err != nil {
+			m.voice.phase = voiceIdle
+			m.voice.note = msg.err.Error()
+			return m, nil
+		}
+		m.voice.phase = voiceIdle
+		text := strings.TrimSpace(msg.text)
+		if text == "" {
+			m.voice.note = "nothing heard"
+			return m, nil
+		}
+		return m.submitVoiceTranscript(text)
+	case voiceCancelledMsg:
 		return m, nil
 	case chatSearchFlashExpiredMsg:
 		// The 1.2s flash window started by jumpToChatMatch has elapsed —
@@ -3900,6 +4068,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				}
+			}
+			// A permission dialog still open means this round has asks the user
+			// has not answered yet — promoteNextPermAsk moves the next one into
+			// the slot as each is resolved. Resuming now would re-Step the agent
+			// on a transcript whose remaining sentinels
+			// buildAgentMessagesSnapshot strips, so every outstanding ask would
+			// come back as an orphan re-execution (recoverOrphanedToolCalls)
+			// instead of the decision the user is being asked for.
+			if !stop && m.showPermDialog {
+				stop = true
+			}
+			// Same hold for an unanswered question prompt: the agent strips every
+			// QUESTION_PROMPT sentinel in buildAgentMessagesSnapshot, so re-stepping
+			// with one outstanding turns it into an orphan re-execution.
+			if !stop && m.showQuestionDialog {
+				stop = true
 			}
 			if !stop {
 				return m, m.askAgent()
@@ -4681,7 +4865,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// result splice against the wrong (or nil) mapping, silently discarding
 		// it. pendingCompactUIIdx is set synchronously at compaction start, so
 		// it covers the whole window (including before compactStartedMsg lands).
-		if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.showPermDialog {
+		// anyAskPending subsumes showPermDialog and additionally covers a queued
+		// ask and an open QUESTION dialog. Compaction rebuilds the transcript, so
+		// it must not run while a round's decisions are still outstanding.
+		if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.anyAskPending() {
 			m.pendingJobMsgs = append(m.pendingJobMsgs, injected)
 		} else {
 			m.messages = append(m.messages, message{
@@ -4915,6 +5102,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// as pending. No agent Step runs — the user's next message
 				// starts a fresh turn, mirroring Esc on the local dialog.
 				m.clearQuestionPrompt()
+				m.promoteNextQueuedAsk()
 				if idx := m.findToolMessageIndexByToolID(res.RequestID); idx >= 0 {
 					if m.messages[idx].raw != nil {
 						m.messages[idx].raw.Content = tool.QuestionDismissedResult
@@ -5652,18 +5840,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A sub-agent tool call needs a permission decision. Reuse the same
 		// permission dialog the main agent uses. The sub-agent goroutine is
 		// blocked on resp.respCh until handlePermissionChoice answers it.
+		//
+		// The sub-agent asker is serialised by subAgentPermMu, so only one
+		// sub-agent ask is in flight at a time — but a main-agent sentinel from
+		// the round that spawned this sub-agent can land in the same frame. Go
+		// through the same queue as every other ask so the parked respCh is
+		// always paired with the request it belongs to; the sub-agent goroutine
+		// is already parked, so queueing costs it nothing.
 		req := msg.req
 		log.Printf("[perm] sub-agent permission dialog shown: tool=%s rule=%s command=%q", req.ToolName, req.Rule, req.Command)
-		m.pendingSubAgentResp = msg.respCh
-		m.showPermDialog = true
-		m.permConfirm = ""
-		m.activeTab = tabChat
-		m.chatUnread = false
-		m.pendingPermission = req
-		m.pendingToolName = req.ToolName
-		m.pendingToolArgs = req.Args
-		m.pendingToolCallID = ""
-		m.layout() // shrink the transcript viewport to make room for the dialog
+		m.enqueuePermAsk(queuedPermAsk{req: req, subResp: msg.respCh})
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
@@ -6197,6 +6383,12 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				return true, m, copyToClipboard(m.sessionID)
 			}
 			return true, m, nil
+		case "v":
+			if !m.voiceKeyAllowed() {
+				return true, m, nil
+			}
+			cmd := m.toggleVoice()
+			return true, m, cmd
 		case "t":
 			m.cycleThinkingLevel()
 			return true, m, nil
@@ -6558,6 +6750,10 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return leaderTimeoutMsg{seq: seq}
 		})
 	case "esc":
+		if m.voice.phase == voiceRecording {
+			cmd := m.cancelVoice()
+			return m, cmd
+		}
 		return m.handleEscKey()
 	case "ctrl+c":
 		if strings.TrimSpace(m.input.Value()) != "" {
@@ -6880,6 +7076,11 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		m.lastActivity = agent.ActivitySnapshot{}
 	}
 	if m.streaming {
+		// A cancelled round's asks are void: their tool calls belong to a turn that
+		// will never resume. Drop both queues and the dialogs rather than leaving
+		// the user to answer for dead work.
+		m.clearPermAskState()
+		m.clearQuestionAskState()
 		epoch := m.agentEpoch
 		return m, func() tea.Msg { return streamDoneMsg{err: context.Canceled, epoch: epoch} }
 	}
@@ -7516,7 +7717,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if m.sel.dragging {
 			m.sel.dragging = false
 			if m.sel.active {
-				text := extractSelectionText(m.rawTranscriptLines, m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
+				text := extractSelectionTextCont(m.rawTranscriptLines, m.rawTranscriptCont, m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
 				m.sel = selectionState{}
 				m.applyOrClearSelectionHighlight()
 				return m, copyToClipboard(text), true
@@ -8840,6 +9041,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
 		cmd == "/advisor" || cmd == "/mask" || cmd == "/mem" ||
 		cmd == "/paths" ||
+		cmd == "/voice" ||
 		cmd == "/rc" || cmd == "/remote-control" ||
 		cmd == "/search" || cmd == "/find" ||
 		cmd == "/discover" ||
@@ -8957,7 +9159,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		if matched := findSkillByName(skill.LoadSkillsForRoot(m.workDir), skillName); matched != nil {
 			if m.agent != nil {
 				m.agent.ResetSubagentDispatch()
-				skillPrompt := fmt.Sprintf("Run the **%s** skill.\n\n%s", matched.Name, matched.Content)
+				skillPrompt := fmt.Sprintf("Run the **%s** skill.\n\n%s", matched.Name, matched.ForModel())
 				if len(args) > 0 {
 					userArgs := strings.Join(args, " ")
 					skillPrompt += "\n\n<user instruction>\n" + userArgs + "\n</user instruction>"
@@ -11192,6 +11394,8 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
+			m.clearPermAskState()
+			m.clearQuestionAskState()
 			m.resetTranscriptWindow()
 			m.streamingThinkingIdx = -1
 			roleCounts := map[string]int{}
@@ -11269,6 +11473,18 @@ func displayTextForAgentMessage(msg agent.Message) string {
 func (m *model) handleCompactCmd(args []string) {
 	if m.agent == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Compaction requires an LLM connection. Run /connect first."})
+		return
+	}
+	// Compaction rewrites the transcript the round's tool_calls live in, so it
+	// must not start while a decision is outstanding: the ask would become an
+	// orphan and recoverOrphanedToolCalls would re-execute its tool behind the
+	// user's back. anyAskPending covers the permission dialog, a queued ask, a
+	// parked sub-agent respCh, the question dialog and a queued question prompt.
+	// Typing is already blocked while a dialog is up, so this is defence for the
+	// other ways in (an instant dispatch, a queued command drained later).
+	if m.anyAskPending() {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot compact while a permission or question prompt is pending — answer it first."})
+		m.rerenderTranscriptAndMaybeScroll()
 		return
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
@@ -11588,9 +11804,12 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 
 	m.messages = []message{}
+	m.clearPermAskState()
+	m.clearQuestionAskState()
 	m.invalidateDelayedChatInput()
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
+	m.rawTranscriptCont = nil
 	m.urlLinkRegions = nil
 	m.sel = selectionState{}
 	m.resetTranscriptWindow()
@@ -11685,6 +11904,10 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 					ct.Driver = nil
 					ct.DriverErr = fmt.Errorf("process supervisor not attached")
 				}
+				if wt, ok := t.(*tool.WindowTool); ok {
+					wt.Driver = nil
+					wt.DriverErr = fmt.Errorf("process supervisor not attached")
+				}
 			}
 		} else {
 			// No tools to reuse — start fresh but keep LSP dropped for /new.
@@ -11764,7 +11987,10 @@ func (m *model) handleResetIDCmd(args []string) {
 		m.rerenderTranscriptAndMaybeScroll()
 		return
 	}
-	if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.showPermDialog {
+	// anyAskPending subsumes showPermDialog and additionally covers a queued ask
+	// and an open QUESTION dialog. /reset-id deletes the old transcript, so
+	// answering a still-pending ask afterwards would target a dead session.
+	if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.anyAskPending() {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot reset the session id while a turn is running."})
 		m.rerenderTranscriptAndMaybeScroll()
 		return
@@ -12484,7 +12710,7 @@ func (m *model) handleBtwCmd(args []string) {
 	ch := m.btwCh
 	m.btwCancel = m.agent.AskLoopAsync(agentMsgs, agent.AskLoopOptions{
 		Tools:         m.btwTools(),
-		ExcludedTools: btwExcludedTools,
+		ExcludedTools: agent.BtwExcludedTools,
 		MaxSteps:      btwMaxSteps,
 		// Stream tool activity into the popup as it happens.
 		OnMessage: func(am agent.Message) {
@@ -12524,38 +12750,15 @@ func (m *model) handleBtwCmd(args []string) {
 // burn tokens forever in the popup.
 const btwMaxSteps = 8
 
-// btwExcludedTools lists tools the /btw side-query loop must not expose.
-// It is used BOTH to filter the builtin slice (question, todo/plan tools)
-// and as AskLoopOptions.ExcludedTools, which deletes NewAgent-registered
-// tools (task family, wait, knowledge_lookup, advisor) from the child's
-// final tool map — the slice filter alone cannot remove those, since
-// NewAgent registers them unconditionally. The result stays non-interactive:
-// any permission ASK is denied non-blockingly by AskLoopAsync.
-var btwExcludedTools = []string{
-	"question",
-	"task",
-	"task_status",
-	"agent_status",
-	"task_cancel",
-	"wait",
-	"todo_write",
-	"todo_update",
-	"plan_enter",
-	"plan_exit",
-	"discover_more",
-	"knowledge_lookup",
-	"advisor",
-}
-
 // btwTools returns the tool set exposed to the /btw side-query loop: the
-// builtin set minus btwExcludedTools. The exclusion list is applied to the
+// builtin set minus agent.BtwExcludedTools. The exclusion list is applied to the
 // slice HERE and (as AskLoopOptions.ExcludedTools) to the child's final tool
 // map, because NewAgent unconditionally registers the dispatch family even
 // when the slice omits it. The result stays non-interactive: any permission
 // ASK is denied non-blockingly by AskLoopAsync.
 func (m *model) btwTools() []tool.Tool {
-	excluded := make(map[string]bool, len(btwExcludedTools))
-	for _, name := range btwExcludedTools {
+	excluded := make(map[string]bool, len(agent.BtwExcludedTools))
+	for _, name := range agent.BtwExcludedTools {
 		excluded[name] = true
 	}
 	tools, _ := m.getInitialTools()
@@ -12569,26 +12772,11 @@ func (m *model) btwTools() []tool.Tool {
 	return out
 }
 
-// formatBtwActivity renders a compact activity line for a /btw loop message:
-// "→ name: args" for an assistant tool call (the tool-result message carries
-// only the call id, so it adds no signal). Returns "" when the message has
-// nothing worth surfacing.
+// formatBtwActivity renders a compact activity line for a /btw loop message.
+// Delegates to agent.FormatSideQueryActivity so the TUI popup and the
+// web/desktop panel render identical activity text.
 func formatBtwActivity(am agent.Message) string {
-	if am.Role == "assistant" && len(am.ToolCalls) > 0 {
-		var b strings.Builder
-		for _, tc := range am.ToolCalls {
-			if b.Len() > 0 {
-				b.WriteString("\n")
-			}
-			args := strings.TrimSpace(tc.Function.Arguments)
-			if len(args) > 60 {
-				args = args[:57] + "..."
-			}
-			b.WriteString("→ " + tc.Function.Name + " " + args)
-		}
-		return b.String()
-	}
-	return ""
+	return agent.FormatSideQueryActivity(am)
 }
 
 func (m *model) handleInitCmd(args []string) tea.Cmd {
@@ -14642,19 +14830,20 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				// Otherwise open the local TUI dialog. (Web /rc users also get the
 				// inline buttons from the event above, so this is a terminal-side
 				// fallback they can use instead.)
+				//
+				// A round can raise several asks: enqueuePermAsk shows this one
+				// only if the dialog slot is free, and otherwise queues it in
+				// arrival order. Assigning the slot fields unconditionally (the
+				// old shape here) made the last ask of the batch silently
+				// replace every earlier one.
 				log.Printf("[perm] permission dialog shown: tool=%s rule=%s command=%q", req.ToolName, req.Rule, req.Command)
-				m.showPermDialog = true
-				m.permConfirm = ""
-				m.activeTab = tabChat
-				m.chatUnread = false
-				m.pendingPermission = req
-				m.pendingToolName = req.ToolName
-				m.pendingToolArgs = req.Args
-				m.pendingToolCallID = am.ToolID
-				m.layout() // shrink the transcript viewport to make room for the dialog
+				m.enqueuePermAsk(queuedPermAsk{req: req, toolCallID: am.ToolID})
 				m.messages = append(m.messages, message{role: roleAssistant, text: renderPermissionPrompt(req), raw: &copyMsg})
 			}
 		} else if prompts, ok := parseQuestionPrompt(am.Content); ok {
+			// rcAsk travels with the prompt through the queue instead of being
+			// written straight into m.rcPendingQuestion, which holds exactly one.
+			var rcAsk *rcPendingQuestion
 			// Surface the question to any external client via the SSE stream.
 			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
 				ev := server.QuestionEvent{RequestID: am.ToolID, Questions: prompts}
@@ -14665,15 +14854,23 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				// Also surface it to the web /rc UI (mirror SSE) so it can
 				// render the same inline question dialog.
 				m.broadcastRC("question", ev)
-				m.rcPendingQuestion = &rcPendingQuestion{requestID: am.ToolID, questions: prompts}
+				rcAsk = &rcPendingQuestion{requestID: am.ToolID, questions: prompts}
 			}
 			// Telegram: pause for the remote answer; do not open the local dialog.
 			if m.pendingRC != nil && m.pendingRC.RemoteApproval && m.pendingRC.StreamCh != nil {
+				// The remote client owns this prompt, so it stays in the slot rather
+				// than going through the local queue.
+				m.rcPendingQuestion = rcAsk
 				m.messages = append(m.messages, message{role: roleAssistant, text: "❓ Question sent to Telegram.", raw: &copyMsg})
 				m.rerenderTranscriptAndMaybeScroll()
 				return
 			}
-			m.startQuestionPrompt(am.ToolID, prompts)
+			// A round can raise several prompts: enqueueQuestionAsk shows this one
+			// only if the dialog slot is free, and otherwise queues it in arrival
+			// order. Calling startQuestionPrompt unconditionally (the old shape) made
+			// the last prompt of the batch silently replace every earlier one — and
+			// the /rc slot had the same single-slot overwrite.
+			m.enqueueQuestionAsk(queuedQuestionAsk{toolCallID: am.ToolID, prompts: prompts, rc: rcAsk})
 			m.messages = append(m.messages, message{role: roleAssistant, text: renderQuestionTranscriptNotice(prompts), raw: &copyMsg})
 		} else {
 			toolName := m.lookupToolName(am.ToolID)
@@ -14781,6 +14978,132 @@ func (m *model) recordUsage(am agent.Message) {
 	})
 }
 
+// permAskSlotBusy reports whether the permission dialog can take the screen.
+// pendingSubAgentResp is included because a sub-agent dialog occupies the same
+// slot: leaving it out would let a main-agent sentinel stamp over the request
+// whose respCh is still parked. showQuestionDialog is included because a question
+// prompt and a permission ask share ONE screen slot — two simultaneously-open
+// modal dialogs is a TUI layout corruption, not a cosmetic overlap.
+func (m *model) permAskSlotBusy() bool {
+	return m.showPermDialog || m.pendingSubAgentResp != nil || m.showQuestionDialog
+}
+
+// promoteNextQueuedAsk hands the screen to the next waiting ask of EITHER kind,
+// and reports whether one was promoted. Every terminal answer path calls this,
+// so a mixed round (a permission ask plus a question prompt) never strands the
+// second item behind a closed dialog.
+//
+// Permission asks are drained first: a permission decision gates whether a tool
+// runs at all, so it is the more urgent thing to put in front of the user. Each
+// queue still preserves its own arrival order.
+func (m *model) promoteNextQueuedAsk() bool {
+	if m.promoteNextPermAsk() {
+		return true
+	}
+	if m.promoteNextQuestionAsk() {
+		// A question now owns the screen, so the answered permission ask's slot
+		// must not linger: pendingToolCallID is what executeApprovedTool and
+		// permissionDeniedToolResult key on, and a stale value left behind by a
+		// cross-kind promotion would let any later handlePermissionChoice
+		// resolve against a dead tool call. The reverse direction needs no
+		// equivalent, because each kind's own drain path already cleared its own
+		// slot before we got here.
+		m.clearPendingPermAskSlot()
+		return true
+	}
+	return false
+}
+
+// anyAskPending reports whether anything at all is waiting on the user, across
+// both ask kinds. The turn may only resume when this is false.
+func (m *model) anyAskPending() bool {
+	return len(m.permAskQueue) > 0 || len(m.questionAskQueue) > 0 ||
+		m.showPermDialog || m.pendingSubAgentResp != nil || m.showQuestionDialog
+}
+
+// showPermAsk loads one ask into the dialog slot and opens the dialog. It is the
+// single writer of pendingPermission/pendingToolName/pendingToolArgs/
+// pendingToolCallID/pendingSubAgentResp, so every path that fills the slot goes
+// through here or through promoteNextPermAsk.
+func (m *model) showPermAsk(q queuedPermAsk) {
+	m.showPermDialog = true
+	m.permConfirm = ""
+	m.activeTab = tabChat
+	m.chatUnread = false
+	m.pendingPermission = q.req
+	m.pendingToolName = q.req.ToolName
+	m.pendingToolArgs = q.req.Args
+	m.pendingToolCallID = q.toolCallID
+	m.pendingSubAgentResp = q.subResp
+	if q.rc != nil {
+		m.rcPendingPerm = q.rc
+	}
+	m.layout() // shrink the transcript viewport to make room for the dialog
+}
+
+// enqueuePermAsk records a newly arrived ask. When the dialog slot is free the
+// ask is shown immediately; otherwise it joins the back of permAskQueue and is
+// promoted once the current ask is answered.
+//
+// Callers append their own transcript line either way, so the transcript lists
+// every ask of a multi-ask round in the order the agent produced them — the user
+// can see what is coming before answering what is on screen.
+func (m *model) enqueuePermAsk(q queuedPermAsk) {
+	if !m.permAskSlotBusy() {
+		m.showPermAsk(q)
+		return
+	}
+	log.Printf("[perm] permission dialog busy; queued ask tool=%s rule=%s command=%q (depth=%d)",
+		q.req.ToolName, q.req.Rule, q.req.Command, len(m.permAskQueue)+1)
+	m.permAskQueue = append(m.permAskQueue, q)
+}
+
+// promoteNextPermAsk moves the oldest queued ask into the dialog slot, which the
+// caller must have just freed. Returns false when nothing was waiting.
+//
+// Called from exactly one place — the terminal exits of handlePermissionChoice —
+// so every answer path (keyboard, mouse button, always-allow confirm, sub-agent
+// respCh, /rc remote resolve) advances the queue exactly once and no path can
+// double-promote.
+func (m *model) promoteNextPermAsk() bool {
+	if len(m.permAskQueue) == 0 {
+		return false
+	}
+	q := m.permAskQueue[0]
+	m.permAskQueue = m.permAskQueue[1:]
+	log.Printf("[perm] promoting queued ask tool=%s rule=%s (remaining=%d)", q.req.ToolName, q.req.Rule, len(m.permAskQueue))
+	m.showPermAsk(q)
+	m.rerenderTranscriptAndMaybeScroll()
+	return true
+}
+
+// clearPendingPermAskSlot empties the dialog slot without touching the queue.
+// Called after the final ask of a round is answered so no half-populated slot
+// survives: pendingToolCallID is what the substitution helpers key on, and a
+// stale one would let a later, unrelated answer resolve against an already
+// decided tool call.
+func (m *model) clearPendingPermAskSlot() {
+	m.showPermDialog = false
+	m.permConfirm = ""
+	m.permHoverChoice = ""
+	m.pendingPermission = agent.PermissionRequest{}
+	m.pendingToolName = ""
+	m.pendingToolArgs = nil
+	m.pendingToolCallID = ""
+	m.pendingSubAgentResp = nil
+	m.rcPendingPerm = nil
+}
+
+// clearPermAskState drops the dialog and every queued ask. Called wherever the
+// transcript is rebuilt from a different session (session load, /new, an /rc
+// rewind), because an ask refers to a tool call in the round that produced it:
+// keeping it would resolve a decision against a transcript that no longer holds
+// that call, and a parked sub-agent respCh would leak its goroutine.
+func (m *model) clearPermAskState() {
+	m.permAskQueue = nil
+	m.clearPendingPermAskSlot()
+}
+
 func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
 	var req agent.PermissionRequest
 	payload := strings.TrimPrefix(content, tool.SentinelPermissionAsk)
@@ -14843,6 +15166,32 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 		lines = append(lines, req.DenyReason)
 		lines = append(lines, "")
 	}
+	if req.Scope == agent.PermissionScopeContent {
+		// Content-guardrail ask. The header deliberately does NOT say
+		// "Auto-denied by LLM permission model" — the auto-permission judge
+		// never saw this request, and telling the user their content was
+		// auto-denied would misattribute a human decision to the model.
+		lines = append(lines, "🛡 Content guardrail — this tool's result was flagged:")
+		if req.UntrustedSummary != "" {
+			lines = append(lines, req.UntrustedSummary)
+		}
+		if req.UntrustedSource != "" {
+			lines = append(lines, "Source: "+req.UntrustedSource)
+		}
+		if req.UntrustedFailure != "" {
+			// The guardrail could not clear this result. Said explicitly, because
+			// a failed guardrail and a clean pass otherwise look identical.
+			lines = append(lines, "⚠ Guardrail could not clear this result:")
+			lines = append(lines, req.UntrustedFailure)
+			lines = append(lines, "")
+		}
+		lines = append(lines, contentGuardScoreLines(req.UntrustedScores)...)
+		lines = append(lines, "The full result is below. Review it before deciding.")
+		lines = append(lines, "Secrets are already masked in this view.")
+		lines = append(lines, "")
+		lines = append(lines, req.UntrustedContent)
+		return strings.Join(lines, "\n")
+	}
 	if req.ModelUnavailable != "" {
 		lines = append(lines, "ℹ Permission model unavailable — asking you instead:")
 		lines = append(lines, req.ModelUnavailable)
@@ -14863,7 +15212,7 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
 		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
 			lang := strings.TrimPrefix(req.Prefix, "bash.interpreter.")
-			lines = append(lines, fmt.Sprintf("Always-rule scope: interpreter execution %q (stores bash prefix %q)", lang, req.Prefix))
+			lines = append(lines, fmt.Sprintf("Always-rule scope: exact %s script grant (file hash + command + cwd)", lang))
 		} else {
 			lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q (all `%s ...` commands)", req.Prefix, req.Prefix))
 		}
@@ -14882,8 +15231,56 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	return strings.Join(lines, "\n")
 }
 
+// contentGuardScoreLines renders the per-question judge output. Each chunk is
+// listed with its own verdict confidence, its concern, and that concern's
+// confidence — the raw scores rather than one collapsed verdict, so the user can
+// see WHY the guardrail reached its answer and disagree with it.
+func contentGuardScoreLines(scores []agent.ContentGuardScore) []string {
+	if len(scores) == 0 {
+		return nil
+	}
+	lines := []string{"Judge scores:"}
+	for _, sc := range scores {
+		verdict := sc.Verdict
+		line := fmt.Sprintf("  chunk %d/%d — %s (confidence %.2f)",
+			sc.Chunk, sc.Total, verdict, sc.VerdictConfidence)
+		// Always show the concern's own confidence, including for `none`: the
+		// user asked for each scoring, and dropping the number on the clean case
+		// would make it look like the question went unanswered.
+		if sc.Concern != "" {
+			line += fmt.Sprintf(" · %s (confidence %.2f)", sc.Concern, sc.ConcernConfidence)
+		}
+		lines = append(lines, line)
+		// Show the full verdict distribution when the provider returned one:
+		// a 0.62 confidence is opaque on its own but readable as
+		// "flagged 0.58 / clean 0.42".
+		if len(sc.Probabilities) > 0 {
+			keys := make([]string, 0, len(sc.Probabilities))
+			for k := range sc.Probabilities {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s %.2f", k, sc.Probabilities[k]))
+			}
+			lines = append(lines, "      p: "+strings.Join(parts, " / "))
+		}
+	}
+	lines = append(lines, "")
+	return lines
+}
+
 func renderPermissionPrompt(req agent.PermissionRequest) string {
 	var b strings.Builder
+	if req.Scope == agent.PermissionScopeContent {
+		// Distinct headline: this is a judgement about content, not about
+		// whether a command may run, and "allow this action?" would misread.
+		b.WriteString("Deliver this result to the model?\n\n")
+		b.WriteString(renderPermissionRequestBody(req))
+		b.WriteString("\n\n[y] deliver  [n] withhold")
+		return b.String()
+	}
 	if req.DenyReason != "" {
 		b.WriteString("Auto-denied — allow anyway?\n\n")
 	} else {
@@ -14948,10 +15345,35 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 	return m.handlePermissionChoice(choice), true
 }
 
+// handlePermissionChoice answers the ask currently in the dialog and, when the
+// answer was a terminal one, promotes the next queued ask (see permAskQueue)
+// into the now-free slot.
+//
+// The split matters: answerPermAsk's returned command captures the answered
+// ask's identity at build time (executeApprovedTool and friends are value
+// receivers reading pendingToolCallID), so the queue may only advance AFTER the
+// command is built. Every answer path — keyboard, mouse button, the always-allow
+// confirm step, a parked sub-agent's respCh, and an /rc remote resolve — funnels
+// through here, which keeps promotion to exactly one call site and stops any
+// path from double-promoting.
 func (m *model) handlePermissionChoice(choice string) tea.Cmd {
+	cmd, terminal := m.answerPermAsk(choice)
+	if terminal && !m.promoteNextQueuedAsk() {
+		// Nothing left waiting: leave no half-populated slot behind.
+		m.clearPendingPermAskSlot()
+	}
+	return cmd
+}
+
+// answerPermAsk applies one answer to the ask in the dialog. The bool result
+// reports whether the outcome freed the dialog slot (an allow, a deny, or an
+// always-allow after its confirmation step) and the queue should therefore
+// advance. A rejected choice, or a harmful request that cannot be always-allowed,
+// keeps the same ask on screen and returns false.
+func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 	log.Printf("[perm] permission choice received: choice=%q tool=%s", choice, m.pendingToolName)
 	if m.agent == nil {
-		return func() tea.Msg { return errorMsg(fmt.Errorf("no agent configured")) }
+		return func() tea.Msg { return errorMsg(fmt.Errorf("no agent configured")) }, true
 	}
 	req := m.pendingPermission
 	toolName := m.pendingToolName
@@ -14992,11 +15414,14 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 				if m.agent.Permissions() != nil {
 					m.agent.Permissions().SetWebfetchDomain(domain, agent.PermissionAllow)
 				}
+			} else if ruleErr := m.setPermissionRule(req, agent.PermissionAllow); ruleErr != nil {
+				// The call is still approved; only the durable rule failed, and
+				// saying so is better than a silent no-op that re-asks next time.
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed this call, but the rule was not saved: %v", ruleErr), transient: true})
 			} else {
-				m.setPermissionRule(req, agent.PermissionAllow)
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s (sub-agent).", permissionRuleLabel(req)), transient: true})
 			}
 			m.persistPermissions()
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s (sub-agent).", permissionRuleLabel(req)), transient: true})
 		case "t":
 			resp = agent.PermissionResponse{Level: agent.PermissionAllow, PersistTool: true}
 			log.Printf("[perm] sub-agent permission ALWAYS ALLOW (tool): tool=%s", toolName)
@@ -15011,11 +15436,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			m.pendingSubAgentResp = respCh
 			m.updatePermButtonRegions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
-			return nil
+			return nil, false
 		}
 		respCh <- resp
 		// Re-arm the listener so subsequent sub-agent asks are still received.
-		return m.armSubAgentPermListener()
+		return m.armSubAgentPermListener(), true
 	}
 
 	// A local terminal decision resolves (and supersedes) any pending remote
@@ -15031,14 +15456,21 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		pathRoot := outOfScopePathRoot(req)
 		log.Printf("[perm] permission ALLOWED once: tool=%s", toolName)
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName), transient: true})
-		return m.executeApprovedTool(toolName, args, pathRoot)
+		// A content ask is about an ALREADY-EXECUTED result, so approval
+		// delivers the vetted text instead of re-running the tool. Re-executing
+		// here would issue a second webfetch/MCP call — new, unvetted bytes and a
+		// real side effect — and defeat the scan that produced this ask.
+		if agent.IsContentAsk(req) {
+			return m.contentAskResolved(req, true), true
+		}
+		return m.executeApprovedTool(toolName, args, pathRoot), true
 	case "a", "always", "always allow":
 		if agent.IsHarmfulRequest(req) {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow %s — this operation is considered harmful and always requires human approval.", permissionRuleLabel(req)), transient: true})
 			m.showPermDialog = true
 			m.updatePermButtonRegions()
-			return nil
+			return nil, false
 		}
 		m.allowOutOfScopePath(req, true)
 		// Special handling for webfetch domains
@@ -15058,8 +15490,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing webfetch for domain %q.", domain), transient: true})
 		default:
 			log.Printf("[perm] permission ALWAYS ALLOW (rule): tool=%s rule=%s", toolName, req.Rule)
-			m.setPermissionRule(req, agent.PermissionAllow)
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
+			if ruleErr := m.setPermissionRule(req, agent.PermissionAllow); ruleErr != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed this call, but the rule was not saved: %v", ruleErr), transient: true})
+			} else {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
+			}
 		}
 		m.persistPermissions()
 		// Execute the just-approved call via the approved path (no permission
@@ -15068,14 +15503,14 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		// persisted rule didn't fully cover the request (un-persistable broad
 		// prefixes, out-of-scope redirections/env vars, or compound commands
 		// where the next sub-command still needs approval).
-		return m.executeApprovedTool(toolName, args, outOfScopePathRoot(req))
+		return m.executeApprovedTool(toolName, args, outOfScopePathRoot(req)), true
 	case "t":
 		if agent.IsHarmfulRequest(req) {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful tool): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow tool %q — this operation is considered harmful and always requires human approval.", toolName), transient: true})
 			m.showPermDialog = true
 			m.updatePermButtonRegions()
-			return nil
+			return nil, false
 		}
 		pathRoot := outOfScopePathRoot(req)
 		log.Printf("[perm] permission ALWAYS ALLOW (tool): tool=%s", toolName)
@@ -15084,15 +15519,20 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName), transient: true})
 		// Approved path (no re-check) for this call; the tool rule persisted
 		// above governs future calls. See the "a" branch above for why.
-		return m.executeApprovedTool(toolName, args, pathRoot)
+		return m.executeApprovedTool(toolName, args, pathRoot), true
 	case "n", "no", "deny":
 		log.Printf("[perm] permission DENIED: tool=%s", toolName)
-		return m.permissionDeniedToolResult(toolName)
+		// Content asks deny by withholding the result rather than by refusing a
+		// re-run, for the same reason they approve without one.
+		if agent.IsContentAsk(req) {
+			return m.contentAskResolved(req, false), true
+		}
+		return m.permissionDeniedToolResult(toolName), true
 	default:
 		m.showPermDialog = true
 		m.updatePermButtonRegions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
-		return nil
+		return nil, false
 	}
 }
 
@@ -15123,8 +15563,25 @@ type permDirtyFlags struct {
 	bashPrefixMode map[string]string // prefix -> mode for each changed entry
 }
 
-func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.PermissionLevel) {
+// setPermissionRule applies a permission answer to the rule tables. It returns
+// a non-nil error when the answer was ALLOWED for this call but the rule could
+// not be stored — SetBashPrefixRule silently discards a rule it refuses (a
+// blanket `git` allow), so without this the caller's "Always allowing …" message
+// would claim a rule that does not exist. The caller's control flow must not
+// change: the approved call still runs, only the reporting differs.
+func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.PermissionLevel) error {
+	if level == agent.PermissionAllow && strings.HasPrefix(req.Prefix, "bash.interpreter.") {
+		// A per-language prefix rule is never read back (Decide always routes
+		// interpreter runs through the judge), so persist an exact script grant.
+		if m.agent == nil || m.agent.Permissions() == nil {
+			return fmt.Errorf("no permission manager")
+		}
+		return m.agent.Permissions().PersistInterpreterScriptGrant(req.Command, m.persistAutoGrant)
+	}
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
+		if err := agent.ValidateBashPrefixRule(req.Prefix, level); err != nil {
+			return fmt.Errorf("bash prefix %q cannot be stored: %w", req.Prefix, err)
+		}
 		if m.agent != nil && m.agent.Permissions() != nil {
 			m.agent.Permissions().SetBashPrefixRule(req.Prefix, level)
 		}
@@ -15132,9 +15589,10 @@ func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.Permi
 			m.permDirty.bashPrefixes = make(map[string]string)
 		}
 		m.permDirty.bashPrefixes[req.Prefix] = string(level)
-		return
+		return nil
 	}
 	m.setToolPermission(req.ToolName, level)
+	return nil
 }
 
 func (m *model) setToolPermission(toolName string, level agent.PermissionLevel) {
@@ -15319,6 +15777,30 @@ func (m model) executeApprovedTool(toolName string, args json.RawMessage, pathRo
 func (m model) permissionDeniedToolResult(toolName string) tea.Cmd {
 	return func() tea.Msg {
 		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: fmt.Sprintf("denied: tool %q denied by user", toolName)}}
+	}
+}
+
+// contentAskResolved resolves a content-guardrail ask. The tool already ran, so
+// there is nothing to execute: approval substitutes the content the guardrail
+// inspected, and denial substitutes the refusal notice.
+//
+// The approved branch goes through TruncateToolResult like every other tool
+// result, so an approved result is bounded exactly like any other: the ask
+// deliberately carries the FULL flagged text (the user cannot judge a result is
+// safe without reading it), and ResolveContentAsk hands that text back verbatim,
+// so without this a 200KB MCP response or fetched page would land whole in the
+// context on the strength of one approval click. Truncation happens HERE, after
+// the dialog, never before it — the ask payload must stay complete. It is safe
+// on this string because ResolveContentAsk has already replaced the sentinel,
+// so the "never cut an ask" rule in truncate.go does not apply.
+//
+// The substitution is keyed on m.pendingToolCallID, the same field
+// executeApprovedTool uses, so the sentinel is replaced in place by ToolID and a
+// round holding several asks resolves each one independently.
+func (m model) contentAskResolved(req agent.PermissionRequest, approved bool) tea.Cmd {
+	return func() tea.Msg {
+		content := agent.TruncateToolResult(m.pendingToolCallID, agent.ResolveContentAsk(req, approved))
+		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: content}}
 	}
 }
 
@@ -15822,6 +16304,8 @@ func (m *model) commitRCRequestRewind(req server.RCRequest) (int, error) {
 	// by row count would truncate too little. It deliberately avoids
 	// appendAgentMessage, which would double-record usage and may re-request a
 	// title for already-seen rows.
+	m.clearPermAskState()
+	m.clearQuestionAskState()
 	m.messages = nil
 	for _, am := range result.KeptPrefix {
 		copyMsg := am
@@ -16259,6 +16743,10 @@ func (m *model) submitRCQuestionAnswers(requestID string, questions []tool.Quest
 		raw:  &toolMsg,
 	})
 	m.saveSession()
+	if m.promoteNextQueuedAsk() {
+		// Promoted an ask that still needs an answer — hold the turn.
+		return nil
+	}
 	if m.agent == nil {
 		return nil
 	}
@@ -16811,8 +17299,8 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 	case req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "":
 		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
 			lang := strings.TrimPrefix(req.Prefix, "bash.interpreter.")
-			lines = append(lines, fmt.Sprintf("Persist an interpreter rule: always allow %q interpreter executions.", lang))
-			lines = append(lines, fmt.Sprintf("Stores bash prefix %q for future calls.", req.Prefix))
+			lines = append(lines, fmt.Sprintf("Persist an exact %s script grant: this script file, this exact command, this directory.", lang))
+			lines = append(lines, "Stops matching if the file changes. Heredoc and inline code cannot be saved.")
 		} else {
 			lines = append(lines, fmt.Sprintf("Persist a bash-prefix rule: always allow `%s ...` (all commands starting with %q).", req.Prefix, req.Prefix))
 		}
@@ -16919,6 +17407,15 @@ func (m *model) renderPermissionDialog(width int) string {
 	headerText := "⚠ Permission required"
 	if req.DenyReason != "" {
 		headerText = "⚠ Auto-denied by LLM — override?"
+	}
+	if req.Scope == agent.PermissionScopeContent {
+		// Last, so it wins over both headers above. A content ask is not a
+		// permission escalation: the tool already ran, and "Permission required"
+		// would misread as "the agent wanted to run something and you stopped
+		// it". A content request also never carries a DenyReason, but ordering
+		// this after the check keeps that true by construction rather than by
+		// the accident of two fields never being set together.
+		headerText = "🛡 Content guardrail — review before it reaches the model"
 	}
 	header := m.styles.Header.Render(headerText)
 	if m.permConfirm != "" {
@@ -17434,6 +17931,7 @@ type msgRenderCacheEntry struct {
 	// region line counter without re-scanning bytes.
 	wrapped  []string
 	stripped []string
+	cont     []bool // parallel to wrapped: hard-wrap continuation flags (wrapViewMarked)
 	nl       int
 }
 
@@ -17504,7 +18002,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			block = m.buildToolOutputBox(toolName, hit.innerContent, hit.rawLineCount, expanded)
 		case hit.kind == blockKindPlain && msg.role != roleUser:
 			// Assistant text blocks have no width-baked borders; re-wrap the cached block.
-			wrapped := strings.Split(wrapView(hit.block, width), "\n")
+			wrapped, cont := wrapViewMarked(hit.block, width)
 			stripped := make([]string, len(wrapped))
 			for j, ln := range wrapped {
 				stripped[j] = stripANSI(ln)
@@ -17512,7 +18010,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			entry := msgRenderCacheEntry{
 				key: key, innerContent: hit.innerContent,
 				block: hit.block, kind: hit.kind,
-				wrapped: wrapped, stripped: stripped, nl: hit.nl,
+				wrapped: wrapped, stripped: stripped, cont: cont, nl: hit.nl,
 			}
 			m.msgRenderCache[i] = entry
 			return entry
@@ -17525,7 +18023,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			block = m.styles.UserMessageBox.Width(bubbleWidth).Render(hit.innerContent)
 		}
 		if block != "" {
-			wrapped := strings.Split(wrapView(block, width), "\n")
+			wrapped, cont := wrapViewMarked(block, width)
 			stripped := make([]string, len(wrapped))
 			for j, ln := range wrapped {
 				stripped[j] = stripANSI(ln)
@@ -17533,7 +18031,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			entry := msgRenderCacheEntry{
 				key: key, innerContent: hit.innerContent, rawLineCount: hit.rawLineCount,
 				block: block, kind: hit.kind,
-				wrapped: wrapped, stripped: stripped, nl: strings.Count(block, "\n"),
+				wrapped: wrapped, stripped: stripped, cont: cont, nl: strings.Count(block, "\n"),
 			}
 			m.msgRenderCache[i] = entry
 			return entry
@@ -17583,7 +18081,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 	// messages on every streamed delta. Joining per-message wrapView output with
 	// the inter-message "\n\n" separator is byte-identical to wrapView over the
 	// full concatenation (wrapView is line-wise; escapes never span "\n").
-	wrapped := strings.Split(wrapView(block, width), "\n")
+	wrapped, cont := wrapViewMarked(block, width)
 	stripped := make([]string, len(wrapped))
 	for j, ln := range wrapped {
 		stripped[j] = stripANSI(ln)
@@ -17596,6 +18094,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 		kind:         kind,
 		wrapped:      wrapped,
 		stripped:     stripped,
+		cont:         cont,
 		nl:           strings.Count(block, "\n"),
 	}
 	m.msgRenderCache[i] = entry
@@ -17665,6 +18164,7 @@ func (m *model) renderTranscript() {
 		// case; this defends against other paths that lead here).
 		m.transcriptLines = nil
 		m.rawTranscriptLines = nil
+		m.rawTranscriptCont = nil
 		m.urlLinkRegions = nil
 		m.sel = selectionState{}
 		m.transcriptRenderedLen = len(m.messages)
@@ -17758,6 +18258,7 @@ func (m *model) renderTranscript() {
 	}
 	m.transcriptLines = make([]string, 0, (len(m.messages)-windowStart)*2+10)
 	m.rawTranscriptLines = make([]string, 0, (len(m.messages)-windowStart)*2+10)
+	m.rawTranscriptCont = make([]bool, 0, (len(m.messages)-windowStart)*2+10)
 	// Parallel to m.messages: for each message index, the first wrapped line of
 	// its block in transcriptLines. -1 for hidden messages outside the window.
 	// The chat-search jump-to-match uses this to scroll the viewport to the
@@ -17783,6 +18284,7 @@ func (m *model) renderTranscript() {
 		notice = truncateToWidth(notice, max(1, m.viewport.Width()))
 		m.transcriptLines = append(m.transcriptLines, notice)
 		m.rawTranscriptLines = append(m.rawTranscriptLines, stripANSI(notice))
+		m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 		nlAcc = 1
 	}
 	firstRendered := true
@@ -17792,6 +18294,7 @@ func (m *model) renderTranscript() {
 			nlAcc += 1 // one separator empty line
 			m.transcriptLines = append(m.transcriptLines, "")
 			m.rawTranscriptLines = append(m.rawTranscriptLines, "")
+			m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 		}
 		firstRendered = false
 		entry := m.renderMessageBlock(i, msg, toolNames)
@@ -17807,6 +18310,11 @@ func (m *model) renderTranscript() {
 		}
 		m.transcriptLines = append(m.transcriptLines, wrappedLines...)
 		m.rawTranscriptLines = append(m.rawTranscriptLines, entry.stripped...)
+		if len(entry.cont) == len(entry.stripped) {
+			m.rawTranscriptCont = append(m.rawTranscriptCont, entry.cont...)
+		} else {
+			m.rawTranscriptCont = append(m.rawTranscriptCont, make([]bool, len(entry.stripped))...)
+		}
 		switch entry.kind {
 		case blockKindThinking:
 			m.thinkingRegions = append(m.thinkingRegions, toolOutputRegion{messageIndex: i, startLine: startLine, endLine: endLine})
@@ -17821,6 +18329,7 @@ func (m *model) renderTranscript() {
 	for k := 0; k < 10; k++ {
 		m.transcriptLines = append(m.transcriptLines, "")
 		m.rawTranscriptLines = append(m.rawTranscriptLines, "")
+		m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 	}
 	// Recover clickable targets for markdown links ([text](url)): the markdown
 	// renderer drops the URL from the visible/stripped text, so the generic
@@ -18190,29 +18699,54 @@ func constrainViewPreservingBottom(view string, width int, height int, bottomLin
 }
 
 func wrapView(view string, width int) string {
+	lines, _ := wrapViewMarked(view, width)
+	return strings.Join(lines, "\n")
+}
+
+// wrapViewMarked is wrapView returning the wrapped lines plus a parallel
+// continuation slice: cont[j] is true when line j is the tail of a word that
+// was HARD-wrapped (split mid-token because it exceeded the width) from line
+// j-1. Selection copy joins such lines without a newline and URL click
+// detection reassembles the token across them; word-wrapped lines are never
+// marked because a real space was dropped at that boundary.
+func wrapViewMarked(view string, width int) ([]string, []bool) {
 	if width <= 0 {
-		return view
+		lines := strings.Split(view, "\n")
+		return lines, make([]bool, len(lines))
 	}
 	lines := strings.Split(view, "\n")
 	wrapped := make([]string, 0, len(lines))
+	cont := make([]bool, 0, len(lines))
 	for _, line := range lines {
-		wrapped = append(wrapped, strings.Split(wordWrap(line, width), "\n")...)
+		ls, cs := wordWrapMarked(line, width)
+		wrapped = append(wrapped, ls...)
+		cont = append(cont, cs...)
 	}
-	return strings.Join(wrapped, "\n")
+	return wrapped, cont
 }
 
 // wordWrap wraps text at word (space) boundaries to fit within the given width.
 // It preserves ANSI escape codes and handles wide characters. If a single word
 // exceeds the width, it falls back to hard-wrapping at grapheme boundaries.
 func wordWrap(text string, width int) string {
+	lines, _ := wordWrapMarked(text, width)
+	return strings.Join(lines, "\n")
+}
+
+// wordWrapMarked is wordWrap returning the lines plus the hard-wrap
+// continuation flags described on wrapViewMarked.
+func wordWrapMarked(text string, width int) ([]string, []bool) {
 	if width <= 0 {
-		return text
+		lines := strings.Split(text, "\n")
+		return lines, make([]bool, len(lines))
 	}
 	lines := strings.Split(text, "\n")
 	var wrapped []string
+	var cont []bool
 	for _, line := range lines {
 		if ansi.StringWidth(line) <= width {
 			wrapped = append(wrapped, line)
+			cont = append(cont, false)
 			continue
 		}
 		// Try to break at spaces first.
@@ -18225,10 +18759,14 @@ func wordWrap(text string, width int) string {
 				// Word too long — flush current line and hard-wrap the word.
 				if cur.Len() > 0 {
 					wrapped = append(wrapped, cur.String())
+					cont = append(cont, false)
 					cur.Reset()
 					curW = 0
 				}
-				wrapped = append(wrapped, strings.Split(ansi.Hardwrap(word, width, false), "\n")...)
+				for k, piece := range strings.Split(ansi.Hardwrap(word, width, false), "\n") {
+					wrapped = append(wrapped, piece)
+					cont = append(cont, k > 0)
+				}
 			} else if curW == 0 {
 				cur.WriteString(word)
 				curW = wW
@@ -18238,6 +18776,7 @@ func wordWrap(text string, width int) string {
 				curW += 1 + wW
 			} else {
 				wrapped = append(wrapped, cur.String())
+				cont = append(cont, false)
 				cur.Reset()
 				cur.WriteString(word)
 				curW = wW
@@ -18245,9 +18784,10 @@ func wordWrap(text string, width int) string {
 		}
 		if cur.Len() > 0 {
 			wrapped = append(wrapped, cur.String())
+			cont = append(cont, false)
 		}
 	}
-	return strings.Join(wrapped, "\n")
+	return wrapped, cont
 }
 
 // wireCompactCallbacks attaches OnCompactStart and OnCompact to the active
@@ -20058,7 +20598,7 @@ func (m *model) renderStatus() string {
 		if supportsReasoning {
 			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact t:thinking y:copy-id q:quit"
 		} else {
-			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact y:copy-id q:quit"
+			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact v:voice y:copy-id q:quit"
 		}
 	} else {
 		switch m.activeTab {
@@ -20188,6 +20728,9 @@ func (m *model) renderStatus() string {
 	}
 	if m.mcpLoading {
 		leftStatus += " · ~MCP"
+	}
+	if vs := m.voiceStatusText(); vs != "" {
+		leftStatus += " · " + vs
 	}
 	if m.rcSrv != nil {
 		leftStatus += " | " + rcActiveStyle.Render("⊕ RC")
@@ -22489,9 +23032,23 @@ func (m *model) transcriptUrlLinkAt(mouse tea.Mouse) (urlLinkRegion, bool) {
 		return r, true
 	}
 
-	// 2. Single-line miss — try wrapped-line detection (combine with
-	//    adjacent lines). This bypasses the probe cache since wrap
-	//    crossings are rare and the combined regex scan is cheap.
+	// 2. Single-line miss — a hard-wrapped token (a long URL) spans a run
+	//    of continuation lines; reassemble the whole run so the click target
+	//    is the full URL, not the 2-line prefix the adjacent-line pass below
+	//    would return.
+	if len(m.rawTranscriptCont) == len(m.rawTranscriptLines) {
+		first, last := contRunBounds(m.rawTranscriptCont, contentLine)
+		if last > first {
+			if r, ok := urlLinkInRun(m.rawTranscriptLines[first:last+1], contentLine-first, col); ok {
+				r.line = contentLine
+				return r, true
+			}
+		}
+	}
+
+	// 3. Try wrapped-line detection (combine with adjacent lines) for
+	//    surfaces without continuation flags. This bypasses the probe cache
+	//    since wrap crossings are rare and the combined regex scan is cheap.
 	prevLine := ""
 	if contentLine > 0 {
 		prevLine = m.rawTranscriptLines[contentLine-1]

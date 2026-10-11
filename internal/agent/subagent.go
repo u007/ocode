@@ -549,9 +549,17 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// Propagate the permission-ask callback so sub-agent tool calls that need a
 	// decision bubble up to the main TUI. Set before the spec-permissions block
 	// so it applies whether or not the sub-agent gets its own PermissionManager.
-	subAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
+	//
+	// Wrapped so the request is stamped with THIS dispatch's agent name. The
+	// raw callback is installed once on the parent and shared by every child,
+	// so it cannot know who is asking — and a prompt that can only say "a
+	// sub-agent asked" is useless when several run at once. The wrapper is
+	// handed to SetSubAgentPermAsker too, so a grandchild stamps its OWN name
+	// and this level's stamp becomes a no-op (attributePermAsker only fills an
+	// empty AgentName).
+	subAgent.OnPermissionAsk = attributePermAsker(t.mainAgent.subAgentPermAsker, spec.Name)
 	subAgent.OnPermissionGrant = t.mainAgent.OnPermissionGrant
-	subAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
+	subAgent.SetSubAgentPermAsker(subAgent.OnPermissionAsk)
 
 	// Subagents share the parent (main thread) PermissionManager directly so
 	// every grant — whether seeded at startup or accumulated mid-session via

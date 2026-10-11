@@ -105,9 +105,19 @@ func (m *blockingToolCallClient) GetModel() string    { return "mock-model" }
 // calls from multiple subagents sharing the same client.
 type blockingReleaseClient struct {
 	release chan struct{}
+	// entered, when non-nil, receives once per Chat call that has reached the
+	// provider, so a test can tell "the run is waiting on the model" apart from
+	// "the run is still building its prompt".
+	entered chan struct{}
 }
 
 func (c *blockingReleaseClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	if c.entered != nil {
+		select {
+		case c.entered <- struct{}{}:
+		default:
+		}
+	}
 	<-c.release
 	return &Message{Role: "assistant", Content: "done"}, nil
 }
@@ -251,7 +261,13 @@ func TestTaskToolBackgroundRunUnexpectedStopMarksFailed(t *testing.T) {
 }
 
 func TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent(t *testing.T) {
-	client := &blockingReleaseClient{release: make(chan struct{})}
+	// An empty HOME keeps the developer's installed plugins out of the child
+	// agents' prompts: their SessionStart hooks are real subprocesses that ran
+	// inside the completion window below and made it flaky.
+	home := t.TempDir()
+	setHomeTree(t, home)
+	t.Setenv("XDG_DATA_HOME", home)
+	client := &blockingReleaseClient{release: make(chan struct{}), entered: make(chan struct{}, 2)}
 	a := NewAgent(client, nil, nil, nil)
 	a.Runs().SetMaxConcurrent(1)
 	taskTool, ok := a.tools["task"].(*TaskTool)
@@ -277,6 +293,14 @@ func TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent(t *testing.T) {
 		t.Fatalf("running=%d queued=%d, want running=1 queued=1 (second dispatch should be blocked behind the limit)", running, queued)
 	}
 
+	// Release only once the first run is actually waiting on the model. Its
+	// prompt build is cold in a fresh process (context files, runtime probes),
+	// and counting that against the completion window below made this flaky.
+	select {
+	case <-client.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the first background run never reached the model")
+	}
 	close(client.release)
 
 	deadline = time.Now().Add(2 * time.Second)
@@ -2896,7 +2920,7 @@ func TestLoadFromEnvPathEmptyAndInvalid(t *testing.T) {
 
 func TestLoadFromSnapshotPopulated(t *testing.T) {
 	if len(modelsSnapshotData) == 0 {
-		t.Fatal("expected embedded snapshot to be non-empty")
+		t.Skip("no embedded models snapshot in this build; regenerate it with `make models-snapshot` and run with -tags models")
 	}
 	data, _, ok := loadFromSnapshot()
 	if !ok {
@@ -2939,7 +2963,7 @@ func TestLoadRegistryEnvWinsOverSnapshot(t *testing.T) {
 func TestLoadRegistryUsesSnapshotWhenNoCache(t *testing.T) {
 	// HOME temp dir ensures no leftover cache file is used.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home) // windows
 	t.Setenv(envModelsPath, "")
@@ -3021,7 +3045,7 @@ func TestForceRefreshRegistrySuccess(t *testing.T) {
 
 	// HOME temp dir so writeCache() lands in a sandboxed path.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home)
 	t.Setenv(envModelsPath, "")
@@ -3084,7 +3108,7 @@ func TestForceRefreshRegistrySuccess(t *testing.T) {
 func TestForceRefreshRegistryRemoteFailureKeepsExisting(t *testing.T) {
 	// HOME temp dir so the refresh lock file lands in a sandboxed path.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home)
 	t.Setenv(envModelsPath, "")
@@ -3116,7 +3140,7 @@ func TestForceRefreshRegistryRemoteFailureKeepsExisting(t *testing.T) {
 
 func TestForceRefreshRegistryRemoteFailureNoExisting(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home)
 	t.Setenv(envModelsPath, "")
@@ -3134,7 +3158,7 @@ func TestForceRefreshRegistryRemoteFailureNoExisting(t *testing.T) {
 
 func TestForceRefreshRegistryNon200Status(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home)
 	t.Setenv(envModelsPath, "")
@@ -3330,7 +3354,7 @@ func TestOpenCodeSessionIDCanBePropagatedToReplacementAgent(t *testing.T) {
 // that replaced load-time self-heal, so all four paths must stay pinned at
 // the composition level.
 func TestAutoPermissionAddendumAdvisory(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	path, err := config.AutoPermissionPromptFilePath()
 	if err != nil {
 		t.Fatalf("AutoPermissionPromptFilePath: %v", err)
@@ -3425,7 +3449,7 @@ func TestHandleToolCallAutoPermissionHarmfulSegmentNotMaskedByEarlierAsk(t *test
 			// Isolate from the developer's own ~/.claude deny rules, which
 			// would hard-deny the git segment before the gate under test.
 			home := t.TempDir()
-			t.Setenv("HOME", home)
+			setHomeTree(t, home)
 			t.Setenv("USERPROFILE", home)
 			mockTool := &MockTool{name: "bash", result: "executed"}
 			cfg := &config.Config{}

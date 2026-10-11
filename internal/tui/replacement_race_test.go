@@ -110,7 +110,7 @@ func TestReplacementQueueNoticeIsCoalesced(t *testing.T) {
 
 func TestReplacementQueueWaitsForMCPAndUsesCurrentAgent(t *testing.T) {
 	m := replacementTestModel()
-	m.agent = agent.NewAgent(retryTestClient{}, nil, nil, nil)
+	m.agent = newTestAgent(retryTestClient{}, nil, nil, nil)
 	m.mcpReady = false
 	m.replacementQueuePending = true
 	m.replacementNoticeShown = true
@@ -166,7 +166,7 @@ func TestStaleStreamEventsDoNotMutateCurrentSession(t *testing.T) {
 }
 
 func TestHandleNewInvalidatesOldStreamEvents(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	oldAgent := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { oldAgent.Shutdown() })
 	m := replacementTestModel()
 	m.agent = oldAgent
@@ -213,7 +213,7 @@ func TestHandleNewInvalidatesOldStreamEvents(t *testing.T) {
 func TestReplacementTrackerShutdownCleansUnclaimedAgent(t *testing.T) {
 	tracker := &replacementTracker{}
 	run, _ := tracker.start()
-	next := agent.NewAgent(nil, nil, nil, nil)
+	next := newTestAgent(nil, nil, nil, nil)
 	cleaned := false
 	tracker.setCleanup(run, func() { cleaned = true })
 	tracker.setResources(run, next, nil)

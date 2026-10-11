@@ -462,3 +462,233 @@ func TestRunAsyncReturnsBeforeFnFinishes(t *testing.T) {
 		t.Fatal("fn never finished after release")
 	}
 }
+
+// TestForwardArgsDefaultIsLocalForward pins that the -L path is unchanged by
+// the reverse branch: same tunnelArgs shape, no -R anywhere.
+func TestForwardArgsDefaultIsLocalForward(t *testing.T) {
+	got := strings.Join(forwardArgs(ProjectPortMap{RemotePort: 4000, LocalPort: 5000}, Target{Kind: KindSSH, Host: "devbox"}), " ")
+	if !strings.Contains(got, "-L 5000:127.0.0.1:4000") {
+		t.Fatalf("default forward args = %q, want -L 5000:127.0.0.1:4000", got)
+	}
+	if strings.Contains(got, "-R") {
+		t.Fatalf("default forward args = %q, must not carry -R", got)
+	}
+}
+
+// TestForwardArgsReverse pins the -R argv: both ends on loopback, the explicit
+// bind address on the remote side, and ExitOnForwardFailure so a busy remote
+// port fails ssh instead of leaving a silent tunnel.
+func TestForwardArgsReverse(t *testing.T) {
+	got := forwardArgs(ProjectPortMap{RemotePort: 9222, LocalPort: 9222, Reverse: true}, Target{Kind: KindSSH, User: "u", Host: "devbox"})
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "-R 127.0.0.1:9222:127.0.0.1:9222") {
+		t.Fatalf("reverse args = %q, want -R 127.0.0.1:9222:127.0.0.1:9222", joined)
+	}
+	if !strings.Contains(joined, "ExitOnForwardFailure=yes") {
+		t.Fatalf("reverse args = %q, want ExitOnForwardFailure=yes", joined)
+	}
+	if strings.Contains(joined, " -L ") {
+		t.Fatalf("reverse args = %q, must not carry -L", joined)
+	}
+	if got[len(got)-1] != "u@devbox" {
+		t.Fatalf("reverse args = %q, target must be the last argument", joined)
+	}
+}
+
+// TestForwardArgsReverseCarriesSSHPort checks a non-default ssh port lands
+// before the target, the same as the -L path.
+func TestForwardArgsReverseCarriesSSHPort(t *testing.T) {
+	got := forwardArgs(ProjectPortMap{RemotePort: 9222, LocalPort: 9222, Reverse: true}, Target{Kind: KindSSH, Host: "devbox", Port: 2222})
+	joined := strings.Join(got, " ")
+	if !strings.HasSuffix(joined, "-p 2222 devbox") {
+		t.Fatalf("reverse args = %q, want -p 2222 immediately before the target", joined)
+	}
+}
+
+// TestForwardStartReverseComesUpWhileChildLives: a -R child that stays alive
+// through the probe budget is ready, even though nothing listens on the
+// local port the test passes in (the remote bind is what is being proved).
+func TestForwardStartReverseComesUpWhileChildLives(t *testing.T) {
+	installFakeSSH(t)
+	withShrunkTunnelReadyTimings(t, 3, 10*time.Millisecond)
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	fm := NewForwardManager(sup, Target{Kind: KindSSH, Host: "devbox"})
+	defer func() { _ = fm.Stop(9222) }()
+	if err := fm.Start(ProjectPortMap{RemotePort: 9222, LocalPort: 9222, Enabled: true, Reverse: true}); err != nil {
+		t.Fatalf("reverse Start: %v", err)
+	}
+	if !fm.IsLive(9222) {
+		t.Fatal("reverse forward reported not live after a successful Start")
+	}
+}
+
+// TestForwardStartReverseFailsFastWithSSHReason: ssh refusing the remote bind
+// exits at once, so Start must fail on the exit (not wait out the budget) and
+// surface ssh's own stderr, which is the only thing that says why.
+func TestForwardStartReverseFailsFastWithSSHReason(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\necho 'Error: remote port forwarding failed for listen port 9222' >&2\nexit 255\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The budget must outlast a shell's startup, or the budget fires before the
+	// child exits and this test would measure the timer, not the early exit.
+	withShrunkTunnelReadyTimings(t, 100, 20*time.Millisecond)
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	fm := NewForwardManager(sup, Target{Kind: KindSSH, Host: "devbox"})
+	began := time.Now()
+	err := fm.Start(ProjectPortMap{RemotePort: 9222, LocalPort: 9222, Enabled: true, Reverse: true})
+	if err == nil {
+		t.Fatal("reverse Start succeeded although ssh exited at once")
+	}
+	if elapsed := time.Since(began); elapsed > time.Second {
+		t.Fatalf("reverse Start took %s; an early ssh exit must fail well inside the 2s budget", elapsed)
+	}
+	if !strings.Contains(err.Error(), "remote port forwarding failed for listen port 9222") {
+		t.Fatalf("reverse Start error = %v, want ssh's stderr in it", err)
+	}
+	if fm.IsLive(9222) {
+		t.Fatal("failed reverse forward left live")
+	}
+}
+
+// TestForwardStartReverseRejectsWSL: WSL shares the Windows loopback, so a
+// -R forward from it is meaningless. Refused before any ssh is spawned.
+func TestForwardStartReverseRejectsWSL(t *testing.T) {
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+	fm := NewForwardManager(sup, Target{Kind: KindWSL, Distro: "Ubuntu"})
+	err := fm.Start(ProjectPortMap{RemotePort: 9222, LocalPort: 9222, Enabled: true, Reverse: true})
+	if err == nil || !strings.Contains(err.Error(), "needs an SSH target") {
+		t.Fatalf("reverse Start on WSL error = %v, want SSH-target refusal", err)
+	}
+}
+
+// installFakeSSHScript puts a fake `ssh` on PATH running body verbatim.
+func installFakeSSHScript(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestForwardStopBoundedWhenGrandchildHoldsStderr: a ProxyCommand-style helper
+// inherits ssh's stderr pipe and outlives the killed ssh. Stop must return
+// within the wait delay, not wait for the helper to exit.
+func TestForwardStopBoundedWhenGrandchildHoldsStderr(t *testing.T) {
+	// The marker is written only after the background sleep has forked. Without
+	// it Stop can kill the shell before the grandchild exists, and the test
+	// would pass without ever holding the pipe.
+	marker := filepath.Join(t.TempDir(), "forked")
+	installFakeSSHScript(t, "sleep 10 &\n: > "+marker+"\nsleep 10")
+	ln, port := listenLocalPort(t)
+	defer ln.Close()
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	fm := NewForwardManager(sup, Target{Kind: KindSSH, Host: "devbox"})
+	if err := fm.Start(ProjectPortMap{RemotePort: 4000, LocalPort: port, Enabled: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForFile(t, marker)
+	began := time.Now()
+	if err := fm.Stop(4000); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(began); elapsed > 2*forwardWaitDelay+time.Second {
+		t.Fatalf("Stop took %s with a grandchild holding stderr; want it bounded by the wait delay", elapsed)
+	}
+}
+
+// TestForwardLiveClearsWhenGrandchildHoldsStderr: ssh exits on its own while a
+// helper still holds its stderr. The forward must read dead within the wait
+// delay, not stay live until the helper exits.
+func TestForwardLiveClearsWhenGrandchildHoldsStderr(t *testing.T) {
+	installFakeSSHScript(t, "sleep 10 &\nexit 3")
+	ln, port := listenLocalPort(t)
+	defer ln.Close()
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	fm := NewForwardManager(sup, Target{Kind: KindSSH, Host: "devbox"})
+	// The local listener makes -L readiness pass before ssh exits, so Start
+	// returns and the death is observed by the reaper alone.
+	if err := fm.Start(ProjectPortMap{RemotePort: 4000, LocalPort: port, Enabled: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	deadline := time.Now().Add(2*forwardWaitDelay + 2*time.Second)
+	for fm.IsLive(4000) {
+		if time.Now().After(deadline) {
+			t.Fatal("exited forward still reads live while a grandchild holds its stderr")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestForwardEarlyExitDuringReadinessSkipsMonitorHook: a refused -R bind exits
+// ssh before the forward is ready. Start reports it through its error; the
+// monitor hook must not also fire, or one refusal counts twice.
+func TestForwardEarlyExitDuringReadinessSkipsMonitorHook(t *testing.T) {
+	installFakeSSHScript(t, "echo 'remote port forwarding failed' >&2\nexit 255")
+	withShrunkTunnelReadyTimings(t, 100, 20*time.Millisecond)
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	defer func() { _ = sup.Shutdown(context.Background()) }()
+
+	fm := NewForwardManager(sup, Target{Kind: KindSSH, Host: "devbox"})
+	fired := make(chan struct{}, 1)
+	fm.SetOnExit(func(int, int, time.Duration) { fired <- struct{}{} })
+	if err := fm.Start(ProjectPortMap{RemotePort: 9222, LocalPort: 9222, Enabled: true, Reverse: true}); err == nil {
+		t.Fatal("reverse Start succeeded although ssh exited at once")
+	}
+	select {
+	case <-fired:
+		t.Fatal("monitor hook fired for an exit during readiness; Start's error already counts it")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestForwardExitClaimIsSingle pins the rule that one exit gets exactly one
+// report. An exit before readiness wins the claim, so Start's readiness check
+// fails and the monitor hook stays silent. An exit after readiness is routed
+// to the monitor hook, and Start has already returned success.
+func TestForwardExitClaimIsSingle(t *testing.T) {
+	early := &forwardProcess{}
+	if early.markExited() {
+		t.Fatal("an exit before readiness was routed to the monitor hook")
+	}
+	if early.markReady() {
+		t.Fatal("Start claimed readiness after the child exited; the exit would be counted twice")
+	}
+
+	late := &forwardProcess{}
+	if !late.markReady() {
+		t.Fatal("Start could not claim readiness for a live child")
+	}
+	if !late.markExited() {
+		t.Fatal("an exit after readiness was not routed to the monitor hook")
+	}
+}
+
+// waitForFile polls until path exists, failing the test after a few seconds.
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

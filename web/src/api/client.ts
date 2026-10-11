@@ -1,4 +1,6 @@
 import type {
+  AutoShareConfig,
+  ShareStatus,
   ChatResponse,
   SessionInfo,
   SessionDetail,
@@ -28,6 +30,8 @@ import type {
   BrowseResponse,
   PermissionsResponse,
   PermissionModeConfigResponse,
+  PermissionRule,
+  BashRulesDelta,
   MemoryStatusResponse,
   UsageSummary,
   PluginInfo,
@@ -57,6 +61,8 @@ import type {
   TTSConfig,
   TTSStatus,
   TTSPlayback,
+  STTSettings,
+  STTTranscribeResult,
   TTSInstallState,
   PortMapView,
   PortMapTarget,
@@ -67,6 +73,8 @@ import type {
   VaultGenOptions,
   ChatVerbosityConfig,
   ChatVerbosityResponse,
+  QuickActionsConfig,
+  QuickActionsResponse,
   PendingRewind,
   PreparePendingRewindRequest,
   PulsePage,
@@ -183,6 +191,9 @@ export interface ImageGenConfig {
 }
 
 // HtrStatus is the managed `htrcli serve` daemon snapshot (Settings > Browser).
+// Field names mirror the Go `htrStatusResponse` tags exactly — a mismatch here
+// renders as `undefined` in the UI rather than as a type error, because the
+// payload arrives as parsed JSON.
 export interface HtrStatus {
   enabled: boolean;
   running: boolean;
@@ -191,7 +202,74 @@ export interface HtrStatus {
   port: number;
   socket: string;
   binary: string;
+  /** "shared" = htrcli's own singleton, "private" = legacy ocode-managed, "" = HTR off. */
+  mode?: string;
+  /** ocode may use this daemon but must never start one. */
+  adopt_only?: boolean;
+  /** Why adopt-only is in effect, naming the file to fix or the command to run. */
+  notice?: string;
+  /** "htrcli-config" | "ocode-config" | "none" | "generated" | "". Never the token. */
+  token_source?: string;
+  /** htrcli's own config, the source of the shared coordinates. */
+  config_path?: string;
+  /** Live daemon pid from ocode's owner marker; 0 unless `running`. */
+  daemon_pid?: number;
+  /**
+   * True only when ocode itself spawned the daemon and may therefore stop it.
+   * The Stop button must be gated on this: a daemon ocode did not start (a
+   * second ocode instance's, or the user's own `htrcli serve`) is never killed
+   * on ocode's initiative.
+   */
+  started_by_ocode?: boolean;
   error?: string;
+  /** Present only on a stop response: false is a refusal, not a failure. */
+  stopped?: boolean;
+  reason?: string;
+}
+
+// BrowserConfig is the embedded-browser settings, including the HTR companion.
+// htr_shared/htr_token_set are REPORT-ONLY: config.SaveOcodeHTRConfig takes no
+// parameter for browser.htr_shared or browser.htr_token, so neither key can be
+// written through this API. They are shown as provenance for values the user
+// edits in ocodeconfig.json — never as inputs, which would look editable and
+// then silently fail to persist. htr_token_set is a boolean for the same reason
+// the value is absent: the bearer token must not cross the wire.
+export interface BrowserConfig {
+  chrome_path: string;
+  idle_timeout_minutes: number;
+  screencast_quality: number;
+  htr_enabled?: boolean;
+  htr_extension_path?: string;
+  htrcli_path?: string;
+  /** Configured legacy private-daemon port. Shared mode ignores it. */
+  htr_port?: number;
+  /** Configured legacy private-daemon socket. Shared mode ignores it. */
+  htr_socket_path?: string;
+  htr_native_host_name?: string;
+  htr_shared?: boolean;
+  htr_token_set?: boolean;
+  /** The port ocode actually uses, resolved from htrcli's config in shared mode. */
+  effective_port?: number;
+  effective_socket?: string;
+  token_source?: string;
+  adopt_only?: boolean;
+  config_path?: string;
+}
+
+// BrowserConfigSaveResult is the PUT /api/config/ocode/browser reply. It is NOT
+// a full BrowserConfig: only what the save actually wrote comes back, so every
+// derived field (effective_port, effective_socket, token_source, config_path,
+// htr_shared, htr_token_set) is absent and must be re-read with a GET.
+export interface BrowserConfigSaveResult {
+  chrome_path: string;
+  idle_timeout_minutes: number;
+  screencast_quality: number;
+  htr_enabled?: boolean;
+  htr_port?: number;
+  htr_socket_path?: string;
+  htr_native_host_name?: string;
+  /** A live start/stop triggered by htr_enabled failed; HTTP is still 200. */
+  htr_error?: string;
 }
 
 // HtrTab is one browser tab connected to the managed HTR daemon.
@@ -679,6 +757,14 @@ export interface ConnectMethod {
   id: string;
   label: string;
   kind: ConnectMethodKind;
+  /**
+   * Completion modes the server honours for this method, when it has a choice
+   * (["auto","manual"] for the OpenAI loopback login). Absent means exactly one
+   * shape, so a client MUST NOT render a mode chooser — the server would ignore
+   * the answer. Set by the server from oauthFlowTakesMode; see
+   * handler_connect.go.
+   */
+  modes?: ("auto" | "manual")[];
 }
 
 export interface ConnectProvider {
@@ -724,6 +810,268 @@ export interface ConnectFlowInput {
   ct0?: string;
 }
 
+
+// ── SQLite browser types (GET /api/db/info, /api/db/table, POST /api/db/query).
+
+export interface DBTableInfo {
+  name: string;
+  type: "table" | "view";
+  /** ANALYZE row estimate, or -1 when unknown. */
+  rows: number;
+}
+
+export interface DBInfo {
+  is_sqlite: boolean;
+  path: string;
+  tables?: DBTableInfo[];
+}
+
+export interface DBColumn {
+  name: string;
+  decl_type: string;
+  not_null: boolean;
+  default?: string;
+  /** 1-based position in the primary key; 0 when not part of it. */
+  pk: number;
+  generated: boolean;
+}
+
+export interface DBIndex {
+  name: string;
+  unique: boolean;
+  columns: string[];
+  origin: string;
+}
+
+export interface DBForeignKey {
+  from: string;
+  table: string;
+  to: string;
+}
+
+export interface DBTableSchema {
+  name: string;
+  type: string;
+  columns: DBColumn[];
+  indexes: DBIndex[];
+  foreign_keys: DBForeignKey[];
+  ddl: string;
+  rowid: boolean;
+}
+
+export interface DBResultColumn {
+  name: string;
+  decl_type: string;
+}
+
+export interface DBBlob {
+  $blob: true;
+  bytes: number;
+  preview: string;
+  data?: string;
+  truncated?: boolean;
+}
+
+export type DBCell = null | number | string | boolean | DBBlob;
+
+/**
+ * A BLOB value being SENT to the server.
+ *
+ * Deliberately narrower than DBBlob: `bytes`, `preview` and `truncated` are
+ * response-only (the server derives them from the stored bytes). A request that
+ * claimed a `preview` would be describing data it does not have.
+ */
+export interface DBBlobInput {
+  $blob: true;
+  data: string;
+}
+
+/** A value as sent in a row insert/update. */
+export type DBCellInput = DBCell | DBBlobInput;
+
+export interface DBResultSet {
+  columns: DBResultColumn[];
+  rows: DBCell[][];
+  row_count: number;
+  truncated: boolean;
+  elapsed_ms: number;
+}
+
+/** A saved Postgres connection. Its URL is never sent to the client. */
+export interface DBConnectConnection {
+  name: string;
+  driver: string;
+  /** True when the caller's surface holds an unlock grant for this connection. */
+  unlocked: boolean;
+}
+
+/** A Postgres query result. Values are JSON scalars, or objects for json/array columns. */
+export interface DBConnectQueryResult {
+  columns: string[];
+  rows: unknown[][];
+  truncated: boolean;
+  /** Set only for a committed write; the rows are then empty. */
+  rowsAffected: number | null;
+}
+
+/** One page of public table names. */
+export interface DBConnectTablePage {
+  tables: string[];
+  hasMore: boolean;
+}
+
+/** A column of a Postgres table. `type` is the catalog type text; `pk` is the 1-based primary-key position, 0 when not part of it. */
+export interface DBConnectColumn {
+  name: string;
+  type: string;
+  pk: number;
+}
+
+/** One page of a table's rows. Each row is in column order. */
+export interface DBConnectBrowsePage {
+  columns: DBConnectColumn[];
+  rows: unknown[][];
+  hasMore: boolean;
+  primaryKey: string[];
+}
+
+export interface DBConnectBrowseOptions {
+  sort: string;
+  dir: "asc" | "desc";
+  filter: string;
+  limit: number;
+  offset: number;
+}
+
+export interface DBTableResponse {
+  schema: DBTableSchema;
+  result: DBResultSet;
+  /**
+   * Total rows matching the current filter, present only when the request asked
+   * for a count (or a filter/sort), so the grid can say "1–100 of 4,231" instead
+   * of guessing from the ANALYZE estimate. Undefined means "not counted".
+   */
+  total?: number;
+  /**
+   * Exact row keys, index-aligned with `result.rows`, for addressing a row in a
+   * mutation.
+   *
+   * The values are STRINGS because `JSON.parse` turns a JSON integer into a
+   * float64, and past 2^53 two adjacent ids collapse into the same number — so a
+   * key rebuilt from the grid's cells can silently address the neighbouring row.
+   * A `null` value is a NULL key component (an `IS NULL` predicate, not an empty
+   * string), and a `null` ENTRY means that row's key could not be expressed
+   * exactly, so the caller must fall back to building one from the cells.
+   *
+   * Absent entirely when the table has no addressable key (a view), or when the
+   * server is older than this field.
+   */
+  row_keys?: (Record<string, string | null> | null)[];
+}
+
+/**
+ * Wire normalization for the /api/db/* payloads.
+ *
+ * Every list field on these responses is an ARRAY by contract — the server
+ * allocates empty slices rather than nil so `encoding/json` cannot emit null
+ * (pinned by internal/dbbrowse's wire_contract_test.go). These normalizers exist
+ * for the one case the server fix cannot cover: `/api/db/*` for a REMOTE
+ * project is proxied to that machine's own `ocode serve --remote` binary, so a
+ * freshly built bundle can be talking to a host still running an older server
+ * that emits `"foreign_keys": null`. The SQLite preview dereferences these
+ * fields unguarded (`schema.foreign_keys.length`), which surfaced to users as
+ * "null is not an object (evaluating 'e.foreign_keys.length')" — a crash of the
+ * whole preview pane, not a degraded section.
+ *
+ * Applied once here at the fetch boundary rather than with `?? []` at each
+ * dereference, so no call site can forget it and no new one has to remember.
+ */
+function normalizeDBInfo(res: DBInfo): DBInfo {
+  return res.tables ? res : { ...res, tables: [] };
+}
+
+function normalizeDBResult(res: DBResultSet): DBResultSet {
+  return { ...res, columns: res.columns ?? [], rows: res.rows ?? [] };
+}
+
+function normalizeDBTableSchema(schema: DBTableSchema): DBTableSchema {
+  return {
+    ...schema,
+    columns: schema.columns ?? [],
+    indexes: (schema.indexes ?? []).map((ix) => (ix.columns ? ix : { ...ix, columns: [] })),
+    foreign_keys: schema.foreign_keys ?? [],
+  };
+}
+
+function normalizeDBTable(res: DBTableResponse): DBTableResponse {
+  return { schema: normalizeDBTableSchema(res.schema), result: normalizeDBResult(res.result) };
+}
+
+/** Result of a confirmed write (row op, SQL write, or DDL). */
+export interface DBExecResult {
+  rows_affected: number;
+  last_insert_id?: number;
+  elapsed_ms: number;
+}
+
+/** One column in a guided CREATE TABLE / ADD COLUMN. */
+export interface DBColumnDef {
+  name: string;
+  type?: string;
+  not_null?: boolean;
+  pk?: boolean;
+  default?: string | null;
+}
+
+/** Query string for a BLOB-cell request: the row key travels as JSON, matching
+ *  the shape the grid already builds for row edits. */
+function dbBlobQuery(
+  path: string,
+  table: string,
+  column: string,
+  key: Record<string, DBCell>,
+  projectRoot?: string,
+): string {
+  const q = new URLSearchParams({ path, table, column, key: JSON.stringify(key) });
+  if (projectRoot) q.set("project_root", projectRoot);
+  return q.toString();
+}
+
+/** Reads a non-2xx body into a readable message. The server answers errors as
+ *  JSON `{"error": "..."}`; a proxy or an older build may answer plain text, so
+ *  fall back to the raw text, then to the status line. */
+async function readErrorMessage(res: Response): Promise<string> {
+  const text = (await res.text().catch(() => "")).trim();
+  if (text) {
+    try {
+      const body = JSON.parse(text) as { error?: unknown; message?: unknown };
+      const msg = body.error ?? body.message;
+      if (typeof msg === "string" && msg.trim()) return msg;
+    } catch {
+      // not JSON: the plain-text body is the message
+    }
+    return text;
+  }
+  return res.statusText || `request failed (${res.status})`;
+}
+
+async function transcribeAudio(
+  audio: Blob,
+  filename: string,
+): Promise<STTTranscribeResult> {
+  const form = new FormData();
+  form.append("audio", audio, filename);
+  const res = await fetch(apiPath("/api/stt/transcribe"), {
+    method: "POST",
+    headers: authHeaders(),
+    body: form,
+  });
+  if (!res.ok) {
+    reportAuthFailure(res.status);
+    throw new ApiError(await readErrorMessage(res), res.status);
+  }
+  return (await res.json()) as STTTranscribeResult;
+}
 
 export const api = {
   listSessions: (opts?: { limit?: number; offset?: number }, host?: string) => {
@@ -982,6 +1330,52 @@ export const api = {
       },
       host,
     ),
+
+  // ── Pulse assistant (local-only, never host-routed) ──
+  // The one global assistant session behind the Pulse dashboard's chat drawer.
+  // Created on first call; the same id afterwards. It is an ordinary session
+  // for every other endpoint (transcript, sendMessage, SSE, model override).
+  getPulseAssistant: () =>
+    fetchJSON<import("./types").PulseAssistantInfo>("/api/pulse/assistant"),
+  // Chat history. A new chat becomes current and the old transcript stays on
+  // disk; a select makes an earlier chat current. Both are refused (409) while
+  // the current chat is mid-turn or paused on an ask.
+  newPulseChat: () =>
+    fetchJSON<import("./types").PulseAssistantInfo>("/api/pulse/assistant/new", {
+      method: "POST",
+    }),
+  selectPulseChat: (sessionId: string) =>
+    fetchJSON<import("./types").PulseAssistantInfo>("/api/pulse/assistant", {
+      method: "PUT",
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
+  /** Live terminals for the Pulse dashboard, running programs first. */
+  listPulseTerminals: (offset: number, limit: number) =>
+    fetchJSON<import("./types").PulseTerminalPage>(
+      `/api/pulse/terminals?offset=${offset}&limit=${limit}`,
+    ),
+  listPulseChats: (offset: number, limit: number) =>
+    fetchJSON<import("./types").PulseChatPage>(
+      `/api/pulse/assistant/chats?offset=${offset}&limit=${limit}`,
+    ),
+  // The assistant's model slot. Empty = unset (the server default applies);
+  // a PUT with an empty model clears it. Takes effect on the next turn.
+  getPulseModel: () => fetchJSON<{ model: string }>("/api/config/pulse-model"),
+  setPulseModel: (model: string) =>
+    fetchJSON<{ model: string }>("/api/config/pulse-model", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  // The assistant's system prompt override. `prompt` is empty when unset (the
+  // built-in `default` applies); a PUT with an empty prompt clears it. Takes
+  // effect on the assistant's next turn.
+  getPulseSystemPrompt: () =>
+    fetchJSON<import("./types").PulseSystemPrompt>("/api/config/pulse-system-prompt"),
+  setPulseSystemPrompt: (prompt: string) =>
+    fetchJSON<unknown>("/api/config/pulse-system-prompt", {
+      method: "PUT",
+      body: JSON.stringify({ prompt }),
+    }),
 
   getPermissionModel: (host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>(
@@ -1299,6 +1693,19 @@ export const api = {
     }),
   ttsStop: () => fetchJSON<TTSPlayback>("/api/tts/stop", { method: "POST" }),
 
+  // Speech-to-text (voice input). The selected model is server config; PUT
+  // returns the refreshed list so the form never shows a stale selection.
+  getSTT: () => fetchJSON<STTSettings>("/api/stt"),
+  setSTTModel: (model: string) =>
+    fetchJSON<STTSettings>("/api/stt", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+  /** Uploads one recording as multipart field `audio`. No Content-Type header:
+   *  the browser must set the multipart boundary itself. */
+  transcribeSpeech: (audio: Blob, filename: string) =>
+    transcribeAudio(audio, filename),
+
   getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
   setTUISettings: (cfg: TUISettings) =>
     fetchJSON<TUISettings>("/api/config/ocode/tui", {
@@ -1327,12 +1734,12 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
 
-  getPathsConfig: () =>
+  getPathsConfig: (host?: string) =>
     fetchJSON<{
       extra_allowed_paths: string[];
       upload_dir: string;
       platform?: string;
-    }>("/api/config/ocode/paths"),
+    }>("/api/config/ocode/paths", undefined, host),
   setPathsConfig: (extra_allowed_paths: string[], upload_dir: string) =>
     fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>(
       "/api/config/ocode/paths",
@@ -1360,18 +1767,22 @@ export const api = {
       body: JSON.stringify(fields),
     }),
 
-  getBrowserConfig: () =>
-    fetchJSON<{
-      chrome_path: string;
-      idle_timeout_minutes: number;
-      screencast_quality: number;
-    }>("/api/config/ocode/browser"),
+  getBrowserConfig: () => fetchJSON<BrowserConfig>("/api/config/ocode/browser"),
   setBrowserConfig: (fields: {
     chrome_path: string;
     idle_timeout_minutes: number;
     screencast_quality: number;
+    // The legacy private-daemon fields. The server writes htr_port only when it
+    // is > 0 and htr_socket_path only when non-empty, so clearing either is a
+    // no-op there; the form says so rather than pretending otherwise.
+    htr_port?: number;
+    htr_socket_path?: string;
   }) =>
-    fetchJSON<typeof fields>("/api/config/ocode/browser", {
+    // Deliberately NOT BrowserConfig: the save reply echoes only what was
+    // written, so effective_port and the shared provenance are absent from it.
+    // Typing it as the full config would let a caller read undefined and blame
+    // the resolution instead of the narrower reply.
+    fetchJSON<BrowserConfigSaveResult>("/api/config/ocode/browser", {
       method: "PUT",
       body: JSON.stringify(fields),
     }),
@@ -1402,6 +1813,16 @@ export const api = {
     fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity"),
   setChatVerbosityConfig: (cfg: ChatVerbosityConfig) =>
     fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  // Quick actions take NO `host`: like the other ocodeconfig endpoints, this is
+  // a GLOBAL Settings surface, not a session- or project-scoped one. Threading a
+  // host through would make the Settings panel read a remote machine's config.
+  getQuickActionsConfig: () =>
+    fetchJSON<QuickActionsResponse>("/api/config/ocode/quick-actions"),
+  setQuickActionsConfig: (cfg: QuickActionsConfig) =>
+    fetchJSON<QuickActionsResponse>("/api/config/ocode/quick-actions", {
       method: "PUT",
       body: JSON.stringify(cfg),
     }),
@@ -1541,6 +1962,14 @@ export const api = {
     }),
   gitDiscard: (paths: string[], project?: string, host?: string) =>
     fetchJSON<GitStatus>(`/api/git/discard${projQuery(project, host)}`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  /** Append repo-relative paths to the repository's root .gitignore. Only
+   *  meaningful for untracked paths (gitignore does not untrack a tracked
+   *  file); the server dedupes and returns the refreshed status. */
+  gitIgnore: (paths: string[], project?: string, host?: string) =>
+    fetchJSON<GitStatus>(`/api/git/ignore${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ paths }),
     }),
@@ -2126,6 +2555,25 @@ export const api = {
     fetchJSON<import("../api/types").OcrModelsResponse>("/api/ocr/models"),
 
   // ── Computer use ──
+  // Auto-share-on-start. Reading is side-effect free: the server reports the
+  // cached exposure only, never starts one, so this is safe to call on mount.
+  getAutoShareConfig: () =>
+    fetchJSON<AutoShareConfig>("/api/config/ocode/auto-share"),
+  setAutoShareConfig: (enabled: boolean) =>
+    fetchJSON<AutoShareConfig>("/api/config/ocode/auto-share", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // ── Tailscale share (whole desktop) ──
+  // Reading the share status is side-effect free; STARTING and STOPPING are
+  // explicit POSTs so opening the Share dialog / Settings can never publish the
+  // instance by itself.
+  getShareStatus: () => fetchJSON<ShareStatus>("/api/tailscale-share"),
+  startShare: () =>
+    fetchJSON<ShareStatus>("/api/tailscale-share/start", { method: "POST" }),
+  stopShare: () =>
+    fetchJSON<ShareStatus>("/api/tailscale-share/stop", { method: "POST" }),
   getComputerUseConfig: () =>
     fetchJSON<import("../api/types").ComputerUseConfig>(
       "/api/config/computer-use",
@@ -2482,6 +2930,12 @@ export const api = {
       },
       host,
     ),
+  cancelBtw: (id: string, host?: string) =>
+    fetchJSON<{ status: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/btw`,
+      { method: "DELETE" },
+      host,
+    ),
 
   // Mask (secret redaction) config
   getMaskConfig: () =>
@@ -2606,6 +3060,228 @@ export const api = {
     }
     return res.arrayBuffer();
   },
+
+  // ── SQLite browser (read-only in this phase). host routes to a registered
+  // remote project's server through the /api/remote/{host} proxy (the remote
+  // server reads its own filesystem); projectRoot scopes path containment.
+  dbInfo: (path: string, projectRoot?: string, host?: string) => {
+    const q = new URLSearchParams({ path });
+    if (projectRoot) q.set("project_root", projectRoot);
+    return fetchJSON<DBInfo>(`/api/db/info?${q.toString()}`, undefined, host).then(normalizeDBInfo);
+  },
+
+  dbTable: (
+    path: string,
+    table: string,
+    opts: {
+      projectRoot?: string;
+      limit?: number;
+      offset?: number;
+      /** SQL boolean expression, without the WHERE keyword. Server-validated. */
+      filter?: string;
+      /** Column to order by; the server refuses a column the table lacks. */
+      sort?: string;
+      dir?: "asc" | "desc";
+      /** Ask for the total row count matching the filter. */
+      count?: boolean;
+      host?: string;
+    } = {},
+  ) => {
+    const q = new URLSearchParams({ path, table });
+    if (opts.projectRoot) q.set("project_root", opts.projectRoot);
+    if (opts.limit != null) q.set("limit", String(opts.limit));
+    if (opts.offset != null) q.set("offset", String(opts.offset));
+    if (opts.filter) q.set("filter", opts.filter);
+    if (opts.sort) q.set("sort", opts.sort);
+    if (opts.dir) q.set("dir", opts.dir);
+    if (opts.count) q.set("count", "1");
+    return fetchJSON<DBTableResponse>(`/api/db/table?${q.toString()}`, undefined, opts.host).then(
+      normalizeDBTable,
+    );
+  },
+
+  /**
+   * Download one BLOB cell's full bytes.
+   *
+   * The grid only ever carries the first 8 KB of a blob (`Blob.data` is a
+   * prefix), so this is the only way to obtain the real value. The response is
+   * raw bytes rather than JSON, and a NULL cell answers 204 — reported as
+   * `isNull` so the caller does not save a zero-byte file for a cell that holds
+   * nothing at all.
+   */
+  dbBlobDownload: async (
+    path: string,
+    table: string,
+    column: string,
+    key: Record<string, DBCell>,
+    opts: { projectRoot?: string; host?: string } = {},
+  ): Promise<{ data: ArrayBuffer | null; mediaType: string; byteLength: number; isNull: boolean }> => {
+    const q = dbBlobQuery(path, table, column, key, opts.projectRoot);
+    // Mirrors fetchJSON's host handling: a remote host is reached through the
+    // /api/remote/{host} proxy, where the host's own server reads its own disk.
+    const res = await fetch(apiPath(`${remoteApiBase(opts.host)}/api/db/blob?${q}`), {
+      headers: authHeaders(),
+    });
+    if (res.status === 204) {
+      return { data: null, mediaType: "", byteLength: 0, isNull: true };
+    }
+    if (!res.ok) {
+      reportAuthFailure(res.status);
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new ApiError(err.message || err.error || res.statusText, res.status);
+    }
+    const data = await res.arrayBuffer();
+    return {
+      data,
+      mediaType: (res.headers.get("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase(),
+      byteLength: data.byteLength,
+      isNull: false,
+    };
+  },
+
+  /**
+   * Replace one BLOB cell from raw bytes.
+   *
+   * The bytes are the request body (not base64 in JSON), so the stored value is
+   * exactly what the user picked and a 64 MB file does not inflate to 85 MB on
+   * the wire.
+   */
+  dbBlobUpload: (
+    path: string,
+    table: string,
+    column: string,
+    key: Record<string, DBCell>,
+    bytes: Uint8Array,
+    opts: { projectRoot?: string; host?: string } = {},
+  ) => {
+    const q = dbBlobQuery(path, table, column, key, opts.projectRoot);
+    // The bytes ARE the body (a BufferSource), not a Blob wrapping them: one
+    // less copy for a 64 MB upload, and the caller's Uint8Array goes out
+    // verbatim. The explicit Content-Type stops fetchJSON defaulting a binary
+    // body to application/json.
+    return fetchJSON<DBExecResult>(
+      `/api/db/blob?${q}`,
+      {
+        method: "POST",
+        body: bytes as unknown as BodyInit,
+        headers: { "Content-Type": "application/octet-stream" },
+      },
+      opts.host,
+    );
+  },
+
+  /** Run a maintenance operation: "analyze", "vacuum" or "integrity_check". */
+  dbMaintenance: (
+    path: string,
+    op: "analyze" | "vacuum" | "integrity_check",
+    opts: { projectRoot?: string; host?: string } = {},
+  ) =>
+    fetchJSON<{ rows?: string[]; rows_affected?: number; elapsed_ms?: number }>(
+      "/api/db/maintenance",
+      {
+        method: "POST",
+        body: JSON.stringify({ path, op, project_root: opts.projectRoot }),
+      },
+      opts.host,
+    ),
+
+  dbQuery: (
+    path: string,
+    sql: string,
+    opts: { projectRoot?: string; limit?: number; host?: string } = {},
+  ) =>
+    fetchJSON<DBResultSet>(
+      "/api/db/query",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          path,
+          sql,
+          project_root: opts.projectRoot,
+          limit: opts.limit,
+        }),
+      },
+      opts.host,
+    ).then(normalizeDBResult),
+
+  /** Run a SQL statement the user has explicitly confirmed as a write. */
+  dbExec: (
+    path: string,
+    sql: string,
+    opts: { projectRoot?: string; host?: string } = {},
+  ) =>
+    fetchJSON<DBExecResult>(
+      "/api/db/query",
+      {
+        method: "POST",
+        body: JSON.stringify({ path, sql, project_root: opts.projectRoot, confirm: true }),
+      },
+      opts.host,
+    ),
+
+  /** Insert, update or delete one row. `key` identifies the row; `values` is the
+   * new/inserted data. A key matching zero or many rows throws ApiError 409. */
+  dbRow: (
+    path: string,
+    op: "insert" | "update" | "delete",
+    table: string,
+    opts: {
+      projectRoot?: string;
+      host?: string;
+      key?: Record<string, DBCell>;
+      values?: Record<string, DBCellInput>;
+    } = {},
+  ) =>
+    fetchJSON<DBExecResult>(
+      "/api/db/row",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          path,
+          op,
+          table,
+          key: opts.key,
+          values: opts.values,
+          project_root: opts.projectRoot,
+        }),
+      },
+      opts.host,
+    ),
+
+  /** One guided DDL operation (add column / create or drop table / create or
+   * drop index). The server builds the SQL from validated parts. */
+  dbSchema: (
+    path: string,
+    op: "add_column" | "create_table" | "drop_table" | "create_index" | "drop_index",
+    opts: {
+      projectRoot?: string;
+      host?: string;
+      table?: string;
+      index?: string;
+      column?: DBColumnDef;
+      columns?: DBColumnDef[];
+      indexColumns?: string[];
+      unique?: boolean;
+    } = {},
+  ) =>
+    fetchJSON<DBExecResult>(
+      "/api/db/schema",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          path,
+          op,
+          table: opts.table,
+          index: opts.index,
+          column: opts.column,
+          columns: opts.columns,
+          index_columns: opts.indexColumns,
+          unique: opts.unique,
+          project_root: opts.projectRoot,
+        }),
+      },
+      opts.host,
+    ),
 
   // ── Sidebar preview (audio/video): exchange the bearer for a short-lived,
   // single-file capability the browser's media element can carry in the URL.
@@ -2863,6 +3539,14 @@ export const api = {
     fetchJSON<{ prefix: string; level: string }>("/api/permissions/bash-rule", {
       method: "POST",
       body: JSON.stringify({ prefix, level }),
+    }),
+  // Batch write behind the Settings → Permissions rule editor. The body is a
+  // DELTA, never a replacement map: a rule another surface added between the
+  // editor's load and its save (TUI /ban, the /ban slash command) must survive.
+  setBashRules: (delta: BashRulesDelta) =>
+    fetchJSON<{ bash_rules: PermissionRule[] }>("/api/permissions/bash-rules", {
+      method: "PUT",
+      body: JSON.stringify(delta),
     }),
   getAutoContinue: (host?: string) =>
     fetchJSON<{ enabled: boolean; model: string }>(
@@ -3257,6 +3941,95 @@ export const api = {
       {
         method: "POST",
       },
+    ),
+
+  // ── Postgres connector ──
+  // Saved connections are global (ocodeconfig.json), not directory-bound, so
+  // these are NOT host-threaded. Unlock is per client surface, like the vault.
+  // Null lists are normalised here, once, at the fetch boundary.
+  dbConnectList: (surface: string) =>
+    fetchJSON<{ connections: DBConnectConnection[] | null }>(
+      `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
+    ).then((r) => ({ connections: r.connections ?? [] })),
+  dbConnectAdd: (name: string, url: string, password: string) =>
+    fetchJSON<{ name: string }>("/api/dbconnect/connections", {
+      method: "POST",
+      body: JSON.stringify({ name, url, password }),
+    }),
+  dbConnectRemove: (name: string) =>
+    fetchEmpty(`/api/dbconnect/connections/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  dbConnectUnlock: (surface: string, password: string) =>
+    fetchJSON<{ unlocked: string[] }>("/api/dbconnect/unlock", {
+      method: "POST",
+      body: JSON.stringify({ surface, password }),
+    }),
+  dbConnectLock: (surface: string) =>
+    fetchEmpty("/api/dbconnect/lock", {
+      method: "POST",
+      body: JSON.stringify({ surface }),
+    }),
+  dbConnectTables: (surface: string, connection: string, limit: number, offset: number) =>
+    fetchJSON<{ tables: string[] | null; has_more: boolean }>(
+      `/api/dbconnect/tables?surface=${encodeURIComponent(surface)}&connection=${encodeURIComponent(connection)}&limit=${limit}&offset=${offset}`,
+    ).then((r): DBConnectTablePage => ({ tables: r.tables ?? [], hasMore: r.has_more })),
+  /** One page of a table. Sort and filter are validated by the server; the filter is a read-only predicate. */
+  dbConnectRows: (surface: string, connection: string, table: string, opts: DBConnectBrowseOptions) => {
+    const q = new URLSearchParams({
+      surface,
+      connection,
+      table,
+      dir: opts.dir,
+      limit: String(opts.limit),
+      offset: String(opts.offset),
+    });
+    if (opts.sort) q.set("sort", opts.sort);
+    if (opts.filter.trim()) q.set("filter", opts.filter);
+    return fetchJSON<{
+      columns: DBConnectColumn[] | null;
+      rows: unknown[][] | null;
+      has_more: boolean;
+      primary_key: string[] | null;
+    }>(`/api/dbconnect/rows?${q.toString()}`).then(
+      (r): DBConnectBrowsePage => ({
+        columns: r.columns ?? [],
+        rows: r.rows ?? [],
+        hasMore: r.has_more,
+        primaryKey: r.primary_key ?? [],
+      }),
+    );
+  },
+  /** Insert, update or delete one row. Update and delete match exactly one row by primary key on the server. */
+  dbConnectRow: (
+    surface: string,
+    connection: string,
+    op: "insert" | "update" | "delete",
+    table: string,
+    key: Record<string, unknown>,
+    values: Record<string, unknown>,
+  ) =>
+    fetchJSON<{ rows_affected: number }>("/api/dbconnect/row", {
+      method: "POST",
+      body: JSON.stringify({ surface, connection, op, table, key, values }),
+    }).then((r) => ({ rowsAffected: r.rows_affected })),
+  /** `confirmed` must be true only after the user has approved a write (a 409 asked for it). */
+  dbConnectQuery: (surface: string, connection: string, sql: string, confirmed: boolean) =>
+    fetchJSON<{
+      columns: string[] | null;
+      rows: unknown[][] | null;
+      truncated: boolean;
+      rows_affected?: number;
+    }>("/api/dbconnect/query", {
+      method: "POST",
+      body: JSON.stringify({ surface, connection, sql, confirm: confirmed }),
+    }).then(
+      (r): DBConnectQueryResult => ({
+        columns: r.columns ?? [],
+        rows: r.rows ?? [],
+        truncated: r.truncated,
+        rowsAffected: r.rows_affected ?? null,
+      }),
     ),
 
   // ── Password vault ──

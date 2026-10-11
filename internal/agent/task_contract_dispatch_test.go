@@ -48,7 +48,7 @@ func (c *contractScriptClient) GetModel() string    { return "mock-model" }
 // tool is registered in a.tools["task"] so the child dispatch resolves tools
 // from the main agent, and runs are tracked in the shared registry.
 func newContractTaskTool(client LLMClient) (*Agent, *TaskTool) {
-	a := NewAgent(client, nil, nil, nil)
+	a := newTestAgent(client, nil, nil, nil)
 	taskTool, ok := a.tools["task"].(*TaskTool)
 	if !ok {
 		panic("task tool not registered")

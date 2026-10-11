@@ -1,0 +1,41 @@
+NOTICE — MIT LICENSE, NO RESPONSIBILITY DISCLOSURE
+---------------------------------------------------
+Copyright (c) 2026 James  (see LICENSE; identity clarification may be needed)
+Repository: github.com/u007/ocode  (see README for docs)
+
+This software is licensed under the MIT License (see LICENSE file, lines 15-19:
+"AS IS" warranty disclaimer and liability cap).
+
+NO WARRANTY — USE AT YOUR OWN RISK
+----------------------------------
+This software includes AI-assisted agents and connections to third-party LLM
+providers (configured via opencode.json, profiles, or plugins). Any model —
+regardless of provider, version, or settings — may produce incorrect,
+misleading, fabricated, or unintentionally harmful output ("hallucinations"
+or errors). Behavior varies by model and is outside the authors' control.
+
+You are responsible for reviewing, verifying, and validating any output,
+code change, command, file edit, terminal action, browser interaction, or
+speech result before relying on it. The authors assume no liability for:
+- incorrect or unsafe AI-generated content or actions;
+- bugs, race conditions, data loss, misconfiguration, or unintended effects;
+- results from sandbox, remote SSH, embedded browser, or automation use.
+
+This is general-purpose software provided "AS IS" with no warranty. It does
+not provide legal, medical, financial, or professional advice.
+
+DEPENDENCIES AND ASSETS
+-----------------------
+This project relies on numerous Go modules (go list -m all) and web/npm
+dependencies. Their licenses are separate; users must comply with all
+applicable third-party terms (attribution, copyleft, patents). Embedded
+assets (e.g., htr-assets.zip, models.snapshot files) have their own licenses.
+
+COMMERCIAL / HOSTED USE
+-----------------------
+MIT covers source code only. Hosted, API, or product deployments need
+separate Terms of Service and a Privacy Policy. MIT does not cover data
+collection, authentication, billing, or cross-border transfer.
+
+Not legal advice. Consult an attorney for liability, data protection,
+and dependency-audit obligations.

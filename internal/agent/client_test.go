@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1429,6 +1431,71 @@ func TestChat500UsesUsualMaxRetries(t *testing.T) {
 	if !strings.Contains(err.Error(), fmt.Sprintf("llm request failed after %d attempt(s)", llmMaxRetries+1)) ||
 		!strings.Contains(err.Error(), "opencode-go error (500)") {
 		t.Fatalf("unexpected error format: %v", err)
+	}
+}
+
+// nxdomainTransportErr returns the error chain http.Client builds for a failed
+// name lookup: *url.Error wrapping *net.OpError wrapping *net.DNSError. A
+// RoundTripper returning the inner error makes the client assemble exactly that
+// chain, so the retry classifier sees the authentic shape rather than a
+// hand-rolled approximation of it.
+func nxdomainTransportErr(host string) error {
+	return &net.OpError{
+		Op:  "dial",
+		Net: "tcp",
+		Err: &net.DNSError{Err: "no such host", Name: host, IsNotFound: true},
+	}
+}
+
+// TestIsRetryableLLMErrorRetriesDNSResolutionFailure pins that a name-resolution
+// failure counts as transient. A *net.DNSError for NXDOMAIN reports neither
+// Timeout() nor Temporary(), and the message matches none of the text-arm
+// substrings, so this used to classify as permanent and skip the retry budget
+// entirely. Observed as agent-run-2 in ses_2026-10-02-094643-b014b5ba losing
+// eight minutes of sub-agent work to `dial tcp: lookup opencode.ai: no such
+// host` on a single attempt, while `connection refused` — the same class of dial
+// blip, matched by the text arm — was retried three times.
+func TestIsRetryableLLMErrorRetriesDNSResolutionFailure(t *testing.T) {
+	err := error(&url.Error{
+		Op:  "Post",
+		URL: "https://opencode.ai/zen/go/v1/chat/completions",
+		Err: nxdomainTransportErr("opencode.ai"),
+	})
+	if !strings.Contains(err.Error(), "no such host") {
+		t.Fatalf("fixture does not reproduce the observed error text: %v", err)
+	}
+	if !isRetryableLLMError(err) {
+		t.Fatalf("DNS resolution failure classified non-retryable: %v", err)
+	}
+}
+
+// TestChatRetriesDNSResolutionFailure pins the user-visible symptom rather than
+// the predicate: a DNS failure now receives the usual llmMaxRetries budget
+// (llmMaxRetries+1 attempts) instead of hard-failing the turn on the first
+// response. Before the fix this surfaced as "llm request failed after 1
+// attempt(s)".
+func TestChatRetriesDNSResolutionFailure(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, nxdomainTransportErr("example.test")
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(llmMaxRetries+1) {
+		t.Fatalf("expected %d attempts, got %d", llmMaxRetries+1, got)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("llm request failed after %d attempt(s)", llmMaxRetries+1)) {
+		t.Fatalf("unexpected error format: %v", err)
+	}
+	// The retry must not launder the cause: the operator still sees which host
+	// failed to resolve.
+	if !strings.Contains(err.Error(), "no such host") {
+		t.Fatalf("error lost the underlying cause: %v", err)
 	}
 }
 

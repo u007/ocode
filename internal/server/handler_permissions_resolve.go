@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
@@ -60,6 +61,22 @@ type PermissionEvent struct {
 	// answer persists this path root to extra_allowed_paths instead of any
 	// bash-prefix/tool rule.
 	OutOfScopePath string `json:"out_of_scope_path,omitempty"`
+	// UntrustedContent/Source/Summary carry a content-guardrail ask (scope
+	// "content") through SSE and the pending_asks reconcile payload. They are
+	// omitempty so every ordinary permission frame is byte-identical to before.
+	UntrustedContent string `json:"untrusted_content,omitempty"`
+	UntrustedSource  string `json:"untrusted_source,omitempty"`
+	UntrustedSummary string `json:"untrusted_summary,omitempty"`
+	// UntrustedScores / UntrustedFailure carry the per-question judge output and
+	// the reason the guardrail could not clear the result, so the browser shows
+	// the scores rather than one collapsed verdict.
+	UntrustedScores  []agent.ContentGuardScore `json:"untrusted_scores,omitempty"`
+	UntrustedFailure string                    `json:"untrusted_failure,omitempty"`
+	// AgentName names the sub-agent that raised the ask, and is empty for a
+	// main-agent ask. Without it the dialog can only say "a sub-agent asked",
+	// which is useless when several are parked at once. omitempty, so every
+	// main-agent frame stays byte-identical to before.
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 // newPermissionEvent projects a parsed PermissionRequest onto the SSE frame the
@@ -86,6 +103,12 @@ func newPermissionEvent(requestID string, req agent.PermissionRequest) Permissio
 		Scope:            scope,
 		Prefix:           req.Prefix,
 		OutOfScopePath:   req.OutOfScopePath,
+		UntrustedContent: req.UntrustedContent,
+		UntrustedSource:  req.UntrustedSource,
+		UntrustedSummary: req.UntrustedSummary,
+		UntrustedScores:  req.UntrustedScores,
+		UntrustedFailure: req.UntrustedFailure,
+		AgentName:        req.AgentName,
 	}
 }
 
@@ -195,13 +218,22 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Locate the session whose pending permission ask matches request_id. Prefer
-	// the explicit session_id; otherwise scan (tool-call IDs are unique). The
-	// session comes back with its lock held, so the tail cannot be resolved out
-	// from under us by a racing request. The match can be anywhere in the
-	// trailing tool-call round, not just the literal last message — a round
-	// that dispatched several tool calls needing approval pauses with more
-	// than one unresolved sentinel at once.
+	// ── Sub-agent asks ────────────────────────────────────────────────────────
+	// A sub-agent ask is NOT a sentinel in the parent's transcript: the child's
+	// goroutine is parked on a channel in its session's own registry, which has
+	// its own mutex and never takes as.mu. This branch MUST come before
+	// findPendingSession, because that helper takes a BLOCKING as.mu — and a
+	// child ask parks while the parent's turn holds exactly that lock, so
+	// reaching it first would pin the HTTP connection behind the parked child for
+	// the whole park.
+	//
+	// The branch is also far simpler than the main-agent path below: there is no
+	// sentinel to rewrite and no continuation to dispatch. The decision goes
+	// straight into the channel the child is already blocked on.
+	if h.handleChildPermResolve(w, bodyReq.SessionID, bodyReq.RequestID, decision) {
+		return
+	}
+
 	// Locate the session whose pending permission ask matches request_id. Prefer
 	// the explicit session_id; otherwise scan (tool-call IDs are unique). The
 	// session comes back with its lock held, so the tail cannot be resolved out
@@ -258,7 +290,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 				"cannot always allow this operation — it is considered harmful and always requires human approval")
 			return
 		}
-		persistAlwaysAllow(decision, permReq, as.agent.Permissions())
+		h.persistAlwaysAllow(decision, permReq, as.agent.Permissions())
 	}
 
 	working := append([]agent.Message(nil), as.messages...)
@@ -280,9 +312,25 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	// submit look hung with no result.
 	model := as.model
 	h.dispatchAskContinuation(sessID, as, func() {
-		if decision != PermDecisionDeny {
+		// A content-guardrail ask is about an ALREADY-EXECUTED result. Approval
+		// delivers the vetted text and denial withholds it; neither re-runs the
+		// tool. Re-executing would issue a second webfetch/MCP call — new,
+		// unvetted bytes plus a real side effect — and would discard the very
+		// content the user just reviewed.
+		//
+		// Approval is truncated like any other tool result. The ask deliberately
+		// carries the FULL flagged text (the user cannot judge a result is safe
+		// without reading it) and ResolveContentAsk returns it verbatim, so
+		// without this a >192KB MCP response or fetched page would enter the
+		// context whole on the strength of one approval click. Safe here because
+		// ResolveContentAsk has already replaced the sentinel, so truncate.go's
+		// "never cut an ask" rule does not apply.
+		if agent.IsContentAsk(permReq) {
+			working[askIdx].Content = agent.TruncateToolResult(bodyReq.RequestID,
+				agent.ResolveContentAsk(permReq, decision != PermDecisionDeny))
+		} else if decision != PermDecisionDeny {
 			pathRoot := agent.OutOfScopePathRoot(permReq)
-			result, err := executeApprovedWithTempPath(as.agent, permReq.ToolName, permReq.Args, bodyReq.RequestID, pathRoot)
+			result, err := executeApprovedWithTempPathFn(as.agent, permReq.ToolName, permReq.Args, bodyReq.RequestID, pathRoot)
 			if err != nil {
 				result = "Error: " + err.Error()
 			}
@@ -304,6 +352,39 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		// Mirror the answered sentinel onto disk before anything else persists
 		// this transcript (see rewriteAskResult).
 		h.rewriteAskResult(sessID, working, askIdx)
+
+		// A re-executed approved call can raise a NEW content-guardrail ask. The
+		// guardrail vets the RESULT; the user approved the CALL, not the text it
+		// returned, so a second verdict is a new question that needs a new answer.
+		// TruncateToolResult passes an ask sentinel through untouched (see
+		// truncate.go: cutting an ask makes it unparseable and the question
+		// disappears), so the slot resolved above can now hold a fresh sentinel
+		// whose payload carries the full unvetted content. Stepping on that would
+		// hand the model precisely what the guardrail exists to withhold.
+		// The TUI stops on the sentinel prefix for exactly this reason
+		// (model.go, the []agent.Message case, which skips askAgent); this is the
+		// server-side half of that same guard.
+		//
+		// parsePermissionAsk — not the bare prefix — decides. Content that merely
+		// STARTS with "PERMISSION_ASK:" is ordinary remote text, and treating it
+		// as an ask would park the session on a dialog that can never be answered.
+		if newAsk, isNewAsk := parsePermissionAsk(working[askIdx].Content); isNewAsk {
+			as.messages = working
+			// No saveSession here, deliberately: the rewriteAskResult above
+			// already wrote THIS row (msgs[seq] is working[askIdx], which by now
+			// holds the new sentinel), and working differs from the stored
+			// transcript at no other index. A whole-transcript save would be a
+			// no-op; the sibling branch below needs one only because it also
+			// commits OTHER rows of the round.
+			h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+			// A `messages` frame alone renders as tool output, not a dialog, and
+			// this ask was raised by an approved re-execution rather than by Step,
+			// so the generic sentinel emitter in handler.go never saw it. Without
+			// this explicit frame the client never learns the question exists.
+			h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "permission",
+				Data: newPermissionEvent(working[askIdx].ToolID, newAsk)})
+			return
+		}
 
 		for i := trailingToolRunStart(as.messages); i < len(as.messages); i++ {
 			if i != askIdx && isPermissionAskMsg(working[i]) {
@@ -371,6 +452,14 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: sessID, Model: model})
 }
 
+// executeApprovedWithTempPathFn is the seam a test replaces to make an
+// approved call return an arbitrary result. The one that matters is a
+// content-guardrail ask sentinel: the real executor produces one only once the
+// guardrail is configured AND its judge returns a flagged verdict, and
+// newClientFn (the only lever for that) is unexported in package agent, so a
+// server test cannot reach the state through the public surface.
+var executeApprovedWithTempPathFn = executeApprovedWithTempPath
+
 // executeApprovedWithTempPath wraps HandleApprovedToolCall exactly like the
 // TUI's executeApprovedTool: when the ask was an out-of-workspace path, the
 // path root is temporarily registered as allowed for the duration of this one
@@ -384,6 +473,122 @@ func executeApprovedWithTempPath(ag *agent.Agent, toolName string, args json.Raw
 		defer tool.ReleaseTemporaryAllowedPath(pathRoot)
 	}
 	return ag.HandleApprovedToolCall(toolName, args, callID)
+}
+
+// handleChildPermResolve resolves a SUB-AGENT permission ask and reports whether
+// it owned the request. Returns false (writing nothing) when requestID is not a
+// parked child ask, so the caller falls through to the unchanged main-agent path.
+//
+// Every always-allow guard the main-agent path enforces is enforced here too, in
+// the same order, and NOTHING is delivered to the parked child when a guard
+// fails — otherwise a hand-crafted resolve could wave an always_* request
+// through for a sub-agent (or persist a rule for it) after the dialog hid the
+// button for good reason.
+//
+// The delivered level is a PLAIN allow even for always_rule / always_tool:
+// persistAlwaysAllow has already persisted the rule against the session's
+// PermissionManager, which sub-agents SHARE with the parent. Deliberately NOT
+// PersistRule/PersistTool, because applyPermissionResponse would then install a
+// blanket SetUserConfirmedRule(toolName) allow — and for an out-of-scope-path ask
+// that is exactly the blanket grant the out-of-scope guard exists to prevent.
+// The TUI sends those flags because it persists through its own dialog path and
+// answers out-of-scope asks separately; here persistAlwaysAllow is that path.
+func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, requestID, decision string) bool {
+	as, ask := h.findChildPermAsk(sessionID, requestID)
+	if ask == nil {
+		// The id left the registry without this request owning it: already
+		// answered (double click / two tabs), auto-denied on timeout or parent
+		// cancel, or swept by denyAll. The browser may still be holding it.
+		// Answer 404 HERE rather than falling through: findPendingSession takes a
+		// blocking as.mu, and this session's turn holds exactly that lock while
+		// the child runs on, so the fall-through would pin the HTTP connection
+		// for the rest of the park. Same error shape as today's answer for an
+		// already-resolved main-agent ask, so the client (which treats 404/409 as
+		// "stale, stay dismissed") is unaffected.
+		if sessionID != "" {
+			if prev := h.lookupAgentSession(sessionID); prev != nil && prev.childAsks.wasResolvedRecently(requestID) {
+				writeError(w, http.StatusNotFound, "no pending permission found for request_id")
+				return true
+			}
+		}
+		return false
+	}
+	sessID := sessionID
+	if sessID == "" {
+		// findChildPermAsk scanned, so recover the owning session's id for the
+		// broadcast. Never takes as.mu, so it cannot block behind a parked child.
+		if owner := h.sessionIDForChildPerm(requestID); owner != "" {
+			sessID = owner
+		}
+	}
+
+	// Same always-allow guards as the main-agent path, in the same order. Nothing
+	// has been removed from the registry yet, so a 409 here leaves the ask live
+	// and the dialog still answerable.
+	if decision == PermDecisionAlwaysRule || decision == PermDecisionAlwaysTool {
+		if decision == PermDecisionAlwaysRule && !agent.AlwaysRuleChoiceAvailable(ask.req) {
+			writeError(w, http.StatusConflict,
+				"always-allow rule is not available for this request — it must be approved individually")
+			return true
+		}
+		if decision == PermDecisionAlwaysTool && !agent.AlwaysToolChoiceAvailable(ask.req) {
+			writeError(w, http.StatusConflict,
+				"always-allow tool is not available for this request — it must be approved individually")
+			return true
+		}
+		if agent.IsHarmfulRequest(ask.req) {
+			log.Printf("serve: always-allow refused (harmful, sub-agent): session=%s tool=%s", sessID, ask.req.ToolName)
+			writeError(w, http.StatusConflict,
+				"cannot always allow this operation — it is considered harmful and always requires human approval")
+			return true
+		}
+	}
+
+	// Commit: take() is the single point of removal, so a concurrent second
+	// resolve finds nothing and 404s rather than delivering twice.
+	if got := as.childAsks.take(requestID); got == nil {
+		writeError(w, http.StatusNotFound, "no pending permission found for request_id")
+		return true
+	}
+	as.childAsks.markResolved(requestID)
+	if decision == PermDecisionAlwaysRule || decision == PermDecisionAlwaysTool {
+		h.persistAlwaysAllow(decision, ask.req, as.agent.Permissions())
+	}
+
+	// Dismiss every watcher's dialog NOW, before the child's tool call runs —
+	// same ordering rationale as the main-agent path: a long-running approved
+	// command must not keep the dialog on screen.
+	h.broadcastEvent(SSEEvent{
+		SessionID: sessID,
+		Event:     "permission_resolved",
+		Data:      map[string]string{"request_id": requestID},
+	})
+
+	if decision == PermDecisionDeny {
+		ask.deliver(agent.PermissionDeny)
+	} else {
+		ask.deliver(agent.PermissionAllow)
+	}
+	writeJSON(w, http.StatusOK, ChatResponse{})
+	return true
+}
+
+// sessionIDForChildPerm returns the id of the live session whose registry holds
+// requestID, or "". Used only to recover the session id for the
+// permission_resolved broadcast when the client did not send one.
+func (h *Handler) sessionIDForChildPerm(requestID string) string {
+	as, _ := h.findChildPermAsk("", requestID)
+	if as == nil {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for id, candidate := range h.agents {
+		if candidate == as {
+			return id
+		}
+	}
+	return ""
 }
 
 // persistAlwaysAllow applies a user's explicit "always allow" decision to the
@@ -400,7 +605,7 @@ func executeApprovedWithTempPath(ag *agent.Agent, toolName string, args json.Raw
 //
 // Config write failures are logged and do not fail the resolution: the
 // in-memory rule already governs this session, matching TUI behaviour.
-func persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *agent.PermissionManager) {
+func (h *Handler) persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *agent.PermissionManager) {
 	if pm == nil {
 		return
 	}
@@ -417,6 +622,23 @@ func persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *ag
 		if err := config.SaveExtraAllowedPath(cleaned); err != nil {
 			log.Printf("serve: failed to save extra_allowed_paths %q: %v", cleaned, err)
 		}
+		// initBuiltinTools resets the process-global allowlist from the config
+		// snapshot on every session build, so the grant must live in h.cfg too or
+		// the next new session/sub-agent silently drops it and re-asks.
+		//
+		// NOTE the coupling this creates, because it is not obvious from either
+		// end: h.cfg.Ocode.ExtraAllowedPaths is ALSO the root list the SQLite
+		// browser's path boundary reads (Handler.pathWithinAllowedRoots, via
+		// handler_db.go), so clicking "always allow" on an extra dir permanently
+		// widens what GET/POST /api/db/* may open. That surface is read-only
+		// (see internal/dbbrowse), and the sidebar's "Extra Dirs" section
+		// discloses the live list, but the widening is real — a reader of this
+		// function should not have to know it to reason about the grant.
+		h.mu.Lock()
+		if h.cfg != nil && !slices.ContainsFunc(h.cfg.Ocode.ExtraAllowedPaths, func(p string) bool { return filepath.Clean(p) == cleaned }) {
+			h.cfg.Ocode.ExtraAllowedPaths = append(h.cfg.Ocode.ExtraAllowedPaths, cleaned)
+		}
+		h.mu.Unlock()
 		return
 	}
 
@@ -425,6 +647,12 @@ func persistAlwaysAllow(decision string, permReq agent.PermissionRequest, pm *ag
 		// Session-scoped by design (same as the TUI): the domain cache is not
 		// written back to config.
 		pm.SetWebfetchDomain(strings.TrimPrefix(permReq.Rule, "webfetch.domain."), agent.PermissionAllow)
+	case decision == PermDecisionAlwaysRule && strings.HasPrefix(permReq.Prefix, "bash.interpreter."):
+		// Exact script grant, never a per-language prefix rule (see
+		// PersistInterpreterScriptGrant). Heredoc/inline source cannot be saved.
+		if err := pm.PersistInterpreterScriptGrant(permReq.Command, config.SaveAutoGrant); err != nil {
+			log.Printf("serve: interpreter always-allow not saved for %q: %v", permReq.Command, err)
+		}
 	case decision == PermDecisionAlwaysRule && permReq.Scope == agent.PermissionScopeBashPrefix && permReq.Prefix != "":
 		pm.SetBashPrefixRule(permReq.Prefix, agent.PermissionAllow)
 		if err := config.SaveSingleBashPrefixRule(permReq.Prefix, string(agent.PermissionAllow)); err != nil {

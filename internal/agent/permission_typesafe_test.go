@@ -38,7 +38,7 @@ func newTypesafeJudge(t *testing.T, reply string) (*Agent, *typesafeJudgeHarness
 
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "typesafe/jev-latest"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -64,6 +64,13 @@ func typesafeChoiceReply(choice string, confidence float64) string {
 
 func typesafeReplyWithConcern(choice string, confidence float64, concern string) string {
 	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":10,"output_tokens":2}}`
+}
+
+// typesafeReplyWithConcernConf is typesafeReplyWithConcern with an explicit
+// confidence on the CONCERN answer, so a test can make the judge unsure about
+// the very category that unlocks a relaxed grant.
+func typesafeReplyWithConcernConf(choice string, confidence float64, concern string, concernConf float64) string {
+	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"allow":0.5,"deny":0.5},"confidence":` + jsonFloat(confidence) + `},"concern":{"type":"choice","choice":"` + concern + `","probabilities":{},"confidence":` + jsonFloat(concernConf) + `}},"usage":{"input_tokens":10,"output_tokens":2}}`
 }
 
 func jsonFloat(f float64) string {
@@ -173,7 +180,7 @@ func TestConsultPermissionModelTypesafeLowConfidenceDoesNotAllow(t *testing.T) {
 func TestConsultPermissionModelTypesafeTransportFailureIsUnconsulted(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "typesafe/jev-latest"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
@@ -300,7 +307,10 @@ func TestPermissionJudgeLog_RecordsOutcomeEndToEnd(t *testing.T) {
 			if recs[0].Outcome != tc.outcome {
 				t.Errorf("outcome = %q, want %q", recs[0].Outcome, tc.outcome)
 			}
-			if recs[0].Model != "jev-latest" || recs[0].Tool != "bash" {
+			// Provider-qualified: the judges label with deciderLabel(client) rather than the
+			// bare model name, so a second decision backend is distinguishable in the
+			// log without having to know which slot produced the record.
+			if recs[0].Model != "typesafe/jev-latest" || recs[0].Tool != "bash" {
 				t.Errorf("record lost model/tool: %+v", recs[0])
 			}
 		})

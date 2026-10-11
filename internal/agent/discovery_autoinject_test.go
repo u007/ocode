@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,9 +88,9 @@ func TestAutoInjectFloorIsDeliberatelyDecoupled(t *testing.T) {
 		t.Fatalf("floor %v must stay ABOVE the lenient relevance floor %v, or name-display leniency silently starts inlining bodies",
 			discoveryAutoInjectFloor, relevanceJudgeMinConfidenceDefault)
 	}
-	if discoveryAutoInjectFloor == autoJudgeMinConfidenceDefault {
-		t.Fatal("the floor must be its own constant, not the permission floor")
-	}
+	// The permission floor default is also 0.80 since 2026-10-03, so the two
+	// values coincide; they remain separate constants and a configured
+	// permissions.auto.min_confidence must not move this one.
 }
 
 func TestPickAutoInjectSkillIgnoresNonSkillKinds(t *testing.T) {
@@ -347,6 +346,91 @@ func TestResetAutoInjectedClearsStickyAndStaged(t *testing.T) {
 	}
 }
 
+// A second confident pick must NOT evict the first. The blocks are request-time
+// only and never persisted, so an evicted body is not "one turn stale" — it is
+// gone from the prompt for the rest of the session, because the sticky set
+// already refuses to select that skill again.
+func TestRecordAutoInjectKeepsEarlierSkillWhenASecondIsPicked(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	first := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF BODY", Noul: 0.91}
+	second := &autoInjectSkill{Name: "docx", Source: "/x/docx/SKILL.md", Content: "DOCX BODY", Noul: 0.93}
+
+	if !a.recordAutoInject(first, msgs) {
+		t.Fatal("setup: the first selection should be staged")
+	}
+	if !a.recordAutoInject(second, msgs) {
+		t.Fatal("a DIFFERENT skill must still be stageable; only a replay of the same name is refused")
+	}
+
+	for _, want := range []string{"PDF BODY", "DOCX BODY"} {
+		if !strings.Contains(a.autoInjectBlock(), want) {
+			t.Fatalf("picking a second skill silently dropped %q from the prompt.\nblock: %q", want, a.autoInjectBlock())
+		}
+	}
+	// The same through the real injection path, not just the helper.
+	injected := a.injectDiscoveryContext(msgs)
+	var joined strings.Builder
+	for _, m := range injected {
+		joined.WriteString(m.Content)
+	}
+	for _, want := range []string{"PDF BODY", "DOCX BODY"} {
+		if !strings.Contains(joined.String(), want) {
+			t.Fatalf("injected prompt is missing %q", want)
+		}
+	}
+}
+
+// The staged block is deliberately session-lived, not turn-lived: nothing
+// persists it, so clearing it between turns would drop the body from the prompt
+// while the sticky set still refused to re-select it.
+func TestAutoInjectBlockIsStillEmittedOnALaterTurn(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	pdf := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF BODY", Noul: 0.91}
+	if !a.recordAutoInject(pdf, []Message{{Role: "user", Content: "hi"}}) {
+		t.Fatal("setup: the first selection should be staged")
+	}
+
+	// A later turn: the transcript has grown and a second skill is picked.
+	later := []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "done"},
+		{Role: "user", Content: "now edit a docx"},
+	}
+	if !a.recordAutoInject(&autoInjectSkill{Name: "docx", Source: "/x/docx/SKILL.md", Content: "DOCX BODY", Noul: 0.9}, later) {
+		t.Fatal("the later turn's skill should be staged")
+	}
+	if !strings.Contains(a.autoInjectBlock(), "PDF BODY") {
+		t.Fatalf("the earlier skill's body must stay in the prompt across turns.\nblock: %q", a.autoInjectBlock())
+	}
+}
+
+// After the compaction splice the model genuinely has neither body, so every
+// staged block goes and every name becomes selectable again.
+func TestResetAutoInjectedClearsEveryStagedSkill(t *testing.T) {
+	a := newAutoInjectAgent(t)
+	msgs := []Message{{Role: "user", Content: "hi"}}
+	pdf := &autoInjectSkill{Name: "pdf", Source: "/x/pdf/SKILL.md", Content: "PDF BODY", Noul: 0.91}
+	docx := &autoInjectSkill{Name: "docx", Source: "/x/docx/SKILL.md", Content: "DOCX BODY", Noul: 0.93}
+	for _, sel := range []*autoInjectSkill{pdf, docx} {
+		if !a.recordAutoInject(sel, msgs) {
+			t.Fatalf("setup: %q should be staged", sel.Name)
+		}
+	}
+
+	a.resetAutoInjected()
+
+	if block := a.autoInjectBlock(); block != "" {
+		t.Fatalf("compaction must drop every staged body, got %q", block)
+	}
+	summaryOnly := []Message{{Role: "user", Content: "summary only"}}
+	for _, sel := range []*autoInjectSkill{pdf, docx} {
+		if !a.recordAutoInject(sel, summaryOnly) {
+			t.Fatalf("after a reset %q must be selectable again", sel.Name)
+		}
+	}
+}
+
 func TestLoadAutoInjectBodyUsesWorkDirNotProcessCwd(t *testing.T) {
 	// Regression for the root-aware lookup: LoadSkill resolves the project root
 	// from os.Getwd(), which is the SERVER process's cwd, not the session's
@@ -445,32 +529,5 @@ func TestRecordAutoInjectKeepsEarlierSkillWhenAnotherIsSelected(t *testing.T) {
 	// Still exactly one extra message: the cache-safe tail shape is unchanged.
 	if base := a.injectDiscoveryContext(chat); len(base) != len(got) {
 		t.Fatalf("message count changed between calls: %d vs %d", len(base), len(got))
-	}
-}
-
-// The staged set is bounded: past the cap the oldest body is evicted so a long
-// session cannot grow the uncached tail without limit.
-func TestRecordAutoInjectEvictsOldestPastCap(t *testing.T) {
-	a := newAutoInjectAgent(t)
-	chat := []Message{{Role: "user", Content: "hi"}}
-	for i := 0; i < discoveryAutoInjectMaxSkills+2; i++ {
-		sel := &autoInjectSkill{Name: fmt.Sprintf("skill%d", i), Source: fmt.Sprintf("/x/%d/SKILL.md", i), Content: fmt.Sprintf("BODY-%d", i), Noul: 0.9}
-		if !a.recordAutoInject(sel, chat) {
-			t.Fatalf("selection %d refused", i)
-		}
-	}
-	if got := len(a.disco.autoInject); got != discoveryAutoInjectMaxSkills {
-		t.Fatalf("staged %d skills, want the cap %d", got, discoveryAutoInjectMaxSkills)
-	}
-	block := a.autoInjectBlock()
-	for _, gone := range []string{"BODY-0", "BODY-1"} {
-		if strings.Contains(block, gone) {
-			t.Errorf("oldest body %q survived past the cap", gone)
-		}
-	}
-	for _, kept := range []string{"BODY-2", "BODY-3", "BODY-4"} {
-		if !strings.Contains(block, kept) {
-			t.Errorf("recent body %q was evicted", kept)
-		}
 	}
 }

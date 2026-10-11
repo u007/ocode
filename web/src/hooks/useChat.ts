@@ -503,6 +503,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     resolvePermission,
     submitQuestionAnswers,
     cancelQuestion,
+    hydratePendingAsks,
     projectHost,
     // isStreaming derives from the per-session turn state (Part 05): set
     // optimistically on 202 (SET_STREAMING), confirmed by turn_started

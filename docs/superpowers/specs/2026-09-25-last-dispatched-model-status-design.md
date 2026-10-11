@@ -46,8 +46,8 @@ timestamp: 2026-09-25T14:06:25Z
   (`web/src/lib/sessionEvents.ts:468-479`) and dispatches the same action;
   `turn_done` / `turn_error` handlers are untouched, so the value is retained.
 - **Server — `turn_started`:** `publishTurnStarted(sessionID, model string)`
-  (`internal/server/agent_session.go:819`) adds `data["model"]` when non-empty;
-  its only call site is `runTurn` (`agent_session.go:1092`). This is the
+  (`internal/server/agent_session.go:852`) adds `data["model"]` when non-empty;
+  its only call site is `runTurn` (`agent_session.go:1103`). This is the
   **headless/server-event fallback** — see §5.1 and R1 for exactly which turns
   emit it.
 - **Server — rewind 202:** the tokenized-rewind 202 reports the model handed to
@@ -79,7 +79,7 @@ timestamp: 2026-09-25T14:06:25Z
   dispatched model" (`CHANGES.md:53`); `skills/ocode-web/SKILL.md`
   "Status-bar model semantics".
 - **R1 resolved (see §10):** `publishTurnStarted` is called only from `runTurn`
-  (`agent_session.go:1092`), and `runTurn` publishes `turn_started` regardless of
+  (`agent_session.go:1103`), and `runTurn` publishes `turn_started` regardless of
   an attached bridge — the bridge only suppresses the headless status-snapshot
   push. Turns the TUI executes through the RC channel never reach `runTurn` and
   emit **no** `turn_started`; they are covered by their 202, which reports
@@ -286,7 +286,7 @@ not a redefinition.
     `async: true`, so the synchronous 200 is never issued to the web client;
     it reports the same live-model value anyway, keeping every RC response
     branch consistent.
-- **`publishTurnStarted` (`agent_session.go:819`)** now accepts the model and
+- **`publishTurnStarted` (`agent_session.go:852`)** now accepts the model and
   adds `"model": …` to the data map when non-empty; its only call site is
   `runTurn` (`:1084`, where `as.model` is in scope). `publishTurnDone`
   (`:858`) already emitted `"model"` — `turn_done` remains the wrong moment for
@@ -404,7 +404,7 @@ guard branch — no behavior change. `turn_done` (`:488-494`) and `turn_error`
 - **Remote SSH/WSL projects:** the 202 arrives through the same
   `/api/remote/{host}` proxy as a plain `ChatResponse` — `Model` needs no
   host-specific handling. `turn_started` arrives via the host's
-  `/api/remote/{host}/api/events` stream (`eventBus.ts:256`) into the same
+  `/api/remote/{host}/api/events` stream (`eventBus.ts:257`) into the same
   `routeBusEnvelope` — same dispatch, no host threading (the store key is the
   session id; sessions are unique per host and the event's session id routes
   it to the right slice).
@@ -573,7 +573,7 @@ suite rather than relying on the reducer pins.
 ## 10. Open risks
 
 - **R1 — RC-bridged turns and `turn_started` (resolved, precise scope).**
-  `turn_started` is published only by `runTurn` (`agent_session.go:1092`) —
+  `turn_started` is published only by `runTurn` (`agent_session.go:1103`) —
   and `runTurn` publishes it even when a bridge is attached (the bridge only
   suppresses the headless status push; `TestBridgedTurnTimingStillFlowsOnBus`).
   The gap is RC-*channel* turns: web sends, rewinds and ask continuations on a

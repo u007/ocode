@@ -16,7 +16,7 @@ tuned_for: longcat-2.5-preview-free
 tuned_version: "2.5-preview"
 stack: dotnet
 source_scorecard: ../scores/longcat-2.5-preview-free.md
-threshold: 0.75
+threshold: 0.85
 revalidate_when: model_version changes
 ---
 # .NET corrections for longcat-2.5-preview-free
@@ -74,3 +74,20 @@ revalidate_when: model_version changes
 - Pass a `CancellationToken` (for example `HttpContext.RequestAborted` or a
   linked `CancellationTokenSource` with a timeout) into every
   `GetAsync`/`SendAsync` call so callers can cancel in-flight work.
+
+## resilience-http: completeness checklist for socket and DNS answers
+
+- A socket-exhaustion answer names three stages in order: per-request client
+  (TIME_WAIT, port exhaustion), shared static client (no exhaustion, but stale
+  DNS because pooled connections are never recycled), IHttpClientFactory
+  (pooled handlers rotated on `HandlerLifetime`, so neither problem).
+- A stale-DNS answer states that the client is bound to its handler and that
+  holding a factory client in a singleton or static field pins that handler.
+  It then names `SocketsHttpHandler.PooledConnectionLifetime` as the
+  alternative, with factory rotation optionally disabled via
+  `SetHandlerLifetime(Timeout.InfiniteTimeSpan)`.
+- Typed clients are registered transient. Injecting one into a singleton
+  captures it and its handler for the app's lifetime, the same pinning problem.
+  Inject `IHttpClientFactory`, or configure `PooledConnectionLifetime`.
+- Never answer with "reuse HttpClient" or "use the factory" alone. Give the
+  mechanism (TIME_WAIT, handler pooling, handler rotation) in every answer.

@@ -58,7 +58,7 @@ func TestBlockAtRow(t *testing.T) {
 // TestAgentStripRowCap verifies the agent strip never renders more than
 // agentStripMaxRows worth of run/indicator rows even with many runs.
 func TestAgentStripRowCap(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	for i := 0; i < 20; i++ {
 		a.Runs().New("worker")
 	}
@@ -80,7 +80,7 @@ func TestAgentStripRowCap(t *testing.T) {
 // TestAgentStripScrollVisibility verifies the selected run stays inside the
 // visible window after clamping.
 func TestAgentStripScrollVisibility(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	for i := 0; i < 20; i++ {
 		a.Runs().New("worker")
 	}
@@ -96,7 +96,7 @@ func TestAgentStripScrollVisibility(t *testing.T) {
 // TestAgentsTabListsRunsNewestFirstAndClickOpens verifies the agents tab lists
 // every run newest-first and that clicking a card opens its transcript drill-in.
 func TestAgentsTabListsRunsNewestFirstAndClickOpens(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	r1 := a.Runs().New("alpha")
 	r2 := a.Runs().New("beta") // newest
 
@@ -168,7 +168,7 @@ func TestRenderRunTranscriptUsesSingleSpacingBetweenSectionsAndEvents(t *testing
 }
 
 func TestDetailAgentViewFitsPanelWidth(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run,
 		agent.Message{Role: "user", Content: strings.Repeat("x", 120)},
@@ -199,7 +199,7 @@ func TestDetailAgentViewFitsPanelWidth(t *testing.T) {
 // column detailScrollbarX() hit-tests, or pressing the scrollbar never starts a
 // drag (the click falls through and is swallowed).
 func TestDetailScrollbarColumnMatchesHitTest(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	var msgs []agent.Message
 	for i := 0; i < 60; i++ {
@@ -236,7 +236,7 @@ func TestDetailScrollbarColumnMatchesHitTest(t *testing.T) {
 // content begins a text-selection drag (previously the press was swallowed
 // before the selection-start code ran, so text could not be selected).
 func TestDetailViewMouseStartsTextSelection(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	var msgs []agent.Message
 	for i := 0; i < 40; i++ {
@@ -273,7 +273,7 @@ func TestDetailViewMouseStartsTextSelection(t *testing.T) {
 // (refreshTopDetailView) does not wipe an in-progress selection drag — the
 // case that matters for a streaming orchestral sub-agent the user is watching.
 func TestDetailSelectionSurvivesLiveRefresh(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	var msgs []agent.Message
 	for i := 0; i < 40; i++ {
@@ -303,7 +303,7 @@ func TestDetailSelectionSurvivesLiveRefresh(t *testing.T) {
 // dragging: pressing the thumb then moving the mouse changes the viewport
 // offset.
 func TestDetailScrollbarThumbDragScrolls(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	var msgs []agent.Message
 	for i := 0; i < 200; i++ {
@@ -367,7 +367,7 @@ func TestRenderRunTranscriptShowsThinkingLLMToolRequestAndToolResult(t *testing.
 }
 
 func TestAgentDetailClickTogglesExpandableTranscriptSection(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run,
 		agent.Message{Role: "assistant", ReasoningContent: strings.Join([]string{"line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8", "line 9"}, "\n")},
@@ -433,7 +433,7 @@ func setRunTranscriptForTest(run *agent.AgentRun, msgs ...agent.Message) {
 // from agentStripTopY must match where View() actually paints the strip, and a
 // click there must open the run's detail view.
 func TestAgentStripClickOpensDetail(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "did some work"})
 
@@ -490,7 +490,7 @@ func TestAgentStripClickOpensDetail(t *testing.T) {
 // the visible strip lands above where the handler looks and is swallowed by the
 // transcript-selection handler.
 func TestAgentStripClickableAfterStripGrows(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 
 	m := model{
 		ready:       true,
@@ -558,7 +558,7 @@ func TestAgentStripClickableAfterStripGrows(t *testing.T) {
 // verification-machinery failure is the muted "contract ?" — the run was never
 // judged, so it must not read as a failed child.
 func TestAgentStripContractBadgeDistinguishesUnverified(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 
 	// Judged not satisfied → red ✗.

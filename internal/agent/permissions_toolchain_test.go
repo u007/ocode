@@ -207,7 +207,7 @@ func TestUserWritableRoots_XDGEchoValidation(t *testing.T) {
 
 func TestUserWritableRoots_RejectsSymlinkEscape(t *testing.T) {
 	home := t.TempDir() // real dir, so EvalSymlinks resolves deterministically
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	clearToolchainEnvs(t)
 
 	// Symlink lexically under home but pointing outside (os.TempDir): rejected.

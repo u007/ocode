@@ -456,3 +456,48 @@ func installSleepingSSH(t *testing.T, d time.Duration) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+// A reverse add on a remote port already forwarded the other way is a 409, and
+// it is refused before any ssh is spawned: the stored -L entry is untouched.
+func TestPortMapsAddReverseConflictsWithLocalForward(t *testing.T) {
+	h, mux := newTestPortMapsHandler(t, "user@devbox", "/srv/app")
+	ref := projects.ProjectRef{Host: "user@devbox", Path: "/srv/app"}
+	if err := h.projects.AddPortMap(ref, 9222, 9222); err != nil {
+		t.Fatalf("AddPortMap: %v", err)
+	}
+	body, _ := json.Marshal(map[string]any{"remote_port": 9222, "local_port": 9333, "reverse": true})
+	rec := doPortMaps(t, mux, "POST", "/api/portmaps?host=user@devbox&project=%2Fsrv%2Fapp", body)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("reverse over -L = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	maps, err := h.projects.PortMaps(ref)
+	if err != nil {
+		t.Fatalf("PortMaps: %v", err)
+	}
+	if len(maps) != 1 || maps[0].Reverse || maps[0].LocalPort != 9222 {
+		t.Fatalf("PortMaps = %+v, want the original -L entry", maps)
+	}
+}
+
+// The list view carries the direction, so the panel can tell -R from -L.
+func TestPortMapsListReportsReverse(t *testing.T) {
+	h, mux := newTestPortMapsHandler(t, "user@devbox", "/srv/app")
+	ref := projects.ProjectRef{Host: "user@devbox", Path: "/srv/app"}
+	if err := h.projects.AddReversePortMap(ref, 9222, 9222); err != nil {
+		t.Fatalf("AddReversePortMap: %v", err)
+	}
+	rec := doPortMaps(t, mux, "GET", "/api/portmaps?host=user@devbox&project=%2Fsrv%2Fapp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", rec.Code, rec.Body.String())
+	}
+	var views []struct {
+		RemotePort int  `json:"remote_port"`
+		Reverse    bool `json:"reverse"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &views); err != nil {
+		t.Fatalf("decode list: %v: %s", err, rec.Body.String())
+	}
+	if len(views) != 1 || views[0].RemotePort != 9222 || !views[0].Reverse {
+		t.Fatalf("list = %+v, want one reverse entry on 9222", views)
+	}
+}

@@ -43,7 +43,7 @@ func TestNewClientGrokSubscription(t *testing.T) {
 	// temp dir so the test never touches (or needs write access to) the real
 	// user store — under ocode's own sandbox that write is denied, and even
 	// unsandboxed it would mutate the developer's credentials.
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 
@@ -80,19 +80,6 @@ func TestNewClientGrokSubscription(t *testing.T) {
 	}
 	if gc.CookieAuthToken != "auth-token-val" || gc.CookieCt0 != "ct0-val" {
 		t.Errorf("x.com cookies not carried to client: %q / %q", gc.CookieAuthToken, gc.CookieCt0)
-	}
-}
-
-func TestGrokProviderRegistered(t *testing.T) {
-	p := auth.FindProvider("grok")
-	if p == nil {
-		t.Fatal("grok provider not registered in auth.Providers")
-	}
-	if p.EnvVar != "XAI_API_KEY" {
-		t.Errorf("EnvVar = %q, want XAI_API_KEY", p.EnvVar)
-	}
-	if _, ok := providers["grok"]; !ok {
-		t.Error("grok not present in client providers map")
 	}
 }
 

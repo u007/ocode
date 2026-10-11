@@ -8,7 +8,7 @@ tags:
   - relevance-judge
   - tools
   - architecture
-timestamp: 2026-09-29T04:42:31Z
+timestamp: 2026-10-05T00:45:48Z
 ---
 # Code-Search Relevance Judge
 
@@ -47,7 +47,7 @@ With no judge, `runSearchJudge` returns every result untouched (`internal/tool/s
 
 ## The seam: the judge rides the execution context
 
-The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:4924`), gated to the three tool names (`internal/agent/agent.go:5021`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:5023`). Any other tool's dispatch never touches the judge client factory.
+The judge is carried on the tool-execution **context**, not on the tool struct: `tool.WithSearchResultJudge` (`internal/tool/search_judge.go:72`) attaches it, `tool.SearchJudgeFromContext` (`internal/tool/search_judge.go:82`) reads it back. It is attached **per call** inside `executeToolCallWithContext` (`internal/agent/agent.go:5396`), gated to the three tool names (`internal/agent/agent.go:5395`) and attached alongside the snapshot store, work dir and full-output flag (`internal/agent/agent.go:5134`). Any other tool's dispatch never touches the judge client factory.
 
 The rationale is load-bearing: sub-agents and the transient advisor are handed the **parent's** tool objects (`internal/agent/ask.go:166`, `internal/agent/subagent.go:1126`, `internal/agent/advisor_tool.go:176` all call `GetTools()`), so a judge field on the tool struct would be overwritten by each child — and the advisor is shut down after one call, leaving the parent judging against a dead agent. It would also be a data race, since the search tools are `Parallel() == true`. With the context seam each agent attaches its own judge for its own call: no shared mutable state, no clobbering.
 
@@ -76,7 +76,7 @@ Two regression tests pin this (`internal/agent/search_wiring_test.go`):
 
 ## Candidate cap and pre-judge order
 
-`searchJudgeMaxCandidates` = **40** (`internal/tool/search_judge_apply.go:14`). Results past the cap are **kept unjudged, never dropped** — the cap is a cost control and must not decide relevance — and the footer discloses how many were not judged (`runSearchJudge`, `internal/tool/search_judge_apply.go:78`).
+`SearchJudgeMaxCandidates` = **40** (`internal/tool/search_judge_apply.go:14`). Results past the cap are **kept unjudged, never dropped** — the cap is a cost control and must not decide relevance — and the footer discloses how many were not judged (`runSearchJudge`, `internal/tool/search_judge_apply.go:78`).
 
 The pre-judge order is each tool's existing output order, so the 40 judged candidates are the first 40 in that order. For `glob` that order is **mtime descending** (`sort.Slice`, `internal/tool/search.go:291`), so on a large glob the 40 judged files are the 40 most recently touched. Because unjudged results are kept, a skewed sample costs coverage, not correctness — but on a large `glob` the cap, not relevance, decides how much judging happens, and the footer's unjudged count makes that visible.
 
@@ -131,4 +131,3 @@ Emitted under kind `TOOL`, tag `search_typesafe`:
 - [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) — the shared `noul` mechanics, floor rationale and lenient rubric.
 - [Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md) — the fail-open philosophy and the bypass principle referenced in the scope decisions.
 - Design spec: `superpowers/specs/2026-09-28-code-search-relevance-judge-design.md` — the contract source (signatures, failure matrix, test list).
-- Implementation plan: `superpowers/plans/2026-09-28-code-search-relevance-judge.md` — the task-by-task record (tasks 1–8) that produced the anchors above.

@@ -208,6 +208,11 @@ func stripSubstitutions(s string) string {
 		case c == '$' && i+1 < len(r) && r[i+1] == '(':
 			i = matchParen(r, i+1) - 1
 			b.WriteRune(' ')
+		case inDouble:
+			// Literal text inside double quotes: parens/braces here are data
+			// (`echo "=== status (short) ==="`), not group syntax. Substitutions
+			// inside the quotes were already blanked by the cases above.
+			b.WriteRune(' ')
 		default:
 			b.WriteRune(c)
 		}

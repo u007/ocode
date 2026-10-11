@@ -14,6 +14,7 @@ import {
   Check,
   PanelLeft,
   PanelLeftClose,
+  FileX2,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
@@ -582,6 +583,21 @@ export default function GitPanel({
     runMutation(() => api.gitStage(paths, projectPath, projectHost), `staged ${paths.length} file(s)`);
   const unstageAll = (paths: string[]) =>
     runMutation(() => api.gitUnstage(paths, projectPath, projectHost), `unstaged ${paths.length} file(s)`);
+  // Add the untracked subset of `targets` to the repo's root .gitignore. A
+  // tracked path is skipped with a note: a gitignore entry does not untrack
+  // an already-tracked file, so silently adding one would look like it worked
+  // while the file stayed in the list.
+  const ignoreFiles = (targets: { path: string; untracked: boolean }[]) => {
+    const paths = targets.filter((t) => t.untracked).map((t) => t.path);
+    if (paths.length === 0) return Promise.resolve();
+    const skipped = targets.length - paths.length;
+    const base =
+      paths.length > 1 ? `added ${paths.length} paths to .gitignore` : `added ${paths[0]} to .gitignore`;
+    return runMutation(
+      () => api.gitIgnore(paths, projectPath, projectHost),
+      skipped > 0 ? `${base} (skipped ${skipped} tracked)` : base,
+    );
+  };
 
   // Network actions. Each surfaces a 5-second success notice on completion,
   // mirroring the TUI's status-bar toast.
@@ -650,6 +666,15 @@ export default function GitPanel({
         ];
       }
       const untracked = f.status === "untracked";
+      const ignoreCount = targets.filter((t) => t.untracked).length;
+      const ignoreItem: ContextMenuItem | null =
+        ignoreCount > 0
+          ? {
+              label: ignoreCount > 1 ? `Add ${ignoreCount} to .gitignore` : "Add to .gitignore",
+              icon: <FileX2 className="w-3.5 h-3.5" />,
+              onClick: () => ignoreFiles(targets),
+            }
+          : null;
       const discardLabel =
         n > 1
           ? targets.every((t) => t.untracked)
@@ -675,10 +700,11 @@ export default function GitPanel({
           icon: <Archive className="w-3.5 h-3.5" />,
           onClick: () => openStashDialog(paths),
         },
+        ...(ignoreItem ? [ignoreItem] : []),
         ...(openItem ? [openItem] : []),
       ];
     },
-    [onOpenFile, projectPath, stageAll, unstageAll, requestDiscard, openStashDialog],
+    [onOpenFile, projectPath, stageAll, unstageAll, requestDiscard, openStashDialog, ignoreFiles],
   );
 
   const hunkAction = useCallback(

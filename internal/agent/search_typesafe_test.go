@@ -263,7 +263,7 @@ func TestSearchJudgeTimeoutBudgetIsShort(t *testing.T) {
 	t.Cleanup(func() { searchJudgeTimeout = prevTimeout })
 	searchJudgeTimeout = 150 * time.Millisecond
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	judge := a.searchResultJudge()
 	if judge == nil {
 		t.Fatal("searchResultJudge should resolve with a keyed typesafe factory")
@@ -288,7 +288,7 @@ func TestSearchResultJudgeNilWhenNotConnected(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("", "jev-latest", "http://127.0.0.1:1")
@@ -333,7 +333,7 @@ func TestSearchJudgeAttachedToToolContextOnlyWhenConnected(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.toolBatchDelay = 0
 
 	// Not connected: no judge attached, dispatch still works.

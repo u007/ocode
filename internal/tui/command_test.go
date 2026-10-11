@@ -342,7 +342,7 @@ func TestDrainQueuedItemsPreservesMixedInputCommandOrder(t *testing.T) {
 		height:   20,
 		input:    textarea.New(),
 		viewport: fastviewport.New(80, 20),
-		agent:    agent.NewAgent(nil, nil, &config.Config{}, nil),
+		agent:    newTestAgent(nil, nil, &config.Config{}, nil),
 		queuedItems: []queuedItem{
 			{kind: queueItemInput, text: "first user request"},
 			{kind: queueItemCommand, text: "/sidebar"},
@@ -659,7 +659,7 @@ func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
 		height:               20,
 		input:                textarea.New(),
 		viewport:             fastviewport.New(80, 20),
-		agent:                agent.NewAgent(nil, nil, &config.Config{}, nil),
+		agent:                newTestAgent(nil, nil, &config.Config{}, nil),
 		messages:             []message{{role: roleUser, text: "hello"}},
 		pendingCompactResume: true,
 		queuedItems:          []queuedItem{{kind: queueItemCommand, text: "/sidebar"}},
@@ -799,7 +799,7 @@ func TestMaskRuntimeReconfigUpdatesAgentAndScanner(t *testing.T) {
 		input:             newTestTextarea(),
 		viewport:          fastviewport.New(80, 20),
 		config:            cfg,
-		agent:             agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+		agent:             newTestAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
 		redactionEnabled:  true,
 		redactionModel:    "scan-old",
 		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
@@ -864,7 +864,7 @@ func TestMaskModelAutoSetsBaseURLAndRebuildsScanner(t *testing.T) {
 		input:             newTestTextarea(),
 		viewport:          fastviewport.New(80, 20),
 		config:            cfg,
-		agent:             agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+		agent:             newTestAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
 		redactionEnabled:  true,
 		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
 		redactMode:        "lenient",
@@ -904,7 +904,7 @@ func TestMaskOnRebuildsScannerWhenInitiallyDisabled(t *testing.T) {
 		input:            newTestTextarea(),
 		viewport:         fastviewport.New(80, 20),
 		config:           cfg,
-		agent:            agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+		agent:            newTestAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
 		redactionEnabled: false,
 		redactionModel:   "scan-old",
 		redactMode:       "lenient",
@@ -953,7 +953,7 @@ func TestCdCommandChangesProcessAndSessionWorkspace(t *testing.T) {
 	m := model{
 		input:    newTestTextarea(),
 		workDir:  workspace,
-		agent:    agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, &config.Config{}, nil),
+		agent:    newTestAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, &config.Config{}, nil),
 		viewport: fastviewport.New(80, 20),
 	}
 
@@ -1126,16 +1126,6 @@ func TestEstimateTok(t *testing.T) {
 	}
 }
 
-func TestContextCommandIsRegistered(t *testing.T) {
-	spec := lookupCommand("/context")
-	if spec == nil {
-		t.Fatal("expected /context to be registered")
-	}
-	if spec.help == "" {
-		t.Fatal("expected /context to have help text")
-	}
-}
-
 func TestContextCommandNilAgentGuard(t *testing.T) {
 	m := model{width: 80}
 	// must not panic
@@ -1157,7 +1147,7 @@ func TestContextCommandRendersSharedReport(t *testing.T) {
 		width:   80,
 		workDir: t.TempDir(),
 		config:  cfg,
-		agent:   agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+		agent:   newTestAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
 	}
 
 	m.handleContextCmd(nil)
@@ -1229,7 +1219,7 @@ func TestContextCommandAutocompletes(t *testing.T) {
 }
 
 func TestContextCommandOutputHasNoRaw(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m := model{width: 80, agent: newTestAgent(nil, nil, nil, nil), config: &config.Config{}}
 	m.handleContextCmd(nil)
 	for _, msg := range m.messages {
 		if msg.raw != nil {
@@ -1239,7 +1229,7 @@ func TestContextCommandOutputHasNoRaw(t *testing.T) {
 }
 
 func TestContextCommandOutputsSections(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m := model{width: 80, agent: newTestAgent(nil, nil, nil, nil), config: &config.Config{}}
 	m.handleContextCmd(nil)
 	if len(m.messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(m.messages))
@@ -1255,7 +1245,7 @@ func TestContextCommandOutputsSections(t *testing.T) {
 }
 
 func TestContextCommandDisabledStates(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m := model{width: 80, agent: newTestAgent(nil, nil, nil, nil), config: &config.Config{}}
 	m.agent.SetDocPromptEnabled(false)
 	m.agent.SetMemoryEnabled(false)
 	m.handleContextCmd(nil)
@@ -1272,7 +1262,7 @@ func TestContextCommandDisabledStates(t *testing.T) {
 }
 
 func TestContextCommandKnowledgeBundleInactive(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m := model{width: 80, agent: newTestAgent(nil, nil, nil, nil), config: &config.Config{}}
 	m.agent.SetDocPromptEnabled(true)
 	m.agent.SetMemoryEnabled(false)
 	m.handleContextCmd(nil)
@@ -1283,7 +1273,7 @@ func TestContextCommandKnowledgeBundleInactive(t *testing.T) {
 }
 
 func TestContextCommandMemoryEnabled(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m := model{width: 80, agent: newTestAgent(nil, nil, nil, nil), config: &config.Config{}}
 	m.agent.SetDocPromptEnabled(false)
 	m.agent.SetMemoryEnabled(true)
 	m.workDir = t.TempDir()
@@ -1304,7 +1294,7 @@ func TestContextCommandMemoryEnabled(t *testing.T) {
 }
 
 func TestContextCommandDiscoveryOnLabels(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil)}
+	m := model{width: 80, agent: newTestAgent(nil, nil, nil, nil)}
 	m.config = &config.Config{}
 	m.config.Ocode.Discovery.Enabled = true
 	m.handleContextCmd(nil)
@@ -1354,7 +1344,7 @@ func (oneShotStreamClient) GetModel() string    { return "test-model" }
 // (e.g. /review-changes) freezing the chat: they must stream live via
 // streamStartedMsg, not run synchronously and only deliver output at the end.
 func TestCustomCommandUsesStreamingPath(t *testing.T) {
-	a := agent.NewAgent(oneShotStreamClient{}, nil, &config.Config{}, nil)
+	a := newTestAgent(oneShotStreamClient{}, nil, &config.Config{}, nil)
 	m := &model{agent: a, config: &config.Config{}}
 
 	cmd := m.sendCustomCommandPrompt("review please")
@@ -1461,7 +1451,7 @@ func TestSkillAsCommandDispatchWithAgentReturnsCommand(t *testing.T) {
 		input:    newTestTextarea(),
 		workDir:  root,
 		viewport: fastviewport.New(80, 20),
-		agent:    agent.NewAgent(&staticLLMClient{}, nil, &config.Config{}, nil),
+		agent:    newTestAgent(&staticLLMClient{}, nil, &config.Config{}, nil),
 	}
 
 	updated, cmd := m.handleCommand("/demo-skill some context")
@@ -1680,5 +1670,37 @@ func TestAddDirBypassesCompactingQueue(t *testing.T) {
 	got := derefTestModel(t, updated)
 	if len(got.queuedItems) != 0 {
 		t.Fatalf("expected /add-dir to run immediately while compacting, got queued %#v", got.queuedItems)
+	}
+}
+
+// TestCommandsRegistered folds the per-command "is it in commandSpecs" checks
+// into one table: a handler that exists but was never registered is
+// unreachable from the palette.
+func TestCommandsRegistered(t *testing.T) {
+	cases := []struct {
+		name  string
+		alias string
+	}{
+		{name: "/autocontinue"},
+		{name: "/auto-share"},
+		{name: "/goal"},
+		{name: "/docs", alias: "/doc-mode"},
+		{name: "/context"},
+	}
+	for _, tc := range cases {
+		spec := lookupCommand(tc.name)
+		if spec == nil {
+			t.Errorf("%s not registered", tc.name)
+			continue
+		}
+		if spec.handler == nil {
+			t.Errorf("%s has no handler", tc.name)
+		}
+		if spec.help == "" {
+			t.Errorf("%s has no help text", tc.name)
+		}
+		if tc.alias != "" && lookupCommand(tc.alias) != spec {
+			t.Errorf("%s alias %s does not resolve to it", tc.name, tc.alias)
+		}
 	}
 }

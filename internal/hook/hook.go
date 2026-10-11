@@ -9,8 +9,8 @@ import "sync"
 // Hooks manages a set of callback functions. Safe for concurrent use.
 // The zero value is ready to use.
 type Hooks struct {
-	mu   sync.Mutex
-	fns  []func()
+	mu  sync.Mutex
+	fns []func()
 }
 
 // Add registers fn and returns a remove function. Calling remove is

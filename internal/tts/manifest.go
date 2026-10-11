@@ -21,6 +21,7 @@ type EngineID string
 const (
 	EngineBrowserNative EngineID = "browser-native"
 	EnginePiper         EngineID = "piper"
+	EngineParadee       EngineID = "paradee"
 	EngineMelo          EngineID = "melo"
 	EngineKokoro        EngineID = "kokoro"
 )
@@ -90,8 +91,12 @@ type Artifact struct {
 // regardless (the cache path is not keyed by interpreter version).
 type PythonRuntime struct {
 	Requirements []string
-	MinPython    [2]int
-	MaxPython    [2]int
+	// Wheels names pinned artifacts (by Artifact.Name) that are installed
+	// from the verified cache copy rather than resolved from an index. Used
+	// for packages that are not on PyPI, such as the spaCy English model.
+	Wheels    []string
+	MinPython [2]int
+	MaxPython [2]int
 }
 
 // Manifest is the verified install recipe for one local engine + voice.
@@ -271,6 +276,80 @@ var kokoroManifest = Manifest{
 
 func kokoroRequirements(onnxruntime string) []string {
 	return []string{"kokoro-onnx==0.6.1", "onnxruntime==" + onnxruntime, "soundfile==0.12.1", "espeakng-loader==0.2.4", "phonemizer==3.4.0"}
+}
+
+const (
+	// paradeeModelRevision pins the sahilmahendrakar/Paradee-8M-v1.0 model
+	// repository by commit. A branch or tag would let the artifact change
+	// under an unchanged manifest version.
+	paradeeModelRevision = "f662642d44c03c17588e4176469c54d462c0b623"
+	paradeeVersion       = "paradee-1.0-f662642"
+	paradeeVoice         = "af_heart"
+	// paradeeSpacyModelWheel is the en_core_web_sm wheel misaki's G2P loads
+	// for tokenisation. misaki calls spacy.cli.download when the package is
+	// missing, so it must be installed at install time or synthesis fetches
+	// it from the network.
+	paradeeSpacyModelWheel = "en_core_web_sm-3.8.0-py3-none-any.whl"
+)
+
+// paradeeManifest pins the Paradee 8M English TTS model (Apache-2.0) and its
+// inference runtime. The model is a distillation of Kokoro-82M's af_heart
+// voice; the 9 MB int8 ONNX graph runs on CPU and takes text straight to a
+// waveform. Phonemes come from misaki (Apache-2.0), the same G2P Kokoro uses.
+//
+// The inference driver is the reference core from the Paradee Space
+// (paradee_tts.py, Apache-2.0), reimplemented in paradeeSynthScript so no
+// Hugging Face Hub client runs at synthesis time.
+var paradeeManifest = Manifest{
+	Engine:      EngineParadee,
+	Version:     paradeeVersion,
+	LicenseName: "Paradee Apache-2.0; misaki Apache-2.0; spaCy en_core_web_sm MIT; phonemizer-fork GPL-3.0; espeak-ng GPL-3.0",
+	LicenseURL:  "https://huggingface.co/sahilmahendrakar/Paradee-8M-v1.0/blob/" + paradeeModelRevision + "/LICENSE",
+	LicenseText: "Paradee model and inference code: Apache-2.0 (distilled from Kokoro-82M, Apache-2.0)\nmisaki G2P: Apache-2.0\nspaCy en_core_web_sm: MIT\nphonemizer-fork: GPL-3.0\nespeak-ng (bundled by espeakng-loader): GPL-3.0-or-later",
+	Voice:       paradeeVoice,
+	Voices:      []string{paradeeVoice},
+	VoiceFiles: []Artifact{
+		{
+			Name:   paradeeModelName,
+			URL:    "https://huggingface.co/sahilmahendrakar/Paradee-8M-v1.0/resolve/" + paradeeModelRevision + "/onnx/paradee_int8.onnx",
+			SHA256: "60e8f8a1bc7c546488154e9d99ecac6e9c50baf3f4b684c5b0de48ea03b698eb",
+			Size:   9037971,
+		},
+		{
+			Name:   paradeeConfigName,
+			URL:    "https://huggingface.co/sahilmahendrakar/Paradee-8M-v1.0/resolve/" + paradeeModelRevision + "/config.json",
+			SHA256: "f24046974a3a8c747affefb45c7c504263a99d5081787908b16abe8f5ac94fcd",
+			Size:   1774,
+		},
+		{
+			Name:   paradeeSpacyModelWheel,
+			URL:    "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/" + paradeeSpacyModelWheel,
+			SHA256: "1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
+			Size:   12806118,
+		},
+	},
+	Runtime: map[string]PythonRuntime{
+		// Only darwin/arm64 is declared, matching the hosts this engine was
+		// installed and synthesized on end to end. misaki<3.13 bounds the
+		// interpreter to 3.11-3.12.
+		"darwin/arm64": {Requirements: paradeeRequirements(), Wheels: []string{paradeeSpacyModelWheel}, MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 12}},
+	},
+}
+
+// paradeeRequirements pins the Paradee runtime. misaki is installed without
+// its [en] extra, because that extra adds spacy-curated-transformers and with
+// it PyTorch; Paradee uses misaki's lexicon mode only. The remaining entries
+// are the rest of the [en] extra plus the ONNX runtime and WAV writer.
+func paradeeRequirements() []string {
+	return []string{
+		"misaki==0.9.4",
+		"spacy==3.8.16",
+		"num2words==0.5.14",
+		"phonemizer-fork==3.3.2",
+		"espeakng-loader==0.2.4",
+		"onnxruntime==1.30.0",
+		"soundfile==0.14.0",
+	}
 }
 
 const (
@@ -469,6 +548,9 @@ func ManifestFor(id EngineID) (Manifest, bool) {
 	if id == EnginePiper {
 		return piperManifest, true
 	}
+	if id == EngineParadee {
+		return paradeeManifest, true
+	}
 	if id == EngineMelo {
 		return meloManifest, true
 	}
@@ -588,6 +670,19 @@ func Catalog() []Engine {
 		kokoro.Voices = kokoroManifest.Voices
 		kokoro.ManifestVersion = kokoroManifest.Version
 	}
+	paradee := Engine{ID: EngineParadee, Label: "Paradee", Availability: AvailabilityUnavailable,
+		Reason: "No pinned Paradee runtime and model manifest is verified for " + Host() + "."}
+	paradee.LicenseName = paradeeManifest.LicenseName
+	paradee.LicenseURL = paradeeManifest.LicenseURL
+	paradee.LicenseText = paradeeManifest.LicenseText
+	paradee.LicenseHash = paradeeManifest.LicenseHash()
+	if _, ok := paradeeManifest.HostRuntime(); ok {
+		paradee.Availability = AvailabilityInstallable
+		paradee.Reason = "Accept the license and install to enable."
+		paradee.VoiceID = paradeeManifest.Voice
+		paradee.Voices = paradeeManifest.Voices
+		paradee.ManifestVersion = paradeeManifest.Version
+	}
 	melo := Engine{ID: EngineMelo, Label: "MeloTTS", Availability: AvailabilityUnavailable,
 		Reason: "No pinned MeloTTS runtime and model manifest is verified for " + Host() + "."}
 	melo.LicenseName = meloManifest.LicenseName
@@ -602,11 +697,12 @@ func Catalog() []Engine {
 		melo.ManifestVersion = meloManifest.Version
 	}
 	// Order is the settings-UI presentation order: Browser Native, then the
-	// local engines from smallest to largest install footprint. MeloTTS sits
-	// between Piper and Kokoro.
+	// local engines from smallest to largest install footprint. Paradee and
+	// MeloTTS sit between Piper and Kokoro, in that order.
 	return []Engine{
 		{ID: EngineBrowserNative, Label: "Browser Native", Availability: AvailabilityReady, BrowserOnly: true},
 		piper,
+		paradee,
 		melo,
 		kokoro,
 	}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { MessageSquare, Play, RotateCw, SquareTerminal, X } from "lucide-react";
+import { ChevronDown, ChevronRight, MessageSquare, Play, RotateCw, SquareTerminal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AgentRun, Project } from "@/api/types";
 import type { RemoteHostStatusState } from "@/hooks/useRemoteHostStatus";
@@ -86,8 +86,8 @@ export function RemoteProjectStatus({
   const sessions = projectState.sessionsByProject?.[projectSessionKey(project.path, host)]?.sessions ?? [];
   const openSessionIds = new Set((projectState.tabsByProject?.[project.path] ?? []).map((t) => t.id));
   // Only the chats the user is actually working with: open as a tab here, or
-  // running a turn on the host. `running` is fed by the per-host `runs` bus
-  // (App opens a stream per host and routes frames by session_id), so a remote
+  // running a turn on the host. `running` is fed by the host's `runs` events
+  // (relayed over the one event stream and routed by session_id), so a remote
   // session running with no local tab is still listed. Everything else — the
   // host's full history — is reachable through the Sessions dialog.
   const visibleSessions = sessions.filter((s) => openSessionIds.has(s.id) || running.has(s.id));
@@ -185,6 +185,12 @@ export function RemoteProjectStatus({
         aria-expanded={expanded}
         data-testid="remote-project-status"
       >
+        {connected &&
+          (expanded ? (
+            <ChevronDown className="w-3 h-3 shrink-0" aria-hidden />
+          ) : (
+            <ChevronRight className="w-3 h-3 shrink-0" aria-hidden />
+          ))}
         {outdated && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-label="outdated" />}
         <span className="truncate">{line}</span>
         {!connected && (

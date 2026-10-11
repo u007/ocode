@@ -63,7 +63,7 @@ func TestCopyToClipboardEmptyIsNoop(t *testing.T) {
 // nil one. Before this, the release path wrote via the local utility and
 // dropped the error, so over SSH nothing reached the user's machine.
 func TestTranscriptSelectionReleaseReturnsCopyCmd(t *testing.T) {
-	m := newModel(RunOptions{PermissionMode: "off"})
+	m := newTestModel(RunOptions{PermissionMode: "off"})
 	m.width = 120
 	m.height = 40
 	m.activeTab = tabChat

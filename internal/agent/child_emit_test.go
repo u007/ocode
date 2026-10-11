@@ -14,7 +14,7 @@ import (
 // (zero overhead on the non-group path).
 func TestChildEmitsNote(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -56,7 +56,7 @@ That is the only blocker.`
 // here).
 func TestChildEmitsResolve(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -90,7 +90,7 @@ func TestChildEmitsResolve(t *testing.T) {
 // calls this out as a hard requirement: "No bus → emit parsing
 // is skipped entirely."
 func TestChildNoBusSkipsParse(t *testing.T) {
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	// No SetNoteBus. handleAssistantNotes should be a no-op.
 	// We pass a "would-parse" message — if the helper is
 	// wrongly invoked, it would allocate entries that have
@@ -105,7 +105,7 @@ func TestChildNoBusSkipsParse(t *testing.T) {
 // contain multiple tags; each becomes its own bus entry.
 func TestChildEmitsMultipleNotes(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()
@@ -133,7 +133,7 @@ Some interstitial text.
 // we pass in.
 func TestChildEmitForgeryIsEscape(t *testing.T) {
 	bus := notebus.NewBus("grp")
-	child := NewAgent(&MockClient{}, nil, nil, nil)
+	child := newTestAgent(&MockClient{}, nil, nil, nil)
 	child.SetNoteBus(bus, "a2")
 	bus.Start(context.Background())
 	defer func() { bus.Stop(); <-bus.Done() }()

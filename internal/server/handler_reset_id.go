@@ -53,6 +53,11 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Stop any in-flight /btw side query and drop its registry entry: the
+	// registry is session-id-keyed, so leaving it behind would strand state
+	// under the deleted id.
+	h.cancelBtwRun(id, true)
+
 	projectRoot := entry.ProjectRoot
 
 	// Quiesce: drain queued live snapshots, then release the resident agent so

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useProjectState, findProjectPathForTab, findTabForSession } from "../stores/projectStore";
 import { getTrustedTerminalProject } from "../lib/trustedProject";
 import type { ProjectState } from "../stores/projectStore";
+import { isPulseAssistantSession } from "../lib/pulseAssistant";
 
 /**
  * Resolve the SSH/WSL host for a session via the single-match trust rule.
@@ -21,6 +22,10 @@ export function resolveSessionHost(
   sessionId?: string,
   opts?: { fallbackToActive?: boolean },
 ): string | undefined {
+  // The Pulse assistant is a LOCAL session with no tab. With the draft-tab
+  // fallback below it would inherit whichever project is active, and a remote
+  // active project would send its turns to the remote host.
+  if (isPulseAssistantSession(sessionId)) return undefined;
   const fallbackToActive = opts?.fallbackToActive ?? false;
   // A tab opened against a known host carries it explicitly. Prefer that over
   // path inference: a path saved on two hosts (duplicate as remote) is

@@ -28,13 +28,53 @@
 
 ## Review Focus
 
-The five conditions most likely to bite a user, each pinned by a named test in the owning task:
+The five conditions most likely to bite a user, each pinned by a named test in the owning task.
 
-1. **User edits their token in `~/.htrcli/config.json` while ocode is running** — a daemon ocode started keeps being probed with the identity in ocode's owner marker, not the newly-saved file. `TestForeignProbeUsesConfigToken` / `TestStopRuleUsesStartedByPID` in Task 3.
-2. **Two ocode instances (TUI + desktop) at once** — the second must adopt, not spawn, and must not kill the first's daemon on exit. `TestStopRuleDefersToLiveLease` in Task 4.
-3. **`htr_port: 3846` left in an existing config** — shared mode ignores it, and the Settings UI must show the *effective* port with provenance so it does not read as a bug. `TestSharedModeIgnoresLegacyPort` in Task 1, `BrowserForm` provenance test in Task 7.
-4. **User closes ocode while the extension is connected** — the daemon stops (by design) and the extension drops. This is intended; `TestStopRuleStopsOwnDaemon` in Task 4 must pin that it actually happens, so nobody "fixes" it later by accident.
-5. **A daemon is already listening on the shared port but rejects our token** (wrong token, or a foreign service) — ocode must not spawn over it and must say so. `TestStartSkipsWhenForeignDaemonRejectsToken` in Task 3.
+> **Corrected 2026-10-02 after implementation.** Four of the five test names below
+> were never written under those names, so this table could not be used as a
+> checklist — a reader checking it would re-derive already-covered (or
+> non-existent) defects. The real guards are named now, and where a claim turned
+> out to be false it says so. Items 1 and 5 are **not** what the plan predicted.
+
+1. **User edits their token in `~/.htrcli/config.json` while ocode is running.**
+   **Not a defect.** The plan assumed a cached token; there is none.
+   `ResolveSharedDaemon` re-reads the file on every call (`loadHTRcliConfig` →
+   `os.ReadFile`) and every entry point resolves immediately before use — the
+   TUI's `ensureSharedHTRDaemon` (`internal/tui/model.go:2981`, at-most-once per
+   session) and the settings button's `startManagedHTR`
+   (`internal/server/handler_config.go:2221`), which re-resolves per click. A
+   `SharedDaemon` lives only in a local `HTROptions` inside one `EnsureHTRServe`
+   call, so no edit can go unnoticed.
+   Guards: `TestResolveSharedDaemonRereadsConfigAfterTokenEdit`,
+   `TestResolveSharedDaemonRereadsConfigAfterPortEdit`,
+   `TestResolveSharedDaemonHonoursOcodeTokenOverride` — mutation-verified against
+   a compiling cache mutant.
+2. **Two ocode instances (TUI + desktop) at once** — the second must adopt, not
+   spawn, and must not kill the first's daemon on exit.
+   Guards: `TestStopRuleDefersToLiveLease`, `TestStopHTRServeDefersToAnotherInstancesLease`,
+   `TestFinalLeaseReleaseDoesNotKillAnAdoptedDaemon`.
+3. **`htr_port: 3846` left in an existing config** — shared mode ignores it, and
+   the Settings UI must show the *effective* port with provenance.
+   Guards: `TestResolveSharedDaemon` (table case `LegacyPort: 3846` in shared
+   mode), plus `BrowserForm`'s `htr-effective` provenance assertion in Task 7.
+4. **User closes ocode while the extension is connected** — the daemon stops (by
+   design) and the extension drops. Intended; keep it that way.
+   Guards: `TestStopRuleStopsOwnDaemon`, `TestStopHTRServeStopsOwnDaemon`.
+   (Also `TestStopRuleUsesStartedByPIDNotOwnerPID` — the plan called this
+   `TestStopRuleUsesStartedByPID`.)
+5. **A daemon is already listening on the shared port but rejects our token**
+   (wrong token, or a foreign service). **The plan overstates what the code does.**
+   ocode *cannot* distinguish "occupied by a service that rejects us" from "empty":
+   the only two probes are the strict identity match and the foreign token probe,
+   and a service rejecting both is indistinguishable from an open port. So ocode
+   **does** attempt the spawn; the child fails to bind and dies within
+   `sharedSpawnConfirmBudget`, and `confirmSharedSpawnAlive` surfaces that with
+   the child's own output (including the bind error). The user sees a real error,
+   but a process was wasted and the diagnosis is indirect.
+   Guard for the mechanism: `TestReadinessFailsLoudlyWhenDaemonDiesDuringExec`.
+   There is **no** test for the port-occupied scenario itself, and a clean
+   pre-spawn refusal would need a third probe distinguishing "bound by something
+   else" from "empty".
 
 ---
 

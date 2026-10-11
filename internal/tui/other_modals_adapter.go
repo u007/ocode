@@ -29,6 +29,9 @@ func (q *questionModal) Handle(msg tea.Msg) bool {
 		return true
 	case "esc":
 		q.m.clearQuestionPrompt()
+		// Dismissing this prompt is terminal for it, so the next queued ask of
+		// either kind takes the dialog — otherwise the round is stranded.
+		q.m.promoteNextQueuedAsk()
 		return true
 	}
 	return false

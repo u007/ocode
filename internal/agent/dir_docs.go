@@ -63,7 +63,7 @@ func dirTouchPaths(toolName string, args json.RawMessage) []string {
 // model iteration (see injectDirMDTail). Root-level docs are skipped —
 // LoadContext already injects those into the stable system prompt.
 func (a *Agent) trackDirMDTouch(toolName string, args json.RawMessage) {
-	if strings.TrimSpace(a.workDir) == "" {
+	if strings.TrimSpace(a.WorkDir()) == "" {
 		return
 	}
 	paths := dirTouchPaths(toolName, args)

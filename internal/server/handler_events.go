@@ -18,7 +18,9 @@ const sseKeepaliveInterval = 20 * time.Second
 // streamed as one SSE message whose data is the full envelope JSON
 // ({event, project, session_id, seq, data}). The client passes the projects
 // it is viewing as ?projects=a,b,c (repeated params also accepted) — this
-// drives the subscriber-aware git/spending emitters. On disconnect the
+// drives the subscriber-aware git/spending emitters. ?hosts=a,b names the
+// remote hosts whose own event streams are relayed down this response, each
+// frame tagged with `host` (handler_events_remote.go). On disconnect the
 // subscriber is removed cleanly.
 func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -35,6 +37,14 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	projects := parseEventsProjects(r)
 	sub := h.bus.Subscribe(projects)
 	defer h.bus.Unsubscribe(sub)
+
+	// Remote fan-in: one relay goroutine per host, each ending with the
+	// request context.
+	ctx := r.Context()
+	remoteFrames := make(chan []byte, busBufferSize)
+	for _, host := range h.relayableEventHosts(parseEventsList(r, "hosts")) {
+		go h.relayRemoteEvents(ctx, host, projects, remoteFrames)
+	}
 
 	// Ensure the server-push emitters (runs, git, spending) are running while
 	// a client is connected. Each loop self-exits ~30s after the last
@@ -54,7 +64,6 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	// events flow (comment frames are ignored by EventSource). Without it an
 	// idle stream looks dead to proxies/NAT, and a half-open socket is never
 	// noticed until the next event happens to be written.
-	ctx := r.Context()
 	keepalive := h.sseKeepaliveInterval
 	if keepalive <= 0 {
 		keepalive = sseKeepaliveInterval
@@ -78,17 +87,24 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(w, "event: envelope\ndata: %s\n\n", data)
 			flusher.Flush()
+		case frame := <-remoteFrames:
+			fmt.Fprintf(w, "event: envelope\ndata: %s\n\n", frame)
+			flusher.Flush()
 		}
 	}
 }
 
 // parseEventsProjects extracts the declared project roots from ?projects=.
-// Accepts comma-separated values and repeated params; dedupes and drops
-// empties.
 func parseEventsProjects(r *http.Request) []string {
+	return parseEventsList(r, "projects")
+}
+
+// parseEventsList extracts a list query param. Accepts comma-separated values
+// and repeated params; dedupes and drops empties.
+func parseEventsList(r *http.Request, key string) []string {
 	var out []string
 	seen := make(map[string]bool)
-	for _, raw := range r.URL.Query()["projects"] {
+	for _, raw := range r.URL.Query()[key] {
 		for _, p := range strings.Split(raw, ",") {
 			p = strings.TrimSpace(p)
 			if p == "" || seen[p] {

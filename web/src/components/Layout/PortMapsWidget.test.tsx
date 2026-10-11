@@ -112,6 +112,17 @@ describe("PortMapsWidget", () => {
     await waitFor(() => expect(mockListPortMaps).toHaveBeenCalledWith(SSH_TARGET));
   });
 
+  it("labels a reverse forward with the direction the remote actually reaches", async () => {
+    setActiveProject(SSH_PROJECT);
+    mockIsPortMapsAvailable.mockResolvedValue(true);
+    mockListPortMaps.mockResolvedValue([
+      { remote_port: 9222, local_port: 9222, enabled: true, reverse: true, live: true },
+    ]);
+    render(<PortMapsWidget />);
+    fireEvent.click(await screen.findByTitle("Port forwards"));
+    expect(await screen.findByText("remote:9222 ← localhost:9222 (reverse)")).toBeInTheDocument();
+  });
+
   it("adds a forward against the active project", async () => {
     setActiveProject(SSH_PROJECT);
     mockIsPortMapsAvailable.mockResolvedValue(true);

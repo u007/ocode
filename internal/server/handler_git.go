@@ -40,6 +40,13 @@ func (h *Handler) gitRun(args ...string) (string, error) {
 // short-lived git process rather than a stale lock. A user clicking "Stage"
 // must not see a red error because something else ran git a moment earlier.
 func gitRunInDir(dir string, args ...string) (string, error) {
+	out, err := gitRunInDirRaw(dir, args...)
+	return strings.TrimSpace(out), err
+}
+
+// gitRunInDirRaw is gitRunInDir without trimming. `-z` listings need it: a
+// leading space is the status code of the first record, not padding.
+func gitRunInDirRaw(dir string, args ...string) (string, error) {
 	var out string
 	err := gitexec.WithLockRetry(func() error {
 		cmd := exec.Command(gitBinary, args...)
@@ -50,8 +57,8 @@ func gitRunInDir(dir string, args ...string) (string, error) {
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		b, cmdErr := cmd.Output()
-		out = strings.TrimSpace(string(b))
-		return gitexec.WithOutput(cmdErr, stderr.String(), out)
+		out = string(b)
+		return gitexec.WithOutput(cmdErr, stderr.String(), strings.TrimSpace(out))
 	})
 	return out, err
 }
@@ -360,20 +367,22 @@ func gitStatusForDir(dir string) (GitStatus, error) {
 	for _, c := range status.Conflicts {
 		conflicted[c.Path] = true
 	}
-	cached, err := run("diff", "--name-only", "--cached")
+	// `-z` throughout: without it git C-quotes non-ASCII names and the quoted
+	// form is then passed back to `git add`, which matches nothing.
+	cached, err := runRaw("diff", "--name-only", "-z", "--cached")
 	if err != nil {
 		return GitStatus{}, err
 	}
-	for _, f := range dedupePaths(strings.Split(cached, "\n")) {
+	for _, f := range dedupePaths(strings.Split(cached, "\x00")) {
 		if !conflicted[f] {
 			status.StagedFiles = append(status.StagedFiles, f)
 		}
 	}
-	unstaged, err := run("diff", "--name-only")
+	unstaged, err := runRaw("diff", "--name-only", "-z")
 	if err != nil {
 		return GitStatus{}, err
 	}
-	for _, f := range dedupePaths(strings.Split(unstaged, "\n")) {
+	for _, f := range dedupePaths(strings.Split(unstaged, "\x00")) {
 		if !conflicted[f] {
 			status.ChangedFiles = append(status.ChangedFiles, f)
 		}
@@ -390,19 +399,12 @@ func gitStatusForDir(dir string) (GitStatus, error) {
 	for _, f := range status.ChangedFiles {
 		seen[f] = true
 	}
-	porcelain, err := run("status", "--porcelain", "-u")
+	porcelain, err := runRaw("status", "--porcelain", "-z", "-u")
 	if err != nil {
 		return GitStatus{}, err
 	}
-	for _, line := range strings.Split(porcelain, "\n") {
-		if len(line) < 4 {
-			continue
-		}
-		if !strings.Contains(line[:2], "?") {
-			continue
-		}
-		f := strings.Trim(line[3:], `"`)
-		if f == "" || seen[f] {
+	for _, f := range untrackedPathsFromStatusZ(porcelain) {
+		if seen[f] {
 			continue
 		}
 		seen[f] = true
@@ -632,30 +634,23 @@ func diffFilesForDir(dir string, staged bool, pathFilter string) []GitDiffFile {
 	// The index cannot hold untracked files; only the working-tree diff needs
 	// the untracked pass.
 	if !staged {
-		statusArgs := []string{"status", "--porcelain", "-u"}
+		statusArgs := []string{"status", "--porcelain", "-z", "-u"}
 		if pathFilter != "" {
 			statusArgs = append(statusArgs, "--", pathFilter)
 		}
-		if statusOut, err := run(statusArgs...); err == nil {
-			for _, line := range strings.Split(statusOut, "\n") {
-				if len(line) < 4 {
-					continue
+		if statusOut, err := gitRunInDirRaw(dir, statusArgs...); err == nil {
+			for _, filePath := range untrackedPathsFromStatusZ(statusOut) {
+				// Untracked file — get its content as patch. `git diff
+				// --no-index` exits 1 even on success, so use output only.
+				patch := ""
+				if content, _ := run("diff", "--no-index", "/dev/null", filePath); content != "" {
+					patch = content
 				}
-				statusCode := line[:2]
-				filePath := line[3:]
-				if strings.Contains(statusCode, "?") {
-					// Untracked file — get its content as patch. `git diff
-					// --no-index` exits 1 even on success, so use output only.
-					patch := ""
-					if content, _ := run("diff", "--no-index", "/dev/null", filePath); content != "" {
-						patch = content
-					}
-					files = append(files, GitDiffFile{
-						Path:   filePath,
-						Status: "untracked",
-						Patch:  patch,
-					})
-				}
+				files = append(files, GitDiffFile{
+					Path:   filePath,
+					Status: "untracked",
+					Patch:  patch,
+				})
 			}
 		}
 	}
@@ -791,6 +786,46 @@ func (h *Handler) HandleGitShow(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseUnifiedDiff parses a unified diff output into GitDiffFile entries.
+// untrackedPathsFromStatusZ returns the untracked (`??`) paths from
+// `git status --porcelain -z` output. The -z form is never C-quoted, so each
+// path is exact. A rename or copy record is followed by its original path as
+// a separate NUL record with no status prefix; that record is skipped so it
+// is never read as an entry of its own.
+func untrackedPathsFromStatusZ(out string) []string {
+	paths := []string{}
+	records := strings.Split(out, "\x00")
+	for i := 0; i < len(records); i++ {
+		rec := records[i]
+		if len(rec) < 4 {
+			continue
+		}
+		code := rec[:2]
+		if strings.ContainsAny(code, "RC") {
+			i++
+		}
+		if code == "??" {
+			paths = append(paths, rec[3:])
+		}
+	}
+	return paths
+}
+
+// diffHeaderPath returns the new-side path from a "diff --git" header line.
+// Git C-quotes both sides as `"a/..." "b/..."` when a name holds non-ASCII,
+// quote or backslash bytes; that form goes through gitignoreUnquotePath, which
+// is byte-exact (strconv.Unquote would turn invalid UTF-8 into U+FFFD). The
+// plain form is split on " b/". ok is false when neither form is present.
+func diffHeaderPath(line string) (path string, ok bool) {
+	if i := strings.LastIndex(line, ` "b/`); i >= 0 {
+		return strings.TrimPrefix(gitignoreUnquotePath(line[i+1:]), "b/"), true
+	}
+	parts := strings.Split(line, " b/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	return parts[len(parts)-1], true
+}
+
 func parseUnifiedDiff(diff string) []GitDiffFile {
 	var files []GitDiffFile
 	var current *GitDiffFile
@@ -804,10 +839,9 @@ func parseUnifiedDiff(diff string) []GitDiffFile {
 				files = append(files, *current)
 			}
 			// Parse "diff --git a/path b/path"
-			parts := strings.Split(line, " b/")
-			if len(parts) >= 2 {
+			if path, ok := diffHeaderPath(line); ok {
 				current = &GitDiffFile{
-					Path:   parts[len(parts)-1],
+					Path:   path,
 					Status: "modified",
 				}
 			}

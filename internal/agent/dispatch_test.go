@@ -61,7 +61,7 @@ func TestContextAgentDocToolsAreAllowed(t *testing.T) {
 	defer os.Chdir(origWd)
 
 	// Create an agent that represents the context subagent.
-	a := NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 
 	// Add the base tools that the context agent spec allows.
 	baseTools := []string{"grep", "glob", "read", "list"}

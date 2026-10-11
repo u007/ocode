@@ -85,12 +85,13 @@ func TranscriptTailUnfinished(msgs []agent.Message) bool {
 // unansweredAsk reports whether a tool-result row still holds an unresolved
 // permission or question sentinel. A resolved ask has its sentinel content
 // replaced in place, so it stops matching here.
+//
+// Delegates to the canonical predicate in internal/tool so this file's
+// trailing-round verdict and the advisor's pending-ask gate (which runs in
+// internal/agent, and therefore cannot import internal/session) can never
+// disagree about what counts as a live dialog.
 func unansweredAsk(content string) bool {
-	if strings.HasPrefix(content, tool.SentinelPermissionAsk) {
-		return true
-	}
-	return strings.HasPrefix(content, tool.SentinelQuestionPrompt) &&
-		strings.Contains(content, tool.SentinelWaitingForUser)
+	return tool.UnansweredAsk(content)
 }
 
 // dismissedQuestion reports whether a tool-result row is the in-place rewrite

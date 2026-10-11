@@ -12,7 +12,7 @@ func TestNewModelWiresChangesRegistryToInitialAgent(t *testing.T) {
 	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
 	t.Setenv("OPENCODE_MODEL", "lmstudio/test-model") // key-optional provider: NewClient builds offline
 
-	m := newModel()
+	m := newTestModel()
 	if m.agent == nil {
 		t.Fatal("expected newModel to build an initial agent from OPENCODE_MODEL")
 	}

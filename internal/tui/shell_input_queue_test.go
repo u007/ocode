@@ -6,7 +6,6 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
@@ -19,7 +18,7 @@ import (
 
 func newShellBusyModel(t *testing.T) model {
 	t.Helper()
-	a := agent.NewAgent(nil, nil, nil, nil)
+	a := newTestAgent(nil, nil, nil, nil)
 	t.Cleanup(func() { a.Shutdown() })
 	m := model{
 		input:     textarea.New(),

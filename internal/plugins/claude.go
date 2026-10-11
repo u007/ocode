@@ -318,6 +318,9 @@ func pluginCandidatesForProject(projectRoot string) []pluginCandidate {
 type SkillRoot struct {
 	Plugin string
 	Dir    string
+	// PluginDir is the plugin's root directory (what ${CLAUDE_PLUGIN_ROOT}
+	// names), so a skill can resolve paths relative to its plugin.
+	PluginDir string
 }
 
 // SkillRootsForProject returns the skill directories of every enabled plugin
@@ -326,7 +329,7 @@ func SkillRootsForProject(projectRoot string) []SkillRoot {
 	var roots []SkillRoot
 	for _, p := range LoadPluginsForProject(configuredEnabled(), projectRoot) {
 		for _, d := range p.SkillDirs {
-			roots = append(roots, SkillRoot{Plugin: p.Name, Dir: d})
+			roots = append(roots, SkillRoot{Plugin: p.Name, Dir: d, PluginDir: p.Dir})
 		}
 	}
 	return roots

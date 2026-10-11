@@ -26,7 +26,7 @@ type terminalListEntry struct {
 // terminal_session.go), dead connections are detected and detached
 // far sooner than the TTL — the TTL serves as a final safety net for
 // sessions where the ping goroutine itself couldn't detect the failure.
-const terminalDetachTTL = 30 * time.Minute
+const terminalDetachTTL = 2 * time.Hour
 
 // terminalDetachTTLRemote is the detach TTL used when the server runs in
 // --remote mode. The point of the remote terminal path is that the pty is a

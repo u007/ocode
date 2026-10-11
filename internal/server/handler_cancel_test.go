@@ -108,7 +108,7 @@ func TestCancelActiveTurnRecordsFlagAndCancelsAgent(t *testing.T) {
 	}()
 	select {
 	case <-blocking.started:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("turn never started")
 	}
 

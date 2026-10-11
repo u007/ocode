@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,7 +138,7 @@ func TestEnsureHTRServe_ReusesHealthy(t *testing.T) {
 	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
 	// nil supervisor: reuse-only mode must succeed without spawning.
 	t.Setenv("HOME", t.TempDir())
-	if err := htrWriteOwner(identity, port, os.Getpid(), socket, os.Args[0], time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, os.Args[0], time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	st, err := EnsureHTRServe(nil, HTROptions{Enabled: true, Port: port, SocketPath: socket}, log.Default())
@@ -154,13 +156,107 @@ func TestEnsureHTRServe_NoSupervisorMissing(t *testing.T) {
 	}
 }
 
-func TestEnsureHTRServe_MissingBinary(t *testing.T) {
+// TestEnsureHTRServe_VerifiesReadinessInBackground pins the split that
+// TestEnsureHTRServe_MissingBinary used to depend on. That test asserted
+// EnsureHTRServe returns an error when no daemon answers /api/health, which was
+// true only while readiness was a SYNCHRONOUS 5s wait. The shared-daemon feature
+// made it non-blocking on purpose (CHANGES.md: "Readiness never blocks boot"), so
+// the old assertion became obsolete rather than the code becoming wrong.
+//
+// The invariant worth keeping is that verification is dispatched through
+// launchSharedVerifyFn and is NOT awaited: EnsureHTRServe returns while the
+// verifier is still running. The seam is used rather than a real spawn because a
+// spawn on an unprivileged port dies immediately for reasons unrelated to
+// readiness, which would let this test pass or fail on the wrong cause — it did
+// exactly that in an earlier draft.
+func TestEnsureHTRServe_VerifiesReadinessInBackground(t *testing.T) {
+	requireEmbeddedHTRAssets(t)
+	isolateHTROwnerState(t)
+	withStubbedProbes(t, false, false)
+
+	// Take over the verify launcher: record that it was called, then hold the
+	// verifier open so the main goroutine can observe that EnsureHTRServe
+	// returned before it finished.
+	release := make(chan struct{})
+	var finished atomic.Bool
+	verifyStarted := make(chan struct{})
+	origLaunch := launchSharedVerifyFn
+	launchSharedVerifyFn = func(fn func()) {
+		origLaunch(func() {
+			verifyStarted <- struct{}{}
+			<-release
+			finished.Store(true)
+		})
+	}
+	t.Cleanup(func() { launchSharedVerifyFn = origLaunch })
+
 	sup := newTestSupervisor(t)
+	// freePort yields a bindable port, and the socket path is kept SHORT on
+	// purpose: isolateHTROwnerState nests a long t.TempDir(), and a sockaddr_un
+	// path over ~104 bytes fails to bind with EINVAL, which would kill the
+	// spawned daemon before this test's branch is ever reached.
+	// Unique per invocation too: under -count the previous iteration's daemon
+	// can still be accepting on a pid-only name when this one starts.
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("htrverify%d-%d.sock", os.Getpid(), time.Now().UnixNano()%1_000_000))
+	t.Cleanup(func() { _ = os.Remove(sock) })
+	// The verifier stays held open until the assertions below have run. Releasing
+	// it straight after EnsureHTRServe returned let it finish before the
+	// finished.Load() check about one run in five, failing a correct build.
+	releaseVerifier := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseVerifier)
+	st, err := EnsureHTRServe(sup, HTROptions{Enabled: true, Port: freePort(t), SocketPath: sock}, log.Default())
+
+	if err != nil {
+		t.Fatalf("EnsureHTRServe must not fail here: %v", err)
+	}
+	if !st.Running || !st.StartedByOcode {
+		t.Fatalf("a freshly spawned daemon must report running+startedByOcode: %+v", st)
+	}
+
+	select {
+	case <-verifyStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background readiness verification was never launched")
+	}
+	if finished.Load() {
+		t.Fatal("the verifier completed before EnsureHTRServe returned; readiness is meant to be waited on only AFTER the boot path moves on")
+	}
+	releaseVerifier()
+
+	// Let the background goroutine finish so it cannot race a later test's stubs.
+	waitForVerify(t, &finished)
+}
+
+// waitForVerify bounds the wait for the background verifier to unwind.
+func waitForVerify(t *testing.T, finished *atomic.Bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if finished.Load() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background verifier never finished; it would race the next test's probe stubs")
+}
+
+// TestResolveHTRCliBinaryErrorsWhenNothingResolves keeps the other half of the
+// old test's intent — a lookup that finds no candidate must fail loudly and say
+// what to set. It exercises the resolver directly because EnsureHTRServe no
+// longer reaches it in a normal checkout: ResolveHTRAssetsForHost runs first and
+// extracts htrcli from the embedded htr-assets.zip, so assets.CliPath is always
+// a real path and the erroring fallback is dead code unless the archive is absent.
+func TestResolveHTRCliBinaryErrorsWhenNothingResolves(t *testing.T) {
 	t.Setenv("OCODE_HTRCLI_PATH", filepath.Join(t.TempDir(), "missing-htrcli"))
 	t.Setenv("HTRCLI_PATH", filepath.Join(t.TempDir(), "missing-htrcli-2"))
 	t.Setenv("PATH", t.TempDir())
-	if _, err := EnsureHTRServe(sup, HTROptions{Enabled: true, Port: 1}, log.Default()); err == nil {
-		t.Fatal("missing binary must error loudly")
+
+	_, err := ResolveHTRCliBinary("")
+	if err == nil {
+		t.Fatal("a lookup with no reachable candidate must error")
+	}
+	if !strings.Contains(err.Error(), "htrcli") {
+		t.Fatalf("error %q must name the binary it could not find", err)
 	}
 }
 
@@ -322,7 +418,7 @@ func TestHTRDaemonStatus(t *testing.T) {
 	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
 
 	// No owner marker: reported stopped but still labeled with addr/port.
-	info := HTRDaemonStatus(port, socket)
+	info := HTRDaemonStatus(port, socket, "")
 	if info.Running || info.Managed {
 		t.Fatalf("no marker must report stopped: %+v", info)
 	}
@@ -331,10 +427,10 @@ func TestHTRDaemonStatus(t *testing.T) {
 	}
 
 	// Owner marker + healthy daemon: running, managed, binary from the marker.
-	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
-	info = HTRDaemonStatus(port, socket)
+	info = HTRDaemonStatus(port, socket, "")
 	if !info.Running || !info.Managed {
 		t.Fatalf("healthy marker must report running: %+v", info)
 	}
@@ -358,7 +454,7 @@ func TestStopHTRServe_RemovesStaleMarker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	port := freePort(t)
 	// PID 999999 is not alive; the marker is stale and must be cleaned up.
-	if err := htrWriteOwner("stale", port, 999999, "stale-socket", os.Args[0], time.Now()); err != nil {
+	if err := htrWriteOwner("stale", port, 999999, "stale-socket", os.Args[0], time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	st, err := StopHTRServe(nil, port, log.Default())
@@ -378,7 +474,7 @@ func TestStopHTRServe_RefusesUnverified(t *testing.T) {
 	port := freePort(t)
 	// Our own PID is alive, but neither the executable match nor a managed
 	// health probe can attribute it to ocode, so the stop must refuse.
-	if err := htrWriteOwner("unverified", port, os.Getpid(), "unverified-socket", filepath.Join(t.TempDir(), "not-a-real-binary"), time.Now()); err != nil {
+	if err := htrWriteOwner("unverified", port, os.Getpid(), "unverified-socket", filepath.Join(t.TempDir(), "not-a-real-binary"), time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := StopHTRServe(nil, port, log.Default()); err == nil {
@@ -415,7 +511,7 @@ func TestStopHTRServe_KillsVerifiedDaemon(t *testing.T) {
 
 	// The executable does not match the helper's comm, so verification comes
 	// from the managed health probe.
-	if err := htrWriteOwner(identity, port, helper.Process.Pid, socket, os.Args[0], time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, helper.Process.Pid, socket, os.Args[0], time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	sup := newTestSupervisor(t)
@@ -463,13 +559,13 @@ func TestListHTRTabs(t *testing.T) {
 	port, _ := strconv.Atoi(strings.Split(u.Host, ":")[1])
 
 	// No marker: a standalone/absent daemon is never queried.
-	if _, err := ListHTRTabs(port); err == nil {
+	if _, err := ListHTRTabs(port, ""); err == nil {
 		t.Fatal("listing without an owner marker must error")
 	}
-	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now()); err != nil {
+	if err := htrWriteOwner(identity, port, os.Getpid(), socket, "/opt/htrcli", time.Now(), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
-	tabs, err := ListHTRTabs(port)
+	tabs, err := ListHTRTabs(port, "")
 	if err != nil {
 		t.Fatalf("list tabs → %v", err)
 	}

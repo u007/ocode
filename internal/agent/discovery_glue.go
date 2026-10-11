@@ -40,34 +40,40 @@ type discoveryState struct {
 	// (observability for /discovery status). atomic because the TUI/HTTP status
 	// reader can run while the agent goroutine is mid-turn.
 	judgeVetoed atomic.Int64
-	// judge caches the TypeSafe judge resolution for this state's lifetime
-	// (judgeOnce guards it). Resolving through the shared client factory on
-	// every turn and every /discovery status read would re-emit NewClient's
-	// "no API key ... refusing to build client" debug line for everyone
-	// without a TypeSafe key. A /connect typesafe mid-session therefore takes
-	// effect on the next ResetDiscovery (/discovery toggle) or restart.
-	judgeOnce sync.Once
-	judge     *TypesafeClient
+	// judge caches the discovery relevance judge's decision client for this
+	// state. Keyed on judgeModel rather than a one-shot latch, because a
+	// sync.Once pins whatever resolved FIRST for the whole session and makes a
+	// later /connect or judge_model change look like it did nothing.
+	// judgeMu guards both fields; discoveryJudgeClient builds the client BEFORE
+	// taking it, so no client factory call ever runs under the lock. A nil judge
+	// is deliberately not cached, so connecting mid-session takes effect without
+	// needing a discovery reset.
+	judgeMu    sync.Mutex
+	judgeModel string
+	judge      Decider
 	// tail is a bounded snapshot of the turn's messages, recorded by
 	// runDiscovery so the ON-DEMAND discover_more judge sees the same
 	// conversation the per-turn judge saw. Guarded by tailMu because Step
 	// writes it while /api status reads run on another goroutine.
 	tailMu sync.Mutex
 	tail   []Message
-	// autoInject holds the skills whose bodies are inlined into the prompt,
-	// oldest first, bounded by discoveryAutoInjectMaxSkills. It is a request-time
-	// injection, never persisted, and every entry is re-rendered on each Step
-	// until compaction (injectDiscoveryContext). It is a list, not a single slot:
-	// a second selection used to overwrite the first while the first stayed in
-	// autoInjected, so its body vanished from the prompt and could never be
-	// staged again.
+	// autoInject holds the skills whose bodies are inlined into the prompt, in
+	// the order they were selected. It is a slice, not a single slot: the blocks
+	// are request-time injections that are never persisted, so a selection that
+	// OVERWROTE an earlier one dropped that body from the prompt for the rest of
+	// the session — autoInjected still refused to re-select it, and only a
+	// compaction cleared it. Lifetime is the session (cleared together with
+	// autoInjected by resetAutoInjected at the compaction splice), NOT the turn:
+	// nothing persists the block, so dropping it between turns would lose the
+	// body with no way to get it back.
+	// Guarded by autoInjectMu because injectDiscoveryContext (the agent
+	// goroutine) reads it while a status read can run concurrently.
 	autoInject []*autoInjectSkill
 	// autoInjected is the set of skills already auto-injected this session. It
 	// is what makes a selection happen at most once per skill, and it is cleared
 	// at the compaction splice (resetAutoInjected) because the blocks were never
-	// persisted — after a splice the model no longer has them.
-	// Guarded by autoInjectMu because injectDiscoveryContext (the agent
-	// goroutine) reads autoInject while a status read can run concurrently.
+	// persisted — after a splice the model no longer has them. It is also what
+	// guarantees autoInject never holds the same name twice.
 	autoInjectMu sync.Mutex
 	autoInjected map[string]bool
 }
@@ -277,7 +283,7 @@ func (a *Agent) discoveryModelRoot() (activeModel, root string) {
 	if a.client != nil {
 		activeModel = a.client.GetModel()
 	}
-	root = a.workDir
+	root = a.WorkDir()
 	if root == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			root = cwd
@@ -343,7 +349,7 @@ func (a *Agent) RunDiscovery(query string) {
 // runs discovery with those messages available to the TypeSafe judge. Step uses
 // this so the judge sees the same conversation the embedder ranked against.
 func (a *Agent) RunDiscoveryForMessages(messages []Message) {
-	a.runDiscovery(discoveryQueryFromMessages(messages, a.workDir), messages)
+	a.runDiscovery(discoveryQueryFromMessages(messages, a.WorkDir()), messages)
 }
 
 // runDiscovery is the shared implementation behind both entry points. It ranks
@@ -433,7 +439,7 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 	if client := a.discoveryJudgeClient(); client != nil {
 		judged, scores, jerr := a.judgeDiscoveryCandidates(client, tail, query, candidates)
 		if jerr != nil {
-			judgeNote = fmt.Sprintf("judge=%s error (fail-open)", client.Model)
+			judgeNote = fmt.Sprintf("judge=%s error (fail-open)", deciderLabel(client))
 			a.emitDebug("DISCOVERY", fmt.Sprintf("typesafe judge failed (fail-open, all attached): %v", jerr))
 		} else {
 			keep = judged
@@ -441,7 +447,7 @@ func (a *Agent) runDiscovery(query string, tail []Message) {
 			if vetoed := len(candidates) - len(keep); vetoed > 0 {
 				a.disco.judgeVetoed.Add(int64(vetoed))
 			}
-			judgeNote = fmt.Sprintf("judge=%s kept %d/%d", client.Model, len(keep), len(candidates))
+			judgeNote = fmt.Sprintf("judge=%s kept %d/%d", deciderLabel(client), len(keep), len(candidates))
 		}
 	}
 	// Auto-inject the single top-scoring SKILL body (see discovery_autoinject.go).
@@ -520,10 +526,12 @@ func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 		st.Active = a.disco.enabled
 		st.InitErr = a.disco.initErr
 		st.JudgeVetoed = int(a.disco.judgeVetoed.Load())
-		// The judge's activation condition is TypeSafe connectivity (the shared
-		// factory yielding a keyed *TypesafeClient), the sole "connected" check.
+		// The judge's activation condition is decision-backend connectivity for
+		// this slot (a resolvable Decider with a usable credential), which is the
+		// sole "connected" check. Report the CONFIGURED model rather than a
+		// constant, so /discovery status names the backend this session uses.
 		if a.disco.enabled && a.discoveryJudgeClient() != nil {
-			st.Judge = discoveryJudgeModel
+			st.Judge = a.slotModel(slotDiscovery)
 		}
 		if a.disco.session != nil {
 			st.Attached = a.disco.session.Attached()

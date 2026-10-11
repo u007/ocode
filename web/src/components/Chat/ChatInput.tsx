@@ -1,4 +1,4 @@
-import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
+import { memo, useState, type KeyboardEvent, useRef, useEffect, useLayoutEffect, useMemo, useCallback, forwardRef, useImperativeHandle, type ForwardedRef } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { getQueue, pushQueued, shiftUndispatched, unshiftQueued, popLastQueued, removeQueuedItem, drainQueuedMessagesIntoDraft, QUEUE_CHANGED_EVENT, type QueueChangedDetail, type QueuedItem } from "../../lib/tabQueue";
@@ -6,8 +6,9 @@ import { getInputHistory, pushInputHistory } from "../../lib/tabInputHistory";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
-import { Archive, FileText, Paperclip, Play, RotateCcw, X } from "lucide-react";
+import { Loader2, Mic, MicOff, Paperclip, RotateCcw, Square, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
+import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
@@ -22,9 +23,11 @@ import {
 import { describeActionError, reportActionErrorMessage } from "../../lib/actionErrors";
 import { CHAT_INPUT_DEBOUNCE_MS, joinChatInputBatch } from "../../lib/chatInputBatch";
 import { getCompactionState, isCompactCommand, useCompactionState } from "../../lib/compactionState";
+import { isInstantCommand } from "../../lib/instantCommands";
 import CompactionStatus from "./CompactionStatus";
 import CommandActivityBar from "./CommandActivityBar";
 import RecentInputsStrip from "./RecentInputsStrip";
+import { useVoiceRecorder, VOICE_UNAVAILABLE_MESSAGE } from "./useVoiceRecorder";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. */
@@ -53,6 +56,10 @@ interface ChatInputProps {
    *  from the project context) so this component can be memoized — a context
    *  read would re-render every mounted composer on every tab/project switch. */
   projectPath?: string;
+  /** Show the quick-actions strip (Compact, Continue, Approve, ...). Defaults
+   *  to on; the Pulse assistant drawer turns it off because those chips are
+   *  project-session actions that make no sense for it and eat its height. */
+  quickActions?: boolean;
 }
 
 export interface ChatInputHandle {
@@ -86,6 +93,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   onClearPreviewContext,
   isActive,
   projectPath,
+  quickActions: showQuickActions = true,
 }: ChatInputProps,
   ref: ForwardedRef<ChatInputHandle>
 ) {
@@ -649,10 +657,10 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // touch the composer draft or the @ref/editor context — clicking "Continue"
   // must not clear what the user is already typing.
   //
-  // The whole strip is hidden until the session has conversation content
-  // (`hasConversation`, from useChat): a brand-new/empty session has nothing
-  // to compact, continue, or recap, and the mid-conversation nudges were just
-  // noise there. The slash commands themselves are unaffected.
+  // Visibility is a PER-CHIP decision made in the memo below, not a wrapper
+  // gate: a brand-new/empty session has nothing to compact, continue, or
+  // recap, but a custom chip can be useful there. The slash commands
+  // themselves are unaffected either way.
   const runQuickDispatch = (text: string, kind: "command" | "message") => {
     if (
       effectiveBusy ||
@@ -666,43 +674,33 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     void dispatchCommand(text);
   };
 
-  const runQuickAction = (id: string) => {
-    switch (id) {
-      case "compact":
-        runQuickDispatch("/compact", "command");
-        return;
-      case "recap":
-        runQuickDispatch("/recap", "command");
-        return;
-      case "continue":
-        // Context-aware: an interrupted turn is RESUMED (the pill is already
-        // labelled "Resume"); otherwise "continue" is a plain nudge message.
-        if (wasInterrupted) {
-          handleResume();
-          return;
-        }
-        runQuickDispatch("continue", "message");
-        return;
-      default:
-        return;
-    }
-  };
+  // The configured chips, read from the shared module store (one fetch for N
+  // mounted composer tabs). ONE memo produces the final, already-filtered
+  // list the strip consumes: a second memo layered on top of this one would
+  // split the ordering logic across two places.
+  const { chips: quickActionChips } = useQuickActions();
 
-  const quickActions: QuickActionItem[] = [
-    {
-      id: "compact",
-      label: "Compact",
-      icon: Archive,
-      title: compacting
-        ? "Compaction already in progress"
-        : "Compact conversation context (/compact)",
-      disabled: compacting,
-    },
-    wasInterrupted
-      ? { id: "continue", label: "Resume", icon: Play, title: "Resume the interrupted turn" }
-      : { id: "continue", label: "Continue", icon: Play, title: "Send 'continue' to keep the agent going" },
-    { id: "recap", label: "Recap", icon: FileText, title: "Generate session recap (/recap)" },
-  ];
+  const quickActions: QuickActionItem[] = useMemo(
+    () =>
+      visibleChips(quickActionChips, hasConversation).map((chip) => {
+        // The Continue seed resumes an interrupted turn, so its title says so.
+        // The LABEL stays as the user configured it — the spec makes the label
+        // user-controlled and locks only the seed's behaviour; this is a
+        // deliberate visible change from the old pill that relabelled itself to
+        // "Resume", with the hint moved into the tooltip.
+        const resumeVariant = chip.seed === "continue" && wasInterrupted;
+        return {
+          id: chip.id,
+          label: chip.label,
+          icon: quickActionIconComponent(chip.icon),
+          title: resumeVariant
+            ? `${chip.label} — resume the interrupted turn`
+            : `${chip.label} — ${chip.message.trim()}`,
+          disabled: compacting && chip.mode === "send" && chipDispatchesCompact(chip),
+        };
+      }),
+    [quickActionChips, hasConversation, wasInterrupted, compacting],
+  );
 
   const updateDraft = (value: string) => {
     setInput(value);
@@ -720,6 +718,26 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     // leaves history mode, so the next ↑ starts from the newest entry again.
     historyIndexRef.current = -1;
     historyDraftRef.current = "";
+  };
+
+  // Behaviour is resolved by SEED, then MODE. Declared below `updateDraft`
+  // because a `fill` chip calls it, and a `const` referenced from a handler
+  // that runs before its declaration is a TDZ crash on the first click.
+  const runQuickAction = (id: string) => {
+    const chip = quickActionChips.find((c) => c.id === id);
+    if (!chip) return;
+    // Resume wins over both modes: it is a turn-lifecycle action, not a text
+    // dispatch, so "fill the box with continue" would be wrong here.
+    if (chip.seed === "continue" && wasInterrupted) {
+      handleResume();
+      return;
+    }
+    if (chip.mode === "fill") {
+      updateDraft(chip.message);
+      textareaRef.current?.focus();
+      return;
+    }
+    runQuickDispatch(chip.message, chipDispatchKind(chip));
   };
 
   const cancelPendingRewind = () => {
@@ -845,13 +863,17 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     : [];
   const filteredCount = filteredCommandNames.length;
 
-  const handleSend = async () => {
+  // Shared send path for the Enter key, the Send button and voice input. With
+  // `voiceText`, the transcript is the message: the composer's own draft is left
+  // in place so speaking never wipes what the user had typed.
+  const submitComposer = async (voiceText?: string) => {
+    const isVoice = voiceText !== undefined;
     // In-flight guard — must run before any async gap and before reading
     // `input`, so a duplicate physical submit (same tick) is dropped instead of
     // sending the same text twice. Distinct later submits (different tick, after
     // this send settles) are never blocked.
     if (submittingRef.current) return;
-    const trimmed = input.trim();
+    const trimmed = (isVoice ? voiceText : input).trim();
     if (!trimmed) return;
     submittingRef.current = true;
     // Record the submitted input for ↑/↓ recall. This is the single submit
@@ -864,9 +886,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     historyDraftRef.current = "";
     let delayedSubmission = false;
     try {
-      setInput("");
-      clearDraft(sessionTabId);
-      setShowSlashMenu(false);
+      if (!isVoice) {
+        setInput("");
+        clearDraft(sessionTabId);
+        setShowSlashMenu(false);
+      }
 
     // While a turn is busy (streaming, shell, permission, or interrupted
     // barrier), queue instead of blocking — mirrors the TUI's unified
@@ -881,7 +905,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           await flushDelayedMessages();
           return;
         }
-        if (effectiveBusy || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
+        const compactionActive = getCompactionState(sessionTabId)?.status === "active";
+        // Instant commands (see lib/instantCommands) skip the queue so an aside
+        // typed mid-turn lands immediately instead of waiting for the turn to
+        // end — the server has a mid-turn path for them that avoids writing to
+        // the transcript under a live turn. Compaction still queues EVERY
+        // command, instant ones included: it replaces the transcript wholesale
+        // when it lands, so a concurrently recorded aside would be dropped.
+        if (
+          compactionActive ||
+          (!isInstantCommand(trimmed) &&
+            (effectiveBusy || drainingRef.current.has(sessionTabId)))
+        ) {
           pushQueued(sessionTabId, { kind: "command", text: trimmed });
           setQueuedItems([...getQueue(sessionTabId)]);
           return;
@@ -893,7 +928,8 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           queueMicrotask(() => { submittingRef.current = false; });
         }
         const outcome = await pending;
-        if (!outcome.accepted) {
+        // A rejected voice command must not overwrite a draft the user is typing.
+        if (!outcome.accepted && (!isVoice || !getDraft(sessionTabId).trim())) {
           setInput(trimmed);
           setDraft(sessionTabId, trimmed);
         }
@@ -986,6 +1022,31 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       }
     }
   };
+
+  const handleSend = () => submitComposer();
+
+  // Transcript from voice input. If a send is still settling, keep the words in
+  // the composer instead of dropping them (submitComposer would ignore them).
+  const onVoiceTranscript = (text: string) => {
+    if (submittingRef.current) {
+      const current = getDraft(sessionTabId);
+      updateDraft(current.trim() ? `${current.trimEnd()} ${text}` : text);
+      return;
+    }
+    void submitComposer(text);
+  };
+  const voice = useVoiceRecorder({
+    transcribe: (audio, filename) => api.transcribeSpeech(audio, filename),
+    onTranscript: onVoiceTranscript,
+    // Previews re-upload the whole clip, so they run only for a local engine.
+    canPreview: () =>
+      api
+        .getSTT()
+        .then((s) => s.models.find((m) => m.id === s.selected)?.engine === "local")
+        .catch(() => false),
+  });
+  const voiceRecording = voice.state === "recording";
+  const voiceTranscribing = voice.state === "transcribing";
 
   // Recall the most recently queued item into the input box for editing —
   // web equivalent of the TUI's up-arrow queue restore.
@@ -1239,6 +1300,30 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           {pendingRewindError}
         </div>
       )}
+      {voice.state !== "idle" && (
+        <div role="status" className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          {voiceRecording ? (
+            <span aria-hidden="true" className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-destructive" />
+          ) : (
+            <Loader2 aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin" />
+          )}
+          <span className="shrink-0 whitespace-nowrap">
+            {voiceRecording ? "Recording… click to stop" : "Transcribing…"}
+          </span>
+          {voiceRecording && voice.partialText && (
+            // aria-hidden: a live preview that changes every few seconds would
+            // make the status region announce constantly. The final text is announced by the send.
+            <span aria-hidden="true" title={voice.partialText} className="min-w-0 flex-1 truncate italic text-muted-foreground/80">
+              {voice.partialText}
+            </span>
+          )}
+        </div>
+      )}
+      {voice.error && (
+        <div role="alert" className="mb-2 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {voice.error}
+        </div>
+      )}
       <input
         type="file"
         multiple
@@ -1261,6 +1346,37 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           aria-label="Attach files"
         >
           <Paperclip className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={voice.toggle}
+          disabled={!voice.supported || voiceTranscribing}
+          aria-pressed={voiceRecording}
+          aria-label={voiceRecording ? "Stop recording" : "Start voice input"}
+          title={
+            !voice.supported
+              ? VOICE_UNAVAILABLE_MESSAGE
+              : voiceRecording
+                ? "Stop recording and send"
+                : voiceTranscribing
+                  ? "Transcribing…"
+                  : "Voice input"
+          }
+          className={`composer-control flex w-8 shrink-0 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 ${
+            voiceRecording
+              ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          }`}
+        >
+          {voiceTranscribing ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : voiceRecording ? (
+            <Square className="h-4 w-4" />
+          ) : voice.supported ? (
+            <Mic className="h-4 w-4" />
+          ) : (
+            <MicOff className="h-4 w-4" />
+          )}
         </button>
         <textarea
           ref={textareaRef}
@@ -1355,7 +1471,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
-      {hasConversation && (
+      {showQuickActions && quickActions.length > 0 && (
         <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
       )}
     </div>

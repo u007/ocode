@@ -26,12 +26,12 @@ const (
 // or remote-SSH. Local workspaces are handled by StartServer
 // directly; remote workspaces use RemoteWorkspace + RemoteProxy.
 type Workspace struct {
-	Mode      WorkspaceMode
-	ID        string // workspace ID (UUID for remote; path-based for local)
-	Target    remote.Target
+	Mode       WorkspaceMode
+	ID         string // workspace ID (UUID for remote; path-based for local)
+	Target     remote.Target
 	RemotePath string
-	Remote    *remote.RemoteWorkspace
-	Proxy     *RemoteProxy
+	Remote     *remote.RemoteWorkspace
+	Proxy      *RemoteProxy
 }
 
 // WorkspaceConfig is the saved configuration for a remote

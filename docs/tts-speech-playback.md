@@ -1,7 +1,7 @@
 ---
 type: Guide
 title: Speech playback
-description: 'Speech playback — user-facing doc covering engine availability (Browser Native, Piper, MeloTTS, Kokoro), installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key. Amended 2026-09-30: added the MeloTTS local engine (id `melo`, darwin/arm64 only, card order Piper → MeloTTS → Kokoro), its per-host Python range, install specifics (unpacked source, shared offline import check) and child-process environment (set by ocode, no .env entry).'
+description: 'Speech playback — user-facing doc covering engine availability (Browser Native, Piper, Paradee, MeloTTS, Kokoro), installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key. Amended 2026-09-30: added the MeloTTS local engine (id `melo`, darwin/arm64 only, card order Piper → MeloTTS → Kokoro), its per-host Python range, install specifics (unpacked source, shared offline import check) and child-process environment (set by ocode, no .env entry).'
 tags:
   - speech
   - tts
@@ -42,14 +42,63 @@ embeds the same React application.
   | darwin/arm64, linux/amd64, linux/arm64, windows/amd64 | 3.11–3.14 | onnxruntime 1.30.0 ships cp311–cp314 wheels; piper-tts is cp39-abi3 (wider) |
   | darwin/amd64 | 3.10–3.13 | onnxruntime 1.22.1 universal2 ships cp310–cp313 wheels only |
 
+- **Paradee** (engine id `paradee`) is installable on darwin/arm64 only. It
+  is an 8.07M-parameter English TTS distilled from Kokoro-82M (single voice
+  `af_heart`, Apache-2.0, model card `sahilmahendrakar/Paradee-8M-v1.0`). It
+  appears in Settings > Speech playback **between the Piper and MeloTTS
+  cards**. Its placement is pinned by `TestMeloCatalogSitsBetweenPiperAndKokoro`
+  (the expected order lists Paradee), and its availability by
+  `TestParadeeCatalogEntryIsInstallableOnlyWhereVerified`.
+
+  The manifest (`internal/tts/manifest.go`, `paradeeManifest`) pins the model
+  repository by commit `f662642d…` (not `main` or the `v1.0` tag) and three
+  artifacts, each with SHA-256 and exact size: `paradee_int8.onnx` (9 MB int8
+  graph), `config.json` (vocabulary), and the `en_core_web_sm-3.8.0` spaCy
+  wheel from the spacy-models GitHub release.
+
+  **The spaCy wheel is staged, not resolved.** misaki's English G2P loads
+  `en_core_web_sm` and, when the package is missing, calls
+  `spacy.cli.download` — a network fetch at synthesis time. The model is not on
+  PyPI, so it is a pinned artifact installed from its verified cache copy
+  (`PythonRuntime.Wheels`), which keeps the install offline after download.
+
+  **Runtime:** `misaki==0.9.4` is installed without its `[en]` extra, because
+  that extra adds `spacy-curated-transformers` and with it PyTorch; Paradee
+  uses misaki's lexicon mode only. The rest of the stack is `spacy==3.8.16`
+  (the model's 3.8 line), `num2words`, `phonemizer-fork`, `espeakng-loader`,
+  `onnxruntime==1.30.0` and `soundfile`, all exact pins. misaki<3.13 bounds
+  the interpreter to **Python 3.11–3.12**.
+
+  **Install check:** after pip, `paradeeVerifyRuntime` runs one probe
+  synthesis, not a bare import. misaki builds its spaCy pipeline and espeak
+  backend on first use, so a broken model or espeak path fails at install
+  rather than on the first playback.
+
+  **Synthesis:** `paradeeSynth` runs `paradeeSynthScript`, a reimplementation
+  of the Paradee Space's inference core (sentence split, misaki phonemes,
+  token ids, one ONNX graph, 24 kHz). It does not import `paradee_tts` or call
+  the Hugging Face Hub. The espeak data path goes through the same
+  length-checked helper as Kokoro (`espeakDataPath`), because misaki points
+  espeak at the wheel's bundled data on import.
+
+  **License disclosure** (hashed for consent): Paradee model and code
+  Apache-2.0, distilled from Kokoro-82M (Apache-2.0); misaki Apache-2.0;
+  en_core_web_sm MIT; phonemizer-fork GPL-3.0; espeak-ng GPL-3.0-or-later.
+
+  **End-to-end check (opt-in):** `PARADEE_TTS_E2E=1 go test ./internal/tts/
+  -run TestParadeeInstallAndSynthesizeReal -timeout 20m` runs the real
+  download, verified install, and offline synthesis (~22 MB, one venv). It
+  uses a `/tmp` root because a deep macOS `TMPDIR` overflows espeak's path
+  buffer; see `gotchas/kokoro-espeak-ng-path-limit.md`.
+
 - **MeloTTS** (engine id `melo`) is installable on darwin/arm64 only. It
-  appears in Settings > Speech playback **between the Piper and Kokoro
+  appears in Settings > Speech playback **between the Paradee and Kokoro
   cards**: the card order is the `Catalog()` return order
-  (`internal/tts/manifest.go:564`) because `TTSForm` maps the server response
+  (`internal/tts/manifest.go:646`) because `TTSForm` maps the server response
   without re-sorting (`web/src/components/Settings/TTSForm.tsx:235`). The
   placement is pinned by `TestMeloCatalogSitsBetweenPiperAndKokoro`
-  (`internal/tts/melo_test.go:169`) and the web test `renders MeloTTS between
-  Piper and Kokoro` (`web/src/components/Settings/TTSForm.test.tsx:60`).
+  (`internal/tts/melo_test.go:169`) and the web test `renders Paradee and
+  MeloTTS between Piper and Kokoro` (`web/src/components/Settings/TTSForm.test.tsx:61`).
 
   Like the other local engines it follows the same lifecycle — license
   acceptance (MIT) → pin → download → install → enable — and voice selection
@@ -57,7 +106,7 @@ embeds the same React application.
   speakers in the MeloTTS-English-v2 config: EN-US (default), EN-BR,
   EN_INDIA, EN-AU, EN-Default.
 
-  The manifest (`internal/tts/manifest.go:331`) pins TEN artifacts, each with
+  The manifest (`internal/tts/manifest.go:410`) pins TEN artifacts, each with
   an exact byte size and SHA-256: the MeloTTS source archive pinned to commit
   `209145371cff8fc3bd60d7be902ea69cbdb7965a`, the MeloTTS-English-v2
   `config.json` + `checkpoint.pth`, five `bert-base-uncased` files, and two
@@ -69,7 +118,7 @@ embeds the same React application.
   and its install_requires reads requirements.txt verbatim (torch unpinned).
   The verified archive is unpacked into the cache and imported via PYTHONPATH;
   dependencies are pinned exactly in the manifest (`meloRequirements()`,
-  `internal/tts/manifest.go:435`), including `nltk==3.8.1` — deliberately:
+  `internal/tts/manifest.go:514`), including `nltk==3.8.1` — deliberately:
   from nltk 3.9 the POS tagger resource was renamed
   `averaged_perceptron_tagger_eng` but g2p_en still probes the legacy name, so
   a newer nltk fails at synthesis after silently re-downloading.
@@ -150,9 +199,9 @@ missing/corrupt cache demotes an installed/enabled record to `failed`.
 **MeloTTS install specifics:** The source tree is not pip-installed; the
 checksum-verified archive is unpacked into `<cache>/melo-src` and imported via
 PYTHONPATH (only the pinned requirements are pip-installed into the venv). The
-install-time import check (`verifyRuntime`, `internal/tts/piper.go:286`) runs
+install-time import check (`verifyRuntime`, `internal/tts/piper.go:291`) runs
 `melo_import_check.py` — the **same offline preamble** synthesis will use —
-under `meloEnv` via `runCmdEnv` (`internal/tts/piper.go:444`), so the check
+under `meloEnv` via `runCmdEnv` (`internal/tts/piper.go:452`), so the check
 and the runtime cannot drift apart. A bare `python -c "import melo.api"` would
 reach the Hugging Face Hub, because `melo/text/cleaner.py` eagerly imports all
 six language backends and each loads a tokenizer at module scope. Because the

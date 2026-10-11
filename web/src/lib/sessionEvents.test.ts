@@ -38,6 +38,7 @@ vi.mock("../api/client", () => ({
     getSession: (...a: unknown[]) => mockGetSession(...a),
     closeSession: (...a: unknown[]) => mockCloseSession(...a),
   },
+  apiPath: (p: string) => p,
 }));
 
 function env(event: string, over: Partial<BusEnvelope> = {}): BusEnvelope {
@@ -180,6 +181,26 @@ describe("routeBusEnvelope", () => {
     routeBusEnvelope(env("user_message", { data: { content: "again", user_seq: 1 } }), router);
     routeBusEnvelope(env("user_message", { data: { content: "again", user_seq: 2 } }), router);
     expect(getState().sessions["s1"].messages).toHaveLength(2);
+  });
+
+  // Queued input injected mid-turn: assistant output already streamed into
+  // `live` (rendered after `messages`), so the echo must join `live` in order
+  // or the user line is hoisted above output that preceded it.
+  it("keeps a mid-turn user_message after the live output that preceded it", () => {
+    vi.useFakeTimers();
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(env("user_message", { data: { content: "first", user_seq: 1 } }), router);
+    routeBusEnvelope(env("text", { data: { delta: "working" } }), router);
+    vi.advanceTimersByTime(LIVE_DELTA_FLUSH_MS);
+    routeBusEnvelope(env("user_message", { data: { content: "also", user_seq: 2 } }), router);
+    routeBusEnvelope(env("user_message", { data: { content: "also", user_seq: 2 } }), router);
+    const slice = getState().sessions["s1"];
+    expect(slice.messages).toHaveLength(1);
+    expect(slice.live).toEqual([
+      { kind: "text", text: "working" },
+      { kind: "user", content: "also", user_seq: 2 },
+    ]);
+    vi.useRealTimers();
   });
 
   it("never dedupes a legacy user_message without user_seq", () => {

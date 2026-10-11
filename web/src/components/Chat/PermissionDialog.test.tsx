@@ -1,12 +1,28 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import PermissionDialog from "./PermissionDialog";
 import type { PermissionDecision } from "@/api/types";
 import type { PermissionDecideResult } from "./PermissionDialog";
 
+/**
+ * Mirrors production: the ask is confined to the session's chat surface, so the
+ * dialog portals INTO this wrapper. The sibling button stands in for the
+ * composer, which lives inside the same container.
+ */
+function Scoped(props: Omit<Parameters<typeof PermissionDialog>[0], "container">) {
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  return (
+    <div ref={setContainer} data-testid="chat-surface">
+      <button type="button">composer</button>
+      <PermissionDialog {...props} container={container} />
+    </div>
+  );
+}
+
 function renderDialog(overrides: Partial<Parameters<typeof PermissionDialog>[0]> = {}) {
   const onDecide = vi.fn(async (_id: string, _d: PermissionDecision): Promise<PermissionDecideResult> => ({ ok: true }));
-  const props: Parameters<typeof PermissionDialog>[0] = {
+  const props: Omit<Parameters<typeof PermissionDialog>[0], "container"> = {
     open: true,
     tool: "bash",
     command: "rm -rf build",
@@ -14,9 +30,60 @@ function renderDialog(overrides: Partial<Parameters<typeof PermissionDialog>[0]>
     onDecide,
     ...overrides,
   };
-  const view = render(<PermissionDialog {...props} />);
+  const view = render(<Scoped {...props} />);
   return { onDecide, unmount: () => view.unmount() };
 }
+
+describe("PermissionDialog confinement", () => {
+  // The dialog is confined to the session's chat surface (its `container`), so
+  // these two pin what "confined" must NOT mean: the rest of the app staying
+  // interactive must never be read as "the user dismissed the ask".
+  it("portals the ask into the chat surface instead of the viewport", async () => {
+    renderDialog();
+    await screen.findByRole("dialog");
+
+    const surface = screen.getByTestId("chat-surface");
+    const dialog = screen.getByRole("dialog");
+    expect(surface.contains(dialog)).toBe(true);
+    expect(surface.querySelector("[data-scoped-dialog-overlay]")).toBeTruthy();
+  });
+
+  it("does NOT deny when the composer inside the surface takes focus", async () => {
+    // ChatInput focuses its textarea programmatically (draft restore, session
+    // switch) and the composer lives INSIDE the container. If that counted as an
+    // outside interaction, the dialog would deny itself with no user action —
+    // the scrim click and Escape are the only dismissal paths.
+    const { onDecide } = renderDialog();
+    await screen.findByRole("dialog");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    await act(async () => {
+      screen.getByRole("button", { name: "composer" }).focus();
+    });
+
+    expect(onDecide).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("still denies on a scrim click inside the surface", async () => {
+    const { onDecide } = renderDialog();
+    await screen.findByRole("dialog");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    const overlay = screen
+      .getByTestId("chat-surface")
+      .querySelector("[data-scoped-dialog-overlay]")!;
+    await act(async () => {
+      fireEvent.pointerDown(overlay);
+    });
+
+    expect(onDecide).toHaveBeenCalledWith("call-1", "deny");
+  });
+});
 
 describe("PermissionDialog", () => {
   it("shows all execution parameters alongside the command without truncation", () => {
@@ -117,7 +184,7 @@ describe("PermissionDialog", () => {
   it("re-enables buttons after a failed onDecide so the user can retry", async () => {
     const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: false, error: "resolve failed: boom" }));
     const { unmount } = render(
-      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
     const allowBtn = screen.getByText("Allow once") as HTMLButtonElement;
     fireEvent.click(allowBtn);
@@ -136,13 +203,13 @@ describe("PermissionDialog", () => {
       .mockResolvedValueOnce({ ok: false, error: "first failed" })
       .mockResolvedValue({ ok: true });
     const { rerender, unmount } = render(
-      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
     fireEvent.click(screen.getByText("Allow once"));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("first failed"));
     // A new ask promoted from the queue must not show the previous ask's error.
     rerender(
-      <PermissionDialog open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
     );
     expect(screen.queryByRole("alert")).toBeNull();
     unmount();
@@ -151,7 +218,7 @@ describe("PermissionDialog", () => {
   it("keeps buttons disabled after a successful decision until unmount (single permission)", async () => {
     const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { unmount } = render(
-      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
     const allowBtn = screen.getByText("Allow once") as HTMLButtonElement;
     fireEvent.click(allowBtn);
@@ -164,13 +231,13 @@ describe("PermissionDialog", () => {
   it("resets loading when a new requestId arrives while the dialog stays mounted (queued permission)", async () => {
     const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { rerender, unmount } = render(
-      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
     fireEvent.click(screen.getByText("Allow once"));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith("call-1", "allow"));
     // Simulate the queue resurfacing the next ask: same mounted Dialog, new requestId.
     rerender(
-      <PermissionDialog open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
     );
     // New request must not inherit the previous loading/confirming state.
     const newAllowBtn = screen.getByText("Allow once") as HTMLButtonElement;
@@ -185,13 +252,13 @@ describe("PermissionDialog", () => {
   it("clears the always-allow confirm UI when requestId changes", async () => {
     const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { rerender, unmount } = render(
-      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
     fireEvent.click(screen.getByText("Always allow rule"));
     expect(screen.getByText("Confirm")).toBeTruthy();
     // Queue promotes the next permission — confirm state must clear.
     rerender(
-      <PermissionDialog open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="ls /tmp" requestId="call-2" onDecide={onDecide} />,
     );
     expect(screen.queryByText("Confirm")).toBeNull();
     expect(screen.getByText("Allow once")).toBeTruthy();
@@ -201,7 +268,7 @@ describe("PermissionDialog", () => {
   it("dismissing the dialog (close button / Escape / overlay) submits deny when not loading", async () => {
     const onDecide = vi.fn(async (): Promise<PermissionDecideResult> => ({ ok: true }));
     const { unmount } = render(
-      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
     // Radix DialogContent includes an accessible Close button (X)
     const closeBtn = document.querySelector('button[aria-label="Close"]') as HTMLButtonElement | null;
@@ -216,7 +283,7 @@ describe("PermissionDialog", () => {
     // onDecide that never resolves keeps the dialog in loading=true
     const onDecide = vi.fn(() => new Promise<PermissionDecideResult>(() => {}));
     const { unmount } = render(
-      <PermissionDialog open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
+      <Scoped open={true} tool="bash" command="rm -rf build" requestId="call-1" onDecide={onDecide} />,
     );
     fireEvent.click(screen.getByText("Allow once"));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith("call-1", "allow"));
@@ -249,11 +316,11 @@ describe("PermissionDialog", () => {
     expect(content!.className).toContain("sm:max-w-2xl");
     expect(content!.className).not.toContain("max-w-md");
     expect(content!.className).toContain("w-[calc(100%-2rem)]");
-    // Tall content stays bounded vertically inside the dialog (the shared
-    // dvh-aware cap, so it also holds under mobile browser chrome), and
-    // horizontal overflow from any descendant is explicitly clipped (no
-    // sideways scroll past the dialog edge).
-    expect(content!.className).toContain("dialog-viewport-max");
+    // Tall content stays bounded vertically inside the CONTAINER (a viewport cap
+    // would be wrong now the panel is confined and can be shorter than the
+    // window), and horizontal overflow from any descendant is explicitly clipped
+    // (no sideways scroll past the dialog edge).
+    expect(content!.className).not.toContain("dialog-viewport-max");
     expect(content!.className).not.toContain("max-h-[calc(100vh-2rem)]");
     expect(content!.className).toContain("overflow-y-auto");
     expect(content!.className).toContain("overflow-x-clip");

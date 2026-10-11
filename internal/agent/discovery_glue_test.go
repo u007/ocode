@@ -743,7 +743,7 @@ func TestRunDiscoveryRankLogStatesJudgeStatus(t *testing.T) {
 
 		a.RunDiscovery(discoveryGlueQuery)
 
-		if len(*lines) != 1 || !strings.Contains((*lines)[0], "judge=jev-latest kept ") {
+		if len(*lines) != 1 || !strings.Contains((*lines)[0], "judge=typesafe/jev-latest kept ") {
 			t.Fatalf("rank line must name the connected judge and its kept count: %v", *lines)
 		}
 	})
@@ -768,7 +768,7 @@ func TestRunDiscoveryRankLogStatesJudgeStatus(t *testing.T) {
 
 		a.RunDiscovery(discoveryGlueQuery)
 
-		if len(*lines) != 1 || !strings.Contains((*lines)[0], "judge=jev-latest error (fail-open)") {
+		if len(*lines) != 1 || !strings.Contains((*lines)[0], "judge=typesafe/jev-latest error (fail-open)") {
 			t.Fatalf("rank line must mark a failed judge as fail-open: %v", *lines)
 		}
 	})
@@ -845,8 +845,8 @@ func TestDiscoveryStatusReportsJudge(t *testing.T) {
 	a.RunDiscovery(discoveryGlueQuery)
 
 	st := a.DiscoveryStatus()
-	if st.Judge != discoveryJudgeModel {
-		t.Fatalf("Judge = %q, want %q", st.Judge, discoveryJudgeModel)
+	if st.Judge != defaultJudgeModel {
+		t.Fatalf("Judge = %q, want %q", st.Judge, defaultJudgeModel)
 	}
 	if st.JudgeVetoed != 1 {
 		t.Fatalf("JudgeVetoed = %d, want 1", st.JudgeVetoed)

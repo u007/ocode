@@ -169,7 +169,7 @@ func TestBasePromptMessages_IncludesMemoryContextWhenEnabled(t *testing.T) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 
 	snap, err := memory.Status(wd)
 	if err != nil {

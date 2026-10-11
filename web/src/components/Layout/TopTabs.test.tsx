@@ -71,6 +71,13 @@ beforeEach(() => {
   hostConnected.current = false;
 });
 
+describe("TopTabs assistant toggle", () => {
+  it("puts the one Toggle assistant control in the always-visible top bar", () => {
+    renderTopTabs();
+    expect(screen.getAllByRole("button", { name: "Toggle assistant" })).toHaveLength(1);
+  });
+});
+
 describe("TopTabs mobile project-drawer launcher", () => {
   it("renders no launcher without onMenuToggle (desktop / preview hosts)", () => {
     renderTopTabs();

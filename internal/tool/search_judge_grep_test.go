@@ -227,8 +227,8 @@ func TestGrepJudgeCapBoundary(t *testing.T) {
 			out := runGrep(t, grepJudgeCtx(t, dir, judge), `{"pattern":"foo","include":"*.txt","output_mode":"files_with_matches"}`)
 
 			wantJudged := n
-			if wantJudged > searchJudgeMaxCandidates {
-				wantJudged = searchJudgeMaxCandidates
+			if wantJudged > SearchJudgeMaxCandidates {
+				wantJudged = SearchJudgeMaxCandidates
 			}
 			mu.Lock()
 			gotReceived := received
@@ -238,8 +238,8 @@ func TestGrepJudgeCapBoundary(t *testing.T) {
 			}
 
 			wantFooter := fmt.Sprintf("[relevance judge: 1 of %d result(s) omitted as out of scope for this intent]", wantJudged)
-			if n > searchJudgeMaxCandidates {
-				wantFooter += fmt.Sprintf("; %d beyond the judge cap were not judged", n-searchJudgeMaxCandidates)
+			if n > SearchJudgeMaxCandidates {
+				wantFooter += fmt.Sprintf("; %d beyond the judge cap were not judged", n-SearchJudgeMaxCandidates)
 			}
 			if !strings.Contains(out, wantFooter) {
 				t.Fatalf("footer missing/mismatched for n=%d:\n--- got ---\n%s\n--- want substring ---\n%s", n, out, wantFooter)

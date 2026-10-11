@@ -45,7 +45,7 @@ func TestAnchoredReCompactionAppliesToTranscript(t *testing.T) {
 	m := model{
 		viewport: fastviewport.New(80, 20),
 		styles:   ApplyThemeColors("tokyonight"),
-		agent:    agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		agent:    newTestAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
 		messages: []message{
 			{role: roleAssistant, text: "──────────────────────────────────────────────────"},
 			{role: roleAssistant, text: "▣ Compacted 4 earlier messages", raw: prevSummary},
@@ -101,7 +101,7 @@ func TestCompactionMarksKeptTailUsageStale(t *testing.T) {
 	m := model{
 		viewport: fastviewport.New(80, 20),
 		styles:   ApplyThemeColors("tokyonight"),
-		agent:    agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		agent:    newTestAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
 		messages: []message{
 			{role: roleUser, text: "task one please"},
 			{role: roleAssistant, text: "did task one"},
@@ -140,7 +140,7 @@ func TestBackgroundJobDuringCompactionIsDeferred(t *testing.T) {
 	m := model{
 		viewport:            fastviewport.New(80, 20),
 		styles:              ApplyThemeColors("tokyonight"),
-		agent:               agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		agent:               newTestAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
 		compacting:          true,               // a compaction is in flight
 		pendingCompactUIIdx: []int{-1, 0, 1, 2}, // its captured mapping — must survive
 		messages: []message{
@@ -174,7 +174,7 @@ func TestStreamDoneCompactionIsABarrier(t *testing.T) {
 	m := model{
 		viewport:          fastviewport.New(80, 20),
 		styles:            ApplyThemeColors("tokyonight"),
-		agent:             agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		agent:             newTestAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
 		streaming:         true,
 		recapModelEnabled: true,
 		messages: []message{
@@ -225,12 +225,12 @@ func TestStreamDoneCompactionIsABarrier(t *testing.T) {
 // m.compacting is already true) instead of falling through to askAgent and
 // racing the in-flight compaction.
 func TestEnterDuringPendingCompactApplyIsQueued(t *testing.T) {
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = upd.(model)
 
-	m.agent = agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil)
+	m.agent = newTestAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil)
 	m.streaming = false
 	m.compacting = false                       // not yet flipped by compactStartedMsg
 	m.pendingCompactUIIdx = []int{-1, 0, 1, 2} // set synchronously at compaction start
@@ -260,7 +260,7 @@ func TestStreamDoneWithProviderErrorStillTriggersCompaction(t *testing.T) {
 	m := model{
 		viewport:          fastviewport.New(80, 20),
 		styles:            ApplyThemeColors("tokyonight"),
-		agent:             agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		agent:             newTestAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
 		streaming:         true,
 		recapModelEnabled: true,
 		messages: []message{

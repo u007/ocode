@@ -45,7 +45,7 @@ func TestAskLoopAsyncRunsIndependentToolCallLoop(t *testing.T) {
 	}}
 	mainClient := &scriptedSideQueryClient{}
 
-	main := NewAgent(mainClient, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
+	main := newTestAgent(mainClient, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
 	// The count tool is ASK-level by default in normal mode; a side query
 	// cannot show a permission dialog, so the loop needs an explicit allow
 	// (mirrors auto-permission allowing read-only tools in the real flow).
@@ -105,7 +105,7 @@ func TestAskLoopAsyncCancellation(t *testing.T) {
 		resp:    &Message{Role: "assistant", ToolCalls: []ToolCall{mkCall()}},
 	}
 	var calls int32
-	main := NewAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
+	main := newTestAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
 	main.permissions.SetRule("count", PermissionAllow)
 
 	done := make(chan struct{})
@@ -129,7 +129,7 @@ func TestAskLoopAsyncCancellation(t *testing.T) {
 // TestAskLoopAsyncPanicRecovered verifies a panicking client is recovered in
 // the goroutine and surfaced as an error through onResult (no deadlock).
 func TestAskLoopAsyncPanicRecovered(t *testing.T) {
-	main := NewAgent(&MockClient{}, nil, nil, nil)
+	main := newTestAgent(&MockClient{}, nil, nil, nil)
 	done := make(chan struct{})
 	var gotErr error
 	cancel := main.AskLoopAsync(
@@ -161,7 +161,7 @@ func TestAskLoopAsyncPermissionAskDeniedNonBlocking(t *testing.T) {
 		{Role: "assistant", ToolCalls: []ToolCall{tc}},
 	}}
 	var calls int32
-	main := NewAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
+	main := newTestAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
 	// Make the count tool ASK-level so Decide returns PermissionAsk.
 	main.permissions.SetRule("count", PermissionAsk)
 
@@ -203,7 +203,7 @@ func TestAskLoopAsyncStreamsActivity(t *testing.T) {
 		{Role: "assistant", ToolCalls: []ToolCall{tc}},
 	}}
 	var calls int32
-	main := NewAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
+	main := newTestAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
 	main.permissions.SetRule("count", PermissionAllow)
 
 	var activityMsgs int
@@ -245,7 +245,7 @@ func TestAskLoopAsyncMaxStepsTerminates(t *testing.T) {
 		{Role: "assistant", ToolCalls: []ToolCall{tc}},
 	}}
 	var calls int32
-	main := NewAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
+	main := newTestAgent(&MockClient{}, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
 	main.permissions.SetRule("count", PermissionAllow)
 
 	done := make(chan struct{})
@@ -268,7 +268,7 @@ func TestAskLoopAsyncMaxStepsTerminates(t *testing.T) {
 // regardless of the Tools slice, so AskLoopOptions.ExcludedTools must delete
 // them from the child's FINAL tool map — a slice filter alone is not enough.
 func TestAskLoopAsyncExcludedToolsRemovedFromFinalMap(t *testing.T) {
-	main := NewAgent(&MockClient{}, nil, nil, nil)
+	main := newTestAgent(&MockClient{}, nil, nil, nil)
 
 	// Mirror the TUI: the builtin tool set is passed in (read/grep/glob/...),
 	// and NewAgent unconditionally adds the dispatch family on top — which
@@ -315,7 +315,7 @@ func TestAskLoopAsyncExcludedToolsRemovedFromFinalMap(t *testing.T) {
 func TestAskLoopAsyncFreshClientFailureIsStartupError(t *testing.T) {
 	// Provider "mock" is not keyed: NewClient returns nil for the derived
 	// "mock/mock-model" id, so the fresh-client build fails fast.
-	main := NewAgent(&MockClient{}, nil, nil, nil)
+	main := newTestAgent(&MockClient{}, nil, nil, nil)
 	done := make(chan struct{})
 	var gotErr error
 	cancel := main.AskLoopAsync(
@@ -331,5 +331,47 @@ func TestAskLoopAsyncFreshClientFailureIsStartupError(t *testing.T) {
 	}
 	if gotErr == nil || !strings.Contains(gotErr.Error(), "side-query client") {
 		t.Fatalf("err = %v, want a fresh-client build error", gotErr)
+	}
+}
+
+// TestFormatSideQueryActivity pins the shared side-query activity formatter
+// (the TUI popup and the web/desktop panel must render identical text).
+// NOTE: ToolCall.Function is an anonymous struct (client.go), so it is set
+// field-by-field rather than with a composite literal.
+func TestFormatSideQueryActivity(t *testing.T) {
+	m := Message{Role: "assistant"}
+	m.ToolCalls = []ToolCall{{}}
+	m.ToolCalls[0].Function.Name = "read"
+	m.ToolCalls[0].Function.Arguments = `{"file":"a.go"}`
+	if got := FormatSideQueryActivity(m); !strings.Contains(got, "→ read") {
+		t.Fatalf("got %q", got)
+	}
+	if got := FormatSideQueryActivity(Message{Role: "assistant", Content: "hi"}); got != "" {
+		t.Fatalf("want empty, got %q", got)
+	}
+	long := Message{Role: "assistant"}
+	long.ToolCalls = []ToolCall{{}}
+	long.ToolCalls[0].Function.Name = "bash"
+	long.ToolCalls[0].Function.Arguments = strings.Repeat("x", 100)
+	if got := FormatSideQueryActivity(long); !strings.HasSuffix(got, "...") {
+		t.Fatalf("want truncated args, got %q", got)
+	}
+}
+
+// TestBtwExcludedToolsComplete guards the shared side-query exclusion list
+// against silent drift: every non-interactive tool must be named.
+func TestBtwExcludedToolsComplete(t *testing.T) {
+	want := []string{"question", "task", "task_status", "agent_status", "task_cancel", "wait", "todo_write", "todo_update", "plan_enter", "plan_exit", "discover_more", "knowledge_lookup", "advisor"}
+	if len(BtwExcludedTools) != len(want) {
+		t.Fatalf("len = %d, want %d", len(BtwExcludedTools), len(want))
+	}
+	have := map[string]bool{}
+	for _, n := range BtwExcludedTools {
+		have[n] = true
+	}
+	for _, n := range want {
+		if !have[n] {
+			t.Fatalf("BtwExcludedTools missing %q", n)
+		}
 	}
 }

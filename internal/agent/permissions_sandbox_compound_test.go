@@ -15,7 +15,7 @@ func sandboxDecideTestPM(t *testing.T) *PermissionManager {
 	t.Cleanup(func() { sandboxSupported = orig })
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	pm := NewPermissionManager()

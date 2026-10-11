@@ -83,7 +83,7 @@ Answer no only when it is of a different scope — an unrelated subject that mer
 // a single Decide call and returns the subset judged in scope, preserving the
 // input (rank) order. Fail-open: a transport/decode error returns (nil, err) so
 // the caller shows every result; a missing or non-noul answer keeps that doc.
-func (a *Agent) judgeDocSearchResults(client *TypesafeClient, query string, docs []*knowledge.Doc) ([]*knowledge.Doc, error) {
+func (a *Agent) judgeDocSearchResults(client Decider, query string, docs []*knowledge.Doc) ([]*knowledge.Doc, error) {
 	if len(docs) == 0 {
 		return docs, nil
 	}
@@ -132,7 +132,7 @@ func (a *Agent) docSearchJudge() DocSearchJudge {
 	return func(query string, docs []*knowledge.Doc) ([]*knowledge.Doc, error) {
 		kept, err := a.judgeDocSearchResults(client, query, docs)
 		if err != nil {
-			a.emitDebug("KNOWLEDGE", fmt.Sprintf("doc_search_typesafe judge=%s failed (fail-open, all %d results kept): %v", client.Model, len(docs), err))
+			a.emitDebug("KNOWLEDGE", fmt.Sprintf("doc_search_typesafe judge=%s failed (fail-open, all %d results kept): %v", deciderLabel(client), len(docs), err))
 			return docs, nil
 		}
 		return kept, nil

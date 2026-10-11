@@ -39,6 +39,7 @@ vi.mock("../../api/client", () => ({
     getAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
     setAutoContinue: vi.fn(() => Promise.resolve({ enabled: false, model: "" })),
     getDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
+    getPathsConfig: vi.fn(() => Promise.resolve({ extra_allowed_paths: [], upload_dir: "" })),
     setDiscoveryConfig: vi.fn(() => Promise.resolve(null)),
     getCompactConfig: vi.fn(() => Promise.resolve(EMPTY_COMPACT_CONFIG)),
     setCompactConfig: vi.fn((patch: Partial<CompactConfig>) =>

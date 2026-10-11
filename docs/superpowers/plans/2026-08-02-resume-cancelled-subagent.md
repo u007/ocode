@@ -671,7 +671,7 @@ git commit -m "refactor(agent): extract TaskTool background/sync dispatch into s
 - Modify: `internal/agent/subagent.go`
 
 **Interfaces:**
-- Consumes: `AgentRun.beginResume()` (Task 1), `Agent.RearmMaintenance()` (Task 2), `t.runBackgroundDispatch`/`t.runSyncDispatch` (Task 3), `AgentRunRegistry.Get`, `run.appendTranscript`, `run.TranscriptPublic()`, `Agent.NoteSubagentDispatch`, `subagentDispatchLimit` (`internal/agent/agent.go:416`).
+- Consumes: `AgentRun.beginResume()` (Task 1), `Agent.RearmMaintenance()` (Task 2), `t.runBackgroundDispatch`/`t.runSyncDispatch` (Task 3), `AgentRunRegistry.Get`, `run.appendTranscript`, `run.TranscriptPublic()`, `Agent.NoteSubagentDispatch`, `subagentDispatchLimit` (`internal/agent/agent.go:982`).
 - Produces: `resume_task_id` task-tool schema param; `TaskTool.Execute` resume branch; `taskToolParams` (named type replacing the previous anonymous params struct — needed so `executeResume` can take it as a parameter).
 
 - [x] **Step 1: Name the params struct and add `resume_task_id`**

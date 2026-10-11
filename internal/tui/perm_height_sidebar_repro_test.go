@@ -17,7 +17,7 @@ import (
 // every frame (visibly on each permission popup) and clipped the sidebar's
 // pinned bottom rows.
 func TestSidebarViewHeightMatchesTerminal(t *testing.T) {
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	// Height 28 is short enough that the default sidebar sections (Git/TODO/
 	// Tools/paths/usage) saturate the column, which is the condition that used

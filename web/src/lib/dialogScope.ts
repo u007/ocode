@@ -6,10 +6,16 @@ import type { SessionSubTabId } from "../stores/projectStore";
  *
  * A chat-session-bound dialog — the permission ask, the `question` tool ask,
  * and any future session-scoped prompt — may only be mounted while that
- * session's chat surface is actually on screen. Mounting one off-surface
- * renders a full-screen Radix modal (`fixed inset-0` overlay + focus trap) over
- * a view the user is not working in, which blocks the entire app for a session
- * they cannot even see.
+ * session's chat surface is actually on screen.
+ *
+ * This gate is still REQUIRED even though those two dialogs are now CONFINED to
+ * the session's chat surface (`ui/scoped-dialog.tsx` portals them into the
+ * active chat tab's element, so an ask no longer covers the project list or any
+ * other session). Off-surface that same panel is `display:none`
+ * (`ui/tabs.tsx` `data-[state=inactive]:hidden`), so confining alone would
+ * render the ask INVISIBLY — worse than blocking, because the user gets no
+ * signal at all. The two rules are complementary: this one decides WHETHER an
+ * ask may mount; confinement decides WHERE it renders once it may.
  *
  * The ask is not lost by hiding it: it stays in its per-session chat-store
  * slice, so returning to that session's Chat sub-tab re-opens the prompt. While

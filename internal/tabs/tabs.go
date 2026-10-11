@@ -31,6 +31,7 @@ import (
 
 	"github.com/u007/ocode/internal/filelock"
 	"github.com/u007/ocode/internal/paths"
+	"github.com/u007/ocode/internal/session"
 )
 
 // Tab is one open session tab in the UI.
@@ -46,6 +47,25 @@ type Tab struct {
 type ProjectTabs struct {
 	Tabs   []Tab  `json:"tabs"`
 	Active string `json:"active,omitempty"`
+}
+
+// capTabTitles bounds every tab title to session.MaxStoredTitleRunes. The tab
+// label mirrors a session title, which can be multi-megabyte when a session
+// was created from an oversized first user message; GET /api/tabs echoes the
+// whole store, so an unbounded label rides every tab fetch and the rendered
+// tab strip. Applied on load AND on write so an already-poisoned tabs.json
+// self-heals on the next read. Returns a copy; the caller's slice is not
+// mutated.
+func capTabTitles(ts []Tab) []Tab {
+	if len(ts) == 0 {
+		return ts
+	}
+	out := make([]Tab, len(ts))
+	copy(out, ts)
+	for i := range out {
+		out[i].Title = session.TruncateTitle(out[i].Title, session.MaxStoredTitleRunes)
+	}
+	return out
 }
 
 // Store persists per-project open-tab state.
@@ -118,6 +138,10 @@ func (s *Store) load() error {
 	}
 	if cache == nil {
 		cache = map[string]ProjectTabs{}
+	}
+	for k, pt := range cache {
+		pt.Tabs = capTabTitles(pt.Tabs)
+		cache[k] = pt
 	}
 	s.cache = cache
 	s.recordStamp()
@@ -248,7 +272,7 @@ func (s *Store) ApplyBulk(patch map[string]ProjectTabs) error {
 				delete(s.cache, cleaned)
 				continue
 			}
-			s.cache[cleaned] = v
+			s.cache[cleaned] = ProjectTabs{Tabs: capTabTitles(v.Tabs), Active: v.Active}
 		}
 		return s.saveLocked()
 	})
@@ -265,7 +289,7 @@ func (s *Store) Set(path string, pt ProjectTabs) error {
 		if len(pt.Tabs) == 0 {
 			delete(s.cache, cleaned)
 		} else {
-			s.cache[cleaned] = pt
+			s.cache[cleaned] = ProjectTabs{Tabs: capTabTitles(pt.Tabs), Active: pt.Active}
 		}
 		return s.saveLocked()
 	})

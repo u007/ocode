@@ -430,7 +430,7 @@ func (h *Handler) HandleGitStage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "no paths provided")
 			return
 		}
-		args := append([]string{"add", "--"}, specs...)
+		args := append([]string{"add", "--"}, remoteQuoteSpecs(specs)...)
 		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git add failed: "+err.Error())
 			return
@@ -468,7 +468,7 @@ func (h *Handler) HandleGitUnstage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "no paths provided")
 			return
 		}
-		args := append([]string{"reset", "--"}, specs...)
+		args := append([]string{"reset", "--"}, remoteQuoteSpecs(specs)...)
 		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git reset failed: "+err.Error())
 			return
@@ -510,7 +510,7 @@ func (h *Handler) HandleGitDiscard(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "no paths provided")
 			return
 		}
-		args := append([]string{"checkout", "HEAD", "--"}, specs...)
+		args := append([]string{"checkout", "HEAD", "--"}, remoteQuoteSpecs(specs)...)
 		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			if !strings.Contains(err.Error(), "pathspec") {
 				writeError(w, http.StatusInternalServerError, "git checkout failed: "+err.Error())
@@ -554,7 +554,7 @@ func (h *Handler) HandleGitStash(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, remoteStashPushArgs(req, specs)...)); err != nil {
+		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, remoteStashPushArgs(req, remoteQuoteSpecs(specs))...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git stash failed: "+err.Error())
 			return
 		}
@@ -778,7 +778,7 @@ func (h *Handler) HandleGitCommit(w http.ResponseWriter, r *http.Request) {
 		args := []string{"commit", "-m", remote.ShellQuote(message)}
 		if len(specs) > 0 {
 			args = append(args, "--")
-			args = append(args, specs...)
+			args = append(args, remoteQuoteSpecs(specs)...)
 		}
 		if err := remoteGitMutation(r.Context(), rw, remoteGitCommand(rw.Path, args...)); err != nil {
 			writeError(w, http.StatusInternalServerError, "git commit failed: "+err.Error())

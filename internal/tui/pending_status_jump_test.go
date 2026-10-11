@@ -24,7 +24,7 @@ func clickStatusLine(t *testing.T, m *model, relRow int) *model {
 
 func pendingTestModel(t *testing.T) *model {
 	t.Helper()
-	m := newModel()
+	m := newTestModel()
 	m.ready = true
 	upd, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	mm := upd.(model)

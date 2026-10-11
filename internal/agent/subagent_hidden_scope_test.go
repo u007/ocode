@@ -14,7 +14,7 @@ import (
 // including the main LLM, whose spec has no matching registry entry.
 func TestTaskToolBlocksHiddenAgentFromUnrelatedCaller(t *testing.T) {
 	client := &scriptedSubagentClient{responses: []*Message{{Role: "assistant", Content: "done"}}}
-	parent := NewAgent(client, []tool.Tool{}, nil, nil)
+	parent := newTestAgent(client, []tool.Tool{}, nil, nil)
 	parent.SetSpec(&AgentSpec{Name: "unrelated-caller"})
 
 	reg := NewAgentRegistry()
@@ -47,7 +47,7 @@ func TestTaskToolBlocksHiddenAgentFromUnrelatedCaller(t *testing.T) {
 // directory (e.g. orchestrator.md dispatching orchestrator-developer.md).
 func TestTaskToolAllowsHiddenAgentFromSamePlugin(t *testing.T) {
 	client := &scriptedSubagentClient{responses: []*Message{{Role: "assistant", Content: "done"}}}
-	parent := NewAgent(client, []tool.Tool{}, nil, nil)
+	parent := newTestAgent(client, []tool.Tool{}, nil, nil)
 	parent.SetSpec(&AgentSpec{Name: "orchestrator-pipeline"})
 
 	reg := NewAgentRegistry()

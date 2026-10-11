@@ -255,7 +255,7 @@ func TestProviderModelsOrcaRouterIncludesAuto(t *testing.T) {
 func withSandboxedModelsCache(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home) // windows
 	t.Setenv(envModelsPath, "")

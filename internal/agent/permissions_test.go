@@ -640,7 +640,7 @@ func TestPermissions_BashAutoAllowInRoot_PersistsProjectScopedRule(t *testing.T)
 	}
 
 	key := bashInRootKey("awk", resolvedWorkDir)
-	if _, exists := pm.bashPrefixes[key]; exists {
+	if _, exists := pm.bashPrefixSnapshot()[key]; exists {
 		t.Fatalf("did not expect mutating awk mode to persist in-root key %q", key)
 	}
 }
@@ -653,7 +653,9 @@ func TestPermissions_BashPersistedRule_DoesNotBypassOutOfRoot(t *testing.T) {
 	}
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
-	pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)] = PermissionAllow
+	pm.mutateBashPrefixes(func(rules map[string]PermissionLevel) {
+		rules[bashInRootKey("awk", resolvedWorkDir)] = PermissionAllow
+	})
 
 	dec := pm.Decide("bash", json.RawMessage(`{"command":"awk '{print $1}' /etc/hosts"}`))
 	if dec.Level != PermissionAsk {
@@ -755,7 +757,7 @@ func TestPermissions_BashCdIntoExtraAllowedPath_AutoAllows(t *testing.T) {
 // flagged as out-of-scope, even on a model ALLOW — scope expansion is human-only.
 func TestVerifyAutoGrant_BashOutOfScopePathRejected(t *testing.T) {
 	wd := t.TempDir()
-	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
 	a.permissions.SetWorkDir(wd)
 
 	req := &PermissionRequest{
@@ -781,7 +783,9 @@ func TestPermissions_ExportConfigSkipsInternalInRootRules(t *testing.T) {
 	}
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
-	pm.bashPrefixes[bashInRootKey("cat", resolvedWorkDir)] = PermissionAllow
+	pm.mutateBashPrefixes(func(rules map[string]PermissionLevel) {
+		rules[bashInRootKey("cat", resolvedWorkDir)] = PermissionAllow
+	})
 
 	exported := pm.ExportConfig()
 	for k := range exported.Bash.Prefixes {
@@ -811,7 +815,7 @@ func TestPermissions_BashAutoAllowInRoot_Awk(t *testing.T) {
 		t.Fatalf("expected in-root awk command to auto-allow, got %s", dec.Level)
 	}
 
-	if _, ok := pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)]; ok {
+	if _, ok := pm.bashPrefixSnapshot()[bashInRootKey("awk", resolvedWorkDir)]; ok {
 		t.Fatalf("did not expect temp-dir awk rule to persist as project-scoped allow")
 	}
 }
@@ -831,7 +835,7 @@ func TestPermissions_BashAutoAllowInRoot_Mkdir(t *testing.T) {
 	if dec.Level != PermissionAllow {
 		t.Fatalf("expected in-root mkdir command to auto-allow, got %s", dec.Level)
 	}
-	if _, exists := pm.bashPrefixes[bashInRootKey("mkdir", resolvedWorkDir)]; exists {
+	if _, exists := pm.bashPrefixSnapshot()[bashInRootKey("mkdir", resolvedWorkDir)]; exists {
 		t.Fatalf("did not expect mutating mkdir mode to persist in-root key")
 	}
 
@@ -1047,7 +1051,7 @@ func TestPermissions_FindUnsafeFlagsAsk(t *testing.T) {
 // subcommands are no longer auto-allowed (previously the generic `git `
 // prefix in isSafeBashCommand allowed them all).
 func TestPermissions_GitMutatingSubcommandsAsk(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetWorkDir("/Users/test/project")
 
@@ -1179,7 +1183,7 @@ func TestPermissions_BashAutoAllow_NeverAutoModeAsks(t *testing.T) {
 
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
-	pm.bashPrefixModes["awk"] = bashPrefixModeNever
+	pm.bashPrefixModes.mutate(func(m map[string]string) { m["awk"] = bashPrefixModeNever })
 
 	cmd := fmt.Sprintf(`{"command":"awk '{print $1}' %s"}`, outsidePath)
 	dec := pm.Decide("bash", json.RawMessage(cmd))
@@ -1335,7 +1339,7 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 
 	// Set temporary HOME to a temp directory outside of workdir
 	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
+	setHomeTree(t, tempHome)
 
 	t.Run("tokenizer_and_compound_splitting", func(t *testing.T) {
 		cmds, err := parseShellCommandLine(`cd ` + resolvedWorkDir + ` && grep -rn "pattern" .`)
@@ -2012,7 +2016,7 @@ func TestPermissions_ReadToolOnExtraAllowedPath(t *testing.T) {
 func TestPermissions_ReadMissingTargetDenied(t *testing.T) {
 	workDir := t.TempDir()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 
 	cases := []struct {
 		name  string
@@ -2230,7 +2234,7 @@ func TestAskPermissionModelIncludesAllowedRootsInPrompt(t *testing.T) {
 	wd := t.TempDir()
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.permissions.SetWorkDir(wd)
 
 	capture := &scriptedCaptureClient{Responses: []string{"ALLOW: safe"}}
@@ -2279,7 +2283,7 @@ func isolateConfigHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(home) })
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 }
@@ -2350,7 +2354,7 @@ func TestAskPermissionModelPromptIncludesGlobalConfigDir(t *testing.T) {
 	wd := t.TempDir()
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
-	a := NewAgent(nil, nil, cfg, nil)
+	a := newTestAgent(nil, nil, cfg, nil)
 	a.permissions.SetWorkDir(wd)
 
 	capture := &scriptedCaptureClient{Responses: []string{"ALLOW: safe"}}
@@ -2396,7 +2400,7 @@ func TestVerifyAutoGrantAcceptsGlobalConfigDir(t *testing.T) {
 		t.Helper()
 		cfg := &config.Config{}
 		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		a.permissions.SetWorkDir(t.TempDir())
 		prevClientFn := newClientFn
 		t.Cleanup(func() { newClientFn = prevClientFn })
@@ -2690,7 +2694,7 @@ func TestDecideSandboxConfigWriteAsks(t *testing.T) {
 // TestDecideSandboxSshReadAsks: reading a private key is Ask in sandbox.
 func TestDecideSandboxSshReadAsks(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 	ssh := filepath.Join(home, ".ssh")
 	key := filepath.Join(ssh, "id_ed25519")
@@ -2719,7 +2723,7 @@ func TestDecideSandboxGitPush(t *testing.T) {
 	// real "Bash(git push --force*)" deny) leak in — the force assertions
 	// below must exercise the isHarmfulForceCommand gate, not local env.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	pm := NewPermissionManager()
@@ -2761,7 +2765,7 @@ func TestDecideSandboxHarmfulGitRequiresAsk(t *testing.T) {
 	t.Cleanup(func() { sandboxSupported = orig })
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	pm := NewPermissionManager()
@@ -2929,6 +2933,16 @@ func TestSandboxOSBoundaryGrantsSharedProjectWrites(t *testing.T) {
 		os.Remove(outerProbe)
 	}
 
+	// The data dir is expanded into the entries that exist, so the two stores
+	// probed below must exist before the root set is built. On a developer's
+	// real home they always did; under the package's isolated test home they
+	// do not until something creates them.
+	for _, sub := range []string{"project", "memory"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir %s store: %v", sub, err)
+		}
+	}
+
 	pm := NewPermissionManager()
 	pm.SetWorkDir(t.TempDir())
 	roots := sandbox.NewRootSet(pm.AllowedRootsClassified())
@@ -3028,7 +3042,7 @@ func TestSandboxAskRoutesThroughAutoPermission(t *testing.T) {
 	t.Run("with auto enabled, ask reaches the judge (human callback not called)", func(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		a.Permissions().SetWorkDir(t.TempDir())
 		a.Permissions().SetMode(PermissionModeSandbox)
 		a.Permissions().SetAutoPermissionEnabled(true)
@@ -3058,7 +3072,7 @@ func TestSandboxAskRoutesThroughAutoPermission(t *testing.T) {
 
 	t.Run("with auto disabled, ask reaches the human callback", func(t *testing.T) {
 		cfg := &config.Config{}
-		a := NewAgent(nil, nil, cfg, nil)
+		a := newTestAgent(nil, nil, cfg, nil)
 		a.Permissions().SetWorkDir(t.TempDir())
 		a.Permissions().SetMode(PermissionModeSandbox)
 		a.Permissions().SetAutoPermissionEnabled(false)
@@ -3206,7 +3220,7 @@ func TestWriteToProjectSettingsAsks(t *testing.T) {
 // Ask (a matching deny there would otherwise be editable away).
 func TestWriteToClaudeSettingsAsks(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	work := t.TempDir()
 	claude := filepath.Join(home, ".claude", "settings.json")
 	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
@@ -3272,7 +3286,7 @@ func TestGitStashReadOnlyFormsReachAutoAllow(t *testing.T) {
 	// user deny like "Bash(git stash *)" (a deliberate user choice that wins
 	// over everything), which would leak into the test via claudeSettingsPaths
 	// and mask the code-level behavior under test.
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetWorkDir(t.TempDir())
 
@@ -3322,7 +3336,7 @@ func TestGitStashReadOnlyFormsReachAutoAllow(t *testing.T) {
 // every form that creates, deletes, renames, copies, or re-points a branch
 // stays off it.
 func TestGitBranchListingFormsAutoAllow(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetWorkDir(t.TempDir())
 
@@ -3385,34 +3399,36 @@ func TestGitBranchListingFormsAutoAllow(t *testing.T) {
 // project's over-broad `.claude/settings.json` deny look like "bash is always
 // blocked").
 func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
-	// Case 1: Claude Code settings deny names the offending pattern. HOME is
-	// redirected so the developer's real ~/.claude/settings.json (which carries
-	// its own deny rules) cannot leak in and mask the assertion.
-	t.Run("claude settings", func(t *testing.T) {
+	// Case 1: a Claude Code settings deny is NOT a ban in ocode. Banned
+	// commands come only from ocode's own config, so a matching Claude deny
+	// pattern must not produce a Deny.
+	t.Run("claude settings deny is ignored", func(t *testing.T) {
 		home := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		settings := `{"permissions":{"allow":[],"deny":["Bash(git stash *)"]}}`
+		settings := `{"permissions":{"allow":[],"deny":["Bash(git stash *)","Bash(rm -rf /*)","Bash"]}}`
 		if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("HOME", home)
+		setHomeTree(t, home)
 
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
-		dec := pm.Decide("bash", json.RawMessage(`{"command":"git stash list"}`))
-		if dec.Level != PermissionDeny {
-			t.Fatalf("Claude wildcard deny: level=%s, want deny", dec.Level)
-		}
-		if !strings.Contains(dec.DenyReason, "Bash(git stash *)") || !strings.Contains(dec.DenyReason, ".claude/settings.json") {
-			t.Fatalf("Claude deny reason=%q, want it to name Bash(git stash *) in .claude/settings.json", dec.DenyReason)
+		for _, command := range []string{"git stash list", "rm -rf /tmp/ocode-scratch", "echo hi; git stash list"} {
+			args, err := json.Marshal(map[string]string{"command": command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dec := pm.Decide("bash", args); dec.Level == PermissionDeny {
+				t.Fatalf("Decide(bash %q) = deny (%s), want Claude deny rules ignored", command, dec.DenyReason)
+			}
 		}
 	})
 
 	// Case 2: a user-defined bash ban names the banned prefix.
 	t.Run("user bash ban", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir()) // no Claude settings
+		setHomeTree(t, t.TempDir()) // no Claude settings
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
 		pm.SetBashPrefixRule("git stash", PermissionDeny)
@@ -3427,7 +3443,7 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 
 	// Case 3: locked mode says so instead of implying a missing rule.
 	t.Run("locked mode", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		setHomeTree(t, t.TempDir())
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
 		pm.SetMode(PermissionModeLocked)
@@ -3444,7 +3460,7 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 	// that does not hit an earlier auto-allow/always-allow rule, so the
 	// decision reaches the tool-rule fall-through in decideSingleCommand.
 	t.Run("tool rule", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		setHomeTree(t, t.TempDir())
 		pm := NewPermissionManager()
 		pm.SetWorkDir(t.TempDir())
 		pm.SetRule("bash", PermissionDeny)
@@ -3461,8 +3477,8 @@ func TestDenyReasonNamesBlockingPolicy(t *testing.T) {
 // TestDenyToolMessageSurfacesReason proves the reason reaches the model as a
 // tool result, and that an unset reason keeps the legacy generic wording.
 func TestDenyToolMessageSurfacesReason(t *testing.T) {
-	withReason := denyToolMessage("bash", PermissionDecision{Level: PermissionDeny, DenyReason: `Claude Code deny rule "Bash(git stash *)" in .claude/settings.json`})
-	if !strings.Contains(withReason, `Bash(git stash *)`) {
+	withReason := denyToolMessage("bash", PermissionDecision{Level: PermissionDeny, DenyReason: `user-defined bash ban "git stash"`})
+	if !strings.Contains(withReason, `user-defined bash ban "git stash"`) {
 		t.Fatalf("message=%q, want it to include the deny reason", withReason)
 	}
 	if !strings.Contains(withReason, `tool "bash"`) {
@@ -3519,7 +3535,7 @@ func TestBannedGitStashPrefixSkipsReadOnlyForms(t *testing.T) {
 	sandboxSupported = func() bool { return true }
 	t.Cleanup(func() { sandboxSupported = orig })
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("USERPROFILE", home)
 
 	for _, mode := range []PermissionMode{PermissionModeNormal, PermissionModeSandbox} {
@@ -3582,7 +3598,7 @@ func TestIsHarmfulRequestUsesFullCommandFromArgs(t *testing.T) {
 // arbitrary */vp elsewhere, and never without the rule.
 func TestAllowRuleMatchesPathQualifiedTrustedTool(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	work := t.TempDir()
 	for _, p := range []string{
 		filepath.Join(work, "node_modules", ".bin", "vp"),

@@ -1,0 +1,65 @@
+name: Feature request
+description: Propose a capability or an improvement to an existing one.
+labels: ["enhancement", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ocode is feature-dense, so proposals are held to a high bar. The strongest
+        ones name the workflow they unblock, not just the feature they want.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you unable to do today? Describe the workflow, not the solution.
+      placeholder: |
+        I hand off long-running agent sessions between my laptop and a remote box.
+        Today the transcript on the remote host is a different session from the one
+        on my laptop, so I lose scrollback and context when I switch.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What would you like ocode to do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Including "I worked around it by …".
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      options:
+        - TUI
+        - Web UI
+        - Desktop app
+        - CLI / headless
+        - Editor integration (ACP / Zed)
+        - Cross-cutting
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives-providers
+    attributes:
+      label: Providers / models affected
+      description: Leave blank if it is provider-independent.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and discussions for this first.
+          required: true

@@ -199,8 +199,8 @@ func TestAdvisorTool_Execute_RecursionGuard(t *testing.T) {
 
 func TestAdvisorTool_Execute_RecursionGuard_ScopedPerAgent(t *testing.T) {
 	client := &advisorMockLLMClient{response: "test"}
-	agentA := NewAgent(client, nil, nil, nil)
-	agentB := NewAgent(client, nil, nil, nil)
+	agentA := newTestAgent(client, nil, nil, nil)
+	agentB := newTestAgent(client, nil, nil, nil)
 	t.Cleanup(agentA.Shutdown)
 	t.Cleanup(agentB.Shutdown)
 
@@ -221,7 +221,7 @@ func TestAdvisorTool_Execute_RecursionGuard_ScopedPerAgent(t *testing.T) {
 
 	// But a second call on the same agent (e.g. a sub-agent sharing the
 	// parent's guard) must still be blocked.
-	subAgent := NewAgent(client, nil, nil, nil)
+	subAgent := newTestAgent(client, nil, nil, nil)
 	t.Cleanup(subAgent.Shutdown)
 	subAgent.SetParentAdvisorInFlight(agentA.advisorGuard())
 	toolSub := AdvisorTool{mainAgent: subAgent}
@@ -241,7 +241,7 @@ func TestAdvisorTool_getAdvisorTools_NilMainAgent(t *testing.T) {
 
 func TestAdvisorTool_getAdvisorTools_WithAgent(t *testing.T) {
 	client := &advisorMockLLMClient{response: "test"}
-	agent := NewAgent(client, nil, nil, nil)
+	agent := newTestAgent(client, nil, nil, nil)
 	// NewAgent registers default tools (bash, bash_output, kill_shell, wait, etc.)
 	// and we add a few more for testing.
 	agent.tools["read"] = &advisorMockTool{name: "read"}

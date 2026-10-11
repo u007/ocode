@@ -67,7 +67,7 @@ func TestEditorModeDefaults(t *testing.T) {
 	t.Run("LoadOcodeConfig defaults to external", func(t *testing.T) {
 		tmp := t.TempDir()
 		origHome := os.Getenv("HOME")
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		_ = origHome
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0755)
@@ -89,7 +89,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 
 	t.Run("load tmux-split", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0755)
 		val := `{"editor_mode":"tmux-split"}`
@@ -107,7 +107,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 
 	t.Run("load tmux-window", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0755)
 		val := `{"editor_mode":"tmux-window"}`
@@ -125,7 +125,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 
 	t.Run("save editor_mode", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0755)
 
@@ -160,7 +160,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 
 	t.Run("save editor_mode external is omitted", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0755)
 
@@ -187,7 +187,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 
 	t.Run("save editor mode preserves editor", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0755)
 
@@ -218,7 +218,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 }
 
 func TestMaxConcurrentAgentsRoundTrip(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	if err := SaveMaxConcurrentAgents(7); err != nil {
 		t.Fatalf("SaveMaxConcurrentAgents failed: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestIDEModeLoadSave(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	if err := SaveIDEMode(IDEModeOff); err != nil {
 		t.Fatalf("SaveIDEMode(off) failed: %v", err)
@@ -277,7 +277,7 @@ func TestIDEModeLoadSave(t *testing.T) {
 
 func TestSaveOcodeConfigWritesToGlobalPath(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	cfg := defaultOcodeConfig()
 	cfg.Permissions.Tools["bash"] = "allow"
@@ -312,7 +312,7 @@ func TestSaveOcodeConfigWritesToGlobalPath(t *testing.T) {
 
 func TestSaveOcodePermissionsWritesToGlobalPath(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	permissions := defaultPermissionConfig()
 	permissions.Tools["webfetch"] = "allow"
@@ -344,7 +344,7 @@ func TestSaveOcodePermissionsWritesToGlobalPath(t *testing.T) {
 
 func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	chdirTempForConfigTest(t)
 
 	permissions := defaultPermissionConfig()
@@ -384,7 +384,7 @@ func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
 // erase those fields already on disk when it persists.
 func TestSaveOcodePermissionsPreservesAutoModelAndGrants(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	chdirTempForConfigTest(t)
 
 	// Disk already has a configured model + a grant (set by another session).
@@ -429,7 +429,7 @@ func TestSaveOcodePermissionsPreservesAutoModelAndGrants(t *testing.T) {
 // model — only SavePermissionModel owns it.
 func TestSaveOcodePermissionsNeverClobbersModelFromStaleSnapshot(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	chdirTempForConfigTest(t)
 
 	onDisk := defaultPermissionConfig()
@@ -467,7 +467,7 @@ func TestSaveOcodePermissionsNeverClobbersModelFromStaleSnapshot(t *testing.T) {
 // (model + enabled) to disk. The whole disk block must survive verbatim.
 func TestSaveOcodePermissionsPreservesDiskAutoWhenCallerHasNone(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	chdirTempForConfigTest(t)
 
 	onDisk := defaultPermissionConfig()
@@ -506,7 +506,7 @@ func TestSaveOcodePermissionsPreservesDiskAutoWhenCallerHasNone(t *testing.T) {
 // writer used by --permission-mode does not clobber model/grants/tool rules.
 func TestSaveAutoPermissionEnabledKeepsOtherFields(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	chdirTempForConfigTest(t)
 
 	seed := defaultPermissionConfig()
@@ -543,7 +543,7 @@ func TestSaveAutoPermissionEnabledKeepsOtherFields(t *testing.T) {
 // identical grants.
 func TestSaveAutoGrantRoundTrip(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	chdirTempForConfigTest(t)
 
 	// Seed an on-disk config carrying a non-default min_confidence + model.
@@ -615,7 +615,7 @@ func TestSaveEditorMode(t *testing.T) {
 
 	t.Run("valid modes save", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0755)
 
@@ -639,7 +639,7 @@ func TestSaveAndGetLastThinkingBudget(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -669,7 +669,7 @@ func TestExtraAllowedPathsLoadAndSave(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -711,7 +711,7 @@ func TestAdvisorConfigLoadPreservesDefaultEnabledWhenOmitted(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -737,7 +737,7 @@ func TestAdvisorConfigLoadAppliesExplicitEnabledFalse(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -760,7 +760,7 @@ func TestAutoPermissionConfigLoadAppliesExplicitFalseOverrides(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 
 	globalDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(globalDir, 0o755); err != nil {
@@ -795,7 +795,7 @@ func TestAdvisorCheckpointsRoundTrip(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -856,7 +856,7 @@ func TestSaveAdvisorModel_RequiresProviderPrefix(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -919,7 +919,7 @@ func TestASTPluginLoadSave(t *testing.T) {
 
 	t.Run("default is disabled", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		var cfg Config
 		if err := LoadOcodeConfig(&cfg); err != nil {
 			t.Fatalf("LoadOcodeConfig failed: %v", err)
@@ -931,7 +931,7 @@ func TestASTPluginLoadSave(t *testing.T) {
 
 	t.Run("load enabled from file", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0o755)
 		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"plugins":{"ast":true}}`), 0o644)
@@ -947,7 +947,7 @@ func TestASTPluginLoadSave(t *testing.T) {
 
 	t.Run("save round-trips", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0o755)
 
@@ -980,7 +980,7 @@ func TestMemoryEnabledLoadSave(t *testing.T) {
 
 	t.Run("default is enabled", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		var cfg Config
 		if err := LoadOcodeConfig(&cfg); err != nil {
 			t.Fatalf("LoadOcodeConfig failed: %v", err)
@@ -992,7 +992,7 @@ func TestMemoryEnabledLoadSave(t *testing.T) {
 
 	t.Run("load disabled from file", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0o755)
 		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"memory_enabled":false}`), 0o644)
@@ -1008,7 +1008,7 @@ func TestMemoryEnabledLoadSave(t *testing.T) {
 
 	t.Run("save round-trips", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0o755)
 
@@ -1041,7 +1041,7 @@ func TestDocPromptEnabledLoadSave(t *testing.T) {
 
 	t.Run("default is disabled", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		var cfg Config
 		if err := LoadOcodeConfig(&cfg); err != nil {
 			t.Fatalf("LoadOcodeConfig failed: %v", err)
@@ -1053,7 +1053,7 @@ func TestDocPromptEnabledLoadSave(t *testing.T) {
 
 	t.Run("load enabled from file", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0o755)
 		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"doc_prompt_enabled":true}`), 0o644)
@@ -1069,7 +1069,7 @@ func TestDocPromptEnabledLoadSave(t *testing.T) {
 
 	t.Run("save round-trips", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		configDir := filepath.Join(tmp, ".config", "opencode")
 		os.MkdirAll(configDir, 0o755)
 
@@ -1163,7 +1163,7 @@ func TestLoadOcodeConfigReturnsErrorForInvalidProjectSettings(t *testing.T) {
 	}
 
 	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
+	setHomeTree(t, homeDir)
 	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
 	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
 		t.Fatalf("create global config dir: %v", err)
@@ -1210,7 +1210,7 @@ func TestLoadOcodeConfigMergesProjectSettings(t *testing.T) {
 
 	// Isolate HOME so we don't load real global config
 	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
+	setHomeTree(t, homeDir)
 	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
 	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
 		t.Fatalf("create global config dir: %v", err)
@@ -1368,7 +1368,7 @@ func TestSaveExtraAllowedPath_SavesToProjectConfig(t *testing.T) {
 
 	// Isolate HOME so we don't load real global config
 	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
+	setHomeTree(t, homeDir)
 	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
 	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
 		t.Fatalf("create global config dir: %v", err)
@@ -1404,7 +1404,7 @@ func TestSaveExtraAllowedPath_SavesToProjectConfig(t *testing.T) {
 func TestSaveExtraAllowedPath_FallsBackToGlobal(t *testing.T) {
 	// Isolate in a temp dir with HOME isolated so no project is found
 	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
+	setHomeTree(t, homeDir)
 	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
 	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
 		t.Fatalf("create global config dir: %v", err)
@@ -1490,7 +1490,7 @@ func TestLoadFullOcodeConfig_DoesNotMergeProjectPaths(t *testing.T) {
 // restart.
 func TestSavePinnedSkillsRoundTrip(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	// Pin two skills.
 	want := []string{"brainstorming", "review-changes"}
@@ -1522,7 +1522,7 @@ func TestSavePinnedSkillsRoundTrip(t *testing.T) {
 
 func TestSaveLocalModelConfigRoundTrips(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	if err := SaveLocalModelConfig("local/bonsai-8b-1bit", true, 2, 50000); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
@@ -1542,7 +1542,7 @@ func TestSaveLocalModelConfigRoundTrips(t *testing.T) {
 
 func TestDeleteLocalModelConfigRemovesEntry(t *testing.T) {
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	if err := SaveLocalModelConfig("local/bonsai-8b-1bit", false, 1, 0); err != nil {
 		t.Fatalf("SaveLocalModelConfig: %v", err)
@@ -1564,7 +1564,7 @@ func TestTerminalScrollbackLinesConfig(t *testing.T) {
 
 	t.Run("defaults to 9999", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		var cfg Config
 		if err := LoadOcodeConfig(&cfg); err != nil {
 			t.Fatalf("LoadOcodeConfig failed: %v", err)
@@ -1586,7 +1586,7 @@ func TestTerminalScrollbackLinesConfig(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				tmp := t.TempDir()
-				t.Setenv("HOME", tmp)
+				setHomeTree(t, tmp)
 				path := filepath.Join(tmp, ".config", "opencode")
 				if err := os.MkdirAll(path, 0o755); err != nil {
 					t.Fatal(err)
@@ -1607,7 +1607,7 @@ func TestTerminalScrollbackLinesConfig(t *testing.T) {
 
 	t.Run("save round-trips", func(t *testing.T) {
 		tmp := t.TempDir()
-		t.Setenv("HOME", tmp)
+		setHomeTree(t, tmp)
 		if err := SaveTerminalScrollbackLines(12345); err != nil {
 			t.Fatalf("SaveTerminalScrollbackLines failed: %v", err)
 		}
@@ -1674,7 +1674,7 @@ func TestThinkingBudgetForLabel(t *testing.T) {
 
 func TestSaveAndGetLastThinkingBudgetRoundTrip(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	if err := SaveLastThinkingBudget(16000); err != nil {
 		t.Fatalf("SaveLastThinkingBudget failed: %v", err)
 	}
@@ -1693,7 +1693,7 @@ func TestSaveAndGetLastThinkingBudgetRoundTrip(t *testing.T) {
 func TestBrowserConfigLoadAppliesFields(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1720,7 +1720,7 @@ func TestBrowserConfigLoadAppliesFields(t *testing.T) {
 func TestBrowserConfigDefaultWhenAbsent(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1746,7 +1746,7 @@ func TestBrowserConfigDefaultWhenAbsent(t *testing.T) {
 func TestBrowserConfigScreencastQuality(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1782,7 +1782,7 @@ func TestBrowserConfigScreencastQuality(t *testing.T) {
 func TestBrowserConfigRejectsExtensions(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1804,7 +1804,7 @@ func TestBrowserConfigRejectsExtensions(t *testing.T) {
 func TestBrowserConfigRejectsNegativeIdleTimeout(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1822,7 +1822,7 @@ func TestBrowserConfigRejectsNegativeIdleTimeout(t *testing.T) {
 func TestBrowserConfigExplicitZeroKeepsDefault(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1849,7 +1849,7 @@ func TestBrowserConfigExplicitZeroKeepsDefault(t *testing.T) {
 func TestInvalidBackendURLPreservesRawOnLoadThenSave(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1896,7 +1896,7 @@ func TestInvalidBackendURLPreservesRawOnLoadThenSave(t *testing.T) {
 func TestInvalidSyncURLPreservesRawOnLoadThenSave(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1942,7 +1942,7 @@ func TestInvalidSyncURLPreservesRawOnLoadThenSave(t *testing.T) {
 func TestValidURLWinsOverPreservedRaw(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2031,7 +2031,7 @@ func TestNormalizeBackendURLHubReturnsSentinel(t *testing.T) {
 func TestValidBackendURLNormalizesAndPersists(t *testing.T) {
 	chdirTempForConfigTest(t)
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	setHomeTree(t, tmp)
 	configDir := filepath.Join(tmp, ".config", "opencode")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)

@@ -14,8 +14,8 @@ func TestFormatToken(t *testing.T) {
 
 func TestTokenPattern(t *testing.T) {
 	tests := []struct {
-		name     string
-		text     string
+		name        string
+		text        string
 		shouldMatch bool
 	}{
 		{"valid token", "[[OCSEC:a3f9c2:1]]", true},

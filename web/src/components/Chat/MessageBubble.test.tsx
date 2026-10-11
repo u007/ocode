@@ -1,7 +1,7 @@
 import { useState, type ReactElement } from "react";
 import { render as rtlRender, screen, act, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import MessageBubble from "./MessageBubble";
+import MessageBubble, { OVERSIZED_MESSAGE_CHARS } from "./MessageBubble";
 import type { Message } from "../../api/types";
 import { ChatDisplayTestProvider } from "./chatDisplayTestUtils";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
@@ -194,5 +194,30 @@ describe("MessageBubble deferred restore", () => {
     } finally {
       window.removeEventListener(RESTORE_EVENT, listener);
     }
+  });
+});
+
+describe("oversized user message rendering", () => {
+  it("bounds the default render and reveals the full body on demand", () => {
+    const huge = "A".repeat(OVERSIZED_MESSAGE_CHARS + 5000);
+    render(<MessageBubble message={{ role: "user", content: huge }} />);
+
+    // Default render is bounded — the whole string is NOT laid out.
+    expect(document.querySelector("pre")!.textContent!.length).toBe(OVERSIZED_MESSAGE_CHARS);
+
+    const toggle = screen.getByTestId("expand-oversized-message");
+    expect(toggle.textContent).toMatch(/Show full message/);
+    fireEvent.click(toggle);
+    expect(document.querySelector("pre")!.textContent!.length).toBe(huge.length);
+    expect(screen.getByTestId("expand-oversized-message").textContent).toBe("Show less");
+
+    fireEvent.click(screen.getByTestId("expand-oversized-message"));
+    expect(document.querySelector("pre")!.textContent!.length).toBe(OVERSIZED_MESSAGE_CHARS);
+  });
+
+  it("renders a normal message in full with no expander", () => {
+    render(<MessageBubble message={{ role: "user", content: "short message" }} />);
+    expect(screen.queryByTestId("expand-oversized-message")).toBeNull();
+    expect(document.querySelector("pre")!.textContent).toBe("short message");
   });
 });

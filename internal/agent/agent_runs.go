@@ -819,9 +819,36 @@ func (r *AgentRunRegistry) CancelOwned(taskID, dispatcher string) error {
 	return nil
 }
 
-// CancelAll cancels every running subagent and marks it cancelled immediately.
-// Shared process teardown is owned by the session supervisor.
+// CancelAll cancels every running subagent and marks it cancelled immediately,
+// recursing into the registries those sub-agents own. Shared process teardown is
+// owned by the session supervisor.
+//
+// The recursion is required, not an optimisation. Each dispatched sub-agent is a
+// full *Agent with its OWN AgentRunRegistry, and every surface renders those
+// nested runs verbatim (server buildRunDTO -> dto.Children, TUI
+// agentRunChildren -> run.Sub.Runs().Snapshot(), web AgentPreview counts
+// status=="running"). A nested run that CancelAll never reaches keeps
+// Status==RunRunning forever, so pressing Stop leaves a child task displayed as
+// still running even though its parent is cancelled.
+//
+// run.Cancel only closes the sub-agent's stop channel; the child's own children
+// are separate dispatch goroutines holding their own slots, so they are not
+// reached by that either.
+//
+// visited makes this safe on a run graph that is not a tree. A run's Sub is a
+// live *Agent pointer, so a registry cycle (registry -> agent -> registry ->
+// agent -> …) is representable; without the guard this would spin forever. The
+// guard is keyed on the registry, not the run, so one walk covers a whole level.
 func (r *AgentRunRegistry) CancelAll() {
+	r.cancelAll(make(map[*AgentRunRegistry]bool))
+}
+
+func (r *AgentRunRegistry) cancelAll(visited map[*AgentRunRegistry]bool) {
+	if r == nil || visited[r] {
+		return
+	}
+	visited[r] = true
+
 	r.mu.Lock()
 	runs := make([]*AgentRun, 0, len(r.runs))
 	for _, run := range r.runs {
@@ -837,6 +864,15 @@ func (r *AgentRunRegistry) CancelAll() {
 		}
 		run.tryFinishCancelled()
 		run.forceReleaseSlot()
+	}
+	// Descend after releasing r.mu: a child's walk takes its own registry lock,
+	// and holding two at once is an avoidable lock-ordering hazard. Collect the
+	// child registries first so no lock is held across the recursion.
+	for _, run := range runs {
+		if run.Sub == nil {
+			continue
+		}
+		run.Sub.Runs().cancelAll(visited)
 	}
 }
 

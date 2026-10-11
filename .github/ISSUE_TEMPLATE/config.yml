@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/u007/ocode/blob/main/.github/SECURITY.md
+    about: Report privately via SECURITY.md — never open a public issue.
+  - name: Question or usage help
+    url: https://github.com/u007/ocode/discussions
+    about: Ask in Discussions so the answer is searchable for the next person.

@@ -31,7 +31,7 @@ func (c *sequenceUsageClient) GetModel() string    { return "mock-model" }
 // a later response that reports zero.
 func TestLastInputTokensRecordsProviderUsage(t *testing.T) {
 	c := &sequenceUsageClient{first: 1234}
-	ag := NewAgent(c, nil, nil, nil)
+	ag := newTestAgent(c, nil, nil, nil)
 
 	if got := ag.LastInputTokens(); got != 0 {
 		t.Fatalf("before any call LastInputTokens = %d, want 0", got)

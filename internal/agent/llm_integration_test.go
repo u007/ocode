@@ -1,3 +1,5 @@
+//go:build integration
+
 package agent
 
 import (
@@ -145,11 +147,4 @@ func TestReadToolCall_MultipleModels(t *testing.T) {
 			TestReadToolCall_Integration(t)
 		})
 	}
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

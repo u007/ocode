@@ -15,7 +15,7 @@ import (
 // completion status map is populated correctly.
 func TestGroupTeardownAndCompletion(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 
 	// Build a tracker the group bus populates. This is the
@@ -60,7 +60,7 @@ func TestGroupTeardownAndCompletion(t *testing.T) {
 // Done() signal — this guard asserts the drain.
 func TestGroupTeardown_FlushesBus(t *testing.T) {
 	factory := &recordingBusFactory{}
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 	a.SetNoteBusFactory(factory.New)
 	bus, _ := a.maybeBuildGroupBusForTest(tcsTwoQualifying(), []int{0, 1})
 	if bus == nil {

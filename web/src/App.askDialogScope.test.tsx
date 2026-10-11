@@ -2,13 +2,18 @@
 // permission/question ask belongs to its chat session, so its dialog may only
 // mount while that session's Chat sub-tab is actually on screen. Anywhere else
 // (another top-level view, the terminal half, a non-chat sub-tab) it must stay
-// unmounted — otherwise a full-screen Radix modal blocks the whole app for a
-// session the user is not looking at.
+// unmounted — off-surface the chat panel is `display:none`, so a confined ask
+// would render invisibly with no signal at all.
+//
+// The dialog stubs portal into the `container` they are handed, so this file
+// covers the gate AND the containment wiring (the ask lands in the chat
+// surface, not on the viewport).
 //
 // Heavy children are stubbed; the real providers (Chat/Project/Terminal) and
 // the real HomeApp view/sub-tab wiring stay live, so the gate under test is
 // genuine. `useChat` is mocked to supply a constant pending ask.
 import { act, render, screen, waitFor } from "@testing-library/react";
+import { createPortal } from "react-dom";
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -99,11 +104,18 @@ vi.mock("./hooks/useChat", () => ({
   }),
 }));
 
+// The stubs portal into the `container` they are HANDED, so these suites also
+// prove the containment wiring and not just the gate: if App.tsx passed `null`
+// or the wrong element, the marker would not appear inside the chat surface.
+// (The real dialogs do the same portal; PermissionDialog/QuestionDialog suites
+// cover that side.)
 vi.mock("./components/Chat/PermissionDialog", () => ({
-  default: () => <div data-testid="permission-dialog" />,
+  default: ({ container }: { container: HTMLElement | null }) =>
+    container ? createPortal(<div data-testid="permission-dialog" />, container) : null,
 }));
 vi.mock("./components/Chat/QuestionDialog", () => ({
-  default: () => <div data-testid="question-dialog" />,
+  default: ({ container }: { container: HTMLElement | null }) =>
+    container ? createPortal(<div data-testid="question-dialog" />, container) : null,
 }));
 
 // Per-sub-tab markers: their presence proves the tab list restored AND the
@@ -131,11 +143,19 @@ vi.mock("./components/Assets/AssetsPanel", () => ({ default: () => null }));
 vi.mock("./components/Cron/CronPanel", () => ({ default: () => null }));
 vi.mock("./components/Preview/PreviewHost", () => ({ default: () => null }));
 vi.mock("./components/Preview/PreviewTabPage", () => ({ default: () => null }));
-vi.mock("./components/Chat/RemoteVersionBanner", () => ({ default: () => null }));
+// Renders a marker so the containment suite can prove this interactive banner
+// stays clickable — i.e. OUTSIDE the ask's confined surface.
+vi.mock("./components/Chat/RemoteVersionBanner", () => ({
+  default: () => <div data-testid="version-banner" />,
+}));
 vi.mock("./components/Settings/SettingsPanel", () => ({ default: () => null }));
 vi.mock("./components/Layout/TopTabs", () => ({ default: () => null }));
 vi.mock("./components/Layout/ProjectSidebar", () => ({ default: () => null }));
-vi.mock("./components/Layout/SessionSubTabs", () => ({ default: () => null }));
+// Renders a marker (not null) so the containment suite can prove the sub-tab
+// bar sits OUTSIDE the confined chat surface.
+vi.mock("./components/Layout/SessionSubTabs", () => ({
+  default: () => <div data-testid="session-sub-tabs" />,
+}));
 vi.mock("./components/Layout/SessionTabSync", () => ({ default: () => null }));
 vi.mock("./components/Layout/CoworkSidebar", () => ({ default: () => null }));
 vi.mock("./components/Layout/SessionDialog", () => ({ default: () => null }));
@@ -190,6 +210,58 @@ beforeEach(() => {
   appApi.listGroups.mockReset().mockResolvedValue([]);
   appApi.getSpending.mockReset().mockResolvedValue({ spending_usd: 0 });
   appApi.getTabs.mockReset().mockResolvedValue(sessionTabs("chat"));
+});
+
+describe("ask dialogs are confined to the active session's chat surface", () => {
+  /**
+   * The element the asks are confined to. Located by its test id rather than by
+   * DOM shape: the surface is a nested flex column, and guessing at classes
+   * broke the moment the banner moved out of it.
+   */
+  const chatSurface = (): HTMLElement => screen.getByTestId("chat-ask-surface");
+
+  it("mounts both asks INSIDE the chat tab wrapper, not on the viewport", async () => {
+    window.localStorage.setItem("ocode.ui.view-state.v1", viewState("sessions", "chat"));
+    renderApp();
+
+    await screen.findByTestId("permission-dialog");
+    await screen.findByTestId("question-dialog");
+
+    const surface = chatSurface();
+    expect(surface.contains(screen.getByTestId("permission-dialog"))).toBe(true);
+    expect(surface.contains(screen.getByTestId("question-dialog"))).toBe(true);
+    // The portal target IS the surface — not <body>, which is what a
+    // viewport-level dialog would have used.
+    expect(screen.getByTestId("permission-dialog").parentElement).toBe(surface);
+    expect(document.body.contains(surface)).toBe(true);
+  });
+
+  it("keeps the session's sub-tab bar OUTSIDE the confined surface", async () => {
+    // SessionSubTabs renders ABOVE the tab map, so the user can still leave the
+    // ask (switch sub-tab / session) instead of being walled in.
+    window.localStorage.setItem("ocode.ui.view-state.v1", viewState("sessions", "chat"));
+    renderApp();
+
+    await screen.findByTestId("permission-dialog");
+    const surface = chatSurface();
+    const subTabs = screen.getByTestId("session-sub-tabs");
+    expect(surface.contains(subTabs)).toBe(false);
+    expect(document.body.contains(subTabs)).toBe(true);
+  });
+
+  it("keeps the interactive version-mismatch banner OUTSIDE the confined surface", async () => {
+    // The banner has an expand toggle and an Update action, so covering it would
+    // make the one piece of session chrome a pending ask can act on unreachable.
+    window.localStorage.setItem("ocode.ui.view-state.v1", viewState("sessions", "chat"));
+    renderApp();
+
+    await screen.findByTestId("permission-dialog");
+    const surface = chatSurface();
+    const banner = screen.getByTestId("version-banner");
+    expect(surface.contains(banner)).toBe(false);
+    // It is a SIBLING of the surface, inside the same tab wrapper.
+    expect(banner.parentElement).toBe(surface.parentElement);
+  });
 });
 
 describe("session-scoped ask dialogs", () => {

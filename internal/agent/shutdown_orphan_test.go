@@ -37,7 +37,7 @@ func (b *blockingTool) Execute(_ json.RawMessage) (string, error) {
 // retired so the straggler's late write cannot re-seed the global registry.
 func TestShutdownBoundsOrphanRecoveryWait(t *testing.T) {
 	bt := &blockingTool{entered: make(chan struct{}), release: make(chan struct{})}
-	a := NewAgent(&MockClient{}, []tool.Tool{bt}, nil, nil)
+	a := newTestAgent(&MockClient{}, []tool.Tool{bt}, nil, nil)
 	a.permissions = nil
 
 	tc := ToolCall{ID: "orphan-1", Type: "function"}
@@ -81,7 +81,7 @@ func TestShutdownBoundsOrphanRecoveryWait(t *testing.T) {
 // TestShutdownFastWhenNoOrphanRecovery pins the no-straggler path: with
 // nothing tracked, Shutdown must not pay the bound at all.
 func TestShutdownFastWhenNoOrphanRecovery(t *testing.T) {
-	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a := newTestAgent(&MockClient{}, nil, nil, nil)
 
 	start := time.Now()
 	a.Shutdown()

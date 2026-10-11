@@ -193,7 +193,7 @@ func TestPermissionPrefixBeatsSafeCommand(t *testing.T) {
 // command auto-allows on the next Decide — without auto-allowing force-push or
 // other harmful git subcommands.
 func TestGitAlwaysAllowPersistsAtSubcommandGranularity(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	pm := NewPermissionManager()
 	pm.SetMode(PermissionModeNormal)
 
@@ -377,7 +377,7 @@ func TestAgentSpecToolFiltering(t *testing.T) {
 		},
 	}
 
-	a := NewAgent(mock, nil, nil, nil)
+	a := newTestAgent(mock, nil, nil, nil)
 	a.SetSpec(&AgentSpec{
 		Name:  "debug",
 		Tools: []string{"read", "bash", "grep"},
@@ -409,7 +409,7 @@ func TestAgentPermissions(t *testing.T) {
 		},
 	}
 
-	a := NewAgent(mock, nil, nil, nil)
+	a := newTestAgent(mock, nil, nil, nil)
 	if a.Permissions() == nil {
 		t.Fatal("expected permissions manager to be initialized")
 	}
@@ -428,7 +428,7 @@ func TestAgentSpec(t *testing.T) {
 		},
 	}
 
-	a := NewAgent(mock, nil, nil, nil)
+	a := newTestAgent(mock, nil, nil, nil)
 	if a.Spec() != nil {
 		t.Error("expected nil spec initially")
 	}

@@ -91,7 +91,7 @@ func findDef(defs []AgentDefinition, name string) *AgentDefinition {
 // that a disk copy overrides it (bundled is prepended as the lowest-precedence
 // source).
 func TestBundledPluginAgentLoadsAndDiskWins(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 
 	const name = "embeddedfallback"
 

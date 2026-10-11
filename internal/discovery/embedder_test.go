@@ -24,8 +24,8 @@ func TestFakeEmbedderDiscriminates(t *testing.T) {
 	fe := FakeEmbedder{Dimension: 128}
 	v, _ := fe.Embed(context.Background(),
 		[]string{"send email to the team", "send email", "compile rust binary"}, Passage)
-	near := Cosine(v[0], v[1])  // related
-	far := Cosine(v[0], v[2])   // unrelated
+	near := Cosine(v[0], v[1]) // related
+	far := Cosine(v[0], v[2])  // unrelated
 	if near <= far {
 		t.Fatalf("related texts must score higher: near=%.3f far=%.3f", near, far)
 	}

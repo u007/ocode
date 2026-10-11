@@ -59,7 +59,7 @@ on-screen toast). Helpers in `internal/tui/git_model.go`:
   `statusMsg` directly (`git_model.go:660`).
 - `setGitStatus(text)` — records terminal state; errors are sticky + raise an OS notification,
   successes schedule the timeout (`git_model.go:690`).
-- `gitOKDone(text)` / `gitErrDone(text)` — set status then `cmdRefresh()` (`git_model.go:703-711`).
+- `gitOKDone(text)` / `gitErrDone(text)` — set status then `cmdRefresh()` (`git_model.go:731-739`).
 - `gitStatusTimeout()` — 5s → `gitStatusTimeoutMsg{seq}` (`git_model.go:674`).
 - `statusSeq` field — a stale timeout from an earlier action cannot wipe a newer message
   (`git_model.go:136-139`, checked at `~:869`).

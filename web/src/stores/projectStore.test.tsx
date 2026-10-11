@@ -1091,38 +1091,56 @@ describe("projectStore keeps one tab per session across projects", () => {
     expect(result.current.state.tabsByProject["/proj-b"].map((t) => t.id)).toEqual(["sess-y"]);
   });
 
-  it("RESTORE_TABS re-points an active tab whose duplicate copy was dropped", async () => {
+  // The dedupe pass runs AFTER the active ids are resolved, so a project whose
+  // active tab was the one dropped was left pointing at a tab that no longer
+  // exists anywhere it can reach. `mergeExternalTabs` already re-points after
+  // deduping; RESTORE_TABS has to agree, or the two paths disagree about which
+  // tab the user is looking at.
+  it("RESTORE_TABS re-points an active id whose tab was dropped as a duplicate", async () => {
     const { result } = setup();
-    // Let the provider's own initial restore settle first: it dispatches a
-    // RESTORE_TABS of its own whose merge branch would otherwise repair the
-    // active ids behind this test's back and hide the reducer's behaviour.
-    await act(async () => {});
+    // Wait for the provider's OWN restore to land first. It dispatches
+    // RESTORE_TABS asynchronously on mount, and a late second pass happens to
+    // re-point the stale id — which would make this test pass for the wrong
+    // reason (the reducer output is what is under test, and in production this
+    // dispatch IS the only pass).
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
     await act(async () => {
       result.current.dispatch({
         type: "RESTORE_TABS",
         tabsByProject: {
-          "/proj-a": [
-            { id: "sess-w", projectPath: "/proj-a", title: "w", activeSubTab: "chat" },
-            { id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" },
-          ],
+          "/proj-a": [{ id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" }],
           "/proj-b": [
             { id: "sess-x", projectPath: "/proj-b", title: "x", activeSubTab: "chat" },
             { id: "sess-y", projectPath: "/proj-b", title: "y", activeSubTab: "chat" },
           ],
-          // Only holds the duplicate, so dropping it empties the project.
-          "/proj-c": [{ id: "sess-x", projectPath: "/proj-c", title: "x", activeSubTab: "chat" }],
         },
-        activeTabByProject: { "/proj-a": "sess-w", "/proj-b": "sess-x", "/proj-c": "sess-x" },
+        activeTabByProject: { "/proj-a": "sess-x", "/proj-b": "sess-x" },
       });
     });
     await act(async () => {});
-    const { tabsByProject, activeTabByProject } = result.current.state;
-    // sess-x stays under /proj-a (first path wins).
-    expect(tabsByProject["/proj-b"].map((t) => t.id)).toEqual(["sess-y"]);
-    expect(tabsByProject["/proj-c"]).toBeUndefined();
-    // Every remaining active id names a tab that still exists.
-    expect(activeTabByProject["/proj-a"]).toBe("sess-w");
-    expect(activeTabByProject["/proj-b"]).toBe("sess-y");
-    expect(activeTabByProject["/proj-c"]).toBeUndefined();
+    // /proj-b lost sess-x to /proj-a, so its active id must move to a tab that
+    // still exists — not stay on the dropped one.
+    expect(result.current.state.activeTabByProject["/proj-b"]).toBe("sess-y");
+    expect(result.current.state.activeTabByProject["/proj-a"]).toBe("sess-x");
+  });
+
+  it("RESTORE_TABS forgets the active id of a project left with no tabs", async () => {
+    const { result } = setup();
+    await waitFor(() => expect(result.current.state.tabsRestored).toBe(true));
+    await act(async () => {
+      result.current.dispatch({
+        type: "RESTORE_TABS",
+        tabsByProject: {
+          "/proj-a": [{ id: "sess-x", projectPath: "/proj-a", title: "x", activeSubTab: "chat" }],
+          "/proj-b": [{ id: "sess-x", projectPath: "/proj-b", title: "x", activeSubTab: "chat" }],
+        },
+        activeTabByProject: { "/proj-a": "sess-x", "/proj-b": "sess-x" },
+      });
+    });
+    await act(async () => {});
+    // /proj-b's only tab was the duplicate, so the project is gone entirely and
+    // must not keep an active id.
+    expect(result.current.state.tabsByProject["/proj-b"]).toBeUndefined();
+    expect(result.current.state.activeTabByProject["/proj-b"]).toBeUndefined();
   });
 });

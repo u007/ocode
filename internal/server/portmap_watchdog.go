@@ -306,8 +306,7 @@ func (h *Handler) monitorPortMaps(entry *portMapEntry) {
 			entry.policy.noteHealthy(m.RemotePort)
 			continue
 		}
-		pm := remote.ProjectPortMap{RemotePort: m.RemotePort, LocalPort: m.LocalPort, Enabled: true}
-		attempted, err := entry.policy.tryStart(pm)
+		attempted, err := entry.policy.tryStart(m.Runtime())
 		if !attempted {
 			// Backing off, or already given up — the panel shows the row as
 			// not-live either way, so there is nothing to report.

@@ -9,7 +9,13 @@ stack: react
 source_scorecard: ../scores/claude-opus-4-8.md
 threshold: 0.75
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
-illustrative: true   # teaching placeholder, NOT a real eval — never embedded/shipped
+# `illustrative: true` was REMOVED here on 2026-10-02. The flag said "teaching
+# placeholder, NOT a real eval", but a real closed-book eval exists and names this very
+# file as its expected output: ../scores/claude-opus-4-8.md, 84% stack score with
+# rsc 0.58 / suspense 0.55 / refs 0.67 below the 0.75 threshold. The flag dated from
+# before that eval existed, and while it stood, sync-derived-skills.py refused to ship
+# the skill — so claude-opus-4-8 ran with zero React corrections on a stack where it
+# has three documented blind spots. Confirmed by audit-derived-skills.py.
 ---
 # React tuning — claude-opus-4-8
 

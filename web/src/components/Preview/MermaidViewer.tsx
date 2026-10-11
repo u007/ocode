@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import mermaid from "mermaid";
 import { dispatchPreviewContext } from "../../lib/previewKind";
+import type { EditorAppearance } from "../../lib/editorAppearance";
 
+// Default init (dark) so a viewer that never receives an `appearance` prop
+// renders exactly as before. The render effect re-initializes with the resolved
+// theme before each render, since mermaid's theme is a global, not a render arg.
 mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "dark" });
 
 /**
@@ -18,12 +22,16 @@ export default function MermaidViewer({
   projectRoot,
   projectHost,
   onOpenFile,
+  appearance,
 }: {
   path: string;
   code: string;
   projectRoot?: string;
   projectHost?: string;
   onOpenFile: (path: string) => void;
+  /** Light/dark override forwarded from PreviewSurface. `"light"` selects
+   *  mermaid's built-in light theme; unset keeps the dark default. */
+  appearance?: EditorAppearance;
 }) {
   const [svg, setSvg] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -38,6 +46,10 @@ export default function MermaidViewer({
     setError(null);
     setSvg("");
     setActiveNode(null);
+    // mermaid's theme is a global set by `initialize`, not a render argument,
+    // so it must be (re)applied immediately before each render — otherwise the
+    // diagram keeps the previous appearance after a toggle.
+    mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: appearance === "light" ? "default" : "dark" });
     mermaid
       .render(renderId, code)
       .then(({ svg }) => {
@@ -49,7 +61,7 @@ export default function MermaidViewer({
     return () => {
       cancelled = true;
     };
-  }, [code, renderId]);
+  }, [code, renderId, appearance]);
 
   // Node clicks: mermaid emits g.node (flowcharts) / g.node* groups with an
   // id; click handlers with hrefs render as <a> inside the node.

@@ -80,6 +80,13 @@ describe("buildTerminalOptions", () => {
     expect(opts.smoothScrollDuration).toBe(0);
   });
 
+  it("forces Option+drag selection on mac (mouse-tracking programs swallow plain drags)", () => {
+    // Trade-off documented in terminalOptions.ts: xterm's shouldColumnSelect
+    // is `altKey && !(isMac && macOptionClickForcesSelection)`, so Option+drag
+    // column selection is unavailable on mac.
+    expect(buildTerminalOptions(PROD_OPTIONS).macOptionClickForcesSelection).toBe(true);
+  });
+
   it("constructs at the saved buffer geometry and falls back to defaults otherwise", () => {
     const withGeom = buildTerminalOptions({ ...PROD_OPTIONS, savedBuffer: { cols: 120, rows: 40 } });
     expect(withGeom.cols).toBe(120);

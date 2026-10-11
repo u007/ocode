@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type ConnectProvider } from "../../api/client";
+import { api, type ConnectMethod, type ConnectProvider } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import ConfirmDialog from "../common/ConfirmDialog";
+import ConnectFlowPanel from "./ConnectFlowPanel";
 
 /**
  * ConnectorsForm — Settings → Connectors, the web/desktop equivalent of the
@@ -18,8 +19,10 @@ import ConfirmDialog from "../common/ConfirmDialog";
  *    Wails/WKWebView desktop webview, which makes a guarded action permanently
  *    unreachable there while looking fine in a browser.
  *
- * Scope: status + API keys. OAuth flows are Phase 2 and arrive as the flow
- * panel below, driven by the same `api.startConnectFlow` endpoints.
+ * Scope: status, API keys, and OAuth. An OAuth method renders
+ * `ConnectFlowPanel` in place of the key form — the two are alternatives, never
+ * stacked, because a provider offers either way in and showing both at once
+ * reads as "fill in both".
  */
 /**
  * `host` is OMITTED by SettingsPanel on purpose: settings are a global surface
@@ -28,13 +31,44 @@ import ConfirmDialog from "../common/ConfirmDialog";
  * project-scoped surface will need it, and because credentials on a remote
  * (SSH/WSL) host are a different store entirely.
  */
+/**
+ * The methods worth choosing between in an expanded row.
+ *
+ * `remove` is excluded on purpose: it is not a way to CONNECT, and the row
+ * already carries a confirm-gated Remove button. Offering it again behind a
+ * chooser labelled "sign-in method" would put a destructive action under a label
+ * that promises the opposite, one click away from the API-key field.
+ */
+function connectMethodChoices(provider: ConnectProvider): ConnectMethod[] {
+  return provider.methods.filter((m) => m.kind !== "remove");
+}
+
+/**
+ * The method an expanded row shows before the user picks one.
+ *
+ * The API-key form wins when the provider offers one, so "Connect" keeps opening
+ * the thing it opened before OAuth was reachable here. Only a provider with no
+ * key method (or none at all beyond remove) starts on a flow.
+ */
+function defaultConnectMethod(choices: ConnectMethod[]): ConnectMethod | undefined {
+  return choices.find((m) => m.kind === "apikey") ?? choices[0];
+}
+
 export default function ConnectorsForm({ host }: { host?: string }) {
   const [providers, setProviders] = useState<ConnectProvider[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
+  // Which connect method the expanded row is showing. Null means "the default
+  // for this provider" — see connectMethodChoices — so the API-key form stays
+  // what "Connect" opens with.
+  const [openMethodId, setOpenMethodId] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
+  // Cloudflare's two extra prompts: the Workers account id, and the AI Gateway
+  // base URL. Only the matching provider renders and sends one of them.
+  const [accountId, setAccountId] = useState("");
+  const [gatewayBaseUrl, setGatewayBaseUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<ConnectProvider | null>(null);
@@ -73,7 +107,10 @@ export default function ConnectorsForm({ host }: { host?: string }) {
   const closeForm = () => {
     setOpenId(null);
     setApiKey("");
+    setAccountId("");
+    setGatewayBaseUrl("");
     setSaveError(null);
+    setOpenMethodId(null);
   };
 
   const save = async (providerId: string) => {
@@ -82,10 +119,15 @@ export default function ConnectorsForm({ host }: { host?: string }) {
       setSaveError("Enter an API key first.");
       return;
     }
+    // The server rejects a missing extra field with a message that names it,
+    // so send what the user typed (possibly empty) and surface that error.
+    const payload: { apiKey: string; accountId?: string; baseUrl?: string } = { apiKey: key };
+    if (providerId === "cloudflare-workers") payload.accountId = accountId.trim();
+    if (providerId === "cloudflare-gateway") payload.baseUrl = gatewayBaseUrl.trim();
     setSaving(true);
     setSaveError(null);
     try {
-      await api.setConnectCredential(providerId, { apiKey: key }, host);
+      await api.setConnectCredential(providerId, payload, host);
       closeForm();
       // The mask is server-derived, so re-list rather than patching locally:
       // an optimistic mask would be one the server never produced.
@@ -144,8 +186,11 @@ export default function ConnectorsForm({ host }: { host?: string }) {
         <div className="text-sm text-muted-foreground">Loading providers…</div>
       ) : (
         <div className="space-y-2">
-          {visible.map((p) => (
-            <div key={p.id} data-testid={`connector-${p.id}`} className="rounded border border-border p-3">
+          {visible.map((p) => {
+            const choices = connectMethodChoices(p);
+            const selected = choices.find((m) => m.id === openMethodId) ?? defaultConnectMethod(choices);
+            return (
+              <div key={p.id} data-testid={`connector-${p.id}`} className="rounded border border-border p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-foreground">{p.label}</div>
@@ -181,6 +226,8 @@ export default function ConnectorsForm({ host }: { host?: string }) {
                     onClick={() => {
                       setOpenId(openId === p.id ? null : p.id);
                       setApiKey("");
+                      setAccountId("");
+                      setGatewayBaseUrl("");
                       setSaveError(null);
                     }}
                   >
@@ -196,29 +243,99 @@ export default function ConnectorsForm({ host }: { host?: string }) {
               )}
 
               {openId === p.id && (
-                <div className="mt-3 space-y-2">
-                  <Input
-                    aria-label="API key"
-                    placeholder="API key"
-                    type="password"
-                    autoComplete="off"
-                    spellCheck={false}
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                  />
-                  {saveError && <div className="text-xs text-destructive">{saveError}</div>}
-                  <div className="flex gap-2">
-                    <Button size="sm" disabled={saving} onClick={() => void save(p.id)}>
-                      {saving ? "Saving…" : "Save"}
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={closeForm}>
-                      Cancel
-                    </Button>
-                  </div>
+                <div className="mt-3 space-y-3">
+                  {/* Only when there is a real choice: a single-method provider
+                      gets straight to the form, and a chooser with one option is
+                      a control that cannot be wrong and teaches nothing. */}
+                  {choices.length > 1 && (
+                    <div
+                      role="group"
+                      aria-label={`${p.label} sign-in method`}
+                      className="flex flex-wrap gap-2"
+                    >
+                      {choices.map((m) => (
+                        <Button
+                          key={m.id}
+                          size="sm"
+                          variant={selected?.id === m.id ? "default" : "outline"}
+                          aria-pressed={selected?.id === m.id}
+                          onClick={() => setOpenMethodId(m.id)}
+                        >
+                          {m.label}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+
+                  {selected?.kind === "apikey" && (
+                    <div className="space-y-2">
+                      <Input
+                        aria-label="API key"
+                        placeholder="API key"
+                        // Masked, like the TUI /connect dialog (textinput
+                        // EchoPassword in internal/tui/connect.go) and like every
+                        // other key field in Settings. A plain-text field leaves the
+                        // secret on screen, in screenshots and in screen-shares;
+                        // autoComplete is off so a password manager does not offer to
+                        // fill or persist it either.
+                        type="password"
+                        autoComplete="off"
+                        spellCheck={false}
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                      />
+                      {p.id === "cloudflare-workers" && (
+                        <Input
+                          aria-label="Cloudflare account ID"
+                          placeholder="Account ID"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={accountId}
+                          onChange={(e) => setAccountId(e.target.value)}
+                        />
+                      )}
+                      {p.id === "cloudflare-gateway" && (
+                        <Input
+                          aria-label="AI Gateway base URL"
+                          placeholder="https://gateway.ai.cloudflare.com/v1/<account>/<gateway>"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={gatewayBaseUrl}
+                          onChange={(e) => setGatewayBaseUrl(e.target.value)}
+                        />
+                      )}
+                      {saveError && <div className="text-xs text-destructive">{saveError}</div>}
+                      <div className="flex gap-2">
+                        <Button size="sm" disabled={saving} onClick={() => void save(p.id)}>
+                          {saving ? "Saving…" : "Save"}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={closeForm}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* A flow method replaces the key form rather than sitting
+                      under it. `key` remounts the panel when the selection
+                      changes, so a finished flow's state cannot bleed into the
+                      next method's panel. onDone reloads the list: the credential
+                      now exists and only the server knows its new status and
+                      mask. */}
+                  {selected && selected.kind !== "apikey" && (
+                    <ConnectFlowPanel
+                      key={`${p.id}:${selected.id}`}
+                      provider={p}
+                      method={selected}
+                      host={host}
+                      onDone={() => void load()}
+                    />
+                  )}
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
           {visible.length === 0 && !loadError && (
             <div className="text-sm text-muted-foreground">No provider matches “{filter}”.</div>
           )}

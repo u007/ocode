@@ -208,7 +208,7 @@ func TestAgentStepPreservesTelemetry(t *testing.T) {
 			Spend: &spend,
 		},
 	}
-	a := NewAgent(mock, nil, nil, nil)
+	a := newTestAgent(mock, nil, nil, nil)
 
 	msgs, err := a.Step([]Message{{Role: "user", Content: "Hi"}})
 	if err != nil {

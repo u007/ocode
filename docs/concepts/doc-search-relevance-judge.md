@@ -7,32 +7,21 @@ tags:
   - knowledge
   - doc_search
   - architecture
-timestamp: 2026-09-28T16:16:36Z
+timestamp: 2026-10-04T12:33:27Z
 ---
----
-title: Doc Search Relevance Judge
-type: Concept
-description: TypeSafe/Jev relevance judge for doc_search results — filters out-of-scope knowledge docs before get_top body inlining.
-tags:
-  - typesafe
-  - knowledge
-  - doc_search
-  - architecture
----
-
 # Doc Search Relevance Judge
 
 ## Overview
 
-When the TypeSafe provider is connected, every `doc_search` call is filtered by a relevance judge that asks Jev (the `typesafe/jev-latest` model) whether each returned knowledge document is in scope for the query. Out-of-scope docs are hidden before `get_top` body inlining, so the caller only sees and reads documents the judge considers relevant. The judge is **fail-open**: on any error it falls back to showing all results.
+When a decision backend is connected, every `doc_search` call is filtered by a relevance judge that asks whether each returned knowledge document is in scope for the query. Out-of-scope docs are hidden before `get_top` body inlining, so the caller only sees and reads documents the judge considers relevant. The judge is **fail-open**: on any error it falls back to showing all results.
 
 The judge shares its lenient core and confidence floor with the [discovery relevance judge](concepts/discovery-typesafe-judge.md) through `judgeRelevanceQuestions` (`internal/agent/relevance_typesafe.go:57`).
 
 ## Activation
 
-There is no separate config flag. `Agent.docSearchJudge()` (`internal/agent/doc_search_typesafe.go:127`) returns the `DocSearchJudge` callback only when `discoveryJudgeClient()` yields a keyed `TypesafeClient`. A nil config, a non-TypeSafe factory result, or a keyless client all mean "no judge" and every doc_search result is shown as before.
+There is no separate config flag. `Agent.docSearchJudge()` (`internal/agent/doc_search_typesafe.go:127`) returns the `DocSearchJudge` callback only when `discoveryJudgeClient()` yields a keyed `Decider`. A nil config, a non-decision factory result, or a keyless client all mean "no judge" and every doc_search result is shown as before.
 
-`discoveryJudgeClient()` (`internal/agent/discovery_typesafe.go:41`) is the **shared connected check** for both the discovery and doc_search judges — same factory, model, caching, and resolution.
+**Since 2026-10-04, doc_search is independent of discovery.** Previously both judges called the same `discoveryJudgeClient()` and shared one client, so setting one model moved both. Now doc_search resolves through `resolveDecider(slotDocSearch)` and reads its own `doc_search.judge_model` config key (default `typesafe/jev-latest`). Setting `discovery.judge_model` no longer silently changes the doc_search judge.
 
 ## Injection seam
 
@@ -85,8 +74,8 @@ When all results are filtered out, a specific message is returned: `"Found N mat
 
 | Condition | Behaviour |
 |---|---|
-| Judge is nil (TypeSafe not connected) | Show all results — no filtering |
-| Transport or decode error from `Decide` | Show all results (judge returns `(docs, nil)` internally) |
+| Judge is nil (no decision backend connected) | Show all results — no filtering |
+| Transport or decode error from `DecideCtx` | Show all results (judge returns `(docs, nil)` internally) |
 | Candidate answer missing or not `type:"noul"` | That doc is kept (fail-open per candidate) |
 | Real below-threshold noul (Noul < 0.5) | Vetoes only that doc |
 
@@ -94,13 +83,13 @@ The judge can only ever **hide** results — it never makes doc_search return fe
 
 ## Side usage
 
-`judgeRelevanceQuestions` records the decide-call tokens as side usage via `RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, "typesafe/"+client.Model)`.
+`judgeRelevanceQuestions` records the decide-call tokens as side usage via `RecordSideUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0, 0, deciderLabel(client))`. The label is provider-qualified (e.g. `typesafe/jev-latest`), so the usage ledger attributes spend to the backend that actually answered.
 
 ## Debug lines
 
 Emitted by `judgeRelevanceQuestions` under kind `KNOWLEDGE` with tag `doc_search_typesafe`:
 
-- `doc_search_typesafe kept=<n> vetoed=<n> min=<threshold> model=<model>` — summary line after the judge call.
+- `doc_search_typesafe kept=<n> vetoed=<n> min=<threshold> model=<model>` — summary line after the judge call. The `model=` field is the provider-qualified label from `deciderLabel(client)`.
 - `doc_search_typesafe id=<id> noul=<score> verdict=keep|veto` — per-candidate verdict.
 
 ## Scope boundary
@@ -109,4 +98,4 @@ Filtering applies **only** to `doc_search`. The `doc_get` tool reads a single do
 
 ## See also
 
-- [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) — the discovery judge that shares the same lenient core, floor, and `discoveryJudgeClient` connected check.
+- [Discovery TypeSafe Relevance Judge](concepts/discovery-typesafe-judge.md) — the discovery judge that shares the same lenient core and confidence floor. Since 2026-10-04 it resolves its own `discovery.judge_model`, so the two judges no longer share one client.

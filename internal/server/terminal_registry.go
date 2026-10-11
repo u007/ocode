@@ -18,6 +18,12 @@ type terminalProcEntry struct {
 type terminalRegistry struct {
 	mu      sync.Mutex
 	entries map[string]terminalProcEntry
+	// gen counts every change to entries, so a cache keyed on it notices a
+	// terminal opened or closed without polling the map itself.
+	gen uint64
+	// pulseRows memoizes the Pulse terminal walk (pulseTerminalRows). It lives
+	// here, not on Handler, because it is keyed by gen.
+	pulseRows pulseRowsMemo
 }
 
 func newTerminalRegistry() *terminalRegistry {
@@ -31,6 +37,7 @@ func (r *terminalRegistry) register(id string, entry terminalProcEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.entries[id] = entry
+	r.gen++
 }
 
 func (r *terminalRegistry) unregister(id string) {
@@ -39,7 +46,18 @@ func (r *terminalRegistry) unregister(id string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.entries, id)
+	if _, ok := r.entries[id]; ok {
+		delete(r.entries, id)
+		r.gen++
+	}
+}
+
+// generation returns the change counter: it moves on every register and on
+// every unregister of a live terminal.
+func (r *terminalRegistry) generation() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gen
 }
 
 // snapshot returns a copy of the current id -> entry map, safe for the

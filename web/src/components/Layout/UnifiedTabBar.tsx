@@ -38,17 +38,14 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { CopyValueButton } from "../common/CopyValueButton";
-
-function truncateTitle(s: string, maxLen: number): string {
-  s = s.replace(/\n/g, " ").trim();
-  const runes = Array.from(s);
-  if (runes.length <= maxLen) return s;
-  return runes.slice(0, maxLen - 3).join("") + "...";
-}
+import { truncateTitle, MAX_TITLE_TOOLTIP_CHARS } from "../../lib/title";
 
 function deriveChatTabTitle(tab: { title: string; titleManual?: boolean }, slice: SessionSlice): string {
-  if (tab.titleManual) return tab.title;
-  if (tab.title && tab.title !== "New session") return tab.title;
+  // Always bound the label: a tab title can be mirrored from an oversized
+  // first user message (megabytes), and rendering it raw into the nowrap tab
+  // strip forces a full-string layout on every reflow.
+  if (tab.titleManual) return truncateTitle(tab.title);
+  if (tab.title && tab.title !== "New session") return truncateTitle(tab.title);
   const raw = slice.tuiStatus?.session_title?.trim() || "";
   if (raw) return truncateTitle(raw, 80);
   for (const m of slice.messages) {
@@ -58,7 +55,7 @@ function deriveChatTabTitle(tab: { title: string; titleManual?: boolean }, slice
     }
   }
   if (slice.messages.length === 0) return "New session";
-  return tab.title || "New session";
+  return truncateTitle(tab.title) || "New session";
 }
 
 type ChatTurnState = "idle" | "running" | "stalled";
@@ -114,6 +111,10 @@ interface TabPillProps {
   sortId: string;
   emoji: string;
   title: string;
+  /** Hover tooltip text. Defaults to `title`; chat tabs pass the (bounded)
+   *  un-clamped title so a longer, user-renamed label is still readable on
+   *  hover even though the visible label is clamped to fit. */
+  tooltipTitle?: string;
   isActive: boolean;
   isLoading?: boolean;
   hasPending?: boolean;
@@ -146,6 +147,7 @@ function TabPill({
   sortId,
   emoji,
   title,
+  tooltipTitle,
   isActive,
   isLoading,
   hasPending,
@@ -166,6 +168,7 @@ function TabPill({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: sortId });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
   const displayTitle = title || sortId;
+  const tooltip = tooltipTitle && tooltipTitle.length > displayTitle.length ? tooltipTitle : displayTitle;
 
   return (
     <div
@@ -257,7 +260,7 @@ function TabPill({
       ) : (
         <span
           className="min-w-0 flex-1 truncate whitespace-nowrap"
-          title={displayTitle}
+          title={tooltip}
           onDoubleClick={(e) => {
             e.stopPropagation();
             onStartRename();
@@ -948,6 +951,7 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
           sortId={key}
           emoji="💬"
           title={displayTitle}
+          tooltipTitle={truncateTitle(tab.title, MAX_TITLE_TOOLTIP_CHARS)}
           isActive={focusedKind === "chat" && activeChatId === id}
           isLoading={isLoadingChatTab(id, derived?.initialized ?? false)}
           hasPending={derived?.hasPending ?? false}

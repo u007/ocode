@@ -47,7 +47,7 @@ func TestEnsureUserBinPath(t *testing.T) {
 	}
 	sep := string(os.PathListSeparator)
 
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	t.Setenv("PATH", "/usr/bin"+sep+"/bin")
 
 	if !EnsureUserBinPath() {
@@ -80,7 +80,7 @@ func TestEnsureUserBinPathSkipsMissingAndExistingDirs(t *testing.T) {
 	if err := os.MkdirAll(localBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 
 	// ~/bin does not exist → only ~/.local/bin is added.
 	t.Setenv("PATH", "/usr/bin")

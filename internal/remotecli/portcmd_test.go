@@ -104,3 +104,32 @@ func TestHandleUnknownSubcommand(t *testing.T) {
 		t.Fatalf("Handle(/port frobnicate) = %q, want an unknown-subcommand message", out)
 	}
 }
+
+// The status line names a reverse entry's direction so it is never read as a
+// -L forward. Added straight to the store: the add path itself spawns ssh.
+func TestHandleStatusShowsReverseDirection(t *testing.T) {
+	hook, fm := newTestHook(t)
+	if err := hook.store.AddReversePortMap(hook.ref, 9222, 9222); err != nil {
+		t.Fatalf("AddReversePortMap: %v", err)
+	}
+	out, _ := hook.Handle(fm, "/port status")
+	if !strings.Contains(out, "remote:9222 <- localhost:9222 (reverse)") {
+		t.Fatalf("status = %q, want the reverse arrow and label", out)
+	}
+}
+
+// `-R` with no port is a usage error, reported before anything is saved.
+func TestHandleAddReverseWithoutPortShowsUsage(t *testing.T) {
+	hook, fm := newTestHook(t)
+	out, ok := hook.Handle(fm, "/port add -R")
+	if !ok || !strings.Contains(out, "usage: /port add [-R]") {
+		t.Fatalf("Handle(/port add -R) = (%q, %v), want usage", out, ok)
+	}
+	maps, err := hook.store.PortMaps(hook.ref)
+	if err != nil {
+		t.Fatalf("PortMaps: %v", err)
+	}
+	if len(maps) != 0 {
+		t.Fatalf("PortMaps = %+v, want none saved on a usage error", maps)
+	}
+}

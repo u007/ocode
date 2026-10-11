@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -21,6 +22,24 @@ const (
 // learns that the question went unanswered when the next turn runs. The turn
 // is NOT resumed on dismissal — the user's next message starts a fresh turn.
 const QuestionDismissedResult = "The user dismissed the question prompt without answering."
+
+// ToolCancelledResult is the tool result written for a tool call that the user
+// interrupted (Stop / Escape) before it produced a result of its own.
+//
+// It exists because an assistant tool_call with no matching tool message is an
+// ORPHAN: every surface renders it as still in flight (the web ToolBlock shows
+// a pulsing "running…" because resultContent is undefined), and
+// Agent.recoverOrphanedToolCalls RE-EXECUTES it on the next turn — so a tool
+// the user deliberately stopped silently ran again. Answering every call keeps
+// the transcript protocol-valid and the round terminal.
+//
+// Like QuestionDismissedResult it carries no sentinel prefix on purpose: a new
+// prefix would have to be threaded through every consumer that pattern-matches
+// tool content (web isSentinelToolContent hides PERMISSION_ASK/QUESTION_PROMPT,
+// tool.UnansweredAsk keys dialogs off them) and a mismatch in any one of them
+// would suppress the block or fake a dialog. Plain prose needs no such
+// coordination — any non-empty content already clears "pending".
+const ToolCancelledResult = "Cancelled by the user before this tool call finished. It did not complete; do not assume any result."
 
 type SkillTool struct{}
 
@@ -45,6 +64,13 @@ func (t SkillTool) Definition() map[string]interface{} {
 }
 
 func (t SkillTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+// ExecuteCtx resolves the skill against the session's project root carried
+// by WithWorkDir — not the process cwd, which is "/" for the desktop app — and
+// returns it with its base directory (skill.ForModel).
+func (t SkillTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Name string `json:"name"`
 	}
@@ -56,7 +82,7 @@ func (t SkillTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("invalid skill name %q", params.Name)
 	}
 
-	s, err := skill.LoadSkill(params.Name)
+	s, err := skill.LoadSkillForRoot(params.Name, workDirFromContext(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -64,7 +90,7 @@ func (t SkillTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("skill %s not found", params.Name)
 	}
 
-	return s.Content, nil
+	return s.ForModel(), nil
 }
 
 // SkillAliasTool registers "load_skill" as an alias for SkillTool. Models

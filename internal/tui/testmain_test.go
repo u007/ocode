@@ -7,6 +7,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/tailscale"
 )
 
 // TestMain isolates every global-config read/write for the whole tui test
@@ -50,6 +51,9 @@ func TestMain(m *testing.M) {
 	if p, err := config.ActiveOcodeConfigPath(); err == nil {
 		snapshot.SetGlobalBaseDir(filepath.Join(filepath.Dir(p), "snapshots"))
 	}
+
+	// Never let a test reach the real tailscale CLI (live node-wide serve config).
+	tailscale.CLIPath = func() string { return "" }
 
 	code := m.Run()
 

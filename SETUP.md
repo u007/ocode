@@ -12,7 +12,7 @@
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-org/ocode.git
+git clone https://github.com/u007/ocode.git
 cd ocode
 ```
 
@@ -34,6 +34,35 @@ Or build a static binary:
 go build -o ocode .
 ./ocode
 ```
+
+### Build variants
+
+| Command | Needs | Produces |
+|---------|-------|----------|
+| `go build -o ocode .` | Go only | CLI + TUI + headless + ACP. No web UI (the embedded `dist` is empty). |
+| `make build` | Go + Node/pnpm | Same, plus the real web UI in `web/dist`. |
+| `make install` | Go + Node/pnpm + network + out-of-tree HTR sources | Installed CLI **with** the HTR browser bundle and the models.dev snapshot (`-tags "htr models"`). |
+| `make desktop-app` | macOS + Xcode CLT + Node/pnpm + network + HTR sources | Signed-ready `bin/ocode.app` for the desktop shell. |
+
+Notes:
+
+- A plain `go build` works in a fresh clone with no extra setup — every embed
+  input it needs is either a committed placeholder or behind a build tag.
+- **Two optional bundles are gated behind build tags, and neither is committed.**
+  They are generated on demand, so a source build never needs them:
+  - `internal/browse/cdp/htr-assets.zip` — tag `htr`, built by
+    `make prepare-htr-assets` (set `HTRCLI_ROOT` / `HTR_EXTENSION_DIR`, or
+    provide `HTRCLI_BIN`). Without it the HTR browser feature reports itself
+    unavailable at runtime.
+  - `internal/agent/models-snapshot.json` — tag `models`, built by
+    `make models-snapshot` (fetches models.dev). Without it the model registry
+    resolves from `~/.config/opencode/models.json` and a live models.dev fetch,
+    which is the normal path once any embedded snapshot goes stale. The practical
+    loss is offline model metadata (context windows, pricing) for a user with no
+    cache and no network.
+- A tagged build without its input **fails loudly** rather than silently
+  producing a degraded binary. `make install` and the desktop targets pass
+  `-tags "htr models"` and depend on both generators.
 
 ## Configuration
 

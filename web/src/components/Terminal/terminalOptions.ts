@@ -48,6 +48,16 @@ export function buildTerminalOptions({
     scrollSensitivity: 3,
     fastScrollSensitivity: 5,
     smoothScrollDuration: 0,
+    // A program with mouse tracking on (claude code sends ?1000/?1006 for
+    // wheel scrolling) receives every plain left drag as mouse reports, so
+    // xterm never builds a selection from it. Shift+drag forces a selection
+    // on non-mac by default; on mac xterm's shouldForceSelection ONLY honours
+    // Option+drag, and only with this option on, so without it there is no
+    // way to select text under such a program at all. Same convention as
+    // iTerm2/Terminal. Trade-off (xterm's shouldColumnSelect): Option+drag is
+    // then always a line selection on mac, so rectangular column selection is
+    // unavailable there. Normal selection beats column selection.
+    macOptionClickForcesSelection: true,
     theme: { background: "#18181b", foreground: "#e4e4e7" },
     ...(savedBuffer?.cols && savedBuffer?.rows
       ? { cols: savedBuffer.cols, rows: savedBuffer.rows }

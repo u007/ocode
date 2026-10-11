@@ -38,7 +38,7 @@ const (
 // GetNodeForLocation asks Chrome for the deepest visible node at (x,y).
 func (t *Target) GetNodeForLocation(ctx context.Context, x, y int) (*NodeLocation, error) {
 	var res struct {
-		NodeId         int    `json:"nodeId"`
+		NodeId        int    `json:"nodeId"`
 		BackendNodeId int    `json:"backendNodeId,omitempty"`
 		FrameId       string `json:"frameId,omitempty"`
 	}
@@ -61,7 +61,7 @@ func (t *Target) GetNodeForLocation(ctx context.Context, x, y int) (*NodeLocatio
 		return nil, errors.New(ErrNoNode)
 	}
 	return &NodeLocation{
-		NodeId:         res.NodeId,
+		NodeId:        res.NodeId,
 		BackendNodeId: res.BackendNodeId,
 		FrameId:       res.FrameId,
 	}, nil

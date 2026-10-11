@@ -279,7 +279,15 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	as.messages = append(as.messages, resp...)
-	_ = h.saveSession(sessionID, "", as.messages, nil)
+	// Log a failed turn-end save. This path calls saveSession directly instead
+	// of persistTurnTranscript, so it gets none of that caller's
+	// ErrTranscriptConflict recovery; swallowing the error here made a real
+	// divergence invisible. HandleCompactSession swallowed its own save error
+	// the same way, which is how a compaction could report success while
+	// persisting nothing.
+	if err := h.saveSession(sessionID, "", as.messages, nil); err != nil {
+		log.Printf("serve: chat-stream turn-end save for %s: %v", sessionID, err)
+	}
 
 	// Headless-only: generate a title for an untitled session after its first
 	// turn (mirrors the TUI; no-op when an RC bridge is attached).

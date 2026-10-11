@@ -24,7 +24,7 @@ func TestMaybeCompactAsyncLogsDeclineReason(t *testing.T) {
 	cfg.Ocode.Compact.Enabled = true
 	cfg.Ocode.Compact.TokenThreshold = 0.85
 	cfg.Ocode.Compact.MinMessages = 1
-	a := NewAgent(fakeCompactClient{}, nil, cfg, nil)
+	a := newTestAgent(fakeCompactClient{}, nil, cfg, nil)
 
 	msgs := []Message{
 		{Role: "user", Content: "hi"},

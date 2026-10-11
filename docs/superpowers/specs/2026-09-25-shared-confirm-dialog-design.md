@@ -16,7 +16,7 @@ timestamp: 2026-09-25T12:20:45Z
 1. Project removal in the web/desktop sidebar had NO confirmation: `ProjectSidebar.tsx` called `removeProject` directly from every entry point (row context menu, row hover trash button, collapsed-rail menu). Fixed earlier the same day with a bespoke `RemoveProjectDialog` rendered from all three surface branches.
 2. `projectStore.removeProject` swallowed failures (`console.error`, never rethrows), so a rejected removal (404, remote host down) closed the confirm and told the user nothing. `renameProject` directly below it DOES rethrow — inconsistent contract.
 3. Four destructive actions still used native `window.confirm`, which SILENTLY RETURNS FALSE in the Wails/WKWebView desktop webview (the bug is already documented in code at `FileTree.tsx:692-694` and `GitPanel.tsx:194`): `CronPanel.tsx:148` (delete cron job), `Logs/LogPanel.tsx:237` (clear logs), `Settings/ProfilesManager.tsx:82` (delete profile) and `:103` (remove provider key).
-4. "Delete group" in the sidebar had no confirm, and it is a bulk change: `HandleDeleteGroup` (`internal/server/handler_projects.go:505`) ungroups EVERY project in the group before dropping the group.
+4. "Delete group" in the sidebar had no confirm, and it is a bulk change: `HandleDeleteGroup` (`internal/server/handler_projects.go:576`) ungroups EVERY project in the group before dropping the group.
 
 ## Decision
 One shared component, `web/src/components/common/ConfirmDialog.tsx` (placed in `components/common/`, not `ui/`, because it carries product copy). Contract:

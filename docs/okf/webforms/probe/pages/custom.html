@@ -1,0 +1,26 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Event registration</title>
+<style>body{font:16px sans-serif;max-width:520px;margin:2rem auto}.dd{position:relative;display:inline-block}.dd .btn{border:1px solid #888;padding:.4rem .8rem;cursor:pointer;min-width:12rem;display:inline-block}
+.dd ul{display:none;position:absolute;margin:0;padding:0;list-style:none;background:#fff;border:1px solid #888;z-index:5;min-width:12rem}.dd.open ul{display:block}.dd li{padding:.4rem .8rem;cursor:pointer}.dd li:hover{background:#def}
+.cal{display:none;border:1px solid #888;padding:.5rem;width:16rem}.cal.open{display:block}.cal button{width:2rem;margin:1px}.sw{width:3rem;height:1.5rem;border-radius:1rem;background:#bbb;display:inline-block;position:relative;cursor:pointer}.sw[aria-checked=true]{background:#2a7}.sw::after{content:'';position:absolute;top:2px;left:2px;width:1.1rem;height:1.1rem;border-radius:50%;background:#fff}.sw[aria-checked=true]::after{left:1.7rem}</style></head><body>
+<h1>Event registration</h1>
+<form method="post" action="/submit">
+<div>Country<br><div class="dd" id="country"><span class="btn" role="combobox" tabindex="0" aria-haspopup="listbox">Select a country</span>
+<ul role="listbox"><li role="option" data-v="US">United States</li><li role="option" data-v="CA">Canada</li><li role="option" data-v="MX">Mexico</li><li role="option" data-v="BR">Brazil</li></ul></div>
+<input type="hidden" name="country"></div>
+<div>Event date<br><input type="text" id="datebox" name="event_date" readonly placeholder="Pick a date">
+<div class="cal" id="cal"><div><button type="button" id="prev">&lt;</button> <b id="mon"></b> <button type="button" id="nxt">&gt;</button></div><div id="days"></div></div></div>
+<p>Email me updates <span class="sw" id="news" role="switch" aria-checked="false" tabindex="0"></span><input type="hidden" name="newsletter" value="no"></p>
+<button type="submit">Register</button></form>
+<script>
+var f=document.forms[0],M=['January','February','March','April','May','June','July','August','September','October','November','December'];
+var dd=document.getElementById('country');dd.querySelector('.btn').onclick=function(){dd.classList.toggle('open')};
+dd.querySelectorAll('li').forEach(function(li){li.onclick=function(){dd.querySelector('.btn').textContent=li.textContent;f.country.value=li.dataset.v;dd.classList.remove('open');f.country.dispatchEvent(new Event('change',{bubbles:true}))}});
+var cur=new Date(2026,9,1);var cal=document.getElementById('cal'),box=document.getElementById('datebox');
+function draw(){document.getElementById('mon').textContent=M[cur.getMonth()]+' '+cur.getFullYear();var n=new Date(cur.getFullYear(),cur.getMonth()+1,0).getDate(),h='';
+for(var d=1;d<=n;d++)h+='<button type="button" data-d="'+d+'">'+d+'</button>';document.getElementById('days').innerHTML=h;
+document.querySelectorAll('#days button').forEach(function(b){b.onclick=function(){var m=('0'+(cur.getMonth()+1)).slice(-2),d=('0'+b.dataset.d).slice(-2);box.value=cur.getFullYear()+'-'+m+'-'+d;cal.classList.remove('open');box.dispatchEvent(new Event('change',{bubbles:true}))}})}
+box.onclick=function(){cal.classList.add('open');draw()};
+document.getElementById('prev').onclick=function(){cur.setMonth(cur.getMonth()-1);draw()};document.getElementById('nxt').onclick=function(){cur.setMonth(cur.getMonth()+1);draw()};
+var sw=document.getElementById('news');function tog(){var on=sw.getAttribute('aria-checked')!=='true';sw.setAttribute('aria-checked',on);f.newsletter.value=on?'yes':'no';f.newsletter.dispatchEvent(new Event('change',{bubbles:true}))}
+sw.onclick=tog;sw.onkeydown=function(e){if(e.key===' '||e.key==='Enter'){e.preventDefault();tog()}};
+</script></body></html>

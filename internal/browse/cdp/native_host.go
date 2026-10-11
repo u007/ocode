@@ -112,6 +112,15 @@ func nativeHostAllowedOrigins(extensionDir string) ([]string, error) {
 
 // ensureNativeHostManifest owns only the namespaced ocode host manifest. It
 // never reads, rewrites, or removes com.htrcontrol.host.
+//
+// Shared mode depends on exactly this. ocode's preloaded extension resolves the
+// daemon through the namespaced com.ocode.htrcontrol manifest written here, so
+// sharing the daemon does not mean sharing the host name: the user's browser
+// still loads its own com.htrcontrol.host file, untouched, and the two
+// extensions reach the same daemon by different routes. It is also why
+// shared mode drops HTR_NATIVE_HOST_NAME from Chrome's environment instead of
+// renaming anything — the manifest is what the preload resolves, and dropping
+// an inert env var cannot orphan the user's host file.
 func ensureNativeHostManifest(name, binaryPath, extensionDir, browserPath string) error {
 	if err := validateHTRNativeHostName(name); err != nil {
 		return err

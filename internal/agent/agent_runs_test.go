@@ -82,7 +82,7 @@ func TestAgentRunRegistryCancelAll(t *testing.T) {
 	r := NewAgentRunRegistry()
 	run := r.New("explore")
 	cancelled := false
-	run.Sub = NewAgent(nil, nil, nil, nil)
+	run.Sub = newTestAgent(nil, nil, nil, nil)
 	run.Cancel = func() { cancelled = true }
 	r.CancelAll()
 	if !cancelled {
@@ -255,7 +255,7 @@ func TestCancelOwnedAlreadyDoneIsNoOp(t *testing.T) {
 func TestCancelAllMarksRunCancelled(t *testing.T) {
 	r := NewAgentRunRegistry()
 	run := r.New("explore")
-	run.Sub = NewAgent(nil, nil, nil, nil)
+	run.Sub = newTestAgent(nil, nil, nil, nil)
 	run.Cancel = func() {}
 	r.CancelAll()
 

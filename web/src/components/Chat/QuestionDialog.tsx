@@ -3,11 +3,12 @@ import { useListNavigation } from "../../hooks/useListNavigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  ScopedDialog,
+  ScopedDialogContent,
+  ScopedDialogHeader,
+  ScopedDialogTitle,
+  type ScopedDialogContainer,
+} from "@/components/ui/scoped-dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   HelpCircle,
@@ -27,6 +28,12 @@ import AskContextPreview from "./AskContextPreview";
 
 interface Props {
   open: boolean;
+  /**
+   * Element the dialog is confined to — the session's chat surface, so a prompt
+   * never covers the project list, the tab bar or another session. Required
+   * (not optional) so a call site cannot silently render an invisible dialog.
+   */
+  container: ScopedDialogContainer;
   requestId: string;
   questions: QuestionPrompt[];
   onSubmit: (
@@ -191,6 +198,7 @@ function QuestionOptionList({
 
 export default function QuestionDialog({
   open,
+  container,
   requestId,
   questions,
   onSubmit,
@@ -337,19 +345,24 @@ export default function QuestionDialog({
     // X and Escape hide the prompt locally. Overlay clicks stay suppressed
     // (onInteractOutside) so a stray click cannot discard a half-answered
     // multi-question form; the footer action remains the server-side escape.
-    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleHide()}>
-      <DialogContent
-        className="dialog-viewport-max sm:max-w-lg bg-card border-border flex flex-col overflow-hidden"
+    <ScopedDialog container={container} open={open} onOpenChange={(isOpen) => !isOpen && handleHide()}>
+      {/* No `dialog-viewport-max`: it capped the panel to the WINDOW, which is
+          wrong once the dialog is confined to a panel that can be shorter than
+          the viewport. ScopedDialogContent supplies the container-relative
+          `max-h-[calc(100%-2rem)]` instead (two `max-height` declarations do NOT
+          take the min — last one wins). */}
+      <ScopedDialogContent
+        className="sm:max-w-lg bg-card border-border flex flex-col overflow-hidden"
         onInteractOutside={(e) => e.preventDefault()}
       >
-        <DialogHeader className="shrink-0">
-          <DialogTitle className="flex items-center gap-2 text-foreground">
+        <ScopedDialogHeader className="shrink-0">
+          <ScopedDialogTitle className="flex items-center gap-2 text-foreground">
             <HelpCircle className="w-5 h-5 text-blue-400" />
             {questions.length === 1
               ? questions[0].header || "Question"
               : "Questions"}
-          </DialogTitle>
-        </DialogHeader>
+          </ScopedDialogTitle>
+        </ScopedDialogHeader>
 
         {/* Everything that can grow (model context, question text, long option
             lists) scrolls here, so the Don't answer/Submit row stays pinned and
@@ -397,7 +410,7 @@ export default function QuestionDialog({
             Submit
           </Button>
         </div>
-      </DialogContent>
-    </Dialog>
+      </ScopedDialogContent>
+    </ScopedDialog>
   );
 }

@@ -21,7 +21,7 @@ func TestApprovedToolCallWithEmptyIDTracksInChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := NewAgent(nil, []tool.Tool{tool.PatchTool{}}, nil, nil)
+	a := newTestAgent(nil, []tool.Tool{tool.PatchTool{}}, nil, nil)
 	a.SetWorkDir(dir)
 
 	patchText := "*** Begin Patch\n*** Update File: foo.go\n@@\n-func A() {}\n+func A() { println(\"hi\") }\n*** End Patch"

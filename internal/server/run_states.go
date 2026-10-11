@@ -85,19 +85,27 @@ func (s *Server) RunStates() []RunState {
 }
 
 // PendingPermissionAsks counts sessions currently blocked on a permission
-// prompt: the agent pauses a turn after emitting a PERMISSION_ASK: tool
-// message (see Agent.Step's pauseAfterResults), so a session is pending
-// exactly when its trailing tool-call round still contains one.
+// prompt, from BOTH sources, for the same reason livePendingAsks merges them:
+//
+//   - Main-agent asks: the agent pauses a turn after emitting a PERMISSION_ASK:
+//     tool message (see Agent.Step's pauseAfterResults), so the session is
+//     pending exactly when its trailing tool-call round still contains one.
+//   - Sub-agent asks: a child parked in as.childAsks, which has its own mutex
+//     and never takes as.mu. This source is read unconditionally — a session
+//     parked on a sub-agent ask is mid-turn BY CONSTRUCTION (the parent's turn
+//     holds as.mu for the whole dispatch), so the TryLock skip below would
+//     under-count exactly the sessions this badge exists to flag.
 //
 // Each session's messages are read under its own as.mu (not h.mu): a running
 // turn mutates as.messages concurrently, so a snapshot taken under h.mu alone
 // would race — see findPendingSession's comment for the same hazard.
 //
-// The read is a non-blocking TryLock: runTurn holds as.mu for the whole turn,
-// and this is polled by the desktop badge watcher and the quit dialog, so a
-// blocking Lock parks the caller until that turn ends. A session that is
-// mid-turn cannot be parked on an ask (the turn returns before the pause), so
-// a failed TryLock means "not pending".
+// The transcript read is a non-blocking TryLock: runTurn holds as.mu for the
+// whole turn, and this is polled by the desktop badge watcher and the quit
+// dialog, so a blocking Lock parks the caller until that turn ends. For the
+// SENTINEL source a failed TryLock does mean "not pending" (the turn returns
+// before the pause) — but only for that source, which is why the registry is
+// consulted outside the lock.
 func (h *Handler) PendingPermissionAsks() int {
 	h.mu.Lock()
 	sessions := make([]*agentSession, 0, len(h.agents))
@@ -108,6 +116,10 @@ func (h *Handler) PendingPermissionAsks() int {
 
 	count := 0
 	for _, as := range sessions {
+		if len(as.childAsks.list()) > 0 {
+			count++
+			continue
+		}
 		if !as.mu.TryLock() {
 			continue
 		}

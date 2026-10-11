@@ -368,7 +368,7 @@ func gatherProcessStats(entries map[string]terminalProcEntry, cache map[int32]*p
 	stats := make([]terminalProcessStat, 0, len(entries))
 	for id, entry := range entries {
 		cpu, mem := sumProcessTree(entry.PID, cache, touched, childPids)
-		cmd := terminalCommand(entry.PID, cache, childPids)
+		cmd, _ := terminalForeground(entry.PID, cache, childPids)
 		stats = append(stats, terminalProcessStat{ID: id, PID: entry.PID, CPUPercent: cpu, MemBytes: mem, Command: cmd})
 	}
 	return stats
@@ -455,18 +455,19 @@ func collectCmdlines(p *process.Process, cache map[int32]*process.Process, touch
 	return out
 }
 
-// terminalCommand returns a best-effort human-readable command for a terminal's
-// process tree. It prefers a descendant that is actually running something
-// (e.g. "npm run dev") over the interactive shell itself, and falls back to the
-// shell's bare name when the terminal is idle (no current command). The walk
+// terminalForeground returns a best-effort human-readable command for a terminal's
+// process tree, and whether that command is a program other than the shell. It
+// prefers a descendant that is actually running something (e.g. "npm run dev")
+// over the interactive shell itself, and falls back to the shell's bare name
+// with running=false when the terminal is idle (no current command). The walk
 // reuses the shared handle cache but its own touched set so it never disturbs
 // the CPU/mem cycle guard in sumProcessTree.
-func terminalCommand(pid int32, cache map[int32]*process.Process, childPids map[int32][]int32) string {
+func terminalForeground(pid int32, cache map[int32]*process.Process, childPids map[int32][]int32) (string, bool) {
 	root, ok := cache[pid]
 	if !ok {
 		np, err := process.NewProcess(pid)
 		if err != nil {
-			return ""
+			return "", false
 		}
 		root = np
 		cache[pid] = root
@@ -475,15 +476,15 @@ func terminalCommand(pid int32, cache map[int32]*process.Process, childPids map[
 	cmdlines := collectCmdlines(root, cache, touched, childPids)
 	for _, cl := range cmdlines {
 		if cl != "" && !isInteractiveShell(cl) {
-			return cl
+			return cl, true
 		}
 	}
 	// Idle: only the shell is present — report its bare name, not its argv
 	// (e.g. "zsh", never "zsh -i -l").
 	if name, err := root.Name(); err == nil && name != "" {
-		return name
+		return name, false
 	}
-	return ""
+	return "", false
 }
 
 func (h *Handler) terminalProcessesEmitterLoop() {

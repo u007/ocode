@@ -15,8 +15,9 @@ Behavior:
   * idempotent — re-running produces the same tree (byte-identical files are not
     rewritten);
   * generic over N stacks — copies EVERY `docs/okf/*/derived/*.SKILL.md`;
-  * prunes stale `skills/kaizen/<name>/` dirs whose source no longer exists;
-  * logs every write / skip / prune.
+  * prunes stale `skills/kaizen/<name>/` dirs whose source skill no longer exists —
+    but ONLY for dirs this tool owns (see HAND_AUTHORED below);
+  * logs every write / skip / prune / preserve.
 
 Usage:  python3 docs/okf/_tools/sync-derived-skills.py
 Run from anywhere (paths are resolved relative to this file). Exits non-zero on a
@@ -30,6 +31,23 @@ import sys
 OKF = pathlib.Path(__file__).resolve().parent.parent          # docs/okf
 REPO = OKF.parent.parent                                       # repo root
 KAIZEN_DIR = REPO / "skills" / "kaizen"
+
+# `skills/kaizen/<name>/` dirs that are hand-authored, NOT produced by this tool.
+#
+# The prune loop used to delete every dir it did not recognise, which quietly made
+# this tool a data-loss hazard for any Kaizen skill authored by hand: a skill with no
+# `docs/okf/*/derived/` source is invisible here, so it became prune collateral on the
+# next run. `tanstack-tuning-space-bunny-free` was the first such skill — a requested
+# stack-hygiene correction whose model scored 92.6% on the closed-book tanstack corpus
+# with NO tag below threshold, so `derived/` was the wrong home for it (the scorecard
+# says outright that no derived skill was written for it).
+#
+# Listing a name here is the deliberate act of claiming a dir this tool must not touch.
+# A manifest file was rejected on purpose: it drifts silently and is invisible at the
+# point of review, whereas this constant sits in the prune loop that does the damage.
+HAND_AUTHORED = frozenset({
+    "tanstack-tuning-space-bunny-free",
+})
 
 
 def read_name(src: pathlib.Path) -> str:
@@ -101,17 +119,27 @@ def main() -> None:
         wrote += 1
 
     # Prune stale kaizen dirs whose source skill no longer exists.
-    pruned = 0
+    #
+    # Only dirs this tool owns are eligible. A hand-authored dir is never pruned even
+    # when it has no source, and an unknown dir is reported rather than deleted: the
+    # failure mode of getting this wrong is silent deletion of someone's skill.
+    pruned = preserved = 0
     if KAIZEN_DIR.exists():
         for child in sorted(KAIZEN_DIR.iterdir()):
-            if child.is_dir() and child.name not in wanted:
-                shutil.rmtree(child)
-                print(f"  pruned (source gone): {child.relative_to(REPO)}")
-                pruned += 1
+            if not child.is_dir() or child.name in wanted:
+                continue
+            if child.name in HAND_AUTHORED:
+                print(f"  kept (hand-authored, not synced): {child.relative_to(REPO)}")
+                preserved += 1
+                continue
+            shutil.rmtree(child)
+            print(f"  pruned (source gone): {child.relative_to(REPO)}")
+            pruned += 1
 
     print(
         f"sync-derived-skills: {len(wanted)} skill(s) — "
-        f"{wrote} written, {skipped} unchanged, {pruned} pruned."
+        f"{wrote} written, {skipped} unchanged, {pruned} pruned, "
+        f"{preserved} hand-authored kept."
     )
 
 

@@ -30,7 +30,7 @@ const (
 	ProcessKindRemote ProcessKind = "remote"
 	// ProcessKindTTS covers one-shot local speech synthesis runs spawned by
 	// internal/tts (e.g. python -m piper).
-	ProcessKindTTS ProcessKind = "tts"
+	ProcessKindTTS      ProcessKind = "tts"
 	ProcessKindComputer ProcessKind = "computer"
 )
 

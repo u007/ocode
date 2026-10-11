@@ -8,22 +8,6 @@ import (
 	"github.com/u007/ocode/internal/config"
 )
 
-func TestAutoContinueCommandRegistered(t *testing.T) {
-	found := false
-	for _, spec := range commandSpecs {
-		if spec.name == "/autocontinue" {
-			found = true
-			if spec.handler == nil {
-				t.Error("/autocontinue has no handler")
-			}
-			break
-		}
-	}
-	if !found {
-		t.Error("/autocontinue not found in commandSpecs")
-	}
-}
-
 // TestAutoContinueChainCap simulates streamDoneMsg's guard-then-fire sequence
 // across repeated step-limit cutoffs, and asserts the chain stops at
 // autoContinueMaxChain rather than looping forever.

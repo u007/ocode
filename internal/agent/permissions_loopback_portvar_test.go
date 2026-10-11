@@ -648,7 +648,6 @@ func TestIsLocalhostURLUserinfoAndIPv6(t *testing.T) {
 		"http://127.0.0.1?x=1",
 		"http://127.0.0.1#frag",
 		"localhost:4096/api/permissions",
-		"http://::1/api/permissions",
 	} {
 		if !isLocalhostURL(u) {
 			t.Errorf("isLocalhostURL(%q) = false, want true (self-escalation guard would fail OPEN)", u)

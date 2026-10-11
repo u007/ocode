@@ -875,6 +875,44 @@ func containsDotDot(p string) bool {
 	return false
 }
 
+// resolveProjectFilePath applies the file-content containment rules to a
+// requested path and returns the absolute path to read. The second return is a
+// client-facing error message, empty on success. It is shared by the file
+// content endpoint and the SQLite browser so both enforce ONE boundary: an
+// optional project_root must be an allowed root, the raw path must not contain
+// "..", and the joined path must be contained (resolved or lexical) in it.
+// Relative paths with no project_root resolve against the anchored workDir so
+// they stay correct when the process CWD differs from the project root (e.g. a
+// Finder-launched desktop .app).
+func (h *Handler) resolveProjectFilePath(projectRoot, path string) (string, string) {
+	if projectRoot != "" {
+		root, ok := h.fileContentRootFor(projectRoot)
+		if !ok {
+			return "", "project_root is not an allowed project root"
+		}
+		// Check traversal on the raw value before Join cleans it:
+		// "link/../escape" would otherwise collapse and hide the ".."
+		// that the OS resolves AFTER following "link".
+		if containsDotDot(path) {
+			return "", "path is outside the project root"
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		// Read access follows symlinks inside the project (the Files tab
+		// shows linked folders as navigable). containedIn alone would
+		// reject link/child when link points outside the root, so accept
+		// either resolved or lexical containment. Writes stay strict.
+		if !containedIn(path, root) && !containedLexical(path, root) {
+			return "", "path is outside the project root"
+		}
+	}
+	if !filepath.IsAbs(path) && h.workDir != "" {
+		path = filepath.Join(h.workDir, path)
+	}
+	return path, ""
+}
+
 func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 	// Remote project (?host=): read the file on the remote host.
 	if hostParam(r) != "" {
@@ -886,38 +924,10 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-
-	if projectRoot := r.URL.Query().Get("project_root"); projectRoot != "" {
-		root, ok := h.fileContentRootFor(projectRoot)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
-			return
-		}
-		// Check traversal on the raw query value before Join cleans it:
-		// "link/../escape" would otherwise collapse and hide the ".."
-		// that the OS resolves AFTER following "link".
-		if containsDotDot(path) {
-			writeError(w, http.StatusBadRequest, "path is outside the project root")
-			return
-		}
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(root, path)
-		}
-		// Read access follows symlinks inside the project (the Files tab
-		// shows linked folders as navigable). containedIn alone would
-		// reject link/child when link points outside the root, so accept
-		// either resolved or lexical containment. Writes stay strict.
-		if !containedIn(path, root) && !containedLexical(path, root) {
-			writeError(w, http.StatusBadRequest, "path is outside the project root")
-			return
-		}
-	}
-
-	// Resolve relative paths (as returned by the file tree) against the
-	// anchored workDir so they stay correct when the process CWD differs
-	// from the project root (e.g. a Finder-launched desktop .app).
-	if !filepath.IsAbs(path) && h.workDir != "" {
-		path = filepath.Join(h.workDir, path)
+	path, errMsg := h.resolveProjectFilePath(r.URL.Query().Get("project_root"), path)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
 	}
 
 	data, err := os.ReadFile(path)

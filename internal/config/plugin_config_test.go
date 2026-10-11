@@ -13,7 +13,7 @@ import (
 func TestSavePluginEnabled(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -47,7 +47,7 @@ func TestSavePluginEnabled(t *testing.T) {
 func TestSavePlugin(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -83,7 +83,7 @@ func TestSavePlugin(t *testing.T) {
 func TestRemovePlugin(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -117,7 +117,7 @@ func TestRemovePlugin(t *testing.T) {
 func TestRemoveMCPServer(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)

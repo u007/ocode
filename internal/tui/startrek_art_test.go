@@ -38,17 +38,6 @@ func TestRandomStartrekArtIsOneOfFive(t *testing.T) {
 	t.Fatalf("RandomStartrekArt returned unknown art with %d lines", len(art))
 }
 
-func TestRandomStartrekArtCanProduceMultipleVariants(t *testing.T) {
-	seen := make(map[string]bool)
-	for i := 0; i < 20; i++ {
-		seen[strings.Join(RandomStartrekArt(), "\n")] = true
-		if len(seen) >= 2 {
-			return
-		}
-	}
-	t.Logf("Only saw one art variant in 20 random picks")
-}
-
 func TestRenderStartrekBackgroundZeroDimensions(t *testing.T) {
 	art := RandomStartrekArt()
 	style := lipgloss.NewStyle()

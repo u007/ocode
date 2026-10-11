@@ -6,6 +6,7 @@ import { clearQueue } from "../../lib/tabQueue";
 import { cancelLiveDeltas, closeSessionBackend } from "../../lib/sessionEvents";
 import { prefetchSession } from "../../lib/sessionPrefetch";
 import { isChildSessionId } from "../../lib/sessionId";
+import { resolveSessionHost } from "../../hooks/useSessionHost";
 import { useListNavigation } from "../../hooks/useListNavigation";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
@@ -130,12 +131,12 @@ export default function SessionDialog() {
   // Close a session tab immediately. Middle-click uses this path; the X button
   // goes through the confirmation flow below.
   const closeTabNow = useCallback((tabId: string) => {
-    closeSessionBackend(tabId);
+    closeSessionBackend(tabId, resolveSessionHost(projectState, tabId));
     closeSessionTab(tabId);
     cancelLiveDeltas(tabId);
     chatDispatch({ type: "RESET", sessionId: tabId });
     clearQueue(tabId);
-  }, [closeSessionTab, chatDispatch]);
+  }, [closeSessionTab, chatDispatch, projectState]);
 
   const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
     e.stopPropagation();
