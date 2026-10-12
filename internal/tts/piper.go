@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -39,12 +38,7 @@ func findPython(ctx context.Context, rt PythonRuntime) (pythonSpec, error) {
 	return pyinterp.Select(ctx, r, pyinterp.Candidates(r), nil)
 }
 
-func venvPython(venv string) string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(venv, "Scripts", "python.exe")
-	}
-	return filepath.Join(venv, "bin", "python")
-}
+func venvPython(venv string) string { return pyinterp.VenvPython(venv) }
 
 // piperInstaller performs the download/verify/venv steps for one manifest
 // under one cache directory. progress is called with a 0-100 value and a

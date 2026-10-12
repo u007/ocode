@@ -199,6 +199,14 @@ func Select(ctx context.Context, r Range, candidates [][]string, modules []strin
 	return Spec{}, fmt.Errorf("no %s found%s", what, triedText)
 }
 
+// VenvPython is the interpreter inside a venv directory.
+func VenvPython(venv string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(venv, "Scripts", "python.exe")
+	}
+	return filepath.Join(venv, "bin", "python")
+}
+
 // failureDetail explains a probe that exited non-zero: the last line of its
 // output when it printed any (a failed import ends in "ModuleNotFoundError:
 // ..."), otherwise the exec error, so a silent failure is never reported empty.

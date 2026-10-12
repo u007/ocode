@@ -32,6 +32,58 @@ status request waits for the slowest distinct extras set, not the sum. A scan
 that hits its 60 s deadline is not cached. An OpenAI model is ready only when `auth.ResolveKey("openai")` is non-empty.
 The first local transcription downloads the model weights from Hugging Face.
 
+### Dependency install (asks first)
+
+When no Python 3.10+ imports `onnx_asr`, `Transcribe` does not fail with a hint
+and does not install silently: it returns `*stt.InstallRequiredError` (packages
+and venv path) and touches nothing. The host asks the user, then retries with
+`Options.InstallApproved` (or calls `stt.Install`). The install
+(`internal/stt/autoinstall.go`) builds a managed venv at
+`<user cache>/ocode/stt-venv` from the newest base Python 3.10+, runs
+`pip install onnx-asr[cpu,hub] <model extras>` into it, verifies the imports, then
+drops the probe cache. The managed venv is probed first on every later scan, and
+installs are additive, so switching to the unified model only adds
+`sentencepiece`. A venv sidesteps Homebrew/Debian's "externally-managed
+environment" refusal.
+
+| surface | how it asks |
+| --- | --- |
+| web / desktop | `POST /api/stt/transcribe` answers `409 {code: "stt_install_required", packages, venv}`; the UI shows the shared `ConfirmDialog` (never `window.confirm`: it silently returns false in the Wails desktop webview) and re-uploads with `?install=1` |
+| TUI | the status note says `run /voice install to approve it, then dictate again`; `/voice install` is the confirmation and runs `stt.Install` in a `tea.Cmd` (12 min cap), reporting in the transcript |
+
+Rules:
+
+- A pinned `Options.Python` is never installed into; it keeps the old
+  error and install hint, and `Install` refuses it.
+- `StatusFor` reports a missing-deps model as `available` with a reason saying
+  a one-time install is needed (you are asked first) whenever a base Python
+  3.10+ exists, so it is selectable. With no Python 3.10+ at all it stays
+  unavailable with the full list of rejected candidates.
+- `PartialTranscribe` clears `InstallApproved`: live partials are polled and a
+  failure is silent, so they can neither install nor nag.
+- **Install failures are shown, not swallowed.** The error carries the tail of
+  pip's/venv's own output (`runInstallCmd`, last 800 bytes). The web composer
+  shows it verbatim in a scrollable `role="alert"` banner prefixed "Voice
+  dependency install failed:", and shows "Installing voice dependencies…" while
+  it runs; `/voice install` posts it into the transcript. Live previews never
+  prompt (`transcribe(..., preview=true)`), so a partial cannot pop the confirm.
+- `ModelInfo.needs_install` marks an available-but-uninstalled local model. The
+  web composer skips live previews for it and the TUI refuses to open the mic
+  (`/voice install` first), so no speech is recorded just to be dropped at the
+  prompt. The client treats a 409 as "install required" only when its JSON
+  `code` is `stt_install_required`.
+- A venv is reused only if `<venv>/python -m pip --version` works
+  (`venvHealthy`); a half-built one is deleted and rebuilt, and a failed
+  `python -m venv` removes what it left. An approved install runs detached from
+  the request context (a tab reload must not SIGKILL pip mid-write) under
+  `installTimeout`, and `runInstallCmd` sets `WaitDelay` so a pip child holding
+  the output pipe cannot hang it. The base-interpreter scan is cached for
+  `probeTTL` (`baseCache`) because status polls and previews ask constantly.
+- Installs are serialised by a channel semaphore (`installSem`; a waiter gives
+  up when its context ends) and bounded by `installTimeout` (10 min). All pip/venv output is captured, never inherited.
+  There is no cross-process lock: two ocode processes on one fresh host can both
+  build; the second `pip install` is then a no-op.
+
 ## Engines
 
 - **local**: `internal/stt/transcribe_onnx.py` (embedded in the binary) runs

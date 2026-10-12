@@ -105,8 +105,21 @@ func (s *Server) handleTranscribeSTT(w http.ResponseWriter, r *http.Request) {
 	}
 
 	opts := s.sttOptions(sttSelectedModel())
+	// The client sets install=1 only after the user confirmed the one-time
+	// dependency install; without it a missing runtime is a 409 that asks.
+	opts.InstallApproved = r.URL.Query().Get("install") == "1"
 	res, err := stt.Transcribe(r.Context(), opts, tmp.Name())
 	if err != nil {
+		var need *stt.InstallRequiredError
+		if errors.As(err, &need) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":    need.Error(),
+				"code":     "stt_install_required",
+				"packages": need.Packages,
+				"venv":     need.Venv,
+			})
+			return
+		}
 		status := http.StatusBadGateway
 		if !stt.StatusFor(opts).ModelAvailable(stt.ResolveModel(opts.Model)) {
 			status = http.StatusServiceUnavailable

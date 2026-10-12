@@ -42,6 +42,7 @@ var (
 		return rec, nil
 	}
 	voiceTranscribe = stt.Transcribe
+	voiceInstall    = stt.Install
 	voiceStatusFor  = stt.StatusFor
 	voiceMicCheck   = stt.RecordingAvailable
 	// voicePartial decodes the audio captured so far. Partials are display
@@ -104,6 +105,11 @@ type voiceTranscribedMsg struct {
 }
 
 type voiceCancelledMsg struct{}
+
+// voiceInstalledMsg is the result of `/voice install`.
+type voiceInstalledMsg struct {
+	err error
+}
 
 // voicePartialTickMsg fires voicePartialInterval after a recording starts or a
 // partial finishes. It is ignored unless gen is still the current recording.
@@ -209,6 +215,13 @@ func (m *model) startVoice() tea.Cmd {
 		st := voiceStatusFor(opts)
 		if !st.ModelAvailable(st.Selected) {
 			return voiceStartedMsg{err: errors.New(voiceUnavailableReason(st))}
+		}
+		// Recording first would discard the speech: the transcription would stop
+		// at the install prompt. Ask for the approval up front instead.
+		for _, mi := range st.Models {
+			if mi.ID == st.Selected && mi.NeedsInstall {
+				return voiceStartedMsg{err: fmt.Errorf("voice model %s needs a one-time dependency install; run /voice install first", mi.ID)}
+			}
 		}
 		rec, err := voiceStart(voiceDir())
 		if err == nil && rec == nil {
@@ -436,8 +449,27 @@ func (m model) voiceStatusText() string {
 }
 
 func runVoiceCmd(m *model, args []string) tea.Cmd {
+	if len(args) > 0 && strings.EqualFold(args[0], "install") {
+		return m.startVoiceInstall()
+	}
 	m.handleVoiceCmd(args)
 	return nil
+}
+
+// voiceInstallTimeout bounds `/voice install`; the onnxruntime wheel dominates.
+const voiceInstallTimeout = 12 * time.Minute
+
+// startVoiceInstall runs the one-time dependency install. Typing the command is
+// the confirmation: a dictation that needs the install never starts it itself.
+func (m *model) startVoiceInstall() tea.Cmd {
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Installing the local voice model's Python dependencies " +
+		"(onnx-asr into ocode's own environment). This can take several minutes; the result is reported here."})
+	opts := voiceOptions()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), voiceInstallTimeout)
+		defer cancel()
+		return voiceInstalledMsg{err: voiceInstall(ctx, opts)}
+	}
 }
 
 // handleVoiceCmd implements /voice (status), /voice list and /voice model <id>.
@@ -475,7 +507,7 @@ func (m *model) handleVoiceCmd(args []string) {
 			"Model: "+selected,
 			"Model status: "+availability,
 			"Microphone: "+mic,
-			"Use /voice list to see models, /voice model <id> to change the model.")
+			"Use /voice list to see models, /voice model <id> to change the model, /voice install to set up local dependencies.")
 	case "list":
 		st := voiceStatusFor(voiceOptions())
 		lines := []string{"Voice models:"}
