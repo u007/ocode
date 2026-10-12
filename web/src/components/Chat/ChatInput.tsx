@@ -1035,17 +1035,28 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     }
     void submitComposer(text);
   };
+  const [voiceInstalling, setVoiceInstalling] = useState(false);
   const voice = useVoiceRecorder({
-    transcribe: async (audio, filename) => {
+    transcribe: async (audio, filename, preview) => {
       try {
         return await api.transcribeSpeech(audio, filename);
       } catch (err) {
         // The local engine needs a one-time pip install: ask, then retry once.
-        if (!(err instanceof STTInstallRequiredError)) throw err;
+        // A live preview never prompts; its failure is ignored by the hook.
+        if (preview || !(err instanceof STTInstallRequiredError)) throw err;
         if (!window.confirm(`${err.message}.\n\nInstall it now? This can take several minutes.`)) {
           throw new Error("Voice input needs the dependency install; it was declined.");
         }
-        return api.transcribeSpeech(audio, filename, { installApproved: true });
+        setVoiceInstalling(true);
+        try {
+          return await api.transcribeSpeech(audio, filename, { installApproved: true });
+        } catch (installErr) {
+          // Keep the server's message (the tail of pip's output) verbatim.
+          const detail = installErr instanceof Error ? installErr.message : String(installErr);
+          throw new Error(`Voice dependency install failed: ${detail}`);
+        } finally {
+          setVoiceInstalling(false);
+        }
       }
     },
     onTranscript: onVoiceTranscript,
@@ -1319,7 +1330,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             <Loader2 aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin" />
           )}
           <span className="shrink-0 whitespace-nowrap">
-            {voiceRecording ? "Recording… click to stop" : "Transcribing…"}
+            {voiceRecording
+              ? "Recording… click to stop"
+              : voiceInstalling
+                ? "Installing voice dependencies… this can take several minutes"
+                : "Transcribing…"}
           </span>
           {voiceRecording && voice.partialText && (
             // aria-hidden: a live preview that changes every few seconds would
@@ -1331,7 +1346,7 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         </div>
       )}
       {voice.error && (
-        <div role="alert" className="mb-2 rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div role="alert" className="mb-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {voice.error}
         </div>
       )}

@@ -65,7 +65,9 @@ export function describeMicError(err: unknown): string {
 
 export interface UseVoiceRecorderOptions {
   /** Uploads the clip. Resolves with the transcript; an empty text means nothing was heard. */
-  transcribe: (audio: Blob, filename: string) => Promise<STTTranscribeResult>;
+  /** `preview` marks a live partial: it must never prompt or install, and its
+   *  failure is ignored. */
+  transcribe: (audio: Blob, filename: string, preview?: boolean) => Promise<STTTranscribeResult>;
   /** Receives a non-empty transcript. Never called for an empty one. Partials never reach it. */
   onTranscript: (text: string) => void;
   /**
@@ -159,7 +161,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       try {
         // new Blob copies the chunk list now, so later chunks do not leak into this request.
         const blob = new Blob(chunks, { type });
-        const result = await callbacksRef.current.transcribe(blob, `recording${audioExtensionFor(type)}`);
+        const result = await callbacksRef.current.transcribe(blob, `recording${audioExtensionFor(type)}`, true);
         if (epoch !== partialEpochRef.current) return;
         setPartial((result?.text ?? "").trim());
       } catch {

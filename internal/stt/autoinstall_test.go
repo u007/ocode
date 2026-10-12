@@ -15,6 +15,13 @@ import (
 // `-m pip install` succeeds. Every invocation is appended to log.
 func writeInstallablePython(t *testing.T, log string) string {
 	t.Helper()
+	return writeFakePython(t, log, false)
+}
+
+// writeFakePython is writeInstallablePython with an optional failing pip, so a
+// test can check that pip's own output reaches the error.
+func writeFakePython(t *testing.T, log string, pipFails bool) string {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake interpreter scripts need a POSIX shell")
 	}
@@ -24,6 +31,9 @@ func writeInstallablePython(t *testing.T, log string) string {
 		"if [ \"$1\" = --version ]; then echo 'Python 3.18.0'; exit 0; fi\n" +
 		"if [ \"$1\" = -m ] && [ \"$2\" = venv ]; then\n" +
 		"  mkdir -p \"$3/bin\" && cp \"$0\" \"$3/bin/python\" && exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = -m ] && [ \"$2\" = pip ] && [ -n \"" + pipFailFlag(pipFails) + "\" ]; then\n" +
+		"  echo 'ERROR: Could not find a version that satisfies onnxruntime' >&2; exit 1\n" +
 		"fi\n" +
 		"case \"$0\" in\n" +
 		"  */bin/python) exit 0 ;;\n" +
@@ -141,6 +151,34 @@ func TestStatusForReportsInstallableModelAvailable(t *testing.T) {
 	for _, m := range st.Models {
 		if m.Engine == EngineLocal && m.Available {
 			t.Errorf("%s available with a broken pinned python", m.ID)
+		}
+	}
+}
+
+func pipFailFlag(fail bool) string {
+	if fail {
+		return "1"
+	}
+	return ""
+}
+
+// A failed pip install must reach the caller with pip's own message, so the web
+// banner and the TUI chat show why, not just "install failed".
+func TestInstallLocalSurfacesPipOutput(t *testing.T) {
+	resetProbeCache(t)
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("HOME", cache)
+	base := writeFakePython(t, filepath.Join(t.TempDir(), "calls.log"), true)
+	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := Install(context.Background(), Options{})
+	if err == nil {
+		t.Fatal("Install succeeded with a failing pip")
+	}
+	for _, want := range []string{"pip install", "Could not find a version that satisfies onnxruntime"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
 		}
 	}
 }

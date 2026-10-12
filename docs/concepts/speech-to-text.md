@@ -61,6 +61,12 @@ Rules:
   unavailable with the full list of rejected candidates.
 - `PartialTranscribe` clears `InstallApproved`: live partials are polled and a
   failure is silent, so they can neither install nor nag.
+- **Install failures are shown, not swallowed.** The error carries the tail of
+  pip's/venv's own output (`runInstallCmd`, last 800 bytes). The web composer
+  shows it verbatim in a scrollable `role="alert"` banner prefixed "Voice
+  dependency install failed:", and shows "Installing voice dependencies…" while
+  it runs; `/voice install` posts it into the transcript. Live previews never
+  prompt (`transcribe(..., preview=true)`), so a partial cannot pop the confirm.
 - Installs are serialised by a process mutex (`installMu`) and bounded by
   `installTimeout` (10 min). All pip/venv output is captured, never inherited.
   There is no cross-process lock: two ocode processes on one fresh host can both
