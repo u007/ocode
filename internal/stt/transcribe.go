@@ -43,6 +43,10 @@ type Options struct {
 	// ModelDir holds downloaded local models, one subdirectory per catalog id.
 	// Empty uses <user cache dir>/ocode/stt-models.
 	ModelDir string
+	// NoAutoInstall stops Transcribe from building a managed Python environment
+	// and pip-installing onnx-asr when no interpreter has it. A pinned Python is
+	// never modified regardless.
+	NoAutoInstall bool
 }
 
 // Result is one finished transcription.
@@ -100,10 +104,20 @@ func StatusFor(opts Options) Status {
 			wg.Add(1)
 			go func(i int, extra []string) {
 				defer wg.Done()
-				if ok, reason := probeLocal(opts.Python, extra); !ok {
-					out.Models[i].Available = false
-					out.Models[i].Reason = reason
+				ok, reason := probeLocal(opts.Python, extra)
+				if !ok && opts.autoInstall() {
+					// A usable base Python means the first transcription can
+					// install the rest, so the model is selectable now.
+					ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+					defer cancel()
+					if _, err := baseInterpreter(ctx); err == nil {
+						ok, reason = true, autoInstallNote
+					}
 				}
+				if !ok {
+					out.Models[i].Available = false
+				}
+				out.Models[i].Reason = reason
 			}(i, s.Extra)
 			continue
 		case EngineOpenAI:
@@ -151,6 +165,12 @@ func Transcribe(ctx context.Context, opts Options, audioPath string) (Result, er
 			return Result{}, err
 		}
 		py, err := localInterpreter(opts.Python, s.Extra)
+		if err != nil && opts.autoInstall() {
+			py, err = installLocal(ctx, s.Extra)
+			if err != nil {
+				return Result{}, fmt.Errorf("speech-to-text: installing local model dependencies: %w", err)
+			}
+		}
 		if err != nil {
 			return Result{}, fmt.Errorf("speech-to-text: local model: %w", err)
 		}
@@ -174,6 +194,9 @@ func PartialTranscribe(ctx context.Context, opts Options, rec *Recording) (Resul
 		return Result{}, err
 	}
 	defer func() { _ = os.Remove(snap) }()
+	// A live partial is polled repeatedly and its failure is simply not shown;
+	// it must never start a multi-minute install. The final transcription does.
+	opts.NoAutoInstall = true
 	return Transcribe(ctx, opts, snap)
 }
 
@@ -405,6 +428,9 @@ func localInterpreter(python string, extra []string) (pyinterp.Spec, error) {
 // the one path the user configured.
 func scanLocal(python string, extra []string) (pyinterp.Spec, error) {
 	candidates := pyinterp.Candidates(localRange)
+	if managed := managedPython(); managed != "" {
+		candidates = append([][]string{{managed}}, candidates...)
+	}
 	if python != "" {
 		if _, err := exec.LookPath(python); err != nil {
 			return pyinterp.Spec{}, fmt.Errorf("configured python %q is not an executable: %w", python, err)

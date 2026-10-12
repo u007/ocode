@@ -32,6 +32,31 @@ status request waits for the slowest distinct extras set, not the sum. A scan
 that hits its 60 s deadline is not cached. An OpenAI model is ready only when `auth.ResolveKey("openai")` is non-empty.
 The first local transcription downloads the model weights from Hugging Face.
 
+### Automatic dependency install
+
+When no Python 3.10+ imports `onnx_asr`, `Transcribe` installs it instead of
+failing (`internal/stt/autoinstall.go`). It builds a managed venv at
+`<user cache>/ocode/stt-venv` from the newest base Python 3.10+, runs
+`pip install onnx-asr[cpu,hub] <model extras>` into it, verifies the imports, then
+drops the probe cache. The managed venv is probed first on every later scan, and
+installs are additive, so switching to the unified model only adds
+`sentencepiece`. A venv sidesteps Homebrew/Debian's "externally-managed
+environment" refusal. Rules:
+
+- A pinned `Options.Python` is never installed into; it keeps the old
+  error and install hint.
+- `StatusFor` reports a missing-deps model as `available` with the reason
+  "Python dependencies install automatically on first use" whenever a base
+  Python 3.10+ exists, so it is selectable. With no Python 3.10+ at all it
+  stays unavailable with the full list of rejected candidates.
+- `PartialTranscribe` sets `NoAutoInstall`: live partials are polled and a
+  failure is silent, so only the final transcription may start the install.
+- Installs are serialised by a process mutex (`installMu`) and bounded by
+  `installTimeout` (10 min). All pip/venv output is captured, never inherited.
+  There is no cross-process lock: two ocode processes on one fresh host can both
+  build; the second `pip install` is then a no-op.
+- Opt out per call with `Options.NoAutoInstall`.
+
 ## Engines
 
 - **local**: `internal/stt/transcribe_onnx.py` (embedded in the binary) runs
