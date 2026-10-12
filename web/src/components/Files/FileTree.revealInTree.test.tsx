@@ -170,6 +170,19 @@ describe("FileTree reveal in file tree", () => {
     expect(saved.roots["/proj"].sort()).toEqual(["src", "src/app"]);
   });
 
+  it("opens a revealed folder as well, so its contents show and not just its row", async () => {
+    reveal({ request: { path: "/proj/src/app", root: "/proj", nonce: 1, isDir: true } });
+
+    // It is expanded, so the file inside it is listed (the children load async)…
+    await waitFor(() => expect(row("src/app/deep.ts")).toBeTruthy());
+    // …and the folder's own row is highlighted and scrolled to.
+    expect(row("src/app")?.getAttribute("data-revealed")).toBe("");
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
+    // The folder itself joins the persisted expansion set, alongside its ancestors.
+    const saved = JSON.parse(window.localStorage.getItem(FILE_TREE_EXPANSION_STORAGE_KEY) ?? "{}");
+    expect(saved.roots["/proj"].sort()).toEqual(["src", "src/app"]);
+  });
+
   it("re-reveals the same file when the request carries a new nonce", async () => {
     const { rerender } = reveal({ request: { path: "/proj/src/app/deep.ts", root: "/proj", nonce: 1 } });
     await waitFor(() => expect(row("src/app/deep.ts")).toBeTruthy());

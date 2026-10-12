@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Folder } from "lucide-react";
 import { useEffect, useState, useMemo, useRef } from "react";
 import {
   Command,
@@ -40,22 +40,30 @@ interface Props {
    *  "file link didn't resolve" fallback, which seeds the basename so the
    *  user can find where the file actually lives. */
   initialQuery?: string;
+  /** When set, folders are listed alongside files and selecting one calls
+   *  this instead of `onOpenFile`. Left unset, the picker lists files only. */
+  onOpenFolder?: (path: string, projectRoot?: string) => void;
 }
 
-function flattenFiles(nodes: FileNode[]): string[] {
-  const out: string[] = [];
+interface FlatTree {
+  files: string[];
+  folders: string[];
+}
+
+function flattenTree(nodes: FileNode[], out: FlatTree = { files: [], folders: [] }): FlatTree {
   for (const n of nodes) {
     if (n.is_dir) {
-      if (n.children) out.push(...flattenFiles(n.children));
+      out.folders.push(n.path);
+      if (n.children) flattenTree(n.children, out);
     } else {
-      out.push(n.path);
+      out.files.push(n.path);
     }
   }
   return out;
 }
 
-export default function FilePicker({ open, onClose, onOpenFile, projectPath, projectHost, initialQuery }: Props) {
-  const [files, setFiles] = useState<string[]>([]);
+export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, projectPath, projectHost, initialQuery }: Props) {
+  const [tree, setTree] = useState<FlatTree>({ files: [], folders: [] });
   const [query, setQuery] = useState("");
   // The choice is per project (and remote host); follow a project switch.
   const hiddenProjectKey = showHiddenFilesProjectKey(projectPath, projectHost);
@@ -80,7 +88,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
   useEffect(() => {
     if (!open) return;
     if (!projectPath) {
-      setFiles([]);
+      setTree({ files: [], folders: [] });
       return;
     }
     const controller = new AbortController();
@@ -96,7 +104,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
         if (data.truncated) {
           console.warn("File tree truncated; not all files are searchable");
         }
-        setFiles(flattenFiles(data.children));
+        setTree(flattenTree(data.children));
       })
       .catch((err) => {
         if ((err as Error).name !== "AbortError") console.error("Failed to load file tree:", err);
@@ -110,11 +118,18 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
   }, [open, initialQuery]);
 
   const keywords = useMemo(() => parseKeywords(query), [query]);
+  // Folder rows only exist when the caller can act on them. A path is either a
+  // file or a folder, never both, so membership alone tells the rows apart.
+  const entries = useMemo(
+    () => (onOpenFolder ? [...tree.files, ...tree.folders] : tree.files),
+    [tree, onOpenFolder],
+  );
+  const folderPaths = useMemo(() => new Set(onOpenFolder ? tree.folders : []), [tree, onOpenFolder]);
   const filteredFiles = useMemo(() => {
     // Unfiltered: shortest path first so root-level files surface above deep ones.
-    if (keywords.length === 0) return [...files].sort(compareByShortestPath);
+    if (keywords.length === 0) return [...entries].sort(compareByShortestPath);
     // Filtered: relevance first, then shortest path as the tiebreaker.
-    return files
+    return entries
       .filter((p) => matchesKeywords(p, keywords))
       .sort((a, b) => {
         const scoreA = scoreMatch(a, keywords);
@@ -122,7 +137,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
         if (scoreA !== scoreB) return scoreB - scoreA;
         return compareByShortestPath(a, b);
       });
-  }, [files, keywords]);
+  }, [entries, keywords]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -163,7 +178,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
           <CommandList ref={scrollContainerRef}>
             <CommandEmpty>{keywords.length > 0 ? "No matching files" : "No files found"}</CommandEmpty>
             <CommandGroup
-              heading={`Files${keywords.length > 0 ? ` — ${filteredFiles.length} match${filteredFiles.length === 1 ? "" : "es"}${filteredFiles.length !== files.length ? ` of ${files.length}` : ""}` : ""}`}
+              heading={`Files${keywords.length > 0 ? ` — ${filteredFiles.length} match${filteredFiles.length === 1 ? "" : "es"}${filteredFiles.length !== entries.length ? ` of ${entries.length}` : ""}` : ""}`}
             >
               <div
                 ref={listRef}
@@ -171,6 +186,7 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
               >
                 {virtualizer.getVirtualItems().map((item) => {
                   const path = filteredFiles[item.index];
+                  const isFolder = folderPaths.has(path);
                   return (
                     <div
                       key={item.key}
@@ -186,11 +202,14 @@ export default function FilePicker({ open, onClose, onOpenFile, projectPath, pro
                       <CommandItem
                         value={path}
                         onSelect={() => {
-                          onOpenFile(path, projectPath);
+                          if (isFolder) onOpenFolder?.(path, projectPath);
+                          else onOpenFile(path, projectPath);
                           onClose();
                         }}
                       >
+                        {isFolder && <Folder className="shrink-0 text-muted-foreground" />}
                         <span className="font-mono text-sm">{path}</span>
+                        {isFolder && <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">folder</span>}
                       </CommandItem>
                     </div>
                   );
