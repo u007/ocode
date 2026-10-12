@@ -892,7 +892,7 @@ export default function CoworkSidebar({
               checked={Boolean(advisorOn)}
               disabled={advisorLoading}
               onChange={toggleAdvisor}
-              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
           {/* Small model — model picker + on/off toggle (mirrors TUI's small: ●on/○off <model> row) */}
@@ -920,7 +920,7 @@ export default function CoworkSidebar({
               checked={Boolean(tuiStatus?.small_model_enabled ?? config.smallModelEnabled ?? globalSmallModelEnabled)}
               disabled={smallLoading}
               onChange={toggleSmall}
-              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
           {/* Explorer model — model picker + on/off toggle for the explore/scout
@@ -950,7 +950,7 @@ export default function CoworkSidebar({
               checked={Boolean(tuiStatus?.explorer_model_enabled ?? config.explorerModelEnabled)}
               disabled={explorerLoading}
               onChange={toggleExplorer}
-              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
           {/* Context model — model picker + on/off toggle for the context/doc-sync
@@ -980,7 +980,7 @@ export default function CoworkSidebar({
               checked={Boolean(tuiStatus?.context_agent_model_enabled ?? config.contextModelEnabled)}
               disabled={contextLoading}
               onChange={toggleContext}
-              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
 
@@ -1011,7 +1011,7 @@ export default function CoworkSidebar({
               checked={Boolean(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled)}
               disabled={autoContinueLoading}
               onChange={toggleAutoContinue}
-              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
 
@@ -1046,7 +1046,7 @@ export default function CoworkSidebar({
               checked={speechSummaryOn}
               disabled={speechSummaryLoading}
               onChange={toggleSpeechSummary}
-              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+              className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
             />
           </label>
 
@@ -1072,7 +1072,7 @@ export default function CoworkSidebar({
                   checked={discoveryCfg.enabled}
                   disabled={discoveryLoading}
                   onChange={toggleDiscovery}
-                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
                 />
               </span>
             </label>
@@ -1264,7 +1264,7 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                   checked={Boolean(tuiStatus?.permission_auto_allow ?? config.permissionModelEnabled)}
                   disabled={permLoading}
                   onChange={togglePermEnabled}
-                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                  className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
                 />
               </label>
               <button
@@ -1501,7 +1501,7 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                         checked={s.enabled}
                         disabled={mcpBusy === s.name}
                         onChange={() => toggleMcp(s.name)}
-                        className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                        className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-foreground checked:before:bg-background relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
                       />
                     </label>
                   ))}
