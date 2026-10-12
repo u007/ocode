@@ -1065,6 +1065,21 @@ export class STTInstallRequiredError extends ApiError {
   }
 }
 
+/** Message for a failed transcribe request: the JSON `error`, else the raw body. */
+function sttErrorMessage(body: string, res: Response): string {
+  if (body) {
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown; message?: unknown };
+      const msg = parsed.error ?? parsed.message;
+      if (typeof msg === "string" && msg.trim()) return msg;
+    } catch {
+      // not JSON: the plain-text body is the message
+    }
+    return body;
+  }
+  return res.statusText || `request failed (${res.status})`;
+}
+
 async function transcribeAudio(
   audio: Blob,
   filename: string,
@@ -1080,9 +1095,20 @@ async function transcribeAudio(
   });
   if (!res.ok) {
     reportAuthFailure(res.status);
-    const message = await readErrorMessage(res);
-    if (res.status === 409) throw new STTInstallRequiredError(message);
-    throw new ApiError(message, res.status);
+    const body = (await res.text().catch(() => "")).trim();
+    if (res.status === 409) {
+      // Only the speech endpoint's own code means "ask to install"; any other 409
+      // (a proxy, a conflict) is an ordinary error.
+      try {
+        const parsed = JSON.parse(body) as { code?: unknown; error?: unknown };
+        if (parsed.code === "stt_install_required" && typeof parsed.error === "string") {
+          throw new STTInstallRequiredError(parsed.error);
+        }
+      } catch (e) {
+        if (e instanceof STTInstallRequiredError) throw e;
+      }
+    }
+    throw new ApiError(sttErrorMessage(body, res), res.status);
   }
   return (await res.json()) as STTTranscribeResult;
 }

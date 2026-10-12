@@ -216,6 +216,13 @@ func (m *model) startVoice() tea.Cmd {
 		if !st.ModelAvailable(st.Selected) {
 			return voiceStartedMsg{err: errors.New(voiceUnavailableReason(st))}
 		}
+		// Recording first would discard the speech: the transcription would stop
+		// at the install prompt. Ask for the approval up front instead.
+		for _, mi := range st.Models {
+			if mi.ID == st.Selected && mi.NeedsInstall {
+				return voiceStartedMsg{err: fmt.Errorf("voice model %s needs a one-time dependency install; run /voice install first", mi.ID)}
+			}
+		}
 		rec, err := voiceStart(voiceDir())
 		if err == nil && rec == nil {
 			err = errors.New("no microphone recorder")

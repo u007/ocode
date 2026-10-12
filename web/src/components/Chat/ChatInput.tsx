@@ -9,6 +9,7 @@ import { COMMANDS } from "./commands";
 import { Loader2, Mic, MicOff, Paperclip, RotateCcw, Square, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
 import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
+import ConfirmDialog from "@/components/common/ConfirmDialog";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError, STTInstallRequiredError } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
@@ -1036,6 +1037,13 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     void submitComposer(text);
   };
   const [voiceInstalling, setVoiceInstalling] = useState(false);
+  const [voiceInstallAsk, setVoiceInstallAsk] = useState<{ message: string; resolve: (ok: boolean) => void } | null>(null);
+  const askVoiceInstall = (message: string) =>
+    new Promise<boolean>((resolve) => setVoiceInstallAsk({ message, resolve }));
+  const answerVoiceInstall = (ok: boolean) => {
+    voiceInstallAsk?.resolve(ok);
+    setVoiceInstallAsk(null);
+  };
   const voice = useVoiceRecorder({
     transcribe: async (audio, filename, preview) => {
       try {
@@ -1044,7 +1052,8 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         // The local engine needs a one-time pip install: ask, then retry once.
         // A live preview never prompts; its failure is ignored by the hook.
         if (preview || !(err instanceof STTInstallRequiredError)) throw err;
-        if (!window.confirm(`${err.message}.\n\nInstall it now? This can take several minutes.`)) {
+        // Not window.confirm: native dialogs silently return false in the desktop webview.
+        if (!(await askVoiceInstall(err.message))) {
           throw new Error("Voice input needs the dependency install; it was declined.");
         }
         setVoiceInstalling(true);
@@ -1064,7 +1073,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     canPreview: () =>
       api
         .getSTT()
-        .then((s) => s.models.find((m) => m.id === s.selected)?.engine === "local")
+        // A model still needing its install would 409 every preview tick.
+        .then((s) => {
+          const m = s.models.find((x) => x.id === s.selected);
+          return m?.engine === "local" && !m.needs_install;
+        })
         .catch(() => false),
   });
   const voiceRecording = voice.state === "recording";
@@ -1345,6 +1358,15 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           )}
         </div>
       )}
+      <ConfirmDialog
+        open={voiceInstallAsk !== null}
+        title="Install voice dependencies?"
+        description={`${voiceInstallAsk?.message ?? ""}. This can take several minutes.`}
+        confirmLabel="Install"
+        confirmVariant="default"
+        onConfirm={async () => answerVoiceInstall(true)}
+        onCancel={() => answerVoiceInstall(false)}
+      />
       {voice.error && (
         <div role="alert" className="mb-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {voice.error}

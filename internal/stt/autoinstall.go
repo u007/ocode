@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/u007/ocode/internal/pyinterp"
 )
@@ -22,9 +23,20 @@ const installTimeout = localTimeout
 // dependencies are missing but can be installed on first use.
 const autoInstallNote = "needs a one-time Python dependency install (you are asked first)"
 
-// installMu serialises dependency installs in this process, so two voice
-// requests racing on a fresh host build one venv, not two.
-var installMu sync.Mutex
+// installSem serialises dependency installs in this process, so two voice
+// requests racing on a fresh host build one venv, not two. A channel rather
+// than a mutex so a waiter can give up when its context ends.
+var installSem = make(chan struct{}, 1)
+
+// baseCache remembers the base-interpreter scan for probeTTL. Status polling and
+// live previews ask "could we install?" constantly, and each uncached answer
+// spawns `python --version` per candidate.
+var baseCache = struct {
+	mu   sync.Mutex
+	at   time.Time
+	spec pyinterp.Spec
+	ok   bool
+}{}
 
 // mayInstall reports whether a missing dependency can be installed for these
 // options at all. A pinned interpreter is the user's own environment and is
@@ -106,7 +118,20 @@ func managedPython() string {
 // baseInterpreter finds a Python 3.10+ to build the venv from, with no module
 // requirement. It is the precondition for an auto-install to be possible.
 func baseInterpreter(ctx context.Context) (pyinterp.Spec, error) {
-	return pyinterp.Select(ctx, localRange, pyinterp.Candidates(localRange), nil)
+	baseCache.mu.Lock()
+	if baseCache.ok && time.Since(baseCache.at) < probeTTL {
+		spec := baseCache.spec
+		baseCache.mu.Unlock()
+		return spec, nil
+	}
+	baseCache.mu.Unlock()
+	spec, err := pyinterp.Select(ctx, localRange, pyinterp.Candidates(localRange), nil)
+	if err == nil {
+		baseCache.mu.Lock()
+		baseCache.at, baseCache.spec, baseCache.ok = time.Now(), spec, true
+		baseCache.mu.Unlock()
+	}
+	return spec, err
 }
 
 // installLocal builds (or repairs) the managed venv and pip-installs onnx-asr
@@ -115,8 +140,12 @@ func baseInterpreter(ctx context.Context) (pyinterp.Spec, error) {
 // venv. Output is captured and surfaced in the error, never inherited, so
 // nothing paints over the TUI's alt-screen.
 func installLocal(ctx context.Context, extra []string) (pyinterp.Spec, error) {
-	installMu.Lock()
-	defer installMu.Unlock()
+	select {
+	case installSem <- struct{}{}:
+		defer func() { <-installSem }()
+	case <-ctx.Done():
+		return pyinterp.Spec{}, fmt.Errorf("waiting for another dependency install: %w", ctx.Err())
+	}
 
 	// Another caller may have finished the install while this one waited.
 	if py, err := scanLocal("", extra); err == nil {
@@ -127,10 +156,13 @@ func installLocal(ctx context.Context, extra []string) (pyinterp.Spec, error) {
 	if venv == "" {
 		return pyinterp.Spec{}, errors.New("no user cache dir to hold the Python environment")
 	}
-	ctx, cancel := context.WithTimeout(ctx, installTimeout)
+	// Once approved the install runs to completion even if the caller goes away
+	// (tab reload, proxy timeout): killing pip mid-write leaves a broken venv
+	// and makes the user approve again. The timeout still bounds it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), installTimeout)
 	defer cancel()
 
-	if managedPython() == "" {
+	if !venvHealthy(ctx, venv) {
 		base, err := baseInterpreter(ctx)
 		if err != nil {
 			return pyinterp.Spec{}, err
@@ -142,6 +174,9 @@ func installLocal(ctx context.Context, extra []string) (pyinterp.Spec, error) {
 			return pyinterp.Spec{}, err
 		}
 		if out, err := runInstallCmd(ctx, append(append([]string{}, base.Command...), "-m", "venv", venv)); err != nil {
+			// `python -m venv` can fail after creating bin/python (no ensurepip,
+			// a timeout); leave nothing that looks like a usable environment.
+			_ = os.RemoveAll(venv)
 			return pyinterp.Spec{}, fmt.Errorf("create venv with %s: %w: %s",
 				strings.Join(base.Command, " "), err, out)
 		}
@@ -159,12 +194,26 @@ func installLocal(ctx context.Context, extra []string) (pyinterp.Spec, error) {
 	return pyinterp.Spec{Command: []string{py}}, nil
 }
 
+// venvHealthy reports whether the managed venv exists and can run pip. A venv
+// whose creation was interrupted has bin/python but no pip, and is rebuilt.
+func venvHealthy(ctx context.Context, venv string) bool {
+	py := managedPython()
+	if py == "" {
+		return false
+	}
+	_, err := runInstallCmd(ctx, []string{py, "-m", "pip", "--version"})
+	return err == nil
+}
+
 // forgetProbes drops every cached interpreter scan so the next status poll and
 // transcription see the freshly installed venv.
 func forgetProbes() {
 	probeCache.mu.Lock()
 	probeCache.entries = map[string]*probeEntry{}
 	probeCache.mu.Unlock()
+	baseCache.mu.Lock()
+	baseCache.ok = false
+	baseCache.mu.Unlock()
 }
 
 // runInstallCmd runs argv with combined output captured and returns its tail.
@@ -174,10 +223,13 @@ func runInstallCmd(ctx context.Context, argv []string) (string, error) {
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
+	// pip's build subprocesses can inherit the output pipe and outlive pip;
+	// without a WaitDelay Run would block on them past the context deadline.
+	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
 	out := strings.TrimSpace(buf.String())
 	if len(out) > 800 {
-		out = out[len(out)-800:]
+		out = strings.ToValidUTF8(out[len(out)-800:], "")
 	}
 	if err != nil && ctx.Err() != nil {
 		err = fmt.Errorf("%w (%v)", ctx.Err(), err)

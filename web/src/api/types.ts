@@ -1440,6 +1440,8 @@ export interface STTModel {
   available: boolean;
   /** Why the model cannot be selected right now; set when available is false. */
   reason?: string;
+  /** Available, but its Python dependencies need a one-time approved install first. */
+  needs_install?: boolean;
 }
 
 /** GET /api/stt and PUT /api/stt both return this shape. */

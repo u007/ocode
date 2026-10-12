@@ -113,6 +113,7 @@ func StatusFor(opts Options) Status {
 					defer cancel()
 					if _, err := baseInterpreter(ctx); err == nil {
 						ok, reason = true, autoInstallNote
+						out.Models[i].NeedsInstall = true
 					}
 				}
 				if !ok {

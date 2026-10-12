@@ -596,3 +596,23 @@ func TestVoiceInstallCommandRunsInstaller(t *testing.T) {
 		t.Fatalf("last message = %q", last)
 	}
 }
+
+// Recording for a model that still needs its install would throw the speech
+// away at the prompt, so the mic must not open until /voice install ran.
+func TestVoiceRefusesToRecordWhileInstallPending(t *testing.T) {
+	s := stubVoice(t, stt.Status{Selected: "parakeet-tdt-0.6b-v3", Models: []stt.ModelInfo{
+		{ID: "parakeet-tdt-0.6b-v3", Label: "Parakeet", Available: true, NeedsInstall: true},
+	}})
+	m := newVoiceTestModel()
+
+	m, cmd := press(t, m, voiceKey("ctrl+x"))
+	m, cmd = press(t, m, voiceKey("v"))
+	m = runMsg(t, m, cmd)
+
+	if s.starts != 0 {
+		t.Fatalf("microphone opened %d times while an install is pending", s.starts)
+	}
+	if !strings.Contains(m.voice.note, "/voice install") {
+		t.Fatalf("note = %q, want it to point at /voice install", m.voice.note)
+	}
+}

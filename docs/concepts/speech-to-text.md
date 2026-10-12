@@ -48,7 +48,7 @@ environment" refusal.
 
 | surface | how it asks |
 | --- | --- |
-| web / desktop | `POST /api/stt/transcribe` answers `409 {code: "stt_install_required", packages, venv}`; the UI shows `window.confirm` and re-uploads with `?install=1` |
+| web / desktop | `POST /api/stt/transcribe` answers `409 {code: "stt_install_required", packages, venv}`; the UI shows the shared `ConfirmDialog` (never `window.confirm`: it silently returns false in the Wails desktop webview) and re-uploads with `?install=1` |
 | TUI | the status note says `run /voice install to approve it, then dictate again`; `/voice install` is the confirmation and runs `stt.Install` in a `tea.Cmd` (12 min cap), reporting in the transcript |
 
 Rules:
@@ -67,8 +67,20 @@ Rules:
   dependency install failed:", and shows "Installing voice dependencies…" while
   it runs; `/voice install` posts it into the transcript. Live previews never
   prompt (`transcribe(..., preview=true)`), so a partial cannot pop the confirm.
-- Installs are serialised by a process mutex (`installMu`) and bounded by
-  `installTimeout` (10 min). All pip/venv output is captured, never inherited.
+- `ModelInfo.needs_install` marks an available-but-uninstalled local model. The
+  web composer skips live previews for it and the TUI refuses to open the mic
+  (`/voice install` first), so no speech is recorded just to be dropped at the
+  prompt. The client treats a 409 as "install required" only when its JSON
+  `code` is `stt_install_required`.
+- A venv is reused only if `<venv>/python -m pip --version` works
+  (`venvHealthy`); a half-built one is deleted and rebuilt, and a failed
+  `python -m venv` removes what it left. An approved install runs detached from
+  the request context (a tab reload must not SIGKILL pip mid-write) under
+  `installTimeout`, and `runInstallCmd` sets `WaitDelay` so a pip child holding
+  the output pipe cannot hang it. The base-interpreter scan is cached for
+  `probeTTL` (`baseCache`) because status polls and previews ask constantly.
+- Installs are serialised by a channel semaphore (`installSem`; a waiter gives
+  up when its context ends) and bounded by `installTimeout` (10 min). All pip/venv output is captured, never inherited.
   There is no cross-process lock: two ocode processes on one fresh host can both
   build; the second `pip install` is then a no-op.
 

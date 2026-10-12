@@ -3589,6 +3589,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text = "Voice dependency install failed: " + msg.err.Error()
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: text})
+		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	case voiceTranscribedMsg:
 		if msg.err != nil {

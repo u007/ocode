@@ -220,11 +220,8 @@ func writeFakeInterpreter(t *testing.T, version string) string {
 // a fake interpreter's result never outlives the test that created it.
 func resetProbeCache(t *testing.T) {
 	t.Helper()
-	t.Cleanup(func() {
-		probeCache.mu.Lock()
-		probeCache.entries = map[string]*probeEntry{}
-		probeCache.mu.Unlock()
-	})
+	forgetProbes()
+	t.Cleanup(forgetProbes)
 }
 
 // A model's extra modules are part of its availability: an interpreter that

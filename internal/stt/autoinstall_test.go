@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/pyinterp"
 )
 
 // writeInstallablePython writes a POSIX stand-in for a base Python whose
@@ -182,3 +184,74 @@ func TestInstallLocalSurfacesPipOutput(t *testing.T) {
 		}
 	}
 }
+
+// A venv whose creation was interrupted has bin/python but no working pip. The
+// next install must rebuild it instead of failing on "No module named pip".
+func TestInstallLocalRepairsBrokenVenv(t *testing.T) {
+	resetProbeCache(t)
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("HOME", cache)
+	log := filepath.Join(t.TempDir(), "calls.log")
+	base := writeInstallablePython(t, log)
+	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// A leftover venv whose python cannot run pip.
+	broken := pyinterpVenvPython(managedVenvDir())
+	if err := os.MkdirAll(filepath.Dir(broken), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(broken, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Install(context.Background(), Options{}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "-m venv "+managedVenvDir()) {
+		t.Errorf("broken venv was not rebuilt; calls:\n%s", calls)
+	}
+}
+
+// Live previews never install and never ask, even if the caller approved.
+func TestPartialTranscribeNeverInstalls(t *testing.T) {
+	resetProbeCache(t)
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("HOME", cache)
+	log := filepath.Join(t.TempDir(), "calls.log")
+	base := writeInstallablePython(t, log)
+	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "speech-16k.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(t.TempDir(), "live.wav")
+	if err := os.WriteFile(live, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = PartialTranscribe(context.Background(),
+		Options{ModelDir: t.TempDir(), InstallApproved: true}, &Recording{path: live})
+	var req *InstallRequiredError
+	if !errors.As(err, &req) {
+		t.Fatalf("err = %v, want the preview to be refused with *InstallRequiredError", err)
+	}
+	if calls, _ := os.ReadFile(log); strings.Contains(string(calls), "pip") || strings.Contains(string(calls), "-m venv") {
+		t.Errorf("a preview installed:\n%s", calls)
+	}
+}
+
+// A second install waiting behind a running one gives up when its context ends.
+func TestInstallLocalWaiterHonoursContext(t *testing.T) {
+	installSem <- struct{}{}
+	defer func() { <-installSem }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := installLocal(ctx, nil); err == nil || !strings.Contains(err.Error(), "waiting") {
+		t.Fatalf("err = %v, want a waiting/cancelled error", err)
+	}
+}
+
+func pyinterpVenvPython(venv string) string { return pyinterp.VenvPython(venv) }

@@ -101,6 +101,10 @@ type ModelInfo struct {
 	Description string `json:"description"`
 	Available   bool   `json:"available"`
 	Reason      string `json:"reason,omitempty"`
+	// NeedsInstall marks an available local model whose Python dependencies are
+	// missing: it works only after the user approves the one-time install, so
+	// previews and dictation should not start until then.
+	NeedsInstall bool `json:"needs_install,omitempty"`
 }
 
 // lookup returns the catalog entry for id.
