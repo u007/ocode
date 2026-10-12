@@ -351,9 +351,48 @@ func (r *connectFlowRegistry) pruneLocked() {
 		expired := now.Sub(f.updatedAt) > ttl
 		f.mu.Unlock()
 		if expired {
+			// Dropping the entry is not enough: an expired flow may still own a
+			// loopback listener (the ChatGPT auto flow binds 127.0.0.1:1455 and
+			// waits on its context alone), which would stay bound for the life of
+			// the process and fail every later attempt. Claim the cancel and run it
+			// off this goroutine — it can wait for the listener to release, and this
+			// runs under the registry lock.
+			if cancel, outcome := f.claimCancel(); outcome == cancelClaimed && cancel != nil {
+				crashguard.Go(cancel)
+			}
 			delete(r.flows, id)
 		}
 	}
+}
+
+// supersede cancels every flow of the given provider and kind that is waiting on
+// the browser, waits for its resources to be released, and reports how many it
+// cancelled. A flow abandoned without a cancel (the tab was closed) would
+// otherwise keep its loopback port until it expires, failing the user's retry
+// with "address already in use".
+func (r *connectFlowRegistry) supersede(provider string, kind connectFlowKind) int {
+	r.mu.Lock()
+	var stale []*connectFlow
+	for id, f := range r.flows {
+		// waiting_browser only: that is the state of a flow that owns a loopback
+		// listener. A manual-mode flow (waiting_input) binds nothing and is left
+		// alone.
+		if f.provider == provider && f.kind == kind && f.getState() == connectFlowWaitingBrowser {
+			stale = append(stale, f)
+			delete(r.flows, id)
+		}
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, f := range stale {
+		if cancel, outcome := f.claimCancel(); outcome == cancelClaimed {
+			n++
+			if cancel != nil {
+				cancel() // returns once the listener is released (bounded)
+			}
+		}
+	}
+	return n
 }
 
 // Seams for the network-bound auth flows, so handler tests can drive
@@ -700,6 +739,8 @@ func (h *Handler) startOpenAIConnectFlow(w http.ResponseWriter, p *auth.Provider
 		h.startOpenAIManualFlow(w, p)
 		return
 	}
+	// A previous attempt that was never cancelled still owns the callback port.
+	connectFlows.supersede(p.ID, connectFlowLocalCallback)
 	ctx, cancel := context.WithCancel(context.Background())
 	authURL, finish, err := openaiStartFn(ctx)
 	if err != nil {

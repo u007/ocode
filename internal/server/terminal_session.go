@@ -516,6 +516,12 @@ func (s *terminalSession) detachLocked(ws *websocket.Conn) {
 	}
 	if s.detachTimer != nil {
 		s.detachTimer.Stop()
+		s.detachTimer = nil
+	}
+	if s.detachTTL <= 0 {
+		// terminalDetachTTLNever: the owner reaps shells itself (explicit tab
+		// close, or the process exiting), so a dropped socket never kills one.
+		return
 	}
 	pid := s.pid()
 	s.detachTimer = time.AfterFunc(s.detachTTL, func() {

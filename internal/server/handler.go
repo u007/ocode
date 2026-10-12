@@ -326,7 +326,8 @@ func (h *Handler) SetTerminalAccessPolicy(authConfigured, loopback bool) {
 
 // SetTerminalDetachTTL sets how long a detached shell is kept alive awaiting
 // reattach. Called by Server.SetRemoteMode(true) to extend it to 24 h on the
-// host; a fresh handler defaults to the 30 min local TTL.
+// host and by Server.SetDesktopMode to disable it (terminalDetachTTLNever); a
+// fresh handler defaults to terminalDetachTTL.
 func (h *Handler) SetTerminalDetachTTL(d time.Duration) {
 	h.terminalSessions.mu.Lock()
 	h.terminalSessions.detachTTL = d

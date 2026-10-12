@@ -311,7 +311,7 @@ export interface CommandContext {
     getOcrEnabled: () => Promise<{ enabled: boolean; model: string }>;
     setOcrEnabled: (enabled: boolean) => Promise<unknown>;
     setOcrModel: (model: string) => Promise<unknown>;
-    compactSession: (id: string, host?: string, focus?: string) => Promise<{ original_len: number; compacted_len: number }>;
+    compactSession: (id: string, host?: string, focus?: string) => Promise<{ original_len: number; compacted_len: number; cancelled?: boolean }>;
     recapSession: (id: string, host?: string) => Promise<{ recap: string }>;
     shareSession: (id: string, host?: string) => Promise<{ markdown: string }>;
     btwSession: (id: string, content: string, host?: string) => Promise<{ status: string }>;
@@ -1578,7 +1578,18 @@ async function handleCompact(args: string, ctx: CommandContext): Promise<Command
   try {
     // Optional focus steers the summary (TUI `/compact <focus>`); an empty
     // focus is the plain compaction the no-arg form has always done.
-    await ctx.api.compactSession(sessionId, ctx.host, args.trim() || undefined);
+    const result = await ctx.api.compactSession(sessionId, ctx.host, args.trim() || undefined);
+    if (result?.cancelled) {
+      // The user (the bar's Cancel button, or Stop) interrupted the pass. The
+      // transcript is untouched and there is no summary notice to report it, so
+      // say so — otherwise the bar just vanishes as if the pass had finished.
+      markLocalCompactionEnd(sessionId);
+      clearCompaction(sessionId);
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "Compaction cancelled — the conversation was left unchanged." }],
+      };
+    }
     // Completion is reported by the persisted compaction-summary notice now
     // rendered inline in the transcript, so drop the composer bottom bar
     // instead of retaining a "Compacted: X → Y" banner until dismissed.

@@ -28,6 +28,13 @@ type terminalListEntry struct {
 // sessions where the ping goroutine itself couldn't detect the failure.
 const terminalDetachTTL = 2 * time.Hour
 
+// terminalDetachTTLNever disables the detach reaper: a shell whose websocket
+// dropped is kept until the user closes its tab (DELETE /api/terminal/{id}) or
+// the server exits (shutdownTerminals). The desktop app uses it — it owns the
+// server, so a quit sweeps every shell, and a phone that sleeps for hours must
+// not kill a running Claude Code session.
+const terminalDetachTTLNever time.Duration = 0
+
 // terminalDetachTTLRemote is the detach TTL used when the server runs in
 // --remote mode. The point of the remote terminal path is that the pty is a
 // child of the host's `ocode serve --remote`, so it must outlive a laptop

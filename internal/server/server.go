@@ -1675,6 +1675,13 @@ func (s *Server) SetWorkDir(dir string) {
 	}
 }
 
+// SetDesktopMode marks the server as hosted in-process by the desktop app.
+// Detached terminal shells are then never reaped on a timer: the app's quit
+// path sweeps every shell, and closing a tab kills its shell explicitly.
+func (s *Server) SetDesktopMode() {
+	s.handler.SetTerminalDetachTTL(terminalDetachTTLNever)
+}
+
 // SetRemoteMode marks the server as launched in `--remote` mode. Must be
 // called before Serve; it only affects checkAuth and authMiddleware
 // behavior (see the remoteMode field doc), not binding — the caller (Run)
