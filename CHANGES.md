@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- **Per-block conflict resolution in the web Git tab.** `GET|POST /api/git/conflict/chunks` (`internal/server/handler_git_conflict_blocks.go`) lists a conflicted file's blocks and resolves them one at a time, keeping ours, theirs or both; the file is staged after its last block. The Git tab's **Blocks** toggle (`ConflictChunks.tsx`) drives it. Remote (SSH/WSL) projects answer `501` for now. See `docs/concepts/git-conflicts-and-operations.md`.
 - Remote SSH provisioning, pulse terminal scope, STT transcription, TTS updates, and web session fixes; removed `/standup` TUI command in favor of bundled skill.
 - **Pulse assistant window docks to viewport edges.** Releasing the drag grip with a side within 20 px of a viewport edge snaps that side to the 8 px inset (`snapRect` in `pulseAssistantPrefs.ts`). Tests: `PulseAssistantWindow.test.tsx`.
 - **`/standup` is a bundled skill, not a Go command.** `skills/standup/SKILL.md` replaces the built-in TUI spec, `internal/tui/standup.go`, the `standup` case of `GET /api/command-context/{name}` and `commandctx.Standup*`. The model now gathers the context itself (`git log -n 5 --stat`, `git status`/`git diff --stat` then selective diffs, `lsp_diagnostics`, a spec-file glob) and reports the same four sections; diffs are read selectively, so the multi-megabyte pre-assembled prompt is gone. Both TUI and web reach it through the skill-as-slash path. The `/catchup` alias is removed (skills have no aliases). Ships embedded (`//go:embed all:skills`) and installs with `ocode skills install standup`.

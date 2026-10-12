@@ -177,7 +177,11 @@ resolution actions do not double-count a conflicted file. The authenticated
 local and SSH/WSL projects, re-check the active operation before running Git,
 and share the same action policy across transports. Remote path-safety checks
 return a clear `400` for shell-metacharacter names; remote UI conflict and
-operation panels remain a later phase.
+operation panels remain a later phase. Local projects can also resolve a
+conflicted file one block at a time (`GET|POST /api/git/conflict/chunks`): the
+Git tab's **Blocks** toggle keeps ours, theirs or both for each block, and the
+file is staged after its last block. Remote projects answer `501` for that
+endpoint for now.
 
 ### 📁 File Browser
 
@@ -749,7 +753,7 @@ The server exposes a REST + SSE surface under `/api/*` (see `internal/server/ser
 
 - **Chat & sessions:** `POST /api/chat`, `GET /api/sessions`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/message`, `POST /api/sessions/{id}/compact`, `POST/GET /api/sessions/{id}/rewinds`, `GET/DELETE /api/sessions/{id}/rewinds/{token}`, `GET /api/sessions/{id}/export*`, `GET /api/chat/stream` (SSE). A message send may include a prepared `rewindToken`; the durable truncate-and-replace commit completes before the `202` acknowledgement.
 - **Models & agents:** `GET /api/models`, `GET /api/agents/runs/stream`
-- **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `POST /api/git/fetch|pull|push|reset-remote|conflict/resolve|operation`, `GET /api/changes`, `POST /api/changes/undo-*`
+- **Files & git:** `GET /api/files/tree`, `GET/PUT /api/files/content`, `GET /api/git/status|diff`, `GET|POST /api/git/conflict/chunks`, `POST /api/git/fetch|pull|push|reset-remote|conflict/resolve|operation`, `GET /api/changes`, `POST /api/changes/undo-*`
 - **Terminal & shell:** `POST /api/shell`, `GET /api/terminal/ws` (WebSocket), `GET /api/terminal/processes`
 - **Config:** `GET/PUT /api/config/ocode/*` (recap, commit-msg, compact, permissions-auto, permissions-mode, discovery, tui, editor, imagegen, paths, limits, features, autocontinue, browser, local-models, tts, fake-agent, …) + `/api/config/{model,thinking-budget,small-model,terminal,advisor,ocr,mask,agents}`
 - **Permissions / questions / RC:** `GET/POST /api/permissions`, `POST /api/questions`, `POST /api/permissions/resolve`, `POST /api/rc/*`

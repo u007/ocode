@@ -728,6 +728,45 @@ export interface GitConflictResolveRequest {
   resolution: "ours" | "theirs" | "mark";
 }
 
+/** One `<<<<<<<` … `>>>>>>>` region of a conflicted file, as GET
+ *  /api/git/conflict/chunks returns it. `ours`/`theirs` are the lines between
+ *  the markers joined with "\n"; a diff3 base section is not included. */
+export interface GitConflictChunk {
+  /** 1-based line of the opening marker. */
+  start_line: number;
+  /** 1-based line of the closing marker. */
+  end_line: number;
+  /** Text after the opening marker, e.g. the branch name git printed. */
+  ours_label: string;
+  /** Text after the closing marker. */
+  theirs_label: string;
+  ours: string;
+  theirs: string;
+}
+
+/** Response of GET /api/git/conflict/chunks. */
+export interface GitConflictChunks {
+  path: string;
+  /** SHA-256 of the file the chunks were parsed from. Echo it back when
+   *  resolving a chunk; the server answers 409 if the file has changed. Empty
+   *  when the file is absent (a modify/delete conflict), which has no chunks. */
+  fingerprint: string;
+  chunks: GitConflictChunk[];
+}
+
+/** Which side of one chunk to keep. "both" keeps ours, then theirs. */
+export type GitConflictChunkChoice = "ours" | "theirs" | "both";
+
+/** Body of POST /api/git/conflict/chunks. */
+export interface GitConflictChunkRequest {
+  path: string;
+  /** The fingerprint the chunk list was read with. */
+  fingerprint: string;
+  /** Position of the chunk in the list the client last read. */
+  index: number;
+  choice: GitConflictChunkChoice;
+}
+
 /** Body of POST /api/git/operation. */
 export interface GitOperationRequest {
   action: "continue" | "abort" | "skip" | "good" | "bad";

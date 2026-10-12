@@ -11,6 +11,8 @@ import type {
   GitStatus,
   GitDiffFile,
   GitCommit,
+  GitConflictChunkRequest,
+  GitConflictChunks,
   GitConflictResolveRequest,
   GitOperationRequest,
   GitOperationResult,
@@ -2026,6 +2028,31 @@ export const api = {
   ) =>
     fetchJSON<GitWorkspace>(
       `/api/git/conflict/resolve${projQuery(project, host)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(req),
+      },
+    ),
+
+  /** Chunks (conflict regions) of one conflicted file, in file order. Local
+   *  projects only; the server answers 501 for a remote host. */
+  gitConflictChunks: (path: string, project?: string) => {
+    const params = new URLSearchParams({ path });
+    if (project) params.set("project", project);
+    return fetchJSON<GitConflictChunks>(
+      `/api/git/conflict/chunks?${params.toString()}`,
+    );
+  },
+
+  /** Keep one side of one chunk. The server applies it to the file it reads
+   *  now, and refuses with 409 when `fingerprint` no longer matches. The file
+   *  is staged once its last chunk is resolved. */
+  gitResolveConflictChunk: (
+    req: GitConflictChunkRequest,
+    project?: string,
+  ) =>
+    fetchJSON<GitWorkspace>(
+      `/api/git/conflict/chunks${projQuery(project)}`,
       {
         method: "POST",
         body: JSON.stringify(req),

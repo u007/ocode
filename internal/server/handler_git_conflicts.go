@@ -586,35 +586,16 @@ func (h *Handler) gitResolveConflictLocal(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Reuse the shared path validation so this endpoint cannot be used to
-	// write anywhere the stage/discard endpoints could not.
-	_, spec, err := resolveRepoPath(dir, req.Path)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if spec == "" || spec == "." {
-		writeError(w, http.StatusBadRequest, "path is required")
+	spec, ok := resolveConflictPath(w, dir, req.Path)
+	if !ok {
 		return
 	}
 
 	// Re-detect the conflict rather than trusting the request. The per-side
 	// flags decide whether the chosen side can be checked out: a missing stage
 	// means that side is a deletion, which `git checkout` cannot materialize.
-	status, err := gitStatusForDir(dir)
-	if err != nil {
-		writeLocalGitError(w, dir, err)
-		return
-	}
-	var conflict *GitConflict
-	for i := range status.Conflicts {
-		if status.Conflicts[i].Path == spec {
-			conflict = &status.Conflicts[i]
-			break
-		}
-	}
-	if conflict == nil {
-		writeError(w, http.StatusConflict, "path is not a conflicted file: "+spec)
+	conflict, ok := gitConflictOrRefuse(w, dir, spec)
+	if !ok {
 		return
 	}
 
@@ -659,6 +640,42 @@ func (h *Handler) gitResolveConflictLocal(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeLocalGitWorkspace(w, dir)
+}
+
+// resolveConflictPath validates a caller-supplied path against the repository
+// and returns its repo-relative spec. It writes the 400 response and returns
+// ok=false on failure. Every conflict endpoint shares it, so none can be used
+// to write anywhere the stage/discard endpoints could not.
+func resolveConflictPath(w http.ResponseWriter, dir, raw string) (string, bool) {
+	_, spec, err := resolveRepoPath(dir, raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return "", false
+	}
+	if spec == "" || spec == "." {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return "", false
+	}
+	return spec, true
+}
+
+// gitConflictOrRefuse returns the unmerged entry for spec. A path that is not
+// conflicted, or a status that cannot be read, writes the response and returns
+// ok=false. Re-detecting here means a stale panel cannot act on a path that has
+// already moved on.
+func gitConflictOrRefuse(w http.ResponseWriter, dir, spec string) (*GitConflict, bool) {
+	status, err := gitStatusForDir(dir)
+	if err != nil {
+		writeLocalGitError(w, dir, err)
+		return nil, false
+	}
+	for i := range status.Conflicts {
+		if status.Conflicts[i].Path == spec {
+			return &status.Conflicts[i], true
+		}
+	}
+	writeError(w, http.StatusConflict, "path is not a conflicted file: "+spec)
+	return nil, false
 }
 
 // gitMarkResolved stages a hand-edited file after refusing to stage one that

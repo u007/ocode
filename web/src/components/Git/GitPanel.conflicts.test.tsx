@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GitOperation, GitStatus, GitWorkspace } from "@/api/types";
+import type { GitConflictChunks, GitOperation, GitStatus, GitWorkspace } from "@/api/types";
 
 // The union the server's operation kinds must stay within. Derived from the
 // API type rather than re-spelled, so adding a kind to the server is a
@@ -35,6 +35,8 @@ const mocks = vi.hoisted(() => ({
   gitStashDrop: vi.fn(),
   gitResetRemote: vi.fn(),
   gitResolveConflict: vi.fn(),
+  gitConflictChunks: vi.fn(),
+  gitResolveConflictChunk: vi.fn(),
   gitOperation: vi.fn(),
   gitStatusHandlers: [] as Array<(env: unknown) => void>,
 }));
@@ -92,11 +94,22 @@ const conflicted = ws({
   has_changes: true,
 });
 
+// Two regions in src/a.ts, as `git merge` writes them.
+const twoBlocks: GitConflictChunks = {
+  path: "src/a.ts",
+  fingerprint: "fp-1",
+  chunks: [
+    { start_line: 2, end_line: 6, ours_label: "HEAD", theirs_label: "topic", ours: "OURS-2", theirs: "THEIRS-2" },
+    { start_line: 9, end_line: 13, ours_label: "HEAD", theirs_label: "topic", ours: "OURS-9", theirs: "THEIRS-9" },
+  ],
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.gitStatusHandlers.length = 0;
   localStorage.clear();
   mocks.getGitWorkspace.mockResolvedValue(conflicted);
+  mocks.gitConflictChunks.mockResolvedValue(twoBlocks);
   mocks.gitLog.mockResolvedValue([]);
   mocks.gitStashList.mockResolvedValue([]);
   mocks.gitResolveConflict.mockResolvedValue(conflicted);
@@ -648,5 +661,150 @@ describe("an operation kind this build does not know", () => {
     expect(within(banner).getByText(/terminal/i)).toBeInTheDocument();
     // No action row at all — not an empty one, and not a partial one.
     expect(within(banner).queryAllByRole("button")).toHaveLength(0);
+  });
+});
+
+// Block-by-block resolution. Local only: the server answers 501 for a remote
+// host, so the toggle is not offered there at all.
+describe("block-by-block conflict resolution", () => {
+  it("offers a Blocks toggle on local conflicts", async () => {
+    await renderPanel();
+    await screen.findByText("src/a.ts");
+    expect(screen.getAllByRole("button", { name: /^blocks$/i }).length).toBe(2);
+  });
+
+  it("does not offer the toggle for a remote project", async () => {
+    render(<GitPanel projectPath="/proj" projectHost="ssh-box" />);
+    await screen.findByText("src/a.ts");
+    expect(screen.queryByRole("button", { name: /^blocks$/i })).not.toBeInTheDocument();
+  });
+
+  it("reads the blocks only when a row is expanded", async () => {
+    await renderPanel();
+    const row = (await screen.findByText("src/a.ts")).closest("div")!;
+    expect(mocks.gitConflictChunks).not.toHaveBeenCalled();
+
+    const toggle = within(row).getByRole("button", { name: /^blocks$/i });
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(mocks.gitConflictChunks).toHaveBeenCalledWith("src/a.ts", "/proj");
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findAllByTestId("git-conflict-chunk")).toHaveLength(2);
+  });
+
+  it("uses the rebase wording on every block, and names the panes the same way", async () => {
+    mocks.getGitWorkspace.mockResolvedValue(
+      ws({ conflicts: conflicted.status.conflicts, operation: { kind: "rebase", label: "Rebasing feature (2/5)", step: 2, total: 5 } }),
+    );
+    await renderPanel();
+    const row = (await screen.findByText("src/a.ts")).closest("div")!;
+    fireEvent.click(within(row).getByRole("button", { name: /^blocks$/i }));
+
+    const chunks = await screen.findAllByTestId("git-conflict-chunk");
+    expect(chunks).toHaveLength(2);
+    for (const chunk of chunks) {
+      expect(within(chunk).getByRole("button", { name: "Keep upstream" })).toBeInTheDocument();
+      expect(within(chunk).getByRole("button", { name: "Keep my commit" })).toBeInTheDocument();
+      expect(within(chunk).getByRole("button", { name: "Keep both" })).toBeInTheDocument();
+      expect(within(chunk).queryByRole("button", { name: /^use ours$/i })).not.toBeInTheDocument();
+    }
+    // One pane header per side per block.
+    expect(screen.getAllByText("Upstream · HEAD")).toHaveLength(2);
+    expect(screen.getAllByText("Your commit · topic")).toHaveLength(2);
+  });
+
+  it("keeps one block with the fingerprint it was read with, then re-reads the list", async () => {
+    mocks.gitResolveConflictChunk.mockResolvedValue(conflicted);
+    await renderPanel();
+    const row = (await screen.findByText("src/a.ts")).closest("div")!;
+    fireEvent.click(within(row).getByRole("button", { name: /^blocks$/i }));
+
+    const chunks = await screen.findAllByTestId("git-conflict-chunk");
+    fireEvent.click(within(chunks[0]).getByRole("button", { name: "Keep both" }));
+
+    await waitFor(() => {
+      expect(mocks.gitResolveConflictChunk).toHaveBeenCalledWith(
+        { path: "src/a.ts", fingerprint: "fp-1", index: 0, choice: "both" },
+        "/proj",
+      );
+    });
+    await waitFor(() => expect(mocks.gitConflictChunks).toHaveBeenCalledTimes(2));
+  });
+
+  it("holds the block buttons until the list re-read after an action has arrived", async () => {
+    // The first read is the usual one. The re-read after the action is held
+    // open, so the test can observe the window before the new list lands.
+    let finishReread: (value: GitConflictChunks) => void = () => {};
+    mocks.gitConflictChunks
+      .mockResolvedValueOnce(twoBlocks)
+      .mockImplementationOnce(() => new Promise<GitConflictChunks>((resolve) => { finishReread = resolve; }));
+    mocks.gitResolveConflictChunk.mockResolvedValue(conflicted);
+
+    await renderPanel();
+    const row = (await screen.findByText("src/a.ts")).closest("div")!;
+    fireEvent.click(within(row).getByRole("button", { name: /^blocks$/i }));
+    const chunks = await screen.findAllByTestId("git-conflict-chunk");
+    fireEvent.click(within(chunks[0]).getByRole("button", { name: "Keep both" }));
+
+    await waitFor(() => expect(mocks.gitConflictChunks).toHaveBeenCalledTimes(2));
+    // Old list still on screen, but its fingerprint is no longer trustworthy.
+    const held = await screen.findAllByTestId("git-conflict-chunk");
+    for (const chunk of held) {
+      expect(within(chunk).getByRole("button", { name: "Keep both" })).toBeDisabled();
+    }
+
+    finishReread({
+      path: "src/a.ts",
+      fingerprint: "fp-2",
+      chunks: [twoBlocks.chunks[1]],
+    });
+    await waitFor(() => {
+      const fresh = screen.getAllByTestId("git-conflict-chunk");
+      expect(fresh).toHaveLength(1);
+      expect(within(fresh[0]).getByRole("button", { name: "Keep both" })).toBeEnabled();
+    });
+  });
+
+  it("closes the block view once the file is no longer conflicted", async () => {
+    await renderPanel();
+    const row = (await screen.findByText("src/a.ts")).closest("div")!;
+    fireEvent.click(within(row).getByRole("button", { name: /^blocks$/i }));
+    const chunks = await screen.findAllByTestId("git-conflict-chunk");
+
+    // The last block is kept, so the server stages the file and it drops out
+    // of the conflicts list on the reload.
+    mocks.gitResolveConflictChunk.mockResolvedValue(conflicted);
+    mocks.getGitWorkspace.mockResolvedValue(
+      ws({ conflicts: [{ path: "src/deleted.ts", code: "UD", ours: true, theirs: false }] }),
+    );
+    fireEvent.click(within(chunks[0]).getByRole("button", { name: "Keep both" }));
+
+    await waitFor(() => expect(screen.queryByTestId("git-conflict-chunks")).not.toBeInTheDocument());
+    expect(screen.queryByText("src/a.ts")).not.toBeInTheDocument();
+  });
+
+  it("shows the server's refusal, such as a stale fingerprint, instead of applying it", async () => {
+    mocks.gitResolveConflictChunk.mockRejectedValue(
+      new Error("src/a.ts changed since its conflict blocks were read; reload them"),
+    );
+    await renderPanel();
+    const row = (await screen.findByText("src/a.ts")).closest("div")!;
+    fireEvent.click(within(row).getByRole("button", { name: /^blocks$/i }));
+    const chunks = await screen.findAllByTestId("git-conflict-chunk");
+    fireEvent.click(within(chunks[0]).getByRole("button", { name: "Keep both" }));
+
+    expect(await screen.findByText(/changed since its conflict blocks were read/)).toBeInTheDocument();
+  });
+
+  it("says a file with no blocks points back to the whole-file buttons", async () => {
+    mocks.gitConflictChunks.mockResolvedValue({ path: "src/a.ts", fingerprint: "", chunks: [] });
+    await renderPanel();
+    const row = (await screen.findByText("src/a.ts")).closest("div")!;
+    fireEvent.click(within(row).getByRole("button", { name: /^blocks$/i }));
+
+    expect(await screen.findByTestId("git-conflict-chunks-empty")).toHaveTextContent(
+      /no conflict blocks in this file/i,
+    );
   });
 });

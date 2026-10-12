@@ -1,5 +1,9 @@
 # Directory Update Log
 
+## 2026-10-12
+
+* **Update**: Git conflicts and halted-operation recovery (web Git tab) ([concepts/git-conflicts-and-operations.md](/concepts/git-conflicts-and-operations.md))
+
 
 
 

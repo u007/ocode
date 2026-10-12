@@ -1,5 +1,16 @@
 # TODO
 
+## Open: block-by-block conflict resolution for remote projects (2026-10-12)
+
+- **Remote (SSH/WSL) projects have no per-block resolution.** The local endpoints
+  (`GET`/`POST /api/git/conflict/chunks`) answer 501 for a `host` parameter, and the web
+  hides the Blocks toggle for remote projects. Users resolve remote conflicts whole-file
+  (ours / theirs / mark resolved) or in a terminal. The gap is the file body: the block
+  parser and apply step run locally, so a remote port must read the file over SSH,
+  fingerprint it there, and write it back through the same guarded command path as
+  `remoteGitResolveConflict`. It also inherits §7's shell-special-character path limit.
+  Design and contract: `docs/concepts/git-conflicts-and-operations.md` §11.
+
 ## Open: Pulse terminal output follow-ups (2026-10-12)
 
 - **Two emulators, one open x/vt gap.** Option B (2026-10-12): the card stays on

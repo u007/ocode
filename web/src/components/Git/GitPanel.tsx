@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   RefreshCw,
   GitBranch,
@@ -26,7 +26,10 @@ import { ContextMenu } from "@/components/Layout/ContextMenu";
 import type { ContextMenuItem } from "@/components/Layout/ContextMenu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { conflictSideLabels } from "./conflictSideLabels";
+import { ConflictChunks } from "./ConflictChunks";
 import type {
+  GitConflictChunkChoice,
   GitCommit,
   GitDiffFile,
   GitHunkAction,
@@ -151,36 +154,6 @@ const OPERATION_ACTIONS: Record<
     { action: "abort", label: "Reset", done: "reset the bisect", destructive: true },
   ],
 };
-
-/** Labels for the two conflict-side buttons.
- *
- *  THE most consequential detail in this feature. During a rebase git's
- *  "ours" is the UPSTREAM branch being replayed onto and "theirs" is the
- *  user's own commit — the exact opposite of the intuitive reading. A user
- *  who reads "Use ours" as "keep my work" would silently discard their commit
- *  while believing they had kept it. So the wording changes, and the tooltip
- *  names the side explicitly.
- *
- *  Only a rebase inverts. `am` and `cherry-pick` do NOT: verified in a scratch
- *  repo with `git am -3`, stage 2 ("ours") is the current HEAD and stage 3
- *  ("theirs") is the incoming patch. Labelling am's sides as upstream/commit
- *  pointed the user at the wrong side of their own history. */
-function conflictSideLabels(operationKind?: string) {
-  if (operationKind === "rebase" || operationKind === "rebase-interactive") {
-    return {
-      ours: "Keep upstream",
-      theirs: "Keep my commit",
-      oursTip: "Keep the upstream version (during a rebase, git calls this 'ours')",
-      theirsTip: "Keep your own commit (during a rebase, git calls this 'theirs')",
-    };
-  }
-  return {
-    ours: "Use ours",
-    theirs: "Use theirs",
-    oursTip: "Keep our version of this file",
-    theirsTip: "Keep their version of this file",
-  };
-}
 
 interface Props {
   onOpenFile?: (path: string, projectRoot?: string) => void;
@@ -499,6 +472,23 @@ export default function GitPanel({
       resolution === "mark" ? "marked " + path + " resolved" : "resolved " + path,
     );
 
+  const resolveChunk = async (
+    path: string,
+    index: number,
+    choice: GitConflictChunkChoice,
+    fingerprint: string,
+  ) => {
+    await runMutation(
+      () =>
+        api.gitResolveConflictChunk(
+          { path, fingerprint, index, choice },
+          projectPath,
+        ),
+      `resolved block ${index + 1} in ${path}`,
+    );
+    setChunkRefresh((n) => n + 1);
+  };
+
   const runOperation = (
     action: GitOperationRequest["action"],
     kind: GitOperation["kind"],
@@ -610,6 +600,19 @@ export default function GitPanel({
 
   // Force-push confirmation flow
   const [pendingForcePush, setPendingForcePush] = useState(false);
+  // The conflicted file whose block-by-block view is expanded, and a tick the
+  // block list re-reads on after every chunk action.
+  const [openChunkPath, setOpenChunkPath] = useState<string | null>(null);
+  const [chunkRefresh, setChunkRefresh] = useState(0);
+  // Forget the expanded file once it leaves the conflict list, so a later
+  // conflict on the same path starts collapsed instead of auto-fetching.
+  useEffect(() => {
+    if (openChunkPath === null) return;
+    const stillConflicted = (workspace?.status?.conflicts ?? []).some(
+      (c) => c.path === openChunkPath,
+    );
+    if (!stillConflicted) setOpenChunkPath(null);
+  }, [workspace, openChunkPath]);
   const [pendingResetRemote, setPendingResetRemote] = useState(false);
   const doForcePush = () => {
     setPendingForcePush(false);
@@ -1233,52 +1236,79 @@ export default function GitPanel({
           </div>
           {conflicts.map((c) => {
             const labels = conflictSideLabels(operation?.kind);
+            const expanded = openChunkPath === c.path;
             return (
-              <div
-                key={c.path}
-                data-testid="git-conflict-row"
-                className="px-3 py-1.5 flex flex-wrap items-center gap-2 hover:bg-muted/30"
-              >
-                <span
-                  className={`w-4 h-4 rounded text-[10px] flex items-center justify-center shrink-0 ${STATUS_BADGES.conflicted.color}`}
-                  title={c.code}
+              <Fragment key={c.path}>
+                <div
+                  data-testid="git-conflict-row"
+                  className="px-3 py-1.5 flex flex-wrap items-center gap-2 hover:bg-muted/30"
                 >
-                  {STATUS_BADGES.conflicted.label}
-                </span>
-                <button
-                  onClick={() => onOpenFile?.(c.path, projectPath)}
-                  className="text-xs font-mono truncate text-left hover:underline min-w-0 flex-1"
-                  title={c.path}
-                >
-                  {c.path}
-                </button>
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    onClick={() => resolveConflict(c.path, "ours")}
-                    disabled={busy}
-                    title={labels.oursTip}
-                    className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                  <span
+                    className={`w-4 h-4 rounded text-[10px] flex items-center justify-center shrink-0 ${STATUS_BADGES.conflicted.color}`}
+                    title={c.code}
                   >
-                    {labels.ours}
-                  </button>
+                    {STATUS_BADGES.conflicted.label}
+                  </span>
                   <button
-                    onClick={() => resolveConflict(c.path, "theirs")}
-                    disabled={busy}
-                    title={labels.theirsTip}
-                    className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                    onClick={() => onOpenFile?.(c.path, projectPath)}
+                    className="text-xs font-mono truncate text-left hover:underline min-w-0 flex-1"
+                    title={c.path}
                   >
-                    {labels.theirs}
+                    {c.path}
                   </button>
-                  <button
-                    onClick={() => resolveConflict(c.path, "mark")}
-                    disabled={busy}
-                    title="Stage this file as you edited it (refused while conflict markers remain)"
-                    className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
-                  >
-                    Mark resolved
-                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => resolveConflict(c.path, "ours")}
+                      disabled={busy}
+                      title={labels.oursTip}
+                      className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                    >
+                      {labels.ours}
+                    </button>
+                    <button
+                      onClick={() => resolveConflict(c.path, "theirs")}
+                      disabled={busy}
+                      title={labels.theirsTip}
+                      className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                    >
+                      {labels.theirs}
+                    </button>
+                    <button
+                      onClick={() => resolveConflict(c.path, "mark")}
+                      disabled={busy}
+                      title="Stage this file as you edited it (refused while conflict markers remain)"
+                      className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60 disabled:opacity-40"
+                    >
+                      Mark resolved
+                    </button>
+                    {/* Block-by-block view is local-only: the server answers 501
+                        for a remote host, so the toggle is not offered there. */}
+                    {!projectHost && (
+                      <button
+                        onClick={() => setOpenChunkPath(expanded ? null : c.path)}
+                        aria-expanded={expanded}
+                        title="Resolve each conflict block separately"
+                        className="px-1.5 py-0.5 rounded text-[11px] border border-border hover:bg-muted/60"
+                      >
+                        Blocks
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
+                {expanded && (
+                  <ConflictChunks
+                    key={`${projectPath}:${c.path}`}
+                    path={c.path}
+                    project={projectPath}
+                    operationKind={operation?.kind}
+                    busy={busy}
+                    refreshKey={chunkRefresh}
+                    onChoose={(index, choice, fingerprint) =>
+                      resolveChunk(c.path, index, choice, fingerprint)
+                    }
+                  />
+                )}
+              </Fragment>
             );
           })}
         </div>

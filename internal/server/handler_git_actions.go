@@ -208,14 +208,20 @@ func (h *Handler) gitDirForMutation(w http.ResponseWriter, r *http.Request) (str
 		writeError(w, http.StatusBadRequest, "unknown project")
 		return "", false
 	}
+	return gitWorkTreeRoot(w, dir)
+}
+
+// gitWorkTreeRoot resolves dir to the top level of its repository. Git accepts
+// a subdirectory as cmd.Dir and then silently applies operations to its
+// containing repository, and porcelain paths are repo-relative, so every
+// handler that maps a conflict or status path back to a file must normalize
+// first. It writes the 400 response and returns ok=false outside a repository.
+func gitWorkTreeRoot(w http.ResponseWriter, dir string) (string, bool) {
 	root, err := gitRunInDir(dir, "rev-parse", "--show-toplevel")
 	if err != nil || root == "" {
 		writeError(w, http.StatusBadRequest, "not a git repository")
 		return "", false
 	}
-	// Git accepts a subdirectory as cmd.Dir and then silently applies network
-	// operations to its containing repository. Normalize explicitly so an
-	// allowed nested project path cannot broaden the operation unexpectedly.
 	return root, true
 }
 
