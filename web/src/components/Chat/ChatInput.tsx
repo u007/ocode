@@ -9,7 +9,7 @@ import { COMMANDS } from "./commands";
 import { Loader2, Mic, MicOff, Paperclip, RotateCcw, Square, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
 import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
-import { api, apiPath, authHeaders, remoteApiBase, ApiError } from "@/api/client";
+import { api, apiPath, authHeaders, remoteApiBase, ApiError, STTInstallRequiredError } from "@/api/client";
 import EditorContextChip from "./EditorContextChip";
 import { RESTORE_EVENT, type RestoreDetail } from "../../lib/inputRestore";
 import {
@@ -1036,7 +1036,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     void submitComposer(text);
   };
   const voice = useVoiceRecorder({
-    transcribe: (audio, filename) => api.transcribeSpeech(audio, filename),
+    transcribe: async (audio, filename) => {
+      try {
+        return await api.transcribeSpeech(audio, filename);
+      } catch (err) {
+        // The local engine needs a one-time pip install: ask, then retry once.
+        if (!(err instanceof STTInstallRequiredError)) throw err;
+        if (!window.confirm(`${err.message}.\n\nInstall it now? This can take several minutes.`)) {
+          throw new Error("Voice input needs the dependency install; it was declined.");
+        }
+        return api.transcribeSpeech(audio, filename, { installApproved: true });
+      }
+    },
     onTranscript: onVoiceTranscript,
     // Previews re-upload the whole clip, so they run only for a local engine.
     canPreview: () =>

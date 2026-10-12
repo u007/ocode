@@ -559,3 +559,40 @@ func TestVoicePartialSkippedForHostedEngine(t *testing.T) {
 		t.Fatalf("decoder ran %d times for a hosted engine", *calls)
 	}
 }
+
+// A dictation that needs the one-time install never starts it: the note tells
+// the user to run /voice install, which is the confirmation.
+func TestVoiceInstallRequiredPointsAtInstallCommand(t *testing.T) {
+	stubVoice(t, availableStatus())
+	m := newVoiceTestModel()
+	next, _ := m.Update(voiceTranscribedMsg{err: &stt.InstallRequiredError{Packages: []string{"onnx-asr[cpu,hub]"}, Venv: "/cache/stt-venv"}})
+	m = voiceModelOf(next)
+	if !strings.Contains(m.voice.note, "/voice install") || !strings.Contains(m.voice.note, "/cache/stt-venv") {
+		t.Fatalf("note = %q, want it to name the venv and /voice install", m.voice.note)
+	}
+}
+
+// /voice install is the explicit approval: it runs the installer off the UI
+// goroutine and reports the outcome in the transcript.
+func TestVoiceInstallCommandRunsInstaller(t *testing.T) {
+	stubVoice(t, availableStatus())
+	orig := voiceInstall
+	t.Cleanup(func() { voiceInstall = orig })
+	called := 0
+	voiceInstall = func(context.Context, stt.Options) error { called++; return nil }
+
+	m := newVoiceTestModel()
+	cmd := runVoiceCmd(&m, []string{"install"})
+	if cmd == nil || called != 0 {
+		t.Fatalf("install must run in a cmd, not inline (cmd=%v called=%d)", cmd != nil, called)
+	}
+	msg, ok := cmd().(voiceInstalledMsg)
+	if !ok || msg.err != nil || called != 1 {
+		t.Fatalf("msg=%#v called=%d", msg, called)
+	}
+	next, _ := m.Update(msg)
+	m = voiceModelOf(next)
+	if last := m.messages[len(m.messages)-1].text; !strings.Contains(last, "installed") {
+		t.Fatalf("last message = %q", last)
+	}
+}

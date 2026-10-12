@@ -1055,20 +1055,34 @@ async function readErrorMessage(res: Response): Promise<string> {
   return res.statusText || `request failed (${res.status})`;
 }
 
+/** Thrown when the local speech engine needs a one-time dependency install the
+ *  user has not approved yet (HTTP 409, code `stt_install_required`). Retry
+ *  `transcribeSpeech(..., { installApproved: true })` after confirming. */
+export class STTInstallRequiredError extends ApiError {
+  constructor(message: string) {
+    super(message, 409);
+    this.name = "STTInstallRequiredError";
+  }
+}
+
 async function transcribeAudio(
   audio: Blob,
   filename: string,
+  installApproved = false,
 ): Promise<STTTranscribeResult> {
   const form = new FormData();
   form.append("audio", audio, filename);
-  const res = await fetch(apiPath("/api/stt/transcribe"), {
+  const path = installApproved ? "/api/stt/transcribe?install=1" : "/api/stt/transcribe";
+  const res = await fetch(apiPath(path), {
     method: "POST",
     headers: authHeaders(),
     body: form,
   });
   if (!res.ok) {
     reportAuthFailure(res.status);
-    throw new ApiError(await readErrorMessage(res), res.status);
+    const message = await readErrorMessage(res);
+    if (res.status === 409) throw new STTInstallRequiredError(message);
+    throw new ApiError(message, res.status);
   }
   return (await res.json()) as STTTranscribeResult;
 }
@@ -1703,8 +1717,11 @@ export const api = {
     }),
   /** Uploads one recording as multipart field `audio`. No Content-Type header:
    *  the browser must set the multipart boundary itself. */
-  transcribeSpeech: (audio: Blob, filename: string) =>
-    transcribeAudio(audio, filename),
+  transcribeSpeech: (
+    audio: Blob,
+    filename: string,
+    opts?: { installApproved?: boolean },
+  ) => transcribeAudio(audio, filename, opts?.installApproved),
 
   getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
   setTUISettings: (cfg: TUISettings) =>

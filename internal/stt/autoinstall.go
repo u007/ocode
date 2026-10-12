@@ -20,17 +20,64 @@ const installTimeout = localTimeout
 
 // autoInstallNote is the status reason shown for a model whose Python
 // dependencies are missing but can be installed on first use.
-const autoInstallNote = "Python dependencies install automatically on first use"
+const autoInstallNote = "needs a one-time Python dependency install (you are asked first)"
 
 // installMu serialises dependency installs in this process, so two voice
 // requests racing on a fresh host build one venv, not two.
 var installMu sync.Mutex
 
-// autoInstall reports whether a missing dependency may be installed for these
-// options. A pinned interpreter is the user's own environment and is never
-// modified; live partials must not start a multi-minute install on every poll.
-func (o Options) autoInstall() bool {
-	return o.Python == "" && !o.NoAutoInstall
+// mayInstall reports whether a missing dependency can be installed for these
+// options at all. A pinned interpreter is the user's own environment and is
+// never modified. Whether the install actually runs is InstallApproved.
+func (o Options) mayInstall() bool {
+	return o.Python == ""
+}
+
+// InstallRequiredError says the local engine's Python dependencies are missing
+// and can be installed, but the caller has not approved it. Hosts catch it with
+// errors.As, ask the user, and retry with Options.InstallApproved (or call
+// Install). Nothing has been downloaded or written when it is returned.
+type InstallRequiredError struct {
+	// Packages are the pip requirements that would be installed.
+	Packages []string
+	// Venv is the directory the managed environment would be created in.
+	Venv string
+}
+
+func (e *InstallRequiredError) Error() string {
+	return fmt.Sprintf("speech-to-text: the local model needs a one-time install of %s into %s",
+		strings.Join(e.Packages, " "), e.Venv)
+}
+
+// installRequirement returns the pending install when a base Python 3.10+
+// exists to build the venv from, or nil when none does (the original scan error
+// is then the useful one).
+func installRequirement(ctx context.Context, extra []string) *InstallRequiredError {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	if _, err := baseInterpreter(ctx); err != nil {
+		return nil
+	}
+	return &InstallRequiredError{Packages: installPackages(extra), Venv: managedVenvDir()}
+}
+
+func installPackages(extra []string) []string {
+	return append([]string{"onnx-asr[cpu,hub]"}, extra...)
+}
+
+// Install performs the dependency install for the selected model, for hosts
+// that confirm with the user before calling Transcribe. It refuses a pinned
+// Python, which is never modified.
+func Install(ctx context.Context, opts Options) error {
+	s, _ := lookup(ResolveModel(opts.Model))
+	if s.Engine != EngineLocal {
+		return fmt.Errorf("speech-to-text: %s is hosted and needs no install", s.ID)
+	}
+	if !opts.mayInstall() {
+		return errors.New("speech-to-text: a pinned Python is never modified; install onnx-asr into it yourself")
+	}
+	_, err := installLocal(ctx, s.Extra)
+	return err
 }
 
 // managedVenvDir is the venv ocode builds for the local engine, next to the
@@ -101,8 +148,7 @@ func installLocal(ctx context.Context, extra []string) (pyinterp.Spec, error) {
 	}
 
 	py := pyinterp.VenvPython(venv)
-	args := []string{py, "-m", "pip", "install", "--disable-pip-version-check", "onnx-asr[cpu,hub]"}
-	args = append(args, extra...)
+	args := append([]string{py, "-m", "pip", "install", "--disable-pip-version-check"}, installPackages(extra)...)
 	if out, err := runInstallCmd(ctx, args); err != nil {
 		return pyinterp.Spec{}, fmt.Errorf("pip install: %w: %s", err, out)
 	}

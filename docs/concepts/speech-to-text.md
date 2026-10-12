@@ -32,30 +32,39 @@ status request waits for the slowest distinct extras set, not the sum. A scan
 that hits its 60 s deadline is not cached. An OpenAI model is ready only when `auth.ResolveKey("openai")` is non-empty.
 The first local transcription downloads the model weights from Hugging Face.
 
-### Automatic dependency install
+### Dependency install (asks first)
 
-When no Python 3.10+ imports `onnx_asr`, `Transcribe` installs it instead of
-failing (`internal/stt/autoinstall.go`). It builds a managed venv at
+When no Python 3.10+ imports `onnx_asr`, `Transcribe` does not fail with a hint
+and does not install silently: it returns `*stt.InstallRequiredError` (packages
+and venv path) and touches nothing. The host asks the user, then retries with
+`Options.InstallApproved` (or calls `stt.Install`). The install
+(`internal/stt/autoinstall.go`) builds a managed venv at
 `<user cache>/ocode/stt-venv` from the newest base Python 3.10+, runs
 `pip install onnx-asr[cpu,hub] <model extras>` into it, verifies the imports, then
 drops the probe cache. The managed venv is probed first on every later scan, and
 installs are additive, so switching to the unified model only adds
 `sentencepiece`. A venv sidesteps Homebrew/Debian's "externally-managed
-environment" refusal. Rules:
+environment" refusal.
+
+| surface | how it asks |
+| --- | --- |
+| web / desktop | `POST /api/stt/transcribe` answers `409 {code: "stt_install_required", packages, venv}`; the UI shows `window.confirm` and re-uploads with `?install=1` |
+| TUI | the status note says `run /voice install to approve it, then dictate again`; `/voice install` is the confirmation and runs `stt.Install` in a `tea.Cmd` (12 min cap), reporting in the transcript |
+
+Rules:
 
 - A pinned `Options.Python` is never installed into; it keeps the old
-  error and install hint.
-- `StatusFor` reports a missing-deps model as `available` with the reason
-  "Python dependencies install automatically on first use" whenever a base
-  Python 3.10+ exists, so it is selectable. With no Python 3.10+ at all it
-  stays unavailable with the full list of rejected candidates.
-- `PartialTranscribe` sets `NoAutoInstall`: live partials are polled and a
-  failure is silent, so only the final transcription may start the install.
+  error and install hint, and `Install` refuses it.
+- `StatusFor` reports a missing-deps model as `available` with a reason saying
+  a one-time install is needed (you are asked first) whenever a base Python
+  3.10+ exists, so it is selectable. With no Python 3.10+ at all it stays
+  unavailable with the full list of rejected candidates.
+- `PartialTranscribe` clears `InstallApproved`: live partials are polled and a
+  failure is silent, so they can neither install nor nag.
 - Installs are serialised by a process mutex (`installMu`) and bounded by
   `installTimeout` (10 min). All pip/venv output is captured, never inherited.
   There is no cross-process lock: two ocode processes on one fresh host can both
   build; the second `pip install` is then a no-op.
-- Opt out per call with `Options.NoAutoInstall`.
 
 ## Engines
 

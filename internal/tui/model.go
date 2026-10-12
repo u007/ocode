@@ -54,6 +54,7 @@ import (
 	shellpkg "github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/stt"
 	syncpkg "github.com/u007/ocode/internal/sync"
 	"github.com/u007/ocode/internal/tailscale"
 	"github.com/u007/ocode/internal/tool"
@@ -3582,10 +3583,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onVoicePartialTick(msg)
 	case voicePartialMsg:
 		return m, m.onVoicePartial(msg)
+	case voiceInstalledMsg:
+		text := "Voice dependencies installed. Press ctrl+x v to dictate."
+		if msg.err != nil {
+			text = "Voice dependency install failed: " + msg.err.Error()
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: text})
+		return m, nil
 	case voiceTranscribedMsg:
 		if msg.err != nil {
 			m.voice.phase = voiceIdle
 			m.voice.note = msg.err.Error()
+			var need *stt.InstallRequiredError
+			if errors.As(msg.err, &need) {
+				m.voice.note += "; run /voice install to approve it, then dictate again"
+			}
 			return m, nil
 		}
 		m.voice.phase = voiceIdle
