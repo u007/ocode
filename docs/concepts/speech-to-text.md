@@ -15,22 +15,40 @@ need no local install.
 
 | id | engine | runs on | needs |
 | --- | --- | --- | --- |
-| `parakeet-tdt-0.6b-v3` (default) | local | this machine | Python 3 + `onnx-asr[cpu,hub]` |
-| `parakeet-tdt-0.6b-v2` | local | this machine | Python 3 + `onnx-asr[cpu,hub]` |
-| `parakeet-unified-en-0.6b` | local | this machine | Python 3 + `onnx-asr[cpu,hub]` + `sentencepiece` |
+| `parakeet-tdt-0.6b-v3` (default) | local | this machine | Python 3.10+ + `onnx-asr[cpu,hub]` |
+| `parakeet-tdt-0.6b-v2` | local | this machine | Python 3.10+ + `onnx-asr[cpu,hub]` |
+| `parakeet-unified-en-0.6b` | local | this machine | Python 3.10+ + `onnx-asr[cpu,hub]` + `sentencepiece` |
 | `gpt-4o-transcribe` | openai | OpenAI | OpenAI API key |
 | `whisper-1` | openai | OpenAI | OpenAI API key |
 
 Availability is resolved per request (`stt.StatusFor`), never guessed. A local
-model is ready only when `python3 -I -c "import onnx_asr"` succeeds (probe cached
-60 s). An OpenAI model is ready only when `auth.ResolveKey("openai")` is non-empty.
+model is ready only when some Python 3.10+ on this host imports `onnx_asr` plus
+the model's extra modules (checked with `python -I -c "import ..."`). The
+interpreter scan is cached 60 s and shared with transcription, so the probe and
+the run use the same Python. The scan runs outside the cache lock: concurrent
+callers for one key share one in-flight scan, and status polling for another key
+never waits behind it. `StatusFor` probes the local models concurrently, so a
+status request waits for the slowest distinct extras set, not the sum. A scan
+that hits its 60 s deadline is not cached. An OpenAI model is ready only when `auth.ResolveKey("openai")` is non-empty.
 The first local transcription downloads the model weights from Hugging Face.
 
 ## Engines
 
 - **local**: `internal/stt/transcribe_onnx.py` (embedded in the binary) runs
-  under `python3 -I` so no module in the working directory can shadow
-  `onnx_asr`. It downloads the model into `ModelDir/<id>` (default
+  under the chosen interpreter with `-I`, so no module in the working directory
+  can shadow `onnx_asr`. The interpreter is the first candidate that is Python
+  3.10+ and imports every required module. The search is shared with TTS
+  (`internal/pyinterp`): versioned names newest-first, then bare `python3`, then
+  Homebrew, `/usr/local/bin`, `/usr/bin`, pyenv shims and Framework installs.
+  Candidates that resolve to the same binary with the same launcher arguments are
+  probed once (`py -3.9` and `py -3.11` are distinct). A pinned `Options.Python`
+  replaces the search; if that path is not an executable, the reason names it. A failure lists each candidate and why it
+  was rejected, for example `(ModuleNotFoundError: No module named 'onnx_asr')`
+  or `(3.9)`. A too-old interpreter such as the
+  system `/usr/bin/python3` (3.9) is skipped by the version check, so it no
+  longer decides the outcome. Install into any one of the
+  listed interpreters with `pip install "onnx-asr[cpu,hub]"` (plus
+  `sentencepiece` for the unified model). It downloads the model into `ModelDir/<id>` (default
   `<user cache>/ocode/stt-models`) as real files and loads from there: onnx-asr's
   own HF cache stores symlinks into `blobs/`, and onnxruntime rejects the
   external weight file (`External data path escapes model directory`). Non-WAV input (browser webm/mp4) is converted to 16 kHz mono WAV

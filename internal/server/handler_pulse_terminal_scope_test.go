@@ -12,7 +12,7 @@ import (
 
 // terminalToolNames are the tools that read terminal state. They belong to the
 // Pulse assistant alone: no other agent may be handed them.
-var terminalToolNames = []string{"terminal_read", "terminal_tabs"}
+var terminalToolNames = []string{"terminal_read", "terminal_screen", "terminal_tabs"}
 
 func toolNamesOf(defs []map[string]interface{}) map[string]bool {
 	out := make(map[string]bool, len(defs))

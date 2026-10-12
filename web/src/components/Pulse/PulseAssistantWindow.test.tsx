@@ -5,6 +5,7 @@ import {
   ASSISTANT_BAR_HEIGHT,
   ASSISTANT_EDGE,
   ASSISTANT_MIN_WIDTH,
+  ASSISTANT_SNAP_DISTANCE,
   clampRect,
   defaultRect,
   isNarrowViewport,
@@ -13,6 +14,7 @@ import {
   setAssistantMode,
   setAssistantOpen,
   setAssistantRect,
+  snapRect,
   toggleAssistantWindow,
   usePulseAssistantPrefs,
 } from "./pulseAssistantPrefs";
@@ -442,6 +444,29 @@ describe("PulseAssistantWindow drag", () => {
       }),
     );
   });
+
+  it("docks to the right edge when released within the snap distance of it", async () => {
+    // jsdom viewport is 1024x768: the right-docked x is 1024 - 420 - 8 = 596, and this drop lands 6px short of it.
+    setAssistantRect({ x: 560, y: 90, width: 420, height: 560 });
+    mountDrawer();
+    await screen.findByTestId("chat-panel");
+    const grip = screen.getByTestId("pulse-assistant-grip");
+
+    fireEvent.pointerDown(grip, { clientX: 200, clientY: 200, pointerId: 1, button: 0, isPrimary: true });
+    fireEvent.pointerMove(document, { clientX: 220, clientY: 200, pointerId: 1, isPrimary: true });
+    fireEvent.pointerMove(document, { clientX: 230, clientY: 200, pointerId: 1, isPrimary: true });
+    fireEvent.pointerUp(document, { clientX: 230, clientY: 200, pointerId: 1, isPrimary: true });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 60)));
+
+    await waitFor(() =>
+      expect(parseRect(window.localStorage.getItem("pulse.assistant.rect"))).toEqual({
+        x: 596,
+        y: 90,
+        width: 420,
+        height: 560,
+      }),
+    );
+  });
 });
 
 describe("AssistantToggleButton and toggleAssistantWindow", () => {
@@ -514,6 +539,28 @@ describe("Pulse assistant layout geometry", () => {
     expect(d.y + d.height).toBeLessThanOrEqual(vp.height);
     expect(isNarrowViewport({ width: 639, height: 800 })).toBe(true);
     expect(isNarrowViewport({ width: 640, height: 800 })).toBe(false);
+  });
+
+  it("docks each side to its inset edge when it is within the snap distance", () => {
+    const size = { width: 420, height: 560 };
+    const near = ASSISTANT_EDGE + ASSISTANT_SNAP_DISTANCE;
+    expect(snapRect({ x: near, y: 300, ...size }, vp).x).toBe(ASSISTANT_EDGE);
+    const farX = vp.width - size.width - ASSISTANT_EDGE;
+    expect(snapRect({ x: farX - ASSISTANT_SNAP_DISTANCE, y: 300, ...size }, vp).x).toBe(farX);
+    const farY = vp.height - size.height - ASSISTANT_EDGE;
+    expect(snapRect({ x: 300, y: farY - 5, ...size }, vp).y).toBe(farY);
+    expect(snapRect({ x: 300, y: ASSISTANT_EDGE - 5, ...size }, vp).y).toBe(ASSISTANT_EDGE);
+  });
+
+  it("leaves a side alone just outside the snap distance", () => {
+    const size = { width: 420, height: 560 };
+    const outside = ASSISTANT_EDGE + ASSISTANT_SNAP_DISTANCE + 1;
+    expect(snapRect({ x: outside, y: 300, ...size }, vp).x).toBe(outside);
+  });
+
+  it("snaps the two axes independently, so a corner docks on both", () => {
+    const r = snapRect({ x: 3, y: 790 - 560, width: 420, height: 560 }, vp);
+    expect(r).toEqual({ x: ASSISTANT_EDGE, y: vp.height - 560 - ASSISTANT_EDGE, width: 420, height: 560 });
   });
 });
 

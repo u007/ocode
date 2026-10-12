@@ -61,7 +61,7 @@ that selector, which only looks inside explicit listitems.
   project and terminal id. `limit` defaults to 50 and is capped at 200; a bad
   `limit` or `offset` is `400`. It has the same access gate as `GET /api/terminal`
   (`terminalAccessAllowed`), so a non-loopback server without auth gets `403`.
-- **Shape:** `{id, project, title, pid, command, running}`. `running` is true only
+- **Shape:** `{id, project, title, pid, command, running, cols, rows}`. `running` is true only
   when a program other than the interactive shell is in the foreground;
   `command` is that program's command line, or the bare shell name when idle.
   Both come from `terminalForeground` in `emitters.go`, the same walk the Processes
@@ -69,6 +69,28 @@ that selector, which only looks inside explicit listitems.
 - **Source:** the live registry (`terminalProcs`) joined with the open-tab store for
   the title (`pulseTerminalRows`, `internal/server/pulse_terminals.go`). A tab with no
   live pty is not listed here; `terminal_tabs` still shows it, marked not live.
+- **Output:** expanding a row mounts `PulseTerminalOutput`, which shows the terminal's
+  current screen as text. A full-screen program (Claude Code, any TUI) repaints in
+  place with cursor moves and almost no newlines, so the output is not split into lines.
+  `usePulseTerminalScreen` (`web/src/components/Pulse/usePulseTerminals.ts`) replays the
+  last 256 KiB of the terminal's log (`PULSE_TERMINAL_SCREEN_BYTES`) through
+  `restoreTerminalHistory` into a read-only `@xterm/headless` emulator sized to the pty
+  (`cols`×`rows` from the list), then reads the emulator's buffer back as lines. The
+  replay is pinned to one log snapshot, and the output is shown unwrapped at the pty's
+  width. 256 KiB matches a full repaint of a live Claude Code screen; 64 KiB did not.
+  The card and `terminal_screen` start the window the same way: at the first ESC in its
+  first 64 KiB page. The card's xterm keeps a wide character that reaches the last column,
+  which `terminal_screen`'s x/vt drops; see `docs/gotchas/pulse-screen-emulator-parity.md`.
+  The row re-reads on the list cadence while it stays expanded, and stops when collapsed.
+  A terminal with no reported size (`cols` or `rows` is `0`, no resize since its pty
+  started) shows a note instead of a screen. A missing log shows "No saved output for
+  this terminal." and is re-checked on the next tick, not latched. A failed read shows
+  an alert and clears when a later read succeeds. The metadata (command, project, PID,
+  terminal id) stays below the output.
+- **Size:** the browser's resize frame (`pty.Setsize`, `handler_terminal.go`) records the
+  size on the registry entry (`terminalRegistry.setSize`, `terminal_registry.go`). The
+  list reports it as `cols`/`rows`. The log holds no resize events, so the replay uses
+  the current size for the whole window: output drawn before a resize may wrap differently.
 - **Refresh:** `usePulseTerminals` polls the first page every 3 s
   (`PULSE_TERMINALS_POLL_MS`) and skips a tick while the document is hidden. "Load
   more" grows the window, and each poll refetches all of it. A `403` or `501` answer
@@ -235,7 +257,8 @@ empty result collapses the sections entirely and shows the
 `No sessions match "…"` line instead. Keyboard users get roving arrow-key
 navigation over `[role="listitem"] button[aria-expanded]`: the card's header
 button. Each card also has a "Focus session" icon button, which is deliberately
-not a roving stop (it has no `aria-expanded`).
+not a roving stop (it has no `aria-expanded`). A live card's "Expand stream"
+toggle is likewise not a roving stop.
 
 **The filter only sees loaded rows.** Paging is an explicit *Load more* button
 (`PulseView.tsx`, driven by `loadMore`/`hasMore`/`nextCursor` in the store), not
@@ -389,9 +412,10 @@ A non-compact card is a chrome `div` (`flex h-full flex-col`, border,
 background, `CARD_MIN_H`) containing two siblings: the header button (status,
 title, task, plan; click jumps, double-click opens the ask, Enter focuses,
 Shift+Enter jumps, Escape collapses and unpins, focus ring, `aria-expanded`), a
-flex group of the details toggle and the "Focus session" icon button
-(absolutely positioned top-right; a button may not contain a button, so the
-group is a sibling, and the header reserves `pr-12` for both icons) and
+flex group of the details toggle, the "Expand stream" toggle (live cards only),
+and the "Focus session" icon button (absolutely positioned top-right; a button
+may not contain a button, so the group is a sibling, and the header reserves
+`pr-12` for two icons or `pr-[4.5rem]` for three on a live card) and
 the stream region
 (`data-testid="pulse-stream-region"`). The stream used to live inside the
 button, so a wheel over it scrolled the page grid and its text was part of the
@@ -432,6 +456,16 @@ the budget the live stream was raised to from the original 128px (seven truncate
 16.5px lines); it is a layout constant, since the region scrolls past it rather
 than clipping.
 
+### Expanding a live stream in place
+
+A live card's "Expand stream" toggle (`aria-pressed`, `ChevronsUpDown`) swaps that
+card's cap to `STREAM_TALL_MAX_H` = `max-h-[48rem]` (768px). This is a per-card
+local state (`streamTall`) and resets on remount. The taller cap grows the card's
+grid row, so the other cards in that row stretch with it. That is the accepted
+cost of an in-place expand; the default 24rem cap remains the constant-height
+budget for every card that is not toggled. The "Focus session" pane is still the
+place for a full-height, scroll-free read.
+
 ### The `min-h-0` gotcha (superseded)
 
 Before the region scrolled, the newest text stayed visible only because the
@@ -468,6 +502,8 @@ Recent-section cards are multi-line (`compact={compactAll}`, so `false` in the g
 header, title and task, with no stream region and NO height floor, so they size to
 their content. Only the focus-mode side column stays compact (one line each).
 The 32rem floor must stay above the header (~112px) plus the 24rem stream cap.
+A live card's expanded stream (48rem) is the one deliberate exception: it grows
+the row on request.
 
 ## Focus mode
 
@@ -574,7 +610,10 @@ there, and the key works from any view without reaching for it.
 
 - *normal*: floating at `rect` (x, y, width, height). The grip (`data-testid`
   `pulse-assistant-grip`) drags it through `@dnd-kit/core`, the library the app
-  already uses, with a 4 px activation distance. The corner handle
+  already uses, with a 4 px activation distance. On release, a side within 20 px
+  (`ASSISTANT_SNAP_DISTANCE`) of a viewport edge docks to the inset line (`snapRect`).
+  Snapping is not previewed during the drag, and a minimised bar docks at the restore
+  size, so it sits above the bottom edge by the difference. The corner handle
   (`role="separator"`, arrow-key resizable) resizes it. Position and size are
   committed once, on release, not on every pointer move.
 - *minimised*: only the header bar stays, 40 px high, at the same x and y.

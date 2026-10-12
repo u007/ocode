@@ -159,7 +159,7 @@ carried by the most recent successful turn-dispatch acknowledgement (HTTP 202
 this client.**
 
 - **Set on 202.** Every dispatch-acknowledging path resolves a `ChatResponse`
-  (`server.go:2486-2490`; `Content`, `SessionID`, `Model`): initial send
+  (`server.go:2487-2491`; `Content`, `SessionID`, `Model`): initial send
   (`HandleChat` async 202, `handler.go:1054-1057`; `HandleSendMessage` async
   202, injection 202, sync 200), retry (`handler_retry.go:98`),
   permission-resolve continuation (`handler_permissions_resolve.go:371`),

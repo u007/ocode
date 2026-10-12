@@ -91,7 +91,7 @@ func TestBundledRemoteBinaryRejectsStaleAndEmpty(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "ocode-desktop")
 	base := filepath.Join(filepath.Dir(exe), "remote-binaries")
 	writeBinaryFixture(t, filepath.Join(base, "old-version", "ocode-linux-amd64"))
-	if path, err := bundledRemoteBinary(exe, "linux", "amd64"); err != nil || path != "" {
+	if path, err := bundledRemoteArtifact(exe, "ocode", "linux", "amd64"); err != nil || path != "" {
 		t.Fatalf("stale version selected: %q, %v", path, err)
 	}
 	path := filepath.Join(base, version.Version, "ocode-linux-amd64")
@@ -99,7 +99,7 @@ func TestBundledRemoteBinaryRejectsStaleAndEmpty(t *testing.T) {
 	if err := os.Truncate(path, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bundledRemoteBinary(exe, "linux", "amd64"); err == nil {
+	if _, err := bundledRemoteArtifact(exe, "ocode", "linux", "amd64"); err == nil {
 		t.Fatal("empty artifact accepted")
 	}
 }

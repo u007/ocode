@@ -135,7 +135,8 @@ error.
 | `session_read` | `session_id`, `last?` 1-200 (30), `search?` | `{session_id, project_path, title, messages: [{index, role, content, tool_calls?: [{name, args}]}]}` | content 2000 runes, args 200 runes, rune-safe; cap drops OLDEST messages; `search` is case-insensitive over content, `index` is absolute; child (`_child_`) sessions readable; the assistant's own id is refused |
 | `session_recap` | `session_id` | `{session_id, recap}` via `Handler.recapSessionCtx` | runs a model call under a 90 s deadline (`pulseRecapTimeout`); a timeout is an error naming it, never "Recap timed out." text; own id refused |
 | `terminal_tabs` | none | `{projects: [{project, terminals: [{id, title, osc_title?, live, running, command?}]}]}`: open tabs from `internal/termtabs`, joined with the live registry | sorted by project then terminal id; `live` = a shell is running, `running` = a program other than the shell is in the foreground, `command` names it |
-| `terminal_read` | `terminal_id`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?, line_clipped?}` | ANSI stripped, `\r` redraws collapsed, 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; local projects only; the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
+| `terminal_read` | `terminal_id`, `lines?` 1-1000 (100), `offset?` (default 0), `head?` (default false) | `{terminal_id, project, head?, offset?, lines, has_more_before?, has_more_after?, truncated?, line_clipped?}` | ANSI stripped, `\r` redraws collapsed (a line ending in `\r` shows its last redraw, so progress bars do not read as blank; a redraw that erases the line with `CSI K`/`CSI J` shows it empty), 2000 runes per line; a tail read counts `offset` back from the end, so repeated calls page backwards; `head` reads from the start and `offset` then counts forward; only the newest (or oldest) `pulseTerminalWindowBytes` (1 MiB) of the history log is reachable, read in 256 KB chunks; each call reads the output as it is at that moment, not a pinned snapshot, so paging a still-writing terminal can overlap or skip lines (the history endpoint pins a byte cursor; this read does not); same access gate and project boundary as `GET /api/terminal/{id}/history`; local projects only; the cap drops the far end (OLDEST lines of a tail page, NEWEST of a head page) and sets `truncated` |
+| `terminal_screen` | `terminal_id` | `{terminal_id, project, cols, rows, lines, truncated?}` via `renderPulseScreen` (`internal/server/pulse_screen.go`) | the current screen of a live terminal, laid out at its pty size (`cols`×`rows` from the registry), replayed from the newest 256 KiB of its log pinned to one snapshot; plain text, ANSI and cursor moves applied, trailing blank rows dropped, visible rows only (not scrollback); an ESC-led window start, so no sequence tail prints as text; a terminal with no reported size, or not live, is an error, never a guessed size; same access gate and project boundary as `terminal_read`; the cap drops the TOP rows (the bottom holds the prompt) and sets `truncated` |
 | `memory_read` | `scope` global/project, `project_path?` | `{scope, path, content}`; empty content = nothing saved | project scope needs a path in `allowedProjectRoots()` |
 | `memory_write` | `scope`, `project_path?`, `content` | `{scope, path, bytes}`; full replace, atomic | ~30k tokens (`pulseMemoryTokenBudget`) = 90 KB at 3 bytes/token (`pulseMemoryCap`), over-cap rejected; the system prompt tells the assistant to keep only important, durable notes |
 | `session_send` | `session_id`, `content` | `{session_id, accepted: true}`; starts an async turn via `HandleSendMessage` | **asks**; refuses own id, child ids, unknown sessions, and a target that is mid-turn, compacting or paused on an ask (never queued). The pre-check is re-checked at dispatch: a turn that starts after it refuses the send (`turnOptions.refuseIfBusy`, under `cancelMu`), and a synchronous turn can still slip past that check |
@@ -146,11 +147,12 @@ error.
 
 ### Terminal tools
 
-`terminal_tabs` and `terminal_read` let the assistant see terminals: which are open,
-which is running a program, and what a terminal printed. They are read-only. Nothing
+`terminal_tabs`, `terminal_read` and `terminal_screen` let the assistant see terminals:
+which are open, which is running a program, what a terminal printed, and what a
+full-screen program such as `claude` is showing now. They are read-only. Nothing
 in this set writes to a terminal, and the terminal send tool is not built.
 
-**Scope: Pulse assistant only.** Both tools are defined in `pulseTools()`
+**Scope: Pulse assistant only.** All three tools are defined in `pulseTools()`
 (`internal/server/pulse_tools.go`). That set reaches an agent in one place:
 `configurePulseAgent`, called from `buildAgentSession` only when `isPulseSession(id)`.
 The built-in toolset that ordinary sessions get (`tool.InitBuiltinToolsWithComputerDriver`)
@@ -179,10 +181,23 @@ scope test will say whether it leaked.
   line-based offset cannot reach them otherwise), and `line_clipped: true` marks the first
   line (tail) or last line (head) as a fragment.
 
+- `terminal_screen` returns a live terminal's current screen as text, at the pty's own
+  size, the same screen the dashboard row shows. It replays the newest 256 KiB of the log
+  (`pulseTerminalScreenBytes`) through an emulator (`charmbracelet/x/vt`, pinned in
+  `go.mod`). Use it for full-screen programs: `terminal_read` returns the frames of a
+  repainting program as a jumble of lines. The size is the one the browser last reported
+  (`cols`/`rows` on the registry entry). A terminal with no reported size is an error that
+  says to open it in a browser, not a guessed screen.
+  Known gap: a wide character whose cells reach the last column is dropped. In the
+  exact-fit case the text after it also lands on the wrong row. The dashboard card, on
+  xterm, keeps it. The tool strips `ESC[3J` from the
+  input before writing, since x/vt would otherwise blank the visible screen on it. See
+  `docs/gotchas/pulse-screen-emulator-parity.md`.
+
 **Access**
 
-- `terminal_read`, the per-turn board's running-terminal block, and every `command` value
-  go through `terminalAccessAllowed()`: server auth or a loopback bind. The gate is
+- `terminal_read`, `terminal_screen`, the per-turn board's running-terminal block, and
+  every `command` value go through `terminalAccessAllowed()`: server auth or a loopback bind. The gate is
   checked inside `pulseTerminalRows`, so the board and `terminal_tabs` share it. On
   Windows the gate is a stub that returns false.
 - `terminal_tabs` still lists tab ids and titles without the gate. Only the live fields

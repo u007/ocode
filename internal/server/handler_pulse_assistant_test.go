@@ -117,7 +117,7 @@ func TestHandlePulseAssistantMintsPersistsAndIsStable(t *testing.T) {
 	for _, d := range defs {
 		got[toolDefName(t, d)] = true
 	}
-	want := []string{"pulse_board", "session_read", "session_recap", "terminal_tabs", "terminal_read", "agent_runs", "session_send", "session_command", "permission_resolve", "question_answer", "memory_read", "memory_write"}
+	want := []string{"pulse_board", "session_read", "session_recap", "terminal_tabs", "terminal_read", "terminal_screen", "agent_runs", "session_send", "session_command", "permission_resolve", "question_answer", "memory_read", "memory_write"}
 	for _, n := range want {
 		if !got[n] {
 			t.Errorf("assistant is missing tool %q (has %v)", n, got)

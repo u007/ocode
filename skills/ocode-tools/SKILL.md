@@ -104,9 +104,9 @@ Called from each process entry point, not from the agent: `internal/runcli/run.g
 | 33 | `ImageGenTool` | `imagegen.go` | `imagegen` | ❌ | allow |
 | 34 | `PreviewOpenTool` | `preview.go` | `preview_open` | ✅ | ask |
 | | **Opt-in** | | | | |
-| 35 | `AstTool` | `ast.go` | `ast` | ✅ | allow |
-| 36 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | ask |
+| 35 | `AstGrepTool` | `ast_grep.go` | `ast_grep` | ✅ | ask |
 | | **Conditional** | | | | |
+| 36 | `AstTool` | `ast.go` | `ast` | ✅ | allow |
 | 37 | `RgrepTool` | `rgrep.go` | `rgrep` | ✅ | allow |
 | 38 | `ComputerTool` | `computer.go` | `computer` | ❌ | ask |
 | | **Scheduled** | | | | |

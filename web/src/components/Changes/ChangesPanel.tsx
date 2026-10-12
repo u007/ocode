@@ -19,13 +19,18 @@ interface Props {
    *  these is mounted per open session tab (hidden via CSS), so background
    *  instances must not poll — N hidden tabs would hammer /api/changes. */
   active?: boolean;
+  /** Project root the session belongs to. Passed back with `onOpenFile` so the
+   *  opener resolves the file against the right project and host. */
+  projectRoot?: string;
+  /** Opens a changed file in an editor tab. Stable app-level callback. */
+  onOpenFile: (path: string, projectRoot?: string) => void;
   loadingKey?: string;
   onLoadingEvent?: LoadingEventHandler;
 }
 
 type PendingUndo = { path: string; kind: "file" | "block" } | null;
 
-function ChangesPanel({ session, host, active = true, loadingKey, onLoadingEvent }: Props) {
+function ChangesPanel({ session, host, active = true, projectRoot, onOpenFile, loadingKey, onLoadingEvent }: Props) {
   const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [files, setFiles] = useState<FileChange[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -96,6 +101,7 @@ function ChangesPanel({ session, host, active = true, loadingKey, onLoadingEvent
           files={files}
           selectedPath={selectedPath}
           onSelect={(path) => setSelectedPath(path === selectedPath ? null : path)}
+          onOpenFile={(path) => onOpenFile(path, projectRoot)}
           onUndoFile={(path) => setPendingUndo({ path, kind: "file" })}
           onUndoBlock={(path) => setPendingUndo({ path, kind: "block" })}
         />

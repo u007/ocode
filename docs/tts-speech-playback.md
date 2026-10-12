@@ -94,7 +94,7 @@ embeds the same React application.
 - **MeloTTS** (engine id `melo`) is installable on darwin/arm64 only. It
   appears in Settings > Speech playback **between the Paradee and Kokoro
   cards**: the card order is the `Catalog()` return order
-  (`internal/tts/manifest.go:646`) because `TTSForm` maps the server response
+  (`internal/tts/manifest.go:640`) because `TTSForm` maps the server response
   without re-sorting (`web/src/components/Settings/TTSForm.tsx:235`). The
   placement is pinned by `TestMeloCatalogSitsBetweenPiperAndKokoro`
   (`internal/tts/melo_test.go:169`) and the web test `renders Paradee and
@@ -106,7 +106,7 @@ embeds the same React application.
   speakers in the MeloTTS-English-v2 config: EN-US (default), EN-BR,
   EN_INDIA, EN-AU, EN-Default.
 
-  The manifest (`internal/tts/manifest.go:410`) pins TEN artifacts, each with
+  The manifest (`internal/tts/manifest.go:404`) pins TEN artifacts, each with
   an exact byte size and SHA-256: the MeloTTS source archive pinned to commit
   `209145371cff8fc3bd60d7be902ea69cbdb7965a`, the MeloTTS-English-v2
   `config.json` + `checkpoint.pth`, five `bert-base-uncased` files, and two
@@ -118,7 +118,7 @@ embeds the same React application.
   and its install_requires reads requirements.txt verbatim (torch unpinned).
   The verified archive is unpacked into the cache and imported via PYTHONPATH;
   dependencies are pinned exactly in the manifest (`meloRequirements()`,
-  `internal/tts/manifest.go:514`), including `nltk==3.8.1` — deliberately:
+  `internal/tts/manifest.go:508`), including `nltk==3.8.1` — deliberately:
   from nltk 3.9 the POS tagger resource was renamed
   `averaged_perceptron_tagger_eng` but g2p_en still probes the legacy name, so
   a newer nltk fails at synthesis after silently re-downloading.
@@ -199,9 +199,9 @@ missing/corrupt cache demotes an installed/enabled record to `failed`.
 **MeloTTS install specifics:** The source tree is not pip-installed; the
 checksum-verified archive is unpacked into `<cache>/melo-src` and imported via
 PYTHONPATH (only the pinned requirements are pip-installed into the venv). The
-install-time import check (`verifyRuntime`, `internal/tts/piper.go:291`) runs
+install-time import check (`verifyRuntime`, `internal/tts/piper.go:183`) runs
 `melo_import_check.py` — the **same offline preamble** synthesis will use —
-under `meloEnv` via `runCmdEnv` (`internal/tts/piper.go:452`), so the check
+under `meloEnv` via `runCmdEnv` (`internal/tts/piper.go:344`), so the check
 and the runtime cannot drift apart. A bare `python -c "import melo.api"` would
 reach the Hugging Face Hub, because `melo/text/cleaner.py` eagerly imports all
 six language backends and each loads a tokenizer at module scope. Because the

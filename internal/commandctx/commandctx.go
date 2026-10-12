@@ -1,5 +1,5 @@
 // Package commandctx builds the LLM prompts behind the repo-analysis slash
-// commands (/standup, /changes, /review) that need server-side context
+// commands (/changes, /review) that need server-side context
 // gathering — recent commits, pending diffs, LSP diagnostics, spec files.
 //
 // The logic lives here (not in internal/tui) so both the TUI and the
@@ -265,68 +265,6 @@ func BuildChangesPrompt(context string) string {
 	b.WriteString("Be concise. Use bullet points. No filler.\n\n")
 	b.WriteString("---\n\n")
 	b.WriteString("## Repository Changes\n\n")
-	b.WriteString(context)
-	return b.String()
-}
-
-// ─── /standup context ────────────────────────────────────────────────────
-
-// StandupContext gathers context for the /standup command: recent commits
-// (with dates and per-file stat) plus the pending-changes context reused from
-// /changes (git status, staged/unstaged diffs, LSP diagnostics, spec files).
-//
-// Recent commits are gathered first and independently so a standup still works
-// on a clean tree where the only signal is the commit history. The pending
-// changes are optional: on a clean tree ChangesContext returns an error, which
-// we surface as a note rather than failing the whole command.
-func StandupContext(workDir string, lspMgr *lsp.Manager) (string, error) {
-	var b strings.Builder
-
-	// --- Recent commits (dates + stat + full messages, no patch) ---
-	// --date=short and --stat give the model enough to judge "yesterday vs
-	// last 5" itself; patches are omitted because the pending diff below is
-	// already full and commit patches would blow the context budget.
-	commits, err := gitRun(workDir, "log", "-n", "5", "--stat", "--date=short")
-	if err == nil && commits != "" {
-		b.WriteString("## Recent Commits (last 5)\n")
-		b.WriteString(commits)
-		b.WriteString("\n\n")
-	}
-
-	// --- Pending changes (reused from /changes) ---
-	changesCtx, changesErr := ChangesContext(workDir, lspMgr)
-	if changesErr == nil && changesCtx != "" {
-		b.WriteString("## Pending Changes\n\n")
-		b.WriteString(changesCtx)
-	} else {
-		b.WriteString("## Pending Changes\n\nClean tree — no staged or unstaged changes.\n\n")
-	}
-
-	// Only fail if there is genuinely nothing to summarise.
-	if commits == "" && changesErr != nil {
-		return "", fmt.Errorf("no recent commits and no pending changes found")
-	}
-
-	return b.String(), nil
-}
-
-// BuildStandupPrompt creates the LLM prompt for the /standup command. Caveman
-// style (short, punchy, drop articles) but each item carries one line of
-// context so the summary is actionable, not bare bullets.
-func BuildStandupPrompt(context string) string {
-	var b strings.Builder
-	b.WriteString("You are a standup assistant. Review the recent commits and pending changes below, then report in caveman style — short, punchy, drop articles and filler. But give one line of context per item; no bare bullets.\n\n")
-	b.WriteString("Decide what window makes sense: if there are several commits from yesterday, focus there; otherwise summarise the last 5.\n\n")
-	b.WriteString("Cover these sections, in this order:\n\n")
-	b.WriteString("## WHAT DONE\n")
-	b.WriteString("What was built/fixed and what was decided in the recent work. Group by purpose. One line each.\n\n")
-	b.WriteString("## TODO — EASY FIRST\n")
-	b.WriteString("Low-hanging fruit, sorted easiest first: quick wins, small cleanups, trivial follow-ups implied by the changes.\n\n")
-	b.WriteString("## TODO — HIGH PRIORITY\n")
-	b.WriteString("Bigger or more urgent tasks the work points to: incomplete features, risky gaps, things that block shipping.\n\n")
-	b.WriteString("## MISSED STUBS\n")
-	b.WriteString("Flag any TODO/FIXME/XXX markers, unimplemented paths, panic(\"not implemented\"), empty catch blocks, or obvious placeholders introduced in the recent work. If none, say \"None found.\"\n\n")
-	b.WriteString("---\n\n")
 	b.WriteString(context)
 	return b.String()
 }
@@ -676,15 +614,6 @@ func BuildReviewPrompt(target ReviewTarget, context string, description string) 
 }
 
 // ─── Convenience entrypoints ──────────────────────────────────────────────
-
-// Standup assembles the full /standup prompt (context + instructions).
-func Standup(workDir string, lspMgr *lsp.Manager) (string, error) {
-	ctx, err := StandupContext(workDir, lspMgr)
-	if err != nil {
-		return "", err
-	}
-	return BuildStandupPrompt(ctx), nil
-}
 
 // Changes assembles the full /changes prompt (context + instructions).
 func Changes(workDir string, lspMgr *lsp.Manager) (string, error) {

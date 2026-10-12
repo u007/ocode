@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/u007/ocode/internal/pyinterp"
 )
 
 // transcribeOnnxScript is the helper run by the local engine. It is embedded
@@ -33,8 +35,8 @@ type Options struct {
 	OpenAIKey func() string
 	// OpenAIBaseURL overrides https://api.openai.com/v1 (tests, proxies).
 	OpenAIBaseURL string
-	// Python overrides the interpreter probed for onnx-asr. Empty searches
-	// python3 then python on PATH.
+	// Python overrides the interpreter probed for onnx-asr. Empty searches the
+	// Python 3.10+ candidates for the first one that imports onnx_asr.
 	Python string
 	// TempDir holds normalised WAV copies. Empty uses os.TempDir.
 	TempDir string
@@ -73,11 +75,16 @@ func (s Status) ModelAvailable(id string) bool {
 	return false
 }
 
-// StatusFor resolves the selected model and each entry's availability.
+// StatusFor resolves the selected model and each entry's availability. Local
+// models are probed concurrently: each distinct extras set is its own
+// interpreter scan (up to probeTimeout), and probing them one after another
+// made the status request wait for the sum. Models sharing a key share the
+// in-flight scan through the probe cache.
 func StatusFor(opts Options) Status {
 	selected := ResolveModel(opts.Model)
-	out := Status{Selected: selected, Models: make([]ModelInfo, 0, len(catalog))}
-	for _, s := range catalog {
+	out := Status{Selected: selected, Models: make([]ModelInfo, len(catalog))}
+	var wg sync.WaitGroup
+	for i, s := range catalog {
 		m := ModelInfo{
 			ID:          s.ID,
 			Label:       s.Label,
@@ -89,18 +96,25 @@ func StatusFor(opts Options) Status {
 		}
 		switch s.Engine {
 		case EngineLocal:
-			if ok, reason := probeLocal(opts.Python, s.Extra); !ok {
-				m.Available = false
-				m.Reason = reason
-			}
+			out.Models[i] = m
+			wg.Add(1)
+			go func(i int, extra []string) {
+				defer wg.Done()
+				if ok, reason := probeLocal(opts.Python, extra); !ok {
+					out.Models[i].Available = false
+					out.Models[i].Reason = reason
+				}
+			}(i, s.Extra)
+			continue
 		case EngineOpenAI:
 			if opts.OpenAIKey == nil || opts.OpenAIKey() == "" {
 				m.Available = false
 				m.Reason = "needs an OpenAI API key (connect OpenAI in Settings)"
 			}
 		}
-		out.Models = append(out.Models, m)
+		out.Models[i] = m
 	}
+	wg.Wait()
 	return out
 }
 
@@ -136,7 +150,11 @@ func Transcribe(ctx context.Context, opts Options, audioPath string) (Result, er
 		if err != nil {
 			return Result{}, err
 		}
-		text, err := transcribeOnnx(ctx, opts.Python, s.Repo, s.Upstream, filepath.Join(modelDir, id), wav)
+		py, err := localInterpreter(opts.Python, s.Extra)
+		if err != nil {
+			return Result{}, fmt.Errorf("speech-to-text: local model: %w", err)
+		}
+		text, err := transcribeOnnx(ctx, py.Command, s.Repo, s.Upstream, filepath.Join(modelDir, id), wav)
 		if err != nil {
 			return Result{}, err
 		}
@@ -249,11 +267,7 @@ func transcribeOpenAI(ctx context.Context, key, baseURL, model, audioPath string
 // there: onnx-asr's default HF cache uses symlinks into blobs/, which
 // onnxruntime rejects for external weight files. Only stdout is parsed;
 // stderr carries download progress and is surfaced on failure.
-func transcribeOnnx(ctx context.Context, python, repo, upstream, modelDir, wavPath string) (string, error) {
-	py, err := resolvePython(python)
-	if err != nil {
-		return "", err
-	}
+func transcribeOnnx(ctx context.Context, interpreter []string, repo, upstream, modelDir, wavPath string) (string, error) {
 	scriptDir, err := os.MkdirTemp("", "ocode-stt-")
 	if err != nil {
 		return "", err
@@ -267,7 +281,8 @@ func transcribeOnnx(ctx context.Context, python, repo, upstream, modelDir, wavPa
 	ctx, cancel := context.WithTimeout(ctx, localTimeout)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, py, "-I", scriptPath, upstream, repo, modelDir, wavPath)
+	args := append(append([]string{}, interpreter[1:]...), "-I", scriptPath, upstream, repo, modelDir, wavPath)
+	cmd := exec.CommandContext(ctx, interpreter[0], args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -316,62 +331,107 @@ func normaliseToWAV(ctx context.Context, in, tempDir string) (string, func(), er
 	return out, cleanup, nil
 }
 
-// probeCache remembers each interpreter/module-set probe for a short time, so
-// polling the settings UI does not spawn Python on every request.
+// localRange is the interpreter range the local engine runs on. The onnx-asr
+// wheel requires Python 3.10 or newer and declares no ceiling.
+var localRange = pyinterp.Range{Min: [2]int{3, 10}}
+
+// probeTimeout bounds one interpreter scan. Each candidate is version-checked
+// and then imports onnx_asr, which loads onnxruntime and can take seconds.
+const probeTimeout = 60 * time.Second
+
+// probeCache remembers each interpreter scan for a short time, so polling the
+// settings UI does not re-spawn Python on every request, and so the
+// transcription that follows a probe runs under the same interpreter. mu guards
+// only the map: a scan runs outside it, so a 60 s scan never blocks status
+// polling or Transcribe for other keys.
 var probeCache = struct {
 	mu      sync.Mutex
-	entries map[string]probeEntry
-}{entries: map[string]probeEntry{}}
+	entries map[string]*probeEntry
+}{entries: map[string]*probeEntry{}}
 
+// probeEntry is one scan. done is closed once py, err and at are set; callers
+// that find an unfinished entry wait on it instead of scanning again.
 type probeEntry struct {
-	at     time.Time
-	ok     bool
-	reason string
+	done chan struct{}
+	at   time.Time
+	py   pyinterp.Spec
+	err  error
+}
+
+func (e *probeEntry) finished() bool {
+	select {
+	case <-e.done:
+		return true
+	default:
+		return false
+	}
 }
 
 const probeTTL = 60 * time.Second
 
-// probeLocal reports whether the local engine can run with python and the
-// extra modules a model needs on top of onnx_asr.
-func probeLocal(python string, extra []string) (bool, string) {
+// localInterpreter returns the interpreter the local engine runs under: python
+// when set, otherwise the first candidate in localRange that imports onnx_asr
+// and the model's extra modules. Status and transcription share the cache, so
+// they agree on one interpreter without re-scanning, and concurrent callers for
+// the same key share one in-flight scan.
+func localInterpreter(python string, extra []string) (pyinterp.Spec, error) {
 	key := python + "\x00" + strings.Join(extra, ",")
 	probeCache.mu.Lock()
-	defer probeCache.mu.Unlock()
-	if e, ok := probeCache.entries[key]; ok && time.Since(e.at) < probeTTL {
-		return e.ok, e.reason
+	e, ok := probeCache.entries[key]
+	if ok && (!e.finished() || time.Since(e.at) < probeTTL) {
+		probeCache.mu.Unlock()
+		<-e.done
+		return e.py, e.err
 	}
-	ok, reason := doProbe(python, extra)
-	probeCache.entries[key] = probeEntry{at: time.Now(), ok: ok, reason: reason}
-	return ok, reason
+	e = &probeEntry{done: make(chan struct{})}
+	probeCache.entries[key] = e
+	probeCache.mu.Unlock()
+
+	e.py, e.err = scanLocal(python, extra)
+	e.at = time.Now()
+	probeCache.mu.Lock()
+	if errors.Is(e.err, context.DeadlineExceeded) {
+		// A timed-out scan says nothing about the host; the next call rescans.
+		delete(probeCache.entries, key)
+	}
+	probeCache.mu.Unlock()
+	close(e.done)
+	return e.py, e.err
 }
 
-func doProbe(python string, extra []string) (bool, string) {
-	need := append([]string{"onnx_asr"}, extra...)
-	install := `pip install "onnx-asr[cpu,hub]"`
-	if len(extra) > 0 {
-		install += " " + strings.Join(extra, " ")
+// scanLocal runs one uncached interpreter scan under probeTimeout. A pinned
+// python that is not an executable is reported by path: Select skips missing
+// candidate names silently, which is right for the search list but would hide
+// the one path the user configured.
+func scanLocal(python string, extra []string) (pyinterp.Spec, error) {
+	candidates := pyinterp.Candidates(localRange)
+	if python != "" {
+		if _, err := exec.LookPath(python); err != nil {
+			return pyinterp.Spec{}, fmt.Errorf("configured python %q is not an executable: %w", python, err)
+		}
+		candidates = [][]string{{python}}
 	}
-	py, err := resolvePython(python)
-	if err != nil {
-		return false, "needs Python 3 with " + strings.Join(need, ", ") + " (" + install + ")"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	probe := "import " + strings.Join(need, ", ")
-	if err := exec.CommandContext(ctx, py, "-I", "-c", probe).Run(); err != nil {
-		return false, "needs " + strings.Join(need, ", ") + " in " + py + " (" + install + ")"
+	return pyinterp.Select(ctx, localRange, candidates, localModules(extra))
+}
+
+// localModules is every module the local engine imports: onnx_asr plus the
+// model's extras.
+func localModules(extra []string) []string {
+	return append([]string{"onnx_asr"}, extra...)
+}
+
+// probeLocal reports whether the local engine can run, with the reason when it
+// cannot. The reason names every interpreter scanned and how it was rejected,
+// and the install hint targets any Python 3.10+ the user can pip into.
+func probeLocal(python string, extra []string) (bool, string) {
+	if _, err := localInterpreter(python, extra); err != nil {
+		hint := `pip install "onnx-asr[cpu,hub]"`
+		if len(extra) > 0 {
+			hint += " " + strings.Join(extra, " ")
+		}
+		return false, err.Error() + "; install into a Python 3.10+ with: " + hint
 	}
 	return true, ""
-}
-
-func resolvePython(override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
-	for _, name := range []string{"python3", "python"} {
-		if p, err := exec.LookPath(name); err == nil {
-			return p, nil
-		}
-	}
-	return "", errors.New("speech-to-text: python3 not found on PATH")
 }

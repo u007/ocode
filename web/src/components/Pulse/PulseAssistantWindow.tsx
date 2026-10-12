@@ -24,6 +24,7 @@ import {
   clampRect,
   defaultRect,
   isNarrowViewport,
+  snapRect,
   toggleAssistantWindow,
   usePulseAssistantPrefs,
   type AssistantRect,
@@ -127,7 +128,8 @@ function useViewport(): Viewport {
  * PulseAssistantWindow — the Pulse assistant's chat, in a floating window at app
  * level, so it stays available on every view.
  *
- * Modes: normal (floating, draggable by its grip, resizable from the corner),
+ * Modes: normal (floating, draggable by its grip and docked to a viewport edge
+ * when released near one, resizable from the corner),
  * minimised (only the header bar stays), maximised (fills the app inside a
  * margin). Below ASSISTANT_NARROW_BREAKPOINT it is an inset sheet and neither
  * drags nor resizes. The window keeps ONE DOM tree across modes: minimising only
@@ -206,7 +208,7 @@ function AssistantWindowFrame() {
   useDndMonitor({
     onDragEnd: ({ delta }) => {
       if (!dragAllowed) return;
-      prefs.setRect(clampRect({ ...rect, x: rect.x + delta.x, y: rect.y + delta.y }, vp));
+      prefs.setRect(snapRect(clampRect({ ...rect, x: rect.x + delta.x, y: rect.y + delta.y }, vp), vp));
     },
   });
 

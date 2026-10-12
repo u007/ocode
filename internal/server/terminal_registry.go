@@ -9,6 +9,11 @@ import "sync"
 type terminalProcEntry struct {
 	Project string
 	PID     int32
+	// Cols and Rows are the pty size the browser last reported. They are zero
+	// until its first resize. The Pulse card replays output into a screen of
+	// this size, so a cursor-addressed program lays out the way it did live.
+	Cols uint16
+	Rows uint16
 }
 
 // terminalRegistry tracks the pid of every currently-open terminal pty,
@@ -36,6 +41,22 @@ func (r *terminalRegistry) register(id string, entry terminalProcEntry) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.entries[id] = entry
+	r.gen++
+}
+
+// setSize records the pty size of a registered terminal. An id that is no
+// longer registered is ignored on purpose: a resize frame can arrive just as
+// the pty closes, and there is then no entry left to update.
+func (r *terminalRegistry) setSize(id string, cols, rows uint16) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[id]
+	if !ok {
+		// intentionally not logged: the pty closed between the resize and this call
+		return
+	}
+	entry.Cols, entry.Rows = cols, rows
 	r.entries[id] = entry
 	r.gen++
 }

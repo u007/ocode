@@ -12,12 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/pyinterp"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -30,121 +29,14 @@ type installedRecord struct {
 	Python  string `json:"python"`
 }
 
-// pythonSpec pins the interpreter used for a venv. Command is the argv prefix
-// (["python3"] or ["py", "-3"]).
-type pythonSpec struct {
-	Command []string
-	Version [2]int
-}
-
-var pythonVersionRE = regexp.MustCompile(`Python (\d+)\.(\d+)`)
-
-// pythonScanWindow bounds how far above MinPython an unbounded runtime probes
-// for versioned interpreter names (all shipped runtimes set MaxPython; this
-// only keeps a future manifest without a ceiling from degenerating).
-const pythonScanWindow = 8
-
-// pythonMinorRange returns the minor versions to probe for a runtime, newest
-// first, so the newest supported interpreter wins.
-func pythonMinorRange(rt PythonRuntime) []int {
-	hi := rt.MinPython[1] + pythonScanWindow
-	if rt.MaxPython != [2]int{} {
-		hi = rt.MaxPython[1]
-	}
-	var minors []int
-	for m := hi; m >= rt.MinPython[1]; m-- {
-		minors = append(minors, m)
-	}
-	return minors
-}
-
-// pythonCandidates lists the interpreter argv prefixes to probe on this host,
-// in preference order: newest supported minor first, then the unversioned
-// names. Versioned names are deliberately probed because a too-new python3 is
-// usually what PATH resolves and a user following the install error's advice
-// (`brew install python@3.13`) ends up with a versioned binary that is NOT
-// reachable as `python3`. Every candidate is version-checked by selectPython,
-// so a too-old or too-new python3 never silently wins.
-func pythonCandidates(rt PythonRuntime) [][]string {
-	minors := pythonMinorRange(rt)
-	if runtime.GOOS == "windows" {
-		// The py launcher resolves the newest install for a bare `-3`, so pin
-		// the range's minors explicitly and newest-first.
-		var candidates [][]string
-		for _, m := range minors {
-			candidates = append(candidates, []string{"py", "-3." + strconv.Itoa(m)})
-		}
-		return append(candidates, []string{"py", "-3"}, []string{"python"}, []string{"python3"})
-	}
-	var candidates [][]string
-	for _, m := range minors {
-		candidates = append(candidates, []string{"python3." + strconv.Itoa(m)})
-	}
-	candidates = append(candidates, []string{"python3"}, []string{"python"})
-	for _, dir := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"} {
-		for _, m := range minors {
-			candidates = append(candidates, []string{filepath.Join(dir, "python3."+strconv.Itoa(m))})
-		}
-		candidates = append(candidates, []string{filepath.Join(dir, "python3")})
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, m := range minors {
-			candidates = append(candidates, []string{filepath.Join(home, ".pyenv", "shims", "python3."+strconv.Itoa(m))})
-		}
-		candidates = append(candidates, []string{filepath.Join(home, ".pyenv", "shims", "python3")})
-	}
-	if runtime.GOOS == "darwin" {
-		for _, m := range minors {
-			matches, _ := filepath.Glob(fmt.Sprintf("/Library/Frameworks/Python.framework/Versions/3.%d/bin/python3", m))
-			for _, match := range matches {
-				candidates = append(candidates, []string{match})
-			}
-		}
-	}
-	return candidates
-}
-
-// selectPython probes candidates in order and returns the first interpreter
-// whose version falls inside rt's inclusive MinPython/MaxPython range. The
-// upper bound matters as much as the lower one: pip resolves the pinned
-// requirement set against the venv's own interpreter, so a python3 newer than
-// the pinned packages publish wheels for fails the whole install instead of
-// degrading. Candidates outside the range are recorded in the error so a user
-// whose only python3 is, say, 3.14 sees why it was rejected.
-func selectPython(ctx context.Context, rt PythonRuntime, candidates [][]string) (pythonSpec, error) {
-	var tried []string
-	for _, argv := range candidates {
-		bin, err := exec.LookPath(argv[0])
-		if err != nil {
-			continue
-		}
-		args := append([]string{}, argv[1:]...)
-		out, err := exec.CommandContext(ctx, bin, append(args, "--version")...).CombinedOutput()
-		if err != nil {
-			tried = append(tried, strings.Join(argv, " ")+" (failed: "+strings.TrimSpace(string(out))+")")
-			continue
-		}
-		m := pythonVersionRE.FindSubmatch(out)
-		if m == nil {
-			tried = append(tried, strings.Join(argv, " ")+" (unparseable version)")
-			continue
-		}
-		major, _ := strconv.Atoi(string(m[1]))
-		minor, _ := strconv.Atoi(string(m[2]))
-		version := [2]int{major, minor}
-		if !rt.accepts(version) {
-			tried = append(tried, fmt.Sprintf("%s (%d.%d)", strings.Join(argv, " "), major, minor))
-			continue
-		}
-		return pythonSpec{Command: append([]string{bin}, argv[1:]...), Version: version}, nil
-	}
-	return pythonSpec{}, fmt.Errorf("no Python %s found (tried: %s)", rt.pythonRange(), strings.Join(tried, ", "))
-}
+// pythonSpec is the interpreter a venv is built from.
+type pythonSpec = pyinterp.Spec
 
 // findPython returns the newest interpreter on this host inside the runtime's
 // supported range.
 func findPython(ctx context.Context, rt PythonRuntime) (pythonSpec, error) {
-	return selectPython(ctx, rt, pythonCandidates(rt))
+	r := rt.pyRange()
+	return pyinterp.Select(ctx, r, pyinterp.Candidates(r), nil)
 }
 
 func venvPython(venv string) string {

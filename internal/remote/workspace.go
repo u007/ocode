@@ -207,6 +207,13 @@ func (rw *RemoteWorkspace) ensureBinary() error {
 	if _, err := EnsureBinary(rw.Transport, ""); err != nil {
 		return err
 	}
+	goos, goarch, err := DetectPlatform(rw.Transport)
+	if err != nil {
+		return err
+	}
+	if _, err := EnsureHTRCli(rw.Transport, goos, goarch); err != nil {
+		return fmt.Errorf("htrcli: %w", err)
+	}
 	return nil
 }
 

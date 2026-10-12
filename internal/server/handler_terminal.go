@@ -551,6 +551,8 @@ func (h *Handler) serveTerminalSocket(sess *terminalSession, ws *websocket.Conn)
 			}
 			if err := pty.Setsize(sess.ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
 				log.Printf("terminal %s: failed to resize pty to %dx%d: %v", sess.id, msg.Cols, msg.Rows, err)
+			} else {
+				h.terminalProcs.setSize(sess.id, msg.Cols, msg.Rows)
 			}
 			continue
 		}

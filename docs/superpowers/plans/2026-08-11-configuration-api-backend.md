@@ -181,7 +181,7 @@ func (h *Handler) HandleSetRecapConfig(w http.ResponseWriter, r *http.Request) {
 
 - [x] **Step 5: Add the `*Server` wrappers and route registration in `internal/server/server.go`**
 
-Add wrappers near `handleGetTerminalConfig`/`handleSetTerminalConfig` (`server.go:667-672`):
+Add wrappers near `handleGetTerminalConfig`/`handleSetTerminalConfig` (`server.go:668-673`):
 
 ```go
 func (s *Server) handleGetRecapConfig(w http.ResponseWriter, r *http.Request) {

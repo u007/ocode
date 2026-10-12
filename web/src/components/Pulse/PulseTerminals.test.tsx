@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { PulseTerminals } from "./PulseTerminals";
-import { PULSE_TERMINALS_POLL_MS } from "./usePulseTerminals";
+import { PULSE_TERMINAL_SCREEN_BYTES, PULSE_TERMINALS_POLL_MS } from "./usePulseTerminals";
 import { ApiError } from "../../api/client";
 import type { PulseTerminal, PulseTerminalPage } from "../../api/types";
 
@@ -12,6 +12,20 @@ vi.mock("../../api/client", async (importOriginal) => ({
     listPulseTerminals: (...a: unknown[]) => mockList(...a),
   },
 }));
+
+// The output view replays the log through restoreTerminalHistory. Each test
+// decides what the log holds: text fed to onText, or a missing log.
+const mockRestore = vi.fn();
+vi.mock("../Terminal/terminalHistory", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../Terminal/terminalHistory")>()),
+  restoreTerminalHistory: (...a: unknown[]) => mockRestore(...a),
+}));
+function logHolds(text: string) {
+  mockRestore.mockImplementation(async (opts: { onText: (t: string) => Promise<void> | void }) => {
+    await opts.onText(text);
+    return { kind: "restored", snapshotEnd: text.length, state: "active" };
+  });
+}
 
 // The sidebar's project list decides whether Open is enabled; the jump itself
 // is covered in jumpToSession.test.tsx. Mocked here so no provider is needed.
@@ -32,6 +46,8 @@ function term(overrides: Partial<PulseTerminal> = {}): PulseTerminal {
     pid: 4242,
     command: "npm run dev",
     running: true,
+    cols: 120,
+    rows: 40,
     ...overrides,
   };
 }
@@ -42,6 +58,8 @@ function page(terminals: PulseTerminal[], total = terminals.length): PulseTermin
 
 beforeEach(() => {
   mockList.mockReset();
+  mockRestore.mockReset();
+  mockRestore.mockResolvedValue({ kind: "restored", snapshotEnd: 0, state: "active" });
   mockOpenTerminal.mockReset();
   mockSidebarProjects = [{ path: "/Users/james/www/app" }, { path: "/Users/james/www/other" }];
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -119,6 +137,100 @@ describe("PulseTerminals", () => {
     expect(within(details).getByText("/Users/james/www/app")).toBeInTheDocument();
     expect(within(details).getByText("9001")).toBeInTheDocument();
     expect(within(details).getByText("term-run")).toBeInTheDocument();
+  });
+
+  it("replays the terminal's log into a screen only once its row is expanded", async () => {
+    mockList.mockResolvedValue(page([term({ id: "term-run", project: "/Users/james/www/app" })]));
+    logHolds("ready on :5173\r\nhmr update");
+    render(<PulseTerminals />);
+    const row = await screen.findByTestId("pulse-terminal-row");
+    expect(mockRestore).not.toHaveBeenCalled();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Show terminal details" }));
+
+    const output = await screen.findByTestId("pulse-terminal-output");
+    expect(output).toHaveTextContent("ready on :5173");
+    expect(output).toHaveTextContent("hmr update");
+    expect(mockRestore).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "term-run",
+        projectPath: "/Users/james/www/app",
+        maxBytes: PULSE_TERMINAL_SCREEN_BYTES,
+      }),
+    );
+  });
+
+  it("lays a cursor-addressed screen out by position, not by newline", async () => {
+    // A full-screen program draws the bottom row first, then moves the cursor
+    // home and draws the top row. Splitting on newlines would show one mashed
+    // line; the screen is the top row, a blank row, then the bottom row.
+    mockList.mockResolvedValue(page([term({ id: "term-run" })]));
+    logHolds("\x1b[3;1Hbottom line\x1b[1;1Htop");
+    render(<PulseTerminals />);
+    fireEvent.click(within(await screen.findByTestId("pulse-terminal-row")).getByRole("button", { name: "Show terminal details" }));
+
+    const output = await screen.findByTestId("pulse-terminal-output");
+    expect(output.textContent).toBe("top\n\nbottom line");
+  });
+
+  it("says so when the terminal has no reported pty size, and reads nothing", async () => {
+    mockList.mockResolvedValue(page([term({ id: "term-new", cols: 0, rows: 0 })]));
+    render(<PulseTerminals />);
+    fireEvent.click(within(await screen.findByTestId("pulse-terminal-row")).getByRole("button", { name: "Show terminal details" }));
+
+    expect(await screen.findByText("Output shows once the terminal is open in a browser.")).toBeInTheDocument();
+    expect(mockRestore).not.toHaveBeenCalled();
+  });
+
+  it("says so when the expanded terminal has printed nothing yet", async () => {
+    mockList.mockResolvedValue(page([term({ id: "term-idle", running: false, command: "zsh" })]));
+    logHolds("");
+    render(<PulseTerminals />);
+    fireEvent.click(within(await screen.findByTestId("pulse-terminal-row")).getByRole("button", { name: "Show terminal details" }));
+    expect(await screen.findByText("No output yet.")).toBeInTheDocument();
+  });
+
+  it("treats a terminal with no saved log as no output, and checks again on the next tick", async () => {
+    // Only the polling interval is faked: the emulator's write callback is
+    // scheduled with setTimeout and would never fire under fake timers.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    mockList.mockResolvedValue(page([term({ id: "term-anon", running: false, command: "zsh" })]));
+    mockRestore.mockResolvedValue({ kind: "missing", snapshotEnd: 0 });
+    render(<PulseTerminals />);
+    await act(async () => {});
+    fireEvent.click(within(screen.getByTestId("pulse-terminal-row")).getByRole("button", { name: "Show terminal details" }));
+    await act(async () => {});
+
+    expect(screen.getByText("No saved output for this terminal.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(console.error).not.toHaveBeenCalled();
+
+    // Not latched: a log that appears later is picked up on the next tick.
+    logHolds("first output");
+    await act(async () => {
+      vi.advanceTimersByTime(PULSE_TERMINALS_POLL_MS);
+    });
+    expect(await screen.findByTestId("pulse-terminal-output")).toHaveTextContent("first output");
+    expect(mockRestore).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a failed read, then clears it when a later read succeeds", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    mockList.mockResolvedValue(page([term({ id: "term-run" })]));
+    mockRestore.mockRejectedValueOnce(new Error("connection reset"));
+    logHolds("back online");
+    render(<PulseTerminals />);
+    await act(async () => {});
+    fireEvent.click(within(screen.getByTestId("pulse-terminal-row")).getByRole("button", { name: "Show terminal details" }));
+    await act(async () => {});
+    expect(screen.getByRole("alert")).toHaveTextContent("Reading output failed: connection reset");
+
+    await act(async () => {
+      vi.advanceTimersByTime(PULSE_TERMINALS_POLL_MS);
+    });
+    // The emulator finishes parsing on a real timer, so wait for the clear.
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByTestId("pulse-terminal-output")).toHaveTextContent("back online");
   });
 
   it("opens the terminal's project and terminal from the Open button", async () => {

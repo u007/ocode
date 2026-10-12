@@ -43,8 +43,8 @@ ERROR: No matching distribution found for kokoro-onnx==0.6.1"
 ```
 
 The raw pip resolver dump — which reads like a missing package — was the entire
-user-visible error. The root cause was invisible: `findPython` selected the
-venv interpreter using only `MinPython` (the lower bound). On this macOS arm64
+user-visible error. The root cause was invisible: `findPython` (now a call into
+`pyinterp.Select`) selected the venv interpreter using only `MinPython` (the lower bound). On this macOS arm64
 host `/opt/homebrew/bin/python3` is python@3.14 (3.14.6) and is first on PATH,
 so it was chosen; `pip install` then resolved the pinned requirements against
 3.14 and died because **kokoro-onnx 0.6.1 declares `Requires-Python

@@ -567,7 +567,7 @@ The Pulse dashboard's overview chat is one current `pulse_…` session at a time
 (New chat rotates it; earlier chats stay on disk and are listed by
 `GET /api/pulse/assistant/chats`), rooted at `<GlobalDataDir>/pulse` (not a project). Concept doc: `docs/concepts/pulse-assistant.md`.
 
-- **Terminal tools are Pulse-only.** `terminal_tabs` and `terminal_read` live in
+- **Terminal tools are Pulse-only.** `terminal_tabs`, `terminal_read` and `terminal_screen` live in
   `pulseTools()` and reach an agent only through `configurePulseAgent` (gated on
   `isPulseSession`). Never add them to the builtin toolset. `TestTerminalToolsAreOnlyForThePulseAssistant`
   enforces it. Command lines go to the model only through `pulseTerminalRows`, which checks

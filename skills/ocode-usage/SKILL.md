@@ -418,7 +418,7 @@ ocode
 
 # In TUI: use /commands
 /review     # AI code review
-/standup    # Recent commits + pending changes
+/standup    # Recent commits + pending changes (bundled skill)
 /git        # Git operations
 /context    # Show context window token budget
 /lsp        # LSP diagnostics
@@ -475,7 +475,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/small-model` | | Show or switch the small model for lightweight tasks | Small model gets an intent-analysis prompt fragment |
 | `/compact` | `[focus]` | Manually trigger context compaction | Uses configured summary model (separate from chat model) |
 | `/review` | | AI code review (working dir, file, commit, branch, or PR) | Uses parallel agents with shared notes bus |
-| `/standup` | `/catchup` | Caveman summary of recent commits + pending changes | Reviews last 5 commits + working-tree changes |
+| `/standup` | | Caveman summary of recent commits + pending changes | Bundled skill (`skills/standup/SKILL.md`), not a Go command: the model runs `git log`/`status`/`diff`, `lsp_diagnostics` and a spec-file glob itself |
 | `/cron` | | Manage scheduled jobs | `list`, `describe <id>`, `remove <id>`, `add <kind> <args> <message>`; jobs fire in the long-lived serve/web/desktop host, not the TUI |
 | `/agents` | | Show active/queued subagents, or set max concurrent subagents | `status`, `limit <n>` (0 = unlimited) |
 | `/clear` | `/new` | Start a fresh conversation in the current session | Keeps session on disk; only clears in-memory messages |
@@ -535,7 +535,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/search` | `/find` | Find a message by keyword (opens in-chat find bar) | |
 | `/help` | `/?` | Show all available commands | Auto-generated from registered command specs |
 
-**Web command parity:** the web/desktop UI supports the same slash-command surface as the TUI — `/standup`, `/changes`, `/review`, `/context`, `/lsp`, `/agents`, `/skills`, `/mcp`, `/cron`, `/small-model`, `/advisor`, `/github` all work in the web chat input. The repo-analysis ones (`/standup`, `/changes`, `/review`) build their prompts through the shared `internal/commandctx` package, so TUI and web get byte-identical context.
+**Web command parity:** the web/desktop UI supports the same slash-command surface as the TUI — `/changes`, `/review`, `/context`, `/lsp`, `/agents`, `/skills`, `/mcp`, `/cron`, `/small-model`, `/advisor`, `/github` all work in the web chat input. The repo-analysis ones (`/changes`, `/review`) build their prompts through the shared `internal/commandctx` package, so TUI and web get byte-identical context. `/standup` is a bundled skill and rides the skill-as-slash path on both surfaces.
 
 ---
 

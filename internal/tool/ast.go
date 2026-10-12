@@ -17,8 +17,9 @@ import (
 // workspace/symbol, then runs the positional query — so the model can ask
 // "where is LoadBuiltins used?" without already knowing the file:line.
 //
-// This tool is an opt-in plugin: it is NOT registered unless enabled in the
-// ocode config (plugins.ast). Toggle it at runtime with `/plugin enable ast`.
+// This tool is registered by default whenever a language server is on PATH
+// (see tool.go); it has no plugin toggle. The opt-in structural tool is
+// AstGrepTool (`plugins.ast`).
 type AstTool struct {
 	// Mgr, if set, is a shared LSP manager (reused with LSPTool so only one
 	// gopls runs per project). Falls back to a private lazy manager when nil.

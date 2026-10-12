@@ -532,7 +532,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/recap` | `[model|status|enable|disable]` | Summarize conversation / manage recap model |
 | `/context` | | Show context window token budget and system prompt, plus Knowledge Bundle, Memory, and Discovery sections |
 | `/review` | `[file|commit|branch|pr]` | AI code review with actionable findings |
-| `/standup` | `/catchup` | Caveman summary of recent commits + pending changes, with sorted TODOs and missed stubs |
+| `/standup` | | Bundled skill (`skills/standup`): caveman summary of recent commits + pending changes, with sorted TODOs and missed stubs |
 | `/changes` | | Analyze repo changes: diffs, LSP errors, and in-progress specs |
 | `/session` | `/sessions`, `/resume`, `/s` | List, pick, resume sessions |
 | `/connect` | | Show/Set provider API keys |

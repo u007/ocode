@@ -249,7 +249,7 @@ propose changing the shared loader.
 ## Teardown
 
 `Server.Shutdown` calls `tsShare.cleanup()`
-(`internal/server/server.go:1820` → `internal/server/tailscale_share.go:251`),
+(`internal/server/server.go:1821` → `internal/server/tailscale_share.go:251`),
 which kills the process and removes **only** the `--set-path /desktop` mount —
 never a global reset, which would tear down TUI `/rc` sessions on the same node.
 

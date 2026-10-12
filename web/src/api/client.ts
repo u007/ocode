@@ -3498,7 +3498,7 @@ export const api = {
   listCommands: () => fetchJSON<CommandEntry[]>("/api/commands"),
   listSkills: () => fetchJSON<SkillEntry[]>("/api/skills"),
 
-  // ── Command context (repo-analysis prompts for /standup, /changes, /review) ──
+  // ── Command context (repo-analysis prompts for /changes, /review) ──
   // `project` selects which registered repo root the prompt is assembled from
   // (the server resolves it against its registry); `host` routes the call to a
   // remote project's server. Without both, a remote/multi-project tab got the

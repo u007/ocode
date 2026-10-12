@@ -53,7 +53,7 @@ Two independent bugs compounded:
 
 ## Residuals
 
-- **Remote-SSH:** in-process only. A remote-SSH chat runs on the host's `ocode serve --remote`; config syncs at connect time (`internal/remote/connect.go:442`), so a settings change requires that host to reconnect.
+- **Remote-SSH:** in-process only. A remote-SSH chat runs on the host's `ocode serve --remote`; config syncs at connect time (`internal/remote/connect.go:456`), so a settings change requires that host to reconnect.
 - **`autoGrants`** stay build-time in the manager (settings form round-trips them unchanged; not user-visible).
 
 ## Tests

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ChevronDown, GitFork, Maximize2 } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, GitFork, Maximize2 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "../../lib/utils";
 import { useJumpToSession, useJumpToPendingAsk, type JumpTarget } from "../../lib/jumpToSession";
@@ -102,6 +102,14 @@ const CARD_MIN_H = "min-h-[32rem]";
  * than a count of entries. The floor (CARD_MIN_H) must stay above header + this.
  */
 const STREAM_MAX_H = "max-h-[24rem]";
+
+/**
+ * The taller cap a live card switches to on request (its stream toggle). It
+ * grows that card's grid row and stretches the other cards in the row, which is
+ * the cost of an in-place expand. The default cap above is what keeps the row
+ * height constant the rest of the time.
+ */
+const STREAM_TALL_MAX_H = "max-h-[48rem]";
 
 export const STATUS_META: Record<PulseStatus, { glyph: string; label: string; className: string }> = {
   needs_permission: { glyph: "◆", label: "needs permission", className: "text-amber-400" },
@@ -264,6 +272,9 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
   // `expanded`, so a pinned panel survives them; Escape and a second click clear it.
   const [pinned, setPinned] = useState(false);
   const open = expanded || pinned;
+  // A live card's stream is capped short by default; this lifts the cap for
+  // this card only (see STREAM_TALL_MAX_H). Local, so it resets on remount.
+  const [streamTall, setStreamTall] = useState(false);
 
   // A live card reads its tail whether or not it is hovered — which is also the
   // only way it is reachable at all on a touch device, where there is no hover.
@@ -355,7 +366,11 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
           onFocus={expandNow}
           onBlur={collapse}
           onKeyDown={onButtonKeyDown}
-          className="flex w-full min-w-0 flex-col gap-1.5 rounded-md p-2 pr-12 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className={cn(
+            "flex w-full min-w-0 flex-col gap-1.5 rounded-md p-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            // Live cards carry a third icon in the corner group (see below).
+            streamOnCard ? "pr-[4.5rem]" : "pr-12",
+          )}
         >
           {compact ? (
             <div data-pulse-line="" className="flex min-w-0 items-center gap-2">
@@ -456,6 +471,18 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
           >
             <ChevronDown className={cn("h-3 w-3 transition-transform", pinned && "rotate-180")} aria-hidden />
           </button>
+          {streamOnCard && (
+            <button
+              type="button"
+              aria-pressed={streamTall}
+              aria-label="Expand stream"
+              title="Expand stream"
+              onClick={() => setStreamTall((t) => !t)}
+              className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ChevronsUpDown className="h-3 w-3" aria-hidden />
+            </button>
+          )}
           <button
             type="button"
             aria-label="Focus session"
@@ -483,7 +510,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
             onWheel={(e) => e.stopPropagation()}
             className={cn(
               "mx-2 mb-2 mt-0.5 min-h-0 flex-1 overflow-y-auto overscroll-contain",
-              STREAM_MAX_H,
+              streamTall ? STREAM_TALL_MAX_H : STREAM_MAX_H,
             )}
           >
             <PulseStream tail={tail} wrap />

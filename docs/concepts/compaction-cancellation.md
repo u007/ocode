@@ -27,7 +27,7 @@ POST /api/sessions/{id}/compact/cancel        →  200 {"cancelled": true | fals
                                                  404 {"error": "session not found"}   (unknown session)
 ```
 
-- Route: `internal/server/server.go:414` (registered next to `POST /api/sessions/{id}/compact` at `:413`, behind `s.authMiddleware`); wrapper `handleCancelCompaction` at `internal/server/server.go:2175-2177`.
+- Route: `internal/server/server.go:414` (registered next to `POST /api/sessions/{id}/compact` at `:413`, behind `s.authMiddleware`); wrapper `handleCancelCompaction` at `internal/server/server.go:2176-2178`.
 - Handler: `Handler.HandleCancelCompaction` (`internal/server/handler_cancel.go:94-104`). It resolves the session (404 if unknown), then calls `as.agent.CancelCompaction()` and returns `{"cancelled": <bool>}`.
 - **Idempotent by design:** cancelling with nothing in flight returns `200 {"cancelled": false}`, not an error, so a stale or double-clicked Cancel button can never surface as a failure (`TestCancelCompactionEndpointNoPassIsNoop`, `internal/server/compact_cancel_test.go:198`).
 - **No lifecycle bookkeeping in this handler.** The running pass retires its own slot and publishes the terminal `compaction_done` frame itself — a second publisher here would double-decrement the session's compaction counter (see the indicator spec §5 ordering rules).

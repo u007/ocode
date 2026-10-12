@@ -115,7 +115,6 @@ func init() {
 		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
 		{name: "/recap", usage: "/recap [model|status|enable|disable]", help: "Summarize conversation / manage recap model", handler: runRecapCmd},
 		{name: "/changes", help: "Analyze repo changes: diffs, LSP errors, and in-progress specs", handler: runChangesCmd},
-		{name: "/standup", aliases: []string{"/catchup"}, help: "Review recent commits + pending changes: caveman summary + sorted TODOs + missed stubs", handler: runStandupCmd},
 		{name: "/lsp", usage: "/lsp [show|open <path>|errors|all]", help: "Show current LSP diagnostics and error counts", handler: runLSPCmd},
 		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
 		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},

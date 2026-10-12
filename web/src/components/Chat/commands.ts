@@ -101,7 +101,6 @@ export const COMMANDS: CommandDef[] = [
   { name: "/plugin", description: "List, enable, install, or remove plugins", icon: Puzzle },
   { name: "/share", description: "Share session link", icon: Share2 },
   { name: "/help", description: "Show available commands", icon: HelpCircle },
-  { name: "/standup", description: "Review recent commits + pending changes (standup summary)", icon: ListChecks },
   { name: "/changes", description: "Analyze repo changes: diffs, LSP errors, specs", icon: GitBranch },
   { name: "/review", description: "AI code review of changes, file, commit, branch, or PR", icon: GitPullRequest },
   { name: "/context", description: "Show context window token budget", icon: Gauge },
@@ -259,7 +258,7 @@ export function helpMessage(): Message {
  * - `sessionId` — optional session to load / switch to
  * - `newSession` — if true, reset to a fresh session
  * - `prompt` — a user-role message to send through the normal chat pipeline
- *   (used by repo-analysis commands like /standup, /changes, /review: the
+ *   (used by repo-analysis commands like /changes, /review: the
  *   server gathers git context and returns the assembled prompt, which the
  *   client then sends verbatim so the LLM answers it like a TUI turn)
  */
@@ -321,7 +320,7 @@ export interface CommandContext {
     setMaskEnabled: (enabled: boolean) => Promise<{ enabled: boolean }>;
     setMaskMode: (mode: string) => Promise<{ mode: string }>;
     setMaskModel: (model: string) => Promise<{ model: string }>;
-    /** Fetch an assembled LLM prompt for a repo-analysis command (/standup, /changes, /review). */
+    /** Fetch an assembled LLM prompt for a repo-analysis command (/changes, /review). */
     getCommandContext: (name: string, args?: string, project?: string, host?: string) => Promise<{ prompt: string }>;
     /** Token budget for the current session (/context). */
     getSessionContext: (id: string, host?: string) => Promise<{
@@ -553,10 +552,8 @@ export async function dispatchCommand(
       return handleBtw(args, ctx);
 
     // ── Repo-analysis commands: server assembles the full prompt, client
-    //    sends it verbatim through the normal chat pipeline (TUI parity) ──
-    case "/standup":
-    case "/catchup":
-      return handleCommandContext("/standup", args, ctx);
+    //    sends it verbatim through the normal chat pipeline (TUI parity).
+    //    /standup is a bundled skill now, so it rides the skill-as-slash path. ──
     case "/changes":
     case "/review":
     case "/learn":
@@ -1772,13 +1769,13 @@ async function handleBtw(args: string, ctx: CommandContext): Promise<CommandResu
   }
 }
 
-// ─── Repo-analysis commands (/standup, /changes, /review) ──────────────────
+// ─── Repo-analysis commands (/changes, /review) ──────────────────
 
 /**
  * Server-side prompt assembly. The server gathers the same git context the
  * TUI uses (recent commits, pending diffs, LSP, spec files) and returns the
  * full LLM prompt; the client sends it verbatim through the normal send path
- * so the web behaves exactly like the TUI /standup | /changes | /review.
+ * so the web behaves exactly like the TUI /changes | /review.
  */
 async function handleCommandContext(
   commandName: string,

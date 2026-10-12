@@ -176,3 +176,27 @@ func TestTerminalReadFlagsLineClippedAtWindowEdge(t *testing.T) {
 		t.Fatalf("whole lines must not set line_clipped: %+v", p)
 	}
 }
+
+// TestPulseDisplayLinesKeepsRedrawBeforeTrailingCR: a progress bar ends each
+// redraw with \r and never emits \n. A log ending in \r must still show the last
+// redraw, not a blank line.
+func TestPulseDisplayLinesKeepsRedrawBeforeTrailingCR(t *testing.T) {
+	cases := []struct {
+		name, in string
+		want     []string
+	}{
+		{"trailing cr keeps last redraw", "building 41%\rbuilding 42%\r", []string{"building 42%"}},
+		{"double trailing cr", "step\r\r", []string{"step"}},
+		{"partial redraw wins", "building 41%\rbuil", []string{"buil"}},
+		{"line before trailing cr line", "one\ntwo\r\n", []string{"one", "two"}},
+		{"only carriage returns", "\r\r", []string{""}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := pulseDisplayLines(c.in)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("pulseDisplayLines(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}

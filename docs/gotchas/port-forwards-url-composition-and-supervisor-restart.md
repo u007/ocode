@@ -107,7 +107,7 @@ portMapsPath(target, `/${port}/disable`)    // → …/3510/disable?project=~/ap
 `web/src/api/client.ts`, called by `removePortMap` and `setPortMapEnabled` (symbol anchors
 only: that file was under concurrent edit when §4 was written and its line numbers had
 already drifted by >1000 since this page was created — re-grep rather than trust an old
-line). The five server routes are registered in `internal/server/server.go:653-657`
+line). The five server routes are registered in `internal/server/server.go:654-658`
 (`GET /api/portmaps`, `POST /api/portmaps`, `DELETE /api/portmaps/{port}`,
 `POST /api/portmaps/{port}/enable|disable`); the handlers live in
 `internal/server/handler_portmaps.go`.
@@ -250,13 +250,13 @@ Detection alone only clears the lie; something has to re-open the forward. One
   (`entry.policy.forget`, `internal/server/handler_portmaps.go:243` and `:265`) so a
   disabled forward is never revived by the watchdog.
 - **Where it runs:** started in `Serve` right beside the idle-agent evictor —
-  `internal/server/server.go:1761` (`go s.handler.evictIdleLoop(stop)` /
+  `internal/server/server.go:1762` (`go s.handler.evictIdleLoop(stop)` /
   `go s.handler.portMapWatchdogLoop(stop)`), stopped by the same `stop` channel.
 
 ### Deliberately out of scope
 
 - **The service *behind* a forward.** `waitForTunnelReady` only dials
-  `127.0.0.1:localPort` (`internal/remote/connect.go:380`), and ssh's local listener accepts
+  `127.0.0.1:localPort` (`internal/remote/connect.go:394`), and ssh's local listener accepts
   whether or not the remote end is reachable — so "live" means "our ssh child is running",
   **not** "the remote app answers". A dead backend behind a healthy forward is invisible to
   this monitor.
@@ -275,8 +275,8 @@ verified against the working tree on 2026-09-30.
   auto-start trigger: the first list for a project ran `autoStartPortMaps`
   (`internal/server/handler_portmaps.go:149`) inline behind `entry.autoStartOnce`
   (`internal/server/handler_portmaps.go:61`). Every `fm.Start` runs the bounded readiness
-  probe `waitForTunnelReady` (`internal/remote/connect.go:380` — `tunnelReadyAttempts` 25 ×
-  `tunnelReadyInterval` 200ms, `internal/remote/connect.go:371-374`, ~5s), so a forward
+  probe `waitForTunnelReady` (`internal/remote/connect.go:394` — `tunnelReadyAttempts` 25 ×
+  `tunnelReadyInterval` 200ms, `internal/remote/connect.go:385-388`, ~5s), so a forward
   whose tunnel could not come up held the list response for ~5s.
 - `startRemoteServer` (`internal/desktop/boot.go`) ran the same loop before `net.Listen`,
   so a single dead forward delayed the desktop window appearing by ~5s. (That

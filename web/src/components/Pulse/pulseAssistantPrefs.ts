@@ -35,6 +35,8 @@ export const ASSISTANT_NARROW_BREAKPOINT = 640;
 export const ASSISTANT_BAR_HEIGHT = 40;
 /** Gap kept between the window and the viewport edges. */
 export const ASSISTANT_EDGE = 8;
+/** A dropped window whose side is this close to a viewport edge docks to it. */
+export const ASSISTANT_SNAP_DISTANCE = 20;
 
 const KEY_OPEN = "pulse.assistant.open";
 const KEY_MODE = "pulse.assistant.mode";
@@ -189,6 +191,29 @@ export function defaultRect(vp: Viewport): AssistantRect {
     { x: vp.width - width - 2 * ASSISTANT_EDGE, y: vp.height - height - 2 * ASSISTANT_EDGE, width, height },
     vp,
   );
+}
+
+/**
+ * Docks each axis to the nearest edge it is within ASSISTANT_SNAP_DISTANCE of: the
+ * inset left/top line, or the inset right/bottom line for this rect's size. The
+ * size is the rect's own, so a minimised bar docks where its open window would.
+ */
+export function snapRect(r: AssistantRect, vp: Viewport): AssistantRect {
+  return {
+    ...r,
+    x: snapAxis(r.x, r.width, vp.width),
+    y: snapAxis(r.y, r.height, vp.height),
+  };
+}
+
+function snapAxis(pos: number, size: number, viewportSize: number): number {
+  const near = ASSISTANT_EDGE;
+  const far = viewportSize - size - ASSISTANT_EDGE;
+  const toNear = Math.abs(pos - near);
+  const toFar = Math.abs(pos - far);
+  if (toNear <= ASSISTANT_SNAP_DISTANCE && toNear <= toFar) return near;
+  if (toFar <= ASSISTANT_SNAP_DISTANCE) return far;
+  return pos;
 }
 
 export function isNarrowViewport(vp: Viewport): boolean {

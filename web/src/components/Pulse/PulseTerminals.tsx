@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useProjectState } from "@/stores/projectStore";
@@ -6,7 +6,7 @@ import { cn } from "../../lib/utils";
 import { useJumpToTerminal } from "../../lib/jumpToSession";
 import type { PulseTerminal } from "../../api/types";
 import { pulseProjectBasename } from "./pulseFilter";
-import { usePulseTerminals } from "./usePulseTerminals";
+import { usePulseTerminalScreen, usePulseTerminals } from "./usePulseTerminals";
 
 /**
  * PulseTerminals — the live terminals across every project, shown above the
@@ -52,6 +52,45 @@ export function PulseTerminals() {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * The current screen of one terminal, as text. Mounted only while its row is
+ * expanded, so the screen is read only then. It is laid out at the pty's own
+ * size and is not re-wrapped, so a full-screen program keeps its columns. The
+ * bottom of the screen stays in view as it refreshes.
+ */
+function PulseTerminalOutput({ terminal, label }: { terminal: PulseTerminal; label: string }) {
+  const { screen, error, noOutput } = usePulseTerminalScreen(terminal);
+  const outputRef = useRef<HTMLPreElement | null>(null);
+  useEffect(() => {
+    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
+  }, [screen]);
+
+  if (terminal.cols === 0 || terminal.rows === 0) {
+    return <p className="pl-5 text-xs text-muted-foreground">Output shows once the terminal is open in a browser.</p>;
+  }
+  if (error) {
+    return (
+      <p role="alert" className="pl-5 text-xs text-destructive">
+        {error}
+      </p>
+    );
+  }
+  if (noOutput) return <p className="pl-5 text-xs text-muted-foreground">No saved output for this terminal.</p>;
+  if (screen === null) return <p className="pl-5 text-xs text-muted-foreground">Reading output…</p>;
+  if (screen.length === 0) return <p className="pl-5 text-xs text-muted-foreground">No output yet.</p>;
+  return (
+    <pre
+      ref={outputRef}
+      tabIndex={0}
+      aria-label={`Output of ${label}`}
+      data-testid="pulse-terminal-output"
+      className="max-h-48 overflow-auto whitespace-pre rounded bg-muted px-2 py-1.5 font-mono text-[11px] leading-snug"
+    >
+      {screen.join("\n")}
+    </pre>
   );
 }
 
@@ -118,6 +157,7 @@ function PulseTerminalRow({ terminal }: { terminal: PulseTerminal }) {
           Open
         </Button>
       </div>
+      {expanded && <PulseTerminalOutput terminal={terminal} label={label} />}
       {expanded && (
         <dl data-testid="pulse-terminal-details" className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pl-5 text-[11px]">
           <dt className="text-muted-foreground">Command</dt>

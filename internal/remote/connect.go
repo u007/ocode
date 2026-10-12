@@ -165,6 +165,20 @@ func runPrepareStages(opts ConnectOptions, progress *Progress) (Transport, *tool
 		_ = GCVersions(transport)
 	}
 
+	progress.Start("htrcli", "htrcli")
+	htrcli, err := EnsureHTRCli(transport, goos, goarch)
+	switch {
+	case err != nil:
+		progress.Fail(err, "")
+		return nil, sup, err
+	case htrcli.Digest == "":
+		progress.Warn("no bundled build for " + goos + "/" + goarch)
+	case htrcli.Installed:
+		progress.Done("installed " + htrcli.Version + " sha256:" + htrcli.Digest[:12])
+	default:
+		progress.Done("up to date " + htrcli.Version + " sha256:" + htrcli.Digest[:12])
+	}
+
 	if opts.NoSync {
 		progress.Start("sync", "credentials synced")
 		progress.Warn("skipped (--no-sync)")

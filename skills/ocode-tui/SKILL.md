@@ -67,7 +67,7 @@ Both `files.View` and `git.View` build their own header; **they also use `appHea
 
 The chat `renderContent` has a **safety net**: if the rendered output's height exceeds `m.height`, the viewport is shrunk and the layout is re-rendered (plus a hard clamp for modal backdrops). New chrome rows that push `bottomChromeHeight` up can trip this — verify with `TestActivityRowGrowthStaysWithinHeight`.
 
-**Web parity note:** the repo-analysis commands (`/standup`, `/changes`, `/review`) build their prompts in the shared `internal/commandctx` package, and the TUI files (`changes.go`, `review.go`, `standup.go`) are thin wrappers over it. The web/desktop server exposes the identical prompts via `GET /api/command-context/{standup,changes,review}` — never reimplement the prompt-building logic in one place without the other.
+**Web parity note:** the repo-analysis commands (`/changes`, `/review`) build their prompts in the shared `internal/commandctx` package, and the TUI files (`changes.go`, `review.go`) are thin wrappers over it. The web/desktop server exposes the identical prompts via `GET /api/command-context/{changes,review}`. `/standup` is a bundled skill (`skills/standup/SKILL.md`), registered through the skill-as-slash path; a built-in command of the same name would shadow it, so never re-add one — never reimplement the prompt-building logic in one place without the other.
 
 ## 4. Theme + styles
 
@@ -178,7 +178,7 @@ In `internal/tui`:
   A long URL hard-wrapped onto several rows is reassembled from the `rawTranscriptCont`
   flags (`wrapViewMarked`), so the click target and the selection-copy text are the
   full URL, never the one-row prefix; word-wrapped rows still copy with newlines.
-- `internal/tui/changes.go` — **thin wrapper** over the shared `internal/commandctx` package (see §3 web-parity note); `review.go`/`standup.go` are similarly slimmed. The changes-tab UI lives in `internal/tui/changes_model.go`.
+- `internal/tui/changes.go` — **thin wrapper** over the shared `internal/commandctx` package (see §3 web-parity note); `review.go` is similarly slimmed. The changes-tab UI lives in `internal/tui/changes_model.go`.
 - `internal/tui/picker.go` — message picker; opens at the **most recent** entry (`openMessagePicker` sets `pickerIndex = len(items) - 1`), not the top of history.
 
 ### Review & GitHub

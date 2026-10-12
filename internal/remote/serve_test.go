@@ -343,7 +343,7 @@ func TestLaunchServerCmdDeletesStaleStateFileSynchronously(t *testing.T) {
 // returns immediately while the server survives.
 func TestLaunchServerCmdDetachesServerInSubshell(t *testing.T) {
 	cmd := launchServerCmd("0.8.85")
-	if !strings.Contains(cmd, "&& (nohup ") || !strings.Contains(cmd, "&); echo launched") {
+	if !strings.Contains(cmd, "&& (PATH=") || !strings.Contains(cmd, " nohup ") || !strings.Contains(cmd, "&); echo launched") {
 		t.Fatalf("launch command must detach the server in a `( nohup … & )` subshell: %q", cmd)
 	}
 	if strings.Contains(cmd, "& disown;") {

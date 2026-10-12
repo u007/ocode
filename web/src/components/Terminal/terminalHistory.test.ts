@@ -26,6 +26,17 @@ function page(id: string, offset: number, data: Uint8Array, snapshotEnd: number,
   };
 }
 
+// serveLog answers each page request from the requested offset and limit, so a
+// test can describe the whole log instead of scripting every page.
+function serveLog(log: Uint8Array) {
+  return vi.fn(async (url: string) => {
+    const params = new URL(url, "http://x").searchParams;
+    const offset = Number(params.get("offset"));
+    const end = Math.min(offset + Number(params.get("limit")), log.length);
+    return new Response(JSON.stringify(page("t1", offset, log.subarray(offset, end), log.length, end === log.length)));
+  });
+}
+
 describe("restoreTerminalHistory", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -53,8 +64,8 @@ describe("restoreTerminalHistory", () => {
     expect(headers.get("Authorization")).toBe("Bearer test");
   });
 
-  it("replays only the tail of an oversized log, starting on a line boundary", async () => {
-    // 20-byte log, cap 8: restart at offset 12 ("ab\ncdefgh"), drop "ab\n".
+  it("replays the tail of an oversized log whole when it has no escape sequence", async () => {
+    // 21-byte log, cap 8: restart at offset 13 ("b\ncdefgh"). No ESC, so nothing is dropped.
     const log = new TextEncoder().encode("0123456789\nxab\ncdefgh");
     expect(log.length).toBe(21);
     const fetchMock = vi.fn()
@@ -71,10 +82,31 @@ describe("restoreTerminalHistory", () => {
     });
 
     expect(result).toEqual({ kind: "restored", snapshotEnd: 21, state: "exited" });
-    expect(texts.join("")).toBe("cdefgh");
+    expect(texts.join("")).toBe("b\ncdefgh");
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1][0])).toContain("offset=13");
     expect(String(fetchMock.mock.calls[1][0])).toContain("snapshot_end=21");
+  });
+
+  it("starts an oversized log at the first ESC in its first page", async () => {
+    // 13-byte log, cap 10: the window is "3\x1b[1;1Hxyz", so the ESC is one byte in.
+    const log = new TextEncoder().encode("0123\x1b[1;1Hxyz");
+    expect(log.length).toBe(13);
+    vi.stubGlobal("fetch", serveLog(log));
+    const texts: string[] = [];
+    await restoreTerminalHistory({ id: "t1", projectPath: "/project", maxBytes: 10, onText: (text) => { texts.push(text); } });
+    expect(texts.join("")).toBe("\x1b[1;1Hxyz");
+  });
+
+  it("keeps an oversized log whole when its first page has no ESC", async () => {
+    // 27-byte log, cap 12, page 4: the window opens on five x's, and the only ESC is
+    // in the second page. The first page has none, so nothing is dropped.
+    const log = new TextEncoder().encode("x".repeat(20) + "\x1b[1;1Hz");
+    expect(log.length).toBe(27);
+    vi.stubGlobal("fetch", serveLog(log));
+    const texts: string[] = [];
+    await restoreTerminalHistory({ id: "t1", projectPath: "/project", pageSize: 4, maxBytes: 12, onText: (text) => { texts.push(text); } });
+    expect(texts.join("")).toBe("xxxxx\x1b[1;1Hz");
   });
 
   it("replays the whole log when it fits under the byte cap", async () => {

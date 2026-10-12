@@ -7,9 +7,10 @@ export interface TerminalHistoryRestoreOptions {
   pageSize?: number;
   /**
    * Upper bound on replayed bytes. When the log is longer, the restore starts
-   * at `snapshot_end - maxBytes` (advanced to the next line break so no
-   * partial escape sequence is painted) instead of byte zero. Unset replays
-   * the whole log.
+   * at `snapshot_end - maxBytes` instead of byte zero. The first page after
+   * that start is replayed from its first ESC, so no partial escape sequence
+   * is painted; a page with no ESC is replayed whole. Unset replays the whole
+   * log.
    */
   maxBytes?: number;
   signal?: AbortSignal;
@@ -105,8 +106,9 @@ export async function restoreTerminalHistory({
   let state: "active" | "exited" | undefined;
   let first = true;
   // True for the first page after jumping to the tail: its leading bytes up to
-  // the first newline are dropped so the replay begins on a line boundary.
-  let skipToLineStart = false;
+  // the first ESC are dropped, so a sequence cut by the window is not replayed as
+  // text. A page with no ESC is replayed whole. terminal_screen applies the same rule.
+  let skipToEscape = false;
 
   for (;;) {
     const params = new URLSearchParams({ offset: String(offset), limit: String(pageSize) });
@@ -145,7 +147,7 @@ export async function restoreTerminalHistory({
         // The log exceeds the cap: discard this head page and restart from
         // the tail. Every later request stays pinned to this snapshot.
         offset = snapshotEnd - maxBytes;
-        skipToLineStart = true;
+        skipToEscape = true;
         continue;
       }
     } else if (page.snapshot_end !== snapshotEnd) {
@@ -158,10 +160,10 @@ export async function restoreTerminalHistory({
     if (page.eof !== (page.next_offset === page.snapshot_end)) {
       throw new TerminalHistoryError("terminal history returned inconsistent eof metadata");
     }
-    if (skipToLineStart) {
-      skipToLineStart = false;
-      const newline = bytes.indexOf(0x0a);
-      if (newline >= 0) bytes = bytes.subarray(newline + 1);
+    if (skipToEscape) {
+      skipToEscape = false;
+      const escape = bytes.indexOf(0x1b);
+      if (escape >= 0) bytes = bytes.subarray(escape);
     }
     if (bytes.length > 0) {
       const text = decoder.decode(bytes, { stream: true });

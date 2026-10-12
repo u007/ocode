@@ -22,7 +22,7 @@ func (h *Handler) pulseTerminalWindow(terminalID string, head bool) (project, te
 		return "", "", false, false, false, errors.New("terminal access requires server authentication or a loopback bind address")
 	}
 	if strings.HasPrefix(terminalID, "anon-") {
-		return "", "", false, false, false, fmt.Errorf("terminal %q has no history", terminalID)
+		return "", "", false, false, false, fmt.Errorf("terminal %q has no history: %w", terminalID, errTerminalHistoryMissing)
 	}
 	project, err = h.pulseTerminalProject(terminalID)
 	if err != nil {
@@ -119,12 +119,20 @@ func (h *Handler) pulseTerminalProject(terminalID string) (string, error) {
 		}
 	}
 	if project == "" {
-		return "", fmt.Errorf("terminal %q not found (see terminal_tabs for open terminals)", terminalID)
+		return "", fmt.Errorf("%w: %q (see terminal_tabs for open terminals)", errPulseTerminalNotFound, terminalID)
 	}
 	for _, root := range h.allowedProjectRoots() {
 		if project == root {
 			return project, nil
 		}
 	}
-	return "", fmt.Errorf("terminal %q belongs to %q, which is not a local project of this server", terminalID, project)
+	return "", fmt.Errorf("%w: terminal %q belongs to %q, which is not a local project of this server", errPulseTerminalForeign, terminalID, project)
 }
+
+// errPulseTerminalNotFound and errPulseTerminalForeign are the lookup failures
+// pulseTerminalProject returns, so a caller can tell them apart without matching
+// message text.
+var (
+	errPulseTerminalNotFound = errors.New("terminal not found")
+	errPulseTerminalForeign  = errors.New("terminal is outside the local projects")
+)

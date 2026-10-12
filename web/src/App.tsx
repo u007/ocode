@@ -1201,7 +1201,7 @@ function HomeApp() {
       }
     }
     if (result.prompt) {
-      // Server-assembled prompt (/standup, /changes, /review, /learn,
+      // Server-assembled prompt (/changes, /review, /learn,
       // /doc-sync, /mem update, /docs init): send through the normal chat
       // pipeline exactly like the TUI dispatching the same command.
       const accepted = await sendCommandToSession(targetSessionId, result.prompt);
@@ -1857,6 +1857,8 @@ function HomeApp() {
                               session={tab.id}
                               host={resolveSessionHost(projectState, tab.id)}
                               active={isActive}
+                              projectRoot={tab.projectPath}
+                              onOpenFile={openFileAndShow}
                               loadingKey={changesLoadingKey}
                               onLoadingEvent={handleTabLoadingEvent}
                             />

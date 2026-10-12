@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/u007/ocode/internal/pyinterp"
 )
 
 type EngineID string
@@ -129,29 +131,21 @@ func (m Manifest) HostRuntime() (PythonRuntime, bool) {
 	return rt, ok
 }
 
-// accepts reports whether an interpreter version lies inside the runtime's
-// inclusive MinPython/MaxPython range. A zero MaxPython is unbounded.
-func (rt PythonRuntime) accepts(version [2]int) bool {
-	if version[0] < rt.MinPython[0] ||
-		(version[0] == rt.MinPython[0] && version[1] < rt.MinPython[1]) {
-		return false
-	}
-	if rt.MaxPython != [2]int{} &&
-		(version[0] > rt.MaxPython[0] ||
-			(version[0] == rt.MaxPython[0] && version[1] > rt.MaxPython[1])) {
-		return false
-	}
-	return true
+// pyRange is the runtime's inclusive interpreter range, shared with the
+// interpreter search in internal/pyinterp.
+func (rt PythonRuntime) pyRange() pyinterp.Range {
+	return pyinterp.Range{Min: rt.MinPython, Max: rt.MaxPython}
 }
 
-// pythonRange renders the supported interpreter range for user-facing errors
-// ("3.11-3.13", or ">=3.11" when no ceiling is pinned).
+// accepts reports whether an interpreter version lies inside the runtime's
+// range. A zero MaxPython is unbounded.
+func (rt PythonRuntime) accepts(version [2]int) bool {
+	return rt.pyRange().Accepts(version)
+}
+
+// pythonRange renders the supported interpreter range for user-facing errors.
 func (rt PythonRuntime) pythonRange() string {
-	lower := fmt.Sprintf("%d.%d", rt.MinPython[0], rt.MinPython[1])
-	if rt.MaxPython == [2]int{} {
-		return ">=" + lower
-	}
-	return lower + "-" + fmt.Sprintf("%d.%d", rt.MaxPython[0], rt.MaxPython[1])
+	return rt.pyRange().String()
 }
 
 const (

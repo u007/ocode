@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveModelFallsBackToDefault(t *testing.T) {
@@ -194,20 +196,136 @@ func TestLiveParakeetUnifiedTranscribes(t *testing.T) {
 	}
 }
 
+// writeFakeInterpreter writes a POSIX stand-in for a Python interpreter. It
+// reports version and fails every import with a ModuleNotFoundError that names
+// the probed modules, so probes run against it never touch the host's Python.
+func writeFakeInterpreter(t *testing.T, version string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake interpreter scripts need a POSIX shell")
+	}
+	path := filepath.Join(t.TempDir(), "python3")
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'Python " + version + "' ;;\n" +
+		"  *) echo \"ModuleNotFoundError: $3\" >&2; exit 1 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// resetProbeCache empties the package-global probe cache when the test ends, so
+// a fake interpreter's result never outlives the test that created it.
+func resetProbeCache(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		probeCache.mu.Lock()
+		probeCache.entries = map[string]*probeEntry{}
+		probeCache.mu.Unlock()
+	})
+}
+
 // A model's extra modules are part of its availability: an interpreter that
 // has onnx_asr but lacks sentencepiece must not report the unified model ready.
 func TestProbeLocalChecksExtraModules(t *testing.T) {
-	py, err := resolvePython("")
-	if err != nil {
-		t.Skip("no python3 on PATH")
-	}
-	if ok, _ := probeLocal(py, []string{"ocode_no_such_module_xyz"}); ok {
+	resetProbeCache(t)
+	python := writeFakeInterpreter(t, "3.12.0")
+	ok, reason := probeLocal(python, []string{"ocode_no_such_module_xyz"})
+	if ok {
 		t.Fatalf("probe passed with a module that does not exist")
 	}
-	st := StatusFor(Options{Python: "/nonexistent/python"})
+	if !strings.Contains(reason, "ocode_no_such_module_xyz") {
+		t.Errorf("reason %q does not name the missing module", reason)
+	}
+	st := StatusFor(Options{Python: python})
 	for _, m := range st.Models {
 		if m.ID == "parakeet-unified-en-0.6b" && !strings.Contains(m.Reason, "sentencepiece") {
 			t.Fatalf("unified reason %q does not name sentencepiece", m.Reason)
+		}
+	}
+}
+
+// A pinned python that does not exist must be named in the reason. Select
+// skips missing candidate names silently, so without the explicit check the
+// user's configured path would vanish from the error.
+func TestLocalInterpreterNamesMissingPinnedPython(t *testing.T) {
+	resetProbeCache(t)
+	missing := filepath.Join(t.TempDir(), "no-such-python")
+	_, err := localInterpreter(missing, nil)
+	if err == nil {
+		t.Fatal("localInterpreter accepted a python that does not exist")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error %q does not name the configured python %q", err, missing)
+	}
+}
+
+// A slow scan for one key must not hold the cache for the others: status polling
+// and Transcribe for a different interpreter return while it is still running.
+func TestProbeDoesNotBlockOtherKeys(t *testing.T) {
+	resetProbeCache(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("fake interpreter scripts need a POSIX shell")
+	}
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	slow := filepath.Join(dir, "slow-python")
+	script := "#!/bin/sh\ntouch " + started + "\nsleep 2\necho 'Python 3.12.0'\n"
+	if err := os.WriteFile(slow, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		probeLocal(slow, nil)
+	}()
+	defer func() { <-done }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slow scan never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	begin := time.Now()
+	probeLocal(filepath.Join(dir, "no-such-python"), nil)
+	if elapsed := time.Since(begin); elapsed > time.Second {
+		t.Fatalf("probe for another key took %v while a 2s scan ran; cache lock held across the scan", elapsed)
+	}
+}
+
+// StatusFor probes the local models' distinct extras sets concurrently, so a
+// status request waits for the slowest scan, not for the sum of them.
+func TestStatusForProbesLocalModelsConcurrently(t *testing.T) {
+	resetProbeCache(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("fake interpreter scripts need a POSIX shell")
+	}
+	// Every invocation sleeps 1 s: the version check and each import probe. Two
+	// distinct keys (no extras, sentencepiece) each cost 2 s; serial is 4 s.
+	slow := filepath.Join(t.TempDir(), "slow-python")
+	script := "#!/bin/sh\nsleep 1\necho 'Python 3.12.0'\n"
+	if err := os.WriteFile(slow, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	begin := time.Now()
+	st := StatusFor(Options{Python: slow})
+	elapsed := time.Since(begin)
+	if elapsed > 3500*time.Millisecond {
+		t.Fatalf("StatusFor took %v; the local probes ran one after another", elapsed)
+	}
+	for i, s := range catalog {
+		if st.Models[i].ID != s.ID {
+			t.Fatalf("Models[%d] = %q, want catalog order %q", i, st.Models[i].ID, s.ID)
+		}
+		if s.Engine == EngineLocal && !st.Models[i].Available {
+			t.Fatalf("%s unavailable: %s", s.ID, st.Models[i].Reason)
 		}
 	}
 }

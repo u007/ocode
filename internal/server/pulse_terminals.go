@@ -27,6 +27,10 @@ type pulseTerminalRow struct {
 	Command string `json:"command"`
 	// Running is true when a program other than the shell is in the foreground.
 	Running bool `json:"running"`
+	// Cols and Rows are the pty size the browser last reported, zero until its
+	// first resize. The dashboard's output view needs them to lay the screen out.
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
 }
 
 // pulseRowsMemo is the last walk behind pulseTerminalRows. The walk reads the
@@ -95,6 +99,8 @@ func (h *Handler) walkPulseTerminalRows() []pulseTerminalRow {
 			PID:     e.PID,
 			Command: cmd,
 			Running: running,
+			Cols:    e.Cols,
+			Rows:    e.Rows,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

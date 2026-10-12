@@ -124,9 +124,13 @@ func launchServerCmd(ver string) string {
 	// connect backstop reports as a 502 after its timeout. Wrapping the nohup in
 	// `( … & )` keeps the mkdir guard while letting the subshell return
 	// immediately, so `ssh` sees EOF as soon as this command's shell exits.
+	//
+	// The version dir goes first on PATH so the server's agent shell resolves a
+	// bare `htrcli` to the version-matched install (see EnsureHTRCli).
+	versionDir := shellQuotePath(RemoteBinDir + "/" + ver)
 	return fmt.Sprintf(
-		"rm -f %s; mkdir -p %s && (nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 &); echo launched",
-		statePath, shellQuotePath("~/.ocode/remote"), remoteOcode, logPath,
+		"rm -f %s; mkdir -p %s && (PATH=%s:\"$PATH\" nohup %s serve --remote --host 127.0.0.1 --port 0 </dev/null >%s 2>&1 &); echo launched",
+		statePath, shellQuotePath("~/.ocode/remote"), versionDir, remoteOcode, logPath,
 	)
 }
 

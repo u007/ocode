@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ExternalLink } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import type { FileChange } from "@/api/types";
 
@@ -12,11 +13,12 @@ interface Props {
   files: FileChange[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onOpenFile: (path: string) => void;
   onUndoFile: (path: string) => void;
   onUndoBlock: (path: string) => void;
 }
 
-export default function ChangesFileList({ files, selectedPath, onSelect, onUndoFile, onUndoBlock }: Props) {
+export default function ChangesFileList({ files, selectedPath, onSelect, onOpenFile, onUndoFile, onUndoBlock }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   if (files.length === 0) {
@@ -55,6 +57,16 @@ export default function ChangesFileList({ files, selectedPath, onSelect, onUndoF
                 >
                   {isExpanded ? "hide details" : "details"}
                 </button>
+                {file.status !== "deleted" && (
+                  <button
+                    onClick={() => onOpenFile(file.originalPath)}
+                    className="flex items-center gap-1 hover:text-foreground"
+                    title="Open file in editor tab"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    open file
+                  </button>
+                )}
                 <div className="flex-1" />
                 <TooltipProvider>
                   <Tooltip>

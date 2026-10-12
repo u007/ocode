@@ -358,70 +358,17 @@ func TestManifestPythonRangesRejectTooNewInterpreter(t *testing.T) {
 	}
 }
 
-// TestSelectPythonBoundsRange covers the probe loop that picks the venv
-// interpreter: a first-on-PATH interpreter newer than the pinned range must be
-// skipped in favor of an in-range one, and when none is in range the error must
-// name the range and the rejected versions.
-func TestSelectPythonBoundsRange(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake interpreter scripts need a POSIX shell")
-	}
-	dir := t.TempDir()
-	writeFakePython := func(name, version string) string {
-		path := filepath.Join(dir, name)
-		script := "#!/bin/sh\necho 'Python " + version + "'\n"
-		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-	// 3.14 first (mirrors /opt/homebrew/bin/python3 on the failing host), then
-	// 3.13 and 3.10 as fallbacks.
-	tooNew := writeFakePython("python3", "3.14.6")
-	inRange := writeFakePython("python3.13", "3.13.14")
-	tooOld := writeFakePython("python3.10", "3.10.20")
-
-	rt := PythonRuntime{
-		Requirements: []string{"kokoro-onnx" + "==" + "0.6.1"},
-		MinPython:    [2]int{3, 11},
-		MaxPython:    [2]int{3, 13},
-	}
-
-	got, err := selectPython(t.Context(), rt, [][]string{{tooNew}, {inRange}})
-	if err != nil {
-		t.Fatalf("selectPython: %v", err)
-	}
-	if got.Version != [2]int{3, 13} {
-		t.Fatalf("selected %v, want 3.13 (3.14 is outside the pinned range)", got.Version)
-	}
-
-	err = nil
-	if _, err = selectPython(t.Context(), rt, [][]string{{tooNew}, {tooOld}}); err == nil {
-		t.Fatal("selectPython accepted only out-of-range interpreters")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "3.11-3.13") {
-		t.Errorf("error does not name the supported range: %q", msg)
-	}
-	for _, want := range []string{"3.14", "3.10"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("error does not report rejected %s: %q", want, msg)
-		}
-	}
-
-	// piper on darwin/arm64 keeps accepting 3.14 (regression guard: a blanket
-	// 3.13 cap would break the working 3.14 piper install).
+// TestPiperRuntimeAcceptsTooNewInterpreter is the regression guard for the
+// piper range: a blanket 3.13 cap would break the working 3.14 piper install on
+// darwin/arm64. Selection over the range is covered in internal/pyinterp.
+func TestPiperRuntimeAcceptsTooNewInterpreter(t *testing.T) {
 	piper, _ := ManifestFor(EnginePiper)
 	armRT, ok := piper.Runtime["darwin/arm64"]
 	if !ok {
 		t.Skip("piper has no darwin/arm64 runtime")
 	}
-	got, err = selectPython(t.Context(), armRT, [][]string{{tooNew}})
-	if err != nil {
-		t.Fatalf("piper/darwin-arm64 must accept 3.14: %v", err)
-	}
-	if got.Version != [2]int{3, 14} {
-		t.Fatalf("selected %v, want 3.14", got.Version)
+	if !armRT.accepts([2]int{3, 14}) {
+		t.Fatal("piper/darwin-arm64 must accept 3.14")
 	}
 }
 
@@ -461,73 +408,5 @@ func TestPythonRangeRendering(t *testing.T) {
 	}
 	if !unbounded.accepts([2]int{3, 99}) {
 		t.Error("zero MaxPython must be unbounded")
-	}
-}
-
-// TestPythonCandidatesPreferNewestSupportedMinor guards the search order: the
-// unversioned `python3` is usually a too-new Homebrew build, so versioned names
-// inside the supported range must be probed first, including the absolute
-// /opt/homebrew/bin/python3.N path a user gets from `brew install python@N`
-// (which is NOT reachable as bare `python3`).
-func TestPythonCandidatesPreferNewestSupportedMinor(t *testing.T) {
-	rt := PythonRuntime{MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 13}}
-	candidates := pythonCandidates(rt)
-	joined := make([]string, 0, len(candidates))
-	for _, c := range candidates {
-		joined = append(joined, strings.Join(c, " "))
-	}
-	text := strings.Join(joined, "\n")
-	t.Logf("candidates for 3.11-3.13:\n%s", text)
-
-	// Every candidate must be for a minor inside the range: probing 3.14 would
-	// only add noise, since the range check rejects it anyway.
-	for _, rejected := range []string{"3.14", "3.10"} {
-		if strings.Contains(text, rejected) {
-			t.Errorf("candidate mentions %s, outside the pinned range: %q", rejected, text)
-		}
-	}
-	if runtime.GOOS == "windows" {
-		if !strings.Contains(text, "py -3.13") || !strings.Contains(text, "py -3.11") {
-			t.Errorf("windows candidates must pin range minors explicitly: %q", text)
-		}
-		return
-	}
-
-	for _, want := range []string{"python3.13", "python3.12", "python3.11"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("versioned candidate %q missing", want)
-		}
-	}
-	// Newest-first ordering: python3.13 precedes python3.12 precedes python3.11,
-	// and every versioned name precedes the bare python3 fallback.
-	i13 := strings.Index(text, "python3.13")
-	i12 := strings.Index(text, "python3.12")
-	i11 := strings.Index(text, "python3.11")
-	iBare := strings.Index(text, "\npython3\n")
-	if i13 < 0 || i12 < 0 || i11 < 0 {
-		t.Fatalf("versioned candidates missing: %q", text)
-	}
-	if !(i13 < i12 && i12 < i11) {
-		t.Errorf("versioned candidates are not newest-first: 3.13@%d 3.12@%d 3.11@%d", i13, i12, i11)
-	}
-	if iBare >= 0 && iBare < i11 {
-		t.Errorf("bare python3 must be a fallback, after every versioned in-range name")
-	}
-	if !strings.Contains(text, filepath.Join("/opt/homebrew/bin", "python3.13")) {
-		t.Errorf("absolute homebrew python3.13 path missing: %q", text)
-	}
-}
-
-// TestPythonMinorRange covers the probe window: bounded by MaxPython when set,
-// and only MinPython..MinPython+pythonScanWindow when a runtime is unbounded.
-func TestPythonMinorRange(t *testing.T) {
-	bounded := PythonRuntime{MinPython: [2]int{3, 11}, MaxPython: [2]int{3, 13}}
-	if got := pythonMinorRange(bounded); len(got) != 3 || got[0] != 13 || got[2] != 11 {
-		t.Errorf("pythonMinorRange(bounded) = %v, want [13 12 11]", got)
-	}
-	unbounded := PythonRuntime{MinPython: [2]int{3, 11}}
-	got := pythonMinorRange(unbounded)
-	if len(got) != pythonScanWindow+1 || got[0] != 11+pythonScanWindow || got[len(got)-1] != 11 {
-		t.Errorf("pythonMinorRange(unbounded) = %v, want newest-first 19..11", got)
 	}
 }

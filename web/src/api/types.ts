@@ -1379,7 +1379,8 @@ export interface PulseAssistantInfo {
 
 /** One live terminal on the Pulse dashboard, from GET /api/pulse/terminals.
  *  `command` is the program running in it, or the bare shell name when idle;
- *  `running` is true only when a program other than the shell is in the foreground. */
+ *  `running` is true only when a program other than the shell is in the foreground.
+ *  `cols`/`rows` are the pty size the browser last reported; 0 until its first resize. */
 export interface PulseTerminal {
   id: string;
   project: string;
@@ -1387,6 +1388,8 @@ export interface PulseTerminal {
   pid: number;
   command: string;
   running: boolean;
+  cols: number;
+  rows: number;
 }
 
 /** One page of GET /api/pulse/terminals, running programs first. */

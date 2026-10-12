@@ -17,6 +17,9 @@ HTR_EXTENSION_DIR ?= ../how-to-recorder/build
 HTR_GOOS          ?= $(shell go env GOOS)
 HTR_GOARCH        ?= $(shell go env GOARCH)
 HTRCLI_BIN        ?=
+# Stamped into htrcli's --version (commands.Version) so the remote can report it.
+HTRCLI_VERSION    ?= $(shell git -C "$(HTRCLI_ROOT)" describe --tags --always --dirty 2>/dev/null || echo dev)
+HTRCLI_LDFLAGS    := -ldflags "-s -w -X github.com/u007/htrcli/internal/commands.Version=$(HTRCLI_VERSION)"
 HTR_BUNDLE        := internal/browse/cdp/htr-assets.zip
 
 # The HTR bundle is produced from out-of-tree sources and is never committed,
@@ -110,6 +113,12 @@ desktop-remote-binaries: web-build prepare-htr-assets models-snapshot
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(RELEASE_TAGS) $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-linux-arm64" .
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(RELEASE_TAGS) $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-amd64" .
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(RELEASE_TAGS) $(LDFLAGS) -o "$(DESKTOP_REMOTE_DIR)/ocode-darwin-arm64" .
+	@# Remote hosts are headless: -tags traytest swaps htrcli's systray tray for its
+	@# in-memory stub, since the real backend needs cgo, which cannot cross-link.
+	@for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+		os=$${t%/*}; arch=$${t#*/}; \
+		(cd "$(HTRCLI_ROOT)" && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -tags traytest $(HTRCLI_LDFLAGS) -o "$(CURDIR)/$(DESKTOP_REMOTE_DIR)/htrcli-$$os-$$arch" ./cmd/htrcli) || { echo "failed to build htrcli for $$os/$$arch from $(HTRCLI_ROOT) (set HTRCLI_ROOT to the htrcli source checkout)" >&2; exit 1; }; \
+	done
 
 ## desktop-app: build and bundle ocode.app with remote CLIs (macOS only)
 desktop-app: desktop desktop-remote-binaries
@@ -127,7 +136,7 @@ prepare-htr-assets:
 		mkdir -p "$$tmp/extension" "$$tmp/htrcli"; \
 		cp -R "$(HTR_EXTENSION_DIR)/." "$$tmp/extension/"; \
 		find "$$tmp/extension" -name .DS_Store -type f -delete; \
-		if [ -n "$(HTRCLI_BIN)" ]; then cp "$(HTRCLI_BIN)" "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)"; else (cd "$(HTRCLI_ROOT)" && GOOS=$(HTR_GOOS) GOARCH=$(HTR_GOARCH) go build -o "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)" ./cmd/htrcli) || { echo "failed to build htrcli for $(HTR_GOOS)/$(HTR_GOARCH); install the sibling repo's toolchain/dependencies or provide HTRCLI_BIN" >&2; exit 1; }; fi; \
+		if [ -n "$(HTRCLI_BIN)" ]; then cp "$(HTRCLI_BIN)" "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)"; else (cd "$(HTRCLI_ROOT)" && GOOS=$(HTR_GOOS) GOARCH=$(HTR_GOARCH) go build $(HTRCLI_LDFLAGS) -o "$$tmp/htrcli/$(HTR_GOOS)-$(HTR_GOARCH)" ./cmd/htrcli) || { echo "failed to build htrcli for $(HTR_GOOS)/$(HTR_GOARCH); install the sibling repo's toolchain/dependencies or provide HTRCLI_BIN" >&2; exit 1; }; fi; \
 		rm -f "$(HTR_BUNDLE)"; (cd "$$tmp" && zip -qr "$(CURDIR)/$(HTR_BUNDLE)" extension htrcli); \
 		echo "Prepared HTR assets for $(HTR_GOOS)/$(HTR_GOARCH)"
 

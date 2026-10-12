@@ -90,7 +90,7 @@ func prepareLocalBuild(goos, goarch, moduleDir, exe string, isCLI bool) (LocalBu
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-	if path, err := bundledRemoteBinary(exe, goos, goarch); err != nil {
+	if path, err := bundledRemoteArtifact(exe, "ocode", goos, goarch); err != nil {
 		return LocalBuild{}, err
 	} else if path != "" {
 		return LocalBuild{Path: path, Reused: true}, nil
@@ -145,14 +145,18 @@ func findModuleRoot() (string, error) {
 	}
 }
 
-func remotePartialPath(ver string) string {
-	return RemoteBinDir + "/" + ver + "/.ocode.partial"
+func remotePartialPath(ver, name string) string {
+	return RemoteBinDir + "/" + ver + "/." + name + ".partial"
 }
 
 // UploadBinary uploads local (a LocalBuild.Path) to the version dir's
 // ".partial" name, creating the remote dir if needed. It does not activate
 // the binary — see ActivateAndVerify.
 func UploadBinary(t Transport, ver, localPath string) error {
+	return uploadArtifact(t, ver, "ocode", localPath)
+}
+
+func uploadArtifact(t Transport, ver, name, localPath string) error {
 	remoteDir := RemoteBinDir + "/" + ver
 	if _, err := t.Exec("mkdir -p " + shellQuotePath(remoteDir)); err != nil {
 		return fmt.Errorf("prepare remote dir %s: %w", remoteDir, err)
@@ -160,16 +164,32 @@ func UploadBinary(t Transport, ver, localPath string) error {
 
 	f, err := os.Open(localPath)
 	if err != nil {
-		return fmt.Errorf("open local build %s: %w", localPath, err)
+		return fmt.Errorf("open local %s %s: %w", name, localPath, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("stat local build %s: %w", localPath, err)
+		return fmt.Errorf("stat local %s %s: %w", name, localPath, err)
 	}
 
-	if err := t.Copy(f, info.Size(), remotePartialPath(ver)); err != nil {
-		return fmt.Errorf("upload: %w", err)
+	if err := t.Copy(f, info.Size(), remotePartialPath(ver, name)); err != nil {
+		return fmt.Errorf("upload %s: %w", name, err)
+	}
+	return nil
+}
+
+// activateArtifact chmods the uploaded ".partial" file executable and
+// atomically renames it to its final name in the version dir.
+func activateArtifact(t Transport, ver, name string) error {
+	partial := remotePartialPath(ver, name)
+	final := RemoteBinDir + "/" + ver + "/" + name
+
+	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", shellQuotePath(partial), shellQuotePath(partial), shellQuotePath(final))
+	if res, err := t.Exec(installCmd); err != nil || res.ExitCode != 0 {
+		if err == nil {
+			err = fmt.Errorf("exit %d", res.ExitCode)
+		}
+		return fmt.Errorf("install %s: %w: %s", final, err, res.Stderr)
 	}
 	return nil
 }
@@ -179,16 +199,10 @@ func UploadBinary(t Transport, ver, localPath string) error {
 // `ocode --version` remotely — a mismatch is treated as install failure,
 // per the spec ("never silently launched").
 func ActivateAndVerify(t Transport, ver string) error {
-	partial := remotePartialPath(ver)
-	final := RemoteBinaryPath(ver)
-
-	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", shellQuotePath(partial), shellQuotePath(partial), shellQuotePath(final))
-	if res, err := t.Exec(installCmd); err != nil || res.ExitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("exit %d", res.ExitCode)
-		}
-		return fmt.Errorf("install %s: %w: %s", final, err, res.Stderr)
+	if err := activateArtifact(t, ver, "ocode"); err != nil {
+		return err
 	}
+	final := RemoteBinaryPath(ver)
 
 	verify, err := t.Exec(shellQuotePath(final) + " --version")
 	if err != nil {

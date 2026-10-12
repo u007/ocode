@@ -1,0 +1,210 @@
+[
+  {
+    "name": "cursor_addressing",
+    "cols": 40,
+    "rows": 5,
+    "raw": "\u001b[3;1Hbottom line\u001b[1;1Htop",
+    "expect": [
+      "top",
+      "",
+      "bottom line"
+    ]
+  },
+  {
+    "name": "claude_glyphs",
+    "cols": 60,
+    "rows": 10,
+    "raw": "⏺ Read(main.go)\r\n  ⎿  Read 80 lines\r\n✻ Thinking…\r\n───────\r\n> \r\n⏵⏵ accept edits on (shift+tab to cycle)",
+    "expect": [
+      "⏺ Read(main.go)",
+      "  ⎿  Read 80 lines",
+      "✻ Thinking…",
+      "───────",
+      ">",
+      "⏵⏵ accept edits on (shift+tab to cycle)"
+    ]
+  },
+  {
+    "name": "emoji_vs16_zwj",
+    "cols": 40,
+    "rows": 5,
+    "raw": "⚠️ warn\r\n👍🏽 ok\r\n👨‍👩‍👧 fam\r\n✅ done",
+    "expect": [
+      "⚠️ warn",
+      "👍🏽 ok",
+      "👨‍👩‍👧 fam",
+      "✅ done"
+    ]
+  },
+  {
+    "name": "cjk",
+    "cols": 20,
+    "rows": 3,
+    "raw": "中文字符abc\u001b[2;1H中x",
+    "expect": [
+      "中文字符abc",
+      "中x"
+    ]
+  },
+  {
+    "name": "combining",
+    "cols": 20,
+    "rows": 3,
+    "raw": "é café\r\nnaïve",
+    "expect": [
+      "é café",
+      "naïve"
+    ]
+  },
+  {
+    "name": "deferred_wrap_cr",
+    "cols": 10,
+    "rows": 3,
+    "raw": "0123456789\rZ",
+    "expect": [
+      "Z123456789"
+    ]
+  },
+  {
+    "name": "deferred_wrap_overflow",
+    "cols": 10,
+    "rows": 3,
+    "raw": "0123456789AB",
+    "expect": [
+      "0123456789",
+      "AB"
+    ]
+  },
+  {
+    "name": "wide_at_edge",
+    "cols": 10,
+    "rows": 3,
+    "raw": "123456789中",
+    "expect": [
+      "123456789",
+      "中"
+    ],
+    "known_gap": "docs/gotchas/pulse-screen-emulator-parity.md"
+  },
+  {
+    "name": "wide_at_edge_exact_fit",
+    "cols": 10,
+    "rows": 3,
+    "raw": "12345678中x",
+    "expect": [
+      "12345678中",
+      "x"
+    ],
+    "known_gap": "docs/gotchas/pulse-screen-emulator-parity.md"
+  },
+  {
+    "name": "scroll_region",
+    "cols": 20,
+    "rows": 6,
+    "raw": "top\u001b[6;1Hbot\u001b[2;4r\u001b[4;1Hx\r\ny\r\nz\r\nw\u001b[r",
+    "expect": [
+      "top",
+      "y",
+      "z",
+      "w",
+      "",
+      "bot"
+    ]
+  },
+  {
+    "name": "insert_delete_line",
+    "cols": 10,
+    "rows": 5,
+    "raw": "AAAAAAAA\r\nBBBBBBBB\r\nCCCCCCCC\u001b[2;1H\u001b[L\u001b[3;1H\u001b[M",
+    "expect": [
+      "AAAAAAAA",
+      "",
+      "CCCCCCCC"
+    ]
+  },
+  {
+    "name": "erase_partial",
+    "cols": 10,
+    "rows": 5,
+    "raw": "AAAAAAAA\r\nBBBBBBBB\r\nCCCCCCCC\u001b[2;3H\u001b[K\u001b[3;1H\u001b[2K\u001b[1;4H\u001b[1K",
+    "expect": [
+      "    AAAA",
+      "BB"
+    ]
+  },
+  {
+    "name": "clear_screen",
+    "cols": 10,
+    "rows": 3,
+    "raw": "one\r\ntwo\r\nthree\u001b[2J\u001b[Hfour",
+    "expect": [
+      "four"
+    ]
+  },
+  {
+    "name": "clear_scrollback",
+    "cols": 10,
+    "rows": 3,
+    "raw": "1\r\n2\r\n3\r\n4\r\n5\u001b[3J\u001b[Hx",
+    "expect": [
+      "x",
+      "4",
+      "5"
+    ]
+  },
+  {
+    "name": "alt_screen_exit",
+    "cols": 20,
+    "rows": 4,
+    "raw": "main text\u001b[?1049h\u001b[2;1Halt screen\u001b[?1049l",
+    "expect": [
+      "main text"
+    ]
+  },
+  {
+    "name": "alt_screen_open",
+    "cols": 20,
+    "rows": 4,
+    "raw": "main\u001b[?1049h\u001b[1;1HALT",
+    "expect": [
+      "ALT"
+    ]
+  },
+  {
+    "name": "tabs",
+    "cols": 40,
+    "rows": 3,
+    "raw": "a\tb\tc",
+    "expect": [
+      "a       b       c"
+    ]
+  },
+  {
+    "name": "dec_line_drawing",
+    "cols": 20,
+    "rows": 3,
+    "raw": "\u001b(0lqqk\u001b(B x",
+    "expect": [
+      "┌──┐ x"
+    ]
+  },
+  {
+    "name": "cr_repaint",
+    "cols": 20,
+    "rows": 3,
+    "raw": "first\rsecond\rthird",
+    "expect": [
+      "thirdd"
+    ]
+  },
+  {
+    "name": "ink_repaint_up",
+    "cols": 30,
+    "rows": 6,
+    "raw": "frame one\r\nline2\u001b[2A\r\u001b[Kframe two",
+    "expect": [
+      "frame two",
+      "line2"
+    ]
+  }
+]

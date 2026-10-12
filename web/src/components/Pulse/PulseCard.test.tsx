@@ -92,8 +92,9 @@ describe("PulseCard structure", () => {
     expect(item).toBe(container.firstChild);
     // The header is the click target; the focus control is a SIBLING of it, as
     // a button may not contain a button.
+    // Header, details toggle, focus, and (live cards only) the stream toggle.
     const buttons = within(item).getAllByRole("button");
-    expect(buttons).toHaveLength(3);
+    expect(buttons).toHaveLength(4);
     expect(buttons.filter((b) => b.hasAttribute("aria-expanded"))).toEqual([cardButton()]);
     expect(cardButton().contains(screen.getByRole("button", { name: "Focus session" }))).toBe(false);
   });
@@ -383,6 +384,31 @@ describe("PulseCard streams a live row on the card itself", () => {
     // A wrapping entry must still never truncate, or a prose line is one clipped row.
     const entry = within(region).getByText("streaming line a").className;
     expect(entry).not.toContain("truncate");
+  });
+
+  it("expands a live card's stream to a taller cap on request, and back", () => {
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    const region = screen.getByTestId("pulse-stream-region");
+    const toggle = screen.getByRole("button", { name: "Expand stream" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(region.className).toContain("max-h-[24rem]");
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(region.className).toContain("max-h-[48rem]");
+    expect(region.className).not.toContain("max-h-[24rem]");
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(region.className).toContain("max-h-[24rem]");
+  });
+
+  it("offers no stream toggle on a settled card, which has no stream region", () => {
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+
+    expect(screen.queryByRole("button", { name: "Expand stream" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pulse-stream-region")).not.toBeInTheDocument();
   });
 
   it("wraps a streamed line that carries no newlines, so the card is multi-line", () => {

@@ -1,5 +1,34 @@
 # TODO
 
+## Open: Pulse terminal output follow-ups (2026-10-12)
+
+- **Two emulators, one open x/vt gap.** Option B (2026-10-12): the card stays on
+  `@xterm/headless`, the tool stays on `charmbracelet/x/vt`, and both start the window at
+  the first ESC in its first 64 KiB page. The tool strips `ESC[3J` before writing, to work
+  around x/vt's ED 3 bug (`handlers.go`, `case 3`, which clears the visible screen too).
+  Still open: the x/vt wide-character bug below. Option A (serve the card from a
+  server `/screen` endpoint) was rejected: it would regress wide characters on the card, and
+  it would add a server replay per polled row, a cost we did not measure. Full write-up:
+  `docs/gotchas/pulse-screen-emulator-parity.md`.
+- **x/vt drops a wide character whose cells reach the last column** (`terminal_screen` only;
+  the card's xterm is correct). Two shapes: an overflowing character (`123456789中` at 10
+  columns) is lost; an exact fit (`12345678中x`) is lost, leaves a blank, and puts the text
+  after it on the wrong row. Fixtures `wide_at_edge` and `wide_at_edge_exact_fit` in
+  `internal/server/testdata/pulse_screen_parity.json` carry `known_gap`. The fix is an x/vt
+  change or a fork, and it is a decision, not an input filter. When x/vt is bumped or
+  forked, remove both `known_gap` fields so the Go test covers the cases. Details:
+  `docs/gotchas/pulse-screen-emulator-parity.md`.
+- **Measure how often Claude Code puts a wide character on the last column.** Not done.
+  Scan the real terminal logs (`~/.local/share/ocode/project/*/terminal/*.log`) for
+  double-width glyphs that reach the last column of the pty size. The result decides whether
+  the x/vt gap justifies a fork.
+- **`GOOS=windows go vet ./internal/server/` fails at HEAD too.** `pulse_tools_test.go`
+  calls `terminalHistoryPath`, which is defined only in the `!windows` files. The Windows
+  build passes; only the test compile fails.
+- **`charmbracelet/x/vt` is pinned to a pseudo-version** (`v0.0.0-20261011004359-2acd7e345453`,
+  2026-10-11) because the module has no tags. Revisit when it tags a release, and watch
+  its package comment, which says it is still churning.
+
 ## Open: review-fix follow-ups (2026-10-09)
 
 - **FIXED (2026-10-09): Pulse `session_send` raced a synchronous turn.** Every turn
@@ -2584,8 +2613,9 @@ with system-opener fallback. Deferred / limited behavior:
 
 The old ast-grep "code_rel" tool + `.sgindex` daemon were removed (they relied on a
 persistent ast-grep index that doesn't exist; the daemon was a no-op). Replaced by an
-opt-in, LSP-backed `ast` tool (`internal/tool/ast.go`) over `internal/lsp`. Disabled by
-default; toggle with `/plugin enable ast` (persisted in ocode config `plugins.ast`).
+LSP-backed `ast` tool (`internal/tool/ast.go`) over `internal/lsp`. Registered by default
+whenever a language server is on PATH (`tool.go`); no plugin toggle. (`/plugin enable ast`
+toggles the separate opt-in `ast_grep` tool, not this one.)
 
 Incomplete / best-effort:
 - **Only gopls is validated end-to-end.** `internal/lsp/manager.go` maps `.rs`,
@@ -5939,3 +5969,35 @@ Phases 2–4.
   confidential client, `GOOGLE_CLIENT_SECRET`, and a paste-back exchange in
   `internal/auth/google.go`. Until then Google sign-in works from the server machine
   only.
+
+## Pulse terminal tail and STT probe follow-ups (2026-10-12)
+
+Deferred from the review of the Pulse tail / interpreter-probe changes. The
+reported correctness and lock issues are fixed.
+
+- **Moot (2026-10-12): tail endpoint read the full 1 MiB window per poll.** The
+  `GET /api/pulse/terminals/{id}/tail` endpoint was removed with the move to the
+  xterm-replayed screen card. The replacement cost is different: an expanded row
+  fetches the newest 256 KiB (`PULSE_TERMINAL_SCREEN_BYTES`) in five requests: a 64 KiB
+  head page to learn the snapshot end, which is discarded for a log over the cap, then four
+  64 KiB pages, and builds a fresh `@xterm/headless` emulator every 3 s. Not measured.
+- **Fixed (2026-10-12): `stt.StatusFor` scanned each distinct extras set one
+  after another.** The local probes now run concurrently; the request waits for
+  the slowest scan, not the sum. `TestStatusForProbesLocalModelsConcurrently`.
+
+## Remote htrcli provisioning follow-ups (2026-10-12)
+
+Deferred from the remote htrcli install (`internal/remote/htrcli.go`,
+`docs/concepts/remote-htrcli-provisioning.md`).
+
+- **No htrcli bundle for source and CLI builds.** `PrepareLocalBuild`'s
+  cross-compile fallback and CLI-only `ocode connect` ship no `htrcli-<os>-<arch>`,
+  so a remote connected from them logs `no bundled ... build` and its HTR reports
+  `htrcli not found`. Fix: cross-build htrcli from `HTRCLI_ROOT` on that path too,
+  or require an explicit `htrcli` path.
+- **Fixed (2026-10-12):** htrcli has `--version` (`commands.Version`, stamped from
+  `git describe`). Remote connect reports it on every check.
+- **Already-running remote servers keep the old PATH.** A server launched before this
+  change is reused while healthy and matches the version, so it does not pick up the
+  version dir on PATH until restarted. Fix: have connect restart a server when
+  `EnsureHTRCli` reports a fresh install.

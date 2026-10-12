@@ -33,6 +33,9 @@ func newConnectFakeTransport(state ServeState) *fakeTransport {
 	ft.execResults[pidAliveCmd(state.PID)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(state.Port)] = ExecResult{Stdout: "200"}
 
+	// Platform detect (EnsureHTRCli keys its bundle lookup on it)
+	ft.execResults["uname -sm"] = ExecResult{Stdout: "Linux x86_64"}
+
 	// Sync exec (remote-receive-config)
 	syncCmd := shellQuotePath(RemoteBinaryPath(version.Version)) + " remote-receive-config"
 	ft.execResults[syncCmd] = ExecResult{ExitCode: 0}
@@ -258,7 +261,7 @@ func TestEnsureBinaryActivatesUploadedBinary(t *testing.T) {
 	defer func() { prepareLocalBuildFn = prev }()
 
 	final := RemoteBinaryPath(version.Version)
-	partial := remotePartialPath(version.Version)
+	partial := remotePartialPath(version.Version, "ocode")
 	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s",
 		shellQuotePath(partial), shellQuotePath(partial), shellQuotePath(final))
 	verifyCmd := shellQuotePath(final) + " --version"

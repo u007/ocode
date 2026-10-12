@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -123,6 +124,12 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 				"head":        map[string]any{"type": "boolean", "description": "true to read from the start of the output, default false (the end)"},
 			},
 			run: h.pulseTerminalReadTool,
+		},
+		{
+			name:  "terminal_screen",
+			desc:  fmt.Sprintf("Read a live terminal's current screen as text, laid out at the terminal's own size, the way its dashboard row shows it. Use this for a full-screen program such as claude: it repaints in place, so terminal_read would return a jumble of frames. Use terminal_read for line-oriented output like a build or test log. Replays the newest %d KiB of output. Only a live terminal has a screen; ids come from terminal_tabs.", pulseTerminalScreenBytes>>10),
+			props: map[string]any{"terminal_id": str("Terminal id from terminal_tabs")},
+			run:   h.pulseTerminalScreenTool,
 		},
 		{
 			name:  "agent_runs",
@@ -484,22 +491,10 @@ func pulseLinePage(lines []string, n, offset int, head bool) (page []string, mor
 	return lines[start:end], start > 0, end < total
 }
 
-// pulseTailLines turns raw terminal output into at most n display lines.
-// Escape sequences are stripped, a carriage return keeps only the text after
-// the last one on that line (the visible result of a progress-bar redraw), and
-// each line is rune-clipped.
-func pulseTailLines(text string, n int) []string {
-	all := pulseDisplayLines(text)
-	if len(all) > n {
-		all = all[len(all)-n:]
-	}
-	return all
-}
-
 // pulseDisplayLines turns raw terminal output into display lines, all of them.
-// The normalisation is the one pulseTailLines always applied.
+// Escapes are stripped per carriage-return segment (see visibleCarriageSegment),
+// not on the whole text first, so an erase sequence after a \r is still seen.
 func pulseDisplayLines(text string) []string {
-	text = stripANSIEscapes(text)
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.TrimRight(text, "\n")
 	if text == "" {
@@ -507,12 +502,30 @@ func pulseDisplayLines(text string) []string {
 	}
 	all := strings.Split(text, "\n")
 	for i, l := range all {
-		if j := strings.LastIndexByte(l, '\r'); j >= 0 {
-			l = l[j+1:]
-		}
-		all[i] = truncateRunes(l, pulseTerminalLineRuneBudget)
+		all[i] = truncateRunes(visibleCarriageSegment(l), pulseTerminalLineRuneBudget)
 	}
 	return all
+}
+
+// pulseEraseRE matches the erase sequences a program writes to clear the line
+// (EL: CSI K, CSI 1K, CSI 2K) or the display (ED: CSI J).
+var pulseEraseRE = regexp.MustCompile(`\x1b\[[012]?[KJ]`)
+
+// visibleCarriageSegment is what a terminal shows for one line after its carriage
+// returns. Each \r-separated segment is stripped of escapes on its own, and the
+// walk goes back from the last segment to the first one that shows text or
+// erases the line. A line ending in \r has its cursor at column 0 with nothing
+// redrawn yet, so the last redraw stays on screen. But `old\r\x1b[K` is a
+// redraw that cleared the line, so it shows nothing.
+func visibleCarriageSegment(line string) string {
+	segments := strings.Split(line, "\r")
+	for i := len(segments) - 1; i >= 0; i-- {
+		visible := stripANSIEscapes(segments[i])
+		if visible != "" || pulseEraseRE.MatchString(segments[i]) {
+			return visible
+		}
+	}
+	return ""
 }
 
 // --- agent_runs ---

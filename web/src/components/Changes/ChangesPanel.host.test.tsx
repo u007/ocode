@@ -15,13 +15,13 @@ vi.mock("@/api/client", () => ({
 describe("ChangesPanel host routing", () => {
   it("passes the session and project host to listChanges", async () => {
     mockListChanges.mockResolvedValue([]);
-    render(<ChangesPanel session="s1" host="james@217.216.72.49" active />);
+    render(<ChangesPanel session="s1" host="james@217.216.72.49" active onOpenFile={vi.fn()} />);
     await waitFor(() => expect(mockListChanges).toHaveBeenCalledWith("s1", "james@217.216.72.49"));
   });
 
   it("passes undefined host for a local session", async () => {
     mockListChanges.mockResolvedValue([]);
-    render(<ChangesPanel session="s2" active />);
+    render(<ChangesPanel session="s2" active onOpenFile={vi.fn()} />);
     await waitFor(() => expect(mockListChanges).toHaveBeenCalledWith("s2", undefined));
   });
 });

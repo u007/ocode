@@ -33,11 +33,13 @@ describe("ChangesPanel keyed loading", () => {
         <ChangesPanel
           session="session-a"
           loadingKey="host-a\0/project\0session-a:changes"
+          onOpenFile={vi.fn()}
           onLoadingEvent={(event) => events.push(event)}
         />
         <ChangesPanel
           session="session-b"
           loadingKey="host-b\0/project\0session-b:changes"
+          onOpenFile={vi.fn()}
           onLoadingEvent={(event) => events.push(event)}
         />
       </>,
@@ -57,7 +59,8 @@ describe("ChangesPanel keyed loading", () => {
       <ChangesPanel
         session="same-session"
         loadingKey="host\0/project-a\0same-session:changes"
-        onLoadingEvent={(event) => events.push(event)}
+        onOpenFile={vi.fn()}
+          onLoadingEvent={(event) => events.push(event)}
       />,
     );
     await waitFor(() => expect(mocks.listChanges).toHaveBeenCalledTimes(1));
@@ -65,7 +68,8 @@ describe("ChangesPanel keyed loading", () => {
       <ChangesPanel
         session="same-session"
         loadingKey="host\0/project-b\0same-session:changes"
-        onLoadingEvent={(event) => events.push(event)}
+        onOpenFile={vi.fn()}
+          onLoadingEvent={(event) => events.push(event)}
       />,
     );
     await waitFor(() => expect(mocks.listChanges).toHaveBeenCalledTimes(2));

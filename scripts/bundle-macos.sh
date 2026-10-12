@@ -47,10 +47,12 @@ if [[ $# -ge 3 ]]; then
   REMOTE_DIR="$(cd "$REMOTE_DIR" && pwd)"
   REMOTE_VERSION="$(basename "$REMOTE_DIR")"
   for target in "${TARGETS[@]}"; do
-    if [[ ! -f "$REMOTE_DIR/ocode-$target" || ! -s "$REMOTE_DIR/ocode-$target" ]]; then
-      echo "error: remote binary missing or empty: $REMOTE_DIR/ocode-$target" >&2
-      exit 1
-    fi
+    for artifact in ocode htrcli; do
+      if [[ ! -f "$REMOTE_DIR/$artifact-$target" || ! -s "$REMOTE_DIR/$artifact-$target" ]]; then
+        echo "error: remote binary missing or empty: $REMOTE_DIR/$artifact-$target" >&2
+        exit 1
+      fi
+    done
   done
 fi
 
@@ -65,8 +67,10 @@ if [[ -n "$REMOTE_DIR" ]]; then
   REMOTE_DEST="$APP/Contents/Resources/remote-binaries/$REMOTE_VERSION"
   mkdir -p "$REMOTE_DEST"
   for target in "${TARGETS[@]}"; do
-    cp "$REMOTE_DIR/ocode-$target" "$REMOTE_DEST/ocode-$target"
-    chmod +x "$REMOTE_DEST/ocode-$target"
+    for artifact in ocode htrcli; do
+      cp "$REMOTE_DIR/$artifact-$target" "$REMOTE_DEST/$artifact-$target"
+      chmod +x "$REMOTE_DEST/$artifact-$target"
+    done
   done
 fi
 

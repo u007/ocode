@@ -50,7 +50,7 @@ func mustPulseTool(t *testing.T, h *Handler, name, args string) string {
 func TestPulseToolsShape(t *testing.T) {
 	h := pulseTestHandler(t)
 	tools := h.pulseTools()
-	want := []string{"agent_runs", "memory_read", "memory_write", "permission_resolve", "pulse_board", "question_answer", "session_command", "session_read", "session_recap", "session_send", "terminal_read", "terminal_tabs"}
+	want := []string{"agent_runs", "memory_read", "memory_write", "permission_resolve", "pulse_board", "question_answer", "session_command", "session_read", "session_recap", "session_send", "terminal_read", "terminal_screen", "terminal_tabs"}
 	var got []string
 	for _, pt := range tools {
 		got = append(got, pt.Name())
@@ -360,15 +360,28 @@ func TestTerminalTabsTool(t *testing.T) {
 	}
 }
 
-func TestPulseTailLines(t *testing.T) {
-	text := "old\n\x1b[31mred\x1b[0m line\nprogress 10%\rprogress 100%\n\x1b]0;title\x07last\n"
-	got := pulseTailLines(text, 3)
-	want := []string{"red line", "progress 100%", "last"}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("lines = %q, want %q", got, want)
+// TestVisibleCarriageSegmentHonoursErase: an erase sequence after a \r is a
+// redraw that clears the line, so it must not fall back to the stale text
+// before the \r. A line ending in \r with nothing redrawn still keeps its last
+// redraw.
+func TestVisibleCarriageSegmentHonoursErase(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"cr with nothing redrawn keeps last redraw", "old\r", "old"},
+		{"erase after cr clears the line", "old\r\x1b[K", ""},
+		{"erase then redraw shows the redraw", "old\r\x1b[2Knew", "new"},
+		{"sgr after cr keeps last redraw", "old\r\x1b[0m", "old"},
+		{"erase display after cr clears the line", "old\r\x1b[J", ""},
+		{"erase without cr clears nothing visible", "\x1b[2K", ""},
+		{"plain text", "plain", "plain"},
 	}
-	if got := pulseTailLines("", 5); len(got) != 0 {
-		t.Fatalf("empty -> %q", got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := visibleCarriageSegment(c.in); got != c.want {
+				t.Fatalf("visibleCarriageSegment(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 
