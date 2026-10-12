@@ -233,7 +233,7 @@ export default function PermissionsForm() {
             return (
               <label
                 key={`${opt.value}-${opt.auto}`}
-                className={`flex items-center gap-2 text-xs ${disabled ? "text-muted-foreground/50" : "text-muted-foreground"}`}
+                className="flex items-center gap-2 text-xs text-muted-foreground"
               >
                 <input
                   type="radio"
