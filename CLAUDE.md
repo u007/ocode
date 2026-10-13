@@ -114,6 +114,12 @@ embed inputs a source build needs are the committed `.gitkeep` placeholders for
 matches a directory holding only `.gitkeep`, so the directive compiles while
 serving no assets).
 
+The `web/dist/.gitkeep` and `cmd/ocode-desktop/embedded-assets/.gitkeep` placeholders are tracked
+and must stay in the tree. Vite's `emptyOutDir` deletes the web one on every direct `vite build`
+or `pnpm run build`; the vite config's `closeBundle` hook and `make web-build` both re-create it.
+A ` D web/dist/.gitkeep` in `git status` is never an intentional change. Restore it with
+`git checkout -- web/dist/.gitkeep`, and never stage or commit its deletion.
+
 The other two embed inputs are **generated, gitignored, and gated behind build
 tags**, so a plain build never needs them:
 

@@ -139,6 +139,31 @@ func (m *model) clearQuestionAskState() {
 	}
 }
 
+// renderQuestionTabRow renders the question tab strip on exactly one line no wider
+// than width. Tabs share the row equally and each header is cut with an ellipsis
+// to its share, so a long header or many questions never wraps the row: a wrapped
+// row adds height the dialog never budgeted and overflows its box.
+func (m *model) renderQuestionTabRow(width int) string {
+	const tabChrome = 4 // Padding(0,1) on each side plus the " ✓" answered marker
+	share := max(1, width/len(m.questionPrompts)-tabChrome)
+	tabs := make([]string, 0, len(m.questionPrompts))
+	for i, prompt := range m.questionPrompts {
+		label := truncateToWidth(prompt.Header, share)
+		if label == "" {
+			label = truncateToWidth(fmt.Sprintf("Question %d", i+1), share)
+		}
+		if m.questionAnswered(i) {
+			label += " ✓"
+		}
+		style := hintStyle.Padding(0, 1)
+		if i == m.questionTab {
+			style = selectedStyle.Padding(0, 1)
+		}
+		tabs = append(tabs, style.Render(label))
+	}
+	return lipgloss.NewStyle().MaxWidth(max(1, width)).MaxHeight(1).Render(lipgloss.JoinHorizontal(lipgloss.Top, tabs...))
+}
+
 func (m *model) renderQuestionDialog(width int) string {
 	contentWidth := max(1, width-2)
 	if len(m.questionPrompts) == 0 {
@@ -150,26 +175,11 @@ func (m *model) renderQuestionDialog(width int) string {
 	q := m.questionPrompts[m.questionTab]
 	m.clampQuestionCursor()
 
-	var tabs []string
-	for i, prompt := range m.questionPrompts {
-		label := prompt.Header
-		if label == "" {
-			label = fmt.Sprintf("Question %d", i+1)
-		}
-		if m.questionAnswered(i) {
-			label += " ✓"
-		}
-		style := hintStyle.Padding(0, 1)
-		if i == m.questionTab {
-			style = selectedStyle.Padding(0, 1)
-		}
-		tabs = append(tabs, style.Render(label))
-	}
-
 	var body strings.Builder
-	body.WriteString(m.styles.Header.Render("Question"))
+	header := m.styles.Header.Render("Question")
+	body.WriteString(header)
 	body.WriteString("  ")
-	body.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, tabs...))
+	body.WriteString(m.renderQuestionTabRow(contentWidth - lipgloss.Width(header) - 2))
 	body.WriteString("\n\n")
 	body.WriteString(wrapView(q.Question, contentWidth))
 	body.WriteString("\n\n")

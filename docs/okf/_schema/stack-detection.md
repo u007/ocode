@@ -124,10 +124,10 @@ that as a distinct eval.
 >   once and cached for prefix stability **before** the request exists.
 >
 > In all four cases the model received neither a catalogue line nor the
-> force-injected digest, so it had no way to know the corrections were
-> available. Un-gating costs ~1.7KB of extra base prompt per session for the
-> four models that have a pdf corpus, which is accepted (the `conduct` digest is
-> already unconditional at ~2.2KB). A request-conditional gate is deliberately
+> digest, so it had no way to know the corrections were available. Un-gating
+> admits the pdf skill to the catalogue for the four models that have a pdf
+> corpus. Its digest is NOT force-injected (see **Catalog-only stacks** below),
+> so the base prompt does not grow for pdf. A request-conditional gate is deliberately
 > NOT used: the prompt context is built and cached before the request exists, so
 > keying on request content would re-break prefix stability and reintroduce the
 > hole. Authoring side: `docs/okf/pdf/meta.yaml` now reads
@@ -165,6 +165,17 @@ that as a distinct eval.
 > lossless on counterintuitive cruxes (e.g. "confidence is not an exemption",
 > "bare `git reset` — the objection is scope, not tree-wiping"); a smoothed-over
 > digest is a permanent regression, not a benchmark blip.
+>
+> **Catalog-only stacks (`pdf`, `webforms`).** These two universal corpora are
+> admitted and advertised like any other tuning skill, but their digest is never
+> force-injected: the model decides whether to load the full body via the `skill`
+> tool. The gate is `catalogOnlyStacks` in `internal/skill/loader.go`;
+> `parseSkillMetadata` leaves `Digest` empty for them, so `KaizenDigestBlock`, the
+> TUI "directives active" notice, the web model badge and row, and the budget rows
+> all agree. `conduct` and `hallucination` keep the force-injected digest, and
+> marker-gated stacks (docx, pptx, …) keep it when their stack is detected. A new
+> corpus that should be advertised but not injected goes in `catalogOnlyStacks`;
+> add it to `universalStacks` too if it has no stack marker.
 
 ## Regression tests
 

@@ -374,7 +374,9 @@ export default function QuestionDialog({
             renderQuestion(questions[0], 0)
           ) : (
             <Tabs defaultValue="0" className="w-full">
-              <TabsList className="flex-wrap">
+              {/* One row that scrolls sideways: TabsList is a fixed h-10 box, so a
+                  wrapping strip would spill out of it and overlap the content. */}
+              <TabsList className="flex-nowrap max-w-full overflow-x-auto overflow-y-hidden scrollbar-hide">
                 {questions.map((q, qi) => (
                   <TabsTrigger key={qi} value={String(qi)}>
                     {(q.header || `Question ${qi + 1}`) +

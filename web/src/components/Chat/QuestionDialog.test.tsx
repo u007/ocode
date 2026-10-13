@@ -342,3 +342,26 @@ describe("QuestionDialog keyboard navigation", () => {
   });
 
 });
+
+describe("QuestionDialog tab strip", () => {
+  it("keeps the multi-question tab strip on one horizontally scrolling row", () => {
+    renderDialog({
+      questions: ["Authentication strategy", "Database engine choice", "Deployment target region", "Observability stack"].map(
+        (header, i) => ({
+          header,
+          question: `Pick ${i}?`,
+          options: [{ label: "A" }],
+        }),
+      ),
+    });
+
+    // TabsList is a fixed h-10 box. A wrapping strip spills out of it and
+    // overlaps the content, so the strip must not wrap; it scrolls instead.
+    const tablist = screen.getByRole("tablist");
+    expect(tablist.className).not.toContain("flex-wrap");
+    expect(tablist.className).toContain("flex-nowrap");
+    expect(tablist.className).toContain("max-w-full");
+    expect(tablist.className).toContain("overflow-x-auto");
+    expect(tablist.className).toContain("overflow-y-hidden");
+  });
+});

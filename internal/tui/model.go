@@ -16546,7 +16546,7 @@ func (m *model) computeModelPromptInfo() *server.ModelPromptInfo {
 	info.BriefingFile = agent.BriefingFileName(m.workDir)
 	mcModel := m.agent.Client().GetModel()
 	for _, s := range skill.KaizenSkillsForModel(m.workDir, mcModel) {
-		if s.Digest == "" {
+		if !s.ForceInjected() {
 			continue // only digest-bearing skills are force-injected
 		}
 		info.Kaizen = append(info.Kaizen, server.KaizenDirectiveInfo{
@@ -17844,7 +17844,7 @@ func (m *model) appendDiscoveryNotice(text string) {
 func (m *model) announceKaizenDigest(activeModel string) {
 	var names []string
 	for _, s := range skill.KaizenSkillsForModel(m.workDir, activeModel) {
-		if s.Digest == "" {
+		if !s.ForceInjected() {
 			continue // only digest-bearing skills are force-injected
 		}
 		stack := s.Stack

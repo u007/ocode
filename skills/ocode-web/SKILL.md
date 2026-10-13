@@ -13,9 +13,9 @@ A dense map of the ocode React SPA so you don't re-discover it from scratch.
 | Command | What it does |
 |---------|-------------|
 | `cd web && npm run dev` | Vite dev server on `:5173`, proxying `/api` → `:4096` |
-| `cd web && npm run build` | `tsgo && vite build` → `web/dist/` |
+| `cd web && npm run build` | `bun check . && vite build` → `web/dist/` |
 | `cd web && npm run test` | Vitest test suite |
-| `cd web && npm run typecheck` | `tsgo --noEmit` |
+| `cd web && npm run typecheck` | `bun check .` |
 | `make web-build` | `cd web && npm install && npm run build` |
 | `make web-dev` | `cd web && npm run dev` (background) |
 | `make dev` | Go backend + Vite together |

@@ -30,12 +30,12 @@ func TestKaizenDigestBlock_officeRepos(t *testing.T) {
 		notWant []string
 	}{
 		{"legacy doc → docx digest", []string{"old/report.doc"}, "opencode-go/mimo-v2.6-flash", []string{docxMimo}, nil},
-		// pdfGLM is now WANTED, not forbidden: the pdf corpus is model-gated only and
-		// glm-5.3-flash is pdf-tuned, so a docx repo legitimately receives the pdf
-		// digest. This case guards cross-stack isolation (no pptx), as its name says —
-		// pptx is still marker-gated, so a docx-only repo must not get it.
-		{"docx repo gets no pptx digest", []string{"invoice.docx"}, "ollama-cloud/glm-5.3-flash", []string{pdfGLM}, []string{pptxGLM}},
-		{"pptx + pdf repo → both digests", []string{"decks/q3.pptx", "invoice.pdf"}, "ollama-cloud/glm-5.3-flash", []string{pptxGLM, pdfGLM}, nil},
+		// pdf is a catalog-only stack (catalogOnlyStacks): its digest is never
+		// force-injected, whatever the repo holds. The pdf skill is advertised and
+		// the model decides whether to load it. This case guards cross-stack
+		// isolation (no pptx) in a docx-only repo.
+		{"docx repo gets no pptx digest", []string{"invoice.docx"}, "ollama-cloud/glm-5.3-flash", nil, []string{pptxGLM, pdfGLM}},
+		{"pptx + pdf repo → pptx digest only", []string{"decks/q3.pptx", "invoice.pdf"}, "ollama-cloud/glm-5.3-flash", []string{pptxGLM}, []string{pdfGLM}},
 		{"untuned model gets none", []string{"deck.ppt"}, "opencode-go/some-other-model", nil, []string{"python-pptx"}},
 	}
 	for _, tc := range cases {

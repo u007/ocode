@@ -273,7 +273,7 @@ npx complexity-report src/
 mypy src/
 
 # TypeScript
-tsc --noEmit
+npx tsc --noEmit
 
 # JavaScript (with JSDoc)
 npx typescript --allowJs --checkJs --noEmit src/**/*.js

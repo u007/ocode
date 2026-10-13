@@ -352,7 +352,7 @@ func Build(in Input) Report {
 	// prompt, unconditionally (unlike the catalog). "" for a non-matching model.
 	var kaizenRows []Row
 	for _, s := range skill.KaizenSkillsForModel(workDir, rep.Model) {
-		if s.Digest == "" {
+		if !s.ForceInjected() {
 			continue
 		}
 		label := fmt.Sprintf("%s → %s", s.Name, s.TunedFor)

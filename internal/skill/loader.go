@@ -257,7 +257,7 @@ func KaizenDigestAdmittedForModels(root string, models []string) map[string]bool
 	}
 	detected := stackdetect.Detect(root)
 	for _, s := range LoadSkillsForRoot(root) {
-		if s.TunedFor == "" || s.Digest == "" {
+		if s.TunedFor == "" || !s.ForceInjected() {
 			continue
 		}
 		for _, id := range models {
@@ -322,16 +322,29 @@ func excludeKaizen(in []Skill) []Skill {
 //     result was a create-a-PDF task running with no catalogue line and no digest:
 //     the model had no way to learn the corrections were there.
 //
-// A corpus listed here has its digest force-injected into EVERY session for models
-// that have a tuning skill in that corpus (KaizenDigestBlock), at ~1.7KB for pdf.
-// That is deliberate: cheap next to the defects it prevents, and a
-// request-conditional gate is not implementable without re-breaking prefix
-// stability.
+// Admission is not injection: whether a universal corpus's digest is force-injected
+// into the base prompt is decided by catalogOnlyStacks, not here.
 var universalStacks = map[string]bool{
 	"conduct":       true,
 	"hallucination": true,
 	"pdf":           true,
 	"webforms":      true,
+}
+
+// catalogOnlyStacks are the universal corpora whose tuning skills are advertised
+// in the catalog and discovery index but whose digest is NOT force-injected into
+// the base prompt: the model decides whether to load the full body. Every other
+// stack's digest is force-injected on model match (KaizenDigestBlock). Only
+// Skill.ForceInjected reads this, so every injection consumer agrees.
+var catalogOnlyStacks = map[string]bool{
+	"pdf":      true,
+	"webforms": true,
+}
+
+// ForceInjected reports whether the skill's digest goes into the base prompt
+// (KaizenDigestBlock). A catalog-only stack keeps its digest but is advertised only.
+func (s Skill) ForceInjected() bool {
+	return s.Digest != "" && !catalogOnlyStacks[strings.ToLower(strings.TrimSpace(s.Stack))]
 }
 
 // kaizenAdmitted reports whether a Kaizen skill is admitted for the session:
@@ -578,7 +591,7 @@ func KaizenDigestBlock(root, activeModel string) string {
 	skills := KaizenSkillsForModel(root, activeModel)
 	var parts []string
 	for _, s := range skills {
-		if s.Digest != "" {
+		if s.ForceInjected() {
 			parts = append(parts, s.Digest)
 		}
 	}

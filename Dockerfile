@@ -20,6 +20,8 @@ COPY web/package.json web/pnpm-lock.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 
 COPY web/ ./
+# The build script runs `bun check .`, so bun must be on PATH too.
+RUN npm install -g bun@1
 RUN pnpm run build
 
 # ── Stage 2: Go binary ────────────────────────────────────────────────────

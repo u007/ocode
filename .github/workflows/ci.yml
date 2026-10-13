@@ -224,6 +224,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
+      # `typecheck` and `build` run `bun check .`, so bun must be on PATH.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.x"
+
       - run: pnpm install --frozen-lockfile
 
       - name: Typecheck

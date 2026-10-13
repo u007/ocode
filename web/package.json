@@ -6,10 +6,10 @@
   "packageManager": "pnpm@10.27.0",
   "scripts": {
     "dev": "vite",
-    "build": "tsgo && vite build",
+    "build": "bun check . && vite build",
     "preview": "vite preview",
     "test": "vitest run --maxWorkers=4",
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "bun check .",
     "typecheck:legacy": "tsc --noEmit"
   },
   "dependencies": {
@@ -64,7 +64,6 @@
     "@testing-library/react": "^16.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.6.1",
     "jsdom": "^25.0.0",

@@ -13,11 +13,15 @@ import {
   __resetEditorLinksForTest,
 } from "./editorLinks";
 import { OPEN_FILE_EVENT, type OpenFileDetail } from "./fileLinks";
+import { openExternalURL } from "./externalLinks";
+
+vi.mock("./externalLinks", () => ({ openExternalURL: vi.fn() }));
 
 describe("editorLinks", () => {
   beforeEach(() => {
     __resetEditorLinksForTest();
     vi.restoreAllMocks();
+    vi.mocked(openExternalURL).mockClear();
   });
 
   describe("hasKnownExtension", () => {
@@ -299,10 +303,29 @@ describe("editorLinks", () => {
       }
     });
 
-    it("ignores non ocode-file uris", () => {
+    it("routes http(s) uris through openExternalURL", () => {
       const { monaco, getOpener } = fakeMonaco();
       ensureEditorLinks(monaco as never);
-      expect(getOpener().open({ scheme: "https", query: "", path: "/x" })).toBe(false);
+      // Monaco's Uri percent-encodes = and & unless toString(true) is used. The stub
+      // mirrors that, so the test fails if the opener stops passing skipEncoding.
+      const uri = {
+        scheme: "https",
+        query: "a=1&b=2",
+        path: "/x",
+        toString: (skipEncoding?: boolean) =>
+          skipEncoding
+            ? "https://example.com/x?a=1&b=2"
+            : "https%3A%2F%2Fexample.com%2Fx%3Fa%3D1%26b%3D2",
+      };
+      expect(getOpener().open(uri)).toBe(true);
+      expect(openExternalURL).toHaveBeenCalledWith("https://example.com/x?a=1&b=2");
+    });
+
+    it("ignores non ocode-file, non http(s) uris", () => {
+      const { monaco, getOpener } = fakeMonaco();
+      ensureEditorLinks(monaco as never);
+      expect(getOpener().open({ scheme: "mailto", query: "", path: "x@y.z" })).toBe(false);
+      expect(openExternalURL).not.toHaveBeenCalled();
     });
   });
 });

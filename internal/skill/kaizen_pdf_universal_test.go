@@ -46,8 +46,9 @@ func hasDetected(root, stack string) bool {
 }
 
 // TestKaizenPDFIsModelGatedOnly is the hermetic regression guard for the
-// create-a-PDF hole: a pdf-stack tuning skill must be admitted and its digest
-// force-injected in a root that has NO pdf marker for the detector to find.
+// create-a-PDF hole: a pdf-stack tuning skill must be admitted (advertised) in a
+// root that has NO pdf marker for the detector to find. Its digest is NOT
+// force-injected (catalogOnlyStacks): the model decides whether to load it.
 //
 // The `stackdetect` precondition assertion is the load-bearing part. Without it
 // this test could pass for the wrong reason — i.e. because a stray *.pdf happened
@@ -74,18 +75,18 @@ func TestKaizenPDFIsModelGatedOnly(t *testing.T) {
 		t.Fatalf("pdf tuning skill not admitted with no pdf marker present; got %v", names)
 	}
 
-	// 2. Its digest is force-injected into the base prompt — no tool call needed.
-	block := KaizenDigestBlock(root, model)
-	if !strings.Contains(block, "DIGEST-"+marker) {
-		t.Fatalf("pdf digest not injected for a pdf-free root; got:\n%s", block)
-	}
-	if !strings.Contains(block, "Model-Specific Directives") {
-		t.Fatalf("digest missing the directives header; got:\n%s", block)
+	// 2. Its digest is NOT force-injected into the base prompt: pdf is catalog-only.
+	if block := KaizenDigestBlock(root, model); strings.Contains(block, "DIGEST-"+marker) {
+		t.Fatalf("pdf digest force-injected for a catalog-only stack; got:\n%s", block)
 	}
 
-	// 3. Still model-gated: a non-matching model gets nothing.
-	if got := KaizenDigestBlock(root, "anthropic/claude-opus-4-8"); strings.Contains(got, marker) {
-		t.Fatalf("wrong model received the pdf digest:\n%s", got)
+	// 3. Still model-gated: a non-matching model is not advertised the pdf skill.
+	var otherNames []string
+	for _, s := range KaizenSkillsForModel(root, "anthropic/claude-opus-4-8") {
+		otherNames = append(otherNames, s.Name)
+	}
+	if containsName(otherNames, "pdf-tuning-space-bunny-free") {
+		t.Fatalf("wrong model was admitted the pdf tuning skill: %v", otherNames)
 	}
 
 	// 4. Widening must NOT have leaked into other stacks: a marker-gated stack in
@@ -109,13 +110,13 @@ func TestKaizenPDFShippedSkillIsAdmittedWithoutAPDFMarker(t *testing.T) {
 		t.Logf("NOTE: repo root detects no pdf stack — this test is exercising the ungated path")
 	}
 
-	block := KaizenDigestBlock(root, model)
 	// A phrase unique to the pdf digest (not present in the conduct/hallucination ones).
-	if !strings.Contains(block, "rasterising it") {
-		t.Fatalf("shipped pdf digest not force-injected for %s; block was:\n%s", model, block)
+	// It must NOT be force-injected: pdf is catalog-only, the model decides to load it.
+	if block := KaizenDigestBlock(root, model); strings.Contains(block, "rasterising it") {
+		t.Fatalf("shipped pdf digest force-injected for %s; block was:\n%s", model, block)
 	}
 
-	// The catalogue must advertise it too, so the model can load the full body.
+	// The catalogue must advertise it, so the model can decide to load the full body.
 	if cat := BuildCatalogForModel(root, model); !strings.Contains(cat, "pdf-tuning-space-bunny-free") {
 		t.Fatal("BuildCatalogForModel does not advertise the pdf tuning skill")
 	}

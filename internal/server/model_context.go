@@ -24,7 +24,7 @@ func buildModelPromptInfo(root, model string) *ModelPromptInfo {
 			info.Tokens = len(res.Content) / 4
 		}
 		for _, s := range skill.KaizenSkillsForModel(root, model) {
-			if s.Digest == "" {
+			if !s.ForceInjected() {
 				continue // only digest-bearing skills are force-injected
 			}
 			info.Kaizen = append(info.Kaizen, KaizenDirectiveInfo{

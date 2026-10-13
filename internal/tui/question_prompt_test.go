@@ -6,6 +6,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/tool"
@@ -118,6 +119,31 @@ WAITING_FOR_USER_RESPONSE`
 	got = derefTestModel(t, updated)
 	if got.questionTab != 0 {
 		t.Fatalf("expected left arrow to move to first question tab, got %d", got.questionTab)
+	}
+}
+
+// A tab strip wider than the dialog must stay on one line: a wrapped strip adds
+// rows the layout never budgeted, so the dialog overflows its box.
+func TestQuestionDialogTabRowStaysOneLine(t *testing.T) {
+	content := `QUESTION_PROMPT:
+[{"header":"Authentication strategy","question":"Pick auth","options":[{"label":"A"}],"multiple":false},{"header":"Database engine choice","question":"Pick db","options":[{"label":"B"}],"multiple":false},{"header":"Deployment target region","question":"Pick region","options":[{"label":"C"}],"multiple":false},{"header":"Observability stack","question":"Pick obs","options":[{"label":"D"}],"multiple":false}]
+
+WAITING_FOR_USER_RESPONSE`
+	m := model{input: newTestTextarea(), questionInput: newTestTextarea(), viewport: fastviewport.New(90, 20), styles: ApplyThemeColors("tokyonight")}
+	m.appendAgentMessage(agent.Message{Role: "tool", ToolID: "call-1", Content: content})
+	m.questionTab = 2
+
+	for _, width := range []int{30, 44, 60} {
+		lines := strings.Split(stripANSI(m.renderQuestionDialog(width)), "\n")
+		if !strings.Contains(lines[0], "Question") {
+			t.Fatalf("width %d: expected tab row on first line, got %q", width, lines[0])
+		}
+		if strings.TrimSpace(lines[1]) != "" {
+			t.Fatalf("width %d: tab row wrapped onto a second line: %q", width, lines[1])
+		}
+		if w := lipgloss.Width(lines[0]); w > width-2 {
+			t.Fatalf("width %d: tab row is %d cells wide, exceeds content width %d", width, w, width-2)
+		}
 	}
 }
 
