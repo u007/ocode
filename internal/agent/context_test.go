@@ -493,6 +493,27 @@ func TestLoadContextClaudeTakesPriorityOverAgents(t *testing.T) {
 	}
 }
 
+func TestBriefingFileName_MatchesLoadedPriority(t *testing.T) {
+	root := t.TempDir()
+	if got := BriefingFileName(root); got != "" {
+		t.Fatalf("no briefing file: got %q, want empty", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("AGENTS_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := BriefingFileName(root); got != "AGENTS.md" {
+		t.Fatalf("AGENTS.md only: got %q, want AGENTS.md", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("CLAUDE_BODY\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := BriefingFileName(root); got != "CLAUDE.md" {
+		t.Fatalf("both present: got %q, want CLAUDE.md (same winner as LoadContext)", got)
+	}
+}
+
 // TestLoadModelContextWithSourceAt_AnchoredAtRootNotCwd proves the root-anchored
 // loader resolves {model}.OCODE.md from the supplied root even when the process
 // cwd is somewhere else entirely (the desktop shell boots with cwd "/"). The

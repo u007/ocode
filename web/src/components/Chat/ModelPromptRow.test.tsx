@@ -51,6 +51,21 @@ describe("ModelPromptRow", () => {
     expect(row.textContent).not.toContain("Model prompt");
   });
 
+  it("shows the loaded briefing file, root-relative, even with no model prompt", () => {
+    render(<ModelPromptRow prompt={{ briefing_file: "CLAUDE.md" }} model="opencode-go/x" />);
+    const row = screen.getByTestId("model-prompt-row");
+    expect(screen.getByTestId("briefing-file").textContent).toBe("◆ CLAUDE.md loaded");
+    expect(row.textContent).not.toContain("Model prompt");
+  });
+
+  it("shows the briefing file alongside the model prompt and kaizen segments", () => {
+    render(<ModelPromptRow prompt={{ ...prompt, briefing_file: "AGENTS.md" }} model="opencode-go/x" />);
+    const row = screen.getByTestId("model-prompt-row");
+    expect(row.textContent).toContain("◆ AGENTS.md loaded");
+    expect(row.textContent).toContain("◆ Model prompt");
+    expect(row.textContent).toContain("Kaizen directives active");
+  });
+
   it("formats small token counts without a suffix", () => {
     render(<ModelPromptRow prompt={{ kind: "embedded", path: "deepseek-v4-flash.OCODE.md", tokens: 512 }} />);
     expect(screen.getByTestId("model-prompt-row").textContent).toContain("~512 tok");

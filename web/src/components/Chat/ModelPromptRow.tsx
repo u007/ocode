@@ -17,9 +17,10 @@ function formatTok(n: number): string {
 /**
  * ModelPromptRow — the web/desktop mirror of the TUI's "◆ Model prompt" bottom
  * chrome row (internal/tui/model.go renderModelContextRow + the Kaizen
- * "directives active" notice). Renders nothing when the active model has no
- * custom prompt and no force-injected Kaizen directives, so untuned sessions
- * stay visually clean. Single-line and clamped like the TUI's MaxHeight(1).
+ * "directives active" notice) and the loaded-briefing segment (CLAUDE.md /
+ * AGENTS.md, root-relative). Renders nothing when there is no custom prompt,
+ * no force-injected Kaizen directives and no loaded briefing file. Single-line
+ * and clamped like the TUI's MaxHeight(1).
  *
  * Data source: TUIStatus.model_prompt, populated by the shared status pipeline
  * (server buildStatusSnapshot for headless/desktop, the TUI's
@@ -32,16 +33,19 @@ export default function ModelPromptRow({ prompt, model }: Props) {
   const kz = (prompt?.kaizen ?? [])
     .map((k) => `${k.name} → ${k.tuned_for}${k.stack ? ` (${k.stack})` : ""}`)
     .join(", ");
+  const briefing = prompt?.briefing_file ? `${prompt.briefing_file} loaded` : "";
 
   const line = source ? `◆ Model prompt · ${source} ${tok} ${modelPart}`.replace(/\s+/g, " ").trim() : "";
-  if (!line && !kz) return null;
+  if (!line && !kz && !briefing) return null;
 
   return (
     <div
       data-testid="model-prompt-row"
       className="border-t border-border px-4 py-1 text-xs text-muted-foreground/90 truncate"
-      title={kz || line}
+      title={[briefing, line, kz].filter(Boolean).join(" | ")}
     >
+      {briefing && <span data-testid="briefing-file">◆ {briefing}</span>}
+      {briefing && (line || kz) && <span className="mx-2 select-none text-muted-foreground/40">|</span>}
       {line && <span>{line}</span>}
       {line && kz && <span className="mx-2 select-none text-muted-foreground/40">|</span>}
       {kz && (

@@ -6012,3 +6012,12 @@ Deferred from the remote htrcli install (`internal/remote/htrcli.go`,
   change is reused while healthy and matches the version, so it does not pick up the
   version dir on PATH until restarted. Fix: have connect restart a server when
   `EnsureHTRCli` reports a fresh install.
+
+## Briefing indicator: lazily loaded subdirectory CLAUDE.md/AGENTS.md not shown (2026-10-13)
+
+The status-line / web "loaded" indicator covers only the always-on root briefing
+(`agent.BriefingFileName`, `CLAUDE.md` else `AGENTS.md`). Subdirectory files queued
+by `dir_docs.go` (`queueDirMD`, per-session `dirMDSeen`) are injected as a volatile
+user-role tail block and are not shown. Fix: surface the most recent queued
+root-relative path from per-session agent state, read through the live agent with
+`TryLock` (never a blocking `as.mu.Lock()`), and keep it out of the system prompt.

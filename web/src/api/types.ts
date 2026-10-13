@@ -1022,6 +1022,8 @@ export interface ModelPromptInfo {
   path?: string;
   tokens?: number;
   kaizen?: KaizenDirective[];
+  // Always-on project briefing loaded into the prompt, relative to the project root.
+  briefing_file?: string;
 }
 
 export interface KaizenDirective {

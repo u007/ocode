@@ -69,6 +69,31 @@ func TestBuildStatusSnapshotNoModelPromptForUntunedModel(t *testing.T) {
 	}
 }
 
+// The loaded briefing file rides the same ModelPrompt payload, so an untuned
+// model with a root CLAUDE.md still gets the indicator, relative to the root.
+func TestBuildStatusSnapshotCarriesBriefingFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate global config scans
+	h := testHandlerWithConfig(t) // Model = gpt-4o-mini, no tuning
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("RULES\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.workDir = root
+	h.mu.Unlock()
+
+	snap := h.buildStatusSnapshot()
+	if snap.ModelPrompt == nil {
+		t.Fatal("ModelPrompt = nil, want briefing indicator for root CLAUDE.md")
+	}
+	if snap.ModelPrompt.BriefingFile != "CLAUDE.md" {
+		t.Fatalf("BriefingFile = %q, want CLAUDE.md", snap.ModelPrompt.BriefingFile)
+	}
+	if snap.ModelPrompt.Kind != "" {
+		t.Fatalf("Kind = %q, want empty for untuned model", snap.ModelPrompt.Kind)
+	}
+}
+
 // GET /api/models must badge tuned models: has_model_prompt + has_kaizen true
 // for a model with a repo .OCODE.md + conduct digest, false for an untuned
 // model. Recents force both rows into the list regardless of the registry

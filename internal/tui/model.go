@@ -16492,9 +16492,10 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	snap.LSPServers = m.collectLSPStatuses()
 	// Model-prompt banner mirror: the same data the TUI's "◆ Model prompt"
 	// chrome row renders (custom {model}.OCODE.md + force-injected Kaizen
-	// directives), memoized per (model, workDir) — see modelPromptInfoKey.
+	// directives, loaded briefing file), memoized per (model, workDir, briefing
+	// file) — see modelPromptInfoKey.
 	if m.agent != nil && m.agent.Client() != nil {
-		key := m.agent.Client().GetModel() + "\x00" + m.workDir
+		key := m.agent.Client().GetModel() + "\x00" + m.workDir + "\x00" + agent.BriefingFileName(m.workDir)
 		if key != m.modelPromptInfoKey {
 			m.modelPromptInfoKey = key
 			m.modelPromptInfoVal = m.computeModelPromptInfo()
@@ -16542,6 +16543,7 @@ func (m *model) computeModelPromptInfo() *server.ModelPromptInfo {
 		info.Kind = kind
 		info.Path = path
 	}
+	info.BriefingFile = agent.BriefingFileName(m.workDir)
 	mcModel := m.agent.Client().GetModel()
 	for _, s := range skill.KaizenSkillsForModel(m.workDir, mcModel) {
 		if s.Digest == "" {
@@ -16553,7 +16555,7 @@ func (m *model) computeModelPromptInfo() *server.ModelPromptInfo {
 			Stack:    s.Stack,
 		})
 	}
-	if info.Kind == "" && len(info.Kaizen) == 0 {
+	if info.Kind == "" && len(info.Kaizen) == 0 && info.BriefingFile == "" {
 		return nil
 	}
 	return info
@@ -20768,6 +20770,11 @@ func (m *model) renderStatus() string {
 
 	// Second line: session ID and hints
 	rightContent := fmt.Sprintf("Session: %s", m.sessionID)
+	// Display-only: the always-on briefing file (root-relative). Placed before
+	// the Root path so it survives right-side truncation on narrow terminals.
+	if briefing := agent.BriefingFileName(m.workDir); briefing != "" {
+		rightContent += " · " + briefing + " loaded"
+	}
 	if m.workDir != "" {
 		rightContent += " · Root: " + m.workDir
 	}

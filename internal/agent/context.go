@@ -135,6 +135,32 @@ func readContextFile(path string) (string, bool) {
 	return readContextFileAt("", path)
 }
 
+// briefingFileNames is the priority order of the always-on project briefing:
+// the first readable entry is injected by LoadContext and the rest are skipped.
+var briefingFileNames = []string{"CLAUDE.md", "AGENTS.md"}
+
+// BriefingFileName returns the always-on project briefing that LoadContext
+// injects for root, relative to root ("CLAUDE.md", or "AGENTS.md" when CLAUDE.md
+// is absent), or "" when neither file is present. Display-only: the injected
+// content is still produced by LoadContext.
+//
+// Presence is a stat of the working tree, with no git call, because this runs
+// on every status snapshot. It can disagree with LoadContext in one edge case:
+// a file deleted from the working tree but still tracked at HEAD is injected
+// from HEAD, yet reported absent here.
+func BriefingFileName(root string) string {
+	for _, name := range briefingFileNames {
+		path := name
+		if root != "" {
+			path = filepath.Join(root, name)
+		}
+		if _, err := os.Stat(path); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
 // LoadContext assembles the pre-cached system-prompt context. When discoveryOn
 // is true, the skill catalog is suppressed (replaced by the volatile tail
 // injector that lists only attached skills). AGENTS.md is loaded only when
@@ -150,21 +176,16 @@ func readContextFile(path string) (string, bool) {
 func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool, activeModel, root string) string {
 	var context string
 
-	// CLAUDE.md takes priority over AGENTS.md: if CLAUDE.md exists it is
+	// CLAUDE.md takes priority over AGENTS.md: if CLAUDE.md is readable it is
 	// used and AGENTS.md is skipped; otherwise AGENTS.md is read when present.
-	claudePath := "CLAUDE.md"
-	if root != "" {
-		claudePath = filepath.Join(root, "CLAUDE.md")
-	}
-	if content, ok := readContextFileAt(root, claudePath); ok {
-		context += "\n--- CLAUDE.md ---\n" + content + "\n"
-	} else {
-		agentsPath := "AGENTS.md"
+	for _, name := range briefingFileNames {
+		path := name
 		if root != "" {
-			agentsPath = filepath.Join(root, "AGENTS.md")
+			path = filepath.Join(root, name)
 		}
-		if content, ok := readContextFileAt(root, agentsPath); ok {
-			context += "\n--- AGENTS.md ---\n" + content + "\n"
+		if content, ok := readContextFileAt(root, path); ok {
+			context += "\n--- " + name + " ---\n" + content + "\n"
+			break
 		}
 	}
 

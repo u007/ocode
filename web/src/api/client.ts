@@ -1039,24 +1039,6 @@ function dbBlobQuery(
   return q.toString();
 }
 
-/** Reads a non-2xx body into a readable message. The server answers errors as
- *  JSON `{"error": "..."}`; a proxy or an older build may answer plain text, so
- *  fall back to the raw text, then to the status line. */
-async function readErrorMessage(res: Response): Promise<string> {
-  const text = (await res.text().catch(() => "")).trim();
-  if (text) {
-    try {
-      const body = JSON.parse(text) as { error?: unknown; message?: unknown };
-      const msg = body.error ?? body.message;
-      if (typeof msg === "string" && msg.trim()) return msg;
-    } catch {
-      // not JSON: the plain-text body is the message
-    }
-    return text;
-  }
-  return res.statusText || `request failed (${res.status})`;
-}
-
 /** Thrown when the local speech engine needs a one-time dependency install the
  *  user has not approved yet (HTTP 409, code `stt_install_required`). Retry
  *  `transcribeSpeech(..., { installApproved: true })` after confirming. */

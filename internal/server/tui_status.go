@@ -137,6 +137,9 @@ type ModelPromptInfo struct {
 	Tokens int `json:"tokens,omitempty"`
 	// Admitted Kaizen tuning directives that carry a force-injected digest.
 	Kaizen []KaizenDirectiveInfo `json:"kaizen,omitempty"`
+	// Always-on project briefing loaded into the prompt, relative to the project
+	// root ("CLAUDE.md" or "AGENTS.md"). Display-only; empty when none is loaded.
+	BriefingFile string `json:"briefing_file,omitempty"`
 }
 
 // KaizenDirectiveInfo names one force-injected Kaizen tuning directive for the
