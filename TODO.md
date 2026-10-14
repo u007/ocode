@@ -76,6 +76,15 @@ reading the code while building it. Neither was reproduced.
   The endpoints act on the TUI's agent and write no metadata, as the advisor handlers do. A server restart, or
   a TUI quit, before any save loses the change. Fix: have the TUI save when the bridged goal changes (for
   example on the kickoff `rcRequestMsg`), or send an RC event the TUI handles by saving.
+- **13. The stall guard pre-empts the judge on the turn it fires (found by the final review, not reproduced; final review M6).**
+  A goal finished on the third no-tool turn reports `stalled` instead of `met`, because the guard decides before
+  the judge sees that turn's answer. The cap guard has the same shape: the 50th turn's work is never judged. Fix:
+  judge the turn before the guard decides, so a `met` verdict wins over `stalled`.
+- **14. Web `/goal` on a fresh draft tab answers "send a message first" (found by the final review, not reproduced; final review M9).**
+  The TUI accepts `/goal` on a fresh session, but the web path does not. `GET /api/sessions/{id}/goal` also returns
+  404 for a session that is registered but never saved, where it should return `active:false`. Fix: have the web
+  `/goal` path create or save the session first, as the TUI does, and return `active:false` for a registered,
+  unsaved session.
 
 ## Open: block-by-block conflict resolution for remote projects (2026-10-12)
 

@@ -306,6 +306,72 @@ func TestSharedStateBudget_WorstCaseProductionPayloads(t *testing.T) {
 	}
 }
 
+// TestSharedStateBudget_PermissionExecutedScriptsProjectedAndSignalled pins the
+// permission judge's executed_scripts path. The entry shape matches
+// askPermissionModelTypesafe (permission_typesafe.go, the executed_scripts block):
+// a []map[string]any whose bulky value is "text".
+//
+// It pins two things a reviewer could "fix" without noticing:
+//   - Projection signals the clip ONLY through the top-level _projection field,
+//     naming "executed_scripts[0].text". It does NOT set the entry's own
+//     "truncated" bool, because that bool means the SCRIPT was truncated by
+//     ocode's line cap (the judge's "do not approve on a partial view" rule keys
+//     on it). Setting it from projection would make a preview look like an
+//     ocode-side cut and would change the meaning the judge is taught.
+//   - The result must fit the budget as marshalled JSON, not as payload.
+func TestSharedStateBudget_PermissionExecutedScriptsProjectedAndSignalled(t *testing.T) {
+	state := map[string]any{
+		"tool":    "bash",
+		"command": "./deploy.sh",
+		"executed_scripts": []map[string]any{{
+			"path":        "/repo/deploy.sh",
+			"sha256":      strings.Repeat("a", 64),
+			"total_lines": 4000,
+			"truncated":   false,
+			"text":        strings.Repeat("echo deploy\n", 13_000),
+		}},
+	}
+	if before := marshalledSize(t, state); before <= decisionStateBudgetBytes {
+		t.Fatalf("fixture is %d bytes, must exceed the %d budget to exercise projection", before, decisionStateBudgetBytes)
+	}
+
+	prepared, projected, err := prepareDecisionState(state)
+	if err != nil {
+		t.Fatalf("expected projection, not refusal: %v", err)
+	}
+	if !projected {
+		t.Fatalf("expected projected=true for an over-budget executed script")
+	}
+	out, ok := prepared.(map[string]any)
+	if !ok {
+		t.Fatalf("prepared state is %T, want map[string]any", prepared)
+	}
+
+	info, ok := out[stateProjectionKey].(map[string]any)
+	if !ok {
+		t.Fatalf("projected state carries no %q marker; the judge cannot know the script was clipped", stateProjectionKey)
+	}
+	fields, _ := info["fields"].([]string)
+	if len(fields) != 1 || fields[0] != "executed_scripts[0].text" {
+		t.Errorf("%s.fields = %v, want exactly [executed_scripts[0].text]", stateProjectionKey, fields)
+	}
+
+	scripts, ok := out["executed_scripts"].([]map[string]any)
+	if !ok || len(scripts) != 1 {
+		t.Fatalf("executed_scripts = %T (%v), want one []map[string]any entry", out["executed_scripts"], out["executed_scripts"])
+	}
+	if truncated, _ := scripts[0]["truncated"].(bool); truncated {
+		t.Errorf("executed_scripts[0].truncated was set by projection; only %q may signal the clip", stateProjectionKey)
+	}
+	if text, _ := scripts[0]["text"].(string); !strings.Contains(text, "[truncated for the judge:") {
+		t.Errorf("executed_scripts[0].text carries no in-band truncation marker")
+	}
+
+	if after := marshalledSize(t, prepared); after > decisionStateBudgetBytes {
+		t.Errorf("prepared state is %d bytes, over the %d byte budget", after, decisionStateBudgetBytes)
+	}
+}
+
 // buildWorstCaseGoalState mirrors the goal judge's request: a 4000-rune
 // condition and the 12-message tail, each message at the 4000-byte cap. The
 // content is HTML/JSX-heavy, so json.Marshal's <>& escaping inflates it.
