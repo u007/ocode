@@ -55,6 +55,11 @@ type GoalState struct {
 
 // GoalJudgeResult is the outcome of one goal evaluation. Resume is true only
 // when the host should send GoalResumeMessage and run another turn.
+//
+// Verdict is one of met, not_met, impossible, stalled, capped, unavailable, or
+// stale. stale means the goal was cleared, replaced, or changed by a human turn
+// while the judge ran, so the verdict was dropped and nothing was written back.
+// It is distinct from unavailable, which means the judge itself could not decide.
 type GoalJudgeResult struct {
 	Gen     uint64
 	Verdict string
@@ -300,8 +305,11 @@ func (a *Agent) GoalJudgeSync(messages []Message) GoalJudgeResult {
 
 	a.goalMu.Lock()
 	if a.goal == nil || a.goalGen != gen {
+		res = GoalJudgeResult{Verdict: "stale", Detail: "goal changed while it was being judged; verdict discarded"}
+		if a.goal != nil {
+			res.Status = a.goal.Status
+		}
 		a.goalMu.Unlock()
-		res = GoalJudgeResult{Verdict: "unavailable", Detail: "goal changed while it was being judged; verdict discarded"}
 	} else {
 		*a.goal = gs
 		a.goalGen++

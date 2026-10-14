@@ -272,11 +272,32 @@ func TestGoalJudge_ClearDuringJudgeIsNotResurrected(t *testing.T) {
 	}
 	stub.onDecide = a.ClearGoal
 	res := a.GoalJudgeSync(goalTranscriptWithTool())
-	if res.Resume {
-		t.Fatalf("verdict for a cleared goal must not resume: %+v", res)
+	if res.Verdict != "stale" || res.Status != "" || res.Resume {
+		t.Fatalf("verdict for a cleared goal must be stale with no status and no resume: %+v", res)
 	}
 	if _, ok := a.Goal(); ok {
 		t.Fatal("cleared goal was written back by the judge")
+	}
+}
+
+// A human turn that reactivates the goal while the judge is in flight supersedes
+// the judged turn: the verdict is dropped as stale, and the goal stays active with
+// the human turn's bookkeeping, not the dropped verdict's.
+func TestGoalJudge_HumanTurnDuringJudgeDropsVerdict(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	a := newGoalTestAgent(t, stub)
+	a.RestoreGoal(GoalState{Condition: "tests pass", Status: GoalPaused, Turns: 4, NoToolTurns: 1, SetAt: time.Now()})
+	stub.onDecide = a.GoalMarkHumanTurn
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if stub.calls != 1 {
+		t.Fatalf("judge should have been called once, calls=%d", stub.calls)
+	}
+	if res.Verdict != "stale" || res.Resume || res.Status != GoalActive {
+		t.Fatalf("interleaved human turn: want stale/active/no-resume, got %+v", res)
+	}
+	gs, ok := a.Goal()
+	if !ok || gs.Status != GoalActive || gs.Turns != 4 || gs.NoToolTurns != 0 {
+		t.Fatalf("goal after dropped verdict: %+v ok=%v (want active, Turns=4, NoToolTurns=0)", gs, ok)
 	}
 }
 
