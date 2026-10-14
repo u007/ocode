@@ -543,3 +543,48 @@ func TestSessionGoalMetReportsInactive(t *testing.T) {
 		t.Fatalf("status_text = %q, want it to report met", text)
 	}
 }
+
+// TestSessionGoalEndpointsUseRCBridgeAgent: for the /rc-bridged session the goal
+// endpoints act on the TUI's agent. The server builds no agent of its own for
+// it, and it writes no metadata, because the TUI persists that session.
+func TestSessionGoalEndpointsUseRCBridgeAgent(t *testing.T) {
+	h, id, proj := newGoalTestServer(t, &goalTurnClient{toolName: "bash"}, nil, "")
+	h.mu.Lock()
+	delete(h.agents, id)
+	h.mu.Unlock()
+
+	tuiAgent := agent.NewAgent(nil, nil, nil, nil)
+	bridge := &RCBridge{SessionID: id}
+	bridge.SetAgent(tuiAgent)
+	h.rc = bridge
+
+	rec := putSessionGoal(t, h, id, "all tests pass")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT bridged goal: %d (%s)", rec.Code, rec.Body.String())
+	}
+	if gs, ok := tuiAgent.Goal(); !ok || gs.Condition != "all tests pass" || gs.Status != agent.GoalActive {
+		t.Fatalf("TUI agent goal after PUT = %+v ok=%v", gs, ok)
+	}
+	h.mu.Lock()
+	_, built := h.agents[id]
+	h.mu.Unlock()
+	if built {
+		t.Fatal("PUT on a bridged session built a second server agent")
+	}
+	if _, ok := persistedGoal(t, proj, id); ok {
+		t.Fatal("PUT on a bridged session wrote metadata; the TUI owns that session's persistence")
+	}
+
+	if got := getSessionGoal(t, h, id); got["active"] != true || got["condition"] != "all tests pass" {
+		t.Fatalf("GET bridged goal = %v, want active with the condition", got)
+	}
+
+	del := httptest.NewRecorder()
+	h.HandleClearSessionGoal(del, httptest.NewRequest("DELETE", "/api/sessions/"+id+"/goal", nil), id)
+	if del.Code != http.StatusNoContent {
+		t.Fatalf("DELETE bridged goal: %d, want 204 (%s)", del.Code, del.Body.String())
+	}
+	if _, ok := tuiAgent.Goal(); ok {
+		t.Fatal("DELETE on a bridged session did not clear the TUI agent's goal")
+	}
+}

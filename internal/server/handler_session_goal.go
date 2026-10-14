@@ -79,9 +79,25 @@ func (h *Handler) goalSession(w http.ResponseWriter, id string) (*agentSession, 
 	return as, entry.ProjectRoot, true
 }
 
+// bridgedGoalAgent returns the TUI's agent when id is the /rc-bridged session.
+// The TUI owns that session's agent and its persistence, so the goal endpoints
+// act on the bridged agent directly and never build a second one. ok is false
+// for every other session. The agent is nil when the TUI has none yet.
+func (h *Handler) bridgedGoalAgent(id string) (ag *agent.Agent, ok bool) {
+	rc := h.RCBridge()
+	if rc == nil || rc.SessionID != id {
+		return nil, false
+	}
+	return rc.Agent(), true
+}
+
 // HandleGetSessionGoal reports the session's /goal state. It is polled, so it
 // never builds an agent: a live agent answers, otherwise the persisted metadata.
 func (h *Handler) HandleGetSessionGoal(w http.ResponseWriter, r *http.Request, id string) {
+	if ag, bridged := h.bridgedGoalAgent(id); bridged && ag != nil {
+		writeJSON(w, http.StatusOK, liveGoalResponse(ag))
+		return
+	}
 	if as := h.lookupAgentSession(id); as != nil {
 		writeJSON(w, http.StatusOK, liveGoalResponse(as.agent))
 		return
@@ -114,6 +130,22 @@ func (h *Handler) HandleSetSessionGoal(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if ag, bridged := h.bridgedGoalAgent(id); bridged {
+		if ag == nil {
+			writeError(w, http.StatusConflict, "the bridged TUI session has no live agent")
+			return
+		}
+		if err := ag.SetGoal(req.Condition); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// The TUI persists its own session, so the metadata is not written here.
+		writeJSON(w, http.StatusOK, sessionGoalPutResponse{
+			sessionGoalResponse: liveGoalResponse(ag),
+			KickoffPrompt:       ag.GoalKickoffPrompt(),
+		})
+		return
+	}
 	as, projectRoot, ok := h.goalSession(w, id)
 	if !ok {
 		return
@@ -135,6 +167,15 @@ func (h *Handler) HandleSetSessionGoal(w http.ResponseWriter, r *http.Request, i
 
 // HandleClearSessionGoal removes the session's goal.
 func (h *Handler) HandleClearSessionGoal(w http.ResponseWriter, r *http.Request, id string) {
+	if ag, bridged := h.bridgedGoalAgent(id); bridged {
+		if ag == nil {
+			writeError(w, http.StatusConflict, "the bridged TUI session has no live agent")
+			return
+		}
+		ag.ClearGoal()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	as, projectRoot, ok := h.goalSession(w, id)
 	if !ok {
 		return
