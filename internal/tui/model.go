@@ -190,6 +190,18 @@ func (m *model) settleAutoContinueChain() {
 	m.lastTurnWasAutoContinue = false
 }
 
+// settleGoalTurn reactivates a paused goal when a human-started turn completes.
+// A goal resume turn is the agent's own, so it leaves the goal as the judge set it.
+func (m *model) settleGoalTurn() {
+	if m.lastTurnWasGoalResume {
+		m.lastTurnWasGoalResume = false
+		return
+	}
+	if m.agent != nil {
+		m.agent.GoalMarkHumanTurn()
+	}
+}
+
 // fireAutoContinue increments the chain counter, appends the auto-continue
 // hint plus an explicit resume prompt, and returns the Cmd that resumes the
 // turn. Callers must have already confirmed shouldAutoContinue().
@@ -244,6 +256,25 @@ func (m *model) maybeDispatchAutoContinueJudge(forRC bool) bool {
 	}
 	m.autoContinueGen = newGen
 	m.autoContinueJudgeForRC = forRC
+	return true
+}
+
+// goalEvaluable reports whether the session has a goal the judge should still
+// evaluate. While it does, the auto-continue judge must not run alongside it.
+func (m *model) goalEvaluable() bool {
+	return m.agent != nil && m.agent.GoalEvaluable()
+}
+
+// maybeDispatchGoalJudge starts the async goal judge for the turn that just
+// finished. Callers check agent != nil and GoalEvaluable first. Returns false
+// when the agent declines (judge already in flight), and then no result arrives.
+func (m *model) maybeDispatchGoalJudge() bool {
+	agentMsgs, _ := m.buildAgentMessagesSnapshot()
+	newGen := m.goalGen + 1
+	if !m.agent.GoalJudgeAsync(agentMsgs, newGen) {
+		return false
+	}
+	m.goalGen = newGen
 	return true
 }
 
@@ -1344,8 +1375,15 @@ type model struct {
 	// rationale as pendingRCAutoContinue) and must be re-armed once the
 	// judge result lands, whichever way it goes.
 	autoContinueJudgeForRC bool
-	ocrEnabled             bool // runtime OCR tool state; persisted across agent rebuilds
-	ocrEnabledSet          bool // whether ocrEnabled should be applied to newly installed agents
+	// goalGen is bumped on every /goal judge dispatch and on /goal set/clear, so
+	// a goalJudgeFinishedMsg from a superseded goal is ignored (mirrors autoContinueGen).
+	goalGen uint64
+	// lastTurnWasGoalResume is true while the turn in flight was started by a
+	// goal resume rather than a human message. settleGoalTurn reads and clears
+	// it so the agent's own resume turn does not reactivate a paused goal.
+	lastTurnWasGoalResume bool
+	ocrEnabled            bool // runtime OCR tool state; persisted across agent rebuilds
+	ocrEnabledSet         bool // whether ocrEnabled should be applied to newly installed agents
 	// modelSwitchGen guards async model switches — stale completions are dropped.
 	modelSwitchGen          uint64
 	modelSwitchPending      bool
@@ -1616,6 +1654,7 @@ type model struct {
 	advisorCkptStart         time.Time
 	recapCh                  chan recapFinishedMsg
 	autoContinueJudgeCh      chan autoContinueJudgeFinishedMsg
+	goalJudgeCh              chan goalJudgeFinishedMsg
 	btwCh                    chan btwResultMsg
 	recapText                string // held until recap finishes, then cleared; recap result goes to m.messages
 	recapGen                 uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
@@ -2603,6 +2642,7 @@ func newModel(opts ...RunOptions) model {
 	snapshot.Reset()
 	tool.ResetTodoState()
 	if a != nil {
+		a.ClearGoal()
 		// Keep OpenCode request affinity stable without tagging TUI debug logs.
 		a.SetOpenCodeSessionID(o.SessionID)
 		// Journal file-edit backups under this session and replay any
@@ -2721,6 +2761,7 @@ func newModel(opts ...RunOptions) model {
 		advisorCkptIdx:       -1,
 		recapCh:              make(chan recapFinishedMsg, 4),
 		autoContinueJudgeCh:  make(chan autoContinueJudgeFinishedMsg, 4),
+		goalJudgeCh:          make(chan goalJudgeFinishedMsg, 4),
 		btwCh:                make(chan btwResultMsg, 64),
 		btwViewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(8)),
 		titleCh:              make(chan titleResult, 4),
@@ -2873,6 +2914,7 @@ func newModel(opts ...RunOptions) model {
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			m.sessionCreatedAt = sess.CreatedAt
 			restoreTodoState(sess.Metadata)
+			m.restoreGoalState(sess.Metadata)
 			for _, am := range sess.Messages {
 				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
@@ -2909,7 +2951,7 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitAdvisorCheckpointEvent(m.advisorCkptCh), waitRecapEvent(m.recapCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitAdvisorCheckpointEvent(m.advisorCkptCh), waitRecapEvent(m.recapCh), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh), waitGoalJudgeEvent(m.goalJudgeCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
 	if m.permissionGrantCh != nil {
 		cmds = append(cmds, listenPermissionGrant(m.permissionGrantCh))
 	}
@@ -5257,12 +5299,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// pendingRCAutoContinue's doc comment for why).
 		if m.pendingRC == nil && m.pendingRCAutoContinue {
 			m.settleAutoContinueChain()
+			m.settleGoalTurn()
 			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
 			if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
 				m.pendingRCAutoContinue = true
 				return m, m.fireAutoContinue(true)
 			}
-			if msg.err == nil && !stepLimitHit && m.maybeDispatchAutoContinueJudge(true) {
+			if msg.err == nil && !stepLimitHit && !m.goalEvaluable() && m.maybeDispatchAutoContinueJudge(true) {
 				// Judge in flight — leave the /rc listener un-armed until it
 				// resolves (autoContinueJudgeFinishedMsg re-arms it either way).
 				return m, nil
@@ -5322,6 +5365,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.broadcastRCSnapshot()
 			m.settleAutoContinueChain()
+			m.settleGoalTurn()
 			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
 			if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
 				// Do NOT also re-arm waitForRCRequest here: rcRequestMsg's
@@ -5333,7 +5377,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingRCAutoContinue = true
 				return m, m.fireAutoContinue(true)
 			}
-			if msg.err == nil && !stepLimitHit && m.maybeDispatchAutoContinueJudge(true) {
+			if msg.err == nil && !stepLimitHit && !m.goalEvaluable() && m.maybeDispatchAutoContinueJudge(true) {
 				return m, nil
 			}
 			// Surface why the chain declined (off toggle / cap exhausted) — the
@@ -5370,6 +5414,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// lastTurnWasAutoContinue or zero the counter without a real turn
 		// having actually completed.
 		m.settleAutoContinueChain()
+		m.settleGoalTurn()
 		m.streaming = false
 		m.cancelStream = nil
 		m.lastActivity = agent.ActivitySnapshot{}
@@ -5490,7 +5535,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					})
 					m.rerenderTranscriptAndMaybeScroll()
 				}
-				if msg.err == nil && !stepLimitHit {
+				// A goal that is still evaluable owns the post-turn verdict: the
+				// auto-continue judge is not dispatched alongside it.
+				if msg.err == nil && m.goalEvaluable() {
+					m.maybeDispatchGoalJudge()
+				} else if msg.err == nil && !stepLimitHit {
 					m.maybeDispatchAutoContinueJudge(false)
 				}
 			}
@@ -5718,6 +5767,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, waitAutoContinueJudgeEvent(m.autoContinueJudgeCh)
+	case goalJudgeFinishedMsg:
+		// Always re-arm the listener. A stale verdict renders nothing: the goal
+		// was cleared, replaced or changed while the judge ran.
+		if msg.gen != m.goalGen || m.agent == nil || msg.result.Verdict == "stale" {
+			return m, waitGoalJudgeEvent(m.goalJudgeCh)
+		}
+		res := msg.result
+		gs, _ := m.agent.Goal()
+		// The turn may have moved on while the judge ran (typed input, Esc,
+		// a pending compaction). Resume only into an idle session, never
+		// into a turn already in flight.
+		canResume := res.Resume && !m.streaming && !m.queueDrainBlocked() && len(m.pendingCompactUIIdx) == 0
+		var hint string
+		switch {
+		case res.Verdict == "met":
+			hint = fmt.Sprintf("◎ goal met after %d turns", gs.Turns)
+		case res.Verdict == "impossible":
+			hint = "◎ goal impossible: " + res.Detail
+		case canResume:
+			hint = fmt.Sprintf("◎ goal: not yet met — %s, resuming (turn %d/%d)", res.Detail, gs.Turns, agent.GoalMaxTurns)
+		case res.Resume:
+			hint = "◎ goal: not yet met — " + res.Detail + ", will re-check after the current turn"
+		default:
+			hint = "◎ goal paused: " + res.Detail
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render(hint), transient: true})
+		m.saveSession()
+		if !canResume {
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, waitGoalJudgeEvent(m.goalJudgeCh)
+		}
+		resumeMsg := m.agent.GoalResumeMessage()
+		m.messages = append(m.messages, message{role: roleUser, text: resumeMsg.Content, raw: &resumeMsg})
+		m.lastTurnWasGoalResume = true
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, tea.Batch(m.askAgent(), waitGoalJudgeEvent(m.goalJudgeCh))
 	case btwResultMsg:
 		if msg.gen == m.btwGen {
 			if msg.live {
@@ -9078,6 +9163,12 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	if cmd == "/agents" && (len(args) == 0 || args[0] == "status") {
 		isInstantCmd = true
 	}
+	// /goal status and /goal clear are local and run mid-stream. Any other
+	// /goal starts a turn, so it queues like a message. A condition that only
+	// starts with a clear verb ("stop the flaky test") is a condition, not a clear.
+	if cmd == "/goal" && (len(args) == 0 || (len(args) == 1 && isGoalClearVerb(args[0]))) {
+		isInstantCmd = true
+	}
 	if (m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0) && !isExitCmd && !isInstantCmd {
 		m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
 		m.input.Reset()
@@ -11381,8 +11472,12 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			tool.SetTodoSession(m.sessionID)
 			snapshot.Reset()
 			tool.ResetTodoState()
+			if m.agent != nil {
+				m.agent.ClearGoal()
+			}
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
+			m.restoreGoalState(sess.Metadata)
 			m.messages = []message{}
 			m.clearPermAskState()
 			m.clearQuestionAskState()
@@ -11837,9 +11932,13 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.pendingRCAutoContinue = false
 	m.autoContinueJudgeForRC = false
 	m.autoContinueGen++
+	m.goalGen++
 	tool.SetTodoSession(m.sessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
+	if m.agent != nil {
+		m.agent.ClearGoal()
+	}
 	m.sessionTelemetry = sidebarTelemetry{}
 	m.lastActivity = agent.ActivitySnapshot{}
 	m.detail = nil
@@ -18828,6 +18927,13 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	goalJudgeDoneCh := m.goalJudgeCh
+	m.agent.OnGoalJudge = func(result agent.GoalJudgeResult) {
+		select {
+		case goalJudgeDoneCh <- goalJudgeFinishedMsg{gen: result.Gen, result: result}:
+		default:
+		}
+	}
 	usageCh := m.usageCh
 	epoch := m.agentEpoch
 	m.agent.OnUsage = func(inputTokens, outputTokens int64) {
@@ -19015,6 +19121,19 @@ type autoContinueJudgeFinishedMsg struct {
 	// a declined/failed triage is visible instead of the turn silently
 	// looking done.
 	detail string
+}
+
+func waitGoalJudgeEvent(doneCh chan goalJudgeFinishedMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-doneCh
+	}
+}
+
+// goalJudgeFinishedMsg carries one goal verdict. gen is the goalGen it was
+// dispatched under; result.Verdict "stale" means the goal changed mid-judge.
+type goalJudgeFinishedMsg struct {
+	gen    uint64
+	result agent.GoalJudgeResult
 }
 
 func waitBtwEvent(doneCh chan btwResultMsg) tea.Cmd {
@@ -20980,6 +21099,16 @@ func (m model) sessionSidebarMetadata() map[string]any {
 		}
 		meta["todo_text"] = todo
 	}
+	if m.agent != nil {
+		if gs, ok := m.agent.Goal(); ok {
+			if meta == nil {
+				meta = make(map[string]any)
+			}
+			for k, v := range agent.GoalStateToMetadata(gs) {
+				meta[k] = v
+			}
+		}
+	}
 	return meta
 }
 
@@ -20991,6 +21120,18 @@ func restoreTodoState(meta map[string]any) {
 		if s, ok := v.(string); ok {
 			tool.SetTodoState(s)
 		}
+	}
+}
+
+// restoreGoalState reinstates a session's /goal from its metadata. A record
+// that fails to parse is ignored, so callers clear the agent's goal first.
+func (m *model) restoreGoalState(meta map[string]any) {
+	if m.agent == nil {
+		return
+	}
+	if gs, ok := agent.GoalStateFromMetadata(meta); ok {
+		m.agent.RestoreGoal(gs)
+		m.goalGen++
 	}
 }
 

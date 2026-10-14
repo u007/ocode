@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 // TestAutoContinueChainCap simulates streamDoneMsg's guard-then-fire sequence
@@ -171,3 +173,183 @@ func TestAgentAutoContinueDeclineDetail(t *testing.T) {
 type errTestStream struct{}
 
 func (errTestStream) Error() string { return "boom" }
+
+func TestStreamDoneDispatchesGoalJudgeNotAutoContinue(t *testing.T) {
+	m := model{
+		ready:               true,
+		width:               80,
+		height:              24,
+		streaming:           true,
+		autoContinueEnabled: true,
+		agent:               newTestAgent(retryTestClient{}, nil, nil, nil),
+		input:               newTestTextarea(),
+		viewport:            fastviewport.New(76, 20),
+		styles:              ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	goalGen, autoGen := m.goalGen, m.autoContinueGen
+
+	updated, _ := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+	if got.goalGen != goalGen+1 {
+		t.Fatalf("expected goal judge dispatch to bump goalGen %d -> %d, got %d", goalGen, goalGen+1, got.goalGen)
+	}
+	if got.autoContinueGen != autoGen {
+		t.Fatalf("expected auto-continue judge not to dispatch while a goal is evaluable, autoContinueGen %d -> %d", autoGen, got.autoContinueGen)
+	}
+}
+
+func TestStreamDoneGoalSkipsWhenQueueDrainBlocked(t *testing.T) {
+	m := model{
+		ready:              true,
+		width:              80,
+		height:             24,
+		streaming:          true,
+		showQuestionDialog: true,
+		agent:              newTestAgent(retryTestClient{}, nil, nil, nil),
+		input:              newTestTextarea(),
+		viewport:           fastviewport.New(76, 20),
+		styles:             ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	goalGen := m.goalGen
+
+	updated, _ := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+	if got.goalGen != goalGen {
+		t.Fatalf("expected no goal judge dispatch while a question dialog is active, goalGen %d -> %d", goalGen, got.goalGen)
+	}
+}
+
+func TestGoalJudgeFinishedResumesOnNotMet(t *testing.T) {
+	m := newGoalCommandTestModel()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	m.goalGen = 3
+	result := agent.GoalJudgeResult{Gen: 3, Verdict: "not_met", Status: agent.GoalActive, Detail: "judge: not_met", Resume: true}
+
+	updated, cmd := m.Update(goalJudgeFinishedMsg{gen: 3, result: result})
+	got := derefTestModel(t, updated)
+	last := got.messages[len(got.messages)-1]
+	if last.role != roleUser || !strings.HasPrefix(last.text, "[ocode:goal]") {
+		t.Fatalf("expected resume to append a user-role [ocode:goal] message, got %#v", last)
+	}
+	if last.raw == nil || last.raw.Content != last.text {
+		t.Fatalf("expected resume message to carry raw agent message, got %#v", last.raw)
+	}
+	if cmd == nil {
+		t.Fatal("expected resume to return a turn-start command")
+	}
+	if !got.lastTurnWasGoalResume {
+		t.Fatal("expected resume to mark the turn as goal-initiated")
+	}
+
+	before := len(got.messages)
+	updated, _ = got.Update(goalJudgeFinishedMsg{gen: 2, result: result})
+	got = derefTestModel(t, updated)
+	if len(got.messages) != before {
+		t.Fatalf("expected stale-gen verdict to be ignored, transcript grew %d -> %d", before, len(got.messages))
+	}
+}
+
+func TestGoalJudgeStaleVerdictRendersNothing(t *testing.T) {
+	m := newGoalCommandTestModel()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	m.goalGen = 4
+	before := len(m.messages)
+
+	updated, cmd := m.Update(goalJudgeFinishedMsg{gen: 4, result: agent.GoalJudgeResult{Gen: 4, Verdict: "stale", Resume: true}})
+	got := derefTestModel(t, updated)
+	if len(got.messages) != before {
+		t.Fatalf("expected stale verdict to render nothing, transcript grew %d -> %d", before, len(got.messages))
+	}
+	if got.streaming {
+		t.Fatal("expected stale verdict not to start a turn")
+	}
+	if cmd == nil {
+		t.Fatal("expected the judge listener to be re-armed after a stale verdict")
+	}
+}
+
+func TestGoalStateSurvivesSessionSaveRestore(t *testing.T) {
+	m := newGoalCommandTestModel()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+
+	raw, err := json.Marshal(m.sessionSidebarMetadata())
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if _, ok := meta[agent.GoalMetadataKey]; !ok {
+		t.Fatalf("expected sidebar metadata to hold the goal, got %s", raw)
+	}
+
+	fresh := newGoalCommandTestModel()
+	fresh.restoreGoalState(meta)
+	gs, ok := fresh.agent.Goal()
+	if !ok || gs.Condition != "all tests pass" || gs.Status != agent.GoalActive {
+		t.Fatalf("expected restored goal, got ok=%v state=%+v", ok, gs)
+	}
+}
+
+func TestStreamDoneReactivatesPausedGoalOnHumanTurn(t *testing.T) {
+	m := model{
+		ready:              true,
+		width:              80,
+		height:             24,
+		streaming:          true,
+		showQuestionDialog: true,
+		agent:              newTestAgent(retryTestClient{}, nil, nil, nil),
+		input:              newTestTextarea(),
+		viewport:           fastviewport.New(76, 20),
+		styles:             ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+	m.agent.RestoreGoal(agent.GoalState{Condition: "all tests pass", Status: agent.GoalPaused, Turns: 2})
+
+	updated, _ := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+	if gs, _ := got.agent.Goal(); gs.Status != agent.GoalActive {
+		t.Fatalf("expected a completed human turn to reactivate the paused goal, got status %s", gs.Status)
+	}
+}
+
+func TestStreamDoneGoalResumeTurnKeepsPausedGoal(t *testing.T) {
+	m := model{
+		ready:                 true,
+		width:                 80,
+		height:                24,
+		streaming:             true,
+		showQuestionDialog:    true,
+		lastTurnWasGoalResume: true,
+		agent:                 newTestAgent(retryTestClient{}, nil, nil, nil),
+		input:                 newTestTextarea(),
+		viewport:              fastviewport.New(76, 20),
+		styles:                ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+	m.agent.RestoreGoal(agent.GoalState{Condition: "all tests pass", Status: agent.GoalPaused, Turns: 2})
+
+	updated, _ := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+	if gs, _ := got.agent.Goal(); gs.Status != agent.GoalPaused {
+		t.Fatalf("expected the agent's own goal resume turn to leave the paused goal alone, got status %s", gs.Status)
+	}
+	if got.lastTurnWasGoalResume {
+		t.Fatal("expected the goal resume marker to be consumed at turn end")
+	}
+}

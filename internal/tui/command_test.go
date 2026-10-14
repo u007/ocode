@@ -1734,3 +1734,115 @@ func TestOrchestrateAliasIsInstantAndRewrites(t *testing.T) {
 		t.Fatalf("/goal must no longer be the orchestrator alias, got agent %+v", spec)
 	}
 }
+
+func newGoalCommandTestModel() *model {
+	return &model{
+		ready:     true,
+		width:     80,
+		height:    20,
+		activeTab: tabChat,
+		input:     newTestTextarea(),
+		viewport:  fastviewport.New(80, 20),
+		styles:    ApplyThemeColors("tokyonight"),
+		agent:     newTestAgent(retryTestClient{}, nil, nil, nil),
+		sessionID: "goal-command-session",
+	}
+}
+
+func TestGoalCommandSetsGoalAndStartsTurn(t *testing.T) {
+	m := newGoalCommandTestModel()
+
+	updated, cmd := m.handleCommand("/goal all tests pass")
+	got := updated.(*model)
+	gs, ok := got.agent.Goal()
+	if !ok || gs.Condition != "all tests pass" {
+		t.Fatalf("expected goal %q to be set, got ok=%v state=%+v", "all tests pass", ok, gs)
+	}
+	kickoff := got.agent.GoalKickoffPrompt()
+	found := false
+	for _, msg := range got.messages {
+		if msg.role == roleUser && msg.text == kickoff {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected kickoff prompt %q in transcript, got %#v", kickoff, got.messages)
+	}
+	if cmd == nil {
+		t.Fatal("expected /goal <condition> to return a turn-start command")
+	}
+}
+
+func TestGoalCommandStatusAndClearAreInstant(t *testing.T) {
+	m := newGoalCommandTestModel()
+	m.streaming = true
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+
+	updated, _ := m.handleCommand("/goal")
+	got := updated.(*model)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected /goal status to run immediately, queued %#v", got.queuedItems)
+	}
+
+	updated, _ = got.handleCommand("/goal clear")
+	got = updated.(*model)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected /goal clear to run immediately, queued %#v", got.queuedItems)
+	}
+	if _, ok := got.agent.Goal(); ok {
+		t.Fatal("expected /goal clear to remove the goal")
+	}
+
+	updated, _ = got.handleCommand("/goal fix it")
+	got = updated.(*model)
+	if len(got.queuedItems) != 1 {
+		t.Fatalf("expected /goal fix it to be queued while streaming, got %#v", got.queuedItems)
+	}
+}
+
+func TestGoalCommandRejectsOverlongCondition(t *testing.T) {
+	m := newGoalCommandTestModel()
+
+	updated, _ := m.handleCommand("/goal " + strings.Repeat("a", agent.GoalMaxConditionLen+1))
+	got := updated.(*model)
+	if _, ok := got.agent.Goal(); ok {
+		t.Fatal("expected overlong condition not to set a goal")
+	}
+	found := false
+	for _, msg := range got.messages {
+		if msg.role == roleAssistant && strings.Contains(msg.text, "4000") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected assistant message naming the 4000 limit, got %#v", got.messages)
+	}
+}
+
+func TestIsGoalClearVerbIsCaseInsensitive(t *testing.T) {
+	for _, verb := range []string{"clear", "STOP", "Off", "reset", "none", "cancel"} {
+		if !isGoalClearVerb(verb) {
+			t.Fatalf("expected %q to be a clear verb", verb)
+		}
+	}
+	for _, text := range []string{"all tests pass", "stop the flaky test"} {
+		if isGoalClearVerb(text) {
+			t.Fatalf("expected %q not to be a clear verb", text)
+		}
+	}
+}
+
+func TestNewSessionClearsGoal(t *testing.T) {
+	m := newGoalCommandTestModel()
+	ag := m.agent
+	if err := ag.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+
+	m.handleCommand("/new")
+	if _, ok := ag.Goal(); ok {
+		t.Fatal("expected /new to clear the goal")
+	}
+}

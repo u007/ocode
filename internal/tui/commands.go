@@ -174,6 +174,7 @@ func init() {
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},
 		{name: "/orchestrate", usage: "/orchestrate <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runOrchestrateCmd},
 		{name: "/autocontinue", usage: "/autocontinue [on|off|status|model [name]]", help: "Auto-resume any turn cut off by /max-step (or judged interrupted by an optional judge model — chat YES/NO or typesafe decision-only), across TUI and web turns", handler: runAutoContinueCmd},
+		{name: "/goal", usage: "/goal [<condition> | clear]", help: "Keep working toward a condition: a judge checks after every turn and resumes until it is met, impossible, or paused. No args shows status; clear removes it", handler: runGoalCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/computer", usage: "/computer [status|enable|disable]", help: "Show computer-use status or enable/disable desktop control for new sessions", handler: runComputerCmd},
 		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
@@ -1863,6 +1864,47 @@ func runAutoContinueCmd(m *model, args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /autocontinue [on|off|status|model [name]]"})
 	}
 	return nil
+}
+
+// runGoalCmd sets, shows or clears the session's /goal condition. Setting one
+// starts a turn with the kickoff prompt; the judge then runs after every turn.
+func runGoalCmd(m *model, args []string) tea.Cmd {
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: no agent configured"})
+		return nil
+	}
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: m.agent.GoalStatusText()})
+		return nil
+	}
+	if len(args) == 1 && isGoalClearVerb(args[0]) {
+		m.agent.ClearGoal()
+		m.goalGen++
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Goal cleared."})
+		m.saveSession()
+		return nil
+	}
+	if err := m.agent.SetGoal(strings.Join(args, " ")); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+		return nil
+	}
+	m.goalGen++
+	m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("◎ goal set — evaluating after every turn"), transient: true})
+	kickoff := m.agent.GoalKickoffPrompt()
+	m.messages = append(m.messages, message{role: roleUser, text: kickoff, raw: &agent.Message{Role: "user", Content: kickoff}})
+	m.rerenderTranscriptAndMaybeScroll()
+	m.saveSession()
+	return m.askAgent()
+}
+
+// isGoalClearVerb reports whether a lone /goal argument clears the goal rather
+// than naming a new condition.
+func isGoalClearVerb(s string) bool {
+	switch strings.ToLower(s) {
+	case "clear", "stop", "off", "reset", "none", "cancel":
+		return true
+	}
+	return false
 }
 
 func autoContinueStatusText(m *model) string {
