@@ -63,7 +63,7 @@ vi.mock("./api/client", () => {
 });
 
 vi.mock("./lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {}, setHosts: () => {} },
+  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {}, onHostsChange: () => () => {}, currentHosts: () => [], setHosts: () => {} },
 }));
 
 // Capture the Continue callback App hands ChatPanel, and expose a button that

@@ -3398,14 +3398,19 @@ export const api = {
   // ── Pulse ──
   /** GET /api/pulse — the cross-project live-sessions dashboard.
    *  `scope` is "live" (24h idle window) or "all" (7d). `cursor` comes from a
-   *  previous page's `next_cursor`. No host parameter: v1 is local-server only,
-   *  so threading a host here would suggest a capability that does not exist. */
-  getPulse: (scope: "live" | "all", cursor: string | null, limit: number) => {
+   *  previous page's `next_cursor`.
+   *
+   *  `host` routes the same request through the `/api/remote/{host}` reverse
+   *  proxy so the remote host's own server answers for ITS sessions — the
+   *  dashboard is local-host-blind by design, so the client fans the same call
+   *  out to every host the SSE stream already relays (see pulseStore). Omit it
+   *  for the local server. */
+  getPulse: (scope: "live" | "all", cursor: string | null, limit: number, host?: string) => {
     const params = new URLSearchParams();
     params.set("scope", scope);
     if (cursor) params.set("cursor", cursor);
     params.set("limit", String(limit));
-    return fetchJSON<PulsePage>(`/api/pulse?${params.toString()}`);
+    return fetchJSON<PulsePage>(`/api/pulse?${params.toString()}`, undefined, host);
   },
 
   // ── Init ──

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pulseProjectBasename, pulseRowMatchesFilter } from "./pulseFilter";
+import { pulseProjectBasename, pulseProjectLabel, pulseRowMatchesFilter } from "./pulseFilter";
 import type { PulseRow } from "@/api/types";
 
 function row(over: Partial<PulseRow> & { session_id: string }): PulseRow {
@@ -13,6 +13,7 @@ function row(over: Partial<PulseRow> & { session_id: string }): PulseRow {
     turn_started_at: "",
     updated_at: "2020-01-01T00:00:00Z",
     child_count: 0,
+    host: "",
     ...over,
   };
 }
@@ -63,5 +64,42 @@ describe("pulseRowMatchesFilter", () => {
 
   it("does not match a substring of a different project", () => {
     expect(pulseRowMatchesFilter(row({ session_id: "a" }), "beta")).toBe(false);
+  });
+});
+
+describe("pulseProjectLabel", () => {
+  it("is the bare basename for a local row", () => {
+    expect(pulseProjectLabel(row({ session_id: "a", project_path: "/home/j/www/aimsai2" }))).toBe("aimsai2");
+  });
+
+  it("appends the host for a remote row", () => {
+    // Two remote machines can hold the same basename; the label has to say
+    // which one, or a click is a coin toss.
+    expect(
+      pulseProjectLabel(row({ session_id: "a", project_path: "~/www/aimsai2", host: "james@box" })),
+    ).toBe("aimsai2 @ james@box");
+  });
+
+  it("falls back to the basename when host is an empty string", () => {
+    expect(pulseProjectLabel(row({ session_id: "a", project_path: "/p/app", host: "" }))).toBe("app");
+  });
+});
+
+describe("pulseRowMatchesFilter across hosts", () => {
+  it("matches on the host so remote cards can be isolated", () => {
+    const remote = row({ session_id: "r", project_path: "/p/app", host: "james@box" });
+    expect(pulseRowMatchesFilter(remote, "james@box")).toBe(true);
+    expect(pulseRowMatchesFilter(remote, "BOX")).toBe(true);
+    expect(pulseRowMatchesFilter(remote, "nope")).toBe(false);
+  });
+
+  it("does not let a local row match a remote host's name", () => {
+    const local = row({ session_id: "l", project_path: "/p/app" });
+    expect(pulseRowMatchesFilter(local, "james@box")).toBe(false);
+  });
+
+  it("still matches the basename and the title", () => {
+    expect(pulseRowMatchesFilter(row({ session_id: "a", project_path: "/p/alpha", title: "Fix it" }), "alpha")).toBe(true);
+    expect(pulseRowMatchesFilter(row({ session_id: "a", project_path: "/p/alpha", title: "Fix it" }), "fix")).toBe(true);
   });
 });

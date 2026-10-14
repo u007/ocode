@@ -59,7 +59,7 @@ vi.mock("./api/client", () => {
 });
 
 vi.mock("./lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {}, setHosts: () => {} },
+  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {}, onHostsChange: () => () => {}, currentHosts: () => [], setHosts: () => {} },
 }));
 
 const picker = vi.hoisted(() => ({ open: false, initialQuery: undefined as string | undefined }));

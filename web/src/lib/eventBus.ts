@@ -101,6 +101,7 @@ class EventBus {
   private conn = new StreamConnection();
   private readonly handlers = new Map<string, Set<EnvelopeHandler>>();
   private readonly reconnectHandlers = new Set<ReconnectHandler>();
+  private readonly hostsChangeHandlers = new Set<() => void>();
   private projects: string[] = [];
   /** Remote hosts with at least one open tab. The local "" stream always runs. */
   private hosts: string[] = [];
@@ -179,6 +180,29 @@ class EventBus {
     }
     this.hosts = next;
     this.reopenForNewQuery();
+    // Fired only on a REAL change, after the field is updated, so a subscriber
+    // reading currentHosts() inside its handler already sees the new set. A
+    // restart that never changed the query must not make the dashboard refetch.
+    this.hostsChangeHandlers.forEach((h) => h());
+  }
+
+  /** The remote hosts whose events this connection is currently relaying: the
+   *  set declared by the last `setHosts`. The Pulse dashboard reads it to decide
+   *  which hosts to fan its own request out to — using the same set means the
+   *  rows it can show and the frames it can patch them from are always in sync,
+   *  and that neither surface ever dials a host the other did not. */
+  currentHosts(): string[] {
+    return [...this.hosts];
+  }
+
+  /** Subscribe to changes in the relayed host set (a remote project's first tab
+   *  opened, or its last one closed). Returns the unsubscribe function, like
+   *  every other subscription here. */
+  onHostsChange(handler: () => void): () => void {
+    this.hostsChangeHandlers.add(handler);
+    return () => {
+      this.hostsChangeHandlers.delete(handler);
+    };
   }
 
   /** Controlled restart of an open stream whose query changed: the reconnect
@@ -211,6 +235,7 @@ class EventBus {
     this.reconnectHandlers.clear();
     this.projects = [];
     this.hosts = [];
+    this.hostsChangeHandlers.clear();
   }
 
   /** Restart the stream to pick up a new backend origin (apiPath).

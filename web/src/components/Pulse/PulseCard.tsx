@@ -6,7 +6,7 @@ import { useJumpToSession, useJumpToPendingAsk, type JumpTarget } from "../../li
 import { usePulseTail, type PulseTail } from "./usePulseTail";
 import { useStickToBottom } from "./useStickToBottom";
 import { setPulseFocus } from "../../stores/pulseStore";
-import { pulseProjectBasename } from "./pulseFilter";
+import { pulseProjectLabel } from "./pulseFilter";
 import type { PulseRow, PulseStatus, PulseTodoState } from "../../api/types";
 
 /**
@@ -205,14 +205,16 @@ export function PulseStream({
   );
 }
 
-/** The jump target for a row. Pulse is local-only in v1, so the jump always
- *  targets this server; `host` is still explicit so a card can carry one when
- *  remote fan-out lands (see JumpTarget). Shared by the card and the focus pane
- *  so the two can never jump to different places. */
+/**
+ * The jump target for a row. `host` is part of the project's identity, never an
+ * afterthought: a local project and a remote one may share a path, so a jump
+ * that dropped it would send the session to the wrong machine. Shared by the
+ * card and the focus pane so the two can never jump to different places.
+ */
 export function jumpTargetFor(row: PulseRow): JumpTarget {
   return {
     projectPath: row.project_path,
-    host: "",
+    host: row.host,
     sessionId: row.session_id,
     title: row.title,
   };
@@ -290,7 +292,6 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
 
   const status = STATUS_META[row.status];
   const label = row.title || row.session_id;
-  const basename = pulseProjectBasename(row.project_path);
   // A needs-you row's ask IS the thing to do; the task line would just repeat
   // it (and the server already nulls current_task for these rows).
   const taskText = row.pending_ask ? row.pending_ask.summary : (row.current_task?.text ?? "");
@@ -378,7 +379,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
                 {status.glyph}
               </span>
               <span title={row.project_path} className="shrink-0 truncate text-xs text-muted-foreground">
-                {basename}
+                {pulseProjectLabel(row)}
               </span>
               <span className="min-w-0 flex-1 truncate text-xs">{label}</span>
               <span
@@ -398,7 +399,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
                   {status.glyph}
                 </span>
                 <span title={row.project_path} className="shrink-0 truncate text-xs text-muted-foreground">
-                  {basename}
+                  {pulseProjectLabel(row)}
                 </span>
                 {row.child_count > 0 && (
                   // A span, not the ui Badge: a Badge renders a div, and a

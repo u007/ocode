@@ -58,7 +58,7 @@ vi.mock("./api/client", () => {
 });
 
 vi.mock("./lib/eventBus", () => ({
-  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {}, setHosts: () => {} },
+  eventBus: { on: () => () => {}, onReconnect: () => () => {}, emit: () => {}, start: () => {}, stop: () => {}, setProjects: () => {}, onHostsChange: () => () => {}, currentHosts: () => [], setHosts: () => {} },
 }));
 
 // Capture what App passes to the sidebar PreviewHost, and expose a button that

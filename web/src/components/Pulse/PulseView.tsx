@@ -48,7 +48,7 @@ const SECTION_ORDER: { key: Section; title: string; matches: (s: PulseStatus) =>
 ];
 
 export function PulseView() {
-  const { rows, scope, setScope, loadMore, hasMore, error, retry } = usePulse();
+  const { rows, scope, setScope, loadMore, hasMore, error, hostErrors: failedHosts, retry } = usePulse();
   const [filter, setFilter] = useState("");
   usePulseAssistantHotkey(toggleAssistantWindow);
 
@@ -177,6 +177,26 @@ export function PulseView() {
           <span className="flex-1 min-w-0 truncate">Couldn’t load sessions: {error}</span>
           <Button size="sm" variant="outline" onClick={() => retry()}>
             <RefreshCw className="w-3.5 h-3.5" />
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {/* One remote host's outage, deliberately quieter than the fatal banner
+          above: the rows it last showed are still on the board, so this only
+          names what went stale and offers the same retry. */}
+      {failedHosts.length > 0 && (
+        <div
+          role="status"
+          data-testid="pulse-host-errors"
+          className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground border-b border-border"
+        >
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden />
+          <span className="flex-1 min-w-0 truncate">
+            Couldn’t refresh {failedHosts.length === 1 ? "a remote host" : `${failedHosts.length} remote hosts`} — showing their last known sessions.
+          </span>
+          <Button size="sm" variant="outline" onClick={() => retry()}>
+            <RefreshCw className="w-3 h-3" aria-hidden />
             Retry
           </Button>
         </div>

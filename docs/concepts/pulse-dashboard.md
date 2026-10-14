@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Pulse — cross-project live-sessions dashboard
-description: 'Assistant window (floating at app level: drag, minimise, maximise, narrow sheet, shared prefs store, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.'
+description: 'Assistant window (floating at app level: drag, minimise, maximise, narrow sheet, shared prefs store, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Remote fan-out (client-side per-host merge of GET /api/pulse through the /api/remote/{host} proxy, relayed-host set, per-host cursors, non-fatal hostErrors, (session_id, host) row identity, ~-suffix project-path reconcile). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.'
 tags:
   - pulse
   - dashboard
@@ -11,7 +11,8 @@ tags:
   - web
   - desktop
   - api
-timestamp: 2026-10-08T21:00:00Z
+  - remote-ssh
+timestamp: 2026-10-13T00:00:00Z
 ---
 # Pulse — cross-project live-sessions dashboard
 
@@ -22,8 +23,12 @@ projects**, answering two questions: *what is running?* and *what is waiting on
 me?* — with a one-click jump into any session. It is deliberately **not** a
 session manager: no rename, delete, archive, or bulk actions. It is no longer
 read-only, though: [focus mode](#focus-mode) resolves pending asks and sends
-replies inline (user decision 2026-10-08). v1 is
-**local-server only**; the desktop app renders the same SPA.
+replies inline (user decision 2026-10-08).
+
+Since 2026-10-13 the board also covers **remote (SSH/WSL) projects**: see
+[remote fan-out](#remote-fan-out). The server's own `GET /api/pulse` is still
+local-only — nothing about that changed — and the desktop app renders the same
+SPA.
 
 - Design spec: `docs/superpowers/specs/2026-09-24-pulse-dashboard-design.md`
 - Implementation plan: `docs/superpowers/plans/2026-09-24-pulse-dashboard/` (tasks 01–10 + INDEX)
@@ -177,8 +182,11 @@ scales with the number of *projects*, not with chat history. Consequences:
 - Live rows are merged **OVER** the disk listing (`gatherPulseInputs`), so a
   session that is both persisted and resident appears **once**, with its fresher
   live state.
-- Remote-host projects are **skipped** (`p.Host != ""`): their transcripts live
-  on another machine and v1 is local-only.
+- Remote-host projects are **skipped** by the SERVER (`p.Host != ""`): their
+  transcripts live on another machine, so its registry can never hold them. The
+  *client* closes that gap by asking each remote host its own question — see
+  [remote fan-out](#remote-fan-out). Both halves are true: the local disk scan
+  stays local, and the remote rows arrive over the proxy instead.
 
 ## `lastTurnErr` on `sessionEntry`
 
@@ -820,11 +828,82 @@ user was.
   activation. The tray item is the reachable equivalent; the gap is recorded in
   `TODO.md`.
 
+## Remote fan-out
+
+A remote (SSH/WSL) project's sessions used to be invisible on the board in
+**both** scopes, for a structural reason rather than an oversight: remote chat
+runs on the HOST's own `ocode serve --remote`, so no agent for it is ever in
+this server's registry, and the server's disk scan deliberately skips
+`p.Host != ""`. The web store compounded it by discarding every host-tagged SSE
+frame. Recorded as deferred in `TODO.md` since 2026-09-28.
+
+The fan-out is **client-side; no new route and no Go change**. The same
+`GET /api/pulse` the dashboard already made is now issued **once per source**:
+the local server, plus one request per remote host routed through the existing
+`/api/remote/{host}` reverse proxy (`api.getPulse(scope, cursor, limit, host?)`).
+
+Which hosts, and why not all of them:
+
+- **Only hosts the SSE stream already relays** (`eventBus.currentHosts()` — the
+  set `App.tsx` declares via `eventBus.setHosts`, one entry per remote host with
+  at least one open tab). This is the cold-connect-safe choice: dialing an
+  unsaved or disconnected host is the 2026-09-18 "hovering a remote row hangs
+  the app" class. It also keeps the list and the live frames honest — a host
+  whose tab just opened is both relayed *and* fetched, so a card can appear and
+  be patched from the same set. A host with no open tab stays invisible, which
+  is the accepted residual.
+- The store reseeds when that set changes, so a remote project's first tab makes
+  its cards appear with the tab rather than on some later refresh.
+
+Failure is deliberately not fatal. The fan-out is `Promise.allSettled`, so one
+unreachable host cannot reject the merge and empty the board: a source that
+fails **keeps the rows it last showed**, drops its cursor, and is named in a new
+`hostErrors`. `PulseView` renders that as a quieter `role="status"` notice with
+Retry, under the existing fatal error banner. A remote outage dims the board; it
+never blanks it.
+
+Paging follows: `hostCursors` holds one cursor per host (`nextCursor` stays the
+local source's), and `hasMore` means *any* source has another page — so **Load
+more** still works when only a remote host has pages left.
+
+Row identity becomes **`(session_id, host)`**: `applyPulseEvent` takes a host, so
+one host's event can never patch another host's card that happens to share an id.
+A remote row's `host` field is set by the *client* — the server never sends it,
+because a locally-resident session never has a remote project root (remote chat
+never reaches the local handler), so the field would always be `""`.
+
+Two consequences worth knowing before touching this code:
+
+- **Paths must be reconciled, not guessed.** A remote project is registered here
+  with its path verbatim (`~/www/aimsai2` — the separator and `~` belong to the
+  remote shell), but the host expands it when it saves the same project
+  (`/home/james/www/aimsai2`). A card reports the host's expanded form, and a
+  jump matches the saved project on `(path, host)` — keyed on the host's form it
+  would match nothing and the card would render but do nothing.
+  `resolvePulseProjectPath` matches verbatim first, then by `~`-suffix (longest
+  wins, so `~/www/app` beats `~/app`); the remote `$HOME` is never assumed. An
+  unresolvable row keeps the host's own path and its jump is refused loudly,
+  which is strictly better than a wrong-machine jump.
+- **Cards are labelled `basename @ host`.** Two remote machines can hold the same
+  basename, so a bare basename is a coin toss. The free-text filter matches the
+  host too, which is now the only way to isolate remote cards on a multi-host
+  board.
+
+Pure helpers live in `web/src/lib/pulseRemoteRows.ts` (`pulseRowKey`,
+`stampPulseHost`, `resolvePulseProjectPath`), with the merge in
+`web/src/stores/pulseStore.tsx`.
+
+Still local-only, unchanged, and still open: `GET /api/pulse/terminals`, and the
+Pulse assistant's tools over remote projects (`pulse-assistant.md` §Known
+limits). Both are named in `TODO.md`.
+
 ## Known limits
 
 - **Remote terminals are not listed:** `GET /api/pulse/terminals` reads only this
-  server's local registry. A remote project's terminals live on the remote host and
-  are not fanned in, the same gap as remote sessions.
+  server's local registry. A remote project's terminals live on the remote host
+  and are **still** not fanned in. Remote *sessions* were the same gap until
+  2026-10-13 — [remote fan-out](#remote-fan-out) below fixed them; terminals
+  were not included and remain open (see `TODO.md`).
 - **Cross-process blindness:** the desktop app and a separately-running dev
   server each have their own in-process session registry (see
   [cross-process-session-sync.md](cross-process-session-sync.md)), so each sees

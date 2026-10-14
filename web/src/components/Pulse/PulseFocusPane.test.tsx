@@ -43,6 +43,7 @@ function makeRow(over: Partial<PulseRow> = {}): PulseRow {
     turn_started_at: "2020-01-01T00:00:00Z",
     updated_at: new Date().toISOString(),
     child_count: 0,
+    host: "",
     ...over,
   };
 }

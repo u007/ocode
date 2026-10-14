@@ -1340,10 +1340,15 @@ https page; mixed-content risk) and terminal WebSockets from the webview.
 The dashboard shipped with the v1 scope the spec defined (local server only). Each item below was
 deferred at that time and is still open:
 
-- **Remote-host fan-out.** `GET /api/pulse` lists only local projects (`internal/server/handler_pulse.go`
-  skips entries with a `Host`). A remote project's sessions are not in this process's registry, so
-  the dashboard cannot see them at all — the honest version would fan out to each connected host's
-  `/api/pulse` and merge, which needs a per-host cursor and a partial-failure story.
+- **Remote-host fan-out — DONE (2026-10-13).** Delivered CLIENT-side, exactly as described below:
+  no new route, no Go change. `pulseStore` issues the same `GET /api/pulse` once per source (local
+  server + each remote host via the existing `/api/remote/{host}` proxy), with a per-host cursor
+  (`hostCursors`) and a partial-failure story (`Promise.allSettled`, one dead host keeps its last
+  rows and is named in `hostErrors`). Shipped design: `docs/concepts/pulse-dashboard.md` §Remote
+  fan-out.
+  - ACCEPTED RESIDUAL, still open: only hosts with an open tab are asked (the relayed set), so a
+    remote project with no open tab stays invisible. Widening this means dialing hosts, which is
+    the cold-connect hazard — a deliberate trade, not an oversight.
 - **Inline approve/deny from a card.** A needs-you card currently jumps to the session and opens
   the side pane. Answering the ask from the card needs a decision endpoint that does not require the
   session's tab to exist.
@@ -4114,15 +4119,15 @@ Pulse-hover revision-baseline overwrite, and the SpeechProvider post-Stop stall.
   here: it needs a decision about which viewer surface wins, and a wrong guess
   turns a harmless no-op into a wrong-file bug. Until then, silent is the right
   default — a link must never navigate the shell.
-- [ ] **Pulse `getPulse` is host-blind by design (NOT a regression from this
-  pass).** Remote sessions were never listed and still are not: `/api/pulse`
-  reads the in-process registry plus local project dirs, `gatherDiskPulseInputs`
-  skips `p.Host != ""`, and `PulseRow` has no `host` field. What this pass
-  removed is the *pointless polling* — a remote turn used to re-arm the
-  unknown-session refetch continuously even though the response could never
-  contain it. Nothing became less visible; it just stopped costing ~3 requests a
-  second. Real remote fan-out is still a separate feature: it needs `host` on
-  `PulseRow` and a per-host fetch in the client.
+- [x] **Pulse `getPulse` is host-blind — DONE (2026-10-13), closed by
+  "Remote-host fan-out" above.** This entry's own last sentence named the fix
+  ("`host` on `PulseRow` and a per-host fetch in the client"), and that is what
+  shipped, with one correction worth keeping: the `host` is set by the CLIENT,
+  not the server. A locally-resident session never has a remote project root
+  (remote chat never reaches the local handler), so a server-side field would
+  only ever serialize `""`. The client knows which proxy answered and stamps it.
+  The *pointless polling* this pass removed stays removed: a frame from a host we
+  are not fanning out to is still dropped without arming a refetch.
 ## Remote target hardening (2026-09-29)
 
 Fixed in this pass: ssh option injection via a leading-`-` host

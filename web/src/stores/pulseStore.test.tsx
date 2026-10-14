@@ -1,26 +1,41 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, act, waitFor } from "@testing-library/react";
-import { PulseProvider, usePulse, pulseEventSink, sortPulseRows } from "./pulseStore";
+import {
+  PulseProvider,
+  usePulse,
+  pulseEventSink,
+  sortPulseRows,
+  __resetPulseSavedProjectsForTests,
+} from "./pulseStore";
 import { api } from "../api/client";
 import type { PulseRow } from "../api/types";
 
 vi.mock("../api/client", () => ({
-  api: { getPulse: vi.fn() },
+  api: { getPulse: vi.fn(), listProjects: vi.fn() },
 }));
 
 // Fake the bus so the reconnect reseed can be driven deterministically (the
 // real bus opens a live SSE stream, which jsdom has no server for).
 const reconnectHandlers = new Set<() => void>();
+const hostsChangeHandlers = new Set<() => void>();
+/** The relayed host set the fake bus reports, and the fake `setHosts` mutator. */
+const bus: { hosts: string[] } = { hosts: [] };
 vi.mock("../lib/eventBus", () => ({
   eventBus: {
     onReconnect: (h: () => void) => {
       reconnectHandlers.add(h);
       return () => reconnectHandlers.delete(h);
     },
+    onHostsChange: (h: () => void) => {
+      hostsChangeHandlers.add(h);
+      return () => hostsChangeHandlers.delete(h);
+    },
+    currentHosts: () => [...bus.hosts],
   },
 }));
 
 const getPulse = vi.mocked(api.getPulse);
+const listProjects = vi.mocked(api.listProjects);
 
 /** Fixture default: a fixed PAST timestamp. Anything a live event stamps
  *  (new Date().toISOString()) is then genuinely newer, so recency assertions
@@ -38,6 +53,7 @@ function row(over: Partial<PulseRow> & { session_id: string }): PulseRow {
     turn_started_at: "",
     updated_at: OLD,
     child_count: 0,
+    host: "",
     ...over,
   };
 }
@@ -68,8 +84,12 @@ function emit(event: string, sessionId: string, data: unknown, host = "") {
 
 beforeEach(() => {
   getPulse.mockReset();
+  listProjects.mockReset();
+  __resetPulseSavedProjectsForTests();  listProjects.mockResolvedValue([]);
   getPulse.mockResolvedValue(page([]));
+  bus.hosts = [];
   reconnectHandlers.clear();
+  hostsChangeHandlers.clear();
   vi.useRealTimers();
 });
 
@@ -82,7 +102,7 @@ describe("pulseStore seeding", () => {
     getPulse.mockResolvedValue(page([row({ session_id: "a" })]));
     mount();
     await waitFor(() => expect(latest.rows).toHaveLength(1));
-    expect(getPulse).toHaveBeenCalledWith("live", null, 50);
+    expect(getPulse).toHaveBeenCalledWith("live", null, 50, undefined);
     expect(latest.rows[0].session_id).toBe("a");
   });
 
@@ -374,7 +394,7 @@ describe("pulseStore scope and paging", () => {
     await act(async () => {
       latest.setScope("all");
     });
-    expect(getPulse).toHaveBeenCalledWith("all", null, 50);
+    expect(getPulse).toHaveBeenCalledWith("all", null, 50, undefined);
     expect(latest.rows.map((r) => r.session_id)).toEqual(["old"]);
     // The active scope must be recorded, not just used for this one request:
     // the no-op guard in setScope and the reconnect reseed both read it back.
@@ -423,7 +443,7 @@ describe("pulseStore scope and paging", () => {
     });
     // Both clicks must reach the network; the second is a real change of mind.
     expect(getPulse).toHaveBeenCalledTimes(2);
-    expect(getPulse).toHaveBeenLastCalledWith("live", null, 50);
+    expect(getPulse).toHaveBeenLastCalledWith("live", null, 50, undefined);
 
     await act(async () => {
       resolveAll?.(page([row({ session_id: "a" })]));
@@ -441,7 +461,7 @@ describe("pulseStore scope and paging", () => {
     await act(async () => {
       latest.loadMore();
     });
-    expect(getPulse).toHaveBeenLastCalledWith("live", "cur1", 50);
+    expect(getPulse).toHaveBeenLastCalledWith("live", "cur1", 50, undefined);
     // Server pages are disjoint and pre-sorted, so appending preserves order.
     expect(latest.rows.map((r) => r.session_id)).toEqual(["a", "b"]);
     expect(latest.hasMore).toBe(true);
@@ -492,7 +512,7 @@ describe("sortPulseRows", () => {
 });
 
 describe("pulseStore known-session no-refetch", () => {
-  it("does not refetch for a remote host's events — its sessions are not in this list", async () => {
+  it("does not refetch for events from a host it is not fanning out to", async () => {
     vi.useFakeTimers();
     getPulse.mockResolvedValue(page([row({ session_id: "a" })]));
     mount();
@@ -501,12 +521,11 @@ describe("pulseStore known-session no-refetch", () => {
     });
     getPulse.mockClear();
 
-    // GET /api/pulse is LOCAL-only by design (v1 of the dashboard): it lists
-    // the in-process registry and local project dirs, and PulseRow has no host
-    // field. A remote host's session id therefore looks permanently "unknown"
-    // here, so every frame of a streaming remote turn re-armed the 300ms
-    // debounce — ~3 wasted fetches/second, each of which still cannot learn
-    // about the remote session.
+    // A host with no open tab is not in the relayed set, so the dashboard does
+    // not ask it either (dialing an unsaved or disconnected host is the
+    // cold-connect hazard). Its frames therefore describe a session no fetch
+    // could ever learn about, and each one must not re-arm the 300ms debounce —
+    // that was ~3 wasted fetches per second during a streaming remote turn.
     for (let i = 0; i < 20; i++) {
       emit("text", "ses_remote", { delta: "x" }, "james@example.com");
       emit("turn_heartbeat", "ses_remote", {}, "james@example.com");
@@ -580,5 +599,290 @@ describe("sortPulseRows across timestamp formats", () => {
       "live_Z",
       "server_plus08",
     ]);
+  });
+});
+
+// ── Remote fan-out ───────────────────────────────────────────────────────────
+//
+// The dashboard asks the local server AND every remote host the SSE stream
+// relays, so a remote project's sessions get cards. These cover the three
+// things a multi-source list can get wrong: which hosts are asked, what happens
+// to one that cannot answer, and that a live frame patches the right card.
+
+describe("pulseStore remote fan-out", () => {
+  const HOST = "james@217.216.72.49";
+
+  function remoteProject(path: string) {
+    return { path, name: path, added_at: "", last_used_at: "", order: 0, group: "", host: HOST };
+  }
+
+  it("asks each relayed host alongside the local server and stamps the host on its rows", async () => {
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST
+        ? page([row({ session_id: "r1", project_path: "/home/james/www/aimsai2", host })])
+        : page([row({ session_id: "l1" })]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+
+    // Once for the local source, once for the remote one.
+    expect(getPulse.mock.calls.map((c) => c[3])).toEqual([undefined, HOST]);
+    const remote = latest.rows.find((r) => r.session_id === "r1");
+    expect(remote?.host).toBe(HOST);
+    const local = latest.rows.find((r) => r.session_id === "l1");
+    expect(local?.host).toBe("");
+  });
+
+  it("resolves a remote project path to the locally-registered form so a jump finds it", async () => {
+    // The remote server reports the path it expanded; this server registered the
+    // tilde form. Without the resolve the card renders but its click is refused.
+    bus.hosts = [HOST];
+    listProjects.mockResolvedValue([remoteProject("~/www/aimsai2")]);
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST
+        ? page([row({ session_id: "r1", project_path: "/home/james/www/aimsai2", host })])
+        : page([]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(1));
+    expect(latest.rows[0].project_path).toBe("~/www/aimsai2");
+  });
+
+  it("keeps the local board and the host's previous rows when that host fails", async () => {
+    // Seed both sources, then drop only the remote one: the dashboard must dim,
+    // never blank, and the local rows must be untouched.
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", host })]) : page([row({ session_id: "l1" })]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) => {
+      if (host === HOST) throw new Error("502 remote connect failed");
+      return page([row({ session_id: "l1" })]);
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await act(async () => {
+      latest.retry();
+    });
+    await waitFor(() => expect(latest.hostErrors).toEqual([HOST]));
+    // Not a fatal error — the local board is healthy.
+    expect(latest.error).toBeNull();
+    expect(latest.rows.map((r) => r.session_id).sort()).toEqual(["l1", "r1"]);
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it("merges every source's ordering into one rank-ordered list", async () => {
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST
+        ? page([row({ session_id: "r_idle", status: "idle", host })])
+        : page([row({ session_id: "l_run", status: "running" }), row({ session_id: "l_ask", status: "needs_permission" })]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(3));
+    expect(latest.rows.map((r) => r.session_id)).toEqual(["l_ask", "l_run", "r_idle"]);
+  });
+
+  it("pages every source independently, so one host's cursor is not the board's", async () => {
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, cursor, _limit, host?: string) =>
+      host === HOST
+        ? page([row({ session_id: cursor ? "r2" : "r1", host })], cursor ? null : "rcur")
+        : page([row({ session_id: cursor ? "l2" : "l1" })], cursor ? null : "lcur"),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+    expect(latest.hasMore).toBe(true);
+    expect(latest.nextCursor).toBe("lcur");
+
+    await act(async () => {
+      latest.loadMore();
+    });
+    await waitFor(() => expect(latest.rows).toHaveLength(4));
+    // Both cursors were used, not just the local one.
+    expect(getPulse.mock.calls.map((c) => c[1])).toEqual([null, null, "lcur", "rcur"]);
+    expect(latest.hasMore).toBe(false);
+  });
+
+  it("patches a remote card from its own host's event, leaving the local card alone", async () => {
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", host })]) : page([row({ session_id: "l1" })]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+
+    emit("permission", "r1", { tool: "bash", command: "ls" }, HOST);
+    await waitFor(() => expect(latest.rows.find((r) => r.session_id === "r1")?.status).toBe("needs_permission"));
+    // The local row is untouched — identity is (session_id, host), not id alone.
+    expect(latest.rows.find((r) => r.session_id === "l1")?.status).toBe("idle");
+    expect(latest.counts.needsYou).toBe(1);
+  });
+
+  it("reseeds when a remote project's first tab changes the relayed host set", async () => {
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", host })]) : page([row({ session_id: "l1" })]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(1));
+    expect(getPulse).toHaveBeenCalledTimes(1);
+
+    bus.hosts = [HOST];
+    act(() => hostsChangeHandlers.forEach((h) => h()));
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+    expect(latest.rows.find((r) => r.session_id === "r1")?.host).toBe(HOST);
+  });
+
+  it("reports an unresolvable remote project path ONCE, not on every refresh", async () => {
+    // A remote host can report a project this server never saved. The row still
+    // renders (its jump is refused rather than pointed at the wrong machine), so
+    // the only thing that must NOT happen is silence — and the second time it
+    // must not spam 50 identical lines.
+    bus.hosts = [HOST];
+    listProjects.mockResolvedValue([]);
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", project_path: "/srv/unregistered", host })]) : page([]),
+    );
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(1));
+
+    await act(async () => {
+      latest.retry();
+    });
+    await waitFor(() => expect(latest.rows).toHaveLength(1));
+
+    const lines = spy.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes("not a project saved"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("/srv/unregistered");
+    expect(lines[0]).toContain(HOST);
+    // The row keeps the host's own path, so nothing is silently rewritten.
+    expect(latest.rows[0].project_path).toBe("/srv/unregistered");
+  });
+
+  it("patches a local card whose row arrived without a host field", async () => {
+    // The Go row has no `host` key, so a real local page lands as `undefined`.
+    // The fixture's `host: ""` hid this: the store's strict `=== ""` lookups
+    // never matched, every frame looked like an unknown session, and the board
+    // polled /api/pulse ~3x/s for a whole turn instead of patching the card.
+    const serverRow = { ...row({ session_id: "l1" }) } as Partial<PulseRow>;
+    delete serverRow.host;
+    getPulse.mockResolvedValue(page([serverRow as PulseRow]));
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(1));
+    expect(latest.rows[0].host).toBe("");
+    getPulse.mockClear();
+
+    vi.useFakeTimers();
+    emit("turn_started", "l1", {});
+    expect(latest.rows[0].status).toBe("running");
+    emit("text", "l1", { text: "hi" });
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(getPulse).not.toHaveBeenCalled();
+  });
+
+  it("loadMore never re-asks a source whose cursor is exhausted", async () => {
+    // Local has one page, remote has two. The second load-more must ask only
+    // the remote host; re-asking local fetched page one again, got its cursor
+    // back, and `hasMore` cycled between the sources forever.
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, cursor, _limit, host?: string) =>
+      host === HOST
+        ? page([row({ session_id: cursor ? "r2" : "r1", host })], cursor ? null : "rcur")
+        : page([row({ session_id: "l1" })], null),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+    expect(latest.hasMore).toBe(true);
+    getPulse.mockClear();
+
+    await act(async () => {
+      latest.loadMore();
+    });
+    await waitFor(() => expect(latest.rows).toHaveLength(3));
+    expect(getPulse.mock.calls.map((c) => [c[1], c[3]])).toEqual([["rcur", HOST]]);
+    expect(latest.hasMore).toBe(false);
+  });
+
+  it("still replaces a remote host's rows with its fresh page when the local fetch fails", async () => {
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", status: "running", host })]) : page([row({ session_id: "l1" })]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) => {
+      if (host === HOST) return page([row({ session_id: "r1", status: "needs_permission", host })]);
+      throw new Error("local 500");
+    });
+    await act(async () => {
+      latest.retry();
+    });
+    await waitFor(() => expect(latest.error).toBe("local 500"));
+    // Local rows are held over; the remote page that DID land wins over its
+    // stale copy rather than being dropped by a first-occurrence dedupe.
+    expect(latest.rows.map((r) => [r.session_id, r.status])).toEqual([
+      ["r1", "needs_permission"],
+      ["l1", "idle"],
+    ]);
+    expect(latest.counts).toEqual({ running: 0, needsYou: 1 });
+  });
+
+  it("does not cache a failed project list", async () => {
+    bus.hosts = [HOST];
+    listProjects.mockRejectedValueOnce(new Error("projects timeout"));
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", project_path: "/home/james/www/aimsai2", host })]) : page([]),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(1));
+    expect(latest.rows[0].project_path).toBe("/home/james/www/aimsai2");
+
+    listProjects.mockResolvedValue([remoteProject("~/www/aimsai2")]);
+    await act(async () => {
+      latest.retry();
+    });
+    await waitFor(() => expect(latest.rows[0].project_path).toBe("~/www/aimsai2"));
+    expect(listProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it("reseeds against a fresh project list on reconnect", async () => {
+    bus.hosts = [HOST];
+    listProjects.mockResolvedValueOnce([]);
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", project_path: "/home/james/www/aimsai2", host })]) : page([]),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(1));
+    expect(latest.rows[0].project_path).toBe("/home/james/www/aimsai2");
+
+    // The project was added while the stream was down; the reconnect reseed
+    // must read the new list, not the one it cached before the outage.
+    listProjects.mockResolvedValue([remoteProject("~/www/aimsai2")]);
+    act(() => reconnectHandlers.forEach((h) => h()));
+    await waitFor(() => expect(latest.rows[0].project_path).toBe("~/www/aimsai2"));
+  });
+
+  it("drops a host's rows once its last tab closes", async () => {
+    bus.hosts = [HOST];
+    getPulse.mockImplementation(async (_scope, _cursor, _limit, host?: string) =>
+      host === HOST ? page([row({ session_id: "r1", host })]) : page([row({ session_id: "l1" })]),
+    );
+    mount();
+    await waitFor(() => expect(latest.rows).toHaveLength(2));
+
+    bus.hosts = [];
+    act(() => hostsChangeHandlers.forEach((h) => h()));
+    await waitFor(() => expect(latest.rows.map((r) => r.session_id)).toEqual(["l1"]));
+    expect(latest.hostErrors).toEqual([]);
   });
 });

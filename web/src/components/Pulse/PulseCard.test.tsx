@@ -47,6 +47,7 @@ function makeRow(overrides: Partial<PulseRow> = {}): PulseRow {
     turn_started_at: new Date(NOW - 45_000).toISOString(),
     updated_at: new Date(NOW - 45_000).toISOString(),
     child_count: 0,
+    host: "",
     ...overrides,
   };
 }
@@ -1026,5 +1027,50 @@ describe("PulseCard settled multi-line", () => {
     expect(cardButton().textContent).toContain("Fix the pulse dashboard");
     expect(screen.queryByTestId("pulse-stream-region")).not.toBeInTheDocument();
     expect(cardButton().parentElement!.className).not.toContain("min-h-[32rem]");
+  });
+});
+
+describe("PulseCard remote project rows", () => {
+  beforeEach(() => {
+    mockJump.mockReset();
+  });
+
+  it("labels the card with the host so two machines' same-named projects differ", () => {
+    render(
+      <PulseCard
+        row={makeRow({
+          project_path: "~/www/aimsai2",
+          host: "james@217.216.72.49",
+          title: "Cluster sort order",
+        })}
+        compact={false}
+      />,
+    );
+    // The visible label carries the host; the tooltip keeps the verbatim path.
+    expect(screen.getByText("aimsai2 @ james@217.216.72.49")).toBeTruthy();
+    expect(screen.getByTitle("~/www/aimsai2")).toBeTruthy();
+  });
+
+  it("passes the host on the jump target, so a click reaches the right machine", () => {
+    render(
+      <PulseCard
+        row={makeRow({ project_path: "~/www/aimsai2", host: "james@box" })}
+        compact={false}
+      />,
+    );
+    fireEvent.click(cardButton());
+    // path + host, never path alone: a local project can share the path.
+    expect(mockJump).toHaveBeenCalledWith({
+      projectPath: "~/www/aimsai2",
+      host: "james@box",
+      sessionId: "ses_1",
+      title: "Fix the pulse dashboard",
+    });
+  });
+
+  it("keeps a local jump host-agnostic (empty host, not undefined)", () => {
+    render(<PulseCard row={makeRow()} compact={false} />);
+    fireEvent.click(cardButton());
+    expect(mockJump.mock.calls[0][0]).toMatchObject({ projectPath: "/Users/james/www/ocode", host: "" });
   });
 });

@@ -52,6 +52,7 @@ function row(over: Partial<PulseRow> & { session_id: string }): PulseRow {
     turn_started_at: "",
     updated_at: "2020-01-01T00:00:00Z",
     child_count: 0,
+    host: "",
     ...over,
   };
 }
@@ -67,6 +68,7 @@ function mockPulse() {
     nextCursor: null,
     hasMore: false,
     error: null,
+    hostErrors: [],
     loading: false,
     counts: { running: 0, needsYou: 0 },
     setScope: vi.fn(),

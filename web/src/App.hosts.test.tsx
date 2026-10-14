@@ -70,7 +70,7 @@ const bus = vi.hoisted(() => ({
   off: vi.fn(),
   offReconnect: vi.fn(),
   setProjects: vi.fn(),
-  setHosts: vi.fn(),
+  onHostsChange: () => () => {}, currentHosts: () => [], setHosts: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
 }));

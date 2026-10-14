@@ -1394,6 +1394,12 @@ export interface PulseRow {
   /** RFC 3339. */
   updated_at: string;
   child_count: number;
+  /** The SSH/WSL host that runs this session; "" for the local server. The
+   *  server never serializes this field (a locally-resident session has no
+   *  remote project root, so it would only ever be ""): the CLIENT stamps it on
+   *  every fetched page via `stampPulseHost`, "" included, so the field is
+   *  always a string by the time a row reaches the store. */
+  host: string;
 }
 
 export interface PulsePage {

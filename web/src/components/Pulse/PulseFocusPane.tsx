@@ -13,7 +13,7 @@ import {
   jumpTargetFor,
   usePulseElapsed,
 } from "./PulseCard";
-import { pulseProjectBasename } from "./pulseFilter";
+import { pulseProjectLabel } from "./pulseFilter";
 import { usePulseTail } from "./usePulseTail";
 import { useStickToBottom } from "./useStickToBottom";
 import type {
@@ -190,7 +190,7 @@ export function PulseFocusPane({ row, onClose }: { row: PulseRow; onClose: () =>
           {status.glyph}
         </span>
         <span title={row.project_path} className="shrink-0 truncate text-xs text-muted-foreground">
-          {pulseProjectBasename(row.project_path)}
+          {pulseProjectLabel(row)}
         </span>
         <h2 className="min-w-0 flex-1 truncate text-sm font-medium">{label}</h2>
         <span data-testid="pulse-focus-elapsed" className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
