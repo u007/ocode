@@ -16,7 +16,7 @@ reading the code while building it. Neither was reproduced.
   `/goal` in a headless message. Either way the goal has to be set before the turn runs.
 - **2. Evaluation does not defer for background work.** Claude Code holds goal
   evaluation while subagents or background shells are still running. Here the goal
-  judge runs at every natural stop (`GoalJudgeSync`, `internal/agent/goal.go:304`), so it
+  judge runs at every natural stop (`GoalJudgeSync`, `internal/agent/goal.go:328`), so it
   can judge a turn that is still waiting on `task` or `bash` background output and
   return `not_met`. Deferred because the judge gate needs a "background work in flight"
   signal from `AgentRunRegistry` and the bash job registry, and no such signal reaches
@@ -28,21 +28,21 @@ reading the code while building it. Neither was reproduced.
   current behaviour is the bounded, conservative option.
 - **4. TUI `/rc` auto-continue judge dispatch can never resume (pre-existing, found by
   reading, not reproduced).** On the `/rc` branches of `streamDoneMsg`
-  (`internal/tui/model.go`, the `pendingRCAutoContinue` branch near `:5377` and the RC
-  branch near `:5452`), `maybeDispatchAutoContinueJudge(true)` returns with `m.streaming`
+  (`internal/tui/model.go`, the `pendingRCAutoContinue` branch near `:5387` and the RC
+  branch near `:5462`), `maybeDispatchAutoContinueJudge(true)` returns with `m.streaming`
   still true. `autoContinueJudgeFinishedMsg` resumes only when `!m.streaming`
-  (`model.go:5813`), so the verdict can never fire a resume. The goal path already does
-  this correctly: `rcGoalJudge` (`model.go:289`) clears `m.streaming` before it returns.
+  (`model.go:5823`), so the verdict can never fire a resume. The goal path already does
+  this correctly: `rcGoalJudge` (`model.go:287`) clears `m.streaming` before it returns.
   The fix is to clear `streaming` and `cancelStream` on the auto-continue dispatch path
   the same way. Add a test that drives the RC branch to the judge and asserts the resume.
 - **5. TUI session save can revert a server-side metadata write (pre-existing class,
-  found by reading, not reproduced).** `sessionSidebarMetadata` (`internal/tui/model.go:21217`)
+  found by reading, not reproduced).** `sessionSidebarMetadata` (`internal/tui/model.go:21226`)
   builds the save from `m.sessionBaseMetadata`, a snapshot taken at load time
-  (`restoreSessionMetadata`, `:21254`). A `session.UpdateMetadataForDir` write made by
+  (`restoreSessionMetadata`, `:21263`). A `session.UpdateMetadataForDir` write made by
   another process (such as `ocode serve`) while the TUI has the session open is
   reverted on the next TUI save, because the snapshot still holds the old value. The
   `goal` key is already excluded from the snapshot (`sessionOwnedMetadataKeys`,
-  `:21189`), so this only bites keys outside that set. Deferred because the real fix is
+  `:21198`), so this only bites keys outside that set. Deferred because the real fix is
   patch semantics in the session layer (save merges the keys it owns, not the whole
   map), which is outside the goal change.
 - **6. A turn that ends while a goal judge is in flight is never judged (found by the final review, not reproduced).**
