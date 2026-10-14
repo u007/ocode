@@ -73,6 +73,9 @@ const (
 	goalVerdictKey   = "verdict"
 	goalReasonKey    = "reason"
 	goalAwaitingUser = "awaiting_user"
+	// goalUnconfirmedReason replaces the judge's reason when a met or impossible
+	// verdict is downgraded below the confidence floor.
+	goalUnconfirmedReason = "the evaluator could not confirm it with enough confidence"
 )
 
 // goalReasons is the closed set of reasons, in the order they are described to
@@ -94,6 +97,7 @@ Rules:
 - Answer "impossible" only when the condition contradicts itself or needs something the assistant demonstrably cannot reach. Difficulty is not impossibility.
 - A reply that ends on a question for the user, or waits on their decision, confirmation or input, is "not_met" with reason "awaiting_user".
 - Answer "met" only when the transcript shows every part of the condition satisfied.
+- A "_projection" field in the transcript state means the view is partial; do not answer "met" on it.
 Choose "not_met" when the evidence is incomplete or unclear.`
 
 // goalTurnUsedTools reports whether any assistant message after the last user
@@ -286,13 +290,33 @@ func (a *Agent) GoalJudgeAsync(messages []Message, gen uint64) bool {
 	copy(snapshot, messages)
 	crashguard.Go(func() {
 		defer a.goalJudgeMu.Unlock()
-		res := a.GoalJudgeSync(snapshot)
+		res := a.goalJudgeRecovering(snapshot)
 		res.Gen = gen
 		if a.OnGoalJudge != nil {
 			a.OnGoalJudge(res)
 		}
 	})
 	return true
+}
+
+// goalJudgeRecovering is GoalJudgeSync with a panic turned into an unavailable
+// result. OnGoalJudge must always run: an /rc listener stays un-armed until it does.
+// crashguard.Go still guards the goroutine for panics outside the judge.
+func (a *Agent) goalJudgeRecovering(messages []Message) (res GoalJudgeResult) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		detail := fmt.Sprintf("goal judge panicked: %v", r)
+		a.emitDebug("AGENT", detail)
+		status := GoalPaused
+		if gs, ok := a.Goal(); ok {
+			status = gs.Status
+		}
+		res = GoalJudgeResult{Verdict: "unavailable", Status: status, Detail: detail, Err: fmt.Errorf("%v", r)}
+	}()
+	return a.GoalJudgeSync(messages)
 }
 
 // GoalJudgeSync evaluates the goal after a turn: stall and cap guards first, then
@@ -342,9 +366,6 @@ func (a *Agent) decideGoal(gs *GoalState, messages []Message) GoalJudgeResult {
 	if gs.NoToolTurns >= goalStallTurns {
 		return goalPause(gs, "stalled", fmt.Sprintf("no tool use in the last %d turns", gs.NoToolTurns), nil)
 	}
-	if gs.Turns >= GoalMaxTurns {
-		return goalPause(gs, "capped", fmt.Sprintf("reached the %d-turn cap", GoalMaxTurns), nil)
-	}
 
 	d := a.resolveDecider(slotGoal)
 	if d == nil {
@@ -390,6 +411,9 @@ func (a *Agent) decideGoal(gs *GoalState, messages []Message) GoalJudgeResult {
 	if verdict != "not_met" && !(conf >= goalMinConfidenceDefault && conf <= 1) {
 		detail = fmt.Sprintf("%s said %s at %.0f%% confidence, below the %.2f floor; treated as not met (reason: %s)", label, verdict, conf*100, goalMinConfidenceDefault, reason)
 		verdict = "not_met"
+		// The judge's reason names why it was sure, which contradicts a
+		// downgraded "met" in the resume text. Say what actually happened.
+		gs.LastReason = goalUnconfirmedReason
 	}
 	switch verdict {
 	case "met":
@@ -402,6 +426,11 @@ func (a *Agent) decideGoal(gs *GoalState, messages []Message) GoalJudgeResult {
 	if reasonKey == goalAwaitingUser {
 		gs.Status = GoalPaused
 		return GoalJudgeResult{Verdict: "not_met", Detail: detail}
+	}
+	// The cap is judged like any other turn, so a goal finished on its last
+	// turn still closes as met. Only a not_met is stopped here.
+	if gs.Turns >= GoalMaxTurns {
+		return goalPause(gs, "capped", fmt.Sprintf("reached the %d-turn cap; %s", GoalMaxTurns, detail), nil)
 	}
 	gs.Status = GoalActive
 	return GoalJudgeResult{Verdict: "not_met", Detail: detail, Resume: true}

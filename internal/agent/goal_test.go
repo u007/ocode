@@ -251,6 +251,8 @@ func TestGoalJudge_StallPausesAfterThreeNoToolTurns(t *testing.T) {
 	}
 }
 
+// A not_met at the cap pauses instead of resuming. The judge still runs on the
+// capped turn, so a met verdict on that turn is honoured.
 func TestGoalJudge_TurnCapPauses(t *testing.T) {
 	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
 	a := newGoalTestAgent(t, stub)
@@ -259,8 +261,50 @@ func TestGoalJudge_TurnCapPauses(t *testing.T) {
 	if res.Verdict != "capped" || res.Status != GoalPaused || res.Resume {
 		t.Fatalf("turn cap: got %+v", res)
 	}
-	if stub.calls != 0 {
-		t.Fatalf("capped turn must not call the judge, calls=%d", stub.calls)
+	if stub.calls != 1 {
+		t.Fatalf("capped turn must still be judged, calls=%d", stub.calls)
+	}
+	gs, ok := a.Goal()
+	if !ok || gs.Status != GoalPaused || gs.Turns != GoalMaxTurns {
+		t.Fatalf("stored goal after cap: %+v ok=%v", gs, ok)
+	}
+	if !strings.Contains(gs.LastReason, "50-turn cap") {
+		t.Fatalf("cap reason should name the cap: %q", gs.LastReason)
+	}
+}
+
+// A goal finished on its last turn closes as met, not capped.
+func TestGoalJudge_MetAtCapIsTerminal(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("met", 0.9, "all_satisfied")}
+	a := newGoalTestAgent(t, stub)
+	a.RestoreGoal(GoalState{Condition: "tests pass", Status: GoalActive, Turns: GoalMaxTurns - 1, SetAt: time.Now()})
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Verdict != "met" || res.Status != GoalMet || res.Resume {
+		t.Fatalf("met at cap: got %+v", res)
+	}
+	if a.GoalEvaluable() {
+		t.Fatal("met goal at cap must not be evaluable")
+	}
+}
+
+// A downgraded met must not tell the model the judge was sure of it: the resume
+// text carries the confidence-floor reason, not the judge's reason label.
+func TestGoalJudge_DowngradedMetResumeTextSaysUnconfirmed(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("met", 0.4, "all_satisfied")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if !res.Resume {
+		t.Fatalf("downgraded met must resume: got %+v", res)
+	}
+	msg := a.GoalResumeMessage().Content
+	if !strings.Contains(msg, goalUnconfirmedReason) {
+		t.Fatalf("resume text should say the verdict was unconfirmed: %q", msg)
+	}
+	if strings.Contains(msg, "every part of the condition is satisfied") {
+		t.Fatalf("resume text must not carry the judge's met reason: %q", msg)
 	}
 }
 
@@ -298,6 +342,33 @@ func TestGoalJudge_HumanTurnDuringJudgeDropsVerdict(t *testing.T) {
 	gs, ok := a.Goal()
 	if !ok || gs.Status != GoalActive || gs.Turns != 4 || gs.NoToolTurns != 0 {
 		t.Fatalf("goal after dropped verdict: %+v ok=%v (want active, Turns=4, NoToolTurns=0)", gs, ok)
+	}
+}
+
+// A panic inside the judge still delivers an unavailable result, so the host
+// (/rc in particular) is never left waiting on OnGoalJudge.
+func TestGoalJudgeAsync_PanicDeliversUnavailable(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	stub.onDecide = func() { panic("judge exploded") }
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan GoalJudgeResult, 1)
+	a.OnGoalJudge = func(r GoalJudgeResult) { done <- r }
+	if !a.GoalJudgeAsync(goalTranscriptWithTool(), 3) {
+		t.Fatal("async judge should dispatch")
+	}
+	select {
+	case r := <-done:
+		if r.Gen != 3 || r.Verdict != "unavailable" || r.Resume {
+			t.Fatalf("panic result: %+v", r)
+		}
+		if !strings.Contains(r.Detail, "judge exploded") {
+			t.Fatalf("panic detail should carry the panic: %q", r.Detail)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnGoalJudge not called after a judge panic")
 	}
 }
 
