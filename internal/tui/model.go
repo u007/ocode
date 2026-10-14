@@ -1437,6 +1437,11 @@ type model struct {
 	// session was busy (streaming, a dialog, or a compaction). compactFinishedMsg
 	// fires it once the session is idle. Any new turn or judge supersedes it.
 	goalResumePending bool
+	// sessionBaseMetadata is the loaded session's metadata minus the keys
+	// sessionSidebarMetadata rebuilds, carried forward so a save never sends nil.
+	// A nil map means "keep the stored metadata", which would resurrect a goal
+	// or todo that was cleared since the session was loaded.
+	sessionBaseMetadata map[string]any
 	// modelSwitchGen guards async model switches — stale completions are dropped.
 	modelSwitchGen          uint64
 	modelSwitchPending      bool
@@ -2967,7 +2972,7 @@ func newModel(opts ...RunOptions) model {
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			m.sessionCreatedAt = sess.CreatedAt
 			restoreTodoState(sess.Metadata)
-			m.restoreGoalState(sess.Metadata)
+			m.restoreSessionMetadata(sess.Metadata)
 			for _, am := range sess.Messages {
 				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
@@ -11549,7 +11554,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			m.goalResumePending = false
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
-			m.restoreGoalState(sess.Metadata)
+			m.restoreSessionMetadata(sess.Metadata)
 			m.messages = []message{}
 			m.clearPermAskState()
 			m.clearQuestionAskState()
@@ -11984,6 +11989,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	newSessionID := session.NewSessionID()
 	m.sessionID = newSessionID
 	m.sessionCreatedAt = time.Now()
+	m.sessionBaseMetadata = nil
 	if m.agent != nil {
 		m.agent.SetOpenCodeSessionID(newSessionID)
 		m.agent.SetChangesSession(newSessionID)
@@ -21165,24 +21171,58 @@ func (t sidebarTelemetry) metadata() map[string]any {
 	return meta
 }
 
-func (m model) sessionSidebarMetadata() map[string]any {
-	meta := m.sessionTelemetry.metadata()
-	todo := tool.TodoState()
-	if todo != "" {
-		if meta == nil {
-			meta = make(map[string]any)
+// sessionOwnedMetadataKeys are the metadata keys sessionSidebarMetadata rebuilds
+// on every save. The rest of a loaded session's metadata is carried forward.
+// The legacy token keys are owned too: telemetryFromSessionMetadata reads them
+// after the current keys, so a stale copy would win on the next load.
+var sessionOwnedMetadataKeys = map[string]bool{
+	"todo_text":           true,
+	agent.GoalMetadataKey: true,
+	"input_tokens":        true,
+	"output_tokens":       true,
+	"billed_tokens":       true,
+	"cached_tokens":       true,
+	"spend":               true,
+	"prompt_tokens":       true,
+	"completion_tokens":   true,
+	"total_tokens":        true,
+}
+
+// sessionBaseFromLoaded copies a loaded session's metadata without the keys
+// sessionSidebarMetadata owns. A nil input stays nil.
+func sessionBaseFromLoaded(meta map[string]any) map[string]any {
+	if meta == nil {
+		return nil
+	}
+	base := make(map[string]any, len(meta))
+	for k, v := range meta {
+		if !sessionOwnedMetadataKeys[k] {
+			base[k] = v
 		}
+	}
+	return base
+}
+
+func (m model) sessionSidebarMetadata() map[string]any {
+	meta := make(map[string]any, len(m.sessionBaseMetadata))
+	for k, v := range m.sessionBaseMetadata {
+		meta[k] = v
+	}
+	for k, v := range m.sessionTelemetry.metadata() {
+		meta[k] = v
+	}
+	if todo := tool.TodoState(); todo != "" {
 		meta["todo_text"] = todo
 	}
 	if m.agent != nil {
 		if gs, ok := m.agent.Goal(); ok {
-			if meta == nil {
-				meta = make(map[string]any)
-			}
 			for k, v := range agent.GoalStateToMetadata(gs) {
 				meta[k] = v
 			}
 		}
+	}
+	if m.sessionBaseMetadata == nil && len(meta) == 0 {
+		return nil
 	}
 	return meta
 }
@@ -21196,6 +21236,13 @@ func restoreTodoState(meta map[string]any) {
 			tool.SetTodoState(s)
 		}
 	}
+}
+
+// restoreSessionMetadata reinstates a loaded session's metadata: the carry-forward
+// base for later saves, and its /goal.
+func (m *model) restoreSessionMetadata(meta map[string]any) {
+	m.sessionBaseMetadata = sessionBaseFromLoaded(meta)
+	m.restoreGoalState(meta)
 }
 
 // restoreGoalState reinstates a session's /goal from its metadata. A record

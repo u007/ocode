@@ -545,3 +545,29 @@ func TestGoalResumeDeferredClearedByNewSession(t *testing.T) {
 		}
 	}
 }
+
+// A goal cleared after load must not come back on save. Telemetry is absent, so
+// the saved map is built from the loaded base alone, and it must still be non-nil
+// (a nil save keeps the stored goal) while carrying the goal key neither way.
+func TestClearedGoalDoesNotResurrectOnSave(t *testing.T) {
+	stored := agent.GoalStateToMetadata(agent.GoalState{Condition: "all tests pass", Status: agent.GoalActive})
+	stored["source"] = "tui"
+
+	m := newGoalCommandTestModel()
+	m.restoreSessionMetadata(stored)
+	if _, ok := m.agent.Goal(); !ok {
+		t.Fatal("expected the loaded goal to be restored before it is cleared")
+	}
+	m.agent.ClearGoal()
+
+	meta := m.sessionSidebarMetadata()
+	if meta == nil {
+		t.Fatal("expected a non-nil save map: a nil map keeps the stored goal")
+	}
+	if _, ok := meta[agent.GoalMetadataKey]; ok {
+		t.Fatalf("expected the cleared goal to be absent from the save map, got %#v", meta)
+	}
+	if meta["source"] != "tui" {
+		t.Fatalf("expected unowned loaded metadata to carry forward, got %#v", meta)
+	}
+}
