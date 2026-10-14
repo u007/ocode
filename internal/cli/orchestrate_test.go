@@ -1,4 +1,4 @@
-// internal/cli/goal_test.go
+// internal/cli/orchestrate_test.go
 package cli
 
 import (
@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func TestParseGoalArgs_goal(t *testing.T) {
-	opts, goal, err := ParseGoalArgs([]string{"add user validation"})
+func TestParseOrchestrateArgs_goal(t *testing.T) {
+	opts, goal, err := ParseOrchestrateArgs([]string{"add user validation"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -19,8 +19,8 @@ func TestParseGoalArgs_goal(t *testing.T) {
 	}
 }
 
-func TestParseGoalArgs_noWorktree(t *testing.T) {
-	opts, _, err := ParseGoalArgs([]string{"--no-worktree", "add user validation"})
+func TestParseOrchestrateArgs_noWorktree(t *testing.T) {
+	opts, _, err := ParseOrchestrateArgs([]string{"--no-worktree", "add user validation"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -29,8 +29,8 @@ func TestParseGoalArgs_noWorktree(t *testing.T) {
 	}
 }
 
-func TestParseGoalArgs_verifyFlag(t *testing.T) {
-	opts, _, err := ParseGoalArgs([]string{"--verify", "build_test_llm", "add feature"})
+func TestParseOrchestrateArgs_verifyFlag(t *testing.T) {
+	opts, _, err := ParseOrchestrateArgs([]string{"--verify", "build_test_llm", "add feature"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -39,8 +39,8 @@ func TestParseGoalArgs_verifyFlag(t *testing.T) {
 	}
 }
 
-func TestParseGoalArgs_maxIterations(t *testing.T) {
-	opts, _, err := ParseGoalArgs([]string{"--max-iterations", "6", "goal"})
+func TestParseOrchestrateArgs_maxIterations(t *testing.T) {
+	opts, _, err := ParseOrchestrateArgs([]string{"--max-iterations", "6", "goal"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -49,8 +49,8 @@ func TestParseGoalArgs_maxIterations(t *testing.T) {
 	}
 }
 
-func TestParseGoalArgs_emptyGoal(t *testing.T) {
-	_, _, err := ParseGoalArgs([]string{})
+func TestParseOrchestrateArgs_emptyGoal(t *testing.T) {
+	_, _, err := ParseOrchestrateArgs([]string{})
 	if err == nil {
 		t.Error("expected error for empty goal")
 	}

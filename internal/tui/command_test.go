@@ -1683,7 +1683,7 @@ func TestCommandsRegistered(t *testing.T) {
 	}{
 		{name: "/autocontinue"},
 		{name: "/auto-share"},
-		{name: "/goal"},
+		{name: "/orchestrate"},
 		{name: "/docs", alias: "/doc-mode"},
 		{name: "/context"},
 	}
@@ -1702,5 +1702,35 @@ func TestCommandsRegistered(t *testing.T) {
 		if tc.alias != "" && lookupCommand(tc.alias) != spec {
 			t.Errorf("%s alias %s does not resolve to it", tc.name, tc.alias)
 		}
+	}
+}
+
+func TestOrchestrateAliasIsInstantAndRewrites(t *testing.T) {
+	newExploreModel := func() *model {
+		m := &model{
+			agent:     newTestAgent(retryTestClient{}, nil, nil, nil),
+			ready:     true,
+			width:     140,
+			activeTab: tabChat,
+			styles:    ApplyThemeColors("tokyonight"),
+			input:     newTestTextarea(),
+		}
+		m.switchAgent("explore")
+		return m
+	}
+
+	updated, cmd := newExploreModel().handleCommand("/orchestrate x")
+	got := updated.(*model)
+	if cmd == nil {
+		t.Fatal("/orchestrate x returned a nil tea.Cmd; expected the orchestrator turn to start")
+	}
+	if spec := got.agent.Spec(); spec == nil || spec.Name != "orchestrator" {
+		t.Fatalf("/orchestrate x should switch to the orchestrator agent, got %+v", spec)
+	}
+
+	updated, _ = newExploreModel().handleCommand("/goal x")
+	got = updated.(*model)
+	if spec := got.agent.Spec(); spec == nil || spec.Name != "explore" {
+		t.Fatalf("/goal must no longer be the orchestrator alias, got agent %+v", spec)
 	}
 }

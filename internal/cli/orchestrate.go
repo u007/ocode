@@ -1,4 +1,4 @@
-// internal/cli/goal.go
+// internal/cli/orchestrate.go
 package cli
 
 import (
@@ -14,8 +14,8 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
-// GoalOptions mirrors orchestrator.PipelineOptions for CLI parsing.
-type GoalOptions struct {
+// OrchestrateOptions mirrors orchestrator.PipelineOptions for CLI parsing.
+type OrchestrateOptions struct {
 	UseWorktree   bool
 	VerifyMode    string
 	MaxIterations int
@@ -24,11 +24,11 @@ type GoalOptions struct {
 	YOLO          bool
 }
 
-// ParseGoalArgs parses CLI args for the goal subcommand.
+// ParseOrchestrateArgs parses CLI args for the orchestrate subcommand.
 // Flags: --no-worktree, --verify <mode>, --max-iterations <n>, --model <name>, --dir <path>, --yolo
 // Remaining args after flags are joined as the goal.
-func ParseGoalArgs(args []string) (GoalOptions, string, error) {
-	opts := GoalOptions{UseWorktree: true}
+func ParseOrchestrateArgs(args []string) (OrchestrateOptions, string, error) {
+	opts := OrchestrateOptions{UseWorktree: true}
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -69,7 +69,7 @@ func ParseGoalArgs(args []string) (GoalOptions, string, error) {
 		}
 	}
 	if len(remaining) == 0 {
-		return opts, "", fmt.Errorf("goal is required: ocode goal \"<goal>\"")
+		return opts, "", fmt.Errorf("goal is required: ocode orchestrate \"<goal>\"")
 	}
 	goal := ""
 	for i, r := range remaining {
@@ -88,9 +88,9 @@ func ParseGoalArgs(args []string) (GoalOptions, string, error) {
 // the same pattern as `ocode run`: load config, build a client, instantiate
 // an agent, and let the pipeline drive it via DispatchSubagent.
 func Run(args []string) error {
-	opts, goal, err := ParseGoalArgs(args)
+	opts, goal, err := ParseOrchestrateArgs(args)
 	if err != nil {
-		return fmt.Errorf("usage error: %w\n\nUsage: ocode goal [--no-worktree] [--verify MODE] [--max-iterations N] [--model MODEL] [--dir PATH] [--yolo] \"<goal>\"", err)
+		return fmt.Errorf("usage error: %w\n\nUsage: ocode orchestrate [--no-worktree] [--verify MODE] [--max-iterations N] [--model MODEL] [--dir PATH] [--yolo] \"<goal>\"", err)
 	}
 
 	if opts.Dir != "" {

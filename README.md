@@ -559,7 +559,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/doc-sync` | `[session|all]` | Update `AGENTS.md`/rules/skills to reflect current changes (small model) |
 | `/mem` | `[on|off|status|update [user|project|global] [focus]]` | Toggle memory context injection, inspect memory files, or update a memory scope |
 | `/discover` | `[enable|disable|status|model [name]|ignore [add|remove|clear] [path]]` | Toggle retrieval-based skill/MCP discovery, pick the query-embedding model, manage ignored paths |
-| `/goal` | `<goal>` | Run the multi-agent orchestration pipeline on a coding goal |
+| `/orchestrate` | `<goal>` | Run the multi-agent orchestration pipeline on a coding goal |
 | `/init` | `[focus]` | Analyze project and generate `AGENTS.md` |
 | `/learn` | `[focus]` | List project-root skills and guide skill creation/update |
 | `/lsp` | `[show|open <path>|errors|all]` | Show current LSP diagnostics and error counts |
@@ -602,7 +602,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/help` | | Show help for all commands |
 | `/exit` | `/quit`, `/q` | Quit the app (always instant, even while streaming) |
 
-> **Queuing note:** `/exit`/`/quit`/`/q` and ~30 local commands (`/model`, `/themes`, `/help`, `/thinking`, `/details`, `/sidebar`, `/context`, `/commands`, `/permissions`, `/yolo`, `/small-model`, `/editor`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`, `/rc`, `/search`, `/find`, `/docs`, `/goal`, `/agents status`, `/add-dir`, `/add-dirs`, …) run instantly. Everything else — and any command that mutates persistent state mid-stream (`/doc-sync`, `/agents limit`) — queues behind the current turn and drains via `agentStreamDoneMsg` / `compactFinishedMsg`. `handleCommand` is the single chokepoint; keep it in sync with `CLAUDE.md`.
+> **Queuing note:** `/exit`/`/quit`/`/q` and ~30 local commands (`/model`, `/themes`, `/help`, `/thinking`, `/details`, `/sidebar`, `/context`, `/commands`, `/permissions`, `/yolo`, `/small-model`, `/editor`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`, `/rc`, `/search`, `/find`, `/docs`, `/orchestrate`, `/agents status`, `/add-dir`, `/add-dirs`, …) run instantly. Everything else — and any command that mutates persistent state mid-stream (`/doc-sync`, `/agents limit`) — queues behind the current turn and drains via `agentStreamDoneMsg` / `compactFinishedMsg`. `handleCommand` is the single chokepoint; keep it in sync with `CLAUDE.md`.
 
 ### 📊 Debug & Observability
 
@@ -667,7 +667,7 @@ ocode mcp [add|list|ls|auth]   # MCP server management
 ocode models                   # list available models
 ocode skills                   # skill management
 ocode debug project-slug [path] # print project root/slug/session storage as JSON
-ocode goal <goal>              # orchestration pipeline
+ocode orchestrate <goal>       # orchestration pipeline
 ocode lsp-daemon               # (internal) LSP broker daemon
 
 # Desktop
@@ -874,13 +874,13 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`, `sandbo
 ## Layout
 
 ```
-main.go                    Entry point (TUI + serve/web/run/acp/mcp/models/skills/goal)
+main.go                    Entry point (TUI + serve/web/run/acp/mcp/models/skills/orchestrate)
 cmd/ocode-desktop/         Wails v3 desktop shell (native.go, main.go, embedded-assets)
 internal/acp/              Agent Client Protocol server (Zed integration)
 internal/agent/            LLM client, agent registry, permissions, tool truncation, title gen
 internal/auth/             Multi-provider OAuth + keychain
 internal/bundled/          Embedded plugin/skill/model-config FS helpers
-internal/cli/              goal orchestration CLI
+internal/cli/              orchestration CLI (`ocode orchestrate`)
 internal/commands/         Custom command loader (plugin Markdown)
 internal/config/           Config loading (opencode.json / ocodeconfig.json + profiles)
 internal/debuglog/         Shared debug log for TUI and non-TUI consumers

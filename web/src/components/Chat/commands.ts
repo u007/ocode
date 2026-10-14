@@ -116,7 +116,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/effort", description: "Show or set reasoning effort (off/low/med/high/xhigh/max)", icon: Zap },
   { name: "/thinking", description: "Thinking-block visibility note (web always shows thinking)", icon: Eye },
   { name: "/models", description: "Switch model by name, or open the picker", icon: Settings },
-  { name: "/goal", description: "Dispatch a goal to the orchestrator pipeline", icon: ListChecks },
+  { name: "/orchestrate", description: "Dispatch a goal to the orchestrator pipeline", icon: ListChecks },
   { name: "/autocontinue", description: "Auto-continue on|off|status|model [name]", icon: Activity },
   { name: "/mem", description: "Memory on|off|status|update [scope] [focus]", icon: Archive },
   { name: "/paths", description: "Show config/data paths for this project", icon: GitBranch },
@@ -575,8 +575,8 @@ export async function dispatchCommand(
     case "/model":
       return handleModels(args, ctx);
 
-    case "/goal":
-      return handleGoal(args);
+    case "/orchestrate":
+      return handleOrchestrate(args);
 
     case "/autocontinue":
       return handleAutoContinue(args, ctx);
@@ -1928,14 +1928,14 @@ async function handleModels(args: string, ctx: CommandContext): Promise<CommandR
   }
 }
 
-// ─── /goal <text> — orchestrator dispatch ──────────────────────────────────
+// ─── /orchestrate <text> — orchestrator dispatch ───────────────────────────
 
-async function handleGoal(args: string): Promise<CommandResult> {
+async function handleOrchestrate(args: string): Promise<CommandResult> {
   const goal = args.trim();
   if (!goal) {
-    return ok("Usage: `/goal <what to accomplish>` — dispatches the goal to the orchestrator agent (plan → implement → validate pipeline).");
+    return ok("Usage: `/orchestrate <what to accomplish>` — dispatches the goal to the orchestrator agent (plan → implement → validate pipeline).");
   }
-  // The TUI rewrites /goal to an /orchestrator agent switch + turn. The web
+  // The TUI rewrites /orchestrate to an /orchestrator agent switch + turn. The web
   // send path cannot switch the session agent mid-tab today, so we frame the
   // goal as an explicit orchestrator-pipeline request to the active agent.
   const prompt = [

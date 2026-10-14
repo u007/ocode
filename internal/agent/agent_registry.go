@@ -154,10 +154,10 @@ func (r *AgentRegistry) registerBuiltins() {
 			Hidden:       true,
 			Source:       "builtin",
 		},
-		// "orchestrator" is a picker-only entry: the TUI session intercept
-		// recognises this name and routes user messages to the orchestrator
-		// pipeline instead of starting a normal LLM turn. No system prompt
-		// is needed because the pipeline builds its own context per dispatch.
+		// "orchestrator" is a picker-only entry. There is no TUI intercept:
+		// `/orchestrate` switches to this primary agent and sends the goal as a
+		// normal turn. The Go pipeline in internal/orchestrator is CLI-only
+		// (`ocode orchestrate`). No system prompt is set here.
 		AgentDefinition{
 			Name:        "orchestrator",
 			Description: "Self-healing multi-agent pipeline — plans, implements, and validates coding goals",

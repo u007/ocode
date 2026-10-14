@@ -5745,29 +5745,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, waitBtwEvent(m.btwCh)
-	case goalDoneMsg:
-		if msg.err != "" {
-			m.messages = append(m.messages, message{
-				role: roleAssistant,
-				text: fmt.Sprintf("[Goal] Error: %s", msg.err),
-			})
-		} else {
-			m.messages = append(m.messages, message{
-				role: roleAssistant,
-				text: fmt.Sprintf("[Goal] Complete:\n\n%s", msg.report),
-			})
-		}
-		m.rerenderTranscriptAndMaybeScroll()
-		m.saveSession()
-		return m, nil
-	case goalStatusMsg:
-		m.messages = append(m.messages, message{
-			role:      roleAssistant,
-			text:      fmt.Sprintf("[Goal] %s: %s", msg.state, msg.msg),
-			transient: true,
-		})
-		m.rerenderTranscriptAndMaybeScroll()
-		return m, nil
 	case titleGeneratedMsg:
 		// Drop stale results from goroutines started before /new or /title clear.
 		if msg.gen == m.titleGen && m.sessionTitle == "" {
@@ -8999,14 +8976,14 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// /goal is a convenience alias for the orchestrator pipeline. It behaves
+	// /orchestrate is a convenience alias for the orchestrator pipeline. It behaves
 	// exactly like `/orchestrator <goal>`: switch to the orchestrator primary
 	// agent and immediately send <goal> as its first prompt, which runs the
 	// plan -> explore -> develop -> validate -> goal-alignment pipeline that is
-	// hardened to distrust the executor. Tracked as a separate flag so /goal
+	// hardened to distrust the executor. Tracked as a separate flag so /orchestrate
 	// stays instant (like /agent) while the rewrite is applied after the
 	// queue-decision below.
-	goalAlias := cmd == "/goal"
+	orchestrateAlias := cmd == "/orchestrate"
 	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
 	if cmd == "/new" || cmd == "/clear" || isExitCmd {
 		m.invalidateDelayedChatInput()
@@ -9094,7 +9071,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		// turn to end before unblocking an out-of-scope path prompt, so run
 		// them at once like /tools.
 		cmd == "/add-dir" || cmd == "/add-dirs" ||
-		cmd == "/goal"
+		cmd == "/orchestrate"
 	// Agent status is a local inspection command and must remain usable while
 	// the stream is busy. Changing the persistent limit is deliberately queued,
 	// like the other mid-stream state mutations.
@@ -9108,10 +9085,10 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Apply the /goal alias now that the queue-decision is resolved: rewrite to
+	// Apply the /orchestrate alias now that the queue-decision is resolved: rewrite to
 	// `/orchestrator <goal>` so the generic agent-switch path below switches to
 	// the orchestrator primary agent and sends the goal as its first prompt.
-	if goalAlias {
+	if orchestrateAlias {
 		cmd = "/orchestrator"
 		args = parts[1:]
 	}

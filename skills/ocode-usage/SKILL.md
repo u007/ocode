@@ -282,7 +282,7 @@ ocode version          # Show version (alias)
 | `models` | List available models |
 | `skills` | Manage skills |
 | `secret` | Encrypt/decrypt project files or dirs |
-| `goal` | Run multi-agent orchestration pipeline |
+| `orchestrate` | Run multi-agent orchestration pipeline |
 | `remote` | Connect to ocode on a remote SSH host |
 | `debug` | Print project-scoping info (slug, data dirs) |
 | `version` | Show version information |
@@ -524,7 +524,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/discover` | | Enable/disable retrieval-based skill/MCP discovery | |
 | `/localmodel` | | Manage locally-run model instances (e.g. Bonsai 8B) | |
 | `/docs` | `/doc-mode` | Manage documentation-first development and OKF knowledge bundle | |
-| `/goal` | | Run multi-agent orchestration pipeline on a coding goal | |
+| `/orchestrate` | | Run multi-agent orchestration pipeline on a coding goal | |
 | `/autocontinue` | | Auto-resume turns cut off by /max-step | |
 | `/ocr` | | Show OCR status, toggle OCR, or set the OCR model | |
 | `/computer` | | Show computer-use status or enable/disable desktop control | |

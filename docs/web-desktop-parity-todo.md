@@ -108,11 +108,11 @@ below apply to both.
 - **Web:** Skill listing via `GET /api/skills` (surfaced in slash autocomplete). No creation/update UI.
 - **API:** No HTTP endpoint for skill authoring.
 
-### 10. Goal orchestration (`/goal`) — TUI only
+### 10. Goal orchestration (`/orchestrate`) — TUI and web
 
-- **TUI:** `internal/tui/goal.go` — run multi-agent orchestration pipeline on a coding goal.
-- **Web:** No equivalent.
-- **API:** `POST /api/init` for project analysis, but no `/goal` equivalent.
+- **TUI:** `/orchestrate` — run multi-agent orchestration pipeline on a coding goal (rewritten to the `orchestrator` agent in `internal/tui/model.go`).
+- **Web:** `/orchestrate` command exists (`web/src/components/Chat/commands.ts`), framing the goal as an orchestrator-pipeline request.
+- **API:** `POST /api/init` for project analysis, but no `/orchestrate` equivalent.
 
 ### 11. Doc sync (`/doc-sync`) — TUI only
 

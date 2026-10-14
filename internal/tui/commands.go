@@ -172,7 +172,7 @@ func init() {
 			help:    "Manage locally-run chat/completion model instances (e.g. Bonsai 8B 1-bit) that LM Studio can't serve",
 			handler: runLocalModelCmd},
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},
-		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
+		{name: "/orchestrate", usage: "/orchestrate <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runOrchestrateCmd},
 		{name: "/autocontinue", usage: "/autocontinue [on|off|status|model [name]]", help: "Auto-resume any turn cut off by /max-step (or judged interrupted by an optional judge model — chat YES/NO or typesafe decision-only), across TUI and web turns", handler: runAutoContinueCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/computer", usage: "/computer [status|enable|disable]", help: "Show computer-use status or enable/disable desktop control for new sessions", handler: runComputerCmd},
@@ -1820,24 +1820,13 @@ func runPathsCmd(m *model, args []string) tea.Cmd {
 	m.messages = append(m.messages, message{role: roleAssistant, text: commandctx.PathsInfo(m.workDir, extraPaths, uploadDir, activeOpenCodePath)})
 	return nil
 }
-func runGoalCmd(m *model, args []string) tea.Cmd {
-	if len(args) == 0 {
-		m.messages = append(m.messages, message{
-			role: roleAssistant,
-			text: "Usage: /goal <goal>\nExample: /goal add user validation to the login flow",
-		})
-		return nil
-	}
-	goal := strings.Join(args, " ")
-	if m.agent == nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "No active agent — cannot launch orchestrator."})
-		return nil
-	}
-	m.messages = append(m.messages, message{
-		role: roleAssistant,
-		text: fmt.Sprintf("[Goal] Starting pipeline for: %s\nRunning in background — status updates will appear here.", goal),
-	})
-	return runGoalBackground(m, goal, false)
+
+// runOrchestrateCmd is never reached: handleCommand rewrites /orchestrate to
+// /orchestrator before lookupCommand. The table entry exists for /help and
+// autocomplete, so the guard reports a broken route instead of panicking.
+func runOrchestrateCmd(m *model, args []string) tea.Cmd {
+	m.messages = append(m.messages, message{role: roleAssistant, text: "/orchestrate was not rewritten to /orchestrator; this is a routing bug."})
+	return nil
 }
 
 func runAutoContinueCmd(m *model, args []string) tea.Cmd {
@@ -1890,7 +1879,7 @@ func autoContinueStatusText(m *model) string {
 		judgeKind = fmt.Sprintf("\nJudge kind: %s (decision-only triage — the transcript tail travels as structured state and the model answers a typed continue/end choice; no chat call is made)", backend)
 	}
 	return fmt.Sprintf("Auto-continue: %s (chain so far this session: %d/%d)\nJudge model: %s%s\n\n"+
-		"When enabled, any turn cut off by the /max-step cap — not just /goal — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web and headless server turns). "+
+		"When enabled, any turn cut off by the /max-step cap — not just /orchestrate — is automatically resumed with a \"continue\" prompt, general-purpose across whatever command or task is running (including /rc web and headless server turns). "+
 		"If a judge model is set (see /autocontinue model), it's also asked to check replies that did NOT hit /max-step but might still look interrupted. Capped at %d consecutive auto-fires and reset whenever you send a new message, so a stuck local model can't loop forever.",
 		state, m.autoContinueCount, autoContinueMaxChain, judgeModel, judgeKind, autoContinueMaxChain)
 }
