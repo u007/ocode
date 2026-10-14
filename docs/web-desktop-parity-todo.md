@@ -11,7 +11,7 @@ timestamp: 2026-09-29T17:46:12Z
 ---
 # Web/Desktop UI Parity — Current Status
 
-Last updated: 2026-09-30. Desktop (`cmd/ocode-desktop`, Wails) embeds the same
+Last updated: 2026-10-14. Desktop (`cmd/ocode-desktop`, Wails) embeds the same
 `web/` React app, so "web" and "desktop" are the same UI surface — gaps
 below apply to both.
 
@@ -108,11 +108,11 @@ below apply to both.
 - **Web:** Skill listing via `GET /api/skills` (surfaced in slash autocomplete). No creation/update UI.
 - **API:** No HTTP endpoint for skill authoring.
 
-### 10. Goal orchestration (`/orchestrate`) — TUI and web
+### 10. Goal condition loop (`/goal`) and `/orchestrate` — parity ✅
 
-- **TUI:** `/orchestrate` — run multi-agent orchestration pipeline on a coding goal (rewritten to the `orchestrator` agent in `internal/tui/model.go`).
-- **Web:** `/orchestrate` command exists (`web/src/components/Chat/commands.ts`), framing the goal as an orchestrator-pipeline request.
-- **API:** `POST /api/init` for project analysis, but no `/orchestrate` equivalent.
+- **TUI:** `/goal` (`runGoalCmd`, `internal/tui/commands.go`) sets, shows and clears the condition; the judge runs after every TUI and `/rc` turn. `/orchestrate` runs the orchestrator pipeline once (rewritten to the `orchestrator` agent in `internal/tui/model.go`).
+- **Web:** `/goal` (`handleGoal`, `web/src/components/Chat/commands.ts`) over `GET/PUT/DELETE /api/sessions/{id}/goal`. `/orchestrate` frames the goal as an orchestrator-pipeline request.
+- **Shared engine:** `internal/agent/goal.go`. Concept doc: `docs/concepts/goal-condition-loop.md`.
 
 ### 11. Doc sync (`/doc-sync`) — TUI only
 

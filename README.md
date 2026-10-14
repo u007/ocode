@@ -559,7 +559,8 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/doc-sync` | `[session|all]` | Update `AGENTS.md`/rules/skills to reflect current changes (small model) |
 | `/mem` | `[on|off|status|update [user|project|global] [focus]]` | Toggle memory context injection, inspect memory files, or update a memory scope |
 | `/discover` | `[enable|disable|status|model [name]|ignore [add|remove|clear] [path]]` | Toggle retrieval-based skill/MCP discovery, pick the query-embedding model, manage ignored paths |
-| `/orchestrate` | `<goal>` | Run the multi-agent orchestration pipeline on a coding goal |
+| `/orchestrate` | `<goal>` | Run the multi-agent orchestration pipeline on a coding goal (alias for `/orchestrator <goal>`; `ocode orchestrate` is the headless form) |
+| `/goal` | `[<condition> \| clear]` | Keep working toward a condition: a judge checks after every turn and resumes until it is met, impossible, or paused. No args shows status; `clear` removes it. See `docs/concepts/goal-condition-loop.md` |
 | `/init` | `[focus]` | Analyze project and generate `AGENTS.md` |
 | `/learn` | `[focus]` | List project-root skills and guide skill creation/update |
 | `/lsp` | `[show|open <path>|errors|all]` | Show current LSP diagnostics and error counts |
@@ -602,7 +603,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/help` | | Show help for all commands |
 | `/exit` | `/quit`, `/q` | Quit the app (always instant, even while streaming) |
 
-> **Queuing note:** `/exit`/`/quit`/`/q` and ~30 local commands (`/model`, `/themes`, `/help`, `/thinking`, `/details`, `/sidebar`, `/context`, `/commands`, `/permissions`, `/yolo`, `/small-model`, `/editor`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`, `/rc`, `/search`, `/find`, `/docs`, `/orchestrate`, `/agents status`, `/add-dir`, `/add-dirs`, …) run instantly. Everything else — and any command that mutates persistent state mid-stream (`/doc-sync`, `/agents limit`) — queues behind the current turn and drains via `agentStreamDoneMsg` / `compactFinishedMsg`. `handleCommand` is the single chokepoint; keep it in sync with `CLAUDE.md`.
+> **Queuing note:** `/exit`/`/quit`/`/q` and ~30 local commands (`/model`, `/themes`, `/help`, `/thinking`, `/details`, `/sidebar`, `/context`, `/commands`, `/permissions`, `/yolo`, `/small-model`, `/editor`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`, `/mcp`, `/advisor`, `/mask`, `/rc`, `/search`, `/find`, `/docs`, `/orchestrate`, `/goal` (status and `clear` only; `/goal <condition>` starts a turn and queues), `/agents status`, `/add-dir`, `/add-dirs`, …) run instantly. Everything else — and any command that mutates persistent state mid-stream (`/doc-sync`, `/agents limit`) — queues behind the current turn and drains via `agentStreamDoneMsg` / `compactFinishedMsg`. `handleCommand` is the single chokepoint; keep it in sync with `CLAUDE.md`.
 
 ### 📊 Debug & Observability
 

@@ -1,5 +1,51 @@
 # TODO
 
+## Open: `/goal` follow-ups deferred from the goal condition loop (2026-10-14)
+
+Design and invariants: `docs/concepts/goal-condition-loop.md`. Items 1 to 3 were
+scoped out of the first `/goal` cut. Items 4 and 5 are pre-existing bugs found by
+reading the code while building it. Neither was reproduced.
+
+- **1. `ocode run "/goal ..."` headless parsing is missing.** `runAttach`
+  (`internal/runcli/run.go:511`) posts the raw prompt to `POST /api/chat` (`:528`), and
+  the server does not parse slash commands, so `ocode run "/goal fix the build"` sends
+  the literal text as a chat message. The web already does the right thing client-side:
+  `handleGoal` calls `PUT /api/sessions/{id}/goal` and sends `kickoff_prompt`
+  (`web/src/components/Chat/commands.ts`). Deferred because the fix is a design choice:
+  either `runAttach` mirrors that client-side flow, or the server learns to recognise
+  `/goal` in a headless message. Either way the goal has to be set before the turn runs.
+- **2. Evaluation does not defer for background work.** Claude Code holds goal
+  evaluation while subagents or background shells are still running. Here the goal
+  judge runs at every natural stop (`GoalJudgeSync`, `internal/agent/goal.go:304`), so it
+  can judge a turn that is still waiting on `task` or `bash` background output and
+  return `not_met`. Deferred because the judge gate needs a "background work in flight"
+  signal from `AgentRunRegistry` and the bash job registry, and no such signal reaches
+  the goal path today.
+- **3. No check-in cadence while a goal is active.** The judge runs only at natural
+  stops, and the 50-turn cap (`GoalMaxTurns`) is the only bound on a long goal. There is
+  no periodic check-in, and no reminder of the condition between turns. Deferred because
+  cadence (every N turns, or after a wall-clock interval) is a product decision, and the
+  current behaviour is the bounded, conservative option.
+- **4. TUI `/rc` auto-continue judge dispatch can never resume (pre-existing, found by
+  reading, not reproduced).** On the `/rc` branches of `streamDoneMsg`
+  (`internal/tui/model.go`, the `pendingRCAutoContinue` branch near `:5377` and the RC
+  branch near `:5452`), `maybeDispatchAutoContinueJudge(true)` returns with `m.streaming`
+  still true. `autoContinueJudgeFinishedMsg` resumes only when `!m.streaming`
+  (`model.go:5813`), so the verdict can never fire a resume. The goal path already does
+  this correctly: `rcGoalJudge` (`model.go:289`) clears `m.streaming` before it returns.
+  The fix is to clear `streaming` and `cancelStream` on the auto-continue dispatch path
+  the same way. Add a test that drives the RC branch to the judge and asserts the resume.
+- **5. TUI session save can revert a server-side metadata write (pre-existing class,
+  found by reading, not reproduced).** `sessionSidebarMetadata` (`internal/tui/model.go:21217`)
+  builds the save from `m.sessionBaseMetadata`, a snapshot taken at load time
+  (`restoreSessionMetadata`, `:21254`). A `session.UpdateMetadataForDir` write made by
+  another process (such as `ocode serve`) while the TUI has the session open is
+  reverted on the next TUI save, because the snapshot still holds the old value. The
+  `goal` key is already excluded from the snapshot (`sessionOwnedMetadataKeys`,
+  `:21189`), so this only bites keys outside that set. Deferred because the real fix is
+  patch semantics in the session layer (save merges the keys it owns, not the whole
+  map), which is outside the goal change.
+
 ## Open: block-by-block conflict resolution for remote projects (2026-10-12)
 
 - **Remote (SSH/WSL) projects have no per-block resolution.** The local endpoints

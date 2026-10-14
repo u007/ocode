@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: 'TUI User Interaction: Slash Command Queuing'
-description: 'How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-07: web/desktop /btw no longer records the aside into the conversation — both surfaces now run the same independent side query and neither writes the transcript.'
+description: 'How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-14: /goal status and clear are instant on the TUI while /goal <condition> queues; /orchestrate is instant and rewritten after the queue decision. Amended 2026-10-07: web/desktop /btw no longer records the aside into the conversation — both surfaces now run the same independent side query and neither writes the transcript.'
 resource: CLAUDE.md
 tags:
   - tui
@@ -43,6 +43,14 @@ timestamp: 2026-10-07T12:40:26Z
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/doc-sync`,
     `/agents limit <n>`.
+  - **`/goal` and `/orchestrate` are split.** `/goal` with no argument or a
+    lone clear verb (`clear`, `stop`, `off`, `reset`, `none`, `cancel`) is
+    instant through a separate `cmd == "/goal"` check after the chain
+    (`internal/tui/model.go`, the `/goal` branch after `isInstantCmd`). A
+    `/goal <condition>` starts a turn, so it queues like a message.
+    `/orchestrate` sits in the chain and is rewritten to `/orchestrator` after
+    the queue decision, so it runs immediately. Goal semantics:
+    `docs/concepts/goal-condition-loop.md`.
 - Use `ctrl+x` for leader keys and `ctrl+p` for palette.
 - Avoid introducing raw shortcuts that are likely to conflict with host
   terminals like Warp, Ghostty, and iTerm2; prefer `ctrl+x` leader
@@ -58,6 +66,8 @@ immediately is decided in `handleSend`
 instant-command list at all, so every `/command` and `!shell` typed while busy
 was queued. `/btw` and `/by-the-way` now bypass it
 (`web/src/lib/instantCommands.ts`), for TUI parity.
+`/goal` is not on that list, so on the web every `/goal` form (status, set,
+clear) queues while a turn runs, unlike the TUI.
 
 - **Membership is a persistence-safety predicate.** A command belongs in the
   instant set only once its server handler writes nothing to the session

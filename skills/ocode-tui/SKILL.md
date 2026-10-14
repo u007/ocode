@@ -149,6 +149,7 @@ In `internal/tui`:
 ### Commands & knowledge
 - `internal/tui/commands.go` — slash-command registry/dispatch.
 - `internal/tui/model.go` — `/orchestrate` alias, rewritten to the `orchestrator` agent in `handleCommand`.
+- `internal/agent/goal.go` — `/goal` engine (judge verdicts, pause/resume, cap); the TUI command is `runGoalCmd` in `internal/tui/commands.go`, and the post-turn judge dispatch and deferred resume live in `internal/tui/model.go`. Concept doc: `docs/concepts/goal-condition-loop.md`.
 - `internal/tui/docs_knowledge.go` — `/docs` command and OKF knowledge bundle integration.
 - `internal/tui/doc_sync.go` — `/doc-sync` command for rules/skills sync.
 

@@ -66,8 +66,8 @@ two when both exist, so a second file would never be seen. Do not recreate it.
   compaction, small-model or interpreter-effects paths. `*TypesafeClient`
   satisfies it unchanged; `isDecisionModel` is the single place that decides
   which ids route to a decision backend. `resolveDecider(slot)` resolves one of
-  seven `judgeSlot`s (permission, auto_continue, discovery, doc_search,
-  code_search, network_guard, content_guard); all currently default to
+  eight `judgeSlot`s (permission, auto_continue, discovery, doc_search,
+  code_search, network_guard, content_guard, goal); all currently default to
   `typesafe/jev-latest`. Judges label their requests with `deciderLabel(client)`
   — provider-qualified, never a hardcoded prefix — so the usage ledger does not
   book one backend's tokens to another.
@@ -371,8 +371,38 @@ from git. See `docs/changes-tab.md`. The opt-in desktop-control tool is document
   `/exit`/`/quit`/`/q` and "instant" commands bypass. **The `isInstantCmd` chain in
   `handleCommand` (`internal/tui/model.go`) is the sole list of instant commands** — add a
   new synchronous local command there, not here. Commands that mutate persistent state
-  mid-stream (`/doc-sync`, `/agents limit <n>`) stay queued by design. Details:
+  mid-stream (`/doc-sync`, `/agents limit <n>`) stay queued by design. `/goal`
+  with no argument or a lone clear verb is instant through a separate check after
+  the chain; `/goal <condition>` queues (see "Goal condition loop" below). Details:
   `docs/concepts/tui-slash-command-queuing.md`.
+
+## Goal condition loop (`/goal`)
+
+`/goal` (`internal/agent/goal.go`) keeps a session's agent taking turns until the goal
+judge says met or impossible, or pauses the goal. Concept, verdict table and endpoints:
+`docs/concepts/goal-condition-loop.md`. Invariants:
+
+- **The resume is a user-role `[ocode:goal]` message** (`GoalResumeMessage`), never
+  system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
+- **While a goal is evaluable (active or paused), the goal judge owns the post-turn
+  verdict.** The auto-continue judge is not dispatched alongside it: server
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1401`), TUI
+  `streamDoneMsg` (`internal/tui/model.go:5612`).
+- **A pending permission or question ask never auto-resumes a goal.** Server
+  `agent_session.go:1295`; TUI post-turn decisions sit behind `queueDrainBlocked()`.
+- **Pause never clears.** A paused goal keeps its condition, and `GoalMarkHumanTurn`
+  reactivates it. Only `ClearGoal` removes it: `/goal clear`, `/new`, `/clear`, or a
+  session switch. Human turns never reactivate `met` or `impossible`.
+- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12025`).
+- **The 50-turn cap is sticky.** Only `SetGoal` (a new `/goal <text>`) resets `Turns`;
+  a human turn does not.
+- **`slotGoal` has its own confidence floor** (`goalMinConfidenceDefault`, 0.6). Never
+  reuse the permission floor, and never fall back to another backend: an unset judge
+  pauses the goal as `unavailable`.
+- **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
+  back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
+- **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
+  `internal/tui/model.go:21189`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## Task Output Contracts (`expected_output`)
 An optional `expected_output` on a `task` dispatch is verified (shape, not truth)

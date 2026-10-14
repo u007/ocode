@@ -525,6 +525,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/localmodel` | | Manage locally-run model instances (e.g. Bonsai 8B) | |
 | `/docs` | `/doc-mode` | Manage documentation-first development and OKF knowledge bundle | |
 | `/orchestrate` | | Run multi-agent orchestration pipeline on a coding goal | |
+| `/goal` | | Keep working toward a condition until a judge says it is met, impossible, or paused. `/goal` shows status, `/goal clear` removes it (see `docs/concepts/goal-condition-loop.md`) | |
 | `/autocontinue` | | Auto-resume turns cut off by /max-step | |
 | `/ocr` | | Show OCR status, toggle OCR, or set the OCR model | |
 | `/computer` | | Show computer-use status or enable/disable desktop control | |
