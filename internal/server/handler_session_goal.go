@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 
@@ -9,8 +10,9 @@ import (
 )
 
 // sessionGoalResponse is the body of GET and PUT /api/sessions/{id}/goal.
-// Active reports whether the session has a goal at all; Status says whether
-// the judge still evaluates it. All fields are zero when there is no goal.
+// Active reports whether the goal is still being pursued (the same rule as
+// Agent.GoalEvaluable); a met or impossible goal keeps its Status and
+// StatusText but reports Active=false. All fields are zero when there is no goal.
 type sessionGoalResponse struct {
 	Active     bool   `json:"active"`
 	Condition  string `json:"condition"`
@@ -26,18 +28,24 @@ type sessionGoalPutResponse struct {
 	KickoffPrompt string `json:"kickoff_prompt"`
 }
 
-func goalResponse(a *agent.Agent) sessionGoalResponse {
+// liveGoalResponse describes the goal of a session with a live agent.
+func liveGoalResponse(a *agent.Agent) sessionGoalResponse {
 	gs, ok := a.Goal()
 	if !ok {
 		return sessionGoalResponse{}
 	}
+	return goalResponse(gs, a.GoalStatusText())
+}
+
+// goalResponse describes gs. Active follows the same rule as Agent.GoalEvaluable.
+func goalResponse(gs agent.GoalState, statusText string) sessionGoalResponse {
 	return sessionGoalResponse{
-		Active:     true,
+		Active:     gs.Status == agent.GoalActive || gs.Status == agent.GoalPaused,
 		Condition:  gs.Condition,
 		Status:     string(gs.Status),
 		Turns:      gs.Turns,
 		LastReason: gs.LastReason,
-		StatusText: a.GoalStatusText(),
+		StatusText: statusText,
 	}
 }
 
@@ -71,13 +79,29 @@ func (h *Handler) goalSession(w http.ResponseWriter, id string) (*agentSession, 
 	return as, entry.ProjectRoot, true
 }
 
-// HandleGetSessionGoal reports the session's /goal state.
+// HandleGetSessionGoal reports the session's /goal state. It is polled, so it
+// never builds an agent: a live agent answers, otherwise the persisted metadata.
 func (h *Handler) HandleGetSessionGoal(w http.ResponseWriter, r *http.Request, id string) {
-	as, _, ok := h.goalSession(w, id)
-	if !ok {
+	if as := h.lookupAgentSession(id); as != nil {
+		writeJSON(w, http.StatusOK, liveGoalResponse(as.agent))
 		return
 	}
-	writeJSON(w, http.StatusOK, goalResponse(as.agent))
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	s, err := session.LoadForDir(entry.ProjectRoot, id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
+		return
+	}
+	gs, ok := agent.GoalStateFromMetadata(s.Metadata)
+	if !ok {
+		writeJSON(w, http.StatusOK, sessionGoalResponse{})
+		return
+	}
+	writeJSON(w, http.StatusOK, goalResponse(gs, agent.GoalStatusTextFor(gs, "")))
 }
 
 // HandleSetSessionGoal sets the session's goal, replacing any previous one.
@@ -104,7 +128,7 @@ func (h *Handler) HandleSetSessionGoal(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	writeJSON(w, http.StatusOK, sessionGoalPutResponse{
-		sessionGoalResponse: goalResponse(as.agent),
+		sessionGoalResponse: liveGoalResponse(as.agent),
 		KickoffPrompt:       as.agent.GoalKickoffPrompt(),
 	})
 }

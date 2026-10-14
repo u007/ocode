@@ -254,11 +254,22 @@ func (a *Agent) GoalStatusText() string {
 	if d := a.resolveDecider(slotGoal); d != nil {
 		judge = deciderLabel(d)
 	}
+	return GoalStatusTextFor(gs, judge)
+}
+
+// GoalStatusTextFor renders gs as the shared status copy. An empty judge leaves
+// the Judge line out, for callers that hold a persisted goal and no agent to
+// resolve a judge from.
+func GoalStatusTextFor(gs GoalState, judge string) string {
 	reason := gs.LastReason
 	if reason == "" {
 		reason = "none yet"
 	}
-	return fmt.Sprintf("Goal: %s\nStatus: %s\nTurns: %d\nLast reason: %s\nJudge: %s", gs.Condition, gs.Status, gs.Turns, reason, judge)
+	text := fmt.Sprintf("Goal: %s\nStatus: %s\nTurns: %d\nLast reason: %s", gs.Condition, gs.Status, gs.Turns, reason)
+	if judge != "" {
+		text += "\nJudge: " + judge
+	}
+	return text
 }
 
 // GoalJudgeAsync runs GoalJudgeSync in the background and delivers the result to

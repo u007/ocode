@@ -402,3 +402,55 @@ func TestBuildAgentSessionRestoresGoal(t *testing.T) {
 		t.Fatalf("restored goal = %+v ok=%v, want the persisted goal", gs, ok)
 	}
 }
+
+// TestSessionGoalGetDoesNotBuildAgent: the SPA polls GET, so a session with no
+// live agent must answer from its persisted metadata and never bootstrap one.
+func TestSessionGoalGetDoesNotBuildAgent(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	session.SetWorkDir(proj)
+	t.Cleanup(func() { session.SetWorkDir("") })
+	if err := session.Save(id, "goal session", nil, nil); err != nil {
+		t.Fatalf("save session %s: %v", id, err)
+	}
+	saved := agent.GoalState{Condition: "ship the release", Status: agent.GoalActive, Turns: 2, SetAt: time.Now().UTC().Truncate(time.Second)}
+	if err := session.UpdateMetadataForDir(proj, id, func(md map[string]any) {
+		for k, v := range agent.GoalStateToMetadata(saved) {
+			md[k] = v
+		}
+	}); err != nil {
+		t.Fatalf("persist goal: %v", err)
+	}
+
+	got := getSessionGoal(t, h, id)
+	if got["active"] != true || got["condition"] != "ship the release" || got["status"] != "active" {
+		t.Fatalf("GET without a live agent = %v, want the persisted goal", got)
+	}
+	h.mu.Lock()
+	built := len(h.agents)
+	h.mu.Unlock()
+	if built != 0 {
+		t.Fatalf("GET built %d agent(s), want none", built)
+	}
+}
+
+// TestSessionGoalMetReportsInactive: a met goal is no longer pursued, so GET
+// reports active=false while status and status_text still describe it.
+func TestSessionGoalMetReportsInactive(t *testing.T) {
+	h, id, _ := newGoalTestServer(t, &goalTurnClient{toolName: "bash"}, nil, "")
+	as := h.lookupAgentSession(id)
+	as.agent.RestoreGoal(agent.GoalState{Condition: "all tests pass", Status: agent.GoalMet, Turns: 3, SetAt: time.Now()})
+
+	got := getSessionGoal(t, h, id)
+	if got["active"] != false {
+		t.Fatalf("GET met goal active = %v, want false", got["active"])
+	}
+	if got["status"] != "met" || got["condition"] != "all tests pass" || got["turns"] != float64(3) {
+		t.Fatalf("GET met goal = %v, want status met with condition and turns kept", got)
+	}
+	if text, _ := got["status_text"].(string); !strings.Contains(text, "Status: met") {
+		t.Fatalf("status_text = %q, want it to report met", text)
+	}
+}
