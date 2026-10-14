@@ -2026,6 +2026,10 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 			h.publishTurnError(id, fmt.Errorf("cancelled"), "")
 			return
 		}
+		// Every drained item is a human message queued by dispatchTurn, so it
+		// reactivates a paused /goal before the turn runs (as runSyncTurn does).
+		// Empty-content job resumes never reach this loop.
+		as.agent.GoalMarkHumanTurn()
 		_, err := h.runTurn(id, as, content, job.opts)
 		// Treat a post-cancellation successful return as a cancellation so
 		// queued messages are not auto-drained. Agent.Step can return

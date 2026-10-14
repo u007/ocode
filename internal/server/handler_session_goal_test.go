@@ -25,6 +25,8 @@ type goalTurnClient struct {
 	mu       sync.Mutex
 	calls    int
 	toolName string
+	// beforeChat, when set, runs at the start of every Chat call (before the reply).
+	beforeChat func(call int)
 }
 
 func (c *goalTurnClient) Chat(_ []agent.Message, _ []map[string]interface{}) (*agent.Message, error) {
@@ -32,6 +34,9 @@ func (c *goalTurnClient) Chat(_ []agent.Message, _ []map[string]interface{}) (*a
 	c.calls++
 	n := c.calls
 	c.mu.Unlock()
+	if c.beforeChat != nil {
+		c.beforeChat(n)
+	}
 	if n%2 == 1 {
 		tc := agent.ToolCall{ID: fmt.Sprintf("call_%d", n), Type: "function"}
 		tc.Function.Name = c.toolName
@@ -240,14 +245,57 @@ func TestRunTurnGoalPausedOnPendingAsk(t *testing.T) {
 		t.Fatalf("runTurn: %v", err)
 	}
 
-	if !tailIsPermissionAsk(as.messages) {
-		t.Fatalf("turn did not end on a permission ask; tail=%+v", as.messages[len(as.messages)-1])
+	cl.mu.Lock()
+	chats := cl.calls
+	cl.mu.Unlock()
+	if chats != 1 {
+		t.Fatalf("Chat calls = %d, want exactly 1 Step", chats)
 	}
 	if got := judged(); got != 0 {
 		t.Fatalf("goal judge consulted %d times behind a pending ask, want 0", got)
 	}
 	if got := goalResumeCount(as.messages); got != 0 {
 		t.Fatalf("goal resumed behind a pending ask: %d resume messages", got)
+	}
+	if !tailIsPermissionAsk(as.messages) {
+		t.Fatalf("turn did not end on a permission ask; tail=%+v", as.messages[len(as.messages)-1])
+	}
+}
+
+// TestAsyncHumanTurnReactivatesPausedGoal: a human message sent on the async
+// path (queued, then drained by the turn job) reactivates a paused goal before
+// the first Step runs.
+func TestAsyncHumanTurnReactivatesPausedGoal(t *testing.T) {
+	url, judged := newScriptedJudgeStub(t, goalVerdictReply(t, "met", 0.9, "all_satisfied"))
+	var as *agentSession
+	var statusAtFirstChat agent.GoalStatus
+	cl := &goalTurnClient{toolName: "bash", beforeChat: func(call int) {
+		if call != 1 {
+			return
+		}
+		if gs, ok := as.agent.Goal(); ok {
+			statusAtFirstChat = gs.Status
+		}
+	}}
+	h, id, _ := newGoalTestServer(t, cl, nil, url)
+	as = h.lookupAgentSession(id)
+	as.agent.RestoreGoal(agent.GoalState{Condition: "all tests pass", Status: agent.GoalPaused, SetAt: time.Now()})
+
+	job, err := h.dispatchTurn(id, "fake-model", "make the tests pass", turnOptions{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	<-job.persistAck
+	if job.err != nil {
+		t.Fatalf("persist: %v", job.err)
+	}
+	h.turnJobsWG.Wait()
+
+	if statusAtFirstChat != agent.GoalActive {
+		t.Fatalf("goal status at first Step = %q, want active (a human message reactivates a paused goal)", statusAtFirstChat)
+	}
+	if got := judged(); got != 1 {
+		t.Fatalf("goal judge consulted %d times, want 1", got)
 	}
 }
 
