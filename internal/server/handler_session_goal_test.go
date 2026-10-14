@@ -25,6 +25,8 @@ type goalTurnClient struct {
 	mu       sync.Mutex
 	calls    int
 	toolName string
+	// toolArgs is the argument JSON of every tool call; "{}" when empty.
+	toolArgs string
 	// beforeChat, when set, runs at the start of every Chat call (before the reply).
 	beforeChat func(call int)
 }
@@ -40,7 +42,10 @@ func (c *goalTurnClient) Chat(_ []agent.Message, _ []map[string]interface{}) (*a
 	if n%2 == 1 {
 		tc := agent.ToolCall{ID: fmt.Sprintf("call_%d", n), Type: "function"}
 		tc.Function.Name = c.toolName
-		tc.Function.Arguments = "{}"
+		tc.Function.Arguments = c.toolArgs
+		if tc.Function.Arguments == "" {
+			tc.Function.Arguments = "{}"
+		}
 		return &agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{tc}}, nil
 	}
 	return &agent.Message{Role: "assistant", Content: "working on it"}, nil
@@ -259,6 +264,42 @@ func TestRunTurnGoalPausedOnPendingAsk(t *testing.T) {
 	}
 	if !tailIsPermissionAsk(as.messages) {
 		t.Fatalf("turn did not end on a permission ask; tail=%+v", as.messages[len(as.messages)-1])
+	}
+}
+
+// TestRunTurnGoalPausedOnPendingQuestion: a turn that ends on an unanswered
+// question must not reach the goal judge and must not resume. The judge is
+// scripted not_met, so a resume would fire if the guard were missing.
+func TestRunTurnGoalPausedOnPendingQuestion(t *testing.T) {
+	url, judged := newScriptedJudgeStub(t, goalVerdictReply(t, "not_met", 0.9, "work_remains"))
+	cl := &goalTurnClient{
+		toolName: "question",
+		toolArgs: `{"questions":[{"header":"Deploy target","question":"Where should I deploy?"}]}`,
+	}
+	h, id, _ := newGoalTestServer(t, cl, []tool.Tool{tool.QuestionTool{}}, url)
+	as := h.lookupAgentSession(id)
+	if err := as.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+
+	if _, err := h.runTurn(id, as, "pick a target", turnOptions{}); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	cl.mu.Lock()
+	chats := cl.calls
+	cl.mu.Unlock()
+	if chats != 1 {
+		t.Fatalf("Chat calls = %d, want exactly 1 Step", chats)
+	}
+	if got := judged(); got != 0 {
+		t.Fatalf("goal judge consulted %d times behind a pending question, want 0", got)
+	}
+	if got := goalResumeCount(as.messages); got != 0 {
+		t.Fatalf("goal resumed behind a pending question: %d resume messages", got)
+	}
+	if !tailIsQuestionAsk(as.messages) {
+		t.Fatalf("turn did not end on a question ask; tail=%+v", as.messages[len(as.messages)-1])
 	}
 }
 
