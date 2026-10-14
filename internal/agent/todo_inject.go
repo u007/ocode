@@ -17,16 +17,25 @@ import (
 // coalesces with the current user turn, which is exactly what we want.
 const todoMarker = "[ocode:todo]"
 
-// injectTodoTail appends a user-role re-anchor block carrying the current
-// session's todo plan, but ONLY when the list is non-empty and has at least
+// todoScope addresses this agent's own plan: the project root enclosing its
+// WorkDir ("" = process cwd) and its conversation id. It is what the todo tools
+// receive in their context and what the re-anchor and auto-continue reads use,
+// so a server session is served its own file and never the TUI's global
+// "current" todo session (which a server never sets).
+func (a *Agent) todoScope() tool.TodoScope {
+	return tool.TodoScope{ProjectRoot: tool.TodoProjectRootFor(a.WorkDir()), SessionID: a.OpenCodeSessionID()}
+}
+
+// injectTodoTail appends a user-role re-anchor block carrying this agent's
+// session todo plan, but ONLY when the list is non-empty and has at least
 // one open item. A finished or absent list injects nothing, which is the
 // cache-stability invariant: a no-op turn keeps the messages slice
 // byte-identical so the cached prefix survives.
 //
 // The agent loop calls this alongside the other tail injectors
 // (injectNotesTail, injectDiscoveryContext). Like them, base is not mutated.
-func injectTodoTail(base []Message) []Message {
-	snap := tool.ReadTodoSnapshot()
+func (a *Agent) injectTodoTail(base []Message) []Message {
+	snap := tool.ReadTodoSnapshot(a.todoScope())
 	if !snap.HasOpenItems || snap.Content == "" {
 		return base
 	}

@@ -483,7 +483,15 @@ func FindProjectRoot() string {
 	if err != nil {
 		return ""
 	}
+	return FindProjectRootFrom(curr)
+}
 
+// FindProjectRootFrom walks up from dir looking for opencode.json or .git and
+// returns the first directory that has one, or "" when none does. It is the
+// per-session form of FindProjectRoot for callers that own a project root
+// other than the process working directory (a server hosting many projects).
+func FindProjectRootFrom(dir string) string {
+	curr := dir
 	for {
 		if _, err := os.Stat(filepath.Join(curr, "opencode.json")); err == nil {
 			return curr

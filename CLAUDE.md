@@ -24,7 +24,11 @@ two when both exist, so a second file would never be seen. Do not recreate it.
   with `ErrTypesafeDecisionOnly`. Its only consumers are the auto-permission
   judge (`consultPermissionModel` → `askPermissionModelTypesafe`), the
   auto-continue triage judge (`Ocode.AutoContinueModel = "typesafe/<model>"` →
-  `runAutoContinueJudgeTypesafe`), the discovery relevance judge
+  `runAutoContinueJudgeTypesafe`; it picks one key from the closed
+  `autoContinueActions` set, each with a FIXED resume prompt — answer-class
+  keys `proceed`/`skip`/`reject` act for the user and are admitted only with the
+  `awaiting_confirmation` reason at the permission floor, see
+  `docs/concepts/server-auto-continue.md`), the discovery relevance judge
   (`judgeDiscoveryCandidates`) and the doc_search relevance judge
   (`judgeDocSearchResults`; wired only for the context subagent's doc tools).
   All send the request as structured state. Each judge has its own confidence
@@ -386,14 +390,14 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   system-role, the same cache rule as the tail injectors in "Prompt Cache Stability".
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
-  `autoContinueShouldResume` (`internal/server/agent_session.go:1396`), TUI
-  `streamDoneMsg` (`internal/tui/model.go:5622`).
+  `autoContinueShouldResume` (`internal/server/agent_session.go:1376`), TUI
+  `streamDoneMsg` (`internal/tui/model.go:5631`).
 - **A pending permission or question ask never auto-resumes a goal.** Server
-  `agent_session.go:1293`; TUI post-turn decisions sit behind `queueDrainBlocked()`.
+  `agent_session.go:1299`; TUI post-turn decisions sit behind `queueDrainBlocked()`.
 - **Pause never clears.** A paused goal keeps its condition, and `GoalMarkHumanTurn`
   reactivates it. Only `ClearGoal` removes it: `/goal clear`, `/new`, `/clear`, or a
   session switch. Human turns never reactivate `met` or `impossible`.
-- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12038`).
+- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:11936`).
 - **The 50-turn cap is sticky.** Only `SetGoal` (a new `/goal <text>`) resets `Turns`;
   a human turn does not. The judge still runs on a capped turn: a `not_met` pauses as
   `capped`, but `met` and `impossible` still close the goal.
@@ -403,7 +407,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
-  `internal/tui/model.go:21198`), so the TUI's carry-forward copy cannot overwrite it.
+  `internal/tui/model.go:21233`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## Task Output Contracts (`expected_output`)
 An optional `expected_output` on a `task` dispatch is verified (shape, not truth)
@@ -422,6 +426,12 @@ resolution and reporting: `docs/concepts/task-output-contracts.md`. Invariants:
 A per-session plan at `.ocode/todo/<session-id>.md`; format, revision protocol and
 injection details: `docs/concepts/persistent-todo-plan.md`. Invariants:
 
+- **Plans are addressed by `tool.TodoScope` (project root + session id) carried in
+  the tool context** (`tool.WithTodoScope` in `executeToolCallWithContext`; the same
+  `a.todoScope()` feeds `injectTodoTail` and the auto-continue `next` gate). The
+  todo tools refuse without a scope — never fall back to the TUI sidebar's global
+  `SetTodoSession` cursor: a multi-session server never sets it, and the old
+  cwd + cursor store made every todo tool fail there with "todo session not set".
 - **The main agent is the only writer**; subagents have `todoread` only
   (`filterMainOnlyTools`). The in-memory copy is a cache, never a second source of
   truth (`TodoState()` never touches disk; advance it only after a successful write).

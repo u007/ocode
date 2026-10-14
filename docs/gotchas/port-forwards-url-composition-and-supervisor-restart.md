@@ -393,6 +393,16 @@ could not use the desktop's htrcli relay (`:3845`) or Chrome CDP (`:9222`).
 - Web panel: labels reverse rows. **The add form is `-L` only.** Creating a reverse forward
   from the web panel is deferred (see `TODO.md`).
 
+### Automatic htrcli forward (2026-10-14)
+
+When `browser.htr_enabled` is on and the local htrcli daemon answers, every remote autostart
+(`portMapsHandler.autoStartEnabled` on desktop, `Handler.autoStartPortMaps` on the server) also
+opens `-R <htrPort>:127.0.0.1:<htrPort>` through `server.StartHTRReverseForward`, so `htrcli` on
+the SSH remote drives the local browser. It is ephemeral (not in `projects.json`, not in the
+panel), is skipped when the user has a persisted forward on that remote port, and is a no-op on
+WSL (logged). It is re-evaluated only on autostart, so start the local daemon first, then
+reconnect. A remote htrcli configured for a different port is not remapped.
+
 ### Security
 
 A reverse forward makes the desktop's local port reachable by everything on the remote host's

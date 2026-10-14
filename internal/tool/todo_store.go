@@ -27,8 +27,14 @@ import (
 // if a write fails, the memory copy is not advanced and the error is returned.
 //
 // The store keeps one in-memory copy per session id (not a single global
-// cursor) so two sessions in one process cannot collide. The current cursor
-// only selects which session's copy the render/read path serves.
+// cursor) so two sessions in one process cannot collide. The tools and the
+// agent's re-anchor path address a plan by TodoScope (project root + session
+// id), carried in the tool context the agent builds per call — a server
+// process hosts many sessions across many projects and never chdir's per
+// session, so nothing on that path may consult the process cwd or a global
+// "current" session. The current cursor exists only for the TUI sidebar
+// (TodoState, a per-frame render that must not touch disk) and its legacy
+// metadata restore (SetTodoState).
 //
 // Concurrency model:
 //   - In-process: the store mutex serializes all mutations.
@@ -239,11 +245,53 @@ func parseTodoContent(content string) (revision int, items []todoItem, err error
 
 // --- path resolution ---
 
-// todoProjectRoot returns the project root that owns .ocode/todo/. It follows
-// the TUI's workDir source of truth: config.FindProjectRoot walks up from
-// os.Getwd(), which the TUI keeps in sync with m.workDir (the /cd handler
-// calls os.Chdir). Falls back to os.Getwd() for non-project (test/temp) dirs.
-func todoProjectRoot() string {
+// TodoScope addresses one session's plan: the project root that owns
+// .ocode/todo/ and the session id. The agent attaches it to every tool call's
+// context (WithTodoScope) and uses it for the re-anchor and auto-continue
+// reads, so each session is served its own file regardless of the process
+// working directory or of which session the TUI sidebar currently shows.
+type TodoScope struct {
+	ProjectRoot string
+	SessionID   string
+}
+
+type todoScopeKey struct{}
+
+// WithTodoScope returns a context carrying scope for the todo tools.
+func WithTodoScope(ctx context.Context, scope TodoScope) context.Context {
+	return context.WithValue(ctx, todoScopeKey{}, scope)
+}
+
+// todoScopeFromContext returns the scope the agent attached, or an error when
+// the tool was invoked without one. There is deliberately no fallback to the
+// TUI's current session: that global is unset on the server, and answering
+// from it would hand one session another session's plan.
+func todoScopeFromContext(ctx context.Context) (TodoScope, error) {
+	scope, ok := ctx.Value(todoScopeKey{}).(TodoScope)
+	if !ok || scope.ProjectRoot == "" || scope.SessionID == "" {
+		return TodoScope{}, fmt.Errorf("todo scope not set: the todo tools need the agent's project root and session id in the tool context")
+	}
+	return scope, nil
+}
+
+// TodoProjectRootFor returns the project root that owns .ocode/todo/ for an
+// agent bound to dir: the enclosing opencode.json/.git directory, or dir
+// itself for a non-project (test/temp) directory. An empty dir means the
+// process working directory, matching Agent.WorkDir's convention; the TUI keeps
+// that in sync with m.workDir (the /cd handler calls os.Chdir).
+func TodoProjectRootFor(dir string) string {
+	if dir == "" {
+		return TodoProjectRoot()
+	}
+	if root := config.FindProjectRootFrom(dir); root != "" {
+		return root
+	}
+	return dir
+}
+
+// TodoProjectRoot is TodoProjectRootFor the process working directory: the
+// root the TUI sidebar paths (SetTodoSession, RekeyTodoSession) resolve from.
+func TodoProjectRoot() string {
 	if root := config.FindProjectRoot(); root != "" {
 		return root
 	}
@@ -251,18 +299,18 @@ func todoProjectRoot() string {
 	return d
 }
 
-func todoDir() string { return filepath.Join(todoProjectRoot(), ".ocode", "todo") }
+func todoDir(root string) string { return filepath.Join(root, ".ocode", "todo") }
 
-func todoLockPath() string { return filepath.Join(todoDir(), ".todo.lock") }
+func todoLockPath(root string) string { return filepath.Join(todoDir(root), ".todo.lock") }
 
-func todoFilePath(sessionID string) string {
-	return filepath.Join(todoDir(), sessionID+".md")
+func todoFilePath(root, sessionID string) string {
+	return filepath.Join(todoDir(root), sessionID+".md")
 }
 
-// readTodoFile loads and strictly parses the file for sessionID. Returns
-// (revision, items, false, nil) when the file does not exist yet.
-func readTodoFile(sessionID string) (int, []todoItem, bool, error) {
-	path := todoFilePath(sessionID)
+// readTodoFile loads and strictly parses the file for sessionID under root.
+// Returns (revision, items, false, nil) when the file does not exist yet.
+func readTodoFile(root, sessionID string) (int, []todoItem, bool, error) {
+	path := todoFilePath(root, sessionID)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return 0, nil, false, nil
@@ -280,12 +328,12 @@ func readTodoFile(sessionID string) (int, []todoItem, bool, error) {
 // writeTodoFile atomically writes the canonical content for sessionID: temp
 // file in the same directory, fsync, atomic rename. The snapshot store captures
 // the write so undo_file_change can restore it.
-func writeTodoFile(sessionID string, revision int, items []todoItem, store *snapshot.Store, tcID string) error {
-	dir := todoDir()
+func writeTodoFile(root, sessionID string, revision int, items []todoItem, store *snapshot.Store, tcID string) error {
+	dir := todoDir(root)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	path := todoFilePath(sessionID)
+	path := todoFilePath(root, sessionID)
 
 	// Snapshot before the write so undo_file_change can restore the prior
 	// content. A backup failure does not block the write, but it does mean
@@ -324,11 +372,12 @@ func writeTodoFile(sessionID string, revision int, items []todoItem, store *snap
 	return nil
 }
 
-// --- public API (signatures preserved) ---
+// --- TUI sidebar API (process-global current session) ---
 
-// SetTodoSession switches the current session and loads its file into the
-// in-memory copy. The signature is unchanged; the file path is resolved from
-// the project root.
+// SetTodoSession switches the sidebar's current session and loads its file
+// into the in-memory copy, resolving the project root from the process working
+// directory (the TUI chdir's per project). The tools never consult this
+// cursor; they are addressed by the TodoScope in their context.
 func SetTodoSession(sessionID string) {
 	todoStoreState.mu.Lock()
 	defer todoStoreState.mu.Unlock()
@@ -340,7 +389,7 @@ func SetTodoSession(sessionID string) {
 	}
 	// Reload from disk: the file is the durable record. A legacy memory-only
 	// restore (SetTodoState) is preserved only when no file exists yet.
-	rev, items, exists, err := readTodoFile(sessionID)
+	rev, items, exists, err := readTodoFile(TodoProjectRoot(), sessionID)
 	if err != nil {
 		ses.parseErr = err
 		return
@@ -355,17 +404,18 @@ func SetTodoSession(sessionID string) {
 	}
 }
 
-// RekeyTodoSession moves the current session's todo file and in-memory entry
-// from oldID to newID for a session rekey (/reset-id), so the plan follows the
-// conversation instead of being stranded under the deleted id. It is a no-op
-// when oldID is empty or has no todo file. Best-effort: the in-memory entry is
-// rebound regardless so the current session keeps rendering the plan.
-func RekeyTodoSession(oldID, newID string) {
+// RekeyTodoSession moves a session's todo file under projectRoot and its
+// in-memory entry from oldID to newID for a session rekey (/reset-id), so the
+// plan follows the conversation instead of being stranded under the deleted
+// id. It is a no-op when oldID is empty or has no todo file. Best-effort: the
+// in-memory entry is rebound regardless so the TUI sidebar keeps rendering the
+// plan.
+func RekeyTodoSession(projectRoot, oldID, newID string) {
 	if oldID == "" || newID == "" || oldID == newID {
 		return
 	}
-	oldPath := todoFilePath(oldID)
-	newPath := todoFilePath(newID)
+	oldPath := todoFilePath(projectRoot, oldID)
+	newPath := todoFilePath(projectRoot, newID)
 	if _, err := os.Stat(oldPath); err == nil {
 		if err := os.Rename(oldPath, newPath); err != nil {
 			// Cross-device rename is impossible here (same todoDir), so a
@@ -443,54 +493,68 @@ func SetTodoState(state string) {
 
 // --- read/mutation helpers (used by the tools) ---
 
-// currentTodo returns the current session id and its in-memory copy.
-func currentTodo() (string, *todoSession) {
-	todoStoreState.mu.RLock()
-	defer todoStoreState.mu.RUnlock()
-	return todoStoreState.current, todoStoreState.sessions[todoStoreState.current]
+// legacyItems returns the items of a session's memory-only copy (a pre-store
+// session restored through SetTodoState), or nil when there is none. It is the
+// base for the first write of such a session and what todoread/ReadTodoSnapshot
+// serve while no file exists yet. Caller must hold todoStoreState.mu (read or
+// write).
+func legacyItems(sessionID string) []todoItem {
+	ses := todoStoreState.sessions[sessionID]
+	if ses == nil || ses.content == "" {
+		return nil
+	}
+	// parseTodoContent, not parseTodoDoc: legacy headerless content must
+	// parse here too. Swallowing the error and returning nil would skip
+	// the destructive guard entirely, so the first todowrite of a resumed
+	// pre-store session would wipe the restored list.
+	_, items, err := parseTodoContent(ses.content)
+	if err != nil {
+		logTodoError("parse in-memory todo content for session "+sessionID, err)
+		return nil
+	}
+	return items
 }
 
-// readTodo returns the current session's revision + items for todoread.
-func readTodo() (revision int, content string, err error) {
-	cur, ses := currentTodo()
-	if cur == "" {
-		return 0, "", fmt.Errorf("todo session not set")
+// loadTodo reads the plan for scope: the file when one exists, else the
+// session's legacy memory-only copy. The file is read every time — it is the
+// durable record, and a server session resumed in a fresh process has nothing
+// in memory until its first mutation. exists reports whether either source had
+// content.
+func loadTodo(scope TodoScope) (revision int, items []todoItem, exists bool, err error) {
+	rev, items, exists, err := readTodoFile(scope.ProjectRoot, scope.SessionID)
+	if err != nil || exists {
+		return rev, items, exists, err
 	}
-	if ses != nil && ses.parseErr != nil {
-		return 0, "", ses.parseErr
+	todoStoreState.mu.RLock()
+	defer todoStoreState.mu.RUnlock()
+	if legacy := legacyItems(scope.SessionID); legacy != nil {
+		return 0, legacy, true, nil
 	}
-	if ses == nil || ses.content == "" {
-		return 0, "No todo list found", nil
-	}
-	rev, items, err := parseTodoContent(ses.content)
+	return 0, nil, false, nil
+}
+
+// readTodo returns the scoped session's revision + items for todoread.
+func readTodo(scope TodoScope) (revision int, content string, err error) {
+	rev, items, exists, err := loadTodo(scope)
 	if err != nil {
 		return 0, "", err
+	}
+	if !exists {
+		return 0, "No todo list found", nil
 	}
 	return rev, serializeItems(items), nil
 }
 
-// baseItems returns the current session's base items for a mutation: the file
-// content when a file exists, else the legacy in-memory copy, else empty.
-// Caller must hold todoStoreState.mu.
-func baseItems(fileExists bool, fileItems []todoItem) []todoItem {
+// baseItems returns the session's base items for a mutation: the file content
+// when a file exists, else the legacy in-memory copy, else empty. Caller must
+// hold todoStoreState.mu.
+func baseItems(sessionID string, fileExists bool, fileItems []todoItem) []todoItem {
 	if fileExists {
 		out := make([]todoItem, len(fileItems))
 		copy(out, fileItems)
 		return out
 	}
-	ses := todoStoreState.sessions[todoStoreState.current]
-	if ses != nil && ses.content != "" {
-		// parseTodoContent, not parseTodoDoc: legacy headerless content must
-		// parse here too. Swallowing the error and returning nil would skip
-		// the destructive guard entirely, so the first todowrite of a resumed
-		// pre-store session would wipe the restored list.
-		if _, items, err := parseTodoContent(ses.content); err == nil {
-			return items
-		} else {
-			logTodoError("parse in-memory todo content for the destructive guard", err)
-		}
-	}
-	return nil
+	return legacyItems(sessionID)
 }
 
 // assignTodoIDs fills in stable ids for items missing one, using the next free
@@ -528,13 +592,10 @@ func staleTodoError(sessionID string, cited, current int, currentItems []todoIte
 // that drops an existing item, particularly a completed one — are rejected
 // unconditionally: there is no override flag, the rejection text is the fix
 // (use todo_update for status changes).
-func todoWrite(citedRevision int, todoText string, store *snapshot.Store, tcID string) (string, error) {
+func todoWrite(scope TodoScope, citedRevision int, todoText string, store *snapshot.Store, tcID string) (string, error) {
 	todoStoreState.mu.Lock()
 	defer todoStoreState.mu.Unlock()
-	if todoStoreState.current == "" {
-		return "", fmt.Errorf("todo session not set")
-	}
-	cur := todoStoreState.current
+	root, cur := scope.ProjectRoot, scope.SessionID
 
 	newItems, err := parseTodoItems(todoText, false)
 	if err != nil {
@@ -547,7 +608,7 @@ func todoWrite(citedRevision int, todoText string, store *snapshot.Store, tcID s
 	// the guard, below.
 
 	// Ensure the lock's directory exists before opening the lock file.
-	if err := os.MkdirAll(todoDir(), 0o755); err != nil {
+	if err := os.MkdirAll(todoDir(root), 0o755); err != nil {
 		return "", err
 	}
 
@@ -558,8 +619,8 @@ func todoWrite(citedRevision int, todoText string, store *snapshot.Store, tcID s
 	// items. The in-process mutex above does not help here: cross-process is
 	// the only case this lock exists for.
 	var out string
-	err = filelock.WithFileLock(todoLockPath(), func() error {
-		fileRev, fileItems, fileExists, rerr := readTodoFile(cur)
+	err = filelock.WithFileLock(todoLockPath(root), func() error {
+		fileRev, fileItems, fileExists, rerr := readTodoFile(root, cur)
 		if rerr != nil {
 			return rerr
 		}
@@ -573,7 +634,7 @@ func todoWrite(citedRevision int, todoText string, store *snapshot.Store, tcID s
 		// Destructive guard: every existing item must survive the rewrite.
 		existing := fileItems
 		if !fileExists {
-			existing = baseItems(false, nil)
+			existing = baseItems(cur, false, nil)
 		}
 		if gerr := guardNoDroppedItems(existing, newItems); gerr != nil {
 			return gerr
@@ -588,7 +649,7 @@ func todoWrite(citedRevision int, todoText string, store *snapshot.Store, tcID s
 		if !fileExists {
 			newRev = 1
 		}
-		if werr := writeTodoFile(cur, newRev, newItems, store, tcID); werr != nil {
+		if werr := writeTodoFile(root, cur, newRev, newItems, store, tcID); werr != nil {
 			return werr
 		}
 		// Update the in-memory copy only after the file write succeeded.
@@ -679,16 +740,13 @@ const (
 // todoUpdate applies a targeted mutation by item id. Every mutation must cite
 // the revision it was based on; a stale citation is rejected with the current
 // content.
-func todoUpdate(citedRevision int, op, itemID, status, text string, store *snapshot.Store, tcID string) (string, error) {
+func todoUpdate(scope TodoScope, citedRevision int, op, itemID, status, text string, store *snapshot.Store, tcID string) (string, error) {
 	todoStoreState.mu.Lock()
 	defer todoStoreState.mu.Unlock()
-	if todoStoreState.current == "" {
-		return "", fmt.Errorf("todo session not set")
-	}
-	cur := todoStoreState.current
+	root, cur := scope.ProjectRoot, scope.SessionID
 
 	// Ensure the lock's directory exists before opening the lock file.
-	if err := os.MkdirAll(todoDir(), 0o755); err != nil {
+	if err := os.MkdirAll(todoDir(root), 0o755); err != nil {
 		return "", err
 	}
 
@@ -696,8 +754,8 @@ func todoUpdate(citedRevision int, op, itemID, status, text string, store *snaps
 	// reason as todoWrite: a lock released between the read and the write
 	// does not prevent two processes from both writing revision N+1.
 	var out string
-	err := filelock.WithFileLock(todoLockPath(), func() error {
-		fileRev, fileItems, fileExists, rerr := readTodoFile(cur)
+	err := filelock.WithFileLock(todoLockPath(root), func() error {
+		fileRev, fileItems, fileExists, rerr := readTodoFile(root, cur)
 		if rerr != nil {
 			return rerr
 		}
@@ -708,7 +766,7 @@ func todoUpdate(citedRevision int, op, itemID, status, text string, store *snaps
 			return fmt.Errorf("todo update rejected: no todo file exists for this session yet (cited revision %d); run todoread to get the current state", citedRevision)
 		}
 
-		newItems := baseItems(fileExists, fileItems)
+		newItems := baseItems(cur, fileExists, fileItems)
 		assignTodoIDs(newItems)
 
 		res, aerr := applyTodoOp(newItems, op, itemID, status, text)
@@ -721,7 +779,7 @@ func todoUpdate(citedRevision int, op, itemID, status, text string, store *snaps
 		if !fileExists {
 			newRev = 1
 		}
-		if werr := writeTodoFile(cur, newRev, newItems, store, tcID); werr != nil {
+		if werr := writeTodoFile(root, cur, newRev, newItems, store, tcID); werr != nil {
 			return werr
 		}
 		todoStoreState.sessions[cur] = &todoSession{
@@ -855,9 +913,13 @@ func (t TodoWriteTool) execute(ctx context.Context, args json.RawMessage) (strin
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
+	scope, err := todoScopeFromContext(ctx)
+	if err != nil {
+		return "", err
+	}
 	store := snapshot.FromContext(ctx)
 	tcID := snapshot.ToolCallIDFromContext(ctx)
-	return todoWrite(params.Revision, params.TodoText, store, tcID)
+	return todoWrite(scope, params.Revision, params.TodoText, store, tcID)
 }
 
 // TodoReadTool returns the current revision along with the content.
@@ -877,7 +939,15 @@ func (t TodoReadTool) Definition() map[string]interface{} {
 }
 
 func (t TodoReadTool) Execute(args json.RawMessage) (string, error) {
-	rev, content, err := readTodo()
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t TodoReadTool) ExecuteCtx(ctx context.Context, _ json.RawMessage) (string, error) {
+	scope, err := todoScopeFromContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	rev, content, err := readTodo(scope)
 	if err != nil {
 		return "", err
 	}
@@ -944,32 +1014,35 @@ func (t TodoUpdateTool) execute(ctx context.Context, args json.RawMessage) (stri
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
+	scope, err := todoScopeFromContext(ctx)
+	if err != nil {
+		return "", err
+	}
 	store := snapshot.FromContext(ctx)
 	tcID := snapshot.ToolCallIDFromContext(ctx)
-	return todoUpdate(params.Revision, params.Op, params.ItemID, params.Status, params.Text, store, tcID)
+	return todoUpdate(scope, params.Revision, params.Op, params.ItemID, params.Status, params.Text, store, tcID)
 }
 
-// TodoSnapshot describes the current session's plan for the re-anchor path.
-// HasOpenItems is true when at least one item is pending or in-progress, which
-// is the gate for injection: a finished or absent list injects nothing.
+// TodoSnapshot describes one session's plan for the re-anchor and
+// auto-continue paths. HasOpenItems is true when at least one item is pending
+// or in-progress, which is the gate for both: a finished or absent list injects
+// nothing and never offers `next`.
 type TodoSnapshot struct {
 	Revision     int
 	Content      string // canonical serialized items (no header), or ""
 	HasOpenItems bool
 }
 
-// ReadTodoSnapshot returns the current session's plan for the re-anchor path.
-func ReadTodoSnapshot() TodoSnapshot {
-	cur, ses := currentTodo()
-	if cur == "" {
-		return TodoSnapshot{}
-	}
-	if ses == nil || ses.parseErr != nil || ses.content == "" {
-		return TodoSnapshot{}
-	}
-	rev, items, err := parseTodoContent(ses.content)
+// ReadTodoSnapshot returns the scoped session's plan. An unreadable file is
+// logged and reported as an absent plan: the re-anchor must not inject a
+// corrupt list and the judge must not resume into one.
+func ReadTodoSnapshot(scope TodoScope) TodoSnapshot {
+	rev, items, exists, err := loadTodo(scope)
 	if err != nil {
-		logTodoError("parse todo content for the context re-anchor block", err)
+		logTodoError("read the todo plan for session "+scope.SessionID, err)
+		return TodoSnapshot{}
+	}
+	if !exists {
 		return TodoSnapshot{}
 	}
 	open := false

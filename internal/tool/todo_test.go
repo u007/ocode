@@ -41,17 +41,27 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	return b
 }
 
-func writeTodoText(t *testing.T, text string) {
+// todoScopeFor addresses sessionID under the cwd-resolved project root — the
+// scope the agent would attach for a TUI session in this directory.
+func todoScopeFor(sessionID string) TodoScope {
+	return TodoScope{ProjectRoot: TodoProjectRoot(), SessionID: sessionID}
+}
+
+func todoCtx(sessionID string) context.Context {
+	return WithTodoScope(context.Background(), todoScopeFor(sessionID))
+}
+
+func writeTodoText(t *testing.T, sessionID, text string) {
 	t.Helper()
 	args := mustJSON(t, map[string]any{"revision": 0, "todoText": text})
-	if _, err := (TodoWriteTool{}).Execute(args); err != nil {
+	if _, err := (TodoWriteTool{}).ExecuteCtx(todoCtx(sessionID), args); err != nil {
 		t.Fatalf("todowrite: %v", err)
 	}
 }
 
-func readTodoText(t *testing.T) string {
+func readTodoText(t *testing.T, sessionID string) string {
 	t.Helper()
-	got, err := (TodoReadTool{}).Execute(nil)
+	got, err := (TodoReadTool{}).ExecuteCtx(todoCtx(sessionID), nil)
 	if err != nil {
 		t.Fatalf("todoread: %v", err)
 	}
@@ -59,13 +69,13 @@ func readTodoText(t *testing.T) string {
 }
 
 func todoFileExists(sessionID string) bool {
-	_, err := os.Stat(filepath.Join(todoDir(), sessionID+".md"))
+	_, err := os.Stat(todoFilePath(TodoProjectRoot(), sessionID))
 	return err == nil
 }
 
 func readTodoFileRaw(t *testing.T, sessionID string) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(todoDir(), sessionID+".md"))
+	data, err := os.ReadFile(todoFilePath(TodoProjectRoot(), sessionID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,10 +86,9 @@ func readTodoFileRaw(t *testing.T, sessionID string) string {
 
 func TestTodoStoreRoundTrip(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-roundtrip")
-	writeTodoText(t, "- [ ] first\n- [•] second\n- [✓] third")
+	writeTodoText(t, "ses-roundtrip", "- [ ] first\n- [•] second\n- [✓] third")
 
-	got := readTodoText(t)
+	got := readTodoText(t, "ses-roundtrip")
 	if !strings.Contains(got, "revision: 1") {
 		t.Fatalf("expected revision 1 in read, got %q", got)
 	}
@@ -106,7 +115,7 @@ func TestTodoStoreRoundTrip(t *testing.T) {
 
 func TestTodoStoreMalformedFileRefusesWrites(t *testing.T) {
 	chdirTemp(t)
-	dir := todoDir()
+	dir := todoDir(TodoProjectRoot())
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -116,18 +125,14 @@ func TestTodoStoreMalformedFileRefusesWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Resume the session: SetTodoSession loads the malformed file and records
-	// the parse error.
-	SetTodoSession("ses-bad")
-
 	// todoread surfaces the parse error with the path.
-	if _, err := (TodoReadTool{}).Execute(nil); err == nil || !strings.Contains(err.Error(), "failed to parse") {
+	if _, err := (TodoReadTool{}).ExecuteCtx(todoCtx("ses-bad"), nil); err == nil || !strings.Contains(err.Error(), "failed to parse") {
 		t.Fatalf("expected todoread to surface parse error, got %v", err)
 	}
 
 	// A mutation must be refused and the file left untouched.
 	args := mustJSON(t, map[string]any{"revision": 2, "todoText": "- [ ] new"})
-	_, writeErr := (TodoWriteTool{}).Execute(args)
+	_, writeErr := (TodoWriteTool{}).ExecuteCtx(todoCtx("ses-bad"), args)
 	if writeErr == nil {
 		t.Fatal("expected write to be refused on malformed file")
 	}
@@ -145,7 +150,6 @@ func TestTodoStoreMalformedFileRefusesWrites(t *testing.T) {
 
 func TestTodoStoreConcurrentWritesNoInterleave(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-concurrent")
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -154,7 +158,7 @@ func TestTodoStoreConcurrentWritesNoInterleave(t *testing.T) {
 			defer wg.Done()
 			text := "- [ ] item " + string(rune('a'+n))
 			args := mustJSON(t, map[string]any{"revision": 0, "todoText": text})
-			_, _ = (TodoWriteTool{}).Execute(args) // most will fail stale-revision; that is fine
+			_, _ = (TodoWriteTool{}).ExecuteCtx(todoCtx("ses-concurrent"), args) // most will fail stale-revision; that is fine
 		}(i)
 	}
 	wg.Wait()
@@ -171,29 +175,125 @@ func TestTodoStoreConcurrentWritesNoInterleave(t *testing.T) {
 
 func TestTodoTwoSessionsKeepSeparateLists(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-a")
-	writeTodoText(t, "- [ ] a-only")
-	SetTodoSession("ses-b")
-	if got := readTodoText(t); strings.Contains(got, "a-only") {
+	writeTodoText(t, "ses-a", "- [ ] a-only")
+	if got := readTodoText(t, "ses-b"); strings.Contains(got, "a-only") {
 		t.Fatalf("session b saw session a's list: %q", got)
 	}
-	writeTodoText(t, "- [ ] b-only")
+	writeTodoText(t, "ses-b", "- [ ] b-only")
 
-	// Switching back reloads session a's file.
-	SetTodoSession("ses-a")
-	if got := readTodoText(t); !strings.Contains(got, "a-only") {
-		t.Fatalf("session a list lost after switching away: %q", got)
+	// Session a's file is untouched by session b's write.
+	if got := readTodoText(t, "ses-a"); !strings.Contains(got, "a-only") || strings.Contains(got, "b-only") {
+		t.Fatalf("session a list wrong after session b wrote: %q", got)
+	}
+}
+
+// The server shape: many sessions across many project roots in one process,
+// no SetTodoSession ever called. Every tool call is served from its own scope
+// and the files land under each session's project root.
+func TestTodoScopeServesSessionsAcrossProjectRootsWithoutCurrentSession(t *testing.T) {
+	resetTodoStoreForTest()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	ctxA := WithTodoScope(context.Background(), TodoScope{ProjectRoot: rootA, SessionID: "ses-proj-a"})
+	ctxB := WithTodoScope(context.Background(), TodoScope{ProjectRoot: rootB, SessionID: "ses-proj-b"})
+
+	if _, err := (TodoWriteTool{}).ExecuteCtx(ctxA, mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] in A"})); err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	if _, err := (TodoWriteTool{}).ExecuteCtx(ctxB, mustJSON(t, map[string]any{"revision": 0, "todoText": "- [✓] in B"})); err != nil {
+		t.Fatalf("write B: %v", err)
+	}
+	if _, err := os.Stat(todoFilePath(rootA, "ses-proj-a")); err != nil {
+		t.Fatalf("session A's file must land under its project root: %v", err)
+	}
+	if _, err := os.Stat(todoFilePath(rootB, "ses-proj-b")); err != nil {
+		t.Fatalf("session B's file must land under its project root: %v", err)
+	}
+	gotA, err := (TodoReadTool{}).ExecuteCtx(ctxA, nil)
+	if err != nil || !strings.Contains(gotA, "in A") || strings.Contains(gotA, "in B") {
+		t.Fatalf("read A = %q err=%v", gotA, err)
+	}
+	if _, err := (TodoUpdateTool{}).ExecuteCtx(ctxA, mustJSON(t, map[string]any{"revision": 1, "op": "set_status", "item_id": "t1", "status": "done"})); err != nil {
+		t.Fatalf("update A: %v", err)
+	}
+	if snap := ReadTodoSnapshot(TodoScope{ProjectRoot: rootA, SessionID: "ses-proj-a"}); snap.HasOpenItems || snap.Revision != 2 {
+		t.Fatalf("snapshot A after update = %+v, want revision 2 with no open items", snap)
+	}
+	if snap := ReadTodoSnapshot(TodoScope{ProjectRoot: rootB, SessionID: "ses-proj-b"}); snap.HasOpenItems {
+		t.Fatalf("snapshot B must not report A's state: %+v", snap)
+	}
+	if cur := TodoState(); cur != "" {
+		t.Fatalf("the sidebar cursor must stay unset when no TUI session was selected, got %q", cur)
+	}
+}
+
+// A session resumed in a fresh process (nothing in memory) reads its file on
+// the first todoread; the re-anchor snapshot sees it too.
+func TestTodoReadLoadsFileWithoutPriorSessionLoad(t *testing.T) {
+	resetTodoStoreForTest()
+	root := t.TempDir()
+	if err := os.MkdirAll(todoDir(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(todoFilePath(root, "ses-resumed"), []byte("# Todo (revision 4)\n\n- [✓] t1 done\n- [•] t2 doing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scope := TodoScope{ProjectRoot: root, SessionID: "ses-resumed"}
+	got, err := (TodoReadTool{}).ExecuteCtx(WithTodoScope(context.Background(), scope), nil)
+	if err != nil || !strings.Contains(got, "revision: 4") || !strings.Contains(got, "t2 doing") {
+		t.Fatalf("todoread must read the file for a session never loaded in this process, got %q err=%v", got, err)
+	}
+	snap := ReadTodoSnapshot(scope)
+	if !snap.HasOpenItems || snap.Revision != 4 {
+		t.Fatalf("snapshot = %+v, want revision 4 with an open item", snap)
+	}
+}
+
+// Without a scope in the context the tools refuse; there is no fallback to the
+// sidebar's current session.
+func TestTodoToolsRequireScope(t *testing.T) {
+	chdirTemp(t)
+	SetTodoSession("ses-sidebar")
+	if _, err := (TodoWriteTool{}).Execute(mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] x"})); err == nil || !strings.Contains(err.Error(), "todo scope not set") {
+		t.Fatalf("todowrite without scope must refuse, got %v", err)
+	}
+	if _, err := (TodoReadTool{}).Execute(nil); err == nil || !strings.Contains(err.Error(), "todo scope not set") {
+		t.Fatalf("todoread without scope must refuse, got %v", err)
+	}
+	if _, err := (TodoUpdateTool{}).Execute(mustJSON(t, map[string]any{"revision": 0, "op": "append", "text": "x"})); err == nil || !strings.Contains(err.Error(), "todo scope not set") {
+		t.Fatalf("todo_update without scope must refuse, got %v", err)
+	}
+	if todoFileExists("ses-sidebar") {
+		t.Fatal("a refused write must not create the sidebar session's file")
+	}
+}
+
+// RekeyTodoSession moves the file under the given project root (the server's
+// /reset-id passes its session's root, not the process cwd).
+func TestTodoRekeyMovesFileUnderProjectRoot(t *testing.T) {
+	resetTodoStoreForTest()
+	root := t.TempDir()
+	oldScope := TodoScope{ProjectRoot: root, SessionID: "ses-old"}
+	if _, err := (TodoWriteTool{}).ExecuteCtx(WithTodoScope(context.Background(), oldScope), mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] carry me"})); err != nil {
+		t.Fatal(err)
+	}
+	RekeyTodoSession(root, "ses-old", "ses-new")
+	if _, err := os.Stat(todoFilePath(root, "ses-old")); !os.IsNotExist(err) {
+		t.Fatalf("old file must be gone after rekey, stat err=%v", err)
+	}
+	got, err := (TodoReadTool{}).ExecuteCtx(WithTodoScope(context.Background(), TodoScope{ProjectRoot: root, SessionID: "ses-new"}), nil)
+	if err != nil || !strings.Contains(got, "carry me") {
+		t.Fatalf("plan must follow the new id, got %q err=%v", got, err)
 	}
 }
 
 func TestTodoStateNoDiskIO(t *testing.T) {
 	chdirTemp(t)
 	SetTodoSession("ses-nodisk")
-	writeTodoText(t, "- [ ] something")
+	writeTodoText(t, "ses-nodisk", "- [ ] something")
 
 	// Point the store at a path that would fail loudly if touched, then
 	// confirm TodoState still serves the in-memory copy.
-	dir := todoDir()
+	dir := todoDir(TodoProjectRoot())
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -205,24 +305,28 @@ func TestTodoStateNoDiskIO(t *testing.T) {
 func TestTodoResetTodoStateKeepsFileOnDisk(t *testing.T) {
 	chdirTemp(t)
 	SetTodoSession("ses-reset")
-	writeTodoText(t, "- [ ] durable")
+	writeTodoText(t, "ses-reset", "- [ ] durable")
 
 	if !todoFileExists("ses-reset") {
 		t.Fatal("expected file to exist after write")
 	}
 	ResetTodoState()
 
-	// Memory cleared: todoread reports the empty state.
-	if got := readTodoText(t); !strings.Contains(got, "No todo list found") {
-		t.Fatalf("expected cleared read output, got %q", got)
+	// Memory cleared: the sidebar renders nothing. The file is the record, so
+	// todoread (which reads it) still serves the plan.
+	if got := TodoState(); got != "" {
+		t.Fatalf("expected cleared sidebar state, got %q", got)
 	}
-	// File survives and reloads intact on resume.
 	if !todoFileExists("ses-reset") {
 		t.Fatal("ResetTodoState must not delete the file")
 	}
+	if got := readTodoText(t, "ses-reset"); !strings.Contains(got, "durable") {
+		t.Fatalf("expected todoread to serve the file after a memory reset, got %q", got)
+	}
+	// Resume reloads the sidebar copy from the file.
 	SetTodoSession("ses-reset")
-	if got := readTodoText(t); !strings.Contains(got, "durable") {
-		t.Fatalf("expected list to reload from file on resume, got %q", got)
+	if got := TodoState(); !strings.Contains(got, "durable") {
+		t.Fatalf("expected sidebar to reload from file on resume, got %q", got)
 	}
 }
 
@@ -230,12 +334,11 @@ func TestTodoResetTodoStateKeepsFileOnDisk(t *testing.T) {
 
 func TestTodoStaleRevisionRejected(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-stale")
-	writeTodoText(t, "- [ ] first") // writes revision 1
+	writeTodoText(t, "ses-stale", "- [ ] first") // writes revision 1
 
 	// Cite revision 0 against a file at revision 1 → rejected with content.
 	args := mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] replacement"})
-	_, err := (TodoWriteTool{}).Execute(args)
+	_, err := (TodoWriteTool{}).ExecuteCtx(todoCtx("ses-stale"), args)
 	if err == nil {
 		t.Fatal("expected stale revision to be rejected")
 	}
@@ -246,17 +349,16 @@ func TestTodoStaleRevisionRejected(t *testing.T) {
 
 func TestTodoUpdateTargetedStatusChange(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-update")
-	writeTodoText(t, "- [ ] first\n- [ ] second")
+	writeTodoText(t, "ses-update", "- [ ] first\n- [ ] second")
 	before := readTodoFileRaw(t, "ses-update")
 
 	args := mustJSON(t, map[string]any{
 		"revision": 1, "op": "set_status", "item_id": "t1", "status": "done",
 	})
-	if _, err := (TodoUpdateTool{}).Execute(args); err != nil {
+	if _, err := (TodoUpdateTool{}).ExecuteCtx(todoCtx("ses-update"), args); err != nil {
 		t.Fatalf("todo_update: %v", err)
 	}
-	after := readTodoText(t)
+	after := readTodoText(t, "ses-update")
 	if !strings.Contains(after, "- [✓] t1 first") || !strings.Contains(after, "- [ ] t2 second") {
 		t.Fatalf("targeted status change wrong: %q", after)
 	}
@@ -271,11 +373,10 @@ func TestTodoUpdateTargetedStatusChange(t *testing.T) {
 
 func TestTodoWriteDroppingCompletedItemRejected(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-guard")
-	writeTodoText(t, "- [ ] pending\n- [✓] done")
+	writeTodoText(t, "ses-guard", "- [ ] pending\n- [✓] done")
 
 	args := mustJSON(t, map[string]any{"revision": 1, "todoText": "- [ ] pending"})
-	_, err := (TodoWriteTool{}).Execute(args)
+	_, err := (TodoWriteTool{}).ExecuteCtx(todoCtx("ses-guard"), args)
 	if err == nil {
 		t.Fatal("expected todowrite dropping a completed item to be rejected")
 	}
@@ -286,17 +387,17 @@ func TestTodoWriteDroppingCompletedItemRejected(t *testing.T) {
 
 func TestTodoWriteFirstWriteAndAppendAccepted(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-append")
+	scope := todoScopeFor("ses-append")
 
 	// Legitimate first write (no file yet).
-	if _, err := todoWrite(0, "- [ ] one", nil, ""); err != nil {
+	if _, err := todoWrite(scope, 0, "- [ ] one", nil, ""); err != nil {
 		t.Fatalf("first write rejected: %v", err)
 	}
 	// Genuine append: same items plus a new one.
-	if _, err := todoWrite(1, "- [ ] one\n- [•] two", nil, ""); err != nil {
+	if _, err := todoWrite(scope, 1, "- [ ] one\n- [•] two", nil, ""); err != nil {
 		t.Fatalf("append rejected: %v", err)
 	}
-	got := readTodoText(t)
+	got := readTodoText(t, "ses-append")
 	if !strings.Contains(got, "- [ ] t1 one") || !strings.Contains(got, "- [•] t2 two") {
 		t.Fatalf("append result wrong: %q", got)
 	}
@@ -308,10 +409,9 @@ func TestTodoWriteCapturedBySnapshotStore(t *testing.T) {
 	chdirTemp(t)
 
 	store := snapshot.NewStore("test-agent", filepath.Join(t.TempDir(), "snapshots"))
-	ctx := snapshot.WithStore(context.Background(), store)
+	ctx := snapshot.WithStore(todoCtx("ses-snap"), store)
 	ctx = snapshot.WithToolCallID(ctx, "call-todo-write-1")
 
-	SetTodoSession("ses-snap")
 	// First write — file is new (no backup bytes needed), but the snapshot
 	// record is still created.
 	args := mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] one"})
@@ -336,7 +436,7 @@ func TestTodoWriteCapturedBySnapshotStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("undo: %v", err)
 	}
-	path := todoFilePath("ses-snap")
+	path := todoFilePath(TodoProjectRoot(), "ses-snap")
 	var found bool
 	for _, p := range restored {
 		if p == path {

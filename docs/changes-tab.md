@@ -49,6 +49,13 @@ detects file mutations made by the shell directly.
    rows and rehydrates the target session's, so `/session load` on a
    reused agent shows the loaded session's files rather than the old ones.
 
+   Rehydration reads the store's base dir at the moment it runs, so the
+   server must set the project root (`Agent.SetWorkDir`, which re-points the
+   base dir) **before** binding the session (`Agent.SetSessionID`) in
+   `buildAgentSession`. The reverse order rehydrates from the process cwd's
+   journal: the desktop app's cwd is `/`, so the agent came up with an empty
+   Changes tab. Guarded by `TestBuildAgentSessionRehydratesChangesFromProjectJournal`.
+
 3. **Bash detection (`internal/changes/bash.go`).** A `StatBashRecorder`
    runs a pre/post stat-walk around the bash tool's execution. `Pre()`
    returns a per-call `BashBaseline` that the caller hands back to

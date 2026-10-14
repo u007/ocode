@@ -160,6 +160,9 @@ func (h *Handler) autoStartPortMaps(ref projects.ProjectRef, fm *remote.ForwardM
 			log.Printf("port forwards: auto-start remote:%d for %s:%s: %v", m.RemotePort, ref.Host, ref.Path, err)
 		}
 	}
+	if err := StartHTRReverseForward(fm, maps); err != nil {
+		log.Printf("port forwards: %s:%s: %v", ref.Host, ref.Path, err)
+	}
 }
 
 // HandleListPortMaps serves GET /api/portmaps?host=&project=. The first list

@@ -28,18 +28,40 @@ across long runs and post-compaction turns. The store lives in
   ```
   Every item carries a stable `tN` id so targeted updates can land without a
   full rewrite. The revision is the file's optimistic-concurrency token.
+- **Every plan is addressed by a `TodoScope` (project root + session id),
+  never by a process-global "current" session.** The agent builds the scope
+  from its own `WorkDir` (enclosing project root via `tool.TodoProjectRootFor`;
+  `""` = process cwd) and its conversation id (`Agent.OpenCodeSessionID`,
+  which is the server's `SetSessionID` or the TUI's `SetOpenCodeSessionID`),
+  attaches it to every tool call's context with `tool.WithTodoScope` (next to
+  the snapshot store in `executeToolCallWithContext`), and uses the same
+  `a.todoScope()` for the re-anchor (`injectTodoTail`) and the auto-continue
+  `next` gate (`autoContinueTodoOpen`). `todowrite`/`todoread`/`todo_update`
+  refuse to run without a scope in their context — there is deliberately no
+  fallback to the sidebar's current session. Why: a web/desktop server hosts
+  many sessions across many projects in one process and never chdir's per
+  session; the old cwd + global-cursor store made every todo tool fail with
+  "todo session not set" there, while the server's own readers
+  (`publishTodoUpdated`, the Pulse board) were already addressing files by
+  `(ProjectRoot, SessionID)`. Sub-agents inherit the parent's id
+  (`SetSessionID`, or `SetOpenCodeSessionID` for a TUI parent) so their
+  `todoread` sees the dispatcher's plan.
 - **In-memory copy is a cache, not a second source of truth.** `TodoState()`
   is on the TUI render path and must never touch the disk. The memory copy is
-  populated only by (a) loading the file on `SetTodoSession`, or (b) a
-  mutation that just succeeded in writing the file. If a write fails, the
-  memory copy is not advanced and the error is returned.
+  keyed by session id and populated only by (a) loading the file on
+  `SetTodoSession` (the TUI sidebar's cursor), or (b) a mutation that just
+  succeeded in writing the file. If a write fails, the memory copy is not
+  advanced and the error is returned. `todoread` and `ReadTodoSnapshot` read
+  the file itself (then the legacy memory-only copy when no file exists): a
+  server session resumed in a fresh process has nothing in memory until its
+  first mutation, and must still see its plan.
 - **The main agent is the only writer.** Subagents have `todoread` only
   (`filterMainOnlyTools` in `internal/agent/subagent.go` strips `todowrite`
   and `todo_update` from the subagent tool set). A child reports its outcome
   to its dispatcher; the dispatcher — which owns the plan — records it. This
   is the load-bearing rule that prevents in-process concurrent writers.
 - **Mutations are serialized** by an advisory flock
-  (`internal/filelock.WithFileLock(todoLockPath(), fn)`) so a second ocode
+  (`internal/filelock.WithFileLock(todoLockPath(root), fn)`) so a second ocode
   instance, a resumed session, or the same agent writing twice cannot
   interleave. The cross-process lock catches contention; the revision
   protocol below catches stale reads.
@@ -106,8 +128,15 @@ across long runs and post-compaction turns. The store lives in
   invariant: a no-op turn keeps the messages slice byte-identical so the
   cached prefix survives.
 - **Session resume and `/new` semantics.** `SetTodoSession` reloads the file
-  from disk (so resume survives a process restart). `ResetTodoState` (called
-  by `/new` and `/clear`) clears the in-memory copy **only** — it must not
-  delete the file, because the call sites move to a *different* session id,
-  and deleting the outgoing session's plan would destroy exactly the state
-  this mechanism exists to preserve.
+  from disk into the sidebar copy (so the TUI sidebar survives a process
+  restart; the tools and re-anchor read the file directly through their scope
+  and need no load step). `ResetTodoState` (called by `/new` and `/clear`)
+  clears the in-memory copy **only** — it must not delete the file, because
+  the call sites move to a *different* session id, and deleting the outgoing
+  session's plan would destroy exactly the state this mechanism exists to
+  preserve.
+- **`/reset-id` moves the plan on both hosts.** `tool.RekeyTodoSession(root,
+  oldID, newID)` renames `<root>/.ocode/todo/<oldID>.md`; the TUI passes
+  `TodoProjectRootFor(m.workDir)`, the server's `HandleResetSessionID` passes
+  the session's project root. A plan left under the deleted id would read as
+  "No todo list found" on the next turn.

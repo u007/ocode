@@ -2,7 +2,6 @@ package tool
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -11,10 +10,10 @@ import (
 // the store — the only way to simulate an externally corrupted file.
 func writeRawTodoFile(t *testing.T, sessionID, content string) {
 	t.Helper()
-	if err := os.MkdirAll(todoDir(), 0o755); err != nil {
+	if err := os.MkdirAll(todoDir(TodoProjectRoot()), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(todoDir(), sessionID+".md"), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(todoFilePath(TodoProjectRoot(), sessionID), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -28,11 +27,10 @@ func writeRawTodoFile(t *testing.T, sessionID, content string) {
 // guard test passed only because its replacement list was shorter.
 func TestTodoWriteSameLengthUnrelatedReplaceRejected(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-guard-samelen")
-	writeTodoText(t, "- [✓] audit deps\n- [ ] write tests")
+	writeTodoText(t, "ses-guard-samelen", "- [✓] audit deps\n- [ ] write tests")
 
 	// Two completely unrelated items — same count as the existing list.
-	_, err := todoWrite(1, "- [ ] refactor parser\n- [ ] update docs", nil, "")
+	_, err := todoWrite(todoScopeFor("ses-guard-samelen"), 1, "- [ ] refactor parser\n- [ ] update docs", nil, "")
 	if err == nil {
 		t.Fatal("expected rejection: a same-length replace still drops both existing items")
 	}
@@ -45,21 +43,21 @@ func TestTodoWriteSameLengthUnrelatedReplaceRejected(t *testing.T) {
 // reorder, so a later todo_update citing "t1" mutated the wrong item.
 func TestTodoWriteReorderKeepsIDsWithItems(t *testing.T) {
 	chdirTemp(t)
-	SetTodoSession("ses-reorder")
-	if _, err := todoWrite(0, "- [ ] alpha\n- [ ] beta", nil, ""); err != nil {
+	scope := todoScopeFor("ses-reorder")
+	if _, err := todoWrite(scope, 0, "- [ ] alpha\n- [ ] beta", nil, ""); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
-	_, before, err := readTodo()
+	_, before, err := readTodo(scope)
 	if err != nil {
 		t.Fatalf("readTodo: %v", err)
 	}
 	alphaID := idOfText(t, before, "alpha")
 
 	// Legal reorder: same items, swapped order.
-	if _, err := todoWrite(1, "- [ ] beta\n- [ ] alpha", nil, ""); err != nil {
+	if _, err := todoWrite(scope, 1, "- [ ] beta\n- [ ] alpha", nil, ""); err != nil {
 		t.Fatalf("reorder rejected: %v", err)
 	}
-	_, after, err := readTodo()
+	_, after, err := readTodo(scope)
 	if err != nil {
 		t.Fatalf("readTodo after reorder: %v", err)
 	}
@@ -103,15 +101,16 @@ func TestLegacyRestoredSessionReadsAndIsGuarded(t *testing.T) {
 	chdirTemp(t)
 	SetTodoSession("ses-legacy")
 	SetTodoState("- [ ] first\n- [✓] second")
+	scope := todoScopeFor("ses-legacy")
 
-	if _, content, err := readTodo(); err != nil {
+	if _, content, err := readTodo(scope); err != nil {
 		t.Fatalf("todoread must tolerate legacy headerless content: %v", err)
 	} else if !strings.Contains(content, "first") {
 		t.Fatalf("legacy items missing from todoread: %q", content)
 	}
 
 	// The guard must still see the restored items.
-	if _, err := todoWrite(0, "- [ ] something else", nil, ""); err == nil {
+	if _, err := todoWrite(scope, 0, "- [ ] something else", nil, ""); err == nil {
 		t.Fatal("expected the destructive guard to protect legacy restored items")
 	}
 }

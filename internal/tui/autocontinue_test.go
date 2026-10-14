@@ -250,9 +250,6 @@ func TestGoalJudgeFinishedResumesOnNotMet(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected resume to return a turn-start command")
 	}
-	if !got.lastTurnWasGoalResume {
-		t.Fatal("expected resume to mark the turn as goal-initiated")
-	}
 
 	before := len(got.messages)
 	updated, _ = got.Update(goalJudgeFinishedMsg{gen: 2, result: result})
@@ -309,7 +306,20 @@ func TestGoalStateSurvivesSessionSaveRestore(t *testing.T) {
 	}
 }
 
-func TestStreamDoneReactivatesPausedGoalOnHumanTurn(t *testing.T) {
+// A human message that starts a turn reactivates a paused goal.
+func TestHumanSendReactivatesPausedGoal(t *testing.T) {
+	m := newGoalCommandTestModel()
+	m.restoreGoalTurns(t, "all tests pass", agent.GoalPaused, 2)
+
+	updated, _ := m.Update(fileSearchFinishedMsg{processedText: "keep going"})
+	got := derefTestModel(t, updated)
+	if gs, _ := got.agent.Goal(); gs.Status != agent.GoalActive {
+		t.Fatalf("expected a human-sent turn to reactivate the paused goal, got status %s", gs.Status)
+	}
+}
+
+// A goal resume turn is the agent's own, so it leaves a paused goal paused.
+func TestStreamDoneGoalResumeTurnKeepsPausedGoal(t *testing.T) {
 	m := model{
 		ready:              true,
 		width:              80,
@@ -326,34 +336,8 @@ func TestStreamDoneReactivatesPausedGoalOnHumanTurn(t *testing.T) {
 
 	updated, _ := m.Update(streamDoneMsg{})
 	got := derefTestModel(t, updated)
-	if gs, _ := got.agent.Goal(); gs.Status != agent.GoalActive {
-		t.Fatalf("expected a completed human turn to reactivate the paused goal, got status %s", gs.Status)
-	}
-}
-
-func TestStreamDoneGoalResumeTurnKeepsPausedGoal(t *testing.T) {
-	m := model{
-		ready:                 true,
-		width:                 80,
-		height:                24,
-		streaming:             true,
-		showQuestionDialog:    true,
-		lastTurnWasGoalResume: true,
-		agent:                 newTestAgent(retryTestClient{}, nil, nil, nil),
-		input:                 newTestTextarea(),
-		viewport:              fastviewport.New(76, 20),
-		styles:                ApplyThemeColors("tokyonight"),
-	}
-	m.layout()
-	m.agent.RestoreGoal(agent.GoalState{Condition: "all tests pass", Status: agent.GoalPaused, Turns: 2})
-
-	updated, _ := m.Update(streamDoneMsg{})
-	got := derefTestModel(t, updated)
 	if gs, _ := got.agent.Goal(); gs.Status != agent.GoalPaused {
 		t.Fatalf("expected the agent's own goal resume turn to leave the paused goal alone, got status %s", gs.Status)
-	}
-	if got.lastTurnWasGoalResume {
-		t.Fatal("expected the goal resume marker to be consumed at turn end")
 	}
 }
 
@@ -571,6 +555,42 @@ func TestClearedGoalDoesNotResurrectOnSave(t *testing.T) {
 	}
 	if meta["source"] != "tui" {
 		t.Fatalf("expected unowned loaded metadata to carry forward, got %#v", meta)
+	}
+}
+
+// A judge verdict carries its own action and fixed prompt; the TUI must send
+// that prompt (not the generic continue) and record the action in the chain.
+func TestAutoContinueJudgeFinishedFiresActionPrompt(t *testing.T) {
+	m := newGoalCommandTestModel()
+	m.autoContinueEnabled = true
+	m.autoContinueGen = 5
+	const prompt = "The build or tests are failing. Fix the failures before doing anything else, then re-run them and show the output."
+
+	updated, cmd := m.Update(autoContinueJudgeFinishedMsg{gen: 5, resume: true, action: "fix_errors", prompt: prompt, detail: "jev: fix_errors — resuming"})
+	got := derefTestModel(t, updated)
+	last := got.messages[len(got.messages)-1]
+	if last.role != roleUser || last.text != prompt {
+		t.Fatalf("expected the judge's fixed prompt as the resume message, got %#v", last)
+	}
+	if last.raw == nil || last.raw.Content != prompt {
+		t.Fatalf("resume message must carry the raw agent message, got %#v", last.raw)
+	}
+	hint := got.messages[len(got.messages)-2]
+	if !strings.Contains(hint.text, "fix_errors") {
+		t.Fatalf("transcript hint should name the action, got %q", hint.text)
+	}
+	if cmd == nil {
+		t.Fatal("expected a turn-start command")
+	}
+	if len(got.autoContinueActions) != 1 || got.autoContinueActions[0] != "fix_errors" || got.autoContinueCount != 1 {
+		t.Fatalf("chain state = %v/%d, want [fix_errors]/1", got.autoContinueActions, got.autoContinueCount)
+	}
+
+	// A non-auto turn settling the chain clears the action history too.
+	got.lastTurnWasAutoContinue = false
+	got.settleAutoContinueChain()
+	if got.autoContinueActions != nil || got.autoContinueCount != 0 {
+		t.Fatalf("settle must reset the chain, got %v/%d", got.autoContinueActions, got.autoContinueCount)
 	}
 }
 

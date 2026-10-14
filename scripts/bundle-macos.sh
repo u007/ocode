@@ -98,6 +98,8 @@ cat > "$PLIST" <<PLIST_EOF
 	<string>${VERSION}</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ocode uses the microphone to dictate chat messages.</string>
 	<key>NSUserNotificationAlertStyle</key>
 	<string>banner</string>
 </dict>

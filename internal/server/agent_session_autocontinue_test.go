@@ -134,7 +134,7 @@ const endVerdictJSON = `{"model":"jev-latest","answers":{"verdict":{"type":"choi
 // awaitingUserVerdictJSON is the contradictory shape the veto exists for: a
 // high-confidence "continue" verdict with an awaiting_user reason (the reply
 // ends by asking the user a question or requesting feedback).
-const awaitingUserVerdictJSON = `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"continue","probabilities":{"continue":0.8,"end":0.2},"confidence":0.95},"reason":{"type":"choice","choice":"awaiting_user","probabilities":{},"confidence":0.9}},"usage":{"input_tokens":5,"output_tokens":1}}`
+const awaitingUserVerdictJSON = `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"continue","probabilities":{"continue":0.8,"end":0.2},"confidence":0.95},"reason":{"type":"choice","choice":"awaiting_decision","probabilities":{},"confidence":0.9}},"usage":{"input_tokens":5,"output_tokens":1}}`
 
 // TestRunTurnAutoContinueStepLimitResumes covers the hard signal: with
 // maxSteps=1 every Step round trips the cap, and an enabled auto-continue
@@ -169,7 +169,7 @@ func TestRunTurnAutoContinueStepLimitResumes(t *testing.T) {
 	as := h.lookupAgentSession(id)
 	sawResume := false
 	for _, m := range as.messages {
-		if m.Role == "user" && m.Content == "The step limit has been reset — you may use tools again. Continue the task from where you left off; do not just repeat any previous summary." {
+		if m.Role == "user" && m.Content == agent.AutoContinueStepLimitPrompt {
 			sawResume = true
 		}
 	}
@@ -253,7 +253,7 @@ func TestRunTurnAutoContinueTypesafeTriageNaturalStop(t *testing.T) {
 	// The resume prompt must be the plain (non-step-limit) wording.
 	found := false
 	for _, m := range as.messages {
-		if m.Role == "user" && m.Content == "Continue the task from where you left off; do not just repeat any previous summary." {
+		if m.Role == "user" && m.Content == agent.AutoContinueResumePrompt {
 			found = true
 		}
 	}
@@ -292,7 +292,7 @@ func TestRunTurnAutoContinueTypesafeEndVerdictNoResume(t *testing.T) {
 	}
 	// No resume prompt may exist.
 	for _, m := range as.messages {
-		if m.Role == "user" && m.Content == "Continue the task from where you left off; do not just repeat any previous summary." {
+		if m.Role == "user" && m.Content == agent.AutoContinueResumePrompt {
 			t.Fatal("resume prompt must not exist after an end verdict")
 		}
 	}
@@ -320,7 +320,7 @@ func TestRunTurnAutoContinueAwaitingUserVetoesContinue(t *testing.T) {
 		t.Fatal("triage judge was never consulted")
 	}
 	for _, m := range as.messages {
-		if m.Role == "user" && m.Content == "Continue the task from where you left off; do not just repeat any previous summary." {
+		if m.Role == "user" && m.Content == agent.AutoContinueResumePrompt {
 			t.Fatalf("resume prompt must not exist when the reply is awaiting the user; messages=%v", as.messages)
 		}
 	}
@@ -342,8 +342,8 @@ func TestRunTurnAutoContinuePermissionAskBlocksResume(t *testing.T) {
 	cl.handler = func(call int) string { return "done" }
 	as.messages = append(as.messages, agent.Message{Role: "tool", ToolID: "t1", Content: toolSentinelPermissionAsk()})
 
-	should, _ := h.autoContinueShouldResume(id, as, 0)
-	if should {
+	fire, _ := h.autoContinueShouldResume(id, as, 0, nil)
+	if fire.Prompt != "" {
 		t.Fatal("pending permission ask must block auto-continue")
 	}
 }
@@ -398,7 +398,7 @@ func TestAutoContinueMidChainRowsReachLivePersist(t *testing.T) {
 	var live []agent.Message
 	as.liveAppend = func(m agent.Message) { live = append(live, m) }
 
-	if _, ok := h.fireAutoContinue(id, as, true); !ok {
+	if _, ok := h.fireAutoContinue(id, as, true, autoContinueFire{Action: "continue", Prompt: agent.AutoContinueResumePrompt, Reason: "test"}); !ok {
 		t.Fatal("fireAutoContinue did not fire")
 	}
 
@@ -415,5 +415,58 @@ func TestAutoContinueMidChainRowsReachLivePersist(t *testing.T) {
 	tail := as.messages[len(as.messages)-2:]
 	if tail[0].Notice != live[0].Notice || tail[1].Content != live[1].Content || tail[1].UserSeq != live[1].UserSeq {
 		t.Fatalf("live view diverged from transcript tail: live=%+v transcript=%+v", live, tail)
+	}
+}
+
+// proceedConfirmationVerdictJSON: the judge answers a plain go-ahead question
+// on the user's behalf (verdict proceed + reason awaiting_confirmation).
+const proceedConfirmationVerdictJSON = `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"proceed","probabilities":{"proceed":0.9,"end":0.1},"confidence":0.92},"reason":{"type":"choice","choice":"awaiting_confirmation","probabilities":{},"confidence":0.9}},"usage":{"input_tokens":5,"output_tokens":1}}`
+
+// TestRunTurnAutoContinueConfirmationProceeds: a reply that asks "shall I
+// proceed?" on an already-described plan is answered with the fixed proceed
+// prompt, the chain records the action, and the transcript hint names it.
+func TestRunTurnAutoContinueConfirmationProceeds(t *testing.T) {
+	url, bodies := newSystemoneStub(t, proceedConfirmationVerdictJSON)
+	h, id, cl := autoContinueTestServer(t, url)
+	h.mu.Lock()
+	h.cfg.Ocode.MaxSteps = 0
+	h.mu.Unlock()
+	as := h.lookupAgentSession(id)
+	as.agent.SetMaxSteps(0)
+	cl.handler = func(call int) string {
+		if call == 1 {
+			return "Plan: add an LRU in internal/users/cache.go with a unit test. Shall I proceed?"
+		}
+		return "Done — cache added, tests pass."
+	}
+
+	_, err := h.runTurn(id, as, "add caching", turnOptions{})
+	if err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+	if len(bodies()) == 0 {
+		t.Fatal("triage judge was never consulted")
+	}
+	proceeds, hints := 0, 0
+	for _, m := range as.messages {
+		if m.Role == "user" && m.Content == "Yes, proceed as described." {
+			proceeds++
+		}
+		if m.Notice != "" && strings.Contains(m.Notice, "chose proceed") {
+			hints++
+		}
+		if m.Role == "user" && m.Content == agent.AutoContinueResumePrompt {
+			t.Fatalf("a proceed verdict must send the proceed prompt, not the generic continue: %v", as.messages)
+		}
+	}
+	if proceeds == 0 || hints == 0 {
+		t.Fatalf("expected the proceed prompt and its hint in the transcript (proceeds=%d hints=%d): %+v", proceeds, hints, as.messages)
+	}
+	// Later judge calls are told what already fired in the chain.
+	last := bodies()[len(bodies())-1]
+	state, _ := last["state"].(map[string]any)
+	fired, _ := state["chain_actions_fired"].([]any)
+	if len(bodies()) > 1 && len(fired) == 0 {
+		t.Fatalf("state.chain_actions_fired should list the earlier proceed, got %v", state["chain_actions_fired"])
 	}
 }

@@ -23,7 +23,7 @@ timestamp: 2026-09-20T09:59:36Z
 - **`session.RekeyForDir`** — copies the RAW transcript preserving title/metadata/`created_at`; writes a fresh sqlite session; refreshes the index; deletes the old id (all formats + index rows) via shared `deleteInDir`. Missing transcript ⇒ `ErrNoStoredSession`.
 - **`Agent.RekeySession`** — moves debug-log id, provider identity, permissions session, client session. `Agent.RekeyOpenCodeSession` is the TUI variant (debug logs stay process-global).
 - **`snapshot.Store.RekeySession`** — migrates journal rows via `Journal.rekeySession` **without** Reset (unlike `SwitchSession`) so the Changes tab undo history survives.
-- **`tool.RekeyTodoSession`** — renames `.ocode/todo/<id>.md` and rebinds the in-memory entry.
+- **`tool.RekeyTodoSession(projectRoot, oldID, newID)`** — renames `<projectRoot>/.ocode/todo/<id>.md` and rebinds the in-memory entry. Both hosts call it: the TUI with `TodoProjectRootFor(m.workDir)`, the server's `HandleResetSessionID` with the session's project root.
 - **`SessionManager.Rekey`** — moves the registry entry (project root, window binding, pending queue, lastSeq).
 
 ## Quiesce — ordering matters

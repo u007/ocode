@@ -6112,3 +6112,30 @@ by `dir_docs.go` (`queueDirMD`, per-session `dirMDSeen`) are injected as a volat
 user-role tail block and are not shown. Fix: surface the most recent queued
 root-relative path from per-session agent state, read through the live agent with
 `TryLock` (never a blocking `as.mu.Lock()`), and keep it out of the system prompt.
+
+## Desktop macOS microphone: unverified (2026-10-14)
+
+Added `NSMicrophoneUsageDescription` to the bundle `Info.plist` (`scripts/bundle-macos.sh`). Not yet
+verified in a rebuilt `.app`: rebuild, click the voice button, confirm the macOS mic prompt appears and
+recording works. If no prompt: Wails v3 beta.12 has no darwin `WKUIDelegate`
+`requestMediaCapturePermissionForOrigin:` handler — add one in `cmd/ocode-desktop/native_darwin.m`. A signed
+build also needs the `com.apple.security.device.audio-input` entitlement.
+
+## Goal and tool-map races: residual gaps (2026-10-14)
+
+Left open by the goal review fixes. Each needs its own change.
+
+- **Unguarded `a.tools` readers on the turn path.** `advisorAvailable` and the post-construction
+  writers (`SetWorkDir`, `AddTools`, `addMCPTools`, the `discover_more` registration) now take
+  `toolsMu`. The turn-path readers still do not: `GetToolDefinitions`, the tool lookups in
+  `agent.go` (`a.tools[name]` in dispatch and gating), `discovery_glue.go`, `advisor_checkpoint.go`
+  and `DispatchSubagent`. A `/cd` or a tool-map write that runs while a turn reads the map can
+  still hit a fatal concurrent map access. Fix: route those reads through a locked accessor.
+- **Busy goal judge gets no re-dispatch.** When the previous judge is in flight, the turn gets a
+  "verdict skipped" hint and stalls until the next human turn. Fix: set a pending re-judge flag,
+  consume it in the `goalJudgeFinishedMsg` handler, and check the goal generation first.
+- **Panic outside the judge call skips the verdict callback.** `decideGoalRecovering` recovers judge
+  panics and pauses the goal. The outer recover was removed, so a panic elsewhere in `GoalJudgeSync`
+  is caught only by `crashguard.Go`, and `OnGoalJudge` is never called. An `/rc` listener could stay
+  un-armed. Fix: deliver a verdict from the goroutine on any exit, without taking `goalMu` in the
+  recover.

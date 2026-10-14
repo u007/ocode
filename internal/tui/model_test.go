@@ -2481,7 +2481,7 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 	if err := snapshot.Backup("changed.go"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (tool.TodoWriteTool{}).Execute(mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] ship task 4"})); err != nil {
+	if _, err := (tool.TodoWriteTool{}).ExecuteCtx(tuiTodoCtx("session-1"), mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] ship task 4"})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -6094,7 +6094,7 @@ func TestHandleNewCmdResetsSessionScopedState(t *testing.T) {
 	if err := snapshot.Backup("changed.go"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (tool.TodoWriteTool{}).Execute(mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] ship task 4"})); err != nil {
+	if _, err := (tool.TodoWriteTool{}).ExecuteCtx(tuiTodoCtx("session-1"), mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] ship task 4"})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -8419,4 +8419,10 @@ func TestHandleModelCmdRejectedDuringNewSessionPending(t *testing.T) {
 	if len(m.messages) == 0 || m.messages[len(m.messages)-1].text != "New session is being created — please wait." {
 		t.Fatalf("should have shown busy message, got %q", m.messages[len(m.messages)-1].text)
 	}
+}
+
+// tuiTodoCtx is the scope the TUI's agent attaches to a todo tool call for the
+// session shown in the sidebar: the cwd-resolved project root plus the id.
+func tuiTodoCtx(sessionID string) context.Context {
+	return tool.WithTodoScope(context.Background(), tool.TodoScope{ProjectRoot: tool.TodoProjectRoot(), SessionID: sessionID})
 }

@@ -1,0 +1,61 @@
+package server
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/u007/ocode/internal/browse/cdp"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/remote"
+)
+
+// localHTRPort reports the port of the local htrcli daemon when HTR is enabled
+// and that daemon is answering. ok is false when HTR is off or nothing is
+// listening; that is the normal "nothing to expose" case, not an error.
+func localHTRPort(browser config.BrowserConfig) (port int, ok bool) {
+	if !browser.HTREnabled {
+		return 0, false
+	}
+	shared := cdp.ResolveSharedDaemon(cdp.HTRSharedInput{
+		Token:        browser.HTRToken,
+		Shared:       browser.HTRShared,
+		LegacyPort:   browser.HTRPort,
+		LegacySocket: browser.HTRSocketPath,
+	})
+	socket := browser.HTRSocketPath
+	port = browser.HTRPort
+	if shared.Mode == "shared" {
+		socket = shared.Socket
+		port = shared.Port
+	}
+	info := cdp.HTRDaemonStatus(port, socket, browser.HTRToken)
+	return info.Port, info.Running
+}
+
+// StartHTRReverseForward opens `ssh -R <port>:127.0.0.1:<port>` so htrcli on an
+// SSH remote reaches the local machine's htrcli daemon (and therefore the
+// local browser). It is a no-op when HTR is disabled, the daemon is not
+// running, or the user already has a persisted forward on that remote port
+// (their entry wins). The forward is ephemeral: it is re-evaluated on every
+// remote autostart and is not written to projects.json.
+func StartHTRReverseForward(fm *remote.ForwardManager, persisted []projects.PortMap) error {
+	cfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		return fmt.Errorf("load config for htr reverse forward: %w", err)
+	}
+	port, ok := localHTRPort(cfg.Browser)
+	if !ok {
+		return nil
+	}
+	for _, pm := range persisted {
+		if pm.RemotePort == port {
+			return nil
+		}
+	}
+	if err := fm.Start(remote.ProjectPortMap{RemotePort: port, LocalPort: port, Enabled: true, Reverse: true}); err != nil {
+		return fmt.Errorf("htr reverse forward on remote port %d: %w", port, err)
+	}
+	log.Printf("htr: remote %d -> local %d reverse forward open", port, port)
+	return nil
+}

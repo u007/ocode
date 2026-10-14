@@ -159,7 +159,9 @@ func (a *Agent) ensureDiscovery() {
 	// a spec.Tools whitelist will exclude it via isToolAllowed — acceptable in
 	// Plan 1 (sub-agents still get the name index and seeded gating).
 	if a.tools != nil {
+		a.toolsMu.Lock()
 		a.tools["discover_more"] = discoverMoreTool{agent: a}
+		a.toolsMu.Unlock()
 	}
 }
 

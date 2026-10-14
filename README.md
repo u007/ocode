@@ -51,6 +51,107 @@ A clean Go package architecture makes it trivial to add providers, tools, plugin
 
 ---
 
+## Installation & Setup
+
+### Prerequisites
+
+- **Go 1.26.1 or later** — [Download Go](https://go.dev/dl)
+- **Git**
+- **Node.js + pnpm** — only to build the web UI / desktop shell (`corepack enable` pins
+  the pnpm version from `web/package.json`). A plain `go build` does **not** need Node.
+- **An LLM provider account** — OpenAI, Anthropic, Google, Z.AI, Alibaba, GitHub Copilot,
+  OpenRouter, OrcaRouter, AIHubMix, … (or a local Ollama instance)
+- **OS:** macOS, Linux, or Windows (including native builds; WSL2 also supported)
+
+### 1. Get the source
+
+```bash
+git clone https://github.com/u007/ocode.git
+cd ocode
+go mod download
+```
+
+### 2. Build
+
+A fresh clone builds with no extra setup — only the committed `.gitkeep` placeholders are
+needed for `go build`. Pick the variant you need:
+
+```bash
+# Minimal: CLI + TUI + headless + ACP (no web UI assets, no network fetch)
+go build -o ocode .
+./ocode                                # TUI (default)
+
+# With the real web UI embedded
+make build                             # needs Node/pnpm
+
+# Full install: builds + installs ocode to $GOPATH/bin, with HTR + models.dev snapshot
+make install
+
+# Native desktop app (macOS, Wails v3)
+make desktop-app                       # produces bin/ocode.app
+```
+
+| Command | Needs | Produces |
+|---------|-------|----------|
+| `go build -o ocode .` | Go only | CLI + TUI + headless + ACP; served SPA is empty. |
+| `make build` | Go + Node/pnpm | Above + real web UI in `web/dist`. |
+| `make install` | Go + Node/pnpm + network + out-of-tree HTR sources | Installed CLI with HTR bundle + models.dev snapshot (`-tags "htr models"`). |
+| `make desktop-app` | macOS + Xcode CLT + Node/pnpm + network + HTR sources | `bin/ocode.app`. |
+| `make build-all` | Go (cross-compile) | Binaries for darwin / linux / windows. |
+
+The two bulky generated inputs — the HTR browser bundle (`htr` tag) and the models.dev
+registry snapshot (`models` tag) — are gitignored and generated on demand;
+`make install` / `make desktop-app` generate and embed both. See
+[SETUP.md](SETUP.md) for the HTR/models bundle details.
+
+### 3. Configure a model provider
+
+On first launch ocode creates default config files:
+
+- **`opencode.json`** (project root) — provider credentials and model settings
+  (shared with opencode; read-only, safe to check in).
+- **`ocodeconfig.json`** (global config dir — see `paths.GlobalConfigDir()`) — ocode-only state: permissions,
+  editor, compact, profiles, … (written by ocode at runtime).
+
+Add credentials in `opencode.json`:
+
+```json
+{
+  "model": "gpt-4o",
+  "apiKeys": {
+    "openai": "sk-..."
+  }
+}
+```
+
+or with environment variables (ocode honours `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GOOGLE_API_KEY`, `ZHIPUAI_API_KEY` (Z.AI), `DASHSCOPE_API_KEY` (Alibaba),
+`OPENCODE_API_KEY` (opencode-go / DeepSeek), `NOVITA_API_KEY`, `ORCAROUTER_API_KEY`,
+`AIHUBMIX_API_KEY`, … — run `ocode models` for the full provider list), or a single global
+override via `OPENCODE_AUTH_TOKEN` (CI/proxy use; API-key schemes only — not for
+OAuth-subscription providers such as Anthropic Max or GitHub Copilot). You can also
+authenticate interactively from the TUI with `/connect`, then pick a model with
+`/model`. **Never commit real secrets** — keep credentials in env vars or the
+git-ignored `ocodeconfig.json`/`auth.json` store.
+
+### 4. Run
+
+```bash
+./ocode                 # TUI (default)
+./ocode serve           # HTTP server + web UI
+./ocode serve --open    # server + open browser
+./ocode run "fix tests" # headless / CI
+./ocode acp             # Zed editor integration
+```
+
+### Setup & configuration reference
+
+- **Setup:** See [SETUP.md](SETUP.md) for prerequisites, installation, and configuration in depth
+- **Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and PR guidelines
+- **Testing:** See [TESTING.md](TESTING.md) for feature coverage and known issues
+
+---
+
 ## Quick Start
 
 ```bash

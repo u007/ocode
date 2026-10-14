@@ -385,6 +385,11 @@ type RecapResult struct {
 type AutoContinueJudgeResult struct {
 	Gen    uint64
 	Resume bool
+	// Action is the key the judge chose (see autoContinueActions); "" when it
+	// returned no usable verdict. Prompt is the fixed user-role resume prompt
+	// to send when Resume is true.
+	Action string
+	Prompt string
 	Err    error
 	// Detail names the judge and why it decided as it did (model id, step-limit
 	// signal, confidence, or the failure). It is user-facing display text: a
@@ -790,7 +795,13 @@ type Agent struct {
 	// unlocked, then stores under the lock.
 	projectCtxMu       sync.Mutex
 	preloadedContextMu sync.RWMutex
-	preloadedContext   string // set by askAgent to avoid duplicate LoadContext calls
+	// toolsMu guards writes to a.tools after construction (SetWorkDir, AddTools,
+	// addMCPTools, the discover_more registration) and the read in
+	// advisorAvailable, which runs on the async auto-continue judge goroutine. A
+	// concurrent map read and write is a fatal runtime error that recover cannot
+	// catch. Never hold it across a call into another component.
+	toolsMu          sync.RWMutex
+	preloadedContext string // set by askAgent to avoid duplicate LoadContext calls
 	// orphanRecoveryWG tracks background goroutines spawned by
 	// recoverOneOrphanedToolCall that are abandoned on timeout/cancel.
 	// Shutdown waits on it before resetting shared state (snapshotStore,
@@ -1549,7 +1560,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// (or post-compaction turn) keeps the model's own plan in scope. The block
 	// is user-role, not system-role, because every system-role message rides
 	// the cached system block — see CLAUDE.md "## Persistent todo plan".
-	messages = injectTodoTail(messages)
+	messages = a.injectTodoTail(messages)
 	// LSP diagnostics that changed since the agent last reported them
 	// (user edits between turns, package-level fallout). User-role, tail,
 	// absent when nothing changed. See lsp_inject.go.
@@ -2786,18 +2797,18 @@ func (a *Agent) autoContinueJudgeClientTyped() (LLMClient, bool) {
 	return client, isDecision
 }
 
-// AutoContinueJudgeAsync asks the configured auto-continue judge model
-// whether the most recent assistant reply looks like a genuinely interrupted,
-// unfinished response that should be auto-resumed, rather than a naturally
-// completed one. A typesafe/<model> judge is consulted through the TypeSafe
-// decision API (Decide) with structured state — the chat judge path would
-// fail closed because TypesafeClient.Chat always returns
-// ErrTypesafeDecisionOnly. Returns false (no call made) if no judge model is
-// configured or a judge call is already in flight. The verdict arrives via
-// OnAutoContinueJudge; on any error the caller receives Resume=false (fail
-// closed — never auto-resume on an ambiguous/failed judge call) with Detail
-// describing the failure.
-func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
+// AutoContinueJudgeAsync asks the configured auto-continue judge model how
+// the most recent assistant reply ended and which fixed next action (if any)
+// the host should fire — see autoContinueActions. A typesafe/<model> judge is
+// consulted through the TypeSafe decision API (Decide) with structured state —
+// the chat judge path would fail closed because TypesafeClient.Chat always
+// returns ErrTypesafeDecisionOnly. Returns false (no call made) if no judge
+// model is configured or a judge call is already in flight. The decision
+// arrives via OnAutoContinueJudge; on any error the caller receives
+// Resume=false (fail closed — never auto-resume on an ambiguous/failed judge
+// call) with Detail describing the failure. prior lists the action keys
+// already fired in this chain (once-per-chain filtering).
+func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64, prior []string) bool {
 	client, isDecision := a.autoContinueJudgeClientTyped()
 	if client == nil {
 		return false
@@ -2807,11 +2818,11 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 	}
 	snapshot := make([]Message, len(messages))
 	copy(snapshot, messages)
+	priorCopy := append([]string(nil), prior...)
 	crashguard.Go(func() {
 		defer a.autoContinueJudgeMu.Unlock()
-		var resume bool
+		var dec AutoContinueDecision
 		var err error
-		var detail string
 		if isDecision {
 			// The async caller only dispatches after a turn that ended cleanly
 			// (the TUI guards on msg.err == nil), so there is no step error to
@@ -2820,68 +2831,79 @@ func (a *Agent) AutoContinueJudgeAsync(messages []Message, gen uint64) bool {
 			if !ok {
 				return
 			}
-			resume, detail, err = a.runAutoContinueJudgeTypesafe(d, snapshot, nil)
+			dec, err = a.runAutoContinueJudgeTypesafe(d, snapshot, nil, priorCopy)
 		} else {
-			resume, err = a.runAutoContinueJudge(client, snapshot)
-			detail = "continuous judge " + client.GetProvider() + "/" + client.GetModel()
-			// Mirror AutoContinueJudgeSync's Detail exactly, including the
-			// verdict suffix: the TUI renders only Detail on a non-resume
-			// verdict, so a bare judge name left the user unable to tell
-			// "finished" from "failed" — the silent-finish symptom this
-			// feature exists to remove.
-			if err != nil {
-				detail += ": " + err.Error()
-			} else if resume {
-				detail += ": looks cut off — resuming"
-			} else {
-				detail += ": reply finished"
-			}
+			dec, err = a.runAutoContinueJudge(client, snapshot, priorCopy)
 		}
 		if a.OnAutoContinueJudge != nil {
-			a.OnAutoContinueJudge(AutoContinueJudgeResult{Gen: gen, Resume: resume, Err: err, Detail: detail})
+			a.OnAutoContinueJudge(AutoContinueJudgeResult{Gen: gen, Resume: dec.Resume, Action: dec.Action, Prompt: dec.Prompt, Err: err, Detail: dec.Detail})
 		}
 	})
 	return true
 }
 
-// runAutoContinueJudge sends the tail of the conversation to the judge client
-// and expects a bare YES/NO verdict. Any error, empty response, or anything
-// other than an unambiguous "YES" is treated as NO (fail closed). The prompt
-// tells the judge to answer NO when the reply is waiting on the user (it asks
-// a question or requests feedback/confirmation) — a turn that has handed the
-// next move to the user must not be auto-resumed.
-func (a *Agent) runAutoContinueJudge(client LLMClient, messages []Message) (bool, error) {
+// runAutoContinueJudge is the chat-model judge: it sends the tail of the
+// conversation to the judge client with the offered action keys and expects
+// exactly one key back. Any error, empty response, or a word that is not an
+// offered key is treated as end (fail closed). The answer class
+// (proceed/skip/reject) is never offered here: a prose judge returns no typed
+// reason, so there is nothing to gate an auto-answer with — a reply that is
+// waiting on the user must simply end.
+func (a *Agent) runAutoContinueJudge(client LLMClient, messages []Message, prior []string) (AutoContinueDecision, error) {
 	const tailN = 6
 	tail := messages
 	if len(tail) > tailN {
 		tail = tail[len(tail)-tailN:]
 	}
+	offered := a.autoContinueOffered(prior, false, a.autoContinueTodoOpen())
 	var b strings.Builder
-	b.WriteString("You are judging whether an AI assistant's most recent reply, below, was cut off mid-task " +
-		"(e.g. truncated output, an unfinished code block or sentence, or the assistant explicitly saying it will " +
-		"continue) versus a reply that naturally finished the user's request. " +
-		"Answer with exactly one word: YES if the reply looks cut off and should be resumed, NO otherwise.\n" +
-		"Do NOT resume a reply that is waiting on the user: if it ends by asking a question, or requests " +
-		"clarification, confirmation, feedback, approval, or a decision, answer NO — the user must respond first. " +
-		"A reply that ends in a question is not a cut-off mid-task reply.\n\n")
+	b.WriteString("You are judging how an AI coding assistant's most recent reply, below, ended, and choosing the " +
+		"single next action for the harness. The assistant gets no new human input unless you choose an action that ends the turn.\n" +
+		"Answer with exactly one word: the action key.\n\nActions:\n")
+	for _, act := range offered {
+		fmt.Fprintf(&b, "- %s: %s\n", act.Key, act.Criteria)
+	}
+	b.WriteString("\nRules: pick a resume action only when there is concrete remaining work or a concrete gap the action names. " +
+		"Choose end when the reply naturally finished the request or reports a blocking error. " +
+		"Never resume a reply that is waiting on the user: if it ends by asking a question, or requests " +
+		"clarification, confirmation, feedback, approval, or a decision, answer await_user — the user must respond first. " +
+		"A reply that ends in a question is not a cut-off mid-task reply.")
+	if len(prior) > 0 {
+		fmt.Fprintf(&b, "\nActions already fired in this chain: %s. Do not repeat them.", strings.Join(prior, ", "))
+	}
+	b.WriteString("\n\n")
 	for _, m := range tail {
 		if m.Content == "" {
 			continue
 		}
 		fmt.Fprintf(&b, "[%s]\n%s\n\n", m.Role, m.Content)
 	}
+	model := "continuous judge " + client.GetProvider() + "/" + client.GetModel()
 	resp, err := client.Chat([]Message{{Role: "user", Content: b.String()}}, nil)
 	if err != nil {
-		return false, err
+		return AutoContinueDecision{Detail: model + ": " + err.Error()}, err
 	}
 	if resp == nil {
-		return false, nil
+		return AutoContinueDecision{Detail: model + ": empty response — not resuming"}, nil
 	}
-	// A local model rarely returns a bare "YES" even when told to — expect
-	// "YES.", "YES — the reply cuts off...", etc. Prefix match, still fails
-	// closed for anything not unambiguously starting with YES.
-	verdict := strings.ToUpper(strings.TrimSpace(resp.Content))
-	return strings.HasPrefix(verdict, "YES"), nil
+	// A local model rarely returns a bare key even when told to — expect
+	// "fix_errors.", "continue — the reply cuts off...", etc. Take the first
+	// word, strip trailing punctuation, and require an exact offered key.
+	word := strings.ToLower(strings.TrimSpace(resp.Content))
+	if i := strings.IndexAny(word, " \t\r\n"); i >= 0 {
+		word = word[:i]
+	}
+	word = strings.TrimRight(word, ".,:;!?\"'`—-")
+	for _, act := range offered {
+		if act.Key != word {
+			continue
+		}
+		if act.Class == actionEnd {
+			return AutoContinueDecision{Action: act.Key, Detail: model + ": " + act.Key}, nil
+		}
+		return AutoContinueDecision{Resume: true, Action: act.Key, Prompt: act.Prompt, Detail: model + ": " + act.Key + " — resuming"}, nil
+	}
+	return AutoContinueDecision{Detail: fmt.Sprintf("%s returned unknown action %q — not resuming", model, strings.TrimSpace(resp.Content))}, nil
 }
 
 // runCompact starts a compaction pass and owns its operation context. Callers
@@ -3355,6 +3377,7 @@ func (a *Agent) SetWorkDir(dir string) {
 	if a.permissions != nil {
 		a.permissions.SetWorkDir(dir)
 	}
+	a.toolsMu.Lock()
 	if at, ok := a.tools["advisor"].(AdvisorTool); ok {
 		at.workDir = dir
 		a.tools["advisor"] = at
@@ -3374,6 +3397,7 @@ func (a *Agent) SetWorkDir(dir string) {
 			a.tools["bash"] = &btv
 		}
 	}
+	a.toolsMu.Unlock()
 }
 
 // projectSnapshotsDir returns the global, project-scoped directory where this
@@ -5478,6 +5502,11 @@ func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, arg
 	// never reach the changes tab. An empty workDir is harmless: confinedPath
 	// falls back to os.Getwd().
 	toolCtx = tool.WithWorkDir(toolCtx, a.WorkDir())
+	// Address the todo tools at this agent's own plan (project root + session
+	// id). The store has no usable process-global session on a multi-session
+	// server, so without this todowrite/todoread/todo_update refuse to run
+	// there and the Pulse/todo_updated readers never see a plan.
+	toolCtx = tool.WithTodoScope(toolCtx, a.todoScope())
 	// Declare whether this agent's UI keeps the streamed text as the transcript.
 	// Tools that would otherwise return an unbounded result (bash) cap their
 	// output unless this is set. See Agent.RetainFullToolOutput.
@@ -6449,12 +6478,16 @@ func (a *Agent) applyPermissionResponse(req PermissionRequest, resp PermissionRe
 }
 
 func (a *Agent) AddTools(tools []tool.Tool) {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
 	for _, t := range tools {
 		a.tools[t.Name()] = t
 	}
 }
 
 func (a *Agent) addMCPTools(tools []tool.Tool) {
+	a.toolsMu.Lock()
+	defer a.toolsMu.Unlock()
 	for _, t := range tools {
 		a.tools[t.Name()] = t
 		a.mcpTools[t.Name()] = struct{}{}

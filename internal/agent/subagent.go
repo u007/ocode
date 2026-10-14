@@ -455,6 +455,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// no-op and the shared changes registry is untouched.
 	if t.mainAgent.sessionID != "" {
 		subAgent.SetSessionID(t.mainAgent.sessionID)
+	} else if sessionID := t.mainAgent.OpenCodeSessionID(); sessionID != "" {
+		// TUI parents carry only the conversation id. The child needs it too so
+		// its todoread (the one todo tool a sub-agent keeps) is scoped to the
+		// parent's plan instead of a freshly minted id with no file behind it.
+		subAgent.SetOpenCodeSessionID(sessionID)
 	}
 
 	// Propagate the parent's project root so the sub-agent's file writes are

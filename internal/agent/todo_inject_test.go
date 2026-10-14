@@ -1,40 +1,41 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
 )
 
-func chdirTemp(t *testing.T) {
+// todoTestAgent returns an agent bound to a throwaway project root and session
+// id — the two halves of its todoScope — so the plan it writes and re-anchors
+// lives under that root, independent of the process cwd and of the TUI's
+// sidebar session.
+func todoTestAgent(t *testing.T, sessionID string) *Agent {
 	t.Helper()
-	dir := t.TempDir()
-	origWd, _ := os.Getwd()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origWd) })
-	resetTodoStoreForTest()
+	a := newTestAgent(nil, nil, &config.Config{}, nil)
+	a.SetWorkDir(t.TempDir())
+	a.SetSessionID(sessionID)
+	return a
 }
 
-func resetTodoStoreForTest() {
-	// Test-local copy: reach in via SetTodoSession("") and ResetTodoState
-	// to clear the in-memory map for the current goroutine. Subsequent
-	// SetTodoSession("x") then loads cleanly.
-	tool.SetTodoSession("")
-	tool.ResetTodoState()
+func writeAgentTodo(t *testing.T, a *Agent, text string) {
+	t.Helper()
+	ctx := tool.WithTodoScope(context.Background(), a.todoScope())
+	if _, err := (tool.TodoWriteTool{}).ExecuteCtx(ctx, mustRawJSON(t, map[string]any{"revision": 0, "todoText": text})); err != nil {
+		t.Fatalf("todowrite: %v", err)
+	}
 }
 
 func TestInjectTodoTailUserRoleWithMarker(t *testing.T) {
-	chdirTemp(t)
-	tool.SetTodoSession("ses-inject")
-	tool.TodoWriteTool{}.Execute(mustRawJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] first\n- [✓] done"}))
+	a := todoTestAgent(t, "ses-inject")
+	writeAgentTodo(t, a, "- [ ] first\n- [✓] done")
 
 	msgs := []Message{{Role: "user", Content: "what now?"}}
-	out := injectTodoTail(msgs)
+	out := a.injectTodoTail(msgs)
 
 	if len(out) != len(msgs)+1 {
 		t.Fatalf("expected one injected message, got %d (was %d)", len(out), len(msgs))
@@ -61,25 +62,55 @@ func TestInjectTodoTailUserRoleWithMarker(t *testing.T) {
 }
 
 func TestInjectTodoTailSkipsWhenAllDone(t *testing.T) {
-	chdirTemp(t)
-	tool.SetTodoSession("ses-done")
-	tool.TodoWriteTool{}.Execute(mustRawJSON(t, map[string]any{"revision": 0, "todoText": "- [✓] one\n- [✓] two"}))
+	a := todoTestAgent(t, "ses-done")
+	writeAgentTodo(t, a, "- [✓] one\n- [✓] two")
 
 	msgs := []Message{{Role: "user", Content: "?"}}
-	out := injectTodoTail(msgs)
+	out := a.injectTodoTail(msgs)
 	if len(out) != len(msgs) {
 		t.Fatalf("expected no injection when all items are done, got %d (was %d)", len(out), len(msgs))
 	}
 }
 
 func TestInjectTodoTailSkipsWhenEmpty(t *testing.T) {
-	chdirTemp(t)
-	tool.SetTodoSession("ses-empty")
+	a := todoTestAgent(t, "ses-empty")
 
 	msgs := []Message{{Role: "user", Content: "?"}}
-	out := injectTodoTail(msgs)
+	out := a.injectTodoTail(msgs)
 	if len(out) != len(msgs) {
 		t.Fatalf("expected no injection when no todo exists, got %d", len(out))
+	}
+}
+
+// Two agents in one process (the server shape) each re-anchor their own plan:
+// one session's open items never leak into another's tail, and neither needs
+// the TUI's global current todo session.
+func TestInjectTodoTailIsScopedPerAgent(t *testing.T) {
+	a := todoTestAgent(t, "ses-one")
+	b := todoTestAgent(t, "ses-two")
+	writeAgentTodo(t, a, "- [ ] only in one")
+
+	msgs := []Message{{Role: "user", Content: "?"}}
+	if out := b.injectTodoTail(msgs); len(out) != len(msgs) {
+		t.Fatalf("agent b must not re-anchor agent a's plan, got %d messages", len(out))
+	}
+	out := a.injectTodoTail(msgs)
+	if len(out) != len(msgs)+1 || !strings.Contains(out[len(out)-1].Content, "only in one") {
+		t.Fatalf("agent a must re-anchor its own plan, got %+v", out)
+	}
+}
+
+// The agent's tool dispatch attaches its todoScope, so a todowrite issued
+// through the agent lands under the agent's project root and session id.
+func TestExecuteToolCallCarriesTodoScope(t *testing.T) {
+	a := todoTestAgent(t, "ses-dispatch")
+	a.tools["todowrite"] = tool.TodoWriteTool{}
+	if _, err := a.executeToolCallWithContext(context.Background(), "todowrite", mustRawJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] via agent"}), nil, "call-1"); err != nil {
+		t.Fatalf("todowrite through the agent: %v", err)
+	}
+	snap := tool.ReadTodoSnapshot(a.todoScope())
+	if !snap.HasOpenItems || !strings.Contains(snap.Content, "via agent") {
+		t.Fatalf("plan not written under the agent's scope: %+v", snap)
 	}
 }
 

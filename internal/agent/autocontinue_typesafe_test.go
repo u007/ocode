@@ -42,6 +42,13 @@ func newAutoContinueTypesafeJudge(t *testing.T, reply string) (*Agent, *typesafe
 	return a, h
 }
 
+// judgeSync adapts AutoContinueJudgeSync to the (resume, detail, err) shape
+// the older assertions in this file were written against.
+func judgeSync(a *Agent, messages []Message, stepErr error) (bool, string, error) {
+	dec, err := a.AutoContinueJudgeSync(messages, stepErr, nil)
+	return dec.Resume, dec.Detail, err
+}
+
 func autoContinueVerdictReply(choice string, confidence float64, reason string) string {
 	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"continue":0.5,"end":0.5},"confidence":` + jsonFloat(confidence) + `},"reason":{"type":"choice","choice":"` + reason + `","probabilities":{},"confidence":0.8}},"usage":{"input_tokens":7,"output_tokens":2}}`
 }
@@ -49,7 +56,7 @@ func autoContinueVerdictReply(choice string, confidence float64, reason string) 
 func TestAutoContinueTypesafeContinueVerdict(t *testing.T) {
 	a, h := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.95, "truncated"))
 	a.SetMaxSteps(0)
-	resume, detail, err := a.AutoContinueJudgeSync([]Message{
+	resume, detail, err := judgeSync(a, []Message{
 		{Role: "user", Content: "build the thing"},
 		{Role: "assistant", Content: "Here is the first half of the imp"},
 	}, nil)
@@ -90,7 +97,7 @@ func TestAutoContinueTypesafeContinueVerdict(t *testing.T) {
 
 func TestAutoContinueTypesafeEndVerdict(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("end", 0.97, "finished"))
-	resume, detail, err := a.AutoContinueJudgeSync([]Message{
+	resume, detail, err := judgeSync(a, []Message{
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "Done — all tests pass."},
 	}, nil)
@@ -108,8 +115,8 @@ func TestAutoContinueTypesafeEndVerdict(t *testing.T) {
 // answer" case — without the veto the verdict alone would have resumed and
 // answered the user's question on their behalf.
 func TestAutoContinueTypesafeAwaitingUserVetoesContinue(t *testing.T) {
-	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.97, "awaiting_user"))
-	resume, detail, err := a.AutoContinueJudgeSync([]Message{
+	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.97, typesafeAutoContinueAwaitingDecision))
+	resume, detail, err := judgeSync(a, []Message{
 		{Role: "user", Content: "add caching"},
 		{Role: "assistant", Content: "I can use Redis or an in-process LRU. Which would you prefer?"},
 	}, nil)
@@ -138,7 +145,7 @@ func TestAutoContinueGenericJudgePromptCoversAwaitingUser(t *testing.T) {
 	cfg.Ocode.AutoContinueEnabled = true
 	a := newTestAgent(nil, nil, cfg, nil)
 
-	resume, _, err := a.AutoContinueJudgeSync([]Message{
+	resume, _, err := judgeSync(a, []Message{
 		{Role: "assistant", Content: "Step 1 is done. Should I proceed with step 2?"},
 	}, nil)
 	if err != nil {
@@ -160,7 +167,7 @@ func TestAutoContinueGenericJudgePromptCoversAwaitingUser(t *testing.T) {
 
 func TestAutoContinueTypesafeLowConfidenceFailsClosed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.4, "mid_task"))
-	resume, detail, err := a.AutoContinueJudgeSync([]Message{
+	resume, detail, err := judgeSync(a, []Message{
 		{Role: "assistant", Content: "working on it"},
 	}, nil)
 	if err != nil || resume {
@@ -189,7 +196,7 @@ func TestAutoContinueTypesafeUsesRiskScaledFloorNotPermissionFloor(t *testing.T)
 	if got := a.resolveAutoContinueMinConfidence(); got != autoContinueMinConfidenceDefault {
 		t.Fatalf("auto-continue floor = %v, want %v", got, autoContinueMinConfidenceDefault)
 	}
-	resume, detail, err := a.AutoContinueJudgeSync([]Message{
+	resume, detail, err := judgeSync(a, []Message{
 		{Role: "assistant", Content: "I've updated the schema. Next I'll regenerate the migrations and run the tests."},
 	}, nil)
 	if err != nil || !resume {
@@ -201,7 +208,7 @@ func TestAutoContinueTypesafeUsesRiskScaledFloorNotPermissionFloor(t *testing.T)
 // "genuinely unsure / do not act" band of <0.5) still fails closed.
 func TestAutoContinueTypesafeBelowUnsureBandFailsClosed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.49, "mid_task"))
-	resume, _, err := a.AutoContinueJudgeSync([]Message{
+	resume, _, err := judgeSync(a, []Message{
 		{Role: "assistant", Content: "hmm"},
 	}, nil)
 	if err != nil || resume {
@@ -211,7 +218,7 @@ func TestAutoContinueTypesafeBelowUnsureBandFailsClosed(t *testing.T) {
 
 func TestAutoContinueTypesafeUnknownChoiceIsNotResumed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("maybe", 0.9, "finished"))
-	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
+	resume, detail, err := judgeSync(a, nil, nil)
 	if err != nil || resume {
 		t.Fatalf("expected no resume on unknown choice, got resume=%v err=%v", resume, err)
 	}
@@ -222,7 +229,7 @@ func TestAutoContinueTypesafeUnknownChoiceIsNotResumed(t *testing.T) {
 
 func TestAutoContinueTypesafeMissingVerdictFailsClosed(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, `{"model":"jev-latest","answers":{},"usage":{"input_tokens":1,"output_tokens":1}}`)
-	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
+	resume, detail, err := judgeSync(a, nil, nil)
 	if err != nil || resume {
 		t.Fatalf("expected no resume, got resume=%v err=%v", resume, err)
 	}
@@ -239,7 +246,7 @@ func TestAutoContinueTypesafeStepLimitStateReportedNotShortCircuited(t *testing.
 	// fabricate a resume it might mistake for a judge verdict — it reports the
 	// real end reason in the state and lets the judge decide.
 	a.stepLimitHit.Store(true)
-	resume, _, err := a.AutoContinueJudgeSync(nil, nil)
+	resume, _, err := judgeSync(a, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -269,7 +276,7 @@ func TestAutoContinueTypesafeTransportErrorFailsClosed(t *testing.T) {
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
 		return newTypesafeClient("k", "jev-latest", "http://127.0.0.1:1")
 	}
-	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
+	resume, detail, err := judgeSync(a, nil, nil)
 	if err == nil || resume {
 		t.Fatalf("expected error + no resume, got resume=%v err=%v", resume, err)
 	}
@@ -282,7 +289,7 @@ func TestAutoContinueJudgeAsyncTypesafeDetail(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.95, "truncated"))
 	done := make(chan AutoContinueJudgeResult, 1)
 	a.OnAutoContinueJudge = func(r AutoContinueJudgeResult) { done <- r }
-	if !a.AutoContinueJudgeAsync([]Message{{Role: "assistant", Content: "partial res"}}, 1) {
+	if !a.AutoContinueJudgeAsync([]Message{{Role: "assistant", Content: "partial res"}}, 1, nil) {
 		t.Fatal("Async dispatch should start")
 	}
 	r := <-done
@@ -302,11 +309,11 @@ func TestAutoContinueJudgeAsyncContinuousJudgeDetail(t *testing.T) {
 	prev := newClientFn
 	t.Cleanup(func() { newClientFn = prev })
 	newClientFn = func(_ *config.Config, _ string) LLMClient {
-		return &MockClient{Response: &Message{Role: "assistant", Content: "YES"}}
+		return &MockClient{Response: &Message{Role: "assistant", Content: "continue"}}
 	}
 	done := make(chan AutoContinueJudgeResult, 1)
 	a.OnAutoContinueJudge = func(r AutoContinueJudgeResult) { done <- r }
-	if !a.AutoContinueJudgeAsync([]Message{{Role: "assistant", Content: "partial"}}, 1) {
+	if !a.AutoContinueJudgeAsync([]Message{{Role: "assistant", Content: "partial"}}, 1, nil) {
 		t.Fatal("Async dispatch should start")
 	}
 	r := <-done
@@ -332,7 +339,7 @@ func TestAutoContinueJudgeAsyncContinuousJudgeDetailOnError(t *testing.T) {
 	}
 	done := make(chan AutoContinueJudgeResult, 1)
 	a.OnAutoContinueJudge = func(r AutoContinueJudgeResult) { done <- r }
-	if !a.AutoContinueJudgeAsync([]Message{{Role: "assistant", Content: "partial"}}, 1) {
+	if !a.AutoContinueJudgeAsync([]Message{{Role: "assistant", Content: "partial"}}, 1, nil) {
 		t.Fatal("Async dispatch should start")
 	}
 	r := <-done
@@ -346,7 +353,7 @@ func TestAutoContinueJudgeAsyncContinuousJudgeDetailOnError(t *testing.T) {
 
 func TestAutoContinueJudgeSyncNoModelNoCall(t *testing.T) {
 	a := &Agent{client: &MockClient{}, config: &config.Config{}}
-	resume, detail, err := a.AutoContinueJudgeSync(nil, nil)
+	resume, detail, err := judgeSync(a, nil, nil)
 	if resume || err != nil || detail != "" {
 		t.Fatalf("no judge configured: expected (false,\"\",nil), got (%v,%q,%v)", resume, detail, err)
 	}
@@ -373,7 +380,7 @@ func TestAutoContinueTypesafeStateTailBounded(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		msgs = append(msgs, Message{Role: "assistant", Content: "long content here"})
 	}
-	state := a.buildTypesafeAutoContinueState(msgs, nil)
+	state := a.buildTypesafeAutoContinueState(msgs, nil, nil, false)
 	tail := state["transcript_tail"].([]map[string]any)
 	if len(tail) != 6 {
 		t.Fatalf("tail = %d entries, want 6", len(tail))
@@ -384,14 +391,14 @@ func TestAutoContinueTypesafeStateTurnEndedReflectsReason(t *testing.T) {
 	a := &Agent{config: &config.Config{}}
 	msgs := []Message{{Role: "assistant", Content: "partial"}}
 
-	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil)["turn_ended"].(string); !strings.Contains(got, "finished") {
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil, nil, false)["turn_ended"].(string); !strings.Contains(got, "finished") {
 		t.Fatalf("natural-stop turn_ended = %q, want the natural completion wording", got)
 	}
-	if got, _ := a.buildTypesafeAutoContinueState(msgs, errors.New("boom"))["turn_ended"].(string); !strings.Contains(got, "boom") {
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, errors.New("boom"), nil, false)["turn_ended"].(string); !strings.Contains(got, "boom") {
 		t.Fatalf("errored-turn turn_ended = %q, want the error", got)
 	}
 	a.stepLimitHit.Store(true)
-	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil)["turn_ended"].(string); !strings.Contains(got, "step limit") {
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil, nil, false)["turn_ended"].(string); !strings.Contains(got, "step limit") {
 		t.Fatalf("step-limited turn_ended = %q, want the step-limit wording", got)
 	}
 }
@@ -399,7 +406,7 @@ func TestAutoContinueTypesafeStateTurnEndedReflectsReason(t *testing.T) {
 func TestAutoContinueTypesafeStateContentCapped(t *testing.T) {
 	a := &Agent{config: &config.Config{}}
 	big := strings.Repeat("x", 5000)
-	state := a.buildTypesafeAutoContinueState([]Message{{Role: "assistant", Content: big}}, nil)
+	state := a.buildTypesafeAutoContinueState([]Message{{Role: "assistant", Content: big}}, nil, nil, false)
 
 	tail, ok := state["transcript_tail"].([]map[string]any)
 	if !ok || len(tail) != 1 {
@@ -423,7 +430,7 @@ func TestAutoContinueTypesafeStateContentCapped(t *testing.T) {
 func TestAutoContinueTypesafeReasonLabelRendered(t *testing.T) {
 	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.95, "mid_task"))
 	a.SetMaxSteps(0)
-	_, detail, err := a.AutoContinueJudgeSync([]Message{
+	_, detail, err := judgeSync(a, []Message{
 		{Role: "assistant", Content: "I will continue with the next part"},
 	}, nil)
 	if err != nil {

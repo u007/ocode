@@ -533,15 +533,18 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if pulse {
 		h.configurePulseAgent(ag, effCfg)
 	}
+	// SetWorkDir must come before SetSessionID: SetSessionID rehydrates the
+	// changes store from its journal, and the store's base dir is only correct
+	// once SetWorkDir has pointed it at projectRoot. Reversed, a desktop agent
+	// (process cwd "/") rehydrated from the cwd's empty journal and showed no
+	// changes for a session whose snapshots sit under the project.
+	ag.SetWorkDir(projectRoot)
 	ag.SetSessionID(sessionID)
 	// Replace the process-wide seed with THIS session's own advisor model and
 	// trigger set (pinning the current default if the session has none yet).
 	// effCfg may be a per-profile snapshot or a per-session copy, so without
 	// this the advisor would follow a global value the chat never chose.
 	ag.SetAdvisorConfig(h.advisorConfigSeed(sessionID))
-	// projectRoot was normalised to the server's own project dir above, before
-	// any consumer keyed off it.
-	ag.SetWorkDir(projectRoot)
 	// Apply this session's own persisted permission-mode override, if any, so
 	// every build path (bootstrap, profile reconcile, plugin reload) restores
 	// the chat's mode. Per-session on purpose: one chat's yolo/sandbox toggle
@@ -1216,6 +1219,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	// consecutive auto-fired resumes within one runTurn call share the cap;
 	// any human-submitted turn starts a fresh chain.
 	autoContinueCount := 0
+	var autoContinueActions []string
 	for {
 		resp, err := as.agent.Step(messages)
 		if err != nil {
@@ -1279,10 +1283,11 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		// configured judge model (typesafe Decide or chat YES/NO). A pause on
 		// an unresolved permission/question ask never auto-continues — the
 		// turn is over until the dialog is answered.
-		should, triageDetail := h.autoContinueShouldResume(sessionID, as, autoContinueCount)
-		if should {
-			if hint, ok := h.fireAutoContinue(sessionID, as, headless); ok {
+		fire, triageDetail := h.autoContinueShouldResume(sessionID, as, autoContinueCount, autoContinueActions)
+		if fire.Prompt != "" {
+			if hint, ok := h.fireAutoContinue(sessionID, as, headless, fire); ok {
 				autoContinueCount++
+				autoContinueActions = append(autoContinueActions, fire.Action)
 				messages = append(messages, hint)
 				continue
 			}
@@ -1368,68 +1373,73 @@ const autoContinueChainCap = agent.AutoContinueChainCap
 // pause on an unresolved permission/question ask, an errored turn, or a
 // session waiting on its dialog never auto-continues. detail is the
 // user-facing triage outcome for the transcript.
-func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, chainCount int) (should bool, detail string) {
+func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, chainCount int, prior []string) (fire autoContinueFire, detail string) {
 	if as == nil || as.agent == nil {
-		return false, ""
+		return autoContinueFire{}, ""
 	}
 	// A turn paused on a pending permission/question sentinel must not be
 	// resumed behind the user's back — the dialog owns the next move.
 	if tailIsPermissionAsk(as.messages) || tailIsQuestionAsk(as.messages) {
-		return false, ""
+		return autoContinueFire{}, ""
 	}
 	if !as.agent.AutoContinueEnabled() {
-		return false, ""
+		return autoContinueFire{}, ""
 	}
 	if chainCount >= autoContinueChainCap {
-		return false, ""
+		return autoContinueFire{}, ""
 	}
 	// Hard signal first (free, no extra LLM call): the turn was cut off by
-	// the /max-step cap and forced into "stop and summarize".
+	// the /max-step cap and forced into "stop and summarize". The step-limit
+	// prompt explicitly countermands that instruction, or the model is likely
+	// to just re-summarize instead of resuming work.
 	if as.agent.StepLimitHit() {
-		return true, fmt.Sprintf("step-limit cutoff (chain %d/%d) — resuming", chainCount+1, autoContinueChainCap)
+		return autoContinueFire{Action: "continue", Prompt: agent.AutoContinueStepLimitPrompt, Reason: "cut off by /max-step"},
+			fmt.Sprintf("step-limit cutoff (chain %d/%d) — resuming", chainCount+1, autoContinueChainCap)
 	}
-	// Natural stop: ask the configured triage judge whether the reply looks
-	// interrupted. No judge configured → skip silently (opt-in feature).
-	// The caller's Step error never reaches here (runTurn returns on it), so
-	// there is no end-of-turn error to report to the judge.
+	// Natural stop: ask the configured triage judge how the reply ended and
+	// which fixed action to fire. No judge configured → skip silently (opt-in
+	// feature). The caller's Step error never reaches here (runTurn returns on
+	// it), so there is no end-of-turn error to report to the judge.
 	// A live /goal owns the natural stop: the goal judge decides instead.
 	if as.agent.GoalEvaluable() {
-		return false, ""
+		return autoContinueFire{}, ""
 	}
-	resume, detail, err := as.agent.AutoContinueJudgeSync(as.messages, nil)
+	dec, err := as.agent.AutoContinueJudgeSync(as.messages, nil, prior)
 	if err != nil {
 		log.Printf("serve: auto-continue judge for %s: %v", sessionID, err)
 	}
-	if resume && detail != "" {
+	if !dec.Resume {
+		return autoContinueFire{}, dec.Detail
+	}
+	detail = dec.Detail
+	if detail != "" {
 		detail = fmt.Sprintf("%s (chain %d/%d)", detail, chainCount+1, autoContinueChainCap)
 	}
-	return resume, detail
+	return autoContinueFire{Action: dec.Action, Prompt: dec.Prompt, Reason: "the auto-continue judge chose " + dec.Action}, detail
+}
+
+// autoContinueFire is one resume the chain is about to fire: the judge's
+// action key (or "continue" for the step-limit signal), the fixed user-role
+// prompt to send, and the short reason for the transcript hint. A zero value
+// means "do not fire".
+type autoContinueFire struct {
+	Action string
+	Prompt string
+	Reason string
 }
 
 // fireAutoContinue appends the auto-continue hint plus the explicit resume
 // prompt as a user message (transcript + LLM input) and returns it so the
 // runTurn loop can feed the next Step. Mirrors the TUI fireAutoContinue
 // wording so both surfaces read the same.
-func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless bool) (agent.Message, bool) {
-	if as == nil || as.agent == nil {
+func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless bool, fire autoContinueFire) (agent.Message, bool) {
+	if as == nil || as.agent == nil || fire.Prompt == "" {
 		return agent.Message{}, false
 	}
-	stepLimited := as.agent.StepLimitHit()
-	continuePrompt := "Continue the task from where you left off; do not just repeat any previous summary."
-	if stepLimited {
-		// The step-limit cutoff just told the model "Stop using tools and
-		// respond with a summary" — explicitly countermand it, or the model
-		// is likely to just re-summarize instead of resuming work.
-		continuePrompt = "The step limit has been reset — you may use tools again. " + continuePrompt
-	}
-	reason := "the auto-continue judge flagged this reply as cut off"
-	if stepLimited {
-		reason = "cut off by /max-step"
-	}
-	hint := fmt.Sprintf("↩ auto-continue — %s, resuming", reason)
+	hint := fmt.Sprintf("↩ auto-continue — %s, resuming", fire.Reason)
 	notice := agent.Message{Role: "assistant", Content: "", Notice: hint}
 	h.appendTranscriptMessage(as, headless, notice)
-	prompt := h.appendResumePrompt(sessionID, as, headless, agent.Message{Role: "user", Content: continuePrompt})
+	prompt := h.appendResumePrompt(sessionID, as, headless, agent.Message{Role: "user", Content: fire.Prompt})
 	return prompt, true
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
+	"github.com/u007/ocode/internal/server"
 )
 
 // portMapsHandler serves the desktop-only /api/desktop/portmaps* endpoints
@@ -77,6 +78,9 @@ func (h *portMapsHandler) autoStartEnabled() {
 		if err := h.fm.Start(pm.Runtime()); err != nil {
 			log.Printf("desktop: port maps: auto-start remote:%d: %v", pm.RemotePort, err)
 		}
+	}
+	if err := server.StartHTRReverseForward(h.fm, maps); err != nil {
+		log.Printf("desktop: port maps: %v", err)
 	}
 }
 

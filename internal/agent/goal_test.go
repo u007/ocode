@@ -460,3 +460,59 @@ func TestGoalMetadataRoundTrip(t *testing.T) {
 		t.Fatalf("round trip mismatch:\n got  %+v\n want %+v", got, orig)
 	}
 }
+
+// A not_met verdict on a non-human turn must not reactivate a paused goal: only
+// GoalMarkHumanTurn does that. The verdict is recorded, but nothing resumes.
+func TestGoalJudge_PausedGoalNotMetStaysPausedWithoutResume(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	a := newGoalTestAgent(t, stub)
+	a.RestoreGoal(GoalState{Condition: "tests pass", Status: GoalPaused, Turns: 2, SetAt: time.Now()})
+
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Verdict != "not_met" || res.Resume {
+		t.Fatalf("paused goal verdict = %+v, want not_met without resume", res)
+	}
+	if gs, _ := a.Goal(); gs.Status != GoalPaused {
+		t.Fatalf("not_met on a non-human turn reactivated the paused goal: %+v", gs)
+	}
+}
+
+// A judge panic pauses the goal as unavailable, so the host never reports a
+// paused goal while the stored goal is still active.
+func TestGoalJudge_PanicPausesGoal(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	stub.onDecide = func() { panic("judge exploded") }
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Verdict != "unavailable" || res.Resume {
+		t.Fatalf("panic verdict = %+v, want unavailable without resume", res)
+	}
+	gs, _ := a.Goal()
+	if gs.Status != GoalPaused {
+		t.Fatalf("panicked judge left the goal %s, want paused", gs.Status)
+	}
+	if !strings.Contains(gs.LastReason, "judge exploded") {
+		t.Fatalf("paused goal reason should carry the panic, got %q", gs.LastReason)
+	}
+}
+
+// A present but malformed goal record is rejected, not restored half-formed.
+func TestGoalStateFromMetadataRejectsMalformedRecord(t *testing.T) {
+	bad := map[string]any{GoalMetadataKey: map[string]any{
+		"condition":     "ship it",
+		"status":        "bogus",
+		"turns":         1.0,
+		"no_tool_turns": 0.0,
+		"set_at":        "not-a-time",
+	}}
+	if _, ok := GoalStateFromMetadata(bad); ok {
+		t.Fatal("malformed goal record was restored")
+	}
+	if _, ok := GoalStateFromMetadata(map[string]any{GoalMetadataKey: "oops"}); ok {
+		t.Fatal("non-object goal record was restored")
+	}
+}

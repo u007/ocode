@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime/debug"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -290,7 +291,7 @@ func (a *Agent) GoalJudgeAsync(messages []Message, gen uint64) bool {
 	copy(snapshot, messages)
 	crashguard.Go(func() {
 		defer a.goalJudgeMu.Unlock()
-		res := a.goalJudgeRecovering(snapshot)
+		res := a.GoalJudgeSync(snapshot)
 		res.Gen = gen
 		if a.OnGoalJudge != nil {
 			a.OnGoalJudge(res)
@@ -299,24 +300,21 @@ func (a *Agent) GoalJudgeAsync(messages []Message, gen uint64) bool {
 	return true
 }
 
-// goalJudgeRecovering is GoalJudgeSync with a panic turned into an unavailable
-// result. OnGoalJudge must always run: an /rc listener stays un-armed until it does.
-// crashguard.Go still guards the goroutine for panics outside the judge.
-func (a *Agent) goalJudgeRecovering(messages []Message) (res GoalJudgeResult) {
+// decideGoalRecovering is decideGoal with a judge panic turned into an
+// unavailable pause of gs. It runs without goalMu held, so the pause reaches the
+// goal through GoalJudgeSync's ordinary write-back, which bumps goalGen. It must
+// never take goalMu itself: a panic under that lock would deadlock the recover.
+func (a *Agent) decideGoalRecovering(gs *GoalState, messages []Message) (res GoalJudgeResult) {
 	defer func() {
 		r := recover()
 		if r == nil {
 			return
 		}
 		detail := fmt.Sprintf("goal judge panicked: %v", r)
-		a.emitDebug("AGENT", detail)
-		status := GoalPaused
-		if gs, ok := a.Goal(); ok {
-			status = gs.Status
-		}
-		res = GoalJudgeResult{Verdict: "unavailable", Status: status, Detail: detail, Err: fmt.Errorf("%v", r)}
+		a.emitDebug("AGENT", detail+"\n"+string(debug.Stack()))
+		res = goalPause(gs, "unavailable", detail, fmt.Errorf("%v", r))
 	}()
-	return a.GoalJudgeSync(messages)
+	return a.decideGoal(gs, messages)
 }
 
 // GoalJudgeSync evaluates the goal after a turn: stall and cap guards first, then
@@ -335,7 +333,7 @@ func (a *Agent) GoalJudgeSync(messages []Message) GoalJudgeResult {
 	gs := *a.goal
 	a.goalMu.Unlock()
 
-	res := a.decideGoal(&gs, messages)
+	res := a.decideGoalRecovering(&gs, messages)
 	res.Status = gs.Status
 
 	a.goalMu.Lock()
@@ -432,6 +430,11 @@ func (a *Agent) decideGoal(gs *GoalState, messages []Message) GoalJudgeResult {
 	if gs.Turns >= GoalMaxTurns {
 		return goalPause(gs, "capped", fmt.Sprintf("reached the %d-turn cap; %s", GoalMaxTurns, detail), nil)
 	}
+	// Only a human turn reactivates a paused goal (GoalMarkHumanTurn). A verdict
+	// reached on a non-human turn keeps the goal paused and does not resume it.
+	if gs.Status == GoalPaused {
+		return GoalJudgeResult{Verdict: "not_met", Detail: detail}
+	}
 	gs.Status = GoalActive
 	return GoalJudgeResult{Verdict: "not_met", Detail: detail, Resume: true}
 }
@@ -458,10 +461,15 @@ func GoalStateToMetadata(gs GoalState) map[string]any {
 }
 
 // GoalStateFromMetadata reads a goal back from session metadata. ok is false when
-// the record is absent or malformed.
+// the record is absent or malformed. A present but malformed record is logged
+// with each rejected value, so a goal that fails to restore is not lost silently.
 func GoalStateFromMetadata(meta map[string]any) (GoalState, bool) {
-	raw, ok := meta[GoalMetadataKey].(map[string]any)
+	rawValue, present := meta[GoalMetadataKey]
+	raw, ok := rawValue.(map[string]any)
 	if !ok {
+		if present && rawValue != nil {
+			DebugAppendf("GOAL", "goal metadata rejected, goal not restored: not an object: %v", rawValue)
+		}
 		return GoalState{}, false
 	}
 	condition, _ := raw["condition"].(string)
@@ -479,7 +487,24 @@ func GoalStateFromMetadata(meta map[string]any) (GoalState, bool) {
 		LastReason:  lastReason,
 		SetAt:       setAt,
 	}
-	if condition == "" || !okTurns || !okNoTool || err != nil || !goalStatusValid(gs.Status) {
+	var rejects []string
+	if condition == "" {
+		rejects = append(rejects, "condition is empty")
+	}
+	if err != nil {
+		rejects = append(rejects, fmt.Sprintf("set_at %q: %v", setAtText, err))
+	}
+	if !okTurns {
+		rejects = append(rejects, fmt.Sprintf("turns %v", raw["turns"]))
+	}
+	if !okNoTool {
+		rejects = append(rejects, fmt.Sprintf("no_tool_turns %v", raw["no_tool_turns"]))
+	}
+	if !goalStatusValid(gs.Status) {
+		rejects = append(rejects, fmt.Sprintf("status %q", status))
+	}
+	if len(rejects) > 0 {
+		DebugAppendf("GOAL", "goal metadata rejected, goal not restored: %s", strings.Join(rejects, "; "))
 		return GoalState{}, false
 	}
 	return gs, true

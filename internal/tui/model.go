@@ -186,17 +186,17 @@ func shouldAutoContinue(enabled, stepLimitHit bool, count int) bool {
 func (m *model) settleAutoContinueChain() {
 	if !m.lastTurnWasAutoContinue {
 		m.autoContinueCount = 0
+		m.autoContinueActions = nil
 	}
 	m.lastTurnWasAutoContinue = false
 }
 
-// settleGoalTurn reactivates a paused goal when a human-started turn completes.
-// A goal resume turn is the agent's own, so it leaves the goal as the judge set it.
-func (m *model) settleGoalTurn() {
-	if m.lastTurnWasGoalResume {
-		m.lastTurnWasGoalResume = false
-		return
-	}
+// markHumanTurn reactivates a paused goal when a human message starts a turn.
+// Call it only at the human send points: typed input, /rc web messages, custom
+// command prompts and /agent with a prompt. Auto-continue, goal resumes,
+// retries and job completions never reach it, so a goal paused on awaiting_user
+// stays paused across them.
+func (m *model) markHumanTurn() {
 	if m.agent != nil {
 		m.agent.GoalMarkHumanTurn()
 	}
@@ -212,27 +212,28 @@ func (m *model) settleGoalTurn() {
 // distinguishes the two trigger reasons only for the transcript hint/prompt
 // wording — the loop-safety guarantees (counter, cap) are identical either
 // way.
-func (m *model) fireAutoContinue(stepLimited bool) tea.Cmd {
+func (m *model) fireAutoContinue(action, continuePrompt string) tea.Cmd {
 	m.autoContinueCount++
+	m.autoContinueActions = append(m.autoContinueActions, action)
 	m.lastTurnWasAutoContinue = true
-	reason := "the auto-continue judge model flagged this reply as cut off"
-	if stepLimited {
+	reason := "the auto-continue judge chose " + action
+	if continuePrompt == agent.AutoContinueStepLimitPrompt {
 		reason = "cut off by /max-step"
 	}
 	hint := fmt.Sprintf("↩ auto-continue (%d/%d) — %s, resuming", m.autoContinueCount, autoContinueMaxChain, reason)
 	m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render(hint), transient: true})
-	continuePrompt := "Continue the task from where you left off; do not just repeat any previous summary."
-	if stepLimited {
-		// The step-limit cutoff itself just told the model "Stop using tools
-		// and respond with a summary" (agent.go's summarizeMsg), and that
-		// instruction is still the most recent one in transcript history.
-		// Explicitly countermand it, or the model is likely to just
-		// re-summarize instead of resuming work.
-		continuePrompt = "The step limit has been reset — you may use tools again. " + continuePrompt
-	}
 	m.messages = append(m.messages, message{role: roleUser, text: continuePrompt, raw: &agent.Message{Role: "user", Content: continuePrompt}})
 	m.rerenderTranscriptAndMaybeScroll()
 	return m.askAgent()
+}
+
+// fireStepLimitAutoContinue resumes a turn the /max-step cap cut off. The
+// step-limit cutoff itself just told the model "Stop using tools and respond
+// with a summary" (agent.go's summarizeMsg), and that instruction is still the
+// most recent one in transcript history, so the prompt explicitly countermands
+// it — or the model is likely to just re-summarize instead of resuming work.
+func (m *model) fireStepLimitAutoContinue() tea.Cmd {
+	return m.fireAutoContinue("continue", agent.AutoContinueStepLimitPrompt)
 }
 
 // maybeDispatchAutoContinueJudge tries to start an async auto-continue judge
@@ -251,7 +252,7 @@ func (m *model) maybeDispatchAutoContinueJudge(forRC bool) bool {
 	}
 	agentMsgs, _ := m.buildAgentMessagesSnapshot()
 	newGen := m.autoContinueGen + 1
-	if !m.agent.AutoContinueJudgeAsync(agentMsgs, newGen) {
+	if !m.agent.AutoContinueJudgeAsync(agentMsgs, newGen, m.autoContinueActions) {
 		return false
 	}
 	m.autoContinueGen = newGen
@@ -267,12 +268,16 @@ func (m *model) goalEvaluable() bool {
 
 // maybeDispatchGoalJudge starts the async goal judge for the turn that just
 // finished. Callers check agent != nil and GoalEvaluable first. Returns false
-// when the agent declines (judge already in flight), and then no result arrives.
-// forRC records whether the eventual verdict must re-arm the /rc listener.
+// when the agent declines (judge already in flight). Then the turn gets no
+// verdict, so a transcript hint says so and no result arrives. forRC records
+// whether the eventual verdict must re-arm the /rc listener.
 func (m *model) maybeDispatchGoalJudge(forRC bool) bool {
 	agentMsgs, _ := m.buildAgentMessagesSnapshot()
 	newGen := m.goalGen + 1
 	if !m.agent.GoalJudgeAsync(agentMsgs, newGen) {
+		agent.DebugAppendf("GOAL", "goal judge busy; verdict skipped for this turn")
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("◎ goal judge busy; verdict skipped for this turn"), transient: true})
+		m.rerenderTranscriptAndMaybeScroll()
 		return false
 	}
 	m.goalGen = newGen
@@ -303,7 +308,6 @@ func (m *model) goalResumeReady() bool {
 func (m *model) resumeGoal() tea.Cmd {
 	resumeMsg := m.agent.GoalResumeMessage()
 	m.messages = append(m.messages, message{role: roleUser, text: resumeMsg.Content, raw: &resumeMsg})
-	m.lastTurnWasGoalResume = true
 	m.rerenderTranscriptAndMaybeScroll()
 	return m.askAgent()
 }
@@ -1403,6 +1407,10 @@ type model struct {
 	// lastTurnWasAutoContinue). Capped at autoContinueMaxChain to guarantee
 	// termination even if a local model keeps re-triggering maxSteps.
 	autoContinueCount int
+	// autoContinueActions lists the judge action keys fired in the current
+	// chain (same lifetime as autoContinueCount); the judge is told so it
+	// does not re-offer once-per-chain actions.
+	autoContinueActions []string
 	// lastTurnWasAutoContinue marks that the turn currently finishing was
 	// kicked off by auto-continue itself, so the streamDoneMsg handler knows
 	// NOT to reset autoContinueCount (a human-submitted or otherwise
@@ -1437,10 +1445,6 @@ type model struct {
 	// goalGen is bumped on every /goal judge dispatch and on /goal set/clear, so
 	// a goalJudgeFinishedMsg from a superseded goal is ignored (mirrors autoContinueGen).
 	goalGen uint64
-	// lastTurnWasGoalResume is true while the turn in flight was started by a
-	// goal resume rather than a human message. settleGoalTurn reads and clears
-	// it so the agent's own resume turn does not reactivate a paused goal.
-	lastTurnWasGoalResume bool
 	// goalJudgeForRC is true while an in-flight goal judge was dispatched for an
 	// /rc-originated turn, so the /rc listener is re-armed once its verdict lands.
 	goalJudgeForRC bool
@@ -1449,9 +1453,10 @@ type model struct {
 	// fires it once the session is idle. Any new turn or judge supersedes it.
 	goalResumePending bool
 	// sessionBaseMetadata is the loaded session's metadata minus the keys
-	// sessionSidebarMetadata rebuilds, carried forward so a save never sends nil.
-	// A nil map means "keep the stored metadata", which would resurrect a goal
-	// or todo that was cleared since the session was loaded.
+	// sessionSidebarMetadata rebuilds, carried forward so a save keeps the other
+	// keys. Saves always send a non-nil map: a nil map would mean "keep the
+	// stored metadata", which would resurrect a goal or todo cleared since the
+	// session was loaded or started.
 	sessionBaseMetadata map[string]any
 	// modelSwitchGen guards async model switches — stale completions are dropped.
 	modelSwitchGen          uint64
@@ -1473,6 +1478,11 @@ type model struct {
 	// names last announced in the transcript, so the "directives active" notice
 	// is emitted once per active-model change rather than on every request.
 	kaizenAnnounced string
+	// briefingAnnounced is the always-on briefing file last announced as a
+	// transient transcript notice, so "CLAUDE.md loaded"/"AGENTS.md loaded"
+	// is emitted once per (session, briefing-file) change instead of on
+	// every request.
+	briefingAnnounced string
 	// modelPromptInfoKey/Val memoize the status-snapshot ModelPrompt payload
 	// per (model, workDir): broadcastTUIStatus fires on every state change
 	// (per-token during turns), and recomputing stack detection + the prompt
@@ -3884,6 +3894,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
 		if m.agent != nil {
+			m.markHumanTurn()
 			return m, m.askAgent()
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
@@ -5166,6 +5177,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Store the pending RC request so streamDoneMsg can deliver the result
 		m.pendingRC = &msg.req
 		// Run through the agent
+		m.markHumanTurn()
 		return m, m.askAgent()
 	case cronDeliveryMsg:
 		// Passive notification from the host's scheduler drainer. We
@@ -5373,11 +5385,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// pendingRCAutoContinue's doc comment for why).
 		if m.pendingRC == nil && m.pendingRCAutoContinue {
 			m.settleAutoContinueChain()
-			m.settleGoalTurn()
 			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
 			if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
 				m.pendingRCAutoContinue = true
-				return m, m.fireAutoContinue(true)
+				return m, m.fireStepLimitAutoContinue()
 			}
 			if m.rcGoalJudge(msg.err) {
 				// Goal judge in flight — leave the /rc listener un-armed until
@@ -5444,7 +5455,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.broadcastRCSnapshot()
 			m.settleAutoContinueChain()
-			m.settleGoalTurn()
 			stepLimitHit := msg.err == nil && m.agent != nil && m.agent.StepLimitHit()
 			if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
 				// Do NOT also re-arm waitForRCRequest here: rcRequestMsg's
@@ -5454,7 +5464,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// chain's own askAgent() call. Listening resumes once the
 				// chain settles (the branch at the top of this case).
 				m.pendingRCAutoContinue = true
-				return m, m.fireAutoContinue(true)
+				return m, m.fireStepLimitAutoContinue()
 			}
 			if m.rcGoalJudge(msg.err) {
 				return m, nil
@@ -5496,7 +5506,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// lastTurnWasAutoContinue or zero the counter without a real turn
 		// having actually completed.
 		m.settleAutoContinueChain()
-		m.settleGoalTurn()
 		m.streaming = false
 		m.cancelStream = nil
 		m.lastActivity = agent.ActivitySnapshot{}
@@ -5604,7 +5613,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// verdict lands later via autoContinueJudgeFinishedMsg.
 				stepLimitHit := m.agent != nil && m.agent.StepLimitHit()
 				if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
-					return m, m.fireAutoContinue(true)
+					return m, m.fireStepLimitAutoContinue()
 				}
 				// The chain declined to fire: say WHY in the transcript instead
 				// of going silent (a capped-out chain or a disabled toggle left
@@ -5826,7 +5835,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if forRC {
 				m.pendingRCAutoContinue = true
 			}
-			return m, tea.Batch(m.fireAutoContinue(false), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh))
+			return m, tea.Batch(m.fireAutoContinue(msg.action, msg.prompt), waitAutoContinueJudgeEvent(m.autoContinueJudgeCh))
 		}
 		// No resume fired: make the triage outcome VISIBLE instead of letting
 		// the turn silently look done (the "no display output like its done or
@@ -9301,6 +9310,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 			m.agent.ResetSubagentDispatch()
 		}
 		m.rerenderTranscriptAndMaybeScroll()
+		m.markHumanTurn()
 		return m, m.sendCustomCommandPrompt(prompt)
 	} else if agentName := strings.TrimPrefix(cmd, "/"); func() bool {
 		// Hidden agents (title, compaction) drive runtime helpers and must not be
@@ -9314,6 +9324,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 				m.agent.ResetSubagentDispatch()
 			}
 			m.rerenderTranscriptAndMaybeScroll()
+			m.markHumanTurn()
 			return m, m.askAgent()
 		} else {
 			// No extra args — show the agent description as a prompt header
@@ -11579,6 +11590,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			m.clearPermAskState()
 			m.clearQuestionAskState()
 			m.resetTranscriptWindow()
+			m.briefingAnnounced = ""
 			m.streamingThinkingIdx = -1
 			roleCounts := map[string]int{}
 			for _, am := range sess.Messages {
@@ -11989,6 +12001,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.clearPermAskState()
 	m.clearQuestionAskState()
 	m.invalidateDelayedChatInput()
+	m.briefingAnnounced = ""
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
 	m.rawTranscriptCont = nil
@@ -12026,6 +12039,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	// turn through the RC-chain-continuation branch or leave the /rc listener
 	// un-armed.
 	m.autoContinueCount = 0
+	m.autoContinueActions = nil
 	m.lastTurnWasAutoContinue = false
 	m.pendingRCAutoContinue = false
 	m.autoContinueJudgeForRC = false
@@ -12215,7 +12229,7 @@ func (m *model) handleResetIDCmd(args []string) {
 	if m.agent != nil {
 		m.agent.RekeyOpenCodeSession(oldID, newID)
 	}
-	tool.RekeyTodoSession(oldID, newID)
+	tool.RekeyTodoSession(tool.TodoProjectRootFor(m.workDir), oldID, newID)
 	m.broadcastTUIStatus()
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Reset session id: %s → %s\nThe conversation is unchanged; the provider will treat it as a new chat.", oldID, newID)})
 	m.rerenderTranscriptAndMaybeScroll()
@@ -16036,6 +16050,7 @@ func (m *model) askAgent() tea.Cmd {
 		// active-model change, so the user can see the tuning is in effect.
 		m.announceKaizenDigest(activeModel)
 	}
+	m.announceBriefing()
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
 	// The current IDE selection (if any) was just folded into the prompt via
@@ -18042,6 +18057,22 @@ func (m *model) announceKaizenDigest(activeModel string) {
 	m.appendDiscoveryNotice("Kaizen directives active (force-injected): " + strings.Join(names, ", "))
 }
 
+// announceBriefing emits a one-time transient transcript notice naming the
+// always-on project briefing file that LoadContext injected into the prompt
+// (CLAUDE.md / AGENTS.md). The briefing is already surfaced in the status
+// chrome, but this makes it part of the rendered messages (transient, not
+// persisted, not sent to the LLM) so it scrolls with the transcript.
+func (m *model) announceBriefing() {
+	name := agent.BriefingFileName(m.workDir)
+	if name == "" {
+		return
+	}
+	if name == m.briefingAnnounced {
+		return
+	}
+	m.briefingAnnounced = name
+	m.appendDiscoveryNotice(name + " loaded")
+}
 // scrollToCompactionBanner scrolls the viewport so the compaction summary
 // (divider + banner) is visible. Called after /compact succeeds so the user
 // sees the result instead of being scrolled past it.
@@ -19024,7 +19055,7 @@ func (m *model) wireCompactCallbacks() {
 	autoContinueJudgeDoneCh := m.autoContinueJudgeCh
 	m.agent.OnAutoContinueJudge = func(result agent.AutoContinueJudgeResult) {
 		select {
-		case autoContinueJudgeDoneCh <- autoContinueJudgeFinishedMsg{gen: result.Gen, resume: result.Resume, err: result.Err, detail: result.Detail}:
+		case autoContinueJudgeDoneCh <- autoContinueJudgeFinishedMsg{gen: result.Gen, resume: result.Resume, action: result.Action, prompt: result.Prompt, err: result.Err, detail: result.Detail}:
 		default:
 		}
 	}
@@ -19216,6 +19247,10 @@ func waitAutoContinueJudgeEvent(doneCh chan autoContinueJudgeFinishedMsg) tea.Cm
 type autoContinueJudgeFinishedMsg struct {
 	gen    uint64
 	resume bool
+	// action is the judge's chosen action key and prompt the fixed resume
+	// prompt to send when resume is true.
+	action string
+	prompt string
 	err    error
 	// detail is the judge's user-facing outcome line (model, verdict, why) —
 	// rendered in the transcript when the verdict does NOT fire a resume, so
@@ -21240,9 +21275,6 @@ func (m model) sessionSidebarMetadata() map[string]any {
 				meta[k] = v
 			}
 		}
-	}
-	if m.sessionBaseMetadata == nil && len(meta) == 0 {
-		return nil
 	}
 	return meta
 }

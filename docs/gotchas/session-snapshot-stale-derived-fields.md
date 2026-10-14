@@ -26,7 +26,7 @@ Affected builders:
 
 The web main-model pick is a per-session override: `ModelDialog.tsx:361` → `PUT /api/sessions/{id}/model` → `HandleSetSessionModel` → `pushSessionStatusSnapshot`.
 
-**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1580` → `reconcileProfileAgent` defined at `agent_session.go:682`, called at `agent_session.go:1925`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:5955`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:284`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:5901/3332`). The TUI-bridged path was already correct (`internal/tui/model.go:16495-16503` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
+**NOT a logical bug:** the next turn rebuilds the agent from `desiredModel := h.effectiveSessionModel(id)` (`internal/server/handler.go:1580` → `reconcileProfileAgent` defined at `agent_session.go:682`, called at `agent_session.go:1925`) and the prompt loads `LoadModelContextWithSourceAt(a.modelContextRoot(), a.client.GetModel())` (`internal/agent/agent.go:5987`). Kaizen gating uses the live client model (`internal/agent/discovery_glue.go:284`). Agent model-context cache is invalidated on `applySpecModel`/`SetWorkDir` (`agent.go:5933/3359`). The TUI-bridged path was already correct (`internal/tui/model.go:16495-16503` memoizes `computeModelPromptInfo` keyed on (agent client model, workDir, briefing file)).
 
 ## Durable rule
 

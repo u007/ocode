@@ -110,7 +110,12 @@ Rules:
 ## Capture
 
 - **Browser (web and desktop)**: `MediaRecorder` on `getUserMedia`. The blob is
-  uploaded to `POST /api/stt/transcribe`.
+  uploaded to `POST /api/stt/transcribe`. The macOS `.app` needs
+  `NSMicrophoneUsageDescription` in the `Info.plist` written by
+  `scripts/bundle-macos.sh`; without it macOS denies the mic and `getUserMedia`
+  fails with `NotAllowedError` with no prompt. Wails v3 beta.12 has no darwin
+  media-capture permission delegate (Linux does); if the prompt still does not
+  appear after a rebuild, a `WKUIDelegate` handler is the next step (see TODO.md).
 - **TUI**: `stt.StartRecording` runs `arecord` (Linux, if installed) or `ffmpeg`
   (Linux pulse, macOS avfoundation, Windows dshow) to a 16 kHz mono WAV. Output is
   captured, never inherited, so nothing paints over the alt-screen.

@@ -37,6 +37,17 @@ func liveGoalResponse(a *agent.Agent) sessionGoalResponse {
 	return goalResponse(gs, a.GoalStatusText())
 }
 
+// livePollGoalResponse is liveGoalResponse without the judge line. GET is polled,
+// and resolving the judge rebuilds a decision client on every call while none is
+// cached, so a poll must not resolve it.
+func livePollGoalResponse(a *agent.Agent) sessionGoalResponse {
+	gs, ok := a.Goal()
+	if !ok {
+		return sessionGoalResponse{}
+	}
+	return goalResponse(gs, agent.GoalStatusTextFor(gs, ""))
+}
+
 // goalResponse describes gs. Active follows the same rule as Agent.GoalEvaluable.
 func goalResponse(gs agent.GoalState, statusText string) sessionGoalResponse {
 	return sessionGoalResponse{
@@ -95,11 +106,11 @@ func (h *Handler) bridgedGoalAgent(id string) (ag *agent.Agent, ok bool) {
 // never builds an agent: a live agent answers, otherwise the persisted metadata.
 func (h *Handler) HandleGetSessionGoal(w http.ResponseWriter, r *http.Request, id string) {
 	if ag, bridged := h.bridgedGoalAgent(id); bridged && ag != nil {
-		writeJSON(w, http.StatusOK, liveGoalResponse(ag))
+		writeJSON(w, http.StatusOK, livePollGoalResponse(ag))
 		return
 	}
 	if as := h.lookupAgentSession(id); as != nil {
-		writeJSON(w, http.StatusOK, liveGoalResponse(as.agent))
+		writeJSON(w, http.StatusOK, livePollGoalResponse(as.agent))
 		return
 	}
 	entry, err := h.sessions.Resolve(id)

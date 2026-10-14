@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // HandleResetSessionID handles POST /api/sessions/{id}/reset-id: it re-keys a
@@ -102,6 +103,11 @@ func (h *Handler) HandleResetSessionID(w http.ResponseWriter, r *http.Request, i
 	if h.shellSessions != nil {
 		h.shellSessions.rekey(id, newID)
 	}
+
+	// Move the session's todo plan (<root>/.ocode/todo/<id>.md): the todo tools
+	// address it by session id, so a plan left under the deleted id would read
+	// as "No todo list found" on the next turn. No-op when none exists.
+	tool.RekeyTodoSession(tool.TodoProjectRootFor(projectRoot), id, newID)
 
 	h.publishBusEvent("session_rekeyed", newID, map[string]string{
 		"session_id": newID,
