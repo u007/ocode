@@ -2,8 +2,10 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
@@ -569,5 +571,62 @@ func TestClearedGoalDoesNotResurrectOnSave(t *testing.T) {
 	}
 	if meta["source"] != "tui" {
 		t.Fatalf("expected unowned loaded metadata to carry forward, got %#v", meta)
+	}
+}
+
+// A goal lives on the agent. Replacing the agent (model switch, rebuild) must
+// keep the goal, or the next save deletes it from disk.
+func TestGoalSurvivesAgentReplacement(t *testing.T) {
+	m := newGoalCommandTestModel()
+	m.restoreGoalTurns(t, "all tests pass", agent.GoalPaused, 4)
+
+	m.installAgent(newTestAgent(retryTestClient{}, nil, nil, nil))
+
+	gs, ok := m.agent.Goal()
+	if !ok || gs.Condition != "all tests pass" || gs.Status != agent.GoalPaused || gs.Turns != 4 {
+		t.Fatalf("goal after agent replacement: %+v ok=%v (want the carried paused goal with 4 turns)", gs, ok)
+	}
+	if _, ok := m.sessionSidebarMetadata()[agent.GoalMetadataKey]; !ok {
+		t.Fatal("goal dropped from sidebar metadata after agent replacement")
+	}
+}
+
+// A verdict from the outgoing agent's in-flight judge is stale after a replacement:
+// it must not resume the session on the new agent.
+func TestGoalJudgeFinishedIgnoredAfterAgentReplacement(t *testing.T) {
+	m := newGoalCommandTestModel()
+	m.restoreGoalTurns(t, "all tests pass", agent.GoalActive, 1)
+	m.goalGen = 3
+	m.installAgent(newTestAgent(retryTestClient{}, nil, nil, nil))
+	before := len(m.messages)
+
+	updated, _ := m.Update(goalJudgeFinishedMsg{gen: 3, result: agent.GoalJudgeResult{Gen: 3, Verdict: "not_met", Status: agent.GoalActive, Detail: "judge", Resume: true}})
+	got := derefTestModel(t, updated)
+	if len(got.messages) != before || got.streaming {
+		t.Fatalf("verdict from the replaced agent must render nothing and start no turn: transcript %d -> %d, streaming=%v", before, len(got.messages), got.streaming)
+	}
+}
+
+// A turn that ends in error has no judge behind it, so a resume deferred during
+// it must not fire after the error.
+func TestGoalResumePendingClearedOnTurnError(t *testing.T) {
+	m := newGoalCommandTestModel()
+	m.streaming = true
+	m.goalResumePending = true
+
+	updated, _ := m.Update(streamDoneMsg{err: errors.New("provider stream failed")})
+	got := derefTestModel(t, updated)
+	if got.goalResumePending {
+		t.Fatal("goalResumePending survived an errored turn; a later compaction would resume a stopped goal")
+	}
+}
+
+// restoreGoalTurns reinstates a goal with a known status and turn count on the
+// test model's agent.
+func (m *model) restoreGoalTurns(t *testing.T, condition string, status agent.GoalStatus, turns int) {
+	t.Helper()
+	m.agent.RestoreGoal(agent.GoalState{Condition: condition, Status: status, Turns: turns, SetAt: time.Now()})
+	if _, ok := m.agent.Goal(); !ok {
+		t.Fatal("RestoreGoal did not install the goal")
 	}
 }

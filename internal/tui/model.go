@@ -1276,6 +1276,16 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 		next.SetRecapPromptEnabled(m.agent.RecapPromptEnabled())
 	}
 	m.agent = next
+	// The goal lives on the agent. A replacement (model switch, MCP or plugin
+	// rebuild, profile change) starts with none, so carry the outgoing goal over,
+	// or the next save would delete it. The bump makes a verdict still in flight
+	// from the outgoing agent stale.
+	if next != nil && prev != nil {
+		if gs, ok := prev.Goal(); ok {
+			next.RestoreGoal(gs)
+		}
+	}
+	m.goalGen++
 	if m.agent != nil {
 		if m.sessionID != "" {
 			m.agent.SetOpenCodeSessionID(m.sessionID)
@@ -1384,8 +1394,9 @@ type model struct {
 	// when a turn ends because the agent hit its maxSteps cap (a genuinely
 	// interrupted, mid-task stop — see Agent.StepLimitHit), the TUI
 	// automatically injects a "continue" prompt instead of waiting for the
-	// user. Not tied to any specific slash command (e.g. /goal) — it applies
-	// to whatever task is in flight when a turn is truncated this way.
+	// user. It applies to whatever task is in flight when a turn is truncated
+	// this way, but a /goal supersedes it: while a goal is evaluable, the goal
+	// judge owns the turn.
 	autoContinueEnabled bool
 	// autoContinueCount counts consecutive auto-fired continues since the
 	// last turn that was NOT itself an auto-continue (see
@@ -5347,6 +5358,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.currentStreamEpoch(msg.epoch) {
 			return m, nil
 		}
+		if msg.err != nil {
+			// An errored or cancelled turn has no judge behind it, so a resume
+			// deferred from a verdict that landed mid-turn must not fire later.
+			m.goalResumePending = false
+		}
 		// Continuing a previously-RC(web)-initiated auto-continue chain
 		// (iteration 2+ — no fresh RCRequest arrived this round, so there is
 		// no rc.ResultCh to deliver to; that happened on iteration 1 below).
@@ -5579,13 +5595,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 				// General-purpose auto-continue: only after every other
-				// continuation path above has declined. Not scoped to /goal or
-				// any other specific command. Two trigger paths: the hard
-				// StepLimitHit signal (free, no extra LLM call) fires
-				// immediately; when that's false, an optional judge model
-				// (if configured via /autocontinue model) is asked whether the
-				// reply still looks interrupted — its verdict lands later via
-				// autoContinueJudgeFinishedMsg.
+				// continuation path above has declined. A goal supersedes it:
+				// while a goal is evaluable, the goal branch above returns
+				// first. Two trigger paths: the hard StepLimitHit signal (free,
+				// no extra LLM call) fires immediately; when that's false, an
+				// optional judge model (if configured via /autocontinue model)
+				// is asked whether the reply still looks interrupted — its
+				// verdict lands later via autoContinueJudgeFinishedMsg.
 				stepLimitHit := m.agent != nil && m.agent.StepLimitHit()
 				if shouldAutoContinue(m.autoContinueEnabled, stepLimitHit, m.autoContinueCount) {
 					return m, m.fireAutoContinue(true)
@@ -5847,7 +5863,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.goalJudgeNext(forRC)
 		}
 		res := msg.result
-		gs, _ := m.agent.Goal()
+		gs, hasGoal := m.agent.Goal()
+		if !hasGoal {
+			return m, m.goalJudgeNext(forRC)
+		}
 		// The turn may have moved on while the judge ran (typed input, Esc,
 		// a pending compaction). Resume only into an idle session, never
 		// into a turn already in flight.
@@ -11551,6 +11570,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			if m.agent != nil {
 				m.agent.ClearGoal()
 			}
+			m.goalGen++
 			m.goalResumePending = false
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
