@@ -29,6 +29,7 @@ vi.mock("../../stores/projectStore", () => ({
   // resolveSessionHost (useSessionHost.ts) imports this directly, so the
   // real implementation runs against the stub state in these tests.
   findTabForSession: () => undefined,
+  findProjectPathForTab: () => null,
   useProjectState: () => ({
     state: {
       projectSessions: mocks.projectSessions,
@@ -77,7 +78,7 @@ describe("SessionDialog tab closing", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
 
     expect(mocks.closeSessionBackend).toHaveBeenCalledTimes(1);
-    expect(mocks.closeSessionBackend).toHaveBeenCalledWith(session.id);
+    expect(mocks.closeSessionBackend).toHaveBeenCalledWith(session.id, undefined);
     expect(mocks.closeSessionTab).toHaveBeenCalledTimes(1);
     expect(mocks.closeSessionTab).toHaveBeenCalledWith(session.id);
   });
@@ -87,7 +88,7 @@ describe("SessionDialog tab closing", () => {
 
     fireEvent.mouseDown(screen.getByText("Alpha session"), { button: 1 });
 
-    expect(mocks.closeSessionBackend).toHaveBeenCalledWith(session.id);
+    expect(mocks.closeSessionBackend).toHaveBeenCalledWith(session.id, undefined);
     expect(mocks.closeSessionTab).toHaveBeenCalledWith(session.id);
     expect(screen.queryByText("Close session tab?")).not.toBeInTheDocument();
   });

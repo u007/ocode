@@ -304,22 +304,24 @@ function HomeApp() {
     leavePulseFor,
     pendingJumpRef: pendingJumpViewRef,
   } = usePulseViewState();
-  // "Show in file tree" from an editor/preview tab's context menu: switch to the
-  // Files view, un-collapse the tree pane (a reveal into a collapsed tree would
-  // be invisible), and hand the tree a request carrying the tab's path and root.
-  // The nonce makes revealing the SAME file twice a distinct request — the tree
-  // treats an already-seen nonce as done. `setCollapsed` (a state setter) is the
-  // dependency rather than `fileTreePane`, which is a fresh object per render.
+  // "Show in file tree" from an editor/preview tab's context menu, and folder
+  // picks from the ctrl/cmd+p picker: switch to the Files view, un-collapse the
+  // tree pane (a reveal into a collapsed tree would be invisible), and hand the
+  // tree a request carrying the path and root. The nonce makes revealing the
+  // SAME path twice a distinct request — the tree treats an already-seen nonce
+  // as done. `setCollapsed` (a state setter) is the dependency rather than
+  // `fileTreePane`, which is a fresh object per render.
   const [treeRevealRequest, setTreeRevealRequest] = useState<TreeRevealRequest | null>(null);
   const treeRevealSeqRef = useRef(0);
-  const revealEditorTabInTree = useCallback(
-    (tab: { path: string; projectRoot?: string }) => {
+  const revealPathInTree = useCallback(
+    (target: { path: string; projectRoot?: string; isDir?: boolean }) => {
       setActiveView("files");
       fileTreePane.setCollapsed(false);
       setTreeRevealRequest({
-        path: tab.path,
-        root: tab.projectRoot,
+        path: target.path,
+        root: target.projectRoot,
         nonce: ++treeRevealSeqRef.current,
+        isDir: target.isDir,
       });
     },
     [fileTreePane.setCollapsed],
@@ -1599,7 +1601,7 @@ function HomeApp() {
                     onSelectTab={setActiveEditorTabId}
                     onCloseTab={requestCloseTab}
                     onToggleInclude={toggleIncludeInContext}
-                    onRevealInTree={revealEditorTabInTree}
+                    onRevealInTree={revealPathInTree}
                   />
                   <div className="relative flex-1 overflow-hidden">
                     {visibleEditorTabs.length === 0 && (
@@ -2164,6 +2166,7 @@ function HomeApp() {
         open={filePickerOpen}
         onClose={closeFilePicker}
         onOpenFile={openFileAndShow}
+        onOpenFolder={(path, root) => revealPathInTree({ path, projectRoot: root, isDir: true })}
         projectPath={projectState.activeProject?.path}
         projectHost={projectState.activeProject?.host}
         initialQuery={filePickerQuery}

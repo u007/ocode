@@ -162,6 +162,9 @@ export interface TreeRevealRequest {
   path: string;
   root?: string;
   nonce: number;
+  /** The target is a folder: reveal it AND open it, so its contents show,
+   *  not just its row. Set by the ctrl/cmd+p picker's folder results. */
+  isDir?: boolean;
 }
 
 /** Transient highlight state for a row the reveal just brought into view. */
@@ -1638,6 +1641,7 @@ export default function FileTree({
     setExpandedDirs((prev) => {
       const next = new Set(prev);
       for (const dir of ancestorDirs(rel)) next.add(dir);
+      if (req.isDir) next.add(rel);
       saveExpandedDirs(treeRootKey, next);
       return next;
     });

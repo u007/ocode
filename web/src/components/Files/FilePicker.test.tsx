@@ -221,3 +221,92 @@ describe("FilePicker shortest-path ordering", () => {
   });
 });
 
+describe("FilePicker folder results", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  const FOLDER = "benchmark-artifacts/stand-height/2026-10-12-rerun-cke0002";
+  const tree = [
+    {
+      name: "benchmark-artifacts",
+      path: "benchmark-artifacts",
+      is_dir: true,
+      children: [
+        {
+          name: "stand-height",
+          path: "benchmark-artifacts/stand-height",
+          is_dir: true,
+          children: [
+            {
+              name: "2026-10-12-rerun-cke0002",
+              path: FOLDER,
+              is_dir: true,
+              children: [{ name: "result.json", path: `${FOLDER}/result.json`, is_dir: false }],
+            },
+          ],
+        },
+      ],
+    },
+    { name: "readme.md", path: "readme.md", is_dir: false },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchSpy = vi.spyOn(globalThis as any, "fetch").mockResolvedValue(mockTreeResponse(tree));
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("lists no folders unless a folder handler is given", async () => {
+    render(<FilePicker open onClose={() => {}} onOpenFile={() => {}} projectPath="/proj" />);
+    const input = (await screen.findByPlaceholderText("Filter by keywords...")) as HTMLInputElement;
+    await waitFor(() => expect(screen.getByText("readme.md")).toBeInTheDocument());
+
+    fireEvent.change(input, { target: { value: "2026-10-12-rerun-cke0002" } });
+    await waitFor(() => expect(screen.getByText(`${FOLDER}/result.json`)).toBeInTheDocument());
+    expect(screen.queryByText(FOLDER)).not.toBeInTheDocument();
+  });
+
+  it("lists a matching folder and selecting it calls onOpenFolder, not onOpenFile", async () => {
+    const onOpenFile = vi.fn();
+    const onOpenFolder = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <FilePicker
+        open
+        onClose={onClose}
+        onOpenFile={onOpenFile}
+        onOpenFolder={onOpenFolder}
+        projectPath="/proj"
+      />,
+    );
+    const input = (await screen.findByPlaceholderText("Filter by keywords...")) as HTMLInputElement;
+    await waitFor(() => expect(screen.getByText("readme.md")).toBeInTheDocument());
+
+    fireEvent.change(input, { target: { value: FOLDER } });
+    const folderRow = (await screen.findByText(FOLDER)).closest("[cmdk-item]");
+    expect(folderRow).toHaveTextContent("folder");
+
+    fireEvent.click(screen.getByText(FOLDER));
+    expect(onOpenFolder).toHaveBeenCalledWith(FOLDER, "/proj");
+    expect(onOpenFile).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("still opens a file through onOpenFile when folders are listed", async () => {
+    const onOpenFile = vi.fn();
+    const onOpenFolder = vi.fn();
+    render(
+      <FilePicker open onClose={() => {}} onOpenFile={onOpenFile} onOpenFolder={onOpenFolder} projectPath="/proj" />,
+    );
+    const input = (await screen.findByPlaceholderText("Filter by keywords...")) as HTMLInputElement;
+    await waitFor(() => expect(screen.getByText("readme.md")).toBeInTheDocument());
+
+    fireEvent.change(input, { target: { value: "readme" } });
+    fireEvent.click(await screen.findByText("readme.md"));
+    expect(onOpenFile).toHaveBeenCalledWith("readme.md", "/proj");
+    expect(onOpenFolder).not.toHaveBeenCalled();
+  });
+});
+
