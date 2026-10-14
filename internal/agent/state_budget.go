@@ -195,9 +195,23 @@ func projectDecisionValue(path string, v any, preview int, rec *truncationRecord
 			out[i] = projectDecisionValue(fmt.Sprintf("%s[%d]", path, i), e, preview, rec)
 		}
 		return out
+	case []map[string]any:
+		return projectMapSlice(path, t, preview, rec)
 	default:
 		return v
 	}
+}
+
+// projectMapSlice handles the typed []map[string]any that judge states use for
+// their lists (the goal judge's transcript_tail, the discovery candidates). A
+// type switch on []any alone misses it, which left those lists unprojected: an
+// over-budget state was then refused instead of previewed.
+func projectMapSlice(path string, t []map[string]any, preview int, rec *truncationRecorder) []map[string]any {
+	out := make([]map[string]any, len(t))
+	for i, e := range t {
+		out[i] = projectNested(fmt.Sprintf("%s[%d]", path, i), e, preview, rec).(map[string]any)
+	}
+	return out
 }
 
 // projectNested walks a non-bulky value looking for bulky keys further down.
@@ -220,6 +234,8 @@ func projectNested(path string, v any, preview int, rec *truncationRecorder) any
 			out[i] = projectNested(fmt.Sprintf("%s[%d]", path, i), e, preview, rec)
 		}
 		return out
+	case []map[string]any:
+		return projectMapSlice(path, t, preview, rec)
 	default:
 		return v
 	}

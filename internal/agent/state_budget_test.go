@@ -286,6 +286,7 @@ func TestSharedStateBudget_WorstCaseProductionPayloads(t *testing.T) {
 		{"content-guard", map[string]any{
 			"tool": "read", "file_content": strings.Repeat("line of prose\n", 500),
 		}},
+		{"goal-judge-html-tail", buildWorstCaseGoalState()},
 	}
 	for _, tc := range cases {
 		before := marshalledSize(t, tc.state)
@@ -302,6 +303,43 @@ func TestSharedStateBudget_WorstCaseProductionPayloads(t *testing.T) {
 		if after > decisionStateBudgetBytes {
 			t.Errorf("%s: prepared state is %d bytes, over the %d budget", tc.name, after, decisionStateBudgetBytes)
 		}
+	}
+}
+
+// buildWorstCaseGoalState mirrors the goal judge's request: a 4000-rune
+// condition and the 12-message tail, each message at the 4000-byte cap. The
+// content is HTML/JSX-heavy, so json.Marshal's <>& escaping inflates it.
+func buildWorstCaseGoalState() map[string]any {
+	markup := strings.Repeat(`<div class="row">&nbsp;<span>x</span></div>`, 200)[:4000]
+	messages := make([]Message, 0, goalTailN)
+	for i := 0; i < goalTailN; i++ {
+		messages = append(messages, Message{Role: "assistant", Content: markup})
+	}
+	return map[string]any{
+		"condition":       strings.Repeat("<ok>&", 800),
+		"turns":           GoalMaxTurns - 1,
+		"transcript_tail": typesafeTranscriptTail(messages, goalTailN),
+		"turn_ended":      "finished within the step budget",
+	}
+}
+
+// A typed []map[string]any list is projected like a []any one, and the clipped
+// path is recorded, so the judge is told which tail entry it is not seeing whole.
+func TestProjectDecisionState_ReachesTypedMapSlices(t *testing.T) {
+	state := map[string]any{
+		"transcript_tail": []map[string]any{
+			{"role": "assistant", "content": strings.Repeat("a", 5000)},
+		},
+	}
+	rec := &truncationRecorder{}
+	projected := projectDecisionState(state, statePreviewBytes, rec)
+	tail := projected["transcript_tail"].([]map[string]any)
+	got, _ := tail[0]["content"].(string)
+	if len(got) >= 5000 {
+		t.Fatalf("typed map slice content was not projected: %d bytes", len(got))
+	}
+	if names := rec.names(); len(names) != 1 || names[0] != "transcript_tail[0].content" {
+		t.Fatalf("clipped path not recorded: %v", names)
 	}
 }
 
