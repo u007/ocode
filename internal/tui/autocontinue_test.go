@@ -7,6 +7,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
@@ -352,4 +353,134 @@ func TestStreamDoneGoalResumeTurnKeepsPausedGoal(t *testing.T) {
 	if got.lastTurnWasGoalResume {
 		t.Fatal("expected the goal resume marker to be consumed at turn end")
 	}
+}
+
+// An /rc-originated turn ends with a goal evaluable: the goal judge is dispatched
+// (goalGen bumps, the auto-continue judge stays off) and the /rc listener is
+// left un-armed until the verdict lands.
+func TestStreamDoneRCDispatchesGoalJudge(t *testing.T) {
+	m := model{
+		ready:               true,
+		width:               80,
+		height:              24,
+		streaming:           true,
+		autoContinueEnabled: true,
+		pendingRC:           &server.RCRequest{},
+		agent:               newTestAgent(retryTestClient{}, nil, nil, nil),
+		input:               newTestTextarea(),
+		viewport:            fastviewport.New(76, 20),
+		styles:              ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	goalGen, autoGen := m.goalGen, m.autoContinueGen
+
+	updated, cmd := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+	if got.goalGen != goalGen+1 {
+		t.Fatalf("expected RC turn to dispatch the goal judge (goalGen %d -> %d), got %d", goalGen, goalGen+1, got.goalGen)
+	}
+	if got.autoContinueGen != autoGen {
+		t.Fatalf("expected auto-continue judge not to dispatch alongside the goal, autoContinueGen %d -> %d", autoGen, got.autoContinueGen)
+	}
+	if !got.goalJudgeForRC {
+		t.Fatal("expected the goal judge to be marked as /rc-originated")
+	}
+	if got.streaming {
+		t.Fatal("expected the completed /rc turn to settle streaming before the verdict lands")
+	}
+	if cmd != nil {
+		t.Fatal("expected the /rc listener to stay un-armed while the goal judge is in flight")
+	}
+}
+
+// A goal resume that is itself an /rc chain iteration (pendingRCAutoContinue set,
+// no pending request) also dispatches the goal judge.
+func TestStreamDoneRCChainContinuationDispatchesGoalJudge(t *testing.T) {
+	m := model{
+		ready:                 true,
+		width:                 80,
+		height:                24,
+		streaming:             true,
+		pendingRCAutoContinue: true,
+		agent:                 newTestAgent(retryTestClient{}, nil, nil, nil),
+		input:                 newTestTextarea(),
+		viewport:              fastviewport.New(76, 20),
+		styles:                ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	goalGen := m.goalGen
+
+	updated, _ := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+	if got.goalGen != goalGen+1 {
+		t.Fatalf("expected RC chain iteration to dispatch the goal judge (goalGen %d -> %d), got %d", goalGen, goalGen+1, got.goalGen)
+	}
+	if !got.goalJudgeForRC || !got.pendingRCAutoContinue {
+		t.Fatalf("expected chain iteration to keep the /rc listener un-armed (goalJudgeForRC=%v pendingRCAutoContinue=%v)", got.goalJudgeForRC, got.pendingRCAutoContinue)
+	}
+}
+
+// A goal verdict for an /rc turn re-arms the /rc listener when it does not
+// resume, and keeps it un-armed when it does resume into the chain.
+func TestGoalJudgeFinishedRearmsRCListener(t *testing.T) {
+	newRCGoalModel := func(t *testing.T) *model {
+		t.Helper()
+		m := newGoalCommandTestModel()
+		m.rcCh = make(chan server.RCRequest)
+		if err := m.agent.SetGoal("all tests pass"); err != nil {
+			t.Fatalf("SetGoal: %v", err)
+		}
+		m.goalGen = 5
+		m.goalJudgeForRC = true
+		m.pendingRCAutoContinue = true
+		return m
+	}
+
+	t.Run("paused verdict re-arms", func(t *testing.T) {
+		m := newRCGoalModel(t)
+		updated, cmd := m.Update(goalJudgeFinishedMsg{gen: 5, result: agent.GoalJudgeResult{Gen: 5, Verdict: "impossible", Status: agent.GoalImpossible, Detail: "judge"}})
+		got := derefTestModel(t, updated)
+		if got.pendingRCAutoContinue || got.goalJudgeForRC {
+			t.Fatalf("expected verdict to clear the RC chain flags, got pendingRCAutoContinue=%v goalJudgeForRC=%v", got.pendingRCAutoContinue, got.goalJudgeForRC)
+		}
+		if cmd == nil {
+			t.Fatal("expected the /rc listener and judge listener to be re-armed")
+		}
+		if got.streaming {
+			t.Fatal("expected no turn to start on a non-resuming verdict")
+		}
+	})
+
+	t.Run("resume keeps the listener un-armed", func(t *testing.T) {
+		m := newRCGoalModel(t)
+		updated, cmd := m.Update(goalJudgeFinishedMsg{gen: 5, result: agent.GoalJudgeResult{Gen: 5, Verdict: "not_met", Status: agent.GoalActive, Detail: "judge", Resume: true}})
+		got := derefTestModel(t, updated)
+		if !got.pendingRCAutoContinue {
+			t.Fatal("expected a resumed /rc goal turn to keep the chain's listener un-armed")
+		}
+		if last := got.messages[len(got.messages)-1]; !strings.HasPrefix(last.text, "[ocode:goal]") {
+			t.Fatalf("expected the resume marker as the last message, got %q", last.text)
+		}
+		if cmd == nil {
+			t.Fatal("expected a turn-start command")
+		}
+	})
+
+	t.Run("stale verdict still re-arms", func(t *testing.T) {
+		m := newRCGoalModel(t)
+		updated, cmd := m.Update(goalJudgeFinishedMsg{gen: 4, result: agent.GoalJudgeResult{Gen: 4, Verdict: "not_met", Resume: true}})
+		got := derefTestModel(t, updated)
+		if got.pendingRCAutoContinue || got.goalJudgeForRC {
+			t.Fatal("expected a superseded /rc verdict to release the listener")
+		}
+		if cmd == nil {
+			t.Fatal("expected the /rc listener to be re-armed after a superseded verdict")
+		}
+	})
 }

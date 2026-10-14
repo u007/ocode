@@ -268,14 +268,45 @@ func (m *model) goalEvaluable() bool {
 // maybeDispatchGoalJudge starts the async goal judge for the turn that just
 // finished. Callers check agent != nil and GoalEvaluable first. Returns false
 // when the agent declines (judge already in flight), and then no result arrives.
-func (m *model) maybeDispatchGoalJudge() bool {
+// forRC records whether the eventual verdict must re-arm the /rc listener.
+func (m *model) maybeDispatchGoalJudge(forRC bool) bool {
 	agentMsgs, _ := m.buildAgentMessagesSnapshot()
 	newGen := m.goalGen + 1
 	if !m.agent.GoalJudgeAsync(agentMsgs, newGen) {
 		return false
 	}
 	m.goalGen = newGen
+	m.goalJudgeForRC = forRC
 	return true
+}
+
+// rcGoalJudge dispatches the goal judge for an /rc-originated turn that ended
+// without error. On success the turn is over, so streaming settles here and the
+// /rc listener stays un-armed until goalJudgeFinishedMsg resolves.
+func (m *model) rcGoalJudge(err error) bool {
+	if err != nil || !m.goalEvaluable() || !m.maybeDispatchGoalJudge(true) {
+		return false
+	}
+	m.streaming = false
+	m.cancelStream = nil
+	m.broadcastTUIStatus()
+	return true
+}
+
+// goalJudgeNext returns the command that keeps listening for goal verdicts. When
+// the verdict's dispatch was for an /rc turn, it also re-arms the /rc listener,
+// which the turn left un-armed.
+func (m *model) goalJudgeNext(forRC bool) tea.Cmd {
+	judge := waitGoalJudgeEvent(m.goalJudgeCh)
+	if !forRC {
+		return judge
+	}
+	m.pendingRCAutoContinue = false
+	m.broadcastRCSnapshot()
+	if m.rcCh == nil {
+		return judge
+	}
+	return tea.Batch(waitForRCRequest(m.rcCh), judge)
 }
 
 // agentAutoContinueDeclineDetail explains, in one user-facing line, why the
@@ -1375,6 +1406,8 @@ type model struct {
 	// rationale as pendingRCAutoContinue) and must be re-armed once the
 	// judge result lands, whichever way it goes.
 	autoContinueJudgeForRC bool
+	ocrEnabled             bool // runtime OCR tool state; persisted across agent rebuilds
+	ocrEnabledSet          bool // whether ocrEnabled should be applied to newly installed agents
 	// goalGen is bumped on every /goal judge dispatch and on /goal set/clear, so
 	// a goalJudgeFinishedMsg from a superseded goal is ignored (mirrors autoContinueGen).
 	goalGen uint64
@@ -1382,8 +1415,9 @@ type model struct {
 	// goal resume rather than a human message. settleGoalTurn reads and clears
 	// it so the agent's own resume turn does not reactivate a paused goal.
 	lastTurnWasGoalResume bool
-	ocrEnabled            bool // runtime OCR tool state; persisted across agent rebuilds
-	ocrEnabledSet         bool // whether ocrEnabled should be applied to newly installed agents
+	// goalJudgeForRC is true while an in-flight goal judge was dispatched for an
+	// /rc-originated turn, so the /rc listener is re-armed once its verdict lands.
+	goalJudgeForRC bool
 	// modelSwitchGen guards async model switches — stale completions are dropped.
 	modelSwitchGen          uint64
 	modelSwitchPending      bool
@@ -5305,6 +5339,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingRCAutoContinue = true
 				return m, m.fireAutoContinue(true)
 			}
+			if m.rcGoalJudge(msg.err) {
+				// Goal judge in flight — leave the /rc listener un-armed until
+				// goalJudgeFinishedMsg resolves (it re-arms it either way).
+				return m, nil
+			}
 			if msg.err == nil && !stepLimitHit && !m.goalEvaluable() && m.maybeDispatchAutoContinueJudge(true) {
 				// Judge in flight — leave the /rc listener un-armed until it
 				// resolves (autoContinueJudgeFinishedMsg re-arms it either way).
@@ -5376,6 +5415,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// chain settles (the branch at the top of this case).
 				m.pendingRCAutoContinue = true
 				return m, m.fireAutoContinue(true)
+			}
+			if m.rcGoalJudge(msg.err) {
+				return m, nil
 			}
 			if msg.err == nil && !stepLimitHit && !m.goalEvaluable() && m.maybeDispatchAutoContinueJudge(true) {
 				return m, nil
@@ -5538,7 +5580,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// A goal that is still evaluable owns the post-turn verdict: the
 				// auto-continue judge is not dispatched alongside it.
 				if msg.err == nil && m.goalEvaluable() {
-					m.maybeDispatchGoalJudge()
+					m.maybeDispatchGoalJudge(false)
 				} else if msg.err == nil && !stepLimitHit {
 					m.maybeDispatchAutoContinueJudge(false)
 				}
@@ -5768,10 +5810,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitAutoContinueJudgeEvent(m.autoContinueJudgeCh)
 	case goalJudgeFinishedMsg:
-		// Always re-arm the listener. A stale verdict renders nothing: the goal
-		// was cleared, replaced or changed while the judge ran.
+		// The dispatch mode is consumed on every arrival, stale included, so an
+		// /rc listener left un-armed by the dispatch is always re-armed. A stale
+		// verdict renders nothing: the goal was cleared, replaced or changed
+		// while the judge ran.
+		forRC := m.goalJudgeForRC
+		m.goalJudgeForRC = false
 		if msg.gen != m.goalGen || m.agent == nil || msg.result.Verdict == "stale" {
-			return m, waitGoalJudgeEvent(m.goalJudgeCh)
+			return m, m.goalJudgeNext(forRC)
 		}
 		res := msg.result
 		gs, _ := m.agent.Goal()
@@ -5796,11 +5842,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.saveSession()
 		if !canResume {
 			m.rerenderTranscriptAndMaybeScroll()
-			return m, waitGoalJudgeEvent(m.goalJudgeCh)
+			return m, m.goalJudgeNext(forRC)
 		}
 		resumeMsg := m.agent.GoalResumeMessage()
 		m.messages = append(m.messages, message{role: roleUser, text: resumeMsg.Content, raw: &resumeMsg})
 		m.lastTurnWasGoalResume = true
+		// An /rc resume keeps the listener un-armed: the resumed turn is the
+		// chain's next iteration, and its streamDone re-enters the RC chain branch.
+		if forRC {
+			m.pendingRCAutoContinue = true
+		}
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, tea.Batch(m.askAgent(), waitGoalJudgeEvent(m.goalJudgeCh))
 	case btwResultMsg:
