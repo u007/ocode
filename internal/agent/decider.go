@@ -20,6 +20,7 @@ const (
 	slotCodeSearch   judgeSlot = "code_search"
 	slotNetworkGuard judgeSlot = "network_guard"
 	slotContentGuard judgeSlot = "content_guard"
+	slotGoal         judgeSlot = "goal"
 )
 
 // defaultJudgeModel is what every slot resolves to when nothing is configured.
@@ -90,6 +91,8 @@ func (a *Agent) slotModel(slot judgeSlot) string {
 		v = oc.NetworkGuard.JudgeModel
 	case slotContentGuard:
 		v = oc.ContentGuard.JudgeModel
+	case slotGoal:
+		v = oc.Goal.JudgeModel
 	}
 	if v = strings.TrimSpace(v); v != "" {
 		return v

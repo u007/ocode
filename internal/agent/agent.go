@@ -658,6 +658,9 @@ type Agent struct {
 	// OnAutoContinueJudge, if set, is invoked when an async auto-continue
 	// judge call finishes (see AutoContinueJudgeAsync).
 	OnAutoContinueJudge func(AutoContinueJudgeResult)
+	// OnGoalJudge, if set, is invoked when an async goal judge call finishes
+	// (see GoalJudgeAsync).
+	OnGoalJudge func(GoalJudgeResult)
 	// OnPermissionAsk, if set, is invoked synchronously when a tool call
 	// requires a permission decision. It blocks until the user (via the TUI)
 	// responds, returning the permission response. When set, HandleToolCall acts
@@ -759,6 +762,14 @@ type Agent struct {
 	recapMu sync.Mutex
 	// autoContinueJudgeMu serialises async auto-continue judge calls.
 	autoContinueJudgeMu sync.Mutex
+	// goal is the session's /goal condition state. goalMu guards it and goalGen;
+	// it is never held across a judge call. goalGen bumps on every mutation so an
+	// in-flight judge can tell its snapshot went stale. goalJudgeMu serialises
+	// async goal judge calls.
+	goal        *GoalState
+	goalGen     uint64
+	goalMu      sync.Mutex
+	goalJudgeMu sync.Mutex
 	// subagentDispatchGuard tracks consecutive identical task-tool dispatches
 	// since the last user input, to break runaway loops where a small model
 	// keeps re-launching the same subagent in response to its own completion

@@ -883,6 +883,8 @@ type OcodeConfig struct {
 	Search       JudgeModelConfig
 	NetworkGuard JudgeModelConfig
 	ContentGuard JudgeModelConfig
+	// Goal selects the decision-judge model that decides whether a /goal condition is met.
+	Goal JudgeModelConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
 	MemoryEnabled bool
@@ -1245,6 +1247,10 @@ type contentGuardConfigFile struct {
 	JudgeModel string `json:"judge_model,omitempty"`
 }
 
+type goalConfigFile struct {
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
 // browserConfigFile is the on-disk mirror of BrowserConfig. Extensions is read
 // purely to detect (and reject) the reserved-but-unimplemented key.
 type browserConfigFile struct {
@@ -1281,6 +1287,7 @@ type ocodeConfigFile struct {
 	Search                  searchConfigFile            `json:"search"`
 	NetworkGuard            networkGuardConfigFile      `json:"network_guard"`
 	ContentGuard            contentGuardConfigFile      `json:"content_guard"`
+	Goal                    goalConfigFile              `json:"goal"`
 	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
 	AutoShareOnStart        *bool                       `json:"auto_share_on_start,omitempty"`
@@ -1389,6 +1396,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Search:                  defaultJudgeModelConfig(),
 		NetworkGuard:            defaultJudgeModelConfig(),
 		ContentGuard:            defaultJudgeModelConfig(),
+		Goal:                    defaultJudgeModelConfig(),
 		RecapTimeoutSeconds:     120,
 		UndoMaxAgeDelta:         10,
 		MaxConcurrentAgents:     2,
@@ -1706,6 +1714,10 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["content_guard"]; ok {
 		applyJudgeModelConfig(&cfg.ContentGuard.JudgeModel, file.ContentGuard.JudgeModel)
 		delete(raw, "content_guard")
+	}
+	if _, ok := raw["goal"]; ok {
+		applyJudgeModelConfig(&cfg.Goal.JudgeModel, file.Goal.JudgeModel)
+		delete(raw, "goal")
 	}
 
 	if _, ok := raw["browser"]; ok {

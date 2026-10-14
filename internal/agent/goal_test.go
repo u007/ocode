@@ -1,0 +1,370 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/u007/ocode/internal/config"
+)
+
+// goalStubDecider is a scripted Decider standing in for the goal judge backend.
+// It embeds a nil LLMClient only to satisfy the interface newClientFn returns;
+// the goal judge never calls Chat, so a Chat call through it would panic.
+type goalStubDecider struct {
+	LLMClient
+	resp     *TypesafeResponse
+	err      error
+	calls    int
+	onDecide func()
+}
+
+func (s *goalStubDecider) Decide(_ any, _ map[string]TypesafeQuestion) (*TypesafeResponse, error) {
+	s.calls++
+	if s.onDecide != nil {
+		s.onDecide()
+	}
+	return s.resp, s.err
+}
+
+func (s *goalStubDecider) DecideCtx(_ context.Context, state any, questions map[string]TypesafeQuestion) (*TypesafeResponse, error) {
+	return s.Decide(state, questions)
+}
+
+func (s *goalStubDecider) GetProvider() string { return "typesafe" }
+func (s *goalStubDecider) GetModel() string    { return "jev-latest" }
+
+// newGoalTestAgent wires stub in as the goal judge. A nil stub makes
+// newClientFn return no client at all, which is the "no judge credential" case.
+// Tests that use it must not run in parallel: newClientFn is a package var.
+func newGoalTestAgent(t *testing.T, stub *goalStubDecider) *Agent {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Ocode.Goal.JudgeModel = "typesafe/jev-latest"
+	a := newTestAgent(nil, nil, cfg, nil)
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		if stub == nil {
+			return nil
+		}
+		return stub
+	}
+	return a
+}
+
+func goalVerdictResp(verdict string, confidence float64, reason string) *TypesafeResponse {
+	return &TypesafeResponse{
+		Model: "jev-latest",
+		Answers: map[string]TypesafeAnswer{
+			"verdict": {Type: "choice", Choice: verdict, Confidence: confidence},
+			"reason":  {Type: "choice", Choice: reason, Confidence: 0.8},
+		},
+		Usage: TypesafeUsage{InputTokens: 7, OutputTokens: 2},
+	}
+}
+
+// goalTranscriptNoTools ends on a claim with no tool call after the last user turn.
+func goalTranscriptNoTools() []Message {
+	return []Message{
+		{Role: "user", Content: "make the tests pass"},
+		{Role: "assistant", Content: "Done, all tests pass."},
+	}
+}
+
+// goalTranscriptWithTool runs a tool after the last user turn.
+func goalTranscriptWithTool() []Message {
+	return []Message{
+		{Role: "user", Content: "make the tests pass"},
+		{Role: "assistant", Content: "Running them.", ToolCalls: []ToolCall{{ID: "t1", Type: "function"}}},
+		{Role: "tool", Content: "ok", ToolID: "t1"},
+		{Role: "assistant", Content: "Done."},
+	}
+}
+
+func TestSetGoalValidation(t *testing.T) {
+	a := newGoalTestAgent(t, nil)
+	if err := a.SetGoal(""); err == nil {
+		t.Fatal("empty condition: want error")
+	}
+	if err := a.SetGoal("   "); err == nil {
+		t.Fatal("whitespace-only condition: want error")
+	}
+	if err := a.SetGoal(strings.Repeat("x", GoalMaxConditionLen+1)); err == nil {
+		t.Fatal("4001-char condition: want error")
+	}
+	if err := a.SetGoal(strings.Repeat("x", GoalMaxConditionLen)); err != nil {
+		t.Fatalf("4000-char condition: unexpected error %v", err)
+	}
+
+	a.RestoreGoal(GoalState{Condition: "old", Status: GoalPaused, Turns: 5, NoToolTurns: 2, SetAt: time.Now()})
+	if err := a.SetGoal("  fresh  "); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	gs, ok := a.Goal()
+	if !ok {
+		t.Fatal("Goal() ok=false after SetGoal")
+	}
+	if gs.Condition != "fresh" || gs.Status != GoalActive || gs.Turns != 0 || gs.NoToolTurns != 0 {
+		t.Fatalf("SetGoal did not reset state: %+v", gs)
+	}
+}
+
+func TestGoalJudge_MetEndsGoal(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("met", 0.9, "all_satisfied")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Err != nil || res.Verdict != "met" || res.Status != GoalMet || res.Resume {
+		t.Fatalf("met verdict: got %+v", res)
+	}
+	if a.GoalEvaluable() {
+		t.Fatal("met goal must not be evaluable")
+	}
+}
+
+func TestGoalJudge_NotMetResumes(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if !res.Resume || res.Verdict != "not_met" {
+		t.Fatalf("not_met verdict: got %+v", res)
+	}
+	gs, _ := a.Goal()
+	if gs.Turns != 1 || gs.Status != GoalActive {
+		t.Fatalf("state after not_met: %+v", gs)
+	}
+}
+
+func TestGoalJudge_ImpossibleEndsGoal(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("impossible", 0.9, "cannot_be_done")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("reach the moon"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Status != GoalImpossible || res.Resume {
+		t.Fatalf("impossible verdict: got %+v", res)
+	}
+}
+
+func TestGoalJudge_LowConfidenceMetTreatedNotMet(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("met", 0.4, "all_satisfied")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if !res.Resume {
+		t.Fatalf("low-confidence met must resume: got %+v", res)
+	}
+	if !strings.Contains(res.Detail, "0.60") {
+		t.Fatalf("detail should name the confidence floor: %q", res.Detail)
+	}
+}
+
+func TestGoalJudge_AwaitingUserPauses(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "awaiting_user")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Resume || res.Status != GoalPaused {
+		t.Fatalf("awaiting_user must pause: got %+v", res)
+	}
+}
+
+// A below-floor verdict is treated as not_met, and that not_met still pauses on awaiting_user.
+func TestGoalJudge_LowConfidenceAwaitingUserPauses(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("met", 0.4, "awaiting_user")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Resume || res.Status != GoalPaused || res.Verdict != "not_met" {
+		t.Fatalf("below-floor met with awaiting_user must pause: got %+v", res)
+	}
+}
+
+func TestGoalJudge_NoDeciderPauses(t *testing.T) {
+	a := newGoalTestAgent(t, nil)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Verdict != "unavailable" || res.Status != GoalPaused {
+		t.Fatalf("no decider: got %+v", res)
+	}
+	gs, ok := a.Goal()
+	if !ok || gs.Condition != "tests pass" {
+		t.Fatalf("condition must be retained: %+v ok=%v", gs, ok)
+	}
+}
+
+func TestGoalJudge_ErrorPauses(t *testing.T) {
+	stub := &goalStubDecider{err: context.DeadlineExceeded}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Err == nil || res.Status != GoalPaused {
+		t.Fatalf("judge error must pause with Err set: got %+v", res)
+	}
+}
+
+func TestGoalJudge_StallPausesAfterThreeNoToolTurns(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "unverified_claim")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		if res := a.GoalJudgeSync(goalTranscriptNoTools()); res.Verdict == "stalled" {
+			t.Fatalf("turn %d: stalled too early", i)
+		}
+	}
+	if res := a.GoalJudgeSync(goalTranscriptNoTools()); res.Verdict != "stalled" {
+		t.Fatalf("turn 3: want stalled, got %+v", res)
+	}
+
+	// A tool call in between resets the counter, so two more no-tool turns do not stall.
+	a = newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	a.GoalJudgeSync(goalTranscriptNoTools())
+	a.GoalJudgeSync(goalTranscriptNoTools())
+	a.GoalJudgeSync(goalTranscriptWithTool())
+	a.GoalJudgeSync(goalTranscriptNoTools())
+	if res := a.GoalJudgeSync(goalTranscriptNoTools()); res.Verdict == "stalled" {
+		t.Fatalf("tool call did not reset the stall counter: %+v", res)
+	}
+}
+
+func TestGoalJudge_TurnCapPauses(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	a := newGoalTestAgent(t, stub)
+	a.RestoreGoal(GoalState{Condition: "tests pass", Status: GoalActive, Turns: GoalMaxTurns - 1, SetAt: time.Now()})
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Verdict != "capped" || res.Status != GoalPaused || res.Resume {
+		t.Fatalf("turn cap: got %+v", res)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("capped turn must not call the judge, calls=%d", stub.calls)
+	}
+}
+
+func TestGoalJudge_ClearDuringJudgeIsNotResurrected(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	stub.onDecide = a.ClearGoal
+	res := a.GoalJudgeSync(goalTranscriptWithTool())
+	if res.Resume {
+		t.Fatalf("verdict for a cleared goal must not resume: %+v", res)
+	}
+	if _, ok := a.Goal(); ok {
+		t.Fatal("cleared goal was written back by the judge")
+	}
+}
+
+func TestGoalJudgeAsync_DeliversGen(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	a := newGoalTestAgent(t, stub)
+	if a.GoalJudgeAsync(goalTranscriptWithTool(), 1) {
+		t.Fatal("no goal set: async judge must not dispatch")
+	}
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan GoalJudgeResult, 1)
+	a.OnGoalJudge = func(r GoalJudgeResult) { done <- r }
+	if !a.GoalJudgeAsync(goalTranscriptWithTool(), 7) {
+		t.Fatal("async judge should dispatch")
+	}
+	select {
+	case r := <-done:
+		if r.Gen != 7 || !r.Resume {
+			t.Fatalf("async result: %+v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnGoalJudge not called")
+	}
+}
+
+func TestGoalMarkHumanTurnReactivatesPaused(t *testing.T) {
+	a := newGoalTestAgent(t, nil)
+	if err := a.SetGoal("tests pass"); err != nil {
+		t.Fatal(err)
+	}
+	a.RestoreGoal(GoalState{Condition: "tests pass", Status: GoalPaused, NoToolTurns: 2, SetAt: time.Now()})
+	a.GoalMarkHumanTurn()
+	gs, _ := a.Goal()
+	if gs.Status != GoalActive || gs.NoToolTurns != 0 {
+		t.Fatalf("paused goal not reactivated: %+v", gs)
+	}
+
+	a.RestoreGoal(GoalState{Condition: "tests pass", Status: GoalMet, SetAt: time.Now()})
+	a.GoalMarkHumanTurn()
+	if gs, _ := a.Goal(); gs.Status != GoalMet {
+		t.Fatalf("met goal must stay met: %+v", gs)
+	}
+}
+
+func TestGoalResumeMessageIsUserRoleWithMarker(t *testing.T) {
+	stub := &goalStubDecider{resp: goalVerdictResp("not_met", 0.9, "work_remains")}
+	a := newGoalTestAgent(t, stub)
+	if err := a.SetGoal("ship it"); err != nil {
+		t.Fatal(err)
+	}
+	a.GoalJudgeSync(goalTranscriptWithTool())
+	msg := a.GoalResumeMessage()
+	if msg.Role != "user" {
+		t.Fatalf("role = %q, want user", msg.Role)
+	}
+	if !strings.HasPrefix(msg.Content, "[ocode:goal]") {
+		t.Fatalf("content missing marker: %q", msg.Content)
+	}
+	if !strings.Contains(msg.Content, "ship it") {
+		t.Fatalf("content missing condition: %q", msg.Content)
+	}
+}
+
+func TestGoalMetadataRoundTrip(t *testing.T) {
+	orig := GoalState{
+		Condition:   "ship it",
+		Status:      GoalPaused,
+		Turns:       7,
+		NoToolTurns: 2,
+		LastReason:  "no tool use",
+		SetAt:       time.Now().Truncate(time.Second),
+	}
+	raw, err := json.Marshal(GoalStateToMetadata(orig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := GoalStateFromMetadata(meta)
+	if !ok {
+		t.Fatalf("GoalStateFromMetadata ok=false for %s", raw)
+	}
+	if got.Condition != orig.Condition || got.Status != orig.Status || got.Turns != orig.Turns ||
+		got.NoToolTurns != orig.NoToolTurns || got.LastReason != orig.LastReason || !got.SetAt.Equal(orig.SetAt) {
+		t.Fatalf("round trip mismatch:\n got  %+v\n want %+v", got, orig)
+	}
+}

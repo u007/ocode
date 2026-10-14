@@ -183,10 +183,23 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 // The error/step-limit branches are the fallback for a direct caller, keeping
 // the rubric honest if one is ever handed a cut-off or failed turn.
 func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error) map[string]any {
-	const tailN = 6
+	state := map[string]any{
+		"transcript_tail": typesafeTranscriptTail(messages, 6),
+		"turn_ended":      a.typesafeTurnEnded(stepErr),
+	}
+	if a.config != nil {
+		state["auto_continue_model"] = a.config.Ocode.AutoContinueModel
+	}
+	return state
+}
+
+// typesafeTranscriptTail is the bounded conversation tail sent to a TypeSafe
+// judge: the last n messages with empty ones dropped and each trimmed to 4000
+// characters, so one huge tool result cannot blow up the request.
+func typesafeTranscriptTail(messages []Message, n int) []map[string]any {
 	tail := messages
-	if len(tail) > tailN {
-		tail = tail[len(tail)-tailN:]
+	if len(tail) > n {
+		tail = tail[len(tail)-n:]
 	}
 	entries := make([]map[string]any, 0, len(tail))
 	for _, m := range tail {
@@ -199,26 +212,24 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error
 		}
 		entries = append(entries, map[string]any{"role": m.Role, "content": content})
 	}
-	state := map[string]any{
-		"transcript_tail": entries,
-	}
-	// How the turn ended, so Jev does not have to infer it. Production callers
-	// reach here only for a naturally-ended turn (they short-circuit the hard
-	// step-limit signal and never pass a Step error), so in practice this is
-	// "finished within the step budget"; the other two cases keep a direct
-	// caller from describing a cut-off or failed turn as a natural finish.
+	return entries
+}
+
+// typesafeTurnEnded describes how a turn ended, so a TypeSafe judge does not have
+// to infer it. stepErr is the Step error that ended the turn (nil on a clean
+// stop). Production callers reach the auto-continue judge only for a
+// naturally-ended turn, so in practice this is "finished within the step
+// budget"; the other two cases keep a direct caller from describing a cut-off or
+// failed turn as a natural finish.
+func (a *Agent) typesafeTurnEnded(stepErr error) string {
 	switch {
 	case stepErr != nil:
-		state["turn_ended"] = "the turn failed with an error: " + stepErr.Error()
+		return "the turn failed with an error: " + stepErr.Error()
 	case a.StepLimitHit():
-		state["turn_ended"] = "the turn was cut off by the step limit (max steps reached); the reply is a forced summary of unfinished work"
+		return "the turn was cut off by the step limit (max steps reached); the reply is a forced summary of unfinished work"
 	default:
-		state["turn_ended"] = "the reply finished within the step budget"
+		return "the reply finished within the step budget"
 	}
-	if a.config != nil {
-		state["auto_continue_model"] = a.config.Ocode.AutoContinueModel
-	}
-	return state
 }
 
 // AutoContinueJudgeSync is the server-turn variant of AutoContinueJudgeAsync:

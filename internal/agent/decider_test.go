@@ -1,6 +1,10 @@
 package agent
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/u007/ocode/internal/config"
+)
 
 // TestDecider_SlotModelDefaults pins the invariant that an unconfigured install
 // behaves identically to today: every slot resolves to Jev. Part 02 of the plan
@@ -23,6 +27,7 @@ func TestDecider_SlotModelDefaults(t *testing.T) {
 		slotCodeSearch,
 		slotNetworkGuard,
 		slotContentGuard,
+		slotGoal,
 	}
 	for _, s := range slots {
 		if got := a.slotModel(s); got != defaultJudgeModel {
@@ -105,5 +110,20 @@ func TestDecider_ClefSelectorUsesLastPathSegment(t *testing.T) {
 		if got := clefBodySelector(tc.model); got != tc.want {
 			t.Errorf("clefBodySelector(%q) = %q, want %q", tc.model, got, tc.want)
 		}
+	}
+}
+
+// TestDecider_SlotModelGoalReadsConfig pins the goal slot to its own judge_model
+// key: a configured value wins, and a blank one falls back to the default.
+func TestDecider_SlotModelGoalReadsConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Ocode.Goal.JudgeModel = "clef/x"
+	a := &Agent{config: cfg}
+	if got := a.slotModel(slotGoal); got != "clef/x" {
+		t.Errorf("slotModel(goal) = %q, want clef/x", got)
+	}
+	cfg.Ocode.Goal.JudgeModel = "  "
+	if got := a.slotModel(slotGoal); got != defaultJudgeModel {
+		t.Errorf("blank goal judge_model: slotModel = %q, want %q", got, defaultJudgeModel)
 	}
 }
