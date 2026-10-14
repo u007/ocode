@@ -61,6 +61,16 @@ The decisive stop is pinned by mutation-verified tests (each fails against the p
 
 Note: when `auto_continue_model` is set but `auto_continue_enabled` is `false`, the TUI `/autocontinue model <name>` command and the web `/autocontinue model <name>` command both print a warning reminding the user to run `/autocontinue on` (or flip the sidebar toggle) to actually enable the feature.
 
+### `/goal` Precedence
+
+A session with an evaluable `/goal` (active or paused) gives the natural-stop decision to the goal judge, so the triage judge above is not consulted for that turn. The order in `runTurn` is:
+
+1. The step-limit hard resume, unchanged. It counts against `autoContinueCount`.
+2. The goal judge (`GoalJudgeSync`), run only when the tail is not a pending permission or question ask. A `not_met` verdict appends a `[ocode:goal]` user prompt and resumes. A goal resume does **not** advance `autoContinueCount`.
+3. The triage judge, reached only when no goal is evaluable.
+
+The goal lives in the session metadata under the `goal` key. It is written after every judged turn and by the `/api/sessions/{id}/goal` endpoints, and restored in `buildAgentSession`. A human message reactivates a paused goal. Engine: `internal/agent/goal.go`. Server host: `internal/server/handler_session_goal.go`.
+
 ## End-of-Turn Surfacing
 
 The auto-continue loop does **not** set a `auto_continue` status field on the turn result. Instead, the termination reason is surfaced through two mechanisms:

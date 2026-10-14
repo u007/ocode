@@ -632,6 +632,10 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		as.seedSpend(sessionSpendFromMetadata(prev.Metadata))
 		in, out, cached, total := sessionUsageFromMetadata(prev.Metadata)
 		as.seedUsage(in, out, cached, total)
+		// A /goal outlives a rebuild or restart: restore it before any turn judges it.
+		if gs, ok := agent.GoalStateFromMetadata(prev.Metadata); ok {
+			ag.RestoreGoal(gs)
+		}
 	}
 	// Accumulate side-path spend and token usage (advisor, compaction, title,
 	// recap, sub-agent tasks, …) into this session's own totals. The main turn's
@@ -1283,6 +1287,15 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 				continue
 			}
 		}
+		// A live /goal judges the natural stop (the triage judge stood aside
+		// in autoContinueShouldResume). A goal resume is not an auto-continue,
+		// so autoContinueCount is left alone.
+		if as.agent.GoalEvaluable() && !tailIsPermissionAsk(as.messages) && !tailIsQuestionAsk(as.messages) {
+			if prompt, ok := h.goalShouldResume(sessionID, as, headless); ok {
+				messages = append(messages, prompt)
+				continue
+			}
+		}
 		// The chain declined to fire (judge said the reply finished, or a
 		// guard blocked the resume): surface the triage outcome so the turn
 		// does not silently look done. StepLimitHitDetail covers the
@@ -1379,6 +1392,10 @@ func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, c
 	// interrupted. No judge configured → skip silently (opt-in feature).
 	// The caller's Step error never reaches here (runTurn returns on it), so
 	// there is no end-of-turn error to report to the judge.
+	// A live /goal owns the natural stop: the goal judge decides instead.
+	if as.agent.GoalEvaluable() {
+		return false, ""
+	}
 	resume, detail, err := as.agent.AutoContinueJudgeSync(as.messages, nil)
 	if err != nil {
 		log.Printf("serve: auto-continue judge for %s: %v", sessionID, err)
@@ -1412,7 +1429,15 @@ func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless 
 	hint := fmt.Sprintf("↩ auto-continue — %s, resuming", reason)
 	notice := agent.Message{Role: "assistant", Content: "", Notice: hint}
 	h.appendTranscriptMessage(as, headless, notice)
-	prompt := agent.Message{Role: "user", Content: continuePrompt, UserSeq: nextUserSeq(as.messages)}
+	prompt := h.appendResumePrompt(sessionID, as, headless, agent.Message{Role: "user", Content: continuePrompt})
+	return prompt, true
+}
+
+// appendResumePrompt adds a loop-driven user prompt (auto-continue or /goal) to
+// the transcript, mirrors it into the live-persist view, and announces it to the
+// browser when headless. It returns the prompt with its user_seq stamped.
+func (h *Handler) appendResumePrompt(sessionID string, as *agentSession, headless bool, prompt agent.Message) agent.Message {
+	prompt.UserSeq = nextUserSeq(as.messages)
 	as.messages = append(as.messages, prompt)
 	// Keep the live-persisted view in lockstep with the transcript (see
 	// appendTranscriptMessage) so the turn-end reconcile sees a prefix.
@@ -1426,7 +1451,34 @@ func (h *Handler) fireAutoContinue(sessionID string, as *agentSession, headless 
 			Data:      map[string]any{"content": prompt.Content, "user_seq": prompt.UserSeq},
 		})
 	}
-	return prompt, true
+	return prompt
+}
+
+// goalShouldResume runs the /goal judge after a Step that ended without a
+// pending ask. It surfaces the verdict, persists the goal, and returns the
+// resume prompt when the goal wants another turn. A stale verdict is dropped
+// silently: the goal changed under the judge, and that change was persisted by
+// whoever made it.
+func (h *Handler) goalShouldResume(sessionID string, as *agentSession, headless bool) (agent.Message, bool) {
+	res := as.agent.GoalJudgeSync(as.messages)
+	if res.Verdict == "stale" {
+		return agent.Message{}, false
+	}
+	if res.Err != nil {
+		log.Printf("serve: goal judge for %s: %v", sessionID, res.Err)
+	}
+	h.appendTranscriptNotice(as, headless, res.Detail)
+	if e, ok := h.sessions.SnapshotEntry(sessionID); ok && e.ProjectRoot != "" {
+		if err := persistSessionGoal(e.ProjectRoot, sessionID, as.agent); err != nil {
+			log.Printf("serve: persist goal for %s: %v", sessionID, err)
+		}
+	} else {
+		log.Printf("serve: persist goal for %s: session has no project root", sessionID)
+	}
+	if !res.Resume {
+		return agent.Message{}, false
+	}
+	return h.appendResumePrompt(sessionID, as, headless, as.agent.GoalResumeMessage()), true
 }
 
 // appendTranscriptMessage adds a UI-only message to the transcript (persisted
@@ -1736,6 +1788,11 @@ func (h *Handler) beginSyncTurn(id string) func() {
 func (h *Handler) runSyncTurn(id string, as *agentSession, content string, opts turnOptions) (string, error) {
 	release := h.beginSyncTurn(id)
 	defer release()
+	// A human message reactivates a paused /goal. A retry re-runs the tail
+	// without a new message, so it does not count as one.
+	if content != "" && !opts.retryLast {
+		as.agent.GoalMarkHumanTurn()
+	}
 	return h.runTurn(id, as, content, opts)
 }
 

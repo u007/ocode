@@ -286,6 +286,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleClearSessionThinkingBudget))
+	s.mux.HandleFunc("GET /api/sessions/{id}/goal", s.authMiddleware(s.handleGetSessionGoal))
+	s.mux.HandleFunc("PUT /api/sessions/{id}/goal", s.authMiddleware(s.handleSetSessionGoal))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}/goal", s.authMiddleware(s.handleClearSessionGoal))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
 	s.mux.HandleFunc("POST /api/sessions/{id}/rewinds", s.authMiddleware(s.handler.HandlePreparePendingRewind))
 	s.mux.HandleFunc("GET /api/sessions/{id}/rewinds/{token}", s.authMiddleware(s.handler.HandlePendingRewindStatus))
@@ -1469,6 +1472,21 @@ func (s *Server) handleSetSessionThinkingBudget(w http.ResponseWriter, r *http.R
 func (s *Server) handleClearSessionThinkingBudget(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleClearSessionThinkingBudget(w, r, id)
+}
+
+func (s *Server) handleGetSessionGoal(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleGetSessionGoal(w, r, id)
+}
+
+func (s *Server) handleSetSessionGoal(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSetSessionGoal(w, r, id)
+}
+
+func (s *Server) handleClearSessionGoal(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleClearSessionGoal(w, r, id)
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
