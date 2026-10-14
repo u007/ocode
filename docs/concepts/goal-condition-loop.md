@@ -63,14 +63,14 @@ arrives as `goalJudgeFinishedMsg` (`:5845`).
 2. Turn accounting: `Turns` increments. `NoToolTurns` resets when this turn's assistant messages made
    a tool call, otherwise it increments (`goalTurnUsedTools`, `:101`).
 3. Stall guard: `NoToolTurns >= goalStallTurns` (3) pauses the goal with `stalled`. No judge call.
-4. Cap guard: `Turns >= GoalMaxTurns` (50) pauses the goal with `capped`. No judge call.
-5. Resolve the judge (`resolveDecider(slotGoal)`, `:349`). Unresolved pauses with `unavailable`.
-6. Judge call (`:361`) with the condition, turn count, the last 12 messages (`goalTailN`), and
+4. Resolve the judge (`resolveDecider(slotGoal)`, `:349`). Unresolved pauses with `unavailable`.
+5. Judge call (`:361`) with the condition, turn count, the last 12 messages (`goalTailN`), and
    `turn_ended`. A call error, a nil response, or a missing or invalid verdict pauses with `unavailable`.
-7. Confidence floor (`goalMinConfidenceDefault` = 0.6, `:37`, applied at `:390`): a `met` or
+6. Confidence floor (`goalMinConfidenceDefault` = 0.6, `:37`, applied at `:390`): a `met` or
    `impossible` verdict below the floor is treated as `not_met`.
-8. Apply the verdict (`:394`): `met` and `impossible` are terminal. `not_met` with the reason
-   `awaiting_user` pauses. Any other `not_met` stays active and resumes.
+7. Apply the verdict (`:394`): `met` and `impossible` are terminal, at the cap too. `not_met` with
+   the reason `awaiting_user` pauses. A `not_met` on a turn with `Turns >= GoalMaxTurns` (50) pauses
+   as `capped`. Any other `not_met` stays active and resumes.
 
 Write-back (`:317`): the verdict is stored only if `goalGen` is unchanged since the snapshot. If the
 goal was cleared, replaced, or changed while the judge ran, the result is `stale` and nothing is
@@ -85,11 +85,12 @@ written.
 | `not_met` | `active` | yes | Work remains, or a completion claim is unverified |
 | `not_met` | `paused` | no | Reason `awaiting_user`: the reply asks the user for a decision, confirmation or input |
 | `stalled` | `paused` | no | Three consecutive judged turns without a tool call. No judge call |
-| `capped` | `paused` | no | `Turns` reached 50. No judge call |
+| `capped` | `paused` | no | `not_met` on a turn where `Turns` reached 50. The judge still runs, so `met` and `impossible` on that turn stay terminal |
 | `unavailable` | `paused` | no | Judge model unconfigured or without a key, judge error, nil or invalid response |
 | `stale` | unchanged | no | Goal changed while judging. Verdict dropped, nothing written |
 
-A `met` or `impossible` verdict below the floor is shown as `not_met` in the detail text.
+A `met` or `impossible` verdict below the floor is shown as `not_met` in the detail text. Its resume
+text says the evaluator could not confirm it, not the judge's reason.
 
 The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_remains`,
 `unverified_claim`, `blocked_by_error`, `awaiting_user`, `cannot_be_done` (`goalReasons`,
@@ -105,7 +106,8 @@ The judge's reason is advisory. The closed reason set is `all_satisfied`, `work_
   are left alone. The server calls it on sync and async human entries (`agent_session.go:1801`,
   `:2039`). The TUI calls `settleGoalTurn` (`model.go:196`).
 - **The 50-turn cap is sticky.** A human turn does not reset `Turns`. After a `capped` pause, the
-  goal reactivates on the next human message, but the next judged turn caps again. Only a new
+  goal reactivates on the next human message and the judge runs again. A `not_met` caps again, but a
+  `met` verdict closes the goal, so a finished goal is never stranded by the cap. Only a new
   `/goal <text>` starts fresh state (`SetGoal`, `:158`).
 - **A pending ask never auto-resumes.** The server skips the goal judge while the tail is an
   unresolved permission or question ask (`agent_session.go:1295`). The TUI runs its post-turn
@@ -143,6 +145,11 @@ All three are behind `authMiddleware` (`internal/server/server.go:289-291`).
 
 `active` is true for `active` and `paused` goals, the same rule as `GoalEvaluable`
 (`handler_session_goal.go:41`). Terminal goals report `active: false` and keep their status.
+
+For the session an `/rc` bridge serves, the TUI owns the agent and its persistence. The endpoints act on
+the bridged agent (`rc.Agent()`, `bridgedGoalAgent`) and write no server metadata. A PUT or DELETE
+reaches the TUI's agent at once, and the TUI's next save persists it. A bridged session with no TUI
+agent answers `409`.
 
 The web `/goal` command (`web/src/components/Chat/commands.ts`, `handleGoal`) calls these endpoints
 and sends `kickoff_prompt` as the turn.

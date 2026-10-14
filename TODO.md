@@ -45,6 +45,37 @@ reading the code while building it. Neither was reproduced.
   `:21189`), so this only bites keys outside that set. Deferred because the real fix is
   patch semantics in the session layer (save merges the keys it owns, not the whole
   map), which is outside the goal change.
+- **6. A turn that ends while a goal judge is in flight is never judged (found by the final review, not reproduced).**
+  `GoalJudgeAsync` returns false when `goalJudgeMu.TryLock` fails, and `maybeDispatchGoalJudge`'s result is
+  ignored. Example: `/goal A`, its judge runs, then `/goal B` at once. B's kickoff turn ends before A's
+  judge returns, so B is never judged, A's verdict is dropped by the gen bump, and B sits `active` with
+  no loop and no notice. Fix: remember a "re-dispatch when the in-flight judge returns" flag, or post a hint.
+- **7. A post-turn auto-compaction skips the goal judge for that turn (found by the final review, not reproduced).**
+  The `compactionBarrier` branch skips the whole post-turn block. The compaction resume (`pendingCompactResume`
+  to `askAgent`) then runs an unprompted turn, which `settleGoalTurn` counts as human and which reactivates a
+  paused goal. The loop continues one turn late. Fix: dispatch the goal judge from `compactFinishedMsg` when
+  `pendingCompactResume` came from a stream-done barrier.
+- **8. TUI and server disagree on which turns count as human (found by the final review, not reproduced).**
+  TUI `settleGoalTurn` treats job-completion resumes and compaction resumes as human turns. The server does
+  not. Fix: the TUI marks a turn human only when its user row came from the composer or RC.
+- **9. Web `/goal` status and clear queue behind the goal loop (found by the final review, not reproduced).**
+  Every web `/goal` form queues behind the whole loop, which can run 50 turns inside one `runTurn`, and the SPA
+  never polls `GET`. `docs/web-desktop-parity-todo.md` §10 says "parity", which overstates it. Fix: add
+  `/goal` status and clear to `web/src/lib/instantCommands.ts`, or reword the parity entry and the GET handler
+  comment (it says "It is polled").
+- **10. Stop during the server-side goal judge leaves an orphan prompt (found by the final review, not reproduced).**
+  If Stop lands while `goalShouldResume` is judging, the `[ocode:goal]` prompt is appended before the next
+  `Step` sees the cancellation, leaving a dangling user prompt. Fix: check `as.agent.Cancelled()` before
+  `appendResumePrompt`. The auto-continue path has the same shape.
+- **11. A fresh session can briefly resurrect a cleared goal (found by the final review, not reproduced).**
+  With no loaded metadata (`sessionBaseMetadata == nil`) and no telemetry yet, `/goal X` then an instant
+  `/goal clear` makes `sessionSidebarMetadata` return nil. `session.Save` keeps the old map, which still holds
+  the goal, so quitting before the first telemetry resurrects it on resume. Fix: return an empty, non-nil map
+  once a goal has been touched, or seed `sessionBaseMetadata` to `{}` for new sessions.
+- **12. A web `/goal` set on an `/rc`-bridged session persists only at the TUI's next save (found while fixing the final review).**
+  The endpoints act on the TUI's agent and write no metadata, as the advisor handlers do. A server restart, or
+  a TUI quit, before any save loses the change. Fix: have the TUI save when the bridged goal changes (for
+  example on the kickoff `rcRequestMsg`), or send an RC event the TUI handles by saving.
 
 ## Open: block-by-block conflict resolution for remote projects (2026-10-12)
 

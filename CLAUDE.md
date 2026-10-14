@@ -395,7 +395,8 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
   session switch. Human turns never reactivate `met` or `impossible`.
 - **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12025`).
 - **The 50-turn cap is sticky.** Only `SetGoal` (a new `/goal <text>`) resets `Turns`;
-  a human turn does not.
+  a human turn does not. The judge still runs on a capped turn: a `not_met` pauses as
+  `capped`, but `met` and `impossible` still close the goal.
 - **`slotGoal` has its own confidence floor** (`goalMinConfidenceDefault`, 0.6). Never
   reuse the permission floor, and never fall back to another backend: an unset judge
   pauses the goal as `unavailable`.
