@@ -120,11 +120,15 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
   const keywords = useMemo(() => parseKeywords(query), [query]);
   // Folder rows only exist when the caller can act on them. A path is either a
   // file or a folder, never both, so membership alone tells the rows apart.
+  // The memos key on the boolean, not on the callback: callers pass an inline
+  // arrow, and a new identity every render would re-sort the whole listing
+  // (even while the picker is closed).
+  const listFolders = !!onOpenFolder;
   const entries = useMemo(
-    () => (onOpenFolder ? [...tree.files, ...tree.folders] : tree.files),
-    [tree, onOpenFolder],
+    () => (listFolders ? [...tree.files, ...tree.folders] : tree.files),
+    [tree, listFolders],
   );
-  const folderPaths = useMemo(() => new Set(onOpenFolder ? tree.folders : []), [tree, onOpenFolder]);
+  const folderPaths = useMemo(() => new Set(listFolders ? tree.folders : []), [tree, listFolders]);
   const filteredFiles = useMemo(() => {
     // Unfiltered: shortest path first so root-level files surface above deep ones.
     if (keywords.length === 0) return [...entries].sort(compareByShortestPath);
