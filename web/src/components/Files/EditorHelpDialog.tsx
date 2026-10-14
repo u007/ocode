@@ -79,7 +79,7 @@ export default function EditorHelpDialog({ open, onOpenChange }: Props) {
               <div className="rounded-md border border-border divide-y divide-border">
                 <div className="px-3">
                   <ShortcutRow keys={<><Kbd>⌘</Kbd><span className="text-muted-foreground/50">/</span><Kbd>Ctrl</Kbd> + <Kbd>S</Kbd></>} desc="Save file" />
-                  <ShortcutRow keys={<><Kbd>⌘</Kbd><span className="text-muted-foreground/50">/</span><Kbd>Ctrl</Kbd> + <Kbd>P</Kbd></>} desc="Quick file picker" />
+                  <ShortcutRow keys={<><Kbd>⌘</Kbd><span className="text-muted-foreground/50">/</span><Kbd>Ctrl</Kbd> + <Kbd>P</Kbd></>} desc="Quick file or folder picker" />
                   <ShortcutRow keys={<><Kbd>⌘</Kbd><span className="text-muted-foreground/50">/</span><Kbd>Ctrl</Kbd> + <Kbd>K</Kbd></>} desc="Command palette" />
                   <ShortcutRow keys={<><Kbd>⌘</Kbd><span className="text-muted-foreground/50">/</span><Kbd>Ctrl</Kbd> + <Kbd>W</Kbd></>} desc="Close editor tab (desktop only)" />
                 </div>
