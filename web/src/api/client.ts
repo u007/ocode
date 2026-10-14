@@ -1097,6 +1097,17 @@ async function transcribeAudio(
   return (await res.json()) as STTTranscribeResult;
 }
 
+/** A session's goal (/goal). `active` is true only while the goal is still
+ *  pursued; a met or impossible goal reports `active: false` with its status. */
+export interface SessionGoal {
+  active: boolean;
+  condition: string;
+  status: string;
+  turns: number;
+  last_reason: string;
+  status_text: string;
+}
+
 export const api = {
   listSessions: (opts?: { limit?: number; offset?: number }, host?: string) => {
     const params = new URLSearchParams();
@@ -1326,6 +1337,27 @@ export const api = {
     fetchJSON<{ budget: number; level: string; session_id: string }>(
       `/api/sessions/${sessionId}/thinking-budget`,
       { method: "PUT", body: JSON.stringify({ level }) },
+      host,
+    ),
+  // Session goal (/goal): a condition the session keeps working toward. PUT
+  // returns the kickoff prompt that starts the first turn; the server rejects
+  // an empty or overlong (>4000 chars) condition with a 400.
+  getSessionGoal: (sessionId: string, host?: string) =>
+    fetchJSON<SessionGoal>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/goal`,
+      undefined,
+      host,
+    ),
+  setSessionGoal: (sessionId: string, condition: string, host?: string) =>
+    fetchJSON<SessionGoal & { kickoff_prompt: string }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/goal`,
+      { method: "PUT", body: JSON.stringify({ condition }) },
+      host,
+    ),
+  clearSessionGoal: (sessionId: string, host?: string) =>
+    fetchEmpty(
+      `/api/sessions/${encodeURIComponent(sessionId)}/goal`,
+      { method: "DELETE" },
       host,
     ),
   getSmallModel: (host?: string) =>

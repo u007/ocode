@@ -53,6 +53,7 @@ import {
   CalendarClock,
   Radio,
   RefreshCw,
+  Target,
 } from "lucide-react";
 
 // ─── Command Definition ────────────────────────────────────────────────────
@@ -117,6 +118,7 @@ export const COMMANDS: CommandDef[] = [
   { name: "/thinking", description: "Thinking-block visibility note (web always shows thinking)", icon: Eye },
   { name: "/models", description: "Switch model by name, or open the picker", icon: Settings },
   { name: "/orchestrate", description: "Dispatch a goal to the orchestrator pipeline", icon: ListChecks },
+  { name: "/goal", description: "Keep working until a condition is met", icon: Target },
   { name: "/autocontinue", description: "Auto-continue on|off|status|model [name]", icon: Activity },
   { name: "/mem", description: "Memory on|off|status|update [scope] [focus]", icon: Archive },
   { name: "/paths", description: "Show config/data paths for this project", icon: GitBranch },
@@ -434,6 +436,11 @@ export interface CommandContext {
     // ── Session identity (/reset-id) ──
     /** Re-key a chat with a fresh session id, keeping the transcript. */
     resetSessionId?: (sessionId: string, host?: string) => Promise<{ old_id: string; new_id: string }>;
+
+    // ── Session goal (/goal) ──
+    getSessionGoal?: (sessionId: string, host?: string) => Promise<import("../../api/client").SessionGoal>;
+    setSessionGoal?: (sessionId: string, condition: string, host?: string) => Promise<import("../../api/client").SessionGoal & { kickoff_prompt: string }>;
+    clearSessionGoal?: (sessionId: string, host?: string) => Promise<void>;
   };
   /** Current messages in the chat store (used by /export). */
   getMessages?: () => Message[];
@@ -577,6 +584,9 @@ export async function dispatchCommand(
 
     case "/orchestrate":
       return handleOrchestrate(args);
+
+    case "/goal":
+      return handleGoal(args, ctx);
 
     case "/autocontinue":
       return handleAutoContinue(args, ctx);
@@ -1987,6 +1997,39 @@ async function handleAutoContinue(args: string, ctx: CommandContext): Promise<Co
     return ok("Usage: `/autocontinue [on|off|status|model [name]]`.");
   } catch (err) {
     return fail("/autocontinue", err);
+  }
+}
+
+// ─── /goal [<condition> | clear | (none: status)] — session goal loop ─────
+
+const GOAL_CLEAR_VERBS = ["clear", "stop", "off", "reset", "none", "cancel"];
+
+async function handleGoal(args: string, ctx: CommandContext): Promise<CommandResult> {
+  if (!ctx.api.getSessionGoal || !ctx.api.setSessionGoal || !ctx.api.clearSessionGoal) return unsupported("/goal");
+  const sessionId = activeSessionId(ctx);
+  if (!sessionId) {
+    return ok("No active session to set a goal on — send a message first.");
+  }
+  try {
+    if (!args) {
+      const goal = await ctx.api.getSessionGoal(sessionId, ctx.host);
+      return ok(goal.status_text);
+    }
+    if (GOAL_CLEAR_VERBS.includes(args.toLowerCase())) {
+      await ctx.api.clearSessionGoal(sessionId, ctx.host);
+      return ok("Goal cleared.");
+    }
+    // Surrounding quotes are dropped so `/goal ""` is an empty condition
+    // (usage, no request) rather than a PUT the server would refuse.
+    const condition = args.replace(/^(["'])(.*)\1$/s, "$2").trim();
+    if (!condition) {
+      return ok("Usage: `/goal <condition>` — keep working until the condition is met. `/goal` shows status, `/goal clear` stops it.");
+    }
+    const goal = await ctx.api.setSessionGoal(sessionId, condition, ctx.host);
+    // The kickoff prompt rides the normal send path so the first turn starts now.
+    return { handled: true, prompt: goal.kickoff_prompt };
+  } catch (err) {
+    return fail("/goal", err);
   }
 }
 
