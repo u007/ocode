@@ -1880,6 +1880,7 @@ func runGoalCmd(m *model, args []string) tea.Cmd {
 	if len(args) == 1 && isGoalClearVerb(args[0]) {
 		m.agent.ClearGoal()
 		m.goalGen++
+		m.goalResumePending = false
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Goal cleared."})
 		m.saveSession()
 		return nil
@@ -1889,6 +1890,7 @@ func runGoalCmd(m *model, args []string) tea.Cmd {
 		return nil
 	}
 	m.goalGen++
+	m.goalResumePending = false
 	m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("◎ goal set — evaluating after every turn"), transient: true})
 	kickoff := m.agent.GoalKickoffPrompt()
 	m.messages = append(m.messages, message{role: roleUser, text: kickoff, raw: &agent.Message{Role: "user", Content: kickoff}})

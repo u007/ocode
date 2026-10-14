@@ -484,3 +484,64 @@ func TestGoalJudgeFinishedRearmsRCListener(t *testing.T) {
 		}
 	})
 }
+
+// A Resume verdict that arrives while a compaction is pending must not start a
+// turn. It is deferred and fires once compactFinishedMsg lands.
+func TestGoalResumeDeferredUntilCompactionFinishes(t *testing.T) {
+	m := newGoalCommandTestModel()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	m.goalGen = 3
+	m.pendingCompactUIIdx = []int{0}
+
+	updated, _ := m.Update(goalJudgeFinishedMsg{gen: 3, result: agent.GoalJudgeResult{Gen: 3, Verdict: "not_met", Status: agent.GoalActive, Detail: "judge", Resume: true}})
+	got := derefTestModel(t, updated)
+	if last := got.messages[len(got.messages)-1]; strings.HasPrefix(last.text, "[ocode:goal]") {
+		t.Fatal("expected no goal resume while a compaction is pending")
+	}
+	if !got.goalResumePending {
+		t.Fatal("expected the resume to be deferred")
+	}
+
+	updated, _ = got.Update(compactFinishedMsg{result: agent.CompactResult{}})
+	got = derefTestModel(t, updated)
+	if last := got.messages[len(got.messages)-1]; last.role != roleUser || !strings.HasPrefix(last.text, "[ocode:goal]") {
+		t.Fatalf("expected the deferred resume to append the goal marker after compaction, got %#v", last)
+	}
+	if got.goalResumePending {
+		t.Fatal("expected the deferred resume flag to clear once it fires")
+	}
+}
+
+// /new ends the session the deferred resume belonged to, so compaction finishing
+// afterwards must not resume the goal.
+func TestGoalResumeDeferredClearedByNewSession(t *testing.T) {
+	m := newGoalCommandTestModel()
+	if err := m.agent.SetGoal("all tests pass"); err != nil {
+		t.Fatalf("SetGoal: %v", err)
+	}
+	m.goalGen = 3
+	m.pendingCompactUIIdx = []int{0}
+
+	updated, _ := m.Update(goalJudgeFinishedMsg{gen: 3, result: agent.GoalJudgeResult{Gen: 3, Verdict: "not_met", Status: agent.GoalActive, Detail: "judge", Resume: true}})
+	got := derefTestModel(t, updated)
+	if !got.goalResumePending {
+		t.Fatal("expected the resume to be deferred before /new")
+	}
+
+	updated, _ = got.handleCommand("/new")
+	got = *updated.(*model)
+	if got.goalResumePending {
+		t.Fatal("expected /new to clear the deferred resume")
+	}
+	got.pendingCompactUIIdx = nil
+
+	updated, _ = got.Update(compactFinishedMsg{result: agent.CompactResult{}})
+	got = derefTestModel(t, updated)
+	for _, msg := range got.messages {
+		if strings.HasPrefix(msg.text, "[ocode:goal]") {
+			t.Fatalf("expected no goal resume after /new, got %#v", msg)
+		}
+	}
+}

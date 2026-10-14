@@ -277,6 +277,7 @@ func (m *model) maybeDispatchGoalJudge(forRC bool) bool {
 	}
 	m.goalGen = newGen
 	m.goalJudgeForRC = forRC
+	m.goalResumePending = false
 	return true
 }
 
@@ -291,6 +292,20 @@ func (m *model) rcGoalJudge(err error) bool {
 	m.cancelStream = nil
 	m.broadcastTUIStatus()
 	return true
+}
+
+// goalResumeReady reports whether a deferred goal resume may fire now.
+func (m *model) goalResumeReady() bool {
+	return m.goalResumePending && m.goalEvaluable() && !m.streaming && !m.queueDrainBlocked() && len(m.pendingCompactUIIdx) == 0
+}
+
+// resumeGoal appends the goal resume turn and starts it.
+func (m *model) resumeGoal() tea.Cmd {
+	resumeMsg := m.agent.GoalResumeMessage()
+	m.messages = append(m.messages, message{role: roleUser, text: resumeMsg.Content, raw: &resumeMsg})
+	m.lastTurnWasGoalResume = true
+	m.rerenderTranscriptAndMaybeScroll()
+	return m.askAgent()
 }
 
 // goalJudgeNext returns the command that keeps listening for goal verdicts. When
@@ -1418,6 +1433,10 @@ type model struct {
 	// goalJudgeForRC is true while an in-flight goal judge was dispatched for an
 	// /rc-originated turn, so the /rc listener is re-armed once its verdict lands.
 	goalJudgeForRC bool
+	// goalResumePending is true when a Resume verdict could not fire because the
+	// session was busy (streaming, a dialog, or a compaction). compactFinishedMsg
+	// fires it once the session is idle. Any new turn or judge supersedes it.
+	goalResumePending bool
 	// modelSwitchGen guards async model switches — stale completions are dropped.
 	modelSwitchGen          uint64
 	modelSwitchPending      bool
@@ -5740,6 +5759,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if resume && m.agent != nil {
 			return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
 		}
+		if m.goalResumeReady() {
+			return m, tea.Batch(m.resumeGoal(), waitCompactEvent(m.compactStartCh, m.compactCh))
+		}
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 	case recapFinishedMsg:
 		if msg.gen == m.recapGen {
@@ -5840,20 +5862,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render(hint), transient: true})
 		m.saveSession()
+		// A Resume verdict that could not fire now is deferred to compactFinishedMsg.
+		m.goalResumePending = res.Resume && !canResume
 		if !canResume {
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.goalJudgeNext(forRC)
 		}
-		resumeMsg := m.agent.GoalResumeMessage()
-		m.messages = append(m.messages, message{role: roleUser, text: resumeMsg.Content, raw: &resumeMsg})
-		m.lastTurnWasGoalResume = true
 		// An /rc resume keeps the listener un-armed: the resumed turn is the
 		// chain's next iteration, and its streamDone re-enters the RC chain branch.
 		if forRC {
 			m.pendingRCAutoContinue = true
 		}
-		m.rerenderTranscriptAndMaybeScroll()
-		return m, tea.Batch(m.askAgent(), waitGoalJudgeEvent(m.goalJudgeCh))
+		return m, tea.Batch(m.resumeGoal(), waitGoalJudgeEvent(m.goalJudgeCh))
 	case btwResultMsg:
 		if msg.gen == m.btwGen {
 			if msg.live {
@@ -11526,6 +11546,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			if m.agent != nil {
 				m.agent.ClearGoal()
 			}
+			m.goalResumePending = false
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			m.restoreGoalState(sess.Metadata)
@@ -11990,6 +12011,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	if m.agent != nil {
 		m.agent.ClearGoal()
 	}
+	m.goalResumePending = false
 	m.sessionTelemetry = sidebarTelemetry{}
 	m.lastActivity = agent.ActivitySnapshot{}
 	m.detail = nil
@@ -15963,6 +15985,8 @@ func (m *model) lookupToolName(toolID string) string {
 }
 
 func (m *model) askAgent() tea.Cmd {
+	// A new turn supersedes a deferred goal resume: its own judge decides the goal.
+	m.goalResumePending = false
 	// Reset any prior cancellation so a new request isn't immediately
 	// short-circuited by a stopCh that was closed by a previous Escape/Cancel.
 	if m.agent != nil {
