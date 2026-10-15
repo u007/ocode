@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
 import { AlertCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePulse, usePulseFocus } from "@/stores/pulseStore";
-import { PulseCard } from "./PulseCard";
+import { PulseCard, STREAM_ON_CARD } from "./PulseCard";
 import { PulseTerminals } from "./PulseTerminals";
 import { PulseFocusPane } from "./PulseFocusPane";
 import { usePulseAssistantHotkey } from "./PulseAssistantWindow";
 import { toggleAssistantWindow } from "./pulseAssistantPrefs";
+import { pruneStreamOverrides, setAllLiveStreamsTall } from "./pulseStreamPrefs";
+import { prunePulsePins, setPulseFilter, usePulseFilter } from "./pulseViewStore";
 import type { PulseStatus } from "@/api/types";
 import { pulseRowMatchesFilter } from "./pulseFilter";
 
@@ -49,10 +51,22 @@ const SECTION_ORDER: { key: Section; title: string; matches: (s: PulseStatus) =>
 
 export function PulseView() {
   const { rows, scope, setScope, loadMore, hasMore, error, hostErrors: failedHosts, retry } = usePulse();
-  const [filter, setFilter] = useState("");
+  const filter = usePulseFilter();
   usePulseAssistantHotkey(toggleAssistantWindow);
 
   const filtered = useMemo(() => rows.filter((r) => pulseRowMatchesFilter(r, filter)), [rows, filter]);
+  // Over `rows`, not `filtered`: "Expand active" sets a persisted default for
+  // every live card, including ones the filter currently hides.
+  const hasLive = rows.some((r) => STREAM_ON_CARD.has(r.status));
+
+  // Per-session view state (pins, manual stream toggles) is keyed by session id.
+  // pulseStore never replaces good rows with nothing, so a session missing from
+  // `rows` has really left the board and its entries can go.
+  useEffect(() => {
+    const listed = new Set(rows.map((r) => r.session_id));
+    prunePulsePins(listed);
+    pruneStreamOverrides(listed);
+  }, [rows]);
 
   // Roving-tabindex arrow navigation over the rendered cards, in reading order.
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -142,7 +156,7 @@ export function PulseView() {
       <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
         <input
           value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          onChange={(e) => setPulseFilter(e.target.value)}
           placeholder="Filter by project or title…"
           aria-label="Filter sessions by project or title"
           className="flex-1 min-w-0 h-8 rounded-md border border-border bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -164,6 +178,18 @@ export function PulseView() {
             </Button>
           ))}
         </div>
+        {/* Bulk height for every live card's stream. Focus mode has no live
+            cards on its grid, so the controls would act on nothing there. */}
+        {focusedId === null && (
+          <div role="group" aria-label="Live streams" className="flex items-center gap-1 shrink-0">
+            <Button size="sm" variant="ghost" disabled={!hasLive} onClick={() => setAllLiveStreamsTall(true)}>
+              Expand active
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setAllLiveStreamsTall(false)}>
+              Collapse all
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Error banner. Deliberately NOT destructive: the rows below stay, so a

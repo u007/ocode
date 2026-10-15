@@ -6,6 +6,8 @@ import { useJumpToSession, useJumpToPendingAsk, type JumpTarget } from "../../li
 import { usePulseTail, type PulseTail } from "./usePulseTail";
 import { useStickToBottom } from "./useStickToBottom";
 import { setPulseFocus } from "../../stores/pulseStore";
+import { setStreamTall, useStreamTall } from "./pulseStreamPrefs";
+import { setPulsePinned, usePulsePinned } from "./pulseViewStore";
 import { pulseProjectLabel } from "./pulseFilter";
 import type { PulseRow, PulseStatus, PulseTodoState } from "../../api/types";
 
@@ -75,7 +77,7 @@ const MAX_TURN_MS = 24 * 60 * 60 * 1_000;
  * on the card body, so the tail beside it is the context for that ask rather
  * than a historical fetch.
  */
-const STREAM_ON_CARD: ReadonlySet<PulseStatus> = new Set<PulseStatus>([
+export const STREAM_ON_CARD: ReadonlySet<PulseStatus> = new Set<PulseStatus>([
   "running",
   "needs_permission",
   "needs_question",
@@ -272,11 +274,13 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
   }, [clearExpandTimer]);
   // The chevron toggle pins the panel open. Hover and blur only ever touch
   // `expanded`, so a pinned panel survives them; Escape and a second click clear it.
-  const [pinned, setPinned] = useState(false);
+  const pinned = usePulsePinned(row.session_id);
   const open = expanded || pinned;
-  // A live card's stream is capped short by default; this lifts the cap for
-  // this card only (see STREAM_TALL_MAX_H). Local, so it resets on remount.
-  const [streamTall, setStreamTall] = useState(false);
+  // A live card's stream is capped short by default; this lifts the cap (see
+  // STREAM_TALL_MAX_H). The store derives it: this card's manual override when
+  // it has one, else the viewer's persisted default. A toolbar bulk action
+  // clears every override, so a manual toggle lasts only until the next one.
+  const streamTall = useStreamTall(row.session_id);
 
   // A live card reads its tail whether or not it is hovered — which is also the
   // only way it is reachable at all on a touch device, where there is no hover.
@@ -325,7 +329,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
   const onButtonKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key === "Escape") {
       collapse();
-      setPinned(false);
+      setPulsePinned(row.session_id, false);
       return;
     }
     // Enter focuses the session in the dashboard; Shift+Enter is the keyboard
@@ -467,7 +471,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
             aria-pressed={pinned}
             aria-label="Keep details open"
             title="Keep details open"
-            onClick={() => setPinned((p) => !p)}
+            onClick={() => setPulsePinned(row.session_id, !pinned)}
             className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <ChevronDown className={cn("h-3 w-3 transition-transform", pinned && "rotate-180")} aria-hidden />
@@ -478,7 +482,7 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
               aria-pressed={streamTall}
               aria-label="Expand stream"
               title="Expand stream"
-              onClick={() => setStreamTall((t) => !t)}
+              onClick={() => setStreamTall(row.session_id, !streamTall)}
               className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <ChevronsUpDown className="h-3 w-3" aria-hidden />

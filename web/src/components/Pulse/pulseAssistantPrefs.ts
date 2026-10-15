@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { readPref, writePref } from "./pulseStorage";
 
 /**
  * Per-viewer layout of the Pulse assistant window: open or closed, its mode and
@@ -7,8 +8,8 @@ import { useSyncExternalStore } from "react";
  * keeps them in step; two hook instances each reading localStorage once would drift.
  *
  * localStorage on purpose, not the pulse store: each window or device wants its
- * own layout, and nothing else reads these keys. Storage that throws or is blocked
- * only costs the remembered layout, so every read and write is guarded and logged.
+ * own layout, and nothing else reads these keys. Storage access goes through the
+ * guarded helpers in pulseStorage.
  */
 
 export type AssistantMode = "normal" | "minimized" | "maximized";
@@ -47,23 +48,6 @@ export interface AssistantPrefs {
   mode: AssistantMode;
   /** null until the user moves or resizes the window; the default is computed per viewport. */
   rect: AssistantRect | null;
-}
-
-function readPref(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch (err) {
-    console.warn(`PulseAssistant: reading localStorage key ${key} failed:`, err);
-    return null;
-  }
-}
-
-function writePref(key: string, value: string): void {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch (err) {
-    console.warn(`PulseAssistant: writing localStorage key ${key} failed:`, err);
-  }
 }
 
 function isFiniteNumber(v: unknown): v is number {

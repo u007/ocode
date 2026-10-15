@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { PulseView } from "./PulseView";
 import { resetAssistantPrefsForTests, setAssistantMode, setAssistantOpen } from "./pulseAssistantPrefs";
+import { getStreamPrefs, resetStreamPrefsForTests } from "./pulseStreamPrefs";
+import { pulseViewStore, resetPulseViewStoreForTests } from "./pulseViewStore";
 import { PulseJumpProvider } from "@/lib/jumpToSession";
 import { usePulse, setPulseFocus } from "@/stores/pulseStore";
 import type { PulseRow } from "@/api/types";
@@ -90,6 +92,8 @@ beforeEach(() => {
   overrides = {};
   setPulseFocus(null);
   window.localStorage.clear();
+  resetPulseViewStoreForTests();
+  resetStreamPrefsForTests();
   mockJump.mockReset();
   mockJumpAsk.mockReset();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -199,7 +203,7 @@ describe("PulseView toolbar", () => {
     const setScope = vi.fn();
     overrides = { setScope };
     mount();
-    fireEvent.click(screen.getByRole("button", { name: /all/i }));
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(setScope).toHaveBeenCalledWith("all");
   });
 
@@ -233,6 +237,93 @@ describe("PulseView toolbar", () => {
     overrides = { hasMore: false, rows: [row({ session_id: "a" })] };
     mount();
     expect(screen.queryByRole("button", { name: /load more/i })).toBeNull();
+  });
+});
+
+describe("PulseView state across leaving the view", () => {
+  it("keeps the filter across an unmount, as switching to Sessions and back does", () => {
+    const first = mount();
+    fireEvent.change(screen.getByPlaceholderText(/filter/i), { target: { value: "beta" } });
+    first.unmount();
+
+    mount();
+
+    expect(screen.getByPlaceholderText(/filter/i)).toHaveValue("beta");
+  });
+});
+
+describe("PulseView live stream toolbar", () => {
+  const KEY = "pulse.card.streamTall";
+
+  it("Expand active makes every live card's stream tall and persists it", () => {
+    overrides = { rows: [row({ session_id: "ses_run", status: "running" }), row({ session_id: "ses_idle" })] };
+    mount();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand active" }));
+
+    expect(window.localStorage.getItem(KEY)).toBe("1");
+    expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("Collapse all clears the tall stream and persists the collapsed choice", () => {
+    window.localStorage.setItem(KEY, "1");
+    resetStreamPrefsForTests();
+    overrides = { rows: [row({ session_id: "ses_run", status: "running" })] };
+    mount();
+    expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+
+    expect(window.localStorage.getItem(KEY)).toBe("0");
+    expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("disables Expand active when no live row is listed, since it would change nothing visible", () => {
+    overrides = { rows: [row({ session_id: "ses_idle", status: "idle" })] };
+    mount();
+
+    expect(screen.getByRole("button", { name: "Expand active" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Collapse all" })).toBeEnabled();
+  });
+
+  it("keeps Expand active enabled when the filter hides the only live row, since the default it sets is global", () => {
+    overrides = {
+      rows: [
+        row({ session_id: "ses_run", status: "running", project_path: "/proj/alpha" }),
+        row({ session_id: "ses_idle", status: "idle", project_path: "/proj/beta" }),
+      ],
+    };
+    mount();
+    fireEvent.change(screen.getByPlaceholderText(/filter/i), { target: { value: "beta" } });
+    expect(screen.queryByRole("button", { name: "Expand stream" })).not.toBeInTheDocument();
+
+    expect(screen.getByRole("button", { name: "Expand active" })).toBeEnabled();
+  });
+
+  it("drops a pin and a manual stream toggle once their session leaves the board", () => {
+    overrides = { rows: [row({ session_id: "ses_run", status: "running" }), row({ session_id: "ses_idle" })] };
+    const first = mount();
+    fireEvent.click(screen.getAllByRole("button", { name: "Keep details open" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Expand stream" }));
+    expect(pulseViewStore.state.pinned).toEqual({ ses_idle: true });
+    expect(getStreamPrefs().overrides).toEqual({ ses_run: true });
+    first.unmount();
+
+    overrides = { rows: [row({ session_id: "ses_other" })] };
+    mount();
+
+    expect(pulseViewStore.state.pinned).toEqual({});
+    expect(getStreamPrefs().overrides).toEqual({});
+  });
+
+  it("hides both bulk controls in focus mode, where the grid's live cards are not rendered", () => {
+    overrides = { rows: [row({ session_id: "ses_run", status: "running" })] };
+    mount();
+    expect(screen.getByRole("group", { name: "Live streams" })).toBeInTheDocument();
+
+    act(() => setPulseFocus("ses_run"));
+
+    expect(screen.queryByRole("group", { name: "Live streams" })).not.toBeInTheDocument();
   });
 });
 

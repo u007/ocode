@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { PulseCard } from "./PulseCard";
+import { resetStreamPrefsForTests, setAllLiveStreamsTall } from "./pulseStreamPrefs";
+import { resetPulseViewStoreForTests } from "./pulseViewStore";
 import { PULSE_TAIL_ENTRIES, type PulseTail, type PulseTailEntry } from "./usePulseTail";
 import type { PulseRow, PulseStatus } from "../../api/types";
 
@@ -76,6 +78,9 @@ beforeEach(() => {
   mockFocus.mockReset();
   mockTail.mockReset();
   mockTail.mockReturnValue({ entries: [], error: null, loading: false });
+  window.localStorage.clear();
+  resetStreamPrefsForTests();
+  resetPulseViewStoreForTests();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
 });
@@ -403,6 +408,63 @@ describe("PulseCard streams a live row on the card itself", () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-pressed", "false");
     expect(region.className).toContain("max-h-[24rem]");
+  });
+
+  it("starts a live card tall when the viewer's persisted choice is tall", () => {
+    setAllLiveStreamsTall(true);
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("pulse-stream-region").className).toContain("max-h-[48rem]");
+  });
+
+  it("a bulk action reaches a card the user already toggled by hand", () => {
+    render(<PulseCard row={makeRow()} compact={false} />);
+    const toggle = screen.getByRole("button", { name: "Expand stream" });
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    // The stored value is already `false`, so `tall` does not change here. The
+    // bulk action clears the card's manual override, which the user had set to true.
+    act(() => setAllLiveStreamsTall(false));
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    // Stored value is now `true`, and the user collapses this card by hand.
+    act(() => setAllLiveStreamsTall(true));
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    // Expand active again while the stored value is still `true`: no change in
+    // `tall`, but the card must follow the bulk action.
+    act(() => setAllLiveStreamsTall(true));
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps a manual stream toggle across an unmount, as switching to Sessions and back does", () => {
+    const first = render(<PulseCard row={makeRow()} compact={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand stream" }));
+    first.unmount();
+
+    render(<PulseCard row={makeRow()} compact={false} />);
+
+    expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("pulse-stream-region").className).toContain("max-h-[48rem]");
+  });
+
+  it("a manual toggle on one card leaves another card on the viewer's default", () => {
+    render(
+      <>
+        <PulseCard row={makeRow({ session_id: "ses_a" })} compact={false} />
+        <PulseCard row={makeRow({ session_id: "ses_b" })} compact={false} />
+      </>,
+    );
+    const [a, b] = screen.getAllByRole("button", { name: "Expand stream" });
+
+    fireEvent.click(a);
+
+    expect(a).toHaveAttribute("aria-pressed", "true");
+    expect(b).toHaveAttribute("aria-pressed", "false");
   });
 
   it("offers no stream toggle on a settled card, which has no stream region", () => {
@@ -829,6 +891,19 @@ describe("PulseCard overlay", () => {
     fireEvent.pointerLeave(cardButton());
 
     expect(mockTail).toHaveBeenLastCalledWith("ses_1", false, "idle");
+  });
+});
+
+describe("PulseCard pin across leaving the view", () => {
+  it("keeps a pinned details panel across an unmount", () => {
+    const first = render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Keep details open" }));
+    first.unmount();
+
+    render(<PulseCard row={makeRow({ status: "idle" })} compact={false} />);
+
+    expect(screen.getByRole("button", { name: "Keep details open" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("pulse-overlay")).toBeInTheDocument();
   });
 });
 

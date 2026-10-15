@@ -247,6 +247,15 @@ Pure, client-side, and deliberately **not** a server query — filtering already
 rows avoids a round trip per keystroke and keeps SSE-updated rows filtering
 correctly without a refetch.
 
+The typed filter and each card's "Keep details open" pin live in a TanStack Store
+(`web/src/components/Pulse/pulseViewStore.ts`, `pulseViewStore`), not in
+`PulseView`/`PulseCard` `useState`. App mounts `PulseView` only while
+`activeView === "pulse"`, so local state was discarded on every switch to Sessions
+and back. In memory only: a reload resets both, and nothing is written to
+localStorage. Pins are keyed by session id and pruned against the loaded rows
+(`prunePulsePins`, called from `PulseView`), so the map does not grow as sessions
+churn; `resetPulseViewStoreForTests` clears them.
+
 - `pulseProjectBasename(path)` — last path segment, trailing slashes stripped
   first so `/proj/alpha/` and `/proj/alpha` are one project rather than one
   labelled with an empty string. **Shared with `PulseCard`**, which labels the
@@ -467,8 +476,23 @@ than clipping.
 ### Expanding a live stream in place
 
 A live card's "Expand stream" toggle (`aria-pressed`, `ChevronsUpDown`) swaps that
-card's cap to `STREAM_TALL_MAX_H` = `max-h-[48rem]` (768px). This is a per-card
-local state (`streamTall`) and resets on remount. The taller cap grows the card's
+card's cap to `STREAM_TALL_MAX_H` = `max-h-[48rem]` (768px). The card holds no
+state of its own: `useStreamTall(session_id)` derives it from a TanStack Store
+(`streamPrefsStore`, `pulseStreamPrefs.ts`) as the card's manual override when it
+has one, else the viewer's default `tall`. The default is mirrored to localStorage
+key `pulse.card.streamTall` on every write (through the shared guarded helpers in
+`pulseStorage.ts`), so it survives a reload; a `storage` event from another tab
+updates it too. Overrides are in memory only, so a manual toggle survives a view
+switch but not a reload. The grid toolbar's bulk controls set the default for every
+live card at once: **Expand active** (`setAllLiveStreamsTall(true)`, disabled only
+when no live row is loaded at all, since the default it sets also applies to rows
+the filter hides) and **Collapse all** (`setAllLiveStreamsTall(false)`). Only live
+cards carry a stream, so "active" is exactly `STREAM_ON_CARD`. A bulk action clears
+the whole override map, so it reaches a card the user already toggled by hand.
+`PulseView` prunes overrides and pins against the loaded rows whenever they change
+(`pruneStreamOverrides`, `prunePulsePins`), so a session that leaves the board, or
+drops out of the `live` scope, does not keep an entry. The controls are hidden in
+focus mode, where no grid card is live. The taller cap grows the card's
 grid row, so the other cards in that row stretch with it. That is the accepted
 cost of an in-place expand; the default 24rem cap remains the constant-height
 budget for every card that is not toggled. The "Focus session" pane is still the
