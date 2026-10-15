@@ -194,7 +194,7 @@ function HomeApp() {
   // render, so HomeApp must not re-render on every dispatch (every streamed
   // token) just to keep this reference "fresh" — see useChatStateRef's docs.
   const chatStateRef = useChatStateRef();
-  const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab } = useProjectState();
+  const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab, openProjectPath } = useProjectState();
   useEffect(() => {
     const activeTab = activeTabId ? tabs.find((t) => t.id === activeTabId) || Object.values(projectState.tabsByProject).flat().find((t) => t.id === activeTabId) : null;
     const sessionTitle = activeTab?.title?.trim() || projectState.activeProject?.path?.split("/").pop() || "";
@@ -1685,6 +1685,7 @@ function HomeApp() {
                     active={activeView === "git"}
                     loadingKey={gitLoadingKey}
                     onLoadingEvent={handleTabLoadingEvent}
+                    onOpenWorktree={openProjectPath}
                   />
                   <TabLoadingOverlay
                     active={gitLoading?.phase === "initial"}

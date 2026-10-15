@@ -2,7 +2,7 @@
 type: Concept
 title: Web UI Global Keyboard Shortcuts
 description: 'Concept: web UI keyboard shortcuts'
-resource: "web/src/hooks/useKeyboard.ts; web/src/App.tsx:695-763"
+resource: "web/src/hooks/useKeyboard.ts; web/src/App.tsx:869-948"
 tags:
   - web
   - keyboard
@@ -18,7 +18,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 ## Where they live
 
 - **Dispatch:** `web/src/hooks/useKeyboard.ts` — a single `window` `keydown` listener with one `useEffect` and an empty dep array; handlers are read through a ref so re-renders never rebind. This is the only place global shortcuts may be registered.
-- **Wiring/semantics:** `web/src/App.tsx:695-763` — an `openNewChat` helper (`:695-699`) plus the top-level `useKeyboard({...})` call (`:701-763`), which supplies `onNewSession`, `onNewTerminal`, `onCommandPalette`, `onFilePicker`, `onSave`, `onEscape`, `onCloseSession`, `onCloseBrowserTab`, and `focusedKind` / `activeBrowserId`.
+- **Wiring/semantics:** `web/src/App.tsx:869-948` — an `openNewChat` helper (`:869-873`) plus the top-level `useKeyboard({...})` call (`:875-948`), which supplies `onNewSession`, `onNewTerminal`, `onCommandPalette`, `onFilePicker`, `onSave`, `onEscape`, `onCloseSession`, `onCloseBrowserTab`, and `focusedKind` / `activeBrowserId`.
 - **Component-local (not global):** chat find (`⌘/Ctrl+F`) lives inside `web/src/components/Chat/ChatPanel.tsx:1145`, guarded to the visible chat tab. The `/search`, `/find` commands open the same bar via the `ocode:open-chat-search` window `CustomEvent` (`ChatPanel.tsx:1167`).
 
 ## Bindings
@@ -27,7 +27,7 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 |---|---|
 | `⌘K` / `Ctrl+K` | Open CommandPalette (`onCommandPalette`) |
 | `⌘P` / `Ctrl+P` | Open FilePicker (`onFilePicker`) |
-| `⌘S` / `Ctrl+S` | Save the visible editor tab (`onSave`) — also exposed as a **header Save button** (`<Save />`, `aria-label="Save file"`) in `FileEditor`/`FileTabContent` for touch devices that have no keyboard; both paths invoke the same `saveEditorTab` call (`:1423` in `App.tsx`) |
+| `⌘S` / `Ctrl+S` | Save the visible editor tab (`onSave`) — also exposed as a **header Save button** (`<Save />`, `aria-label="Save file"`) in `FileEditor`/`FileTabContent` for touch devices that have no keyboard; both paths invoke the same `saveEditorTab` call (`:911` keyboard path and `:1668` header button, in `App.tsx`) |
 | `⌘N` / `Ctrl+N` | New chat — reveals the merged **Sessions** view on the chat half, then opens (or reuses the blank) chat tab (`onNewSession` → `openNewChat`). Identical to the tab-bar "new chat" button |
 | `⌘T` / `Ctrl+T` | New terminal on the merged **Sessions** view; on any other view the same new-chat reveal (`onNewTerminal`) |
 | `⌘W` / `Ctrl+W` | Close the frontmost thing (desktop shell only — see caveats) |
@@ -39,11 +39,11 @@ Canonical reference for the ocode web/desktop keyboard bindings. The source of t
 
 ## Semantics of ⌘N, ⌘T and ⌘W
 
-**⌘N** (`App.tsx:709-714`, helper at `:695-699`): `openNewChat()` = `setActiveView("sessions"); setFocusedKind("chat"); openNewSessionTab(isNewSessionTabEmpty(activeTabId))`. It reveals the merged Sessions view on the chat half and opens (or reuses the blank) chat tab, so it works from any view (Files/Settings/…) exactly like the tab bar's "new chat" button (`UnifiedTabBar.tsx:551-554`). Before this change ⌘N only touched the tab stores, so pressed from a non-Sessions view the new tab landed behind the current view and the shortcut looked inert; the reveal is the fix. It is the sibling of ⌘T for a new terminal.
+**⌘N** (`App.tsx:887-892`, helper at `:869-873`): `openNewChat()` = `setActiveView("sessions"); setFocusedKind("chat"); openNewSessionTab(isNewSessionTabEmpty(activeTabId))`. It reveals the merged Sessions view on the chat half and opens (or reuses the blank) chat tab, so it works from any view (Files/Settings/…) exactly like the tab bar's "new chat" button (`UnifiedTabBar.tsx:551-554`). Before this change ⌘N only touched the tab stores, so pressed from a non-Sessions view the new tab landed behind the current view and the shortcut looked inert; the reveal is the fix. It is the sibling of ⌘T for a new terminal.
 
-**⌘T** (`App.tsx:715-728`): when `activeView === "sessions"` it focuses the terminal kind and calls `terminalRefs.current.get(projectPath)?.openTerminal()` — terminal handles are **project-scoped**, looked up by the active project path. On any other view it calls the same `openNewChat()` helper (it previously called `openNewSessionTab(...)` directly, i.e. added a chat tab without revealing it — now consistent with ⌘N).
+**⌘T** (`App.tsx:893-906`): when `activeView === "sessions"` it focuses the terminal kind and calls `terminalRefs.current.get(projectPath)?.openTerminal()` — terminal handles are **project-scoped**, looked up by the active project path. On any other view it calls the same `openNewChat()` helper (it previously called `openNewSessionTab(...)` directly, i.e. added a chat tab without revealing it — now consistent with ⌘N).
 
-**⌘W** (`App.tsx:736-758`, `useKeyboard.ts:55-69`): closes whatever is frontmost, mirroring the tab bar's X:
+**⌘W** (`App.tsx:914-943`, `useKeyboard.ts:55-69`): closes whatever is frontmost, mirroring the tab bar's X:
 1. Sessions view + terminal focused → `closeActiveTerminal()` (returns early on success), else bail.
 2. Files view → `requestCloseTab(visibleActiveEditorTabId)`.
 3. Sessions view + chat focused → the full session teardown: `closeSessionBackend` → `closeSessionTab` → `cancelLiveDeltas` → `clearQueue` → `dispatch({type:"RESET"})`.

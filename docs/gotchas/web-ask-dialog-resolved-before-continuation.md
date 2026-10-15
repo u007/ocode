@@ -29,7 +29,7 @@ HTTP request, so the POST stayed pending for the whole model round (Step can
 run for minutes). The browser's `await` never settled, the dialog's local
 answer echo + dismissal were gated on it, and the request held one of the
 browser's ~6 connections per origin for its whole duration — the same
-starvation the async send path was fixed for (`web/src/api/client.ts:1448`
+starvation the async send path was fixed for (`web/src/api/client.ts:2769`
 `async: true`; see the comment at `web/src/hooks/useChat.ts:161`). The TUI
 never had this problem: resolving a dialog just resumes its single in-process
 loop.

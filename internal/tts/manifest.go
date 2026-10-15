@@ -24,6 +24,7 @@ const (
 	EngineBrowserNative EngineID = "browser-native"
 	EnginePiper         EngineID = "piper"
 	EngineParadee       EngineID = "paradee"
+	EngineKyutai        EngineID = "kyutai"
 	EngineMelo          EngineID = "melo"
 	EngineKokoro        EngineID = "kokoro"
 )
@@ -347,6 +348,34 @@ func paradeeRequirements() []string {
 }
 
 const (
+	kyutaiVersion = "kyutai-3.3.0"
+)
+
+var kyutaiVoices = []string{"alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma", "charles", "eve", "george", "mary", "michael", "paul", "vera"}
+var kyutaiManifest = Manifest{
+	Engine:      EngineKyutai,
+	Version:     kyutaiVersion,
+	LicenseName: "Kyutai Pocket TTS MIT (per-voice licenses vary)",
+	LicenseURL:  "https://huggingface.co/kyutai/pocket-tts",
+	LicenseText: "Pocket TTS by Kyutai: MIT. Model and voice weights: see kyutai.org/pocket-tts and each voice license card.",
+	Voice:       "alba",
+	Voices:      kyutaiVoices,
+	VoiceFiles:  nil,
+	Runtime: map[string]PythonRuntime{
+		// torch 2.5.1 ships wheels for CPython 3.9-3.12 only and none for
+		// macOS x86_64, so darwin/amd64 is not listed.
+		"darwin/arm64":  {Requirements: kyutaiRequirements(), MinPython: [2]int{3, 10}, MaxPython: [2]int{3, 12}},
+		"linux/amd64":   {Requirements: kyutaiRequirements(), MinPython: [2]int{3, 10}, MaxPython: [2]int{3, 12}},
+		"linux/arm64":   {Requirements: kyutaiRequirements(), MinPython: [2]int{3, 10}, MaxPython: [2]int{3, 12}},
+		"windows/amd64": {Requirements: kyutaiRequirements(), MinPython: [2]int{3, 10}, MaxPython: [2]int{3, 12}},
+	},
+}
+
+func kyutaiRequirements() []string {
+	return []string{"pocket-tts==3.3.0", "scipy==1.14.1", "torch==2.5.1"}
+}
+
+const (
 	// meloSourceCommit pins the MeloTTS source tree. MeloTTS publishes no
 	// PyPI release (only `pip install -e .` from git), so the source is
 	// distributed as a checksum-verified archive instead of a versioned
@@ -545,6 +574,9 @@ func ManifestFor(id EngineID) (Manifest, bool) {
 	if id == EngineParadee {
 		return paradeeManifest, true
 	}
+	if id == EngineKyutai {
+		return kyutaiManifest, true
+	}
 	if id == EngineMelo {
 		return meloManifest, true
 	}
@@ -664,6 +696,19 @@ func Catalog() []Engine {
 		kokoro.Voices = kokoroManifest.Voices
 		kokoro.ManifestVersion = kokoroManifest.Version
 	}
+	kyutai := Engine{ID: EngineKyutai, Label: "Kyutai", Availability: AvailabilityUnavailable,
+		Reason: "No pinned Kyutai (Pocket TTS) runtime is verified for " + Host() + "."}
+	kyutai.LicenseName = kyutaiManifest.LicenseName
+	kyutai.LicenseURL = kyutaiManifest.LicenseURL
+	kyutai.LicenseText = kyutaiManifest.LicenseText
+	kyutai.LicenseHash = kyutaiManifest.LicenseHash()
+	if _, ok := kyutaiManifest.HostRuntime(); ok {
+		kyutai.Availability = AvailabilityInstallable
+		kyutai.Reason = "Accept the license and install to enable."
+		kyutai.VoiceID = kyutaiManifest.Voice
+		kyutai.Voices = kyutaiManifest.Voices
+		kyutai.ManifestVersion = kyutaiManifest.Version
+	}
 	paradee := Engine{ID: EngineParadee, Label: "Paradee", Availability: AvailabilityUnavailable,
 		Reason: "No pinned Paradee runtime and model manifest is verified for " + Host() + "."}
 	paradee.LicenseName = paradeeManifest.LicenseName
@@ -691,12 +736,13 @@ func Catalog() []Engine {
 		melo.ManifestVersion = meloManifest.Version
 	}
 	// Order is the settings-UI presentation order: Browser Native, then the
-	// local engines from smallest to largest install footprint. Paradee and
-	// MeloTTS sit between Piper and Kokoro, in that order.
+	// local engines from smallest to largest install footprint. Paradee,
+	// Kyutai and MeloTTS sit between Piper and Kokoro, in that order.
 	return []Engine{
 		{ID: EngineBrowserNative, Label: "Browser Native", Availability: AvailabilityReady, BrowserOnly: true},
 		piper,
 		paradee,
+		kyutai,
 		melo,
 		kokoro,
 	}

@@ -123,7 +123,7 @@ export interface ModelInfo {
   has_kaizen?: boolean;
 }
 
-export type TTSEngineId = "browser-native" | "piper" | "paradee" | "melo" | "kokoro";
+export type TTSEngineId = "browser-native" | "piper" | "paradee" | "kyutai" | "melo" | "kokoro";
 export type TTSPlaybackMode = "manual" | "at-bottom" | "auto";
 
 export interface TTSEngine {
@@ -849,6 +849,22 @@ export interface GitStash {
   author: string;
   /** ISO-8601 timestamp from git. */
   date: string;
+}
+
+/** One checkout of the project's repository (`git worktree list`). */
+export interface GitWorktree {
+  path: string;
+  head: string;
+  /** Short branch name; "" when the checkout is detached. */
+  branch: string;
+  detached: boolean;
+  locked: boolean;
+  /** Git reports the checkout's directory as missing. */
+  prunable: boolean;
+  /** The main worktree. It can never be removed. */
+  is_main: boolean;
+  /** The checkout the project is open on. It can't be removed while open. */
+  is_current: boolean;
 }
 
 export interface ThemeColors {

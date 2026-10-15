@@ -94,7 +94,7 @@ parameter that silently falls back to the local server when omitted.
 
 ## Code reference
 
-- `web/src/api/client.ts:755-759` — inline comment on `getConfigModel`
+- `web/src/api/client.ts:1265-1269` — inline comment on `getConfigModel`
   documenting exactly this ("the 'toggle does nothing' symptom on remote
   SSH").
 - `web/src/api/client.ts` `fetchJSON` / `remoteApiBase` — the conditional

@@ -19,6 +19,7 @@ import type {
   GitWorkspace,
   GitHunkRequest,
   GitStash,
+  GitWorktree,
   ThemeResponse,
   TUIStatus,
   LSPStatus,
@@ -2133,6 +2134,26 @@ export const api = {
     fetchJSON<GitStash[]>(`/api/git/stash/drop${projQuery(project, host)}`, {
       method: "POST",
       body: JSON.stringify({ index }),
+    }),
+
+  /** Checkouts of the project's repository, main first. Local projects only. */
+  gitWorktrees: (project?: string) =>
+    fetchJSON<GitWorktree[]>(`/api/git/worktrees${projQuery(project)}`),
+
+  /** Check out `branch` into .worktrees/<branch>: an existing local branch is
+   *  reused, otherwise a new branch is created from HEAD. Returns the list. */
+  gitWorktreeCreate: (branch: string, project?: string) =>
+    fetchJSON<GitWorktree[]>(`/api/git/worktree${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ branch }),
+    }),
+
+  /** Remove one linked worktree. Git refuses a dirty or locked checkout
+   *  (409); the message carries git's reason. Returns the refreshed list. */
+  gitWorktreeRemove: (path: string, project?: string) =>
+    fetchJSON<GitWorktree[]>(`/api/git/worktree/remove${projQuery(project)}`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
     }),
   gitCommit: (
     message: string,

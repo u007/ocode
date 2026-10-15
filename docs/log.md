@@ -1,5 +1,10 @@
 # Directory Update Log
 
+## 2026-10-15
+
+* **Creation**: Git worktrees: list, open, create, remove (web Git tab) ([concepts/git-worktrees.md](/concepts/git-worktrees.md))
+* **Update**: re-derived line anchors on bundle pages that cite the Git tab, web client, App and server files (Git tab, web-keyboard-shortcuts, web-tab-loading-indicators, web-chat-input-history, compaction, auto-share, port-forwards, files-tab and others)
+
 ## 2026-10-12
 
 * **Update**: Git conflicts and halted-operation recovery (web Git tab) ([concepts/git-conflicts-and-operations.md](/concepts/git-conflicts-and-operations.md))

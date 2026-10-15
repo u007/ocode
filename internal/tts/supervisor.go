@@ -275,6 +275,8 @@ func synthText(ctx context.Context, sup *tool.ProcessSupervisor, root string, m 
 		return kokoroSynth(ctx, sup, root, m, id, text, outPath, voice)
 	case EngineParadee:
 		return paradeeSynth(ctx, sup, root, m, id, text, outPath)
+	case EngineKyutai:
+		return kyutaiSynth(ctx, sup, root, m, id, text, outPath, voice)
 	case EngineMelo:
 		return meloSynth(ctx, sup, root, m, id, text, outPath, voice)
 	default:

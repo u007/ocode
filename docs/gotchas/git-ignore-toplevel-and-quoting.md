@@ -78,14 +78,14 @@ The menu wiring is trivial; the load-bearing part is how the path is turned into
 - The **staged pane returns before the ignore item is built** (`:653-666`), so it never
   appears there.
 - API call: `api.gitIgnore(paths, projectPath, projectHost)` (`:597`) →
-  `web/src/api/client.ts:1828` → `POST /api/git/ignore${projQuery(project, host)}` with body
+  `web/src/api/client.ts:2031` → `POST /api/git/ignore${projQuery(project, host)}` with body
   `{paths}`.
 
 The **API itself accepts a tracked path** — the frontend is what restricts the menu
 (`TestGitIgnoreAcceptsTrackedPath`, `handler_git_ignore_test.go:108`). Do not "fix" the
 server to reject tracked paths; the endpoint is a mechanism, the UI is the policy.
 
-Route is registered in `internal/server/server.go:328` behind `s.authMiddleware`, next to
+Route is registered in `internal/server/server.go:331` behind `s.authMiddleware`, next to
 `/api/git/stage` (`:315`). A handler-only test cannot catch a missing/shadowed route
 (it presents as an SPA 404), hence `TestGitIgnoreRouteIsRegistered`
 (`handler_git_ignore_test.go:293`) drives the **real mux**.

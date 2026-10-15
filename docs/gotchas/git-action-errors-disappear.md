@@ -93,8 +93,7 @@ spam the notification centre; the on-screen 5s status message is the toast. `not
 `load()` began with `setError(null)` and ran on a **10-second `REFRESH_INTERVAL` poll** and on every
 `git_status` eventBus event — so a failed push's error was wiped within seconds.
 
-**Fix:** `load({ background: true })` for the poll and bus-driven refreshes (`GitPanel.tsx:204`,
-`:225-226`). Background loads never clear a user-visible error (`if (!background) setError(null)`,
+**Fix:** `load({ background: true })` for the poll and bus-driven refreshes (`GitPanel.tsx:412` poll, `:434` bus-driven). Background loads never clear a user-visible error (`if (!background) setError(null)` at `GitPanel.tsx:344` and `:365`),
 `:165`) and never surface a transient poll failure (`:189-191`). Added a green success notice
 (`data-testid="git-notice"`, `:527`) that auto-clears after 5 seconds.
 

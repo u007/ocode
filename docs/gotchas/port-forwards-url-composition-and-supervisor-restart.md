@@ -107,7 +107,7 @@ portMapsPath(target, `/${port}/disable`)    // → …/3510/disable?project=~/ap
 `web/src/api/client.ts`, called by `removePortMap` and `setPortMapEnabled` (symbol anchors
 only: that file was under concurrent edit when §4 was written and its line numbers had
 already drifted by >1000 since this page was created — re-grep rather than trust an old
-line). The five server routes are registered in `internal/server/server.go:654-658`
+line). The five server routes are registered in `internal/server/server.go:664-668`
 (`GET /api/portmaps`, `POST /api/portmaps`, `DELETE /api/portmaps/{port}`,
 `POST /api/portmaps/{port}/enable|disable`); the handlers live in
 `internal/server/handler_portmaps.go`.
@@ -250,7 +250,7 @@ Detection alone only clears the lie; something has to re-open the forward. One
   (`entry.policy.forget`, `internal/server/handler_portmaps.go:243` and `:265`) so a
   disabled forward is never revived by the watchdog.
 - **Where it runs:** started in `Serve` right beside the idle-agent evictor —
-  `internal/server/server.go:1771-1772` (`go s.handler.evictIdleLoop(stop)` /
+  `internal/server/server.go:1798-1799` (`go s.handler.evictIdleLoop(stop)` /
   `go s.handler.portMapWatchdogLoop(stop)`), stopped by the same `stop` channel.
 
 ### Deliberately out of scope
@@ -307,7 +307,7 @@ verified against the working tree on 2026-09-30.
   (`internal/server/handler_portmaps.go:234`, `:324`) to the panel, which is worth the
   wait.
 
-### The capability probe fails closed — `isPortMapsAvailable` (`web/src/api/client.ts:3154`)
+### The capability probe fails closed — `isPortMapsAvailable` (`web/src/api/client.ts:4259`)
 
 The Ports button gates on "did the server hand me a list?". The old probe returned `true`
 for anything that was not a 404, so a 500 rendered the button whose every action then

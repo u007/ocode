@@ -28,6 +28,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Button } from "@/components/ui/button";
 import { conflictSideLabels } from "./conflictSideLabels";
 import { ConflictChunks } from "./ConflictChunks";
+import WorktreesSection from "./WorktreesSection";
 import type {
   GitConflictChunkChoice,
   GitCommit,
@@ -50,6 +51,7 @@ interface PanelSections {
   staged: boolean;
   unstaged: boolean;
   commits: boolean;
+  worktrees: boolean;
   stashes: boolean;
 }
 
@@ -57,6 +59,8 @@ const DEFAULT_SECTIONS: PanelSections = {
   staged: true,
   unstaged: true,
   commits: true,
+  // Collapsed by default: the list is fetched only once the user opens it.
+  worktrees: false,
   stashes: true,
 };
 
@@ -72,6 +76,7 @@ function loadPanelSections(): PanelSections {
       staged: typeof parsed.staged === "boolean" ? parsed.staged : true,
       unstaged: typeof parsed.unstaged === "boolean" ? parsed.unstaged : true,
       commits: typeof parsed.commits === "boolean" ? parsed.commits : true,
+      worktrees: typeof parsed.worktrees === "boolean" ? parsed.worktrees : false,
       stashes: typeof parsed.stashes === "boolean" ? parsed.stashes : true,
     };
   } catch {
@@ -167,6 +172,9 @@ interface Props {
   active?: boolean;
   loadingKey?: string;
   onLoadingEvent?: LoadingEventHandler;
+  /** Opens a worktree checkout as its own project. When omitted the Worktrees
+   *  section lists checkouts but offers no Open action. */
+  onOpenWorktree?: (path: string) => Promise<void>;
 }
 
 type Selection =
@@ -234,6 +242,7 @@ export default function GitPanel({
   active = true,
   loadingKey,
   onLoadingEvent,
+  onOpenWorktree,
 }: Props) {
   const runKeyedLoad = useKeyedLoad(loadingKey, onLoadingEvent);
   const [workspace, setWorkspace] = useState<GitWorkspace | null>(null);
@@ -1487,6 +1496,17 @@ export default function GitPanel({
               </div>
             )}
           </div>
+
+          {/* Worktrees */}
+          <WorktreesSection
+            key={`${projectHost ?? ""}:${projectPath ?? ""}`}
+            projectPath={projectPath}
+            projectHost={projectHost}
+            expanded={sections.worktrees}
+            onToggle={() => toggleSection("worktrees")}
+            onOpenWorktree={onOpenWorktree}
+            className={sections.worktrees ? "flex-1" : "shrink-0"}
+          />
 
           {/* Stashes */}
           <div

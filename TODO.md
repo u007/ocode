@@ -1,5 +1,14 @@
 # TODO
 
+## Open: Git worktrees follow-ups (2026-10-15)
+
+Shipped: Worktrees section in the Git tab (list, open as project, create under `.worktrees/`, remove), local projects only. Server: `internal/server/handler_git_worktrees.go`; UI: `web/src/components/Git/WorktreesSection.tsx`.
+
+- **Remote projects.** `GET/POST /api/git/worktree*` answer 501 for `?host=`, and the section shows a notice. Fix: route through `remoteWorkFor` + `remoteGitCommand` for `worktree list --porcelain`, `worktree add`, `worktree remove`, and reuse the same parser.
+- **Saved project entry outlives its worktree.** Removing a checkout does not unregister a saved project at the same path. The sidebar keeps a dead entry until it is removed by hand.
+- **Untested paths.** Prune of missing checkouts, `samePath` symlink matching, empty-parent cleanup after remove, forking from the open project's HEAD, and accepting an existing empty target directory have no tests. Add them to `handler_git_worktrees_test.go`.
+- **Not paginated.** The list is sorted (main first, then path) but unpaginated, as the stash list is. CLAUDE.md asks for pagination on all listings. Revisit if repos routinely carry dozens of checkouts.
+
 ## Open: `/goal` follow-ups deferred from the goal condition loop (2026-10-14)
 
 Design and invariants: `docs/concepts/goal-condition-loop.md`. Items 1 to 3 were

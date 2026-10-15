@@ -154,6 +154,8 @@ func (p *piperInstaller) installLabel() string {
 		return "kokoro-onnx"
 	case EngineParadee:
 		return "Paradee runtime"
+	case EngineKyutai:
+		return "Pocket TTS"
 	case EngineMelo:
 		return "MeloTTS runtime"
 	default:
@@ -177,6 +179,9 @@ func (p *piperInstaller) installLabel() string {
 func (p *piperInstaller) verifyRuntime(ctx context.Context, venv, dir string) (string, error) {
 	if p.manifest.Engine == EngineParadee {
 		return paradeeVerifyRuntime(ctx, venv, dir)
+	}
+	if p.manifest.Engine == EngineKyutai {
+		return kyutaiVerifyRuntime(ctx, venv, dir)
 	}
 	if p.manifest.Engine == EngineMelo {
 		scriptPath := filepath.Join(dir, "melo_import_check.py")

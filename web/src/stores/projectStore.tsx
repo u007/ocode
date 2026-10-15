@@ -632,6 +632,10 @@ interface ProjectContextType {
   openSessionTab: (sessionId: string, sessionTitle: string, projectPath?: string, host?: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
+  /** Register a local path as a project (idempotent on the server) and make it
+   *  the active one. Unlike addProject it rejects on failure, so the caller can
+   *  show why the checkout did not open. */
+  openProjectPath: (path: string) => Promise<void>;
   addRemoteProject: (host: string, path: string, port?: number) => Promise<void>;
   /** Create a NEW remote (SSH/WSL) project reusing an existing project's path,
    *  name and group. Rejects with an ApiError on a (host, path) conflict. */
@@ -1020,6 +1024,20 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProjects]);
 
+  const openProjectPath = useCallback(async (path: string) => {
+    await api.addProject(path);
+    const fresh = await api.listProjects();
+    // The server stores the cleaned path; compare with separators and
+    // trailing slashes normalised so git's spelling still matches.
+    const norm = (v: string) => v.replace(/\\/g, "/").replace(/\/+$/, "");
+    const match = fresh.find((p) => norm(p.path) === norm(path) && !p.host);
+    if (!match) {
+      throw new Error(`project not found after registering ${path}`);
+    }
+    dispatch({ type: "SET_PROJECTS", projects: fresh });
+    await selectProject(match);
+  }, [dispatch, selectProject]);
+
   const addRemoteProject = useCallback(async (host: string, path: string, port?: number) => {
     try {
       await api.addRemoteProject(host, path, port);
@@ -1292,6 +1310,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           openSessionTab,
           closeSessionTab,
           addProject,
+          openProjectPath,
           addRemoteProject,
           duplicateProjectAsRemote,
           updateRemoteProject,
