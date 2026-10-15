@@ -76,6 +76,12 @@ Rules:
   at least one saved project (the same trust boundary `remoteWorkFor`
   enforces); a non-matching host is rejected before any connect, and the route
   never consults the local `allowedProjectRoots` path allowlist.
+- **Remote file tree admits any path inside a saved project root.** Expanding a
+  folder requests `?path=<projectRoot>/<dir>`, so `remoteFileTree` admits the
+  longest registered root containing the path (`remoteTreeRoot`, exact or
+  `root + "/"` prefix, `..` rejected) and returns Paths anchored to that root.
+  Every other remote endpoint still goes through `remoteWorkFor`, which
+  requires the exact registered path.
 - **The remote token never reaches the browser.** The proxy strips the local
   `token` query param and `Authorization` header and injects the remote bearer
   server-side. On a 101 it must restore the browser's offered websocket

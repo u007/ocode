@@ -25,11 +25,16 @@ func localHTRPort(browser config.BrowserConfig) (port int, ok bool) {
 	})
 	socket := browser.HTRSocketPath
 	port = browser.HTRPort
+	token := browser.HTRToken
 	if shared.Mode == "shared" {
 		socket = shared.Socket
 		port = shared.Port
+		// The resolved token may come from htrcli's own config rather than
+		// browser.htr_token; probing with the empty config value makes a healthy
+		// shared daemon read as down.
+		token = shared.Token
 	}
-	info := cdp.HTRDaemonStatus(port, socket, browser.HTRToken)
+	info := cdp.HTRDaemonStatus(port, socket, token)
 	return info.Port, info.Running
 }
 

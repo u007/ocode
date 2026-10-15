@@ -142,7 +142,19 @@ func extraKw(kws []string) []string {
 func (h *Handler) remoteFileTree(w http.ResponseWriter, r *http.Request) {
 	host := hostParam(r)
 	root := r.URL.Query().Get("path")
-	rw, err := h.remoteWorkFor(host, root)
+	// Expanding a folder requests a subdirectory of the project, not the
+	// registered project path itself, so admit it through its containing
+	// project root and walk the subdirectory.
+	if containsDotDot(root) {
+		writeError(w, http.StatusBadRequest, "path outside project root")
+		return
+	}
+	anchor, ok := h.remoteTreeRoot(host, root)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "host/project_path is not a remote project registered with this server")
+		return
+	}
+	rw, err := h.remoteWorkFor(host, anchor)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -155,12 +167,47 @@ func (h *Handler) remoteFileTree(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	showHidden := parseBoolParam(r.URL.Query().Get("show_hidden"))
-	children, truncated, isRepo := remoteWalkTree(ctx, rw, maxDepth, showHidden)
+	walk := remoteWork{Target: rw.Target, Path: root}
+	children, truncated, isRepo := remoteWalkTree(ctx, walk, maxDepth, showHidden)
+	// remoteWalkTree reports paths relative to the walked directory. Anchor
+	// them to the project root, as the local handler does, so the frontend can
+	// pass a child's Path straight back as projectRoot/Path on the next expand.
+	// Badges were applied in the walk's own frame, so this runs after them.
+	if rel := strings.Trim(strings.TrimPrefix(root, strings.TrimRight(anchor, "/")), "/"); rel != "" {
+		for i := range children {
+			children[i].Path = rel + "/" + children[i].Path
+		}
+	}
 	writeJSON(w, http.StatusOK, FileTreeResponse{
 		Children:  children,
 		Truncated: truncated,
 		IsGitRepo: isRepo,
 	})
+}
+
+// remoteTreeRoot returns the registered remote project path (verbatim, as
+// remoteWorkFor needs it) that contains p on host, the longest match when
+// roots nest. p must equal the root or sit under root + "/", so a sibling
+// sharing the root's prefix never matches.
+func (h *Handler) remoteTreeRoot(host, p string) (string, bool) {
+	if h.projects == nil || p == "" {
+		return "", false
+	}
+	target, err := remote.ParseTarget(host)
+	if err != nil {
+		return "", false
+	}
+	best, bestLen := "", 0
+	for _, proj := range h.projects.List() {
+		if proj.Host != target.String() {
+			continue
+		}
+		trimmed := strings.TrimRight(proj.Path, "/")
+		if (p == trimmed || strings.HasPrefix(p, trimmed+"/")) && len(trimmed) > bestLen {
+			best, bestLen = proj.Path, len(trimmed)
+		}
+	}
+	return best, best != ""
 }
 
 // atoiNonNegative is a strict non-negative int parser.
