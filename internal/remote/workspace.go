@@ -115,11 +115,14 @@ func (rw *RemoteWorkspace) Connect() error {
 	rw.APIPort = apiPort
 	rw.localAPIURL = fmt.Sprintf("http://127.0.0.1:%d", apiPort)
 
-	if rw.State.BrowsePort > 0 {
-		if err := waitForTunnelReady(rw.State.BrowsePort); err != nil {
-			_ = rw.Disconnect()
-			return fmt.Errorf("browse tunnel not ready (port %d): %w", rw.State.BrowsePort, err)
-		}
+	// Wait on the API port, not the browse port: a dial of the browse port
+	// proves nothing, because that number is the remote's and a colliding
+	// local listener accepts just as well. tunnelArgs binds the browse
+	// forward first under ExitOnForwardFailure, so the API listener (a port
+	// nobody else holds) only ever appears after the browse bind succeeded.
+	if err := waitForTunnelReady(apiPort); err != nil {
+		_ = rw.Disconnect()
+		return fmt.Errorf("tunnel not ready (api port %d, browse port %d): %w", apiPort, rw.State.BrowsePort, err)
 	}
 
 	return nil

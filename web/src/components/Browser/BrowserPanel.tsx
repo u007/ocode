@@ -17,7 +17,13 @@ function isLoopbackHost(hostname: string): boolean {
   return false;
 }
 
-export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: StateKey; mode: "side" | "full"; active?: boolean }) {
+/** `host` is the project host the tab belongs to ("" = this machine). A remote
+ *  host's pages are fetched through that host's browse origin, and its grants
+ *  are minted there. `null` means the owning project is not known (its host
+ *  could not be resolved): the panel then loads nothing, because treating an
+ *  unknown project as local would fetch a remote project's `localhost` page
+ *  from this machine. */
+export function BrowserPanel({ stateKey, mode, active = true, host }: { stateKey: StateKey; mode: "side" | "full"; active?: boolean; host: string | null }) {
   const s = useBrowserStore(stateKey);
   const actions = useBrowserActions();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -33,11 +39,28 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
   const loadGeneration = useRef(0);
 
   useEffect(() => {
-    getBrowseBase().then((nextBase) => {
+    // Drop the previous origin first: a base from another host must never load.
+    setBase(null);
+    if (host === null) {
+      actions.setError(stateKey, "This tab's project is not in the project list, so its host is unknown; the page was not loaded.");
+      return;
+    }
+    // A read for a previous host can resolve after the host changed; the
+    // cleanup marks it stale so it cannot install the other host's origin.
+    let stale = false;
+    getBrowseBase(host).then((nextBase) => {
+      if (stale) return;
       setBase(nextBase);
-      setHtrNotice(getBrowseHTRNotice());
-    }).catch((e) => console.error("browse: base fetch failed:", e));
-  }, []);
+      setHtrNotice(getBrowseHTRNotice(host));
+    }).catch((e) => {
+      if (stale) return;
+      console.error("browse: base fetch failed for host", host || "local", e);
+      actions.setError(stateKey, `Browse origin unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [actions, host, stateKey]);
 
   useBrowserMessages(stateKey, base, {
     pushConsole: actions.pushConsole,
@@ -61,7 +84,7 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
   // internal/browse handleBrowse), so the panel always renders "local".
   const effectiveMode: "local" | "chrome" = (() => {
     if (!s) return "local";
-    if (getBrowseRemoteMode()) return "local";
+    if (host === null || getBrowseRemoteMode(host)) return "local";
     if (s.userMode) return s.userMode;
     let privateHost = false;
     try {
@@ -78,18 +101,25 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
   // the browse origin, this is the one-use proof that a local/private
   // document was initiated by the SPA rather than by an external page link.
   const loadInto = useCallback(async (iframe: HTMLIFrameElement, url: string) => {
-    if (!base || !url) return;
+    if (!base || !url || host === null) return;
     const generation = ++loadGeneration.current;
     try {
-      const grant = await mintBrowseGrant(stateKey);
+      // A remote host's browse listener moves when `ocode serve --remote`
+      // restarts there, so its origin is re-read for every load (getBrowseBase
+      // caches only this machine's). A changed origin also re-keys the
+      // postMessage gate in useBrowserMessages through `base`.
+      const origin = host ? await getBrowseBase(host) : base;
       if (generation !== loadGeneration.current) return;
-      iframe.src = browseSrc(base, grant, stateKey, url);
+      if (origin !== base) setBase(origin);
+      const grant = await mintBrowseGrant(stateKey, host);
+      if (generation !== loadGeneration.current) return;
+      iframe.src = browseSrc(origin, grant, stateKey, url);
     } catch (e) {
       if (generation !== loadGeneration.current) return;
       console.error("browse: load failed:", e);
       actions.setError(stateKey, e instanceof Error ? e.message : String(e));
     }
-  }, [actions, base, stateKey]);
+  }, [actions, base, host, stateKey]);
 
   // Local-mode scroll restore: after each (re)load, send the persisted
   // offset for this URL into the page (capture.js applies it). Retried a few
@@ -196,12 +226,12 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
   })();
 
   const handleBypass = useCallback(async () => {
-    if (!bypassHost) return;
+    if (!bypassHost || host === null) return;
     const urlAtBypass = s?.url;
     const genAtBypass = loadGeneration.current;
     setBypassing(true);
     try {
-      await bypassBrowseTLS(stateKey, bypassHost);
+      await bypassBrowseTLS(stateKey, bypassHost, host);
       // Guard the race: if the user navigated elsewhere while the bypass
       // POST was in flight, don't reload the stale URL.
       if (s?.url !== urlAtBypass || genAtBypass !== loadGeneration.current) return;
@@ -219,7 +249,7 @@ export function BrowserPanel({ stateKey, mode, active = true }: { stateKey: Stat
     } finally {
       setBypassing(false);
     }
-  }, [bypassHost, stateKey, s?.url, base, loadInto, actions, s]);
+  }, [bypassHost, host, stateKey, s?.url, base, loadInto, actions, s]);
 
   if (!s) return null;
 

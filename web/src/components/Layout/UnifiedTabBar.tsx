@@ -23,7 +23,7 @@ import { useTerminalConfig } from "@/hooks/useTerminalConfig";
 import { useTerminalState, getProjectTerminals, terminalDisplayTitle, PROCESSES_TAB_ID } from "../../stores/terminalStore";
 import { useBrowserTabs } from "../../stores/browserTabsStore";
 import { useBrowserPersistence } from "../Browser/browserPersistence";
-import { browserActions, useBrowserStore, type StateKey } from "../../lib/browserStore";
+import { browserActions, projectBrowseHost, useBrowserStore, type StateKey } from "../../lib/browserStore";
 import { shouldLeaveTerminalView } from "../../lib/terminalFocusExit";
 import type { FocusedKind } from "../../lib/viewPersistence";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
@@ -719,11 +719,15 @@ export default function UnifiedTabBar({ focusedKind, onFocusKindChange }: Props)
   }, [closeSessionTab, chatDispatch, projectState]);
 
   const doCloseBrowser = useCallback((id: string) => {
+    // The strip lists the active project's tabs, so the grant was minted on
+    // that project's host; a revoke must go back to that host.
+    const project = projectState.activeProject;
+    if (!project) return;
     closeBrowserTab(id);
     // Drop the tab's page state (URL/history/console) and revoke its server
     // browse session — browserTabsStore owns only the strip identity.
-    browserActions.close(`tab:${id}`);
-  }, [closeBrowserTab]);
+    browserActions.close(`tab:${id}`, projectBrowseHost(project));
+  }, [closeBrowserTab, projectState.activeProject]);
 
   const doCloseTerminal = useCallback((id: string) => {
     // The store reports the POST-close remaining count, so there is no

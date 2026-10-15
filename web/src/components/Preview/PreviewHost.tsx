@@ -262,7 +262,10 @@ export default function PreviewHost({
 
       {surface === "browser" ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <BrowserPanel key={stateKey} stateKey={stateKey} mode="side" />
+          {/* App passes the ACTIVE project's own host here (never a lookup by
+              path), and Project.host is omitted for local projects, so an
+              absent projectHost is this machine, not an unresolved project. */}
+          <BrowserPanel key={stateKey} stateKey={stateKey} mode="side" host={projectHost ?? ""} />
         </div>
       ) : unsupported ? (
         <div className="flex min-h-0 flex-1 flex-col">

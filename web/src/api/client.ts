@@ -4321,50 +4321,94 @@ export type SSEEventHandler = (
 
 // ---- Embedded browser (see internal/browse) --------------------------------
 
-let _browseBase: string | null = null;
-let _browseHTRNotice = "";
-let _browseRemoteMode = false;
-
-/** Test-only: clear the cached browse base URL. */
-export function __resetBrowseBaseCache(): void {
-  _browseBase = null;
-  _browseHTRNotice = "";
-  _browseRemoteMode = false;
+/** One browse origin: this machine's own (host "") or a remote project host's
+ *  (`ocode serve --remote` on that host). */
+interface BrowseOriginState {
+  base: string;
+  htrNotice: string;
+  remoteMode: boolean;
 }
 
-/** Fetches (once, then cached) the browse-origin base URL from the main
- *  server. The browse origin is a SEPARATE loopback listener so proxied pages
- *  are cross-origin to this SPA. */
-export async function getBrowseBase(): Promise<string> {
-  if (_browseBase) return _browseBase;
-  const res = await authedFetch("/api/browse/config", { method: "GET" });
+/** Last-read browse origin by host ("" = this machine). A remote host's origin
+ *  runs on that host, so each host keeps its own base and its grants live there. */
+const _browseOrigins = new Map<string, BrowseOriginState>();
+/** In-flight origin reads by host, so panels mounting together share one request. */
+const _browseOriginReads = new Map<string, Promise<string>>();
+
+/** Test-only: clear the browse origin state. */
+export function __resetBrowseBaseCache(): void {
+  _browseOrigins.clear();
+  _browseOriginReads.clear();
+}
+
+/** Browse config for a host. Local is `/api/browse/config`; a remote host asks
+ *  this machine, which answers with the host's browse origin over the tunnel. */
+function browseConfigPath(host: string): string {
+  return host ? `/api/browse/config?host=${encodeURIComponent(host)}` : "/api/browse/config";
+}
+
+/** Browse API call for a host. A remote host's grant, revoke and bypass run on
+ *  that host through its proxy, so the grant records the browser's own Origin
+ *  (the capture script's postMessage target) and the host's local-mode gate
+ *  sees a grant it minted. */
+function browseApiPath(host: string, action: string): string {
+  return host ? `${remoteApiBase(host)}/api/browse/${action}` : `/api/browse/${action}`;
+}
+
+/** Resolves the browse-origin base URL for a host. The browse origin is a
+ *  SEPARATE loopback listener so proxied pages are cross-origin to this SPA.
+ *
+ *  This machine's listener lives as long as this server process, so the local
+ *  origin is read once. A remote host's listener binds an ephemeral port that
+ *  changes whenever `ocode serve --remote` restarts there, so a remote origin
+ *  is re-read on every call; the server-side workspace registry is the cache
+ *  and answers without a new SSH connect. Concurrent callers for one host
+ *  share a single request. A failed remote lookup rejects; it never falls
+ *  back to local. */
+export function getBrowseBase(host: string): Promise<string> {
+  if (!host) {
+    const cached = _browseOrigins.get("");
+    if (cached) return Promise.resolve(cached.base);
+  }
+  const inFlight = _browseOriginReads.get(host);
+  if (inFlight) return inFlight;
+  const read = readBrowseOrigin(host).finally(() => _browseOriginReads.delete(host));
+  _browseOriginReads.set(host, read);
+  return read;
+}
+
+async function readBrowseOrigin(host: string): Promise<string> {
+  const res = await authedFetch(browseConfigPath(host), { method: "GET" });
   if (!res.ok) throw new Error(`browse config: ${res.status}`);
   const body = (await res.json()) as {
     base_url: string;
     htr_notice?: string;
     remote_mode?: boolean;
   };
-  _browseBase = body.base_url;
-  _browseHTRNotice = body.htr_notice ?? "";
-  _browseRemoteMode = body.remote_mode ?? false;
-  return _browseBase;
+  _browseOrigins.set(host, {
+    base: body.base_url,
+    htrNotice: body.htr_notice ?? "",
+    remoteMode: body.remote_mode ?? false,
+  });
+  return body.base_url;
 }
 
-export function getBrowseHTRNotice(): string {
-  return _browseHTRNotice;
+export function getBrowseHTRNotice(host: string): string {
+  return _browseOrigins.get(host)?.htrNotice ?? "";
 }
 
 /** True when the browse origin backs a remote-workspace server (`ocode serve
  *  --remote`): every host, not just private ones, routes through the
  *  reverse-proxy pipeline, so the panel should never select chrome/CDP mode. */
-export function getBrowseRemoteMode(): boolean {
-  return _browseRemoteMode;
+export function getBrowseRemoteMode(host: string): boolean {
+  return _browseOrigins.get(host)?.remoteMode ?? false;
 }
 
-/** Mints a one-time grant for a stateKey; the first iframe navigation carries
- *  it and the browse origin exchanges it for an HttpOnly cookie. */
-export async function mintBrowseGrant(stateKey: string): Promise<string> {
-  const res = await authedFetch("/api/browse/grant", {
+/** Mints a one-time grant for a stateKey on the origin's host; the first iframe
+ *  navigation carries it and the browse origin exchanges it for an HttpOnly
+ *  cookie. */
+export async function mintBrowseGrant(stateKey: string, host: string): Promise<string> {
+  const res = await authedFetch(browseApiPath(host, "grant"), {
     method: "POST",
     body: JSON.stringify({ state_key: stateKey }),
   });
@@ -4395,8 +4439,12 @@ export async function uploadBrowseFiles(
   }
 }
 
-export async function revokeBrowseSession(stateKey: string): Promise<void> {
-  const res = await authedFetch("/api/browse/revoke", {
+/** Revokes a stateKey's browse session on the host that minted it: the tab's
+ *  project host ("" = this machine). The caller supplies it because the grant
+ *  may have been minted before an SPA reload, so no in-memory record of the
+ *  minting host can be relied on. */
+export async function revokeBrowseSession(stateKey: string, host: string): Promise<void> {
+  const res = await authedFetch(browseApiPath(host, "revoke"), {
     method: "POST",
     body: JSON.stringify({ state_key: stateKey }),
   });
@@ -4408,11 +4456,12 @@ export async function revokeBrowseSession(stateKey: string): Promise<void> {
 /** Explicit TLS bypass for a self-signed local host after the user clicks “Continue anyway”. */
 export async function bypassBrowseTLS(
   stateKey: string,
-  host: string,
+  tlsHost: string,
+  originHost: string,
 ): Promise<void> {
-  const res = await authedFetch("/api/browse/bypass", {
+  const res = await authedFetch(browseApiPath(originHost, "bypass"), {
     method: "POST",
-    body: JSON.stringify({ state_key: stateKey, host }),
+    body: JSON.stringify({ state_key: stateKey, host: tlsHost }),
   });
   if (!res.ok && res.status !== 204) {
     throw new Error(`browse bypass: ${res.status}`);

@@ -30,6 +30,10 @@ type remoteHostWorkspace interface {
 	// Transport fields, and Go forbids a method sharing a field's name.
 	ServeState() remote.ServeState
 	ServeTransport() remote.Transport
+	// BrowseURL is the local end of the workspace's browse tunnel ("" when the
+	// remote reports no browse origin). It is the one place that encodes the
+	// same-port-number tunnel contract; handlers must not re-derive it.
+	BrowseURL() string
 }
 
 // remoteHostStatus is the JSON body of the remote host lifecycle endpoints.

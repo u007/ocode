@@ -42,6 +42,12 @@ func (f *fakeTestWorkspace) Disconnect() error {
 }
 func (f *fakeTestWorkspace) ServeState() remote.ServeState    { return f.state }
 func (f *fakeTestWorkspace) ServeTransport() remote.Transport { return f.transport }
+func (f *fakeTestWorkspace) BrowseURL() string {
+	if f.state.BrowsePort == 0 {
+		return ""
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", f.state.BrowsePort)
+}
 
 func newTestProxyHandler(t *testing.T, host, path string, ws *fakeTestWorkspace) *Handler {
 	t.Helper()

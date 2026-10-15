@@ -13,7 +13,7 @@ import PreviewHost from "./components/Preview/PreviewHost";
 import PreviewTabPage from "./components/Preview/PreviewTabPage";
 import { usePreviewActivation } from "./components/Preview/usePreviewActivation";
 import { PREVIEW_CONTEXT_EVENT, type PreviewSelection } from "./lib/previewKind";
-import { useBrowserStore, browserActions, type StateKey } from "./lib/browserStore";
+import { useBrowserStore, browserActions, hostForProject, projectBrowseHost, type StateKey } from "./lib/browserStore";
 import { loadViewStateForProject, consumePendingJumpView, resolveViewOnProjectSwitch, saveViewStateForProject, type FocusedKind } from "./lib/viewPersistence";
 import { usePulseViewState } from "./lib/pulseViewState";
 import { sessionAskSurfaceVisible } from "./lib/dialogScope";
@@ -416,6 +416,10 @@ function HomeApp() {
       : null;
   const sideTabState = useBrowserStore(sideStateKey ?? ("side:chat:" as StateKey));
   const browserOpen = !!sideStateKey && !!sideTabState?.panelOpen;
+  // Browse host of the active project, for revoking the side pane's and the
+  // active browser tab's grants on the server that minted them. Null when no
+  // project is active, in which case neither surface exists.
+  const activeBrowseHost = projectState.activeProject ? projectBrowseHost(projectState.activeProject) : null;
   const browserPane = useResizableSidebar({
     storageKey: "ocode.ui.browser_width",
     defaultWidth: 480,
@@ -875,8 +879,10 @@ function HomeApp() {
     onToggleAssistant: toggleAssistantWindow,
     onCloseBrowserTab: (id) => {
       // Mirrors the browser pill's X: strip identity + page state + session.
+      // The active browser tab belongs to the active project.
+      if (activeBrowseHost === null) return;
       closeBrowserTab(id);
-      browserActions.close(`tab:${id}`);
+      browserActions.close(`tab:${id}`, activeBrowseHost);
     },
     onNewSession: () => {
       // Ctrl/Cmd+N: the new-chat shortcut. Also reveals the chat half so it
@@ -1486,9 +1492,9 @@ function HomeApp() {
                       disabled={focusedKind === "browser" || !sideStateKey || !sidePaneVisible}
                       title={sidePaneVisible ? "Toggle browser panel" : "Browser panel is available on the chat sub-tab"}
                       onClick={() => {
-                        if (!sideStateKey) return;
+                        if (!sideStateKey || activeBrowseHost === null) return;
                         if (browserOpen) {
-                          browserActions.close(sideStateKey);
+                          browserActions.close(sideStateKey, activeBrowseHost);
                         } else {
                           browserActions.open(sideStateKey);
                         }
@@ -1948,7 +1954,12 @@ function HomeApp() {
                           data-testid={`browser-surface-${tab.id}`}
                           className={isActive ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none"}
                         >
-                          <BrowserPanel stateKey={stateKey} mode="full" active={isActive} />
+                          <BrowserPanel
+                            stateKey={stateKey}
+                            mode="full"
+                            active={isActive}
+                            host={hostForProject(projectState.projects, projectPath)}
+                          />
                         </div>
                       );
                     })}
@@ -2023,7 +2034,8 @@ function HomeApp() {
                         <button
                           type="button"
                           onClick={() => {
-                            browserActions.close(sideStateKey);
+                            if (activeBrowseHost === null) return;
+                            browserActions.close(sideStateKey, activeBrowseHost);
                           }}
                           title="Close browser panel"
                           aria-label="Close browser panel"

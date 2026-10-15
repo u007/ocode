@@ -230,12 +230,21 @@ func KillServer(t Transport, pid int) error {
 // no ServerAlive* never notices a silently-dropped transport, so the desktop
 // proxy and the port forwards it carries hang forever instead of failing and
 // being rebuilt.
+// tunnelArgs builds the ssh argv for the api/browse tunnel. The browse forward
+// comes BEFORE the api forward, and ExitOnForwardFailure=yes makes ssh exit
+// on the first forward it cannot bind: the browse port is the remote's own
+// number, so a local collision (another server's browse listener, a leftover
+// forward) is possible, and without the exit ssh would keep running while a
+// dial of that port reached the unrelated local service. With this order, the
+// api listener (a fresh FreeLocalPort) exists only once the browse bind
+// succeeded, so a successful dial of the api port proves both forwards.
 func tunnelArgs(localPort, remotePort, browsePort int, target string) []string {
 	args := append([]string{"-N"}, sshKeepaliveArgs()...)
-	args = append(args, "-L", fmt.Sprintf("%d:127.0.0.1:%d", localPort, remotePort))
+	args = append(args, "-o", "ExitOnForwardFailure=yes")
 	if browsePort > 0 {
 		args = append(args, "-L", fmt.Sprintf("%d:127.0.0.1:%d", browsePort, browsePort))
 	}
+	args = append(args, "-L", fmt.Sprintf("%d:127.0.0.1:%d", localPort, remotePort))
 	return append(args, target)
 }
 

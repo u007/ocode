@@ -1146,6 +1146,10 @@ func (s *Server) browsePort() int {
 }
 
 func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
+	if host := hostParam(r); host != "" {
+		s.handleRemoteBrowseConfig(w, r, host)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"base_url":    sameSiteBrowseBase(s.browseBase, r.Host),
 		"htr_notice":  s.HTRNotice(),

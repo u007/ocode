@@ -49,10 +49,11 @@ the working directory of a session's work. The rules:
   directly with `m.workDir` and only touches `internal/server` for RC bridge
   types.
 
-### Remote projects: chat and terminals run on the host; files/git/forwards stay per-request
+### Remote projects: chat, terminals and the browser run on the host; files/git/forwards stay per-request
 
-A sidebar remote (SSH/WSL) project's **chat/agent/session traffic and its
-terminal websocket + terminal HTTP calls** are reverse-proxied to an
+A sidebar remote (SSH/WSL) project's **chat/agent/session traffic, its
+terminal websocket + terminal HTTP calls, and its embedded browser** are
+served by an
 `ocode serve --remote` process **on that host**, reached through
 `/api/remote/{host}/api/{rest...}` (`internal/server/handler_remote_proxy.go`,
 route registered in `server.registerRoutes`). `Handler.remoteHosts`
@@ -65,6 +66,43 @@ the **host's** server, not the local one: a remote project's shell survives a
 laptop sleep or a desktop restart (24 h detach TTL in `--remote` mode; 2 h
 in plain web mode; none in the desktop app). The Files tab, git, `!` commands, and port forwards keep their existing
 per-request ssh/wsl.exe paths — they are not proxied.
+
+**Embedded browser.** A remote project's browser tab fetches its origin from the
+host, not from this machine. `GET /api/browse/config?host=<remote>`
+(`handleRemoteBrowseConfig`, `internal/server/handler_remote_browse.go`) returns
+the host's browse origin as the local end of the workspace's browse tunnel
+(`ServeState().BrowsePort`, same port number, `remote.StartTunnel`), with the
+hostname rewritten to the browser's loopback name by `sameSiteBrowseBase`.
+Grants, revoke and TLS bypass go through `/api/remote/{host}/api/browse/*`, so the
+host's own browse server mints and records them, and records the browser's
+`Origin` for the capture script's postMessage target. A `localhost` page in a
+remote project is therefore a `localhost` on the host. Local projects still use
+this machine's browse origin (no `host` param). Rules that keep this honest:
+
+- **The tunnel proves the browse forward.** `remote.tunnelArgs` binds the browse
+  `-L` BEFORE the api `-L` under `ExitOnForwardFailure=yes`, and
+  `RemoteWorkspace.Connect` waits on the api port (a fresh `FreeLocalPort`),
+  not the browse port. The browse number is the remote's own, so a local
+  collision is possible, and a dial of a colliding listener would "succeed"
+  against the wrong service. With this order the api listener exists only once
+  the browse bind succeeded. The handler reads `ws.BrowseURL()` (on the
+  `remoteHostWorkspace` interface) and never re-derives the port itself.
+- **Unknown project ⇒ no load.** `hostForProject(projects, path)`
+  (`web/src/lib/browserStore.ts`) returns `null` when the path is not in the
+  project list (list not loaded, project removed); `BrowserPanel` then sets the
+  tab error and fetches nothing. `PreviewHost` receives the ACTIVE project's own
+  host, never a lookup, so an absent host there is a local project.
+- **Remote origins are re-read per load.** The host's browse listener binds an
+  ephemeral port that changes when `ocode serve --remote` restarts, so
+  `getBrowseBase(host)` caches only the local origin; a remote one is read on
+  every call (concurrent callers share one request) and `BrowserPanel.loadInto`
+  re-reads it before each navigation. The server-side workspace registry is the
+  cache. A failed read is surfaced through `actions.setError`, and a read that
+  resolves after the panel's host changed is dropped.
+- **Revoke is addressed by the tab's project host** (`browserActions.close(key,
+  host)` → `revokeBrowseSession(key, host)`), never by an in-memory record of
+  where the grant was minted: after an SPA reload no such record exists, and a
+  revoke sent to this machine would leave the host's session live.
 
 Terminal routes (`/api/remote/{host}/api/terminal/{ws,…}`), the `ocode.bearer.*`
 websocket auth flow, detach TTLs, lifecycle endpoints and the sidebar inventory

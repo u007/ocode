@@ -394,9 +394,14 @@ func TestFreeLocalPort(t *testing.T) {
 	ln.Close()
 }
 
+// TestTunnelArgsForwardsBrowsePortOnSameNumber pins the forward ORDER as well
+// as the numbers: the browse forward precedes the api forward and ssh runs
+// with ExitOnForwardFailure, so a local collision on the browse port exits
+// ssh before the api listener exists (RemoteWorkspace.Connect waits on the
+// api port for exactly that reason).
 func TestTunnelArgsForwardsBrowsePortOnSameNumber(t *testing.T) {
 	got := tunnelArgs(5001, 4096, 39321, "user@host")
-	want := append(append([]string{"-N"}, keepaliveArgs...), "-L", "5001:127.0.0.1:4096", "-L", "39321:127.0.0.1:39321", "user@host")
+	want := append(append([]string{"-N"}, keepaliveArgs...), "-o", "ExitOnForwardFailure=yes", "-L", "39321:127.0.0.1:39321", "-L", "5001:127.0.0.1:4096", "user@host")
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("tunnelArgs = %q, want %q", got, want)
 	}
@@ -404,7 +409,7 @@ func TestTunnelArgsForwardsBrowsePortOnSameNumber(t *testing.T) {
 
 func TestTunnelArgsSkipsBrowseForwardWhenUnset(t *testing.T) {
 	got := tunnelArgs(5001, 4096, 0, "user@host")
-	want := append(append([]string{"-N"}, keepaliveArgs...), "-L", "5001:127.0.0.1:4096", "user@host")
+	want := append(append([]string{"-N"}, keepaliveArgs...), "-o", "ExitOnForwardFailure=yes", "-L", "5001:127.0.0.1:4096", "user@host")
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("tunnelArgs = %q, want %q", got, want)
 	}

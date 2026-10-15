@@ -20,7 +20,7 @@ describe("browserStore", () => {
     browserActions.open(KEY);
     expect(browserStore.state.byKey[KEY]).toBeTruthy();
     expect(browserStore.state.byKey[KEY].panelOpen).toBe(true);
-    browserActions.close(KEY);
+    browserActions.close(KEY, "");
     expect(browserStore.state.byKey[KEY]).toBeUndefined();
   });
 

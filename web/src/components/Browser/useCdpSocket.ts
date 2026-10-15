@@ -112,7 +112,8 @@ export function useCdpSocket(
     if (disposedRef.current || !on || !base) return;
     const generation = connectionGenerationRef.current;
     setStatus("connecting");
-    const grantPromise = mintBrowseGrant(key);
+    // Chrome mode runs on this machine only; remote projects never select it.
+    const grantPromise = mintBrowseGrant(key, "");
     grantPromise
       .then((grant) => {
         if (disposedRef.current || generation !== connectionGenerationRef.current || !cfgRef.current.enabled) return;

@@ -567,8 +567,15 @@ session's working directory. Details, endpoint params and remote-project routing
 - **Never call `os.Getwd()` inside an `internal/server` handler** — a Finder/Dock-launched
   desktop app starts with cwd `/`, which broke file writes and made
   `resolveWithinWorkdir`'s containment check pass trivially. Resolve against `h.workDir`.
-- **Remote (SSH/WSL) project chat, sessions and terminals are proxied to the host's
-  `ocode serve --remote`**; files, git, `!` commands and port forwards stay per-request.
+- **Remote (SSH/WSL) project chat, sessions, terminals and the embedded browser are
+  served by the host's `ocode serve --remote`**; files, git, `!` commands and port
+  forwards stay per-request. A remote project's browser origin is the host's browse
+  listener over the workspace browse tunnel (`GET /api/browse/config?host=`; grants,
+  revoke and bypass via `/api/remote/{host}/api/browse/*`). Never fall back to this
+  machine's browse origin for a remote host: `localhost` there is not the host's. A
+  browser surface whose project is not in the list gets `host=null` and loads
+  nothing (`hostForProject`); a remote origin is re-read per load, never cached
+  (the host's browse port moves on restart); revoke carries the tab's project host.
   Only saved project hosts may be proxied. The remote token never reaches the browser,
   and the proxy must restore the browser's websocket subprotocol on a 101. A remote
   failure blocks the turn (502 `remote-connect`) — never fall back to a local agent.

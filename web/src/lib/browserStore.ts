@@ -30,6 +30,25 @@ const privateHostRe =
  *  own id. Mirrors the Go `stateKey` in internal/browse. */
 export type StateKey = `side:${"chat" | "term"}:${string}` | `tab:${string}`;
 
+/** A project's host for browse routing. `Project.host` is omitted for local
+ *  projects, and "" is the browse layer's spelling of "this machine". */
+export function projectBrowseHost(project: { host?: string }): string {
+  return project.host ?? "";
+}
+
+/** Browse host of the project at `path`, or `null` when no listed project has
+ *  that path (list not loaded yet, project removed). A browser surface given
+ *  `null` refuses to load: an unknown project must never be treated as local,
+ *  or a remote project's `localhost` page would be fetched from this machine. */
+export function hostForProject(
+  projects: ReadonlyArray<{ path: string; host?: string }>,
+  path: string | undefined,
+): string | null {
+  if (path === undefined) return null;
+  const project = projects.find((p) => p.path === path);
+  return project ? projectBrowseHost(project) : null;
+}
+
 export interface ConsoleEvent {
   level: string; // log | info | warn | error | debug
   text: string;
@@ -188,15 +207,18 @@ export const browserActions = {
     });
   },
 
-  close(key: StateKey) {
+  /** `host` is the owning project's host ("" = this machine): the revoke must
+   *  reach the server that minted the grant, which the SPA cannot recall after
+   *  a reload. */
+  close(key: StateKey, host: string) {
     browserStore.setState((s) => {
       const next = { ...s.byKey };
       delete next[key];
       return { byKey: next };
     });
     // Best-effort server revoke; failure is non-fatal (session expires anyway).
-    void revokeBrowseSession(key).catch((err) =>
-      console.error("browse: revoke failed for", key, err),
+    void revokeBrowseSession(key, host).catch((err) =>
+      console.error("browse: revoke failed for", key, "on host", host || "local", err),
     );
   },
 
@@ -376,12 +398,12 @@ export const browserActions = {
 
 // revokeBrowseSession lives in client.ts; declared here to avoid a cycle at
 // import time. Wired via __setRevoker from App.tsx at startup.
-let revokeBrowseSession: (key: string) => Promise<void> = async () => {
+let revokeBrowseSession: (key: string, host: string) => Promise<void> = async () => {
   // intentionally not wired yet (startup race window only): the real revoker
   // is installed by App.tsx before any panel can close; until then the server
   // grant/cookie expires on its own.
 };
-export function __setRevoker(fn: (key: string) => Promise<void>) {
+export function __setRevoker(fn: (key: string, host: string) => Promise<void>) {
   revokeBrowseSession = fn;
 }
 
