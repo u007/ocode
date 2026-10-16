@@ -114,7 +114,6 @@ func init() {
 		{name: "/reset-id", usage: "/reset-id", help: "Re-key this chat with a fresh session id (keeps the conversation)", handler: runResetIDCmd},
 		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
 		{name: "/recap", usage: "/recap [model|status|enable|disable]", help: "Summarize conversation / manage recap model", handler: runRecapCmd},
-		{name: "/changes", help: "Analyze repo changes: diffs, LSP errors, and in-progress specs", handler: runChangesCmd},
 		{name: "/lsp", usage: "/lsp [show|open <path>|errors|all]", help: "Show current LSP diagnostics and error counts", handler: runLSPCmd},
 		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
 		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
@@ -152,7 +151,7 @@ func init() {
 		{name: "/context-model", usage: "/context-model [status|enable|disable|model [name]]", help: "Show or switch the context agent (context/doc-sync) model; falls back to small model, then main model", handler: runContextModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
-		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]", help: "List, install, update, or sync plugins; 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)", handler: runPluginCmd},
+		{name: "/plugin", usage: "/plugin [list|install <url[@ref]|skill>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|tools [name]|confirm|cancel]", help: "List, install, update, or sync plugins; install a bundled skill name into ~/.claude/skills; 'tools' detects/installs CLI utilities (fd, rg, fzf, eza, bat, grep)", handler: runPluginCmd},
 		{name: "/tools", aliases: []string{"/tool"}, usage: "/tools [name]", help: "Detect/install CLI utilities (fd, rg, fzf, eza, bat, grep); bare lists status, with name installs it", handler: runToolsCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port|off]", help: "Start/stop web UI to remote-control this session", handler: runRemoteControlCmd},
@@ -615,10 +614,21 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 
 	case "install":
 		if len(args) < 2 {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin install <github.com/user/repo[@ref]>"})
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin install <github.com/user/repo[@ref] | bundled-skill>"})
 			return nil
 		}
 		source := args[1]
+		// A bare name (no path or dot) is a bundled skill, installed into
+		// ~/.claude/skills. It never falls through to the GitHub installer.
+		if !strings.ContainsAny(source, "/.") {
+			return func() tea.Msg {
+				out, err := skill.InstallBundledToClaude(source)
+				if err != nil {
+					return skillsOutputMsg{text: fmt.Sprintf("/plugin install %s: %v", source, err)}
+				}
+				return skillsOutputMsg{text: out}
+			}
+		}
 		ref := ""
 		if at := strings.LastIndex(source, "@"); at > 0 {
 			ref = source[at+1:]

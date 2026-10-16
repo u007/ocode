@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import FilePicker from "../Files/FilePicker";
 import PreviewSurface from "./PreviewSurface";
 import { previewKindForPath, type PreviewOpenRequest } from "../../lib/previewKind";
@@ -33,6 +34,10 @@ function PreviewTabPage({
 }) {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [selected, setSelected] = useState<SelectedFile | null>(null);
+  // Bumped by the refresh button. Keying the surface on it remounts the viewer,
+  // which refetches the file from disk (viewers have no other reload path here:
+  // this host passes no live-refresh revision).
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   // Apply a mobile preview activation. Keyed on the monotonic nonce (not the
   // request identity) so re-requesting the same file still re-selects it; the
@@ -55,13 +60,26 @@ function PreviewTabPage({
     <div className="flex h-full w-full min-h-0">
       <aside className="w-72 shrink-0 border-r border-border overflow-y-auto p-3 bg-muted/20">
         <div className="text-xs font-semibold text-muted-foreground mb-2">Files</div>
-        <button
-          type="button"
-          onClick={() => setFilePickerOpen(true)}
-          className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs hover:bg-muted transition-colors text-left"
-        >
-          {selected ? selected.path.split("/").pop() || selected.path : "Select file…"}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setFilePickerOpen(true)}
+            className="min-w-0 flex-1 truncate rounded border border-border bg-background px-2 py-1.5 text-xs hover:bg-muted transition-colors text-left"
+          >
+            {selected ? selected.path.split("/").pop() || selected.path : "Select file…"}
+          </button>
+          {selected && (
+            <button
+              type="button"
+              onClick={() => setRefreshNonce((n) => n + 1)}
+              title="Refresh preview"
+              aria-label="Refresh preview"
+              className="shrink-0 rounded border border-border bg-background p-1.5 hover:bg-muted transition-colors"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
         <FilePicker
           open={filePickerOpen}
           onClose={() => setFilePickerOpen(false)}
@@ -80,6 +98,7 @@ function PreviewTabPage({
           </div>
         ) : (
           <PreviewSurface
+            key={refreshNonce}
             path={selected.path}
             kind={selected.kind as any}
             projectRoot={selected.projectRoot}

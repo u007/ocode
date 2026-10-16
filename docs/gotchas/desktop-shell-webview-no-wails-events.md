@@ -46,7 +46,7 @@ unavailable**:
   `Events.On`; it will compile, register listeners, and silently deliver
   nothing.
 
-The canonical comment lives at `cmd/ocode-desktop/main.go:582-586` (above
+The canonical comment lives at `cmd/ocode-desktop/main.go:628-632` (above
 `msgFocusWindow`).
 
 ## The pattern (shell → page)

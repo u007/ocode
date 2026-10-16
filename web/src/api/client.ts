@@ -38,6 +38,7 @@ import type {
   MemoryStatusResponse,
   UsageSummary,
   PluginInfo,
+  InstallPluginResult,
   CommandEntry,
   SkillEntry,
   CronJob,
@@ -3588,7 +3589,7 @@ export const api = {
       { method: "PUT" },
     ),
   installPlugin: (source: string) =>
-    fetchJSON<{ name: string; dir: string; source: string }>("/api/plugins", {
+    fetchJSON<InstallPluginResult>("/api/plugins", {
       method: "POST",
       body: JSON.stringify({ source }),
     }),
@@ -3608,7 +3609,7 @@ export const api = {
   listCommands: () => fetchJSON<CommandEntry[]>("/api/commands"),
   listSkills: () => fetchJSON<SkillEntry[]>("/api/skills"),
 
-  // ── Command context (repo-analysis prompts for /changes, /review) ──
+  // ── Command context (repo-analysis prompts for /review, /learn, ...) ──
   // `project` selects which registered repo root the prompt is assembled from
   // (the server resolves it against its registry); `host` routes the call to a
   // remote project's server. Without both, a remote/multi-project tab got the

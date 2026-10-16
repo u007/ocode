@@ -108,6 +108,74 @@ func globalSkillsDir() (string, error) {
 	return filepath.Join(home, ".config", "opencode", "skills"), nil
 }
 
+// claudeSkillsDir is Claude Code's user-global skills directory. The loader
+// reads it too (skillSearchPaths), so a skill installed here is visible to
+// both tools.
+func claudeSkillsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".claude", "skills"), nil
+}
+
+// InstallBundledToClaude installs one bundled skill into ~/.claude/skills.
+// It is what `/plugin install <skill>` runs. A symlinked target is refused,
+// an up-to-date copy is left alone, and a differing SKILL.md is backed up
+// before it is replaced. The returned line is for the caller to display.
+func InstallBundledToClaude(name string) (string, error) {
+	dir, err := claudeSkillsDir()
+	if err != nil {
+		return "", err
+	}
+	out, err := installBundledTo(name, dir)
+	if err != nil {
+		return "", err
+	}
+	// Skills changed on disk: drop the load cache so /<skill> sees the new copy.
+	InvalidateSkillCache()
+	return out, nil
+}
+
+// installBundledTo is InstallBundledToClaude with the target dir injected.
+func installBundledTo(name, dir string) (string, error) {
+	bundled, err := bundledSkills()
+	if err != nil {
+		return "", err
+	}
+	var (
+		found     bundledSkill
+		available []string
+		ok        bool
+	)
+	for _, b := range bundled {
+		available = append(available, b.Name)
+		if b.Name == name {
+			found, ok = b, true
+		}
+	}
+	if !ok {
+		return "", fmt.Errorf("no bundled skill %q (bundled: %s)", name, strings.Join(available, ", "))
+	}
+
+	inst, status, err := classifyInstalled(found, dir)
+	if err != nil {
+		return "", err
+	}
+	switch status {
+	case statusSymlink:
+		return "", fmt.Errorf("%s is a symlink (%s); refusing to overwrite — remove the symlink first", name, inst.Dir)
+	case statusUpToDate:
+		return fmt.Sprintf("%s is already up to date in %s", name, dir), nil
+	}
+
+	action, err := installOne(found, inst, dir, true)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s %s in %s", action, name, dir), nil
+}
+
 // ---------------------------------------------------------------------------
 // Bundled-skill discovery (from the embedded FS)
 // ---------------------------------------------------------------------------

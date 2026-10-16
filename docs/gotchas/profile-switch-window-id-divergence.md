@@ -26,7 +26,7 @@ Fixed 2026-09-20. Symptom: selecting a profile in the web/desktop top-right Prof
 
 The profile state is keyed by a **per-window id**. Three independent code paths each derived the window id their own way, and they diverged after a navigation that dropped the URL query string:
 
-1. **ProfileSwitcher** (`web/src/components/ProfileSwitcher.tsx`) resolved `windowId` once at module load via an inline `getWindowId()` call. When the id came from the `?windowId=main` URL param (the desktop shell threads this in via `cmd/ocode-desktop/main.go:312`/`:314`), it was **not persisted to sessionStorage**.
+1. **ProfileSwitcher** (`web/src/components/ProfileSwitcher.tsx`) resolved `windowId` once at module load via an inline `getWindowId()` call. When the id came from the `?windowId=main` URL param (the desktop shell threads this in via `cmd/ocode-desktop/main.go:416`/`:418`), it was **not persisted to sessionStorage**.
 2. **API client** (`web/src/api/client.ts`) `sendMessage`/`chat` independently re-derived the window id per call: `?windowId=` → sessionStorage → else mint a random `win-xxxx`.
 3. **Desktop deep-link redirect** (`web/src/pages/SessionPage.tsx:22`) does `navigate("/", {replace:true})` which **strips the query string**.
 

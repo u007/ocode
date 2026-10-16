@@ -111,7 +111,7 @@ Fail-closed on macOS/Linux: if mode is `sandbox` and a backend is supported but 
 - `Decide` path: `internal/agent/permissions.go:~1430-1505`
 - `persistPermissions`: `internal/tui/model.go:15616`
 - `SavePermissionModeSwitch`: `internal/config/ocodeconfig.go:3671`
-- `runSandboxCmd`: `internal/tui/commands.go:1092`
+- `runSandboxCmd`: `internal/tui/commands.go:1102`
 - `resolveCronPermissionMode`: `internal/server/scheduler_runner.go:172`
 - `isHarmfulForceCommand`: `internal/agent/permissions.go:874`
 - `IsHarmfulBashCommand`: `internal/agent/permissions.go:1489`

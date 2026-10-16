@@ -168,7 +168,7 @@ The failure line now reads `⚠ Compaction failed: <err> (conversation continues
 
 ## 6. Web / desktop surfacing
 
-`handleCompact` (`web/src/components/Chat/commands.ts:1564`; dual surfacing in the catch at `:1589-1590`) keeps **both** surfaces on rejection:
+`handleCompact` (`web/src/components/Chat/commands.ts:1575`; dual surfacing in the catch at `:1611-1618`) keeps **both** surfaces on rejection:
 
 1. **Sticky inline error** — `setCompactionState(sessionId, {status:"error", error})` → the composer `CompactionStatus` bar (`role="alert"`, "Compaction failed: …", dismissible) plus an inline `**Compaction failed:** …` transcript message. Session-scoped, survives view changes; cleared only by a new attempt, completion, or dismissal.
 2. **App-wide action error** — `reportActionError(err, "Compact conversation")` (`web/src/lib/actionErrors.ts:55`), the sticky toast that outlives composer/tab remounts.

@@ -9804,7 +9804,7 @@ func (m model) renderPluginList() string {
 	b.WriteString(fmt.Sprintf("Total: %d plugin(s) (%d enabled, %d disabled)\n",
 		enabledCount+disabledCount, enabledCount, disabledCount))
 	b.WriteString("\nCommands:\n")
-	b.WriteString("  /plugin install <url[@ref]>  — install a plugin\n")
+	b.WriteString("  /plugin install <url[@ref]|skill>  — install a plugin, or a bundled skill into ~/.claude/skills\n")
 	b.WriteString("  /plugin remove <name>        — remove a plugin\n")
 	b.WriteString("  /plugin enable/disable <name> — toggle plugin\n")
 	b.WriteString("  /plugin info <name>          — show plugin details\n")

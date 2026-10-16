@@ -41,7 +41,7 @@ if !hasRealContent { ...m.viewport.SetContent("") or pipboy/LCARS art...; return
 
 | Site | File:Line |
 |------|-----------|
-| `runFakeAgentCmd` replies | `internal/tui/commands.go:1103,1108,1112,1116,1119` |
+| `runFakeAgentCmd` replies | `internal/tui/commands.go:1113,1118,1122,1126,1129` |
 | Cron deliveries | `model.go:5021` |
 | LLM transport errors | `model.go:5215` |
 | User slash-echo (×2) | `model.go:8726,8774` |

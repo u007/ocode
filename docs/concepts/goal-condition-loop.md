@@ -27,7 +27,7 @@ sessions. The engine is `internal/agent/goal.go`.
 | `/goal clear` (also `stop`, `off`, `reset`, `none`, `cancel`) | Removes the goal. Recognised only as the lone argument. | Instant | Queued while busy |
 
 - `/goal stop the flaky test` is a condition, not a clear: a clear verb counts only when it is the
-  whole argument (`isGoalClearVerb`, `internal/tui/commands.go:1904`).
+  whole argument (`isGoalClearVerb`, `internal/tui/commands.go:1914`).
 - A condition must be non-empty and at most `GoalMaxConditionLen` (4000) characters
   (`internal/agent/goal.go:30`, `SetGoal` at `:163`).
 - The kickoff turn is `GoalKickoffPrompt` (`internal/agent/goal.go:231`): the condition plus "verify

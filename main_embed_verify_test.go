@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -31,6 +32,18 @@ func TestBundledModelConfigsResolve(t *testing.T) {
 		}
 		if !strings.Contains(ctx, tc.wantText) {
 			t.Fatalf("embedded context for %s missing expected content %q:\n%s", tc.model, tc.wantText, ctx)
+		}
+	}
+}
+
+// TestBundledSkillsEmbedded verifies the skills that `/plugin install` and
+// `/skills install` hand out are compiled into the binary via
+// //go:embed all:skills, not only present in the source tree.
+func TestBundledSkillsEmbedded(t *testing.T) {
+	fsys := bundledSkillsFS()
+	for _, name := range []string{"changes", "standup"} {
+		if _, err := fs.Stat(fsys, "skills/"+name+"/SKILL.md"); err != nil {
+			t.Fatalf("bundled skill %q missing from embedded FS: %v", name, err)
 		}
 	}
 }

@@ -35,6 +35,7 @@ import { useTerminalState } from "../../stores/terminalStore";
 import { registerTerminalFocus, unregisterTerminalFocus } from "./terminalFocus";
 import { requestSpeech } from "../Speech/SpeechProvider";
 import { sanitizeSpeechText } from "../Speech/speechUtils";
+import { writeDesktopClipboard } from "@/lib/wails";
 
 /**
  * Builds the URL and WebSocket subprotocols for /api/terminal/ws. In remote
@@ -149,6 +150,12 @@ const DUPLICATE_PASTE_WINDOW_MS = 50;
 
 /** Max base64 chars accepted from an OSC 52 clipboard write (~75 KB of text). */
 const OSC52_MAX_PAYLOAD_CHARS = 100_000;
+// How long after the user's last press, release or key in THIS terminal an
+// OSC 52 write is honoured. Measured from release, and by the page itself,
+// because the browser's transient activation (navigator.userActivation) starts
+// at mousedown, so a slow drag plus a remote round trip ran it out. WKWebView
+// can also leave it unset. Either way every OSC 52 copy was refused.
+const OSC52_INPUT_WINDOW_MS = 5_000;
 
 /**
  * Writes text to the system clipboard, falling back to the deprecated
@@ -156,9 +163,14 @@ const OSC52_MAX_PAYLOAD_CHARS = 100_000;
  * (older WebKit, permission refusal, non-secure context). A same-text write
  * racing another copy path for the same user action (desktop menu Copy +
  * keydown, mouse-up + debounced selection-change) is deduplicated.
+ *
+ * In the desktop shell the write goes to the native clipboard only: WKWebView
+ * refuses both browser paths outside a user gesture, which is exactly where an
+ * OSC 52 copy from a remote program arrives.
  */
 export async function writeClipboardText(text: string): Promise<void> {
   if (isDuplicateCopy(text)) return;
+  if (writeDesktopClipboard(text)) return;
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -1064,10 +1076,29 @@ export default function TerminalPanel({
     // would let remote programs read the local clipboard, so it is refused.
     // Replayed scrollback (readyRef false) must not overwrite the clipboard.
     // Hijack guard: a program that merely prints (`cat hostile`, a remote host)
-    // has no user gesture behind it, so the write is honoured only inside the
-    // browser's transient user-activation window (a drag-select mouseup or a
-    // keypress that triggered the copy), and oversized payloads are dropped
-    // before they are decoded on the UI thread.
+    // has no user gesture behind it, so the write is honoured only within
+    // OSC52_INPUT_WINDOW_MS of the user's last press, release or key in this
+    // terminal (the drag-select release or keypress that triggered the copy),
+    // and oversized payloads are dropped before they are decoded on the UI thread.
+    let lastUserInputAt = Number.NEGATIVE_INFINITY;
+    let pressInTerminal = false;
+    const markUserInput = () => {
+      lastUserInputAt = performance.now();
+    };
+    const onInputPointerDown = () => {
+      pressInTerminal = true;
+      markUserInput();
+    };
+    // The release can land outside the container (drag past its edge), so it
+    // is watched on window, but only counts for a press that began here.
+    const onInputPointerUp = () => {
+      if (!pressInTerminal) return;
+      pressInTerminal = false;
+      markUserInput();
+    };
+    el.addEventListener("pointerdown", onInputPointerDown, true);
+    el.addEventListener("keydown", markUserInput, true);
+    window.addEventListener("pointerup", onInputPointerUp, true);
     const osc52Disp = term.parser.registerOscHandler(52, (data) => {
       if (!readyRef.current) return true;
       const sep = data.indexOf(";");
@@ -1078,8 +1109,8 @@ export default function TerminalPanel({
         console.warn("Terminal OSC 52 payload exceeds size cap; clipboard write refused");
         return true;
       }
-      if (navigator.userActivation?.isActive !== true) {
-        console.warn("Terminal OSC 52 write without user activation refused");
+      if (performance.now() - lastUserInputAt > OSC52_INPUT_WINDOW_MS) {
+        console.warn("Terminal OSC 52 write without recent user input refused");
         return true;
       }
       let text: string;
@@ -1612,6 +1643,9 @@ export default function TerminalPanel({
       el.removeEventListener("touchcancel", onTouchEnd);
       el.removeEventListener("keydown", snapshot.input, true);
       el.removeEventListener("pointerdown", onSnapshotPointerDown, true);
+      el.removeEventListener("pointerdown", onInputPointerDown, true);
+      el.removeEventListener("keydown", markUserInput, true);
+      window.removeEventListener("pointerup", onInputPointerUp, true);
       window.removeEventListener("pointerup", snapshot.endSelection, true);
       window.removeEventListener("pointercancel", snapshot.endSelection, true);
       window.removeEventListener("blur", snapshot.endSelection);

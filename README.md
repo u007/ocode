@@ -638,7 +638,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/context` | | Show context window token budget and system prompt, plus Knowledge Bundle, Memory, and Discovery sections |
 | `/review` | `[file|commit|branch|pr]` | AI code review with actionable findings |
 | `/standup` | | Bundled skill (`skills/standup`): caveman summary of recent commits + pending changes, with sorted TODOs and missed stubs |
-| `/changes` | | Analyze repo changes: diffs, LSP errors, and in-progress specs |
+| `/changes` | | Bundled skill (`skills/changes`): analysis of pending diffs, LSP errors, in-progress specs and risks |
 | `/session` | `/sessions`, `/resume`, `/s` | List, pick, resume sessions |
 | `/connect` | | Show/Set provider API keys |
 | `/login` | | Log in and enable encrypted config sync |

@@ -514,7 +514,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/secret` | | Encrypt/decrypt project files | |
 | `/login` | | Log in and enable encrypted config sync | |
 | `/logout` | `/sync-logout` | Log out and stop config sync | |
-| `/changes` | | Analyze repo changes: diffs, LSP errors, specs | |
+| `/changes` | | Bundled skill (`skills/changes`): analyze repo changes, LSP errors, specs | |
 | `/title` | | Set session title | |
 | `/sidebar` | | Toggle sidebar | |
 | `/ban` | | Manage banned bash command prefixes | |
@@ -536,7 +536,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/search` | `/find` | Find a message by keyword (opens in-chat find bar) | |
 | `/help` | `/?` | Show all available commands | Auto-generated from registered command specs |
 
-**Web command parity:** the web/desktop UI supports the same slash-command surface as the TUI — `/changes`, `/review`, `/context`, `/lsp`, `/agents`, `/skills`, `/mcp`, `/cron`, `/small-model`, `/advisor`, `/github` all work in the web chat input. The repo-analysis ones (`/changes`, `/review`) build their prompts through the shared `internal/commandctx` package, so TUI and web get byte-identical context. `/standup` is a bundled skill and rides the skill-as-slash path on both surfaces.
+**Web command parity:** the web/desktop UI supports the same slash-command surface as the TUI — `/changes`, `/review`, `/context`, `/lsp`, `/agents`, `/skills`, `/mcp`, `/cron`, `/small-model`, `/advisor`, `/github` all work in the web chat input. The repo-analysis `/review` builds its prompt through the shared `internal/commandctx` package, so TUI and web get byte-identical context. `/standup` and `/changes` are bundled skills and ride the skill-as-slash path on both surfaces.
 
 ---
 

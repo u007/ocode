@@ -40,6 +40,7 @@ import (
 	"github.com/u007/ocode/internal/shell/sandbox"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/version"
 	"github.com/u007/ocode/web"
 	// Register provider plugins in the desktop binary as well as the CLI. Without
 	// these side-effect imports, OAuth-backed OpenAI requests fall through to the
@@ -259,7 +260,7 @@ func main() {
 		// RawMessageHandler receives every webview message that does not start
 		// with "wails:". The SPA sends quit-guard transitions here through the
 		// minimal _wails.invoke bridge (the full Wails runtime is never loaded).
-		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
+		RawMessageHandler: func(_ application.Window, message string, origin *application.OriginInfo) {
 			quitGuard.HandleRawMessage(message)
 			// The Pulse dashboard can be opened from the tray or the app menu
 			// while ocode is in the background, so the page asks us to raise
@@ -277,6 +278,15 @@ func main() {
 			// browser over this same bridge.
 			if raw, ok := strings.CutPrefix(message, msgOpenExternal); ok {
 				openExternalURL(raw)
+			}
+			// Terminal copies: a program's OSC 52 write arrives over the
+			// terminal websocket, outside any user gesture, so WKWebView refuses
+			// navigator.clipboard and execCommand("copy") alike. The shell's
+			// native clipboard has no gesture rule (see writePageClipboard).
+			if dw := mainWin.Load(); dw != nil {
+				if text, ok := pageClipboardText(message, origin, dw.host); ok {
+					writePageClipboard(text)
+				}
 			}
 		},
 		SingleInstance: &application.SingleInstanceOptions{
@@ -447,13 +457,11 @@ func main() {
 		}
 	}
 
-	// Create the main webview window.
-	// Derive the window title from the resolved workDir: prefer the saved
-	// project name, fall back to directory basename, last resort "ocode".
-	windowTitle := desktop.ResolveWindowTitle(workDir)
+	// Create the main webview window. The native title bar always shows the
+	// app name and version; the project name lives in the in-app top bar.
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:      desktopWindowName,
-		Title:     windowTitle,
+		Title:     "ocode v" + version.Version,
 		Width:     1280,
 		Height:    800,
 		MinWidth:  800,
@@ -464,7 +472,11 @@ func main() {
 		},
 	})
 
-	mainWin.Store(&desktopWindow{window: window, sessionURL: sessionURL})
+	var desktopHost string
+	if parsed, err := url.Parse(desktopURL); err == nil {
+		desktopHost = parsed.Host
+	}
+	mainWin.Store(&desktopWindow{window: window, sessionURL: sessionURL, host: desktopHost})
 
 	// Set up the application menu. The Wails default binds CmdOrCtrl+W to
 	// "Close Window" (which on this single-window shell quits the whole app)
@@ -624,6 +636,48 @@ const msgFocusWindow = "ocode:focus-window"
 // URL in the default browser. The URL follows the prefix verbatim.
 const msgOpenExternal = "ocode:open-external:"
 
+// msgClipboardWrite is the page → shell message asking for text to be placed on
+// the system clipboard. The text follows the prefix verbatim.
+const msgClipboardWrite = "ocode:clipboard-write:"
+
+// pageClipboardText extracts the text of a clipboard-write message. Only the
+// ocode page itself (appHost, the host:port the window was opened on) may
+// write: a page loaded in an iframe (embedded browser, preview) must not be
+// able to set the user's clipboard through the shell. The host is compared
+// rather than OriginInfo.IsMainFrame, which Wails fills in only on darwin.
+// darwin and Windows report the sending frame's URL; Linux reports the
+// webview's top URL, so there the check cannot tell an iframe apart. The
+// page's own guard against unsolicited OSC 52 writes lives in TerminalPanel.tsx.
+func pageClipboardText(message string, origin *application.OriginInfo, appHost string) (string, bool) {
+	text, ok := strings.CutPrefix(message, msgClipboardWrite)
+	if !ok || text == "" {
+		return "", false
+	}
+	if origin == nil {
+		log.Printf("ocode-desktop: refused clipboard write with no sender origin")
+		return "", false
+	}
+	u, err := url.Parse(origin.Origin)
+	if err != nil || appHost == "" || u.Host != appHost {
+		log.Printf("ocode-desktop: refused clipboard write from a frame outside the ocode page")
+		return "", false
+	}
+	return text, true
+}
+
+// writePageClipboard sets the system clipboard. The text is deliberately never
+// logged: it is whatever the user copied.
+func writePageClipboard(text string) {
+	app := application.Get()
+	if app == nil {
+		log.Printf("ocode-desktop: refused clipboard write: application not ready")
+		return
+	}
+	if !app.Clipboard.SetText(text) {
+		log.Printf("ocode-desktop: clipboard write of %d bytes failed", len(text))
+	}
+}
+
 // openExternalURL opens raw in the user's default browser. It is the desktop
 // counterpart of the web build's window.open: the SPA asks for it over the
 // minimal _wails.invoke bridge because the full Wails runtime module is
@@ -674,6 +728,9 @@ func openPulseInPage(window *application.WebviewWindow) {
 type desktopWindow struct {
 	window     *application.WebviewWindow
 	sessionURL func(id string) string
+	// host is the host:port the window was opened on, the only page allowed
+	// to write the clipboard (see pageClipboardText).
+	host string
 }
 
 // sessionIDFromArgs extracts the -session/--session value from an argv (the

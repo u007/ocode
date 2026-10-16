@@ -43,3 +43,14 @@ export function invokeWails(message: string, target: Window = window): boolean {
 export function focusDesktopWindow(target: Window = window): boolean {
   return invokeWails("ocode:focus-window", target);
 }
+
+/**
+ * Put text on the system clipboard through the desktop shell's native
+ * clipboard (cmd/ocode-desktop/main.go msgClipboardWrite). Unlike
+ * navigator.clipboard and execCommand("copy"), WKWebView does not require it
+ * to run inside a user gesture, so a copy that arrives over a websocket (a
+ * terminal program's OSC 52) still lands. Returns false in a plain browser.
+ */
+export function writeDesktopClipboard(text: string, target: Window = window): boolean {
+  return invokeWails(`ocode:clipboard-write:${text}`, target);
+}

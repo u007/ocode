@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/skill"
 )
 
 // pluginListEntry mirrors the JSON emitted by HandleListPlugins.
@@ -495,5 +497,39 @@ func TestConcurrentHandlerAccess(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		<-done
+	}
+}
+
+// TestHandleInstallPluginBareNameIsSkillNotGit: a bare name goes to the
+// bundled-skill installer, never to git. An unknown name is a 400 that names
+// the skill, not a clone failure.
+func TestHandleInstallPluginBareNameIsSkillNotGit(t *testing.T) {
+	skill.SetBundledFS(fstest.MapFS{
+		"skills/alpha/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: alpha\n---\n# alpha\n")},
+	})
+	t.Cleanup(func() { skill.SetBundledFS(nil) })
+
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.mu.Lock()
+	h.cfg = &config.Config{Plugins: map[string]config.PluginConfig{}}
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/plugins", strings.NewReader(`{"source": "nosuch-skill"}`))
+	r.Header.Set("Content-Type", "application/json")
+	h.HandleInstallPlugin(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(resp.Error, `no bundled skill "nosuch-skill"`) {
+		t.Fatalf("error should name the missing bundled skill, got %q", resp.Error)
 	}
 }

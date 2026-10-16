@@ -50,3 +50,4 @@ Every call site now returns `copyToClipboard(text)` instead of calling `clipboar
 ## Related
 
 - `gotchas/radix-modal-focus-trap-breaks-execCommand-clipboard.md` and `gotchas/monaco-webkit-clipboard-workaround.md` — the browser/web side of clipboard failures; this gotcha is the TUI/SSH side.
+- `gotchas/web-terminal-osc52-copy-remote-claude-code.md` — the web/desktop terminal side: a remote program's OSC 52 copy refused by the activation gate and WKWebView.

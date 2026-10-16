@@ -263,8 +263,8 @@ never a global reset, which would tear down TUI `/rc` sessions on the same node.
 - **Web Settings:** "Auto Share" (`web/src/components/Settings/AutoShareForm.tsx:17`)
   shows the same Running/Not-sharing badge + kind, and Start/Stop. The status block
   is independent of the persisted toggle.
-- **TUI:** `/auto-share [on|off|status]` (`internal/tui/commands.go:148`,
-  handler at `internal/tui/commands.go:1138`). Both write the same config key; the
+- **TUI:** `/auto-share [on|off|status]` (`internal/tui/commands.go:147`,
+  handler at `internal/tui/commands.go:1148`). Both write the same config key; the
   `status` verb is read-only and an unrecognised argument prints usage without
   changing the setting.
 

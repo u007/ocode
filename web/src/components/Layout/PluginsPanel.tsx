@@ -26,6 +26,7 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
   const [source, setSource] = useState("");
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [astEnabled, setAstEnabled] = useState(false);
   const [astBusy, setAstBusy] = useState(false);
 
@@ -99,9 +100,11 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
     if (!src) return;
     setInstalling(true);
     setError(null);
+    setNotice(null);
     try {
-      await api.installPlugin(src);
+      const res = await api.installPlugin(src);
       setSource("");
+      if ("skill" in res) setNotice(res.report);
       await load();
     } catch (err) {
       console.error("failed to install plugin", err);
@@ -147,6 +150,12 @@ export default function PluginsPanel({ open, onOpenChange }: Props) {
             Install
           </Button>
         </div>
+
+        {notice && (
+          <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
+            {notice}
+          </div>
+        )}
 
         {error && (
           <div className="px-4 py-2 text-xs text-red-400 border-b border-border">

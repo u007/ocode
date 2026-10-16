@@ -1227,6 +1227,12 @@ export interface PluginInfo {
   description?: string;
 }
 
+/** Result of POST /api/plugins. A git source yields the installed plugin; a
+ * bare name yields the bundled skill installed into ~/.claude/skills. */
+export type InstallPluginResult =
+  | { name: string; dir: string; source: string }
+  | { skill: string; report: string };
+
 /** A plugin installed by Claude Code (source "claude-code"). ocode can
  * enable/disable it (in ocode's config only) but never removes it. */
 export const isClaudeCodePlugin = (p: PluginInfo): boolean => p.source === "claude-code";

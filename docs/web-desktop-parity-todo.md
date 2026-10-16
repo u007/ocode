@@ -51,7 +51,7 @@ below apply to both.
 
 - Backend: `GET /api/changes`, `GET /api/changes/diff`, `POST /api/changes/undo-file`, `POST /api/changes/undo-block` (`internal/server/handler_changes.go`).
 - Web: `ChangesPanel`, `ChangesFileList`, `ChangesDiffView` (`web/src/components/Changes/`).
-- TUI: `internal/tui/changes_model.go`, `internal/tui/changes.go`.
+- TUI: `internal/tui/changes_model.go`.
 - Design spec: `docs/superpowers/specs/2026-07-22-changes-tab-design.md`.
 
 ### 3. Image generation config ✅

@@ -7,7 +7,6 @@ import PortMapsWidget from "./PortMapsWidget";
 import { AssistantToggleButton } from "../Pulse/PulseAssistantWindow";
 import { useProjectState } from "../../stores/projectStore";
 import { loadProjectTerminals } from "../Terminal/terminalPersistence";
-import { basename } from "@/lib/utils";
 import { api } from "@/api/client";
 import { eventBus } from "@/lib/eventBus";
 import { tabLoadKey, type TabLoadingSnapshot } from "@/hooks/useKeyedLoad";
@@ -237,7 +236,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
         <div className="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-xs font-bold">
           o
         </div>
-        <span className="font-semibold text-sm hidden sm:inline">{basename(activeProjectPath) || "ocode"}</span>
+        <span className="font-semibold text-sm hidden sm:inline">{projectState.activeProject?.name}</span>
       </div>
 
       {/* Main tabs — single row, horizontally scrollable */}

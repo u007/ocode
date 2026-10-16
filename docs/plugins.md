@@ -22,6 +22,9 @@ ocode's plugin system extends the agent with custom tools, slash commands, LLM i
 # Install a plugin from GitHub
 /plugin install github.com/username/my-plugin
 
+# Install a bundled skill (e.g. standup, changes) into ~/.claude/skills
+/plugin install standup
+
 # List installed plugins
 /plugin list
 

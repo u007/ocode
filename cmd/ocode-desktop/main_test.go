@@ -1,7 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
 
 	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 )
@@ -69,5 +72,45 @@ func TestMsgOpenExternalPrefixIsNotWailsReserved(t *testing.T) {
 	// with "wails:" (framework messages are consumed before it).
 	if len(msgOpenExternal) >= 6 && msgOpenExternal[:6] == "wails:" {
 		t.Fatalf("msgOpenExternal %q must not start with the reserved %q prefix", msgOpenExternal, "wails:")
+	}
+}
+
+func TestPageClipboardText(t *testing.T) {
+	const host = "127.0.0.1:52100"
+	page := &application.OriginInfo{Origin: "https://127.0.0.1:52100/session/abc?token=t"}
+	cases := []struct {
+		name    string
+		message string
+		origin  *application.OriginInfo
+		want    string
+		wantOK  bool
+	}{
+		{"ocode page", msgClipboardWrite + "hello\nworld", page, "hello\nworld", true},
+		// IsMainFrame is only filled in on darwin; Windows/Linux leave it false.
+		{"page without IsMainFrame", msgClipboardWrite + "hi", &application.OriginInfo{Origin: "https://127.0.0.1:52100/"}, "hi", true},
+		{"pre-https migration page", msgClipboardWrite + "hi", &application.OriginInfo{Origin: "http://127.0.0.1:52100/?migrateTo=x"}, "hi", true},
+		{"external iframe refused", msgClipboardWrite + "hello", &application.OriginInfo{Origin: "https://evil.example/"}, "", false},
+		{"other local port refused", msgClipboardWrite + "hello", &application.OriginInfo{Origin: "http://127.0.0.1:5173/"}, "", false},
+		{"empty origin refused", msgClipboardWrite + "hello", &application.OriginInfo{}, "", false},
+		{"no origin refused", msgClipboardWrite + "hello", nil, "", false},
+		{"empty text", msgClipboardWrite, page, "", false},
+		{"other message", msgFocusWindow, page, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := pageClipboardText(tc.message, tc.origin, host)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("pageClipboardText(%q) = %q, %v; want %q, %v", tc.message, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+	if _, ok := pageClipboardText(msgClipboardWrite+"x", page, ""); ok {
+		t.Fatal("pageClipboardText accepted a write before the window host was known")
+	}
+}
+
+func TestMsgClipboardWritePrefixIsNotWailsReserved(t *testing.T) {
+	if strings.HasPrefix(msgClipboardWrite, "wails:") {
+		t.Fatalf("msgClipboardWrite %q must not start with the reserved %q prefix", msgClipboardWrite, "wails:")
 	}
 }

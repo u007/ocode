@@ -9,7 +9,7 @@ import { dispatchCommand } from "./commands";
  * command context performs must carry `ctx.host` and `ctx.projectPath`;
  * without them the local server answers with its default workdir (or 404s for
  * a remote session's id), which is what made /lsp, /mcp, /session list,
- * /changes and /docs report the wrong project.
+ * /review and /docs report the wrong project.
  */
 function ctx(
   api: Record<string, unknown>,
@@ -52,13 +52,13 @@ describe("command-context host/project routing", () => {
     expect(listSessions).toHaveBeenCalledWith(HOST);
   });
 
-  it("/changes assembles its prompt from the active tab's project + host", async () => {
+  it("/review assembles its prompt from the active tab's project + host", async () => {
     const getCommandContext = vi.fn(async () => ({ prompt: "p" }));
     await dispatchCommand(
-      "/changes",
+      "/review",
       ctx({ getCommandContext }, { host: HOST, projectPath: PROJECT }),
     );
-    expect(getCommandContext).toHaveBeenCalledWith("changes", undefined, PROJECT, HOST);
+    expect(getCommandContext).toHaveBeenCalledWith("review", undefined, PROJECT, HOST);
   });
 
   it("/docs status reads the active tab's project + host", async () => {

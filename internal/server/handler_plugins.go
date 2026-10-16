@@ -11,6 +11,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/skill"
 )
 
 func (h *Handler) pluginConfigSnapshot() *config.Config {
@@ -252,6 +253,18 @@ func (h *Handler) HandleInstallPlugin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := readBodyJSON(r, &req); err != nil || req.Source == "" {
 		writeError(w, http.StatusBadRequest, "source is required")
+		return
+	}
+
+	// A bare name (no path or dot) is a bundled skill, installed into
+	// ~/.claude/skills, the same as `/plugin install <skill>` in the TUI.
+	if !strings.ContainsAny(req.Source, "/.") {
+		report, err := skill.InstallBundledToClaude(req.Source)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"skill": req.Source, "report": report})
 		return
 	}
 

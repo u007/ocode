@@ -10,7 +10,7 @@ import (
 )
 
 // HandleCommandContext builds the LLM prompt behind a repo-analysis slash
-// command (/changes, /review) using the same shared commandctx
+// command (/review, /learn, ...) using the same shared commandctx
 // package the TUI calls, so web/desktop get a byte-identical prompt.
 //
 // Response: {"prompt": "..."} on success, 4xx with an error message when the
@@ -32,8 +32,6 @@ func (h *Handler) HandleCommandContext(w http.ResponseWriter, r *http.Request, n
 	var prompt string
 	var err error
 	switch name {
-	case "changes":
-		prompt, err = commandctx.Changes(workDir, h.lspManagerFor(workDir))
 	case "review":
 		prompt, err = commandctx.Review(workDir, args)
 	case "learn":

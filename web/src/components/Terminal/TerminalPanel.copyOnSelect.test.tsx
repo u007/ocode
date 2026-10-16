@@ -1257,52 +1257,103 @@ describe("terminal OSC 52 clipboard write", () => {
     return call![1];
   }
 
-  function setUserActivation(isActive: boolean | undefined) {
-    Object.defineProperty(navigator, "userActivation", {
-      configurable: true,
-      value: isActive === undefined ? undefined : { isActive, hasBeenActive: isActive },
-    });
-  }
-  beforeEach(() => setUserActivation(true));
-  afterEach(() => setUserActivation(undefined));
-
-  it("refuses a write with no user activation or an oversized payload", async () => {
-    render(<Panel />);
+  async function openPanel() {
+    const { container } = render(<Panel />);
     await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
     await act(async () => {
       h.sockets[0].onopen?.();
     });
-    const handler = osc52Handler();
-    setUserActivation(false);
-    expect(handler(`c;${btoa("hijack")}`)).toBe(true);
-    setUserActivation(true);
+    return { host: container.firstElementChild as HTMLElement, handler: osc52Handler() };
+  }
+
+  function b64(text: string) {
+    return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("refuses a write with no user input in the terminal", async () => {
+    const { handler } = await openPanel();
+    expect(handler(`c;${b64("hijack")}`)).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("refuses an oversized payload even right after input", async () => {
+    const { host, handler } = await openPanel();
+    fireEvent.pointerDown(host);
     expect(handler(`c;${"A".repeat(100_004)}`)).toBe(true);
     expect(writeText).not.toHaveBeenCalled();
   });
 
-  it("writes the decoded payload to the system clipboard once the socket is live", async () => {
-    render(<Panel />);
-    await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
-    await act(async () => {
-      h.sockets[0].onopen?.();
-    });
-    const handler = osc52Handler();
-    const b64 = btoa(String.fromCharCode(...new TextEncoder().encode("héllo from ssh")));
-    expect(handler(`c;${b64}`)).toBe(true);
+  it("writes the decoded payload after a drag-select release in this terminal", async () => {
+    const { host, handler } = await openPanel();
+    fireEvent.pointerDown(host);
+    fireEvent.pointerUp(window);
+    expect(handler(`c;${b64("héllo from ssh")}`)).toBe(true);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("héllo from ssh"));
   });
 
+  it("measures the window from the release, not the press", async () => {
+    const now = vi.spyOn(performance, "now");
+    const { host, handler } = await openPanel();
+    now.mockReturnValue(1_000);
+    fireEvent.pointerDown(host);
+    // A slow drag: released 8 s after the press, copy arrives 1 s later.
+    now.mockReturnValue(9_000);
+    fireEvent.pointerUp(window);
+    now.mockReturnValue(10_000);
+    expect(handler(`c;${b64("slow drag")}`)).toBe(true);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("slow drag"));
+  });
+
+  it("refuses a write once the input window has passed", async () => {
+    const now = vi.spyOn(performance, "now");
+    const { host, handler } = await openPanel();
+    now.mockReturnValue(1_000);
+    fireEvent.keyDown(host, { key: "c" });
+    now.mockReturnValue(6_001);
+    expect(handler(`c;${b64("too late")}`)).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("ignores a release whose press began outside the terminal", async () => {
+    const { handler } = await openPanel();
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(window);
+    expect(handler(`c;${b64("elsewhere")}`)).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
   it("ignores clipboard read queries and replayed scrollback", async () => {
-    render(<Panel />);
+    const { container } = render(<Panel />);
     await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
     const handler = osc52Handler();
+    fireEvent.pointerDown(container.firstElementChild as HTMLElement);
     // Before the socket opens the terminal is replaying history.
-    expect(handler(`c;${btoa("old")}`)).toBe(true);
+    expect(handler(`c;${b64("old")}`)).toBe(true);
     await act(async () => {
       h.sockets[0].onopen?.();
     });
     expect(handler("c;?")).toBe(true);
     expect(handler("c;!!not-base64!!")).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+});
+
+// WKWebView refuses navigator.clipboard and execCommand("copy") outside a user
+// gesture, which is where an OSC 52 copy arrives, so the desktop shell writes
+// through its native clipboard instead (cmd/ocode-desktop/main.go).
+describe("writeClipboardText in the desktop shell", () => {
+  afterEach(() => {
+    delete (window as unknown as { _wails?: unknown })._wails;
+    writeText.mockClear();
+  });
+
+  it("writes through the native bridge only", async () => {
+    const invoke = vi.fn();
+    (window as unknown as { _wails: { invoke: typeof invoke } })._wails = { invoke };
+    await writeClipboardText("native copy");
+    expect(invoke).toHaveBeenCalledWith("ocode:clipboard-write:native copy");
     expect(writeText).not.toHaveBeenCalled();
   });
 });

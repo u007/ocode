@@ -1183,7 +1183,7 @@ function HomeApp() {
         }
       },
       host: targetHost,
-      // Repo/docs-scoped commands (/lsp, /mcp, /changes, /review, /docs) must
+      // Repo/docs-scoped commands (/lsp, /mcp, /review, /docs) must
       // read the tab's own project, not the server's default workdir.
       projectPath: targetProjectPath,
     });
@@ -1212,7 +1212,7 @@ function HomeApp() {
       }
     }
     if (result.prompt) {
-      // Server-assembled prompt (/changes, /review, /learn,
+      // Server-assembled prompt (/review, /learn,
       // /doc-sync, /mem update, /docs init): send through the normal chat
       // pipeline exactly like the TUI dispatching the same command.
       const accepted = await sendCommandToSession(targetSessionId, result.prompt);
