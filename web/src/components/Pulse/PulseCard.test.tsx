@@ -810,8 +810,10 @@ describe("PulseCard overlay", () => {
 
     const overlayEl = overlay()!;
     expect(overlayEl.className).toContain("absolute");
-    // bottom-full: the overlay grows upward instead of downward off the list.
-    expect(overlayEl.className).toContain("bottom-full");
+    // top-full: the overlay grows downward instead of upward off the card, so
+    // it never covers the card above in the grid; the dashboard scroller
+    // absorbs any overflow below.
+    expect(overlayEl.className).toContain("top-full");
     expect(container.querySelector("[role='listitem']")?.className).toContain("relative");
   });
 

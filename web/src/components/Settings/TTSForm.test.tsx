@@ -5,13 +5,20 @@ import { SpeechProvider } from "../Speech/SpeechProvider";
 import { ChatProvider } from "../../stores/chatStore";
 import { api } from "../../api/client";
 
+const { openExternalSpy } = vi.hoisted(() => ({ openExternalSpy: vi.fn() }));
+vi.mock("../../lib/externalLinks", () => ({
+  isHTTPURL: () => true,
+  openExternalURL: (...args: unknown[]) => openExternalSpy(...args),
+}));
+
 const engines = [
   { id: "browser-native", label: "Browser Native", availability: "ready", browser_only: true },
-  { id: "piper", label: "Piper", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "en_US-joe-medium", manifest_version: "piper-1.8.0-joe-1", license_name: "piper-tts GPL-3.0-or-later", license_text: "piper-tts GPL-3.0-or-later", license_hash: "piper-license-hash" },
-  { id: "paradee", label: "Paradee", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "af_heart", voices: ["af_heart"], manifest_version: "paradee-1.0-f662642", license_name: "Paradee Apache-2.0", license_text: "Paradee model and inference code: Apache-2.0", license_hash: "paradee-license-hash" },
-  { id: "melo", label: "MeloTTS", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "EN-US", voices: ["EN-US", "EN-BR", "EN_INDIA", "EN-AU", "EN-Default"], manifest_version: "melo-0.1.2-en-v2-2091453", license_name: "MeloTTS MIT", license_text: "MeloTTS: MIT", license_hash: "melo-license-hash" },
-  { id: "kokoro", label: "Kokoro", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "af_sarah", voices: ["af_sarah", "af_bella"], manifest_version: "kokoro-v1.0-voices-v1.0", license_name: "kokoro-onnx MIT; kokoro model Apache-2.0", license_text: "kokoro-onnx: MIT\nkokoro model: Apache-2.0", license_hash: "kokoro-license-hash" },
-];
+  { id: "piper", label: "Piper", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "en_US-joe-medium", manifest_version: "piper-1.8.0-joe-1", license_name: "piper-tts GPL-3.0-or-later", license_text: "piper-tts GPL-3.0-or-later", license_hash: "piper-license-hash", license_url: "https://example.com/piper-license" },
+  { id: "paradee", label: "Paradee", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "af_heart", voices: ["af_heart"], manifest_version: "paradee-1.0-f662642", license_name: "Paradee Apache-2.0", license_text: "Paradee model and inference code: Apache-2.0", license_hash: "paradee-license-hash", license_url: "https://example.com/paradee-license" },
+  { id: "kyutai", label: "Kyutai (Pocket TTS)", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "alba", voices: ["alba", "marius"], manifest_version: "kyutai-3.3.0", license_name: "Kyutai Pocket TTS MIT (per-voice licenses vary)", license_text: "Pocket TTS by Kyutai: MIT. Model and voice weights: see kyutai.org/pocket-tts and each voice license card.", license_hash: "kyutai-license-hash", license_url: "https://example.com/kyutai-license" },
+  { id: "melo", label: "MeloTTS", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "EN-US", voices: ["EN-US", "EN-BR", "EN_INDIA", "EN-AU", "EN-Default"], manifest_version: "melo-0.1.2-en-v2-2091453", license_name: "MeloTTS MIT", license_text: "MeloTTS: MIT", license_hash: "melo-license-hash", license_url: "https://example.com/melo-license" },
+  { id: "kokoro", label: "Kokoro", availability: "installable", reason: "Accept the license and install to enable.", browser_only: false, voice_id: "af_sarah", voices: ["af_sarah", "af_bella"], manifest_version: "kokoro-v1.0-voices-v1.0", license_name: "kokoro-onnx MIT; kokoro model Apache-2.0", license_text: "kokoro-onnx: MIT\nkokoro model: Apache-2.0", license_hash: "kokoro-license-hash", license_url: "https://example.com/kokoro-license" },
+]
 
 const piperState = (state: string, extra: Record<string, unknown> = {}) => ({
   piper: { engine_id: "piper", state, progress: 0, pinned: false, ...extra },
@@ -64,7 +71,7 @@ describe("TTSForm licensing and selection", () => {
     // rendered order is the presentation contract.
     renderTTSForm();
     await screen.findByTestId("tts-engine-melo");
-    const order = ["tts-engine-browser-native", "tts-engine-piper", "tts-engine-paradee", "tts-engine-melo", "tts-engine-kokoro"];
+    const order = ["tts-engine-browser-native", "tts-engine-piper", "tts-engine-paradee", "tts-engine-kyutai", "tts-engine-melo", "tts-engine-kokoro"];
     const positions = await Promise.all(
       order.map(async (testid) => {
         const card = await screen.findByTestId(testid);
@@ -82,6 +89,16 @@ describe("TTSForm licensing and selection", () => {
     const paradee = within(await screen.findByTestId("tts-engine-paradee"));
     expect(paradee.getByText(/License: Paradee model and inference code: Apache-2.0/i)).toBeDefined();
     expect(paradee.getByRole("button", { name: "Accept License" })).toBeDefined();
+  });
+
+  it("opens the engine license in an external viewer when clicked", async () => {
+    renderTTSForm();
+    const kyutai = within(await screen.findByTestId("tts-engine-kyutai"));
+    expect(kyutai.getByText(/License: Pocket TTS by Kyutai: MIT/i)).toBeDefined();
+    const view = kyutai.getByText("view");
+    expect((view as HTMLAnchorElement).href).toContain("kyutai-license");
+    fireEvent.click(view);
+    await waitFor(() => expect(openExternalSpy).toHaveBeenCalledWith("https://example.com/kyutai-license"));
   });
 
   it("offers the MeloTTS license, manifest and accent voices", async () => {

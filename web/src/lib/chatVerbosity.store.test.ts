@@ -25,6 +25,7 @@ const fullConfig = {
   preset: "full" as const,
   overrides: {
     older_thinking: "preset" as const,
+    latest_thinking: "preset" as const,
     tool_calls: "preset" as const,
     tool_output: "preset" as const,
     activity_notices: "preset" as const,

@@ -366,6 +366,12 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
         }
       }).catch(() => {});
     }
+    // Forward to Pulse explicitly. This branch returns before the generic
+    // session-scoped path (which is where the sink call normally lives), so
+    // without this forward the dashboard never learns a new session exists:
+    // applyPulseEvent returns null for an unknown id, no debounced refetch
+    // arms, and the card never appears. Mirrors the session_rekeyed branch above.
+    pulseEventSink(event, eventSessionId ?? "", data, env.host ?? "");
     return;
   }
 

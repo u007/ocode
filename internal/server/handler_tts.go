@@ -91,6 +91,24 @@ func (s *Server) handleTTSSpeak(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, playback)
 }
 
+func (s *Server) handleTTSSample(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Engine string `json:"engine"`
+		Voice  string `json:"voice,omitempty"`
+		Text   string `json:"text,omitempty"`
+	}
+	if err := decodeTTSJSON(w, r, &req, 4096); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	result, err := s.tts.SpeakSample(tts.EngineID(req.Engine), req.Voice, req.Text)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleTTSStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.tts.Stop())
 }
@@ -104,6 +122,18 @@ func (s *Server) handleTTSAudio(w http.ResponseWriter, r *http.Request) {
 	if err := tts.ServeAudio(w, r, path); err != nil {
 		log.Printf("tts: serve audio %s: %v", path, err)
 		writeError(w, http.StatusNotFound, "audio unavailable")
+	}
+}
+
+func (s *Server) handleTTSSampleAudio(w http.ResponseWriter, r *http.Request) {
+	path, err := s.tts.SampleAudioPath(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := tts.ServeAudio(w, r, path); err != nil {
+		log.Printf("tts: serve sample audio %s: %v", path, err)
+		writeError(w, http.StatusNotFound, "sample audio unavailable")
 	}
 }
 

@@ -1064,6 +1064,9 @@ func updateIndex(dir, id, title string) error {
 }
 
 func Load(id string) (*Session, error) {
+	if strings.HasPrefix(id, "claude:") {
+		return CloneClaudeSession(strings.TrimPrefix(id, "claude:"))
+	}
 	dir, err := GetStorageDir()
 	if err != nil {
 		return nil, err
@@ -1074,6 +1077,12 @@ func Load(id string) (*Session, error) {
 // LoadForDir loads a session from the storage associated with wd. It is used
 // by multi-project servers; Load continues to use the process/session workdir.
 func LoadForDir(wd, id string) (*Session, error) {
+	// Claude Code clones are stored under "claude-<id>" on disk while the
+	// "claude:<id>" form is used in refs and LoadAny. Translate here so the
+	// session can be loaded from wd's storage dir.
+	if strings.HasPrefix(id, "claude:") {
+		id = "claude-" + strings.TrimPrefix(id, "claude:")
+	}
 	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return nil, err
@@ -1366,45 +1375,14 @@ func List() ([]Session, error) {
 	return sessions, nil
 }
 
-// ListRefsForDir returns lightweight refs (id/title/timestamps) for sessions
-// scoped to a specific working directory, without materializing the messages
-// array. Mirrors the metadata-only approach in ListRefsPaginated — use this
-// instead of ListForDir for anything that only needs list display fields.
+// ListRefsForDir returns lightweight ocode refs (id/title/timestamps) for
+// sessions scoped to a specific working directory, without materializing the
+// messages array. It does not merge Claude Code sessions, so every ref it
+// returns can be opened with LoadForDir. Use ListAll for the merged ocode +
+// Claude Code surface.
 func ListRefsForDir(wd string) ([]Ref, error) {
-	dir, err := GetStorageDirForPath(wd)
-	if err != nil {
-		return nil, err
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	metas := legacyOcodeMetas(dir, entries)
-	indexMetas, err := queryIndexMetas(dir)
-	if err != nil {
-		log.Printf("session list: query index: %v", err)
-		indexMetas = nil
-	}
-	metas = mergeMetas(metas, indexMetas)
-
-	refs := make([]Ref, 0, len(metas))
-	for _, meta := range metas {
-		refs = append(refs, Ref{
-			ID:        meta.ID,
-			Title:     meta.Title,
-			CreatedAt: meta.CreatedAt,
-			UpdatedAt: meta.UpdatedAt,
-			Source:    SourceOcode,
-		})
-	}
-
-	sort.Slice(refs, func(i, j int) bool {
-		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
-	})
-
-	return refs, nil
+	refs, _, err := listRefsPaginatedForDir(wd, 0, 0)
+	return refs, err
 }
 
 func ListAll() ([]Ref, error) {
@@ -1412,8 +1390,10 @@ func ListAll() ([]Ref, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	refs := make([]Ref, 0, len(ocodeSessions))
 	clonedClaude := make(map[string]struct{})
+
 	for _, s := range ocodeSessions {
 		refs = append(refs, Ref{ID: s.ID, Title: s.Title, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, Source: SourceOcode})
 		if s.Metadata != nil {
@@ -1601,10 +1581,15 @@ func readOcodeMeta(path string, modTime time.Time) (ocodeMeta, error) {
 	return meta, nil
 }
 
-// ListRefsPaginated returns a page of session refs with optional limit and offset.
-// If limit <= 0, returns all refs. Returns (refs, totalCount, error).
-func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
-	dir, err := GetStorageDir()
+// listRefsPaginatedForDir returns a page of ocode session refs for the project
+// whose root is wd, with optional limit and offset. If limit <= 0, returns all
+// refs. Returns (refs, totalCount, error).
+//
+// It intentionally does not merge Claude Code sessions: every ref returned here
+// can be opened with LoadForDir. Listing sessions the server cannot open would
+// surface dead rows (see LoadAny for the Claude Code open surface).
+func listRefsPaginatedForDir(wd string, limit, offset int) ([]Ref, int, error) {
+	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1623,7 +1608,6 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 	metas = mergeMetas(metas, indexMetas)
 
 	allRefs := make([]Ref, 0, len(metas))
-	clonedClaude := make(map[string]struct{})
 	for _, meta := range metas {
 		allRefs = append(allRefs, Ref{
 			ID:        meta.ID,
@@ -1632,27 +1616,11 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 			UpdatedAt: meta.UpdatedAt,
 			Source:    SourceOcode,
 		})
-		if meta.CloneOf != "" {
-			clonedClaude[meta.CloneOf] = struct{}{}
-		}
 	}
 
 	sort.Slice(allRefs, func(i, j int) bool {
 		return allRefs[i].UpdatedAt.After(allRefs[j].UpdatedAt)
 	})
-
-	claudeRefs, err := listClaudeSessions()
-	if err == nil {
-		for _, ref := range claudeRefs {
-			if _, ok := clonedClaude[strings.TrimPrefix(ref.ID, "claude:")]; ok {
-				continue
-			}
-			allRefs = append(allRefs, ref)
-		}
-		sort.Slice(allRefs, func(i, j int) bool {
-			return allRefs[i].UpdatedAt.After(allRefs[j].UpdatedAt)
-		})
-	}
 
 	total := len(allRefs)
 
@@ -1670,6 +1638,22 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 	}
 
 	return allRefs, total, nil
+}
+
+// ListRefsPaginated returns a page of session refs with optional limit and offset.
+// If limit <= 0, returns all refs. Returns (refs, totalCount, error).
+//
+// It lists the process default project (effectiveWorkDir). For a specific
+// project root, use ListRefsPaginatedForDir.
+func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
+	return listRefsPaginatedForDir(effectiveWorkDir(), limit, offset)
+}
+
+// ListRefsPaginatedForDir returns a page of session refs for the project rooted
+// at wd, with optional limit and offset. If limit <= 0, returns all refs.
+// Returns (refs, totalCount, error).
+func ListRefsPaginatedForDir(wd string, limit, offset int) ([]Ref, int, error) {
+	return listRefsPaginatedForDir(wd, limit, offset)
 }
 
 // ErrNoStoredSession is returned by RekeyForDir when the id to rekey has no
@@ -1838,6 +1822,12 @@ func deleteInDir(dir, id string) error {
 
 func LoadAny(id string) (*Session, error) {
 	if strings.HasPrefix(id, "claude:") {
+		// A cloned Claude session is saved under its claude:<id> id, so try
+		// loading it from ocode storage before falling back to cloning from
+		// the Claude Code source.
+		if s, err := Load(id); err == nil {
+			return s, nil
+		}
 		return CloneClaudeSession(strings.TrimPrefix(id, "claude:"))
 	}
 	return Load(id)

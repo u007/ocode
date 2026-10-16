@@ -1,0 +1,94 @@
+---
+name: dotnet-tuning-nvidia-nemotron-3.5-super-vl
+description: >
+  Corrective .NET HttpClient/resilience guidance for nvidia/nemotron-3.5-super-vl:
+  the three HttpClient lifetimes (per-request, static, factory) and the flaw of
+  each, the client-to-handler binding that makes a cached factory client go
+  stale on DNS regardless of HandlerLifetime, HandlerLifetime vs
+  PooledConnectionLifetime, and the exact Microsoft.Extensions.Http.Resilience
+  / Polly v8 method names.
+when_to_use: >
+  Load when the provider-stripped model id (see stack-detection.md) resolves
+  to exactly `nvidia/nemotron-3.5-super-vl` AND the repository is a .NET
+  project (a `*.sln`, `global.json`, `*.csproj`, `*.vbproj`, or
+  `Directory.Build.props` file — per meta.yaml detection). For any other
+  model or non-.NET repo, do not load.
+tuned_for: nvidia/nemotron-3.5-super-vl
+tuned_version: "3.5"
+stack: dotnet
+source_scorecard: ../scores/nvidia__nemotron-3.5-super-vl.md
+threshold: 0.85
+revalidate_when: model_version changes
+---
+# .NET corrections for nvidia/nemotron-3.5-super-vl
+
+<!-- kaizen:digest -->
+**.NET HttpClient / resilience. Always state the full mechanism, not just the fix:**
+1. Any explanation of socket exhaustion or why IHttpClientFactory exists names THREE stages, in order, and the flaw of each: (a) `new HttpClient()` + dispose per request leaves sockets in TIME_WAIT and exhausts ephemeral ports; (b) one shared `static` HttpClient fixes exhaustion but its pooled connections never re-resolve DNS, so it keeps hitting old IPs after a failover; (c) IHttpClientFactory pools `HttpMessageHandler`s AND rotates them on `HandlerLifetime` (default 2 min), fixing both. Stage (b) is the reason rotation exists; never skip it even when the question only asks about (a) and (c).
+2. An HttpClient is bound to the handler it was created with, for its whole life. Rotation only affects clients created AFTER it. A factory client (or transient typed client) cached in a singleton, static field or long-lived background service pins its original handler and never sees rotation, so it goes stale on DNS exactly like the static client. Shortening `SetHandlerLifetime` does NOT help a client that is already cached; the fix is to call `CreateClient` near each use, or to use a primary `SocketsHttpHandler` with `PooledConnectionLifetime` (optionally disabling factory rotation via `SetHandlerLifetime(Timeout.InfiniteTimeSpan)`). `HandlerLifetime` and `PooledConnectionLifetime` are separate settings; name the one you configure.
+3. Use real method names only: `AddStandardResilienceHandler()` / `AddResilienceHandler("name", b => b.AddRetry(...).AddCircuitBreaker(...).AddTimeout(...))` from `Microsoft.Extensions.Http.Resilience` (Polly v8 builders are `AddRetry`/`AddCircuitBreaker`/`AddTimeout`, not `Retry`/`CircuitBreaker`/`Timeout`); legacy Polly is `AddTransientHttpErrorPolicy` / `AddPolicyHandler` with `HttpPolicyExtensions.HandleTransientHttpError()`. Always flow a `CancellationToken` into the HTTP call.
+<!-- /kaizen:digest -->
+
+## resilience-http: three HttpClient lifetimes, three flaws
+
+When asked why `using (var client = new HttpClient())` per request is wrong
+and how IHttpClientFactory helps, cover all three stages. Dropping the middle
+one loses the point of the factory.
+
+- **Per-request client + dispose.** Each `new HttpClient()` gets its own
+  handler and connection pool; disposing it closes the sockets, which sit in
+  TIME_WAIT. Under load the OS runs out of ephemeral ports.
+- **One long-lived `static` HttpClient.** No exhaustion, but its pooled
+  connections stay open and the hostname is never re-resolved, so after a
+  deployment or failover it keeps talking to the old IP. State this flaw
+  explicitly, as its own sentence; "DNS" must not appear only as a side
+  benefit of the factory or as a property of the per-request client.
+- **IHttpClientFactory.** Hands out cheap clients over a pool of shared
+  `HttpMessageHandler`s (no exhaustion) and rotates those handlers on
+  `HandlerLifetime` (default 2 minutes), so fresh connections pick up DNS
+  changes. Register with `AddHttpClient(...)`, inject `IHttpClientFactory` or
+  a named/typed client.
+
+## resilience-http: a client is bound to its handler; don't cache factory clients
+
+The question "even factory clients go stale if held too long" is about the
+client-to-handler binding, not about rotation in general.
+
+- An HttpClient keeps the `HttpMessageHandler` it was constructed with for
+  its whole life. Factory rotation only affects clients created AFTER the
+  rotation. A factory client stored in a singleton, a static field, or a
+  long-lived background service pins its original handler and never sees a
+  new one, so it serves stale DNS exactly like the static client. Say this
+  sentence whenever handler lifetime comes up.
+- A shorter `SetHandlerLifetime(...)` changes how often NEW clients get a new
+  handler. It does nothing for a client that is already cached. Never offer
+  it as the mitigation for a held client; offer "request a fresh client near
+  each use" instead.
+- Typed clients are registered transient. Injecting one into a singleton has
+  the same pinning effect. Fix: inject `IHttpClientFactory` and call
+  `CreateClient` near each use, or inject the typed client only into
+  scoped/transient consumers.
+- The modern alternative is a primary `SocketsHttpHandler` configured with
+  `PooledConnectionLifetime` (e.g. 2 minutes): the handler itself retires and
+  re-creates pooled connections, re-resolving DNS, so a long-lived
+  client/handler is then safe to cache. You can disable factory rotation with
+  `SetHandlerLifetime(Timeout.InfiniteTimeSpan)` and let the handler do it.
+- `HandlerLifetime` (factory, `SetHandlerLifetime`) and
+  `SocketsHttpHandler.PooledConnectionLifetime` (connection recycling inside
+  one handler) are two different settings. Name the one you are configuring.
+
+## resilience-http: exact API names
+
+- .NET 8+: package `Microsoft.Extensions.Http.Resilience` (Polly v8). Chain
+  `.AddStandardResilienceHandler()` onto `AddHttpClient` for the default
+  retry / total timeout / per-attempt timeout / circuit-breaker pipeline, or
+  `.AddResilienceHandler("name", builder => builder.AddRetry(...)
+  .AddCircuitBreaker(...).AddTimeout(...))` for a custom one. The builder
+  methods carry the `Add` prefix; there are no `.Retry(...)`,
+  `.CircuitBreaker(...)` or `.Timeout(...)` methods.
+- Legacy (`Microsoft.Extensions.Http.Polly`): `AddTransientHttpErrorPolicy(...)`
+  / `AddPolicyHandler(...)` with `HttpPolicyExtensions.HandleTransientHttpError()`.
+- Pass a `CancellationToken` (e.g. `HttpContext.RequestAborted` or a linked
+  `CancellationTokenSource` with a timeout) into every `SendAsync`/`GetAsync`;
+  resilience timeouts are enforced through linked tokens and surface as
+  `OperationCanceledException`/`TaskCanceledException`.

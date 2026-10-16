@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
-import { AlertCircle, RefreshCw } from "lucide-react";
+import { useSelector } from "@tanstack/react-store";
+import { AlertCircle, ChevronsUpDown, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePulse, usePulseFocus } from "@/stores/pulseStore";
 import { PulseCard, STREAM_ON_CARD } from "./PulseCard";
@@ -7,7 +8,7 @@ import { PulseTerminals } from "./PulseTerminals";
 import { PulseFocusPane } from "./PulseFocusPane";
 import { usePulseAssistantHotkey } from "./PulseAssistantWindow";
 import { toggleAssistantWindow } from "./pulseAssistantPrefs";
-import { pruneStreamOverrides, setAllLiveStreamsTall } from "./pulseStreamPrefs";
+import { pruneStreamOverrides, setAllLiveStreamsTall, streamPrefsStore } from "./pulseStreamPrefs";
 import { prunePulsePins, setPulseFilter, usePulseFilter } from "./pulseViewStore";
 import type { PulseStatus } from "@/api/types";
 import { pulseRowMatchesFilter } from "./pulseFilter";
@@ -55,9 +56,15 @@ export function PulseView() {
   usePulseAssistantHotkey(toggleAssistantWindow);
 
   const filtered = useMemo(() => rows.filter((r) => pulseRowMatchesFilter(r, filter)), [rows, filter]);
-  // Over `rows`, not `filtered`: "Expand active" sets a persisted default for
-  // every live card, including ones the filter currently hides.
+  // Over `rows`, not `filtered`: the toggle sets a persisted default for every
+  // live card, including ones the filter currently hides.
+  const streamPrefs = useSelector(streamPrefsStore, (s) => s);
   const hasLive = rows.some((r) => STREAM_ON_CARD.has(r.status));
+  const liveRows = rows.filter((r) => STREAM_ON_CARD.has(r.status));
+  // Every live card's effective tall value: its manual override when it has one,
+  // else the viewer's persisted default. A bulk action clears every override, so
+  // a manual toggle lasts only until the next one.
+  const allExpanded = liveRows.length > 0 && liveRows.every((r) => (streamPrefs.overrides[r.session_id] ?? streamPrefs.tall));
 
   // Per-session view state (pins, manual stream toggles) is keyed by session id.
   // pulseStore never replaces good rows with nothing, so a session missing from
@@ -182,11 +189,14 @@ export function PulseView() {
             cards on its grid, so the controls would act on nothing there. */}
         {focusedId === null && (
           <div role="group" aria-label="Live streams" className="flex items-center gap-1 shrink-0">
-            <Button size="sm" variant="ghost" disabled={!hasLive} onClick={() => setAllLiveStreamsTall(true)}>
-              Expand active
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setAllLiveStreamsTall(false)}>
-              Collapse all
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!hasLive}
+              onClick={() => setAllLiveStreamsTall(!allExpanded)}
+            >
+              {allExpanded ? "Collapse all" : "Expand active"}
+              <ChevronsUpDown className="ml-1 h-3 w-3" aria-hidden />
             </Button>
           </div>
         )}

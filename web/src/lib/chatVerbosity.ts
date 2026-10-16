@@ -16,6 +16,7 @@ export const DEFAULT_CHAT_VERBOSITY_CONFIG: ChatVerbosityConfig = {
   preset: "full",
   overrides: {
     older_thinking: "preset",
+    latest_thinking: "preset",
     tool_calls: "preset",
     tool_output: "preset",
     activity_notices: "preset",
@@ -81,6 +82,7 @@ export function normalizeChatVerbosityConfig(input?: ConfigInput | null): ChatVe
     preset: (input?.preset || "full") as ChatVerbosityPreset,
     overrides: {
       older_thinking: (overrides.older_thinking || "preset") as ChatDisplayOverride,
+      latest_thinking: (overrides.latest_thinking || "preset") as ChatDisplayOverride,
       tool_calls: (overrides.tool_calls || "preset") as ChatDisplayOverride,
       tool_output: (overrides.tool_output || "preset") as ChatDisplayOverride,
       activity_notices: (overrides.activity_notices || "preset") as ChatDisplayOverride,
@@ -99,7 +101,7 @@ function assertValidConfig(config: ChatVerbosityConfig): void {
   }
 }
 
-/** Resolve persisted intent into the renderer policy. Latest thinking is always expanded. */
+/** Resolve persisted intent into the renderer policy. Latest thinking is configurable like the others. */
 export function resolveChatDisplayPolicy(input?: ConfigInput | null): ChatDisplayPolicy {
   const config = normalizeChatVerbosityConfig(input);
   assertValidConfig(config);
@@ -128,7 +130,7 @@ export function resolveChatDisplayPolicy(input?: ConfigInput | null): ChatDispla
 
   return {
     older_thinking: resolveOverride(config.overrides.older_thinking, olderThinking),
-    latest_thinking: "expanded",
+    latest_thinking: resolveOverride(config.overrides.latest_thinking, "expanded"),
     tool_calls: resolveOverride(config.overrides.tool_calls, toolCalls),
     tool_output: resolveOverride(config.overrides.tool_output, toolOutput),
     notices: resolveOverride(config.overrides.activity_notices, notices),
@@ -150,6 +152,7 @@ export function chatPolicyRevision(policy: ChatDisplayPolicy): string {
 
 const CHAT_OVERRIDE_KEYS = new Set<keyof ChatVerbosityConfig["overrides"]>([
   "older_thinking",
+  "latest_thinking",
   "tool_calls",
   "tool_output",
   "activity_notices",

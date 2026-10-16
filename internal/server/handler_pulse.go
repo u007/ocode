@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -143,6 +144,19 @@ func (h *Handler) gatherLivePulseInputs() []PulseInput {
 		agents[id] = as
 	}
 	h.mu.Unlock()
+
+	// Pulse auto-receive: detect turn-done transitions (running -> idle) for
+	// non-Pulse sessions, so the assistant can surface them as stop indicators.
+	// Guarded by pulseMu alongside pulseStopIndicators and pulsePreviousTurnActive.
+	h.pulseMu.Lock()
+	for _, e := range entries {
+		wasActive := h.pulsePreviousTurnActive[e.SessionID]
+		if wasActive && !e.turnActive && !isPulseSession(e.SessionID) {
+			h.recordPulseStopIndicator(e.SessionID, "turn_done", "turn finished", filepath.Base(e.ProjectRoot))
+		}
+		h.pulsePreviousTurnActive[e.SessionID] = e.turnActive
+	}
+	h.pulseMu.Unlock()
 
 	out := make([]PulseInput, 0, len(entries))
 	for _, e := range entries {

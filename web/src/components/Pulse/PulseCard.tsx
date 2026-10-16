@@ -524,13 +524,16 @@ export function PulseCard({ row, compact }: { row: PulseRow; compact: boolean })
       </div>
 
       {open && (
-        // bottom-full: grows upward so it is never clipped by the bottom of the
-        // scrolling list. Absolute, so the card keeps its exact box.
+        // top-full: grows downward from the card so it never covers the card
+        // above in the grid (the overlap users see at the bottom edge). The
+        // dashboard scroll container (overflow-auto) absorbs any overflow, so
+        // the overlay extends into scrollable space below instead of floating
+        // up over a neighbour. Absolute, so the card keeps its exact box.
         <div
           role="group"
           aria-label={`Details for ${label}`}
           data-testid="pulse-overlay"
-          className="absolute bottom-full left-0 right-0 z-20 mb-1 flex flex-col gap-1.5 rounded-md border border-border bg-popover p-2 text-left shadow-lg"
+          className="absolute top-full left-0 right-0 z-20 mb-1 flex flex-col gap-1.5 rounded-md border border-border bg-popover p-2 text-left shadow-lg"
         >
           {/* Hover still owns the preview for every non-live status; a live row
               already carries its stream on the card, so the overlay shows only

@@ -119,6 +119,44 @@ describe("routeBusEnvelope → pulse forward", () => {
     );
   });
 
+  it("forwards session_started for a new session so the Pulse dashboard learns it", () => {
+    // A brand-new session has no row yet. applyPulseEvent returns null for an
+    // unknown id, so the sink must be called explicitly to arm the debounced
+    // refetch that makes the card appear.
+    const { router } = makeRouter([]);
+    routeBusEnvelope(
+      env("session_started", {
+        session_id: "ses_new",
+        data: { session_id: "ses_new", request_id: "new-abc" },
+      }),
+      router,
+    );
+    expect(mockSink).toHaveBeenCalledWith(
+      "session_started",
+      "ses_new",
+      expect.objectContaining({ request_id: "new-abc" }),
+      "",
+    );
+  });
+
+  it("forwards session_started with the originating host", () => {
+    const { router } = makeRouter([]);
+    routeBusEnvelope(
+      env("session_started", {
+        session_id: "ses_remote",
+        host: "james@example.com",
+        data: { session_id: "ses_remote" },
+      }),
+      router,
+    );
+    expect(mockSink).toHaveBeenCalledWith(
+      "session_started",
+      "ses_remote",
+      expect.objectContaining({ session_id: "ses_remote" }),
+      "james@example.com",
+    );
+  });
+
   it("forwards the originating host so Pulse can ignore sessions it cannot list", () => {
     // The dashboard's row list is served by the LOCAL /api/pulse. Without the
     // host, a remote host's session looks like an unknown one forever and every

@@ -6,12 +6,28 @@ const mockGetPrompt = vi.fn();
 const mockSetPrompt = vi.fn();
 const mockGetModel = vi.fn();
 const mockSetModel = vi.fn();
+const mockGetAutoReceive = vi.fn().mockResolvedValue({ enabled: false });
+const mockSetAutoReceive = vi.fn().mockResolvedValue({ enabled: false });
+const mockGetAutoGapMs = vi.fn().mockResolvedValue({ gap_ms: 2000 });
+const mockSetAutoGapMs = vi.fn().mockResolvedValue({ gap_ms: 2000 });
+const mockGetAutoCompact = vi.fn().mockResolvedValue({ enabled: false });
+const mockSetAutoCompact = vi.fn().mockResolvedValue({ enabled: false });
+const mockGetCompactThresholds = vi.fn().mockResolvedValue({ token_threshold: 250000, pct_threshold: 80 });
+const mockSetCompactThresholds = vi.fn().mockResolvedValue({ token_threshold: 250000, pct_threshold: 80 });
 vi.mock("../../api/client", () => ({
   api: {
     getPulseSystemPrompt: (...a: unknown[]) => mockGetPrompt(...a),
     setPulseSystemPrompt: (...a: unknown[]) => mockSetPrompt(...a),
     getPulseModel: (...a: unknown[]) => mockGetModel(...a),
     setPulseModel: (...a: unknown[]) => mockSetModel(...a),
+    getPulseAutoReceive: (...a: unknown[]) => mockGetAutoReceive(...a),
+    setPulseAutoReceive: (...a: unknown[]) => mockSetAutoReceive(...a),
+    getPulseAutoGapMs: (...a: unknown[]) => mockGetAutoGapMs(...a),
+    setPulseAutoGapMs: (...a: unknown[]) => mockSetAutoGapMs(...a),
+    getPulseAutoCompact: (...a: unknown[]) => mockGetAutoCompact(...a),
+    setPulseAutoCompact: (...a: unknown[]) => mockSetAutoCompact(...a),
+    getPulseCompactThresholds: (...a: unknown[]) => mockGetCompactThresholds(...a),
+    setPulseCompactThresholds: (...a: unknown[]) => mockSetCompactThresholds(...a),
   },
 }));
 vi.mock("../Layout/ModelDialog", () => ({
@@ -34,7 +50,7 @@ vi.mock("../Layout/ModelDialog", () => ({
 const prompt = () => screen.getByLabelText("System prompt") as HTMLTextAreaElement;
 
 beforeEach(() => {
-  for (const m of [mockGetPrompt, mockSetPrompt, mockGetModel, mockSetModel]) m.mockReset();
+  for (const m of [mockGetPrompt, mockSetPrompt, mockGetModel, mockSetModel, mockGetAutoReceive, mockSetAutoReceive, mockGetAutoGapMs, mockSetAutoGapMs, mockGetAutoCompact, mockSetAutoCompact, mockGetCompactThresholds, mockSetCompactThresholds]) m.mockReset();
   mockGetPrompt.mockResolvedValue({ prompt: "be terse", default: "BUILT-IN PROMPT" });
   mockGetModel.mockResolvedValue({ model: "" });
   mockSetPrompt.mockResolvedValue({});

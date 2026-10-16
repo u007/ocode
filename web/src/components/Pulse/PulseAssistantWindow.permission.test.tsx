@@ -18,6 +18,7 @@ vi.mock("../../api/client", async () => {
     api: {
       getPulseAssistant: vi.fn().mockResolvedValue({ session_id: "pulse_abc", model: "openai/gpt-x" }),
       setPulseModel: vi.fn(),
+      getPulseAutoReceive: vi.fn().mockResolvedValue({ enabled: false }),
       resolvePermission: (...a: unknown[]) => mockResolvePermission(...a),
       getSessionState: (...a: unknown[]) => mockGetSessionState(...a),
       listProjects: vi.fn().mockResolvedValue([]),
@@ -34,8 +35,12 @@ vi.mock("../../lib/eventBus", () => ({
 }));
 vi.mock("../Chat/ChatPanel", () => ({ default: () => <div data-testid="chat-panel" /> }));
 vi.mock("../Chat/ChatInput", () => ({ default: () => <div data-testid="chat-input" /> }));
+vi.mock("../Logs/LogPanel", () => ({ default: () => <div data-testid="log-panel" /> }));
 vi.mock("../../hooks/useTurnWatchdog", () => ({ useTurnWatchdogAll: () => {} }));
 vi.mock("../Layout/ModelDialog", () => ({ default: () => null }));
+vi.mock("../../stores/pulseStore", () => ({
+  usePulse: () => ({ counts: { needsYou: 0 } }),
+}));
 
 let dispatchRef: ReturnType<typeof useChatDispatch>;
 function Probe() {

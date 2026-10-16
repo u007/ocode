@@ -2054,3 +2054,135 @@ func TestValidBackendURLNormalizesAndPersists(t *testing.T) {
 		t.Fatalf("valid backend_url should not leak into Extra, Extra=%v", cfg.Ocode.Extra)
 	}
 }
+
+// TestSavePulseAutoReceiveRoundTrip proves SavePulseAutoReceive persists and
+// round-trips through load, defaulting to off when unset.
+func TestSavePulseAutoReceiveRoundTrip(t *testing.T) {
+	tmpHome := t.TempDir()
+	setHomeTree(t, tmpHome)
+
+	// Default: unset means off.
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if cfg.PulseAutoReceive {
+		t.Fatalf("PulseAutoReceive default = true, want false")
+	}
+
+	// Save on, reload, confirm.
+	if err := SavePulseAutoReceive(true); err != nil {
+		t.Fatalf("SavePulseAutoReceive(true): %v", err)
+	}
+	cfg, err = loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if !cfg.PulseAutoReceive {
+		t.Fatalf("PulseAutoReceive = false, want true after save")
+	}
+
+	// Save off, reload, confirm.
+	if err := SavePulseAutoReceive(false); err != nil {
+		t.Fatalf("SavePulseAutoReceive(false): %v", err)
+	}
+	cfg, err = loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if cfg.PulseAutoReceive {
+		t.Fatalf("PulseAutoReceive = true, want false after save off")
+	}
+}
+
+// TestSavePulseAutoGapMsRoundTrip proves SavePulseAutoGapMs persists and
+// round-trips through load.
+func TestSavePulseAutoGapMsRoundTrip(t *testing.T) {
+	tmpHome := t.TempDir()
+	setHomeTree(t, tmpHome)
+
+	if err := SavePulseAutoGapMs(5000); err != nil {
+		t.Fatalf("SavePulseAutoGapMs(5000): %v", err)
+	}
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if cfg.PulseAutoGapMs != 5000 {
+		t.Fatalf("PulseAutoGapMs = %d, want 5000", cfg.PulseAutoGapMs)
+	}
+}
+
+// TestSavePulseAutoCompactRoundTrip proves SavePulseAutoCompact persists and
+// round-trips through load, defaulting to off when unset.
+func TestSavePulseAutoCompactRoundTrip(t *testing.T) {
+	tmpHome := t.TempDir()
+	setHomeTree(t, tmpHome)
+
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if cfg.PulseAutoCompact {
+		t.Fatalf("PulseAutoCompact default = true, want false")
+	}
+
+	if err := SavePulseAutoCompact(true); err != nil {
+		t.Fatalf("SavePulseAutoCompact(true): %v", err)
+	}
+	cfg, err = loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if !cfg.PulseAutoCompact {
+		t.Fatalf("PulseAutoCompact = false, want true after save")
+	}
+}
+
+// TestSavePulseCompactThresholdsRoundTrip proves SavePulseCompactTokenThreshold
+// and SavePulseCompactPctThreshold persist and round-trip through load.
+func TestSavePulseCompactThresholdsRoundTrip(t *testing.T) {
+	tmpHome := t.TempDir()
+	setHomeTree(t, tmpHome)
+
+	if err := SavePulseCompactTokenThreshold(300000); err != nil {
+		t.Fatalf("SavePulseCompactTokenThreshold(300000): %v", err)
+	}
+	if err := SavePulseCompactPctThreshold(75); err != nil {
+		t.Fatalf("SavePulseCompactPctThreshold(75): %v", err)
+	}
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if cfg.PulseCompactTokenThreshold != 300000 {
+		t.Fatalf("PulseCompactTokenThreshold = %d, want 300000", cfg.PulseCompactTokenThreshold)
+	}
+	if cfg.PulseCompactPctThreshold != 75 {
+		t.Fatalf("PulseCompactPctThreshold = %d, want 75", cfg.PulseCompactPctThreshold)
+	}
+}
+
+// TestSavePulseAutoReceiveDoesNotClobberOtherKeys proves saving one Pulse
+// field does not erase another that was already persisted.
+func TestSavePulseAutoReceiveDoesNotClobberOtherKeys(t *testing.T) {
+	tmpHome := t.TempDir()
+	setHomeTree(t, tmpHome)
+
+	if err := SavePulseModel("openrouter/vendor/model:free"); err != nil {
+		t.Fatalf("SavePulseModel: %v", err)
+	}
+	if err := SavePulseAutoReceive(true); err != nil {
+		t.Fatalf("SavePulseAutoReceive: %v", err)
+	}
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if cfg.PulseModel != "openrouter/vendor/model:free" {
+		t.Fatalf("PulseModel = %q, want openrouter/vendor/model:free (clobbered?)", cfg.PulseModel)
+	}
+	if !cfg.PulseAutoReceive {
+		t.Fatalf("PulseAutoReceive = false, want true")
+	}
+}

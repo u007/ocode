@@ -1,5 +1,9 @@
 # Directory Update Log
 
+
+## 2026-10-16
+
+* **Update**: TTS speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
 ## 2026-10-15
 
 * **Creation**: Git worktrees: list, open, create, remove (web Git tab) ([concepts/git-worktrees.md](/concepts/git-worktrees.md))

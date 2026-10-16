@@ -1,5 +1,18 @@
 # TODO
 
+## Open: TTS sample voice playback follow-ups (2026-10-16)
+
+Shipped: deep completion note. `internal/tts/supervisor.go::SpeakSample` plus `POST /api/tts/sample` / `GET /api/tts/sample-audio/{id}` and `TTSForm.tsx` Play/Stop sample buttons. Validation paths (unknown engine, not-installed, unsafe voice, voice-not-in-manifest, over-long text, traversal nonce rejection) are unit-tested.
+
+Open:
+- **Live synthesis unverified.** Tests skip synthesis without an installed engine/venv. Needs a machine with piper (or kokoro/melo/kyutai) installed to confirm `sample-{id}.wav` is actually produced and served via `/api/tts/sample-audio/{id}` end to end.
+- **Play/Stop buttons unverified by automated tests.** The `TTSForm` Play/Stop interaction (shared `<audio>`, blob URL revoke on stop/unmount) is exercised only by TypeScript + manual review; no vitest covers it. Cannot add tests safely now because TTSForm.test.tsx is being edited concurrently by another session — coordinate before touching.
+- **Sample file accumulation - DONE (2026-10-16).** `SpeakSample` now reaps previous `sample-*.wav` files and serializes concurrent requests with a `sampleMu.TryLock` (returns "another sample is already being synthesised" instead of spawning a second process). Process spawns go through `synthText` (the shared supervisor path). Files no longer accumulate.
+- **Live synthesis unverified (still open).** Tests use `SynthSeam`/`AvailabilitySeam` test hooks; actual `sample-{id}.wav` creation needs a real engine. Manual check: install piper, press Play, confirm audio plays and Stop silences it.
+- **Play/Stop UI unverified (still open).** No vitest covers the Play/Stop button interaction or the audio blob flow. `TTSForm.test.tsx` is touched concurrently; coordinate before adding tests.
+- **`docs/tts-speech-playback.md` updated via the knowledge bundle.** `CHANGES.md` has an entry. No other docs needed.
+
+
 ## Open: Git worktrees follow-ups (2026-10-15)
 
 Shipped: Worktrees section in the Git tab (list, open as project, create under `.worktrees/`, remove), local projects only. Server: `internal/server/handler_git_worktrees.go`; UI: `web/src/components/Git/WorktreesSection.tsx`.

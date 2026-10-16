@@ -87,6 +87,8 @@ export interface VoiceRecorder {
   start: () => Promise<void>;
   /** Stops the recording and transcribes it. No-op unless recording. */
   stop: () => void;
+  /** Stops the recording and discards the clip: no transcription, back to idle. */
+  cancel: () => void;
   /** Starts when idle, stops when recording, does nothing while transcribing. */
   toggle: () => void;
 }
@@ -105,6 +107,11 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const mountedRef = useRef(false);
+  // Live monitoring of the mic while recording: the same MediaStream feeds
+  // MediaRecorder (for the clip) and an AudioContext destination (speakers).
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const monitoringRef = useRef(false);
   // Interval that requests live partials while recording.
   const partialTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // At most one partial request in flight across the hook.
@@ -149,6 +156,57 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     partialAllowedRef.current = false;
     setPartial("");
   }, [setPartial]);
+
+  /** Wires the mic stream to the Web Audio destination so the user hears the
+   *  microphone live while recording. Best-effort: never blocks recording. */
+  const startMonitoring = useCallback((stream: MediaStream) => {
+    if (monitoringRef.current) return;
+    const Ctx = globalThis.AudioContext ?? (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    let source: MediaStreamAudioSourceNode;
+    try {
+      source = ctx.createMediaStreamSource(stream);
+      source.connect(ctx.destination);
+      if (ctx.state === "suspended") {
+        // This runs from the record-button click, a user gesture, so resume is allowed.
+        void ctx.resume();
+      }
+    } catch {
+      try {
+        ctx.close();
+      } catch {
+        // monitoring is optional; ignore teardown failures too
+      }
+      return;
+    }
+    audioCtxRef.current = ctx;
+    sourceNodeRef.current = source;
+    monitoringRef.current = true;
+  }, []);
+
+  /** Tears down live monitoring: disconnects the source and closes the context. */
+  const stopMonitoring = useCallback(() => {
+    const source = sourceNodeRef.current;
+    if (source) {
+      try {
+        source.disconnect();
+      } catch {
+        // ignore
+      }
+      sourceNodeRef.current = null;
+    }
+    const ctx = audioCtxRef.current;
+    if (ctx) {
+      try {
+        ctx.close();
+      } catch {
+        // ignore
+      }
+      audioCtxRef.current = null;
+    }
+    monitoringRef.current = false;
+  }, []);
 
   /** Requests a transcript of everything recorded so far. Errors are silent: the final transcription still runs on stop. */
   const sendPartial = useCallback(
@@ -207,6 +265,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     report(null);
     stopPartials();
     cancelStartRef.current = false;
+    discardRef.current = false;
     setPhase("recording");
 
     let stream: MediaStream;
@@ -223,6 +282,8 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       return;
     }
     streamRef.current = stream;
+    // Hear the mic live while recording. Same stream also feeds MediaRecorder.
+    startMonitoring(stream);
 
     const mimeType = pickRecordingMimeType();
     let recorder: MediaRecorder;
@@ -230,6 +291,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     try {
       recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     } catch (err) {
+      stopMonitoring();
       releaseStream();
       setPhase("idle");
       report(describeMicError(err));
@@ -299,6 +361,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   const stop = useCallback(() => {
     if (stateRef.current !== "recording") return;
     stopPartials();
+    stopMonitoring(); // recording has ended: stop live monitoring
     const recorder = recorderRef.current;
     if (!recorder) {
       // Still waiting on the permission prompt: cancel the start.
@@ -308,7 +371,24 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     }
     setPhase("transcribing");
     if (recorder.state !== "inactive") recorder.stop();
-  }, [setPhase, stopPartials]);
+  }, [setPhase, stopPartials, stopMonitoring]);
+
+  /** Stops the recording and discards the clip: no transcription, back to idle. */
+  const cancel = useCallback(() => {
+    if (stateRef.current === "idle") return;
+    stopPartials();
+    stopMonitoring();
+    discardRef.current = true; // onstop skips transcription
+    const recorder = recorderRef.current;
+    if (recorder) {
+      if (recorder.state !== "inactive") recorder.stop();
+    } else {
+      // Still waiting on the permission prompt: cancel the start.
+      cancelStartRef.current = true;
+    }
+    setPartial("");
+    setPhase("idle");
+  }, [setPhase, stopPartials, stopMonitoring]);
 
   const toggle = useCallback(() => {
     if (stateRef.current === "idle") void start();
@@ -323,6 +403,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       discardRef.current = true;
       cancelStartRef.current = true;
       stopPartials();
+      stopMonitoring();
       const recorder = recorderRef.current;
       recorderRef.current = null;
       if (recorder && recorder.state !== "inactive") {
@@ -334,7 +415,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       }
       releaseStream();
     };
-  }, [releaseStream, stopPartials]);
+  }, [releaseStream, stopPartials, stopMonitoring]);
 
-  return { supported, state, partialText, error, start, stop, toggle };
+  return { supported, state, partialText, error, start, stop, cancel, toggle };
 }

@@ -65,6 +65,7 @@ import type {
   TTSConfig,
   TTSStatus,
   TTSPlayback,
+  TTSSampleResult,
   STTSettings,
   STTTranscribeResult,
   TTSInstallState,
@@ -1434,6 +1435,47 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ prompt }),
     }),
+  // Pulse auto-receive: when on, the assistant automatically receives stop
+  // indicators (turn done, permission ask, question ask, task complete) from
+  // other sessions. Default off.
+  getPulseAutoReceive: () =>
+    fetchJSON<{ enabled: boolean }>("/api/config/pulse-auto-receive"),
+  setPulseAutoReceive: (enabled: boolean) =>
+    fetchJSON<{ enabled: boolean }>("/api/config/pulse-auto-receive", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  // Pulse auto-gap: quiet gap (ms) after the last stop indicator before the
+  // assistant processes it. Default 2000.
+  getPulseAutoGapMs: () => fetchJSON<{ gap_ms: number }>("/api/config/pulse-auto-gap-ms"),
+  setPulseAutoGapMs: (gapMs: number) =>
+    fetchJSON<{ gap_ms: number }>("/api/config/pulse-auto-gap-ms", {
+      method: "PUT",
+      body: JSON.stringify({ gap_ms: gapMs }),
+    }),
+  // Pulse auto-compact: when on, auto-comacts the assistant's own context when
+  // it hits the token or pct threshold. Default off.
+  getPulseAutoCompact: () =>
+    fetchJSON<{ enabled: boolean }>("/api/config/pulse-auto-compact"),
+  setPulseAutoCompact: (enabled: boolean) =>
+    fetchJSON<{ enabled: boolean }>("/api/config/pulse-auto-compact", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  // Pulse compact thresholds: token_threshold (default 250000) and pct_threshold
+  // (default 80). Auto-compaction fires when either is reached first.
+  getPulseCompactThresholds: () =>
+    fetchJSON<{ token_threshold: number; pct_threshold: number }>(
+      "/api/config/pulse-compact-thresholds",
+    ),
+  setPulseCompactThresholds: (tokenThreshold: number, pctThreshold: number) =>
+    fetchJSON<{ token_threshold: number; pct_threshold: number }>(
+      "/api/config/pulse-compact-thresholds",
+      {
+        method: "PUT",
+        body: JSON.stringify({ token_threshold: tokenThreshold, pct_threshold: pctThreshold }),
+      },
+    ),
 
   getPermissionModel: (host?: string) =>
     fetchJSON<{ model: string; enabled: boolean }>(
@@ -1736,6 +1778,22 @@ export const api = {
       { headers: authHeaders() },
     );
     if (!res.ok) throw new Error(`audio fetch failed (${res.status})`);
+    return res.blob();
+  },
+  /** Synthesises a one-off sample for an installed local engine and returns
+   *  the audio id to fetch from /api/tts/sample-audio. Does not change the
+   *  active TTS config or interrupt current playback. */
+  ttsSample: (engine: string, voice?: string, text?: string) =>
+    fetchJSON<TTSSampleResult>("/api/tts/sample", {
+      method: "POST",
+      body: JSON.stringify({ engine, voice, text }),
+    }),
+  ttsSampleAudioBlob: async (audioId: string): Promise<Blob> => {
+    const res = await fetch(
+      apiPath(`/api/tts/sample-audio/${encodeURIComponent(audioId)}`),
+      { headers: authHeaders() },
+    );
+    if (!res.ok) throw new Error(`sample audio fetch failed (${res.status})`);
     return res.blob();
   },
   getTTSConfig: () => fetchJSON<TTSConfig>("/api/config/ocode/tts"),

@@ -165,6 +165,20 @@ type Handler struct {
 	// that small file read/write, never across agent construction.
 	pulseMu sync.Mutex
 
+	// pulseStopIndicators holds recent stop indicators (turn-done, terminal-stop,
+	// permission-ask, question-ask) for the Pulse assistant's auto-receive
+	// feature. Appended to by runTurn and the terminal polling path; read by
+	// pulseBoardSnapshot when pulse_auto_receive is on. Guarded by pulseMu.
+	pulseStopIndicators []pulseStopIndicator
+
+	// pulsePreviousTurnActive records the last-known turnActive state per
+	// session, used to detect turn-done transitions. Guarded by pulseMu.
+	pulsePreviousTurnActive map[string]bool
+
+	// pulsePreviousTerminalRunning records the last-known running state per
+	// terminal, used to detect terminal-stop transitions. Guarded by pulseMu.
+	pulsePreviousTerminalRunning map[string]bool
+
 	// termTabsStore persists which terminal tabs are open, so a terminal
 	// started in one client is visible in another (the session-tab store above
 	// does the same for session tabs). Nil when the data dir could not be
@@ -609,6 +623,8 @@ func NewHandler() *Handler {
 		pendingCancel:     make(map[string]bool),
 		turnInFlight:      make(map[string]int),
 		closePending:      make(map[string]bool),
+		pulsePreviousTurnActive:      make(map[string]bool),
+		pulsePreviousTerminalRunning: make(map[string]bool),
 	}
 
 	// The session registry is the single authority for session → project root
@@ -1270,7 +1286,7 @@ func (h *Handler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	refs, total, err := session.ListRefsPaginated(limit, offset)
+	refs, total, err := session.ListRefsPaginatedForDir(h.workDir, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
 		return

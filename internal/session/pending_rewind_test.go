@@ -647,7 +647,7 @@ func seedPendingRewindSession(t *testing.T, messages []agent.Message) (string, s
 
 func isolatedPendingRewindProject(t *testing.T) (string, string) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHomeTree(t, t.TempDir())
 	root := t.TempDir()
 	dir, err := GetStorageDirForPath(root)
 	if err != nil {

@@ -259,9 +259,14 @@ describe("PulseView live stream toolbar", () => {
     overrides = { rows: [row({ session_id: "ses_run", status: "running" }), row({ session_id: "ses_idle" })] };
     mount();
 
+    // Starts collapsed: the label says "Expand active".
+    expect(screen.getByRole("button", { name: "Expand active" })).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "Expand active" }));
 
     expect(window.localStorage.getItem(KEY)).toBe("1");
+    // The toggle flips its label after the bulk action.
+    expect(screen.getByRole("button", { name: "Collapse all" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -272,21 +277,22 @@ describe("PulseView live stream toolbar", () => {
     mount();
     expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "true");
 
+    // Starts expanded: the label says "Collapse all".
     fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
 
     expect(window.localStorage.getItem(KEY)).toBe("0");
+    expect(screen.getByRole("button", { name: "Expand active" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Expand stream" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("disables Expand active when no live row is listed, since it would change nothing visible", () => {
+  it("disables the toggle when no live row is listed, since it would change nothing visible", () => {
     overrides = { rows: [row({ session_id: "ses_idle", status: "idle" })] };
     mount();
 
     expect(screen.getByRole("button", { name: "Expand active" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Collapse all" })).toBeEnabled();
   });
 
-  it("keeps Expand active enabled when the filter hides the only live row, since the default it sets is global", () => {
+  it("keeps the toggle enabled when the filter hides the only live row, since the default it sets is global", () => {
     overrides = {
       rows: [
         row({ session_id: "ses_run", status: "running", project_path: "/proj/alpha" }),
@@ -298,6 +304,19 @@ describe("PulseView live stream toolbar", () => {
     expect(screen.queryByRole("button", { name: "Expand stream" })).not.toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "Expand active" })).toBeEnabled();
+  });
+
+  it("toggles back and forth across clicks", () => {
+    overrides = { rows: [row({ session_id: "ses_run", status: "running" })] };
+    mount();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand active" }));
+    expect(window.localStorage.getItem(KEY)).toBe("1");
+    expect(screen.getByRole("button", { name: "Collapse all" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(window.localStorage.getItem(KEY)).toBe("0");
+    expect(screen.getByRole("button", { name: "Expand active" })).toBeInTheDocument();
   });
 
   it("drops a pin and a manual stream toggle once their session leaves the board", () => {

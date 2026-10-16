@@ -11,8 +11,8 @@ okf_version: 0.1
 - [Plugin System](plugins.md) - Overview of ocode's plugin system: plugin.json manifest format, custom tools, slash commands, MCP server registration, and plugin lifecycle management.
 - [Scheduled Jobs / Cron Dispatch](scheduled-jobs.md) - Persistent, disk-backed cron engine + headless agent dispatcher for ocode, modeled on nanobot's CronService and Claude Code's CronCreate/CronList/CronDelete semantics. Also covers the reminders/tasks engine behind the Cron tab's Reminders and Tasks sub-views.
 - [Session Title Generation & UI Update Root Cause Analysis](title-generation-analysis.md) - Root cause analysis of session title delay/mismatch between generation and UI rendering, covering regex anchoring, Anthropic thinking blocks, and rendering cycle timing.
-- [Speech playback](tts-speech-playback.md) - Speech playback — user-facing doc covering engine availability (Browser Native, Piper, Paradee, MeloTTS, Kokoro), installation, playback controls, DOM-based rendered-text extraction, and the fail-open spoken-summary pipeline (turn-active skip, cancellable summariser, unlocked config write). Amended 2026-09-29: short plain-prose messages skip the summariser LLM and are spoken verbatim; long messages open with a one-line recap (recap threshold above the short-text skip gate); the prompt version is salted into the summary cache key. Amended 2026-09-30: added the MeloTTS local engine (id `melo`, darwin/arm64 only, card order Piper → MeloTTS → Kokoro), its per-host Python range, install specifics (unpacked source, shared offline import check) and child-process environment (set by ocode, no .env entry).
 - [Terminal History Persistence and Restore](terminal-history-persistence-and-restore.md) - Accurate guide to ocode's terminal history persistence and restore mechanism, aligning with source implementation
+- [TTS speech playback](tts-speech-playback.md) - How TTS speech playback works in ocode — engines, the active playback state, and one-off sample synthesis for installed engines.
 - [Using ocode with Zed](zed.md) - Setup guide and feature matrix for integrating ocode with the Zed editor via ACP (Agent Client Protocol).
 - [Web/Desktop UI Parity — Current Status](web-desktop-parity-todo.md) - Current web/desktop vs TUI parity status — achieved items and remaining gaps, including the Cron tab's Jobs/Reminders/Tasks sub-views and dated correction notes for stale plans.
 - [Zed-compatible ACP Mode Specification](acp-zed-spec.md) - Approved architecture spec for implementing 'ocode acp' using the Agent Client Protocol, enabling ocode as a Zed editor agent.
@@ -47,10 +47,10 @@ okf_version: 0.1
 - [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md) - TypeSafe/Jev relevance judge for doc_search results — filters out-of-scope knowledge docs before get_top body inlining.
 - [Environment Prompt](concepts/environment-prompt.md) - The env block the LLM receives at session start via internal/agent/prompt.go, including the extra Project host line for remote (SSH/WSL) projects and why there is no git branch line.
 - [File search result ordering: shortest path first](concepts/file-search-shortest-path-ordering.md) - How file-name search results are ordered: relevance first, then shortest path as tiebreak, with shared Go/TS helpers and explicit carve-outs for content search.
-- [Git conflicts and halted-operation recovery (web Git tab)](concepts/git-conflicts-and-operations.md) - Shipped server behavior for conflicted files and halted git operations (phases 01-05), plus block-by-block resolution of one file (local only, §11): shared transport-neutral state parser/probe, ours/theirs stage semantics and the rebase relabel rule, per-file resolve + operation action matrix, HTTP status-code contract, literal-pathspec + editor suppression, 60s operation timeout, remote SSH/WSL parity, the shipped Git-tab UI (phase 06) and badge sweep (phase 07), and the completed phase 07 consumer sweep.
+- [Git conflicts and halted-operation recovery (web Git tab)](concepts/git-conflicts-and-operations.md) - Shipped server behavior for conflicted files and halted git operations (phases 01-05): shared transport-neutral state parser/probe, ours/theirs stage semantics and the rebase relabel rule, per-file resolve + operation action matrix, HTTP status-code contract, literal-pathspec + editor suppression, 60s operation timeout, remote SSH/WSL parity, the shipped Git-tab UI (phase 06) and badge sweep (phase 07), the completed phase 07 consumer sweep, and block-by-block resolution of a single file (local projects only, fingerprint-guarded).
 - [Git stash UI: list, per-file restore, delete](concepts/git-stash-ui.md) - The Git tab's stash surface, per-file/multi-file stash, multi-select, and the server endpoints behind them.
-- [Git worktrees: list, open, create, remove (web Git tab)](concepts/git-worktrees.md) - The Git tab's Worktrees section, the /api/git/worktree endpoints, and the rules that keep create and remove from touching the wrong checkout.
-- [Goal Condition Loop (/goal)](concepts/goal-condition-loop.md) - The /goal session condition: a judge checks after every turn whether it is met, impossible, or should pause; verdict table, pause/resume rules, sticky 50-turn cap, persisted goal key, session goal endpoints, and how it differs from /orchestrate.
+- [Git worktrees: list, open, create, remove (web Git tab)](concepts/git-worktrees.md) - The Git tab's Worktrees section, the three /api/git/worktree endpoints behind it, and the safety rules that keep create and remove from touching the wrong checkout.
+- [Goal Condition Loop (/goal)](concepts/goal-condition-loop.md) - The /goal session condition: a judge checks after every turn whether the condition is met, impossible, or should pause the goal. Covers command syntax, the per-turn evaluation order, the verdict table, pause and resume rules, the sticky 50-turn cap, the persisted goal key, the session goal endpoints, and how it differs from /orchestrate.
 - [Host and project scoping for web session/project reads](concepts/web-session-host-scoping.md) - Every session/project-scoped web read must carry host and project path; command context, resolved surfaces, and the threading rule
 - [In-batch Task DAG (id / depends_on)](concepts/task-dag.md) - Wave scheduler for parallel task batches that declare id/depends_on: validation, scheduling, dependency output injection, failure and cancellation semantics, group-bus interaction and scope.
 - [Inbound Content Guardrail](concepts/inbound-content-guardrail.md) - TypeSafe System One (Jev) inbound-content guardrail as-built: the mirror of the egress guard, sitting between tool execution and the model's context. Covers the verbatim-ingestion hole (webfetch/websearch/MCP/bash-network), the remote-content-only scope with the a.mcpTools discriminator and the delegated isNetworkSubprocessBinary bash predicate, the load-bearing redact→vet→truncate placement at all five scanToolResult call sites (and the TruncateToolResult read-back bypass it closes), the sentinel-truncation fix (an unresolved ask is control flow, not tool output — it is returned unchanged at any size so its JSON payload stays parseable), the 6000/4/32 chunking with the fail-SAFE cap and the corrected truncated-flag boundary (exactly-cap-sized content is judged in full; the capped path reports ScannedChunks=0), the full fail-open contract table plus the Failure string that reports every non-clearing path instead of failing silently, the deliberately-0.6 confidence floor (Jev's distribution-shape confidence, the false-positive "learned click-through" failure mode, the explicit clean list for docs/source/logs/snippets), the 9-entry content concern catalog separate from networkGuardConcerns, per-chunk ContentGuardScore rows (verdict/concern confidences and the probability distribution) surfaced in both dialogs, the PermissionScopeContent escalation carried by the existing PERMISSION_ASK sentinel with both hosts' scrollable renderers, approval that does NOT re-execute (and now goes through TruncateToolResult in BOTH hosts after the dialog, never before), the no-Step guard when an approved re-execution raises a fresh content ask (parsePermissionAsk, not the bare prefix; explicit permission frame on the reused tool-call id), one-shot enforcement (409 server-side), taxonomy-hiding denial, coverage limits (local files, md_discovery, injectDirMDTail, LSP/hook/plugin, browser/CDP, github_*/repo_clone, images), the test suites including truncate_sentinel_test.go and handler_content_guard_reask_test.go, and the 15/15 mutation harness.
@@ -63,7 +63,8 @@ okf_version: 0.1
 - [Persistent Todo Plan (todowrite / todoread / todo_update)](concepts/persistent-todo-plan.md) - Per-session durable todo plan file format, revision-token concurrency, destructive-replacement guard, cache-safe user-role re-anchor injection, and resume semantics.
 - [Prompt Cache Stability](concepts/prompt-cache-stability.md) - Anthropic prompt-cache prefix order and the rules for any change that touches tools or the base prompt: deterministic tool order, sticky sets, role-determines-caching, tail injection by volatility, breakpoints.
 - [Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)](concepts/pulse-assistant.md) - Server side of the Pulse assistant: one global chat session (pulse_ id, dedicated root, state.json) that reads every local session and terminal and, through permission-gated write tools, sends messages, runs allowlisted slash commands and resolves asks. Endpoints (assistant, pulse-model, pulse-system-prompt), config keys, model slot, system-prompt override and per-turn board plus memory injection (user-role, never system-role), the twelve tools with caps, the permission design, assistant-owned memory files, recap deadline, exclusion from the board, and known limits.
-- [Pulse — cross-project live-sessions dashboard](concepts/pulse-dashboard.md) - Assistant drawer (docked chat, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.
+- [Pulse — cross-project live-sessions dashboard](concepts/pulse-dashboard.md) - Assistant window (floating at app level: drag, minimise, maximise, narrow sheet, shared prefs store, localStorage prefs, SSE tracking without a tab, model chooser). Focus mode (master-detail pane with inline ask resolution and reply). Remote fan-out (client-side per-host merge of GET /api/pulse through the /api/remote/{host} proxy, relayed-host set, per-host cursors, non-fatal hostErrors, (session_id, host) row identity, ~-suffix project-path reconcile). Concept doc for the Pulse cross-project live-sessions dashboard: GET /api/pulse contract, status/task derivation, scope=all cost model, todo_updated SSE, client store, card filter, hover-overlay contract, on-card activity feed (STREAM_ON_CARD, PulseStream wrap modes, tool entries, scrollable stream region with stick-to-bottom, STREAM_MAX_H height budget, PULSE_TAIL_ENTRIES, superseded min-h-0 gotcha), 2-column grid, jump sequence, entry points (no client router), desktop wiring, and known limits.
+- [Remote htrcli provisioning](concepts/remote-htrcli-provisioning.md) - How htrcli reaches a remote ssh/WSL host: the desktop bundles one htrcli per remote platform beside ocode, connect uploads it to ~/.ocode/bin/<ver>/htrcli using the ocode install path, identity is the binary SHA-256 and the reported version comes from `htrcli --version`, and the remote server puts that directory on PATH.
 - [Remote MCP OAuth Compatibility](concepts/remote-mcp-oauth-compat.md) - Implemented remote MCP OAuth compatibility: dual-schema mcp-auth.json reads with merge-safe writes, URL-bound token attachment, RFC 9728/8414 discovery refresh with a single retry, status-before-decode HTTP errors, CLI list status fix; per-chat toggle/cache semantics unchanged.
 - [Remote Persistent Sessions and Terminals](concepts/remote-persistent-sessions-terminals.md) - Architecture of remote persistent sessions and terminals — routing, websocket auth, detach/reattach lifecycle, the live (open∪running) sidebar chat inventory and tab reveal, and wake reconnect.
 - [Sandbox Permission Mode](concepts/sandbox-permission-mode.md) - Updated sandbox permission mode concept doc with read-vs-write sensitive-path split, new predicate names, and code references
@@ -75,7 +76,7 @@ okf_version: 0.1
 - [SQLite Browser / DB IDE (preview pane)](concepts/sqlite-browser.md) - Design decisions and invariants for the web/desktop SQLite browser: server-side modernc.org/sqlite engine, containment and read-only allowlist, rowid row identity, BLOB prefix vs full-byte handling, pre-write snapshots, and grid/IDE behaviors that must not regress. Fuller implementation checklist in skills/ocode-web/SKILL.md item 64.
 - [Sub-agent Transcripts: OnSubAgentMessage and Child Sessions](concepts/subagent-transcripts-child-sessions.md) - Why dispatched child messages never reach the parent's OnMessage/OnDelta and how each run is persisted under its own child session.
 - [Task Output Contracts (expected_output)](concepts/task-output-contracts.md) - How a task dispatch's optional expected_output contract is resolved, verified by a small-model check, and retried once in place; includes the CheckFailed-versus-not-satisfied distinction.
-- [TUI User Interaction: Slash Command Queuing](concepts/tui-slash-command-queuing.md) - How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-07: web/desktop /btw no longer records the aside into the conversation — both surfaces now run the same independent side query and neither writes the transcript.
+- [TUI User Interaction: Slash Command Queuing](concepts/tui-slash-command-queuing.md) - How slash commands entered during streaming or compaction are queued, which commands are instant, and which are queued by design. Amended 2026-10-14: /goal status and clear are instant on the TUI while /goal <condition> queues; /orchestrate is instant and rewritten after the queue decision. Amended 2026-10-07: web/desktop /btw no longer records the aside into the conversation — both surfaces now run the same independent side query and neither writes the transcript.
 - [User-Message Jump (Alt+↑ / Alt+↓)](concepts/user-message-jump.md) - Alt+↑/Alt+↓ jump between the user's own messages in a chat transcript (TUI + web), with msg N/M readout; distinct from composer input history and the find bar.
 - [Web Ask Dialog LLM Context Preview](concepts/web-ask-dialog-llm-context.md) - Permission/question ask dialogs now show the LLM's last message and thinking for user context
 - [Web Chat Composer Input History (↑/↓ Navigation)](concepts/web-chat-input-history.md) - Per-tab ↑/↓ history navigation in the web/desktop chat composer, parity with the TUI's Up/Down : Navigate input history. Local per-tab list, append-on-submit, caret-gated walk, queue precedence, rekey/clear lifecycle.
@@ -90,7 +91,6 @@ okf_version: 0.1
 # gotchas
 
 - ["Add to .gitignore" — toplevel targeting, C-quoting, and append-not-truncate](gotchas/git-ignore-toplevel-and-quoting.md) - Gotchas behind the web/desktop Git tab's right-click "Add to .gitignore": entries MUST resolve against the repo toplevel (git status porcelain paths are toplevel-relative, so a nested ?project= subdir double-prefixes), C-quoted porcelain names must be decoded before pattern-building, patterns are anchored/escaped, and the file is appended to (O_APPEND local / read-modify-write remote) rather than rewritten. Also records the latent remoteReadFile MISSING-sentinel bug fixed in the same change.
-- [Git tab stage failed on non-ASCII filenames — C-quoted names from non-`-z` listings](gotchas/git-status-c-quoted-paths.md) - The web/desktop Git tab could not stage files with non-ASCII names, locally or over SSH/WSL: listings without `-z` returned git's C-quoted form, and remote command args were joined unquoted so a space split the name. Listings must use `-z` or decode; every spec that becomes a remote argument must be shell-quoted.
 - ["git commit failed: exit status 1" with no reason (git explains on stdout, not stderr)](gotchas/git-commit-opaque-exit-status.md) - git commit writes its reason on stdout; capturing only stderr hides the explanation
 - [A derived title/label must be bounded before it is persisted or rendered](gotchas/derived-title-label-must-be-bounded.md) - A session title auto-derived from a multi-megabyte first user message was stored verbatim, poisoning every metadata endpoint and the shared tabs.json, and the raw label forced a full-string browser layout. Rule and fix pattern: cap on write AND on read, and bound the truncation work itself.
 - [A failed git probe is not the same answer as "not a repository" - rev-parse exit 128 hides git-missing and safe.directory faults](gotchas/git-probe-failure-is-not-a-non-repo.md) - Gotcha: git rev-parse exits 128 both for a plain non-repo and for a real fault (git missing from PATH, safe.directory / dubious-ownership refusal, unreadable .git), so gitStatusForDir classified on the exit code alone and a server with no git on PATH reported every project as a plain directory with nothing logged. The decision now rests on stderr text, which forces two things: pin LC_ALL=C, and classify on the RAW cmd.Output() error before runRaw wraps it with fmt.Errorf and discards the *exec.ExitError and with it Stderr.
@@ -139,6 +139,7 @@ okf_version: 0.1
 - [Git action errors "come out then disappear by themselves" — TUI truncation, sticky status, and background-refresh error clearing](gotchas/git-action-errors-disappear.md) - Root causes of git push errors vanishing instantly: TUI status bar appended the message after a ~250-col hint line so width-truncation deleted it; status messages auto-cleared; gitRunInDir/cmdNetworkOp discarded stderr; and the web GitPanel poll (10s) plus git_status events cleared the error with setError(null). Includes the sticky-error / timeout-success contract.
 - [Git ext:: Transport Auto-Permission Bypass](gotchas/git-ext-transport-auto-allow-bypass.md) - Critical security gotcha: transparent stripping of git -c config overrides in IsHarmfulBashCommand allows ext:: transport to bypass auto-permission allowlist, enabling arbitrary shell command execution via read-only git subcommands like ls-remote.
 - [Git index.lock contention in ocode git subprocesses](gotchas/git-index-lock-contention.md) - ocode git subprocesses clash with user git commands over .git/index.lock, causing stage failures and HTTP 500s
+- [Git tab "git add failed: pathspec '"…"' did not match" — C-quoted names from non-`-z` listings](gotchas/git-status-c-quoted-paths.md) - The web/desktop Git tab could not stage files whose names contain non-ASCII bytes (an em dash, an accented letter), locally or over SSH/WSL. Listings were read without -z, so git C-quoted the name and the quoted form was passed back to git add; remote command args were also joined unquoted, so a space split the name. Every listing that feeds a path back into git must use -z or decode, and every spec that becomes a command argument must be shell-quoted.
 - [Headless Chrome <select> Dropdown Invisible and Unreachable via CDP](gotchas/chrome-select-popup-invisible-headless.md) - Gotcha: in the embedded Chrome tab, clicking a <select> or pressing ArrowDown appeared to do nothing. Headless Chrome draws the native select popup as a separate OS widget that the screencast never captures and page-session Input.dispatchKeyEvent never reaches.
 - [Journal DB Connection Pool Leak](gotchas/journal-db-connection-pool-leak.md) - Architectural gotcha: journal.go caches *sql.DB connection pools in a module-global journalCache but never closes them, causing a slow connection-pool leak per distinct project dir in long-running processes.
 - [Linux Sandbox Lockout: Confiner Shell Path, /dev/null, and Binary Dispatch](gotchas/linux-sandbox-lockout-confiner-shell-devnull-dispatch.md) - Gotcha: four independent Landlock bugs caused total sandbox lockout on Linux — bare shell name execve, /dev/null not writable, desktop binary missing dispatch, and test binary recursion trap
@@ -163,7 +164,7 @@ okf_version: 0.1
 - [Plugin Auto-Permission — Arbitrary Execution Risk](gotchas/plugin-auto-permission-security.md) - Updated gotcha: blanket OS temp auto-permission is now a deliberate v1.8.0 policy, not an unresolved regression. Historical v1.5.0 tightening preserved.
 - [Plugin Install Rollback Bug](gotchas/plugin-install-rollback-bug.md) - Security gotcha: failed plugin installs leave stale directories and orphaned MCP registrations due to incorrect path handling in deferred cleanup.
 - [Plugin Removal — Root Directory Deletion Risk](gotchas/plugin-removal-root-deletion.md) - Security gotcha: removal validation must reject deletion of an entire approved plugin root directory, not just validate child paths.
-- [Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor](gotchas/port-forwards-url-composition-and-supervisor-restart.md) - Three defects broke the Port forwards panel: a URL helper returned a query-terminated string that callers appended path segments onto (the port landed inside the project param); the process supervisor retained terminal records, blocking stable-ID restart; and — added 2026-09-28 — a dead `ssh -N -L` child stayed reported live forever because nobody performed its Wait, so Disable→Enable could not revive it. Documents the forwardProcess reaper + SetOnExit hook, the portMapWatchdog restart policy (15s→60s exponential backoff, 30s settle window, give-up after 8 failures, event-driven wake + 10s safety tick), and the deliberate limitation that "live" only means the ssh child is running, not that the service behind the forward answers. Includes the test blind spot where widget API mocks can never catch malformed URLs. Added 2026-09-30: the first list request and server/desktop boot no longer block on opening persisted forwards (background, panic-safe `remote.RunAsync`), and the Ports capability probe `isPortMapsAvailable` fails closed — a failed probe hides the button instead of rendering a broken one.
+- [Port forwards Disable/Enable: URL composed past query, supervisor retained-terminal collision, and dead-forward liveness/restart monitor](gotchas/port-forwards-url-composition-and-supervisor-restart.md) - Three defects broke the Port forwards panel: a URL helper returned a query-terminated string that callers appended path segments onto (the port landed inside the project param); the process supervisor retained terminal records, blocking stable-ID restart; and — added 2026-09-28 — a dead `ssh -N -L` child stayed reported live forever because nobody performed its Wait, so Disable→Enable could not revive it. Documents the forwardProcess reaper + SetOnExit hook, the portMapWatchdog restart policy (15s→60s exponential backoff, 30s settle window, give-up after 8 failures, event-driven wake + 10s safety tick), and the deliberate limitation that "live" only means the ssh child is running, not that the service behind the forward answers. Includes the test blind spot where widget API mocks can never catch malformed URLs. Added 2026-09-30: the first list request and server/desktop boot no longer block on opening persisted forwards (background, panic-safe `remote.RunAsync`), and the Ports capability probe `isPortMapsAvailable` fails closed — a failed probe hides the button instead of rendering a broken one. Added 2026-10-09: reverse (`-R`) forwards — the `Reverse` direction field, loopback-pinned argv, readiness as an estimate, a `WaitDelay` on the ssh stderr pipe, and a single exit claim (`forwardProcess.phase`) so the monitor hook fires only for exits after a successful open, and an exit is reported once.
 - [Profile switch does not affect an already-open chat session (window-id divergence)](gotchas/profile-switch-window-id-divergence.md) - Selecting a profile in the ProfileSwitcher did not reflect on an already-open chat session — the session kept using base credentials. Root cause: the window id was re-derived independently per API call after SPA navigation stripped the URL param, so the pill targeted `main` while chat requests minted a fresh random window id the server had no profile bound to.
 - [Project scoping is visibility, not mounting — React key remounts](gotchas/project-scope-is-mounting-not-visibility.md) - "Project switching used to reset an open PDF/Office preview because App filtered editor panes by visibility (unmounting them) and PreviewHost was keyed on the active tab id. Fix: keep panes mounted and hide with CSS; persist per-file viewer state across remounts; pane shell state is now per-session (side:chat:<id> / side:term:<id>, v2)."
 - [Project/Endpoint Isolation — one project must never halt another](gotchas/project-endpoint-isolation.md) - Gotcha: one project endpoint must never halt another — Handler.mu map-only invariant, per-item deadlines in shared loops, and the git-status emitter isolation fix.
@@ -172,7 +173,7 @@ okf_version: 0.1
 - [Radix Select Empty String Sentinel](gotchas/radix-select-empty-string-sentinel.md) - Radix Select rejects empty strings as item values; use a sentinel value instead
 - [React 19 upgrade — act() timing in tests and the skipLibCheck dependency](gotchas/react-19-upgrade-test-timing-and-typings.md) - React 19's async act() can yield to macrotasks, so tests that race an async effect or jsdom's rAF clock go flaky; dnd-kit 6 / monaco-react typings still need skipLibCheck
 - [Remote connection identity is user+host+port, never Target.String() - port-blind cache keys, the per-connection exec-slot pool, and the 6-of-8 foreground reserve](gotchas/remote-connection-identity-includes-port.md) - Gotcha: remote.Target.String() omits the SSH port, so every cache keyed on it collapses distinct connections onto one entry - the ssh ControlPath hash (a command aimed at port 2222 can execute on port 22 multiplexed master), the exec-slot pool, and the still-unfixed host registry. The pool now keys on user+host+port and reserves 6 of its 8 slots for short-lived foreground work so a host full of long remote shell commands cannot starve the 10s git_status poll; long commands are refused at the sub-cap rather than queued, and the refusal message reaches the client verbatim.
-- [Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract)](gotchas/remote-git-shell-quoting.md) - Free-form git messages passed to remoteGitCommand must be shell-quoted by the caller; pathspecs from remoteSafeSpec must not be.
+- [Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract)](gotchas/remote-git-shell-quoting.md) - Free-form git messages and git pathspecs passed to remoteGitCommand must be shell-quoted by the caller; remote lookups against path sets keep the raw spec.
 - [Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary](gotchas/remote-project-path-trust-boundary.md) - Gotcha: remote project paths must not enter the local filesystem trust boundary — now marked Fixed 2026-09-28 with verified anchors.
 - [Remote session listing 404s for tilde-keyed projects](gotchas/remote-session-list-tilde-404.md) - Remote session listing 404'd for every tilde-keyed project: desktop registers ~/path verbatim, host registry holds the expanded path, exact-match gate in HandleListProjectSessions 404'd; fixed via resolveRegisteredProjectRoot (host-side binary).
 - [Remote SSH chat ignored the desktop active profile — proxy silent on window→profile mapping](gotchas/remote-ssh-chat-profile-not-applied.md) - A desktop profile with a custom key (e.g. opencode-go) applied to local chats but ignored on remote SSH projects — the remote kept using the base key despite the profile's key being synced to the host.
@@ -200,11 +201,11 @@ okf_version: 0.1
 - [Terminal find bar stuck on "No matches"](gotchas/terminal-find-stuck-no-matches.md) - SearchAddon find() throws because allowProposedApi was unset on the xterm Terminal.
 - [TTS License Acceptance Must Validate the Exact License Text Hash](gotchas/tts-license-acceptance-hash-validation.md) - TTS license acceptance must validate engine and exact license text/hash instead of trusting client-supplied or synthetic metadata.
 - [TUI copy over SSH never reaches the local clipboard — route every copy through OSC 52 (`copyToClipboard`)](gotchas/tui-clipboard-remote-ssh-osc52.md) - A TUI that copies via a local clipboard utility (pbcopy/xclip/xsel/wl-copy) silently fails on a remote SSH host; route every TUI copy through copyToClipboard → tea.SetClipboard (OSC 52) with the local utility as fallback.
-- [Web terminal OSC 52 copy refused — Claude Code fullscreen on a remote host never reached the clipboard](gotchas/web-terminal-osc52-copy-remote-claude-code.md) - A program's OSC 52 copy arrives over the websocket outside any user gesture; gate it on recent input in that terminal and write through the desktop shell's native clipboard.
 - [TUI Input Queueing Behind a ! Shell Command — Gates That Only Knew About Streaming](gotchas/tui-input-queueing-behind-shell-command.md) - Input-queue gates only checked m.streaming, so text typed during a ! shell command fell into the 1.5s debounce and fired at the LLM while the shell ran; the queue also never drained on shellFinishedMsg. Four fixes (including drainReplacementQueueIfReady) + shellInFlight() helper + an invariant stated as a named-gate checklist.
 - [TUI Leaves Mouse Tracking On After Silent Exit — Diagnose via tui-crash.log](gotchas/tui-mouse-garbage-after-idle-crash-log.md) - After long idle with two TUI instances, the shell prompt appeared under the still-visible frame and every mouse move printed "35;14;1M" garbage. No panic, no zsh job message, no resume summary. Root cause unconfirmed; fd 2 is now mirrored to ~/.local/share/ocode/logs/tui-crash.log with tty job-control state so the next occurrence self-reports.
 - [TUI Selection Context Lost on Double Preparation](gotchas/tui-selection-context-lost-on-double-preparation.md) - Confirmed regression: Agent.Step re-prepares TUI-prepared messages with an empty selection and removes the existing [ocode:selection] context.
 - [TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions](gotchas/tui-skipllm-is-not-a-render-gate.md) - Gotcha: renderTranscript in internal/tui/model.go used skipLLM as a "should this render?" predicate, hiding assistant output (fake-agent replies, cron deliveries, LLM errors) on fresh sessions where every message was transient or a user echo. Fix: gate on transient + isCommandHistoryMessage only; skipLLM must never drive rendering.
+- [Two Terminal Emulators Render The Pulse Screen And Disagree](gotchas/pulse-screen-emulator-parity.md) - The Pulse dashboard card replays a terminal log through @xterm/headless; the terminal_screen tool replays it through charmbracelet/x/vt. A 22-case parity run found three disagreements. Two are x/vt bugs and one is a window-start rule that differs between the two paths. Records the decision to keep the card on xterm, the fixes that followed, and the one open gap.
 - [Version-Changelog Mismatch](gotchas/version-changelog-mismatch.md) - Version mismatch between version.go (0.8.83) and CHANGES.md resolved — CHANGES.md [Unreleased] now includes –– **Version Bump** — 0.8.82 → 0.8.83 entry; `go test ./internal/version/` passes as of this commit. Status updated to resolved-as-of-this-commit.
 - [Web "All sessions" dialog slow to open (render bottleneck, child filtering + pagination)](gotchas/web-all-sessions-dialog-slow.md) - Get-rid of All-sessions dialog 0.73s popup: render-of-6650-rows root cause, child-session filter + 50/page client window, measured numbers, legacy-scan follow-up.
 - [Web ask dialogs: 202 + background continuation (broadcast *_resolved before Step)](gotchas/web-ask-dialog-resolved-before-continuation.md) - Ask resolve endpoints now return 202 and run the agent continuation on a background goroutine via dispatchAskContinuation (lock-ownership handoff + dispatchTurn shutdown parity); web client echoes optimistically and re-hydrates pending_asks on retryable failure; historical broadcast-before-Step note retained.
@@ -220,6 +221,9 @@ okf_version: 0.1
 # okf
 
 - [okf/_schema/scorecard.template.md](okf/_schema/scorecard.template.md)
+- [okf/conduct/scores/cat-jam-free.iter1.with-skill.md](okf/conduct/scores/cat-jam-free.iter1.with-skill.md)
+- [okf/conduct/scores/cat-jam-free.md](okf/conduct/scores/cat-jam-free.md)
+- [okf/conduct/scores/cat-jam-free.with-skill.md](okf/conduct/scores/cat-jam-free.with-skill.md)
 - [okf/conduct/scores/deepseek-v4-flash.md](okf/conduct/scores/deepseek-v4-flash.md)
 - [okf/conduct/scores/deepseek-v4.1-flash.md](okf/conduct/scores/deepseek-v4.1-flash.md)
 - [okf/conduct/scores/glm-5.3-flash.md](okf/conduct/scores/glm-5.3-flash.md)
@@ -229,24 +233,39 @@ okf_version: 0.1
 - [okf/conduct/scores/longcat-2.5-preview-free.with-skill.md](okf/conduct/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/conduct/scores/mimo-v2.5.md](okf/conduct/scores/mimo-v2.5.md)
 - [okf/conduct/scores/muse-spark-1.2.md](okf/conduct/scores/muse-spark-1.2.md)
+- [okf/conduct/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/conduct/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [okf/conduct/scores/nvidia__nemotron-3.5-super-vl.md](okf/conduct/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/conduct/scores/space-bunny-free.md](okf/conduct/scores/space-bunny-free.md)
 - [okf/conduct/scores/space-bunny-free.with-skill.md](okf/conduct/scores/space-bunny-free.with-skill.md)
+- [okf/conduct/scores/step-5-preview-free.md](okf/conduct/scores/step-5-preview-free.md)
+- [okf/conduct/scores/step-5-preview-free.with-skill.md](okf/conduct/scores/step-5-preview-free.with-skill.md)
 - [okf/conduct/scores/tencent__hy3.md](okf/conduct/scores/tencent__hy3.md)
 - [okf/conduct/scores/tencent__hy3.with-skill.md](okf/conduct/scores/tencent__hy3.with-skill.md)
+- [okf/csharp/derived/csharp.cat-jam-free.SKILL.md](okf/csharp/derived/csharp.cat-jam-free.SKILL.md) - Corrective C# knowledge for cat-jam-free, targeting gaps this model showed on the closed-book csharp benchmark: record/record struct mutability and type defaults, async idioms (Task vs ValueTask, async all the way, async-stream cancellation), what generic constraints unlock, the full dispose pattern, and Span/Memory/params-collections details.
+
 - [okf/csharp/derived/csharp.longcat-2.5-preview-free.SKILL.md](okf/csharp/derived/csharp.longcat-2.5-preview-free.SKILL.md) - Corrective C# knowledge for longcat-2.5-preview-free, targeting its nullability/value-vs-reference-type gaps and its async gaps (ValueTask consumption rules, async-all-the-way, CancellationToken and IAsyncEnumerable API names).
 
 - [okf/csharp/derived/csharp.mimo-v2.5.SKILL.md](okf/csharp/derived/csharp.mimo-v2.5.SKILL.md) - Corrective C# knowledge for mimo-v2.5, targeting the nullable-reference/ record-equality and pattern-matching gaps this model showed on the closed-book csharp benchmark (record class mutability, switch expression exhaustiveness, property-pattern syntax, `is` binding scope).
 
+- [okf/csharp/derived/csharp.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/csharp/derived/csharp.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective C# knowledge for nvidia/nemotron-3.5-super-vl, targeting gaps this model showed on the closed-book csharp benchmark: nullable-reference-type history, value vs reference type defaults, record struct mutability, and async idioms (ValueTask to Task conversion, async all the way, async-stream cancellation).
+
 - [okf/csharp/derived/csharp.space-bunny-free.SKILL.md](okf/csharp/derived/csharp.space-bunny-free.SKILL.md) - Corrective C# knowledge for space-bunny-free, targeting the nullable-reference-type / value-vs-reference / record gaps this model showed on the closed-book csharp benchmark (record class positional members are init-only by default, value-type vs reference-type defaults, the `!!` parameter-null-check that never shipped).
 
+- [okf/csharp/scores/cat-jam-free.md](okf/csharp/scores/cat-jam-free.md)
+- [okf/csharp/scores/cat-jam-free.with-skill.md](okf/csharp/scores/cat-jam-free.with-skill.md)
 - [okf/csharp/scores/glm-5.3-flash.md](okf/csharp/scores/glm-5.3-flash.md)
 - [okf/csharp/scores/longcat-2.5-preview-free.md](okf/csharp/scores/longcat-2.5-preview-free.md)
 - [okf/csharp/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/csharp/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/csharp/scores/mimo-v2.5.md](okf/csharp/scores/mimo-v2.5.md)
 - [okf/csharp/scores/muse-spark-1.2.md](okf/csharp/scores/muse-spark-1.2.md)
+- [okf/csharp/scores/nvidia__nemotron-3.5-super-vl.md](okf/csharp/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/csharp/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/csharp/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/csharp/scores/space-bunny-free.md](okf/csharp/scores/space-bunny-free.md)
 - [okf/csharp/scores/space-bunny-free.with-skill.md](okf/csharp/scores/space-bunny-free.with-skill.md)
+- [okf/csharp/scores/step-5-preview-free.md](okf/csharp/scores/step-5-preview-free.md)
 - [okf/csharp/scores/tencent__hy3.md](okf/csharp/scores/tencent__hy3.md)
+- [okf/docx/derived/docx.cat-jam-free.SKILL.md](okf/docx/derived/docx.cat-jam-free.SKILL.md) - Corrective Word-editing guidance for cat-jam-free: keep run formatting by writing into the first run, write field results yourself (Word does not recompute on open), insert rows and columns at the right place with copied formatting, drop the old image rel after a swap, and convert .doc only with LibreOffice headless.
+
 - [okf/docx/derived/docx.deepseek-v4.1-flash.SKILL.md](okf/docx/derived/docx.deepseek-v4.1-flash.SKILL.md) - Corrective Word-editing guidance for deepseek-v4.1-flash: what is left to do after removing a table row, and how to replace one picture without touching shared image parts or leaving the old image in the package.
 
 - [okf/docx/derived/docx.glm-5.3-flash.SKILL.md](okf/docx/derived/docx.glm-5.3-flash.SKILL.md) - Corrective Word-editing guidance for glm-5.3-flash: cell.text wipes paragraph formatting too, doc.add_table already sets widths, field totals are cached, carrying a vMerge restart down, and removing the old image relationship after a picture swap.
@@ -255,8 +274,17 @@ okf_version: 0.1
 
 - [okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md](okf/docx/derived/docx.mimo-v2.6-flash.SKILL.md) - Corrective Word-editing guidance for mimo-v2.6-flash: field results are cached (Word does not recompute SUM(ABOVE) on open), what row deletion and value changes need afterwards, the real python-docx call for replacing one picture and when its old relationship may go, and shading new column cells like their row.
 
+- [okf/docx/derived/docx.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/docx/derived/docx.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective Word-editing guidance for nvidia/nemotron-3.5-super-vl: a copied table row is filled through its existing runs, a fresh python-docx table already carries even gridCol/tcW widths that must be overwritten to match an existing table, and a replaced or removed picture keeps its old media part in the package until the relationship is dropped.
+
 - [okf/docx/derived/docx.space-bunny-free.SKILL.md](okf/docx/derived/docx.space-bunny-free.SKILL.md) - Corrective Word-editing guidance for space-bunny-free: what doc.add_table, add_row and add_column really set for widths, making a new table match an existing one, inserting a column across merged cells, and replacing one picture without touching others that share its image part.
 
+- [okf/docx/derived/docx.step-5-preview-free.SKILL.md](okf/docx/derived/docx.step-5-preview-free.SKILL.md) - Corrective Word-editing guidance for step-5-preview-free: a deleted row reflows on its own but its dependent totals do not, a vMerge restart's content moves down before the row goes, and a replaced or removed picture keeps its old media part in the package until the relationship is dropped.
+
+- [okf/docx/scores/cat-jam-free.iter1.with-skill.md](okf/docx/scores/cat-jam-free.iter1.with-skill.md)
+- [okf/docx/scores/cat-jam-free.iter2.with-skill.md](okf/docx/scores/cat-jam-free.iter2.with-skill.md)
+- [okf/docx/scores/cat-jam-free.iter3.with-skill.md](okf/docx/scores/cat-jam-free.iter3.with-skill.md)
+- [okf/docx/scores/cat-jam-free.md](okf/docx/scores/cat-jam-free.md)
+- [okf/docx/scores/cat-jam-free.with-skill.md](okf/docx/scores/cat-jam-free.with-skill.md)
 - [okf/docx/scores/deepseek-v4.1-flash.md](okf/docx/scores/deepseek-v4.1-flash.md)
 - [okf/docx/scores/deepseek-v4.1-flash.with-skill.md](okf/docx/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/docx/scores/glm-5.3-flash.md](okf/docx/scores/glm-5.3-flash.md)
@@ -264,63 +292,120 @@ okf_version: 0.1
 - [okf/docx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/docx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/docx/scores/mimo-v2.6-flash.md](okf/docx/scores/mimo-v2.6-flash.md)
 - [okf/docx/scores/mimo-v2.6-flash.with-skill.md](okf/docx/scores/mimo-v2.6-flash.with-skill.md)
+- [okf/docx/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/docx/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [okf/docx/scores/nvidia__nemotron-3.5-super-vl.md](okf/docx/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/docx/scores/space-bunny-free.md](okf/docx/scores/space-bunny-free.md)
 - [okf/docx/scores/space-bunny-free.with-skill.md](okf/docx/scores/space-bunny-free.with-skill.md)
+- [okf/docx/scores/step-5-preview-free.md](okf/docx/scores/step-5-preview-free.md)
+- [okf/docx/scores/step-5-preview-free.with-skill.md](okf/docx/scores/step-5-preview-free.with-skill.md)
+- [okf/dotnet/derived/dotnet.cat-jam-free.SKILL.md](okf/dotnet/derived/dotnet.cat-jam-free.SKILL.md) - Corrective .NET guidance for cat-jam-free on EF Core and HttpClient: what to do for parallel DbContext work, when an explicit transaction is needed beyond one SaveChanges, the three HttpClient lifetimes and the DNS flaw of the static client, and why caching a factory-created client defeats handler rotation.
+
 - [okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md](okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md) - Corrective .NET HttpClient/resilience guidance for longcat-2.5-preview-free: why a single static HttpClient goes stale on DNS, why caching a factory-created client defeats handler rotation, HandlerLifetime vs PooledConnectionLifetime, and the current Microsoft.Extensions.Http.Resilience API (AddStandardResilienceHandler) instead of invented Polly helpers.
 
+- [okf/dotnet/derived/dotnet.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/dotnet/derived/dotnet.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective .NET HttpClient/resilience guidance for nvidia/nemotron-3.5-super-vl: the three HttpClient lifetimes (per-request, static, factory) and the flaw of each, the client-to-handler binding that makes a cached factory client go stale on DNS regardless of HandlerLifetime, HandlerLifetime vs PooledConnectionLifetime, and the exact Microsoft.Extensions.Http.Resilience / Polly v8 method names.
+
+- [okf/dotnet/derived/dotnet.step-5-preview-free.SKILL.md](okf/dotnet/derived/dotnet.step-5-preview-free.SKILL.md) - Corrective .NET HttpClient/resilience guidance for step-5-preview-free: the three HttpClient lifetimes (per-request, static, factory) and the flaw of each, the client-to-handler binding that makes caching a factory client go stale on DNS, HandlerLifetime vs PooledConnectionLifetime, and the exact Microsoft.Extensions.Http.Resilience / Polly method names.
+
+- [okf/dotnet/scores/cat-jam-free.md](okf/dotnet/scores/cat-jam-free.md)
+- [okf/dotnet/scores/cat-jam-free.with-skill.md](okf/dotnet/scores/cat-jam-free.with-skill.md)
 - [okf/dotnet/scores/glm-5.3-flash.md](okf/dotnet/scores/glm-5.3-flash.md)
 - [okf/dotnet/scores/longcat-2.5-preview-free.md](okf/dotnet/scores/longcat-2.5-preview-free.md)
 - [okf/dotnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/dotnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md](okf/dotnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/dotnet/scores/mimo-v2.5.md](okf/dotnet/scores/mimo-v2.5.md)
 - [okf/dotnet/scores/muse-spark-1.2.md](okf/dotnet/scores/muse-spark-1.2.md)
+- [okf/dotnet/scores/nvidia__nemotron-3.5-super-vl.md](okf/dotnet/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/dotnet/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/dotnet/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/dotnet/scores/space-bunny-free.md](okf/dotnet/scores/space-bunny-free.md)
+- [okf/dotnet/scores/step-5-preview-free.md](okf/dotnet/scores/step-5-preview-free.md)
+- [okf/dotnet/scores/step-5-preview-free.with-skill.md](okf/dotnet/scores/step-5-preview-free.with-skill.md)
 - [okf/dotnet/scores/tencent__hy3.md](okf/dotnet/scores/tencent__hy3.md)
+- [okf/elixir/derived/elixir.cat-jam-free.SKILL.md](okf/elixir/derived/elixir.cat-jam-free.SKILL.md) - Corrective Elixir knowledge for cat-jam-free, targeting its pattern-matching and pipe/with gaps: `=` as an equality assertion, what limits a `when` guard, what happens when no clause matches, why pipes exist, and how `with` short-circuits.
+
 - [okf/elixir/derived/elixir.longcat-2.5-preview-free.SKILL.md](okf/elixir/derived/elixir.longcat-2.5-preview-free.SKILL.md) - Corrective Elixir knowledge for longcat-2.5-preview-free, targeting its pattern-matching gaps: `=` as a match (not assignment), what happens when no function clause matches, and what guards may contain.
+
+- [okf/elixir/derived/elixir.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/elixir/derived/elixir.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective Elixir knowledge for nvidia/nemotron-3.5-super-vl, targeting its pattern-matching and pipe gaps: `=` is a match assertion rather than assignment, guards are a fixed whitelist, a clause miss raises `FunctionClauseError`, and how to place a piped value in a non-first argument position (`then/2` or a named intermediate, never `with`).
 
 - [okf/elixir/derived/elixir.space-bunny-free.SKILL.md](okf/elixir/derived/elixir.space-bunny-free.SKILL.md) - Corrective Elixir knowledge for space-bunny-free, targeting the pipe / with gaps this model showed on the closed-book elixir benchmark (why pipelines exist, what a failed `with` clause returns, and how to pipe into a non-first argument).
 
+- [okf/elixir/derived/elixir.step-5-preview-free.SKILL.md](okf/elixir/derived/elixir.step-5-preview-free.SKILL.md) - Corrective Elixir knowledge for step-5-preview-free, targeting its pattern-matching and immutable-data gaps: what actually limits a `when` guard, what happens when no function clause matches, and the exact failure behaviour of `%{map | key: val}` and the `*_in` path helpers.
+
 - [okf/elixir/derived/elixir.tencent__hy3.SKILL.md](okf/elixir/derived/elixir.tencent__hy3.SKILL.md) - Corrective Elixir knowledge for tencent/hy3, targeting the pattern-matching gaps this model showed on the closed-book elixir benchmark (guard restrictions, the FunctionClauseError / MatchError failure modes, and the "match is not assignment" framing).
 
+- [okf/elixir/scores/cat-jam-free.iter1.with-skill.md](okf/elixir/scores/cat-jam-free.iter1.with-skill.md)
+- [okf/elixir/scores/cat-jam-free.md](okf/elixir/scores/cat-jam-free.md)
+- [okf/elixir/scores/cat-jam-free.with-skill.md](okf/elixir/scores/cat-jam-free.with-skill.md)
 - [okf/elixir/scores/glm-5.3-flash.md](okf/elixir/scores/glm-5.3-flash.md)
 - [okf/elixir/scores/longcat-2.5-preview-free.md](okf/elixir/scores/longcat-2.5-preview-free.md)
 - [okf/elixir/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/elixir/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/elixir/scores/longcat-2.5-preview-free.with-skill.md](okf/elixir/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/elixir/scores/mimo-v2.5.md](okf/elixir/scores/mimo-v2.5.md)
 - [okf/elixir/scores/muse-spark-1.2.md](okf/elixir/scores/muse-spark-1.2.md)
+- [okf/elixir/scores/nvidia__nemotron-3.5-super-vl.md](okf/elixir/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/elixir/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/elixir/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/elixir/scores/space-bunny-free.md](okf/elixir/scores/space-bunny-free.md)
 - [okf/elixir/scores/space-bunny-free.with-skill.md](okf/elixir/scores/space-bunny-free.with-skill.md)
+- [okf/elixir/scores/step-5-preview-free.md](okf/elixir/scores/step-5-preview-free.md)
+- [okf/elixir/scores/step-5-preview-free.with-skill.md](okf/elixir/scores/step-5-preview-free.with-skill.md)
 - [okf/elixir/scores/tencent__hy3.md](okf/elixir/scores/tencent__hy3.md)
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
+- [okf/golang/scores/cat-jam-free.md](okf/golang/scores/cat-jam-free.md)
 - [okf/golang/scores/glm-5.3-flash.md](okf/golang/scores/glm-5.3-flash.md)
 - [okf/golang/scores/longcat-2.5-preview-free.md](okf/golang/scores/longcat-2.5-preview-free.md)
 - [okf/golang/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/golang/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/golang/scores/mimo-v2.5.md](okf/golang/scores/mimo-v2.5.md)
 - [okf/golang/scores/muse-spark-1.2.md](okf/golang/scores/muse-spark-1.2.md)
+- [okf/golang/scores/nvidia__nemotron-3.5-super-vl.md](okf/golang/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/golang/scores/space-bunny-free.md](okf/golang/scores/space-bunny-free.md)
+- [okf/golang/scores/step-5-preview-free.md](okf/golang/scores/step-5-preview-free.md)
 - [okf/golang/scores/tencent__hy3.md](okf/golang/scores/tencent__hy3.md)
+- [okf/hallucination/derived/hallucination.cat-jam-free.SKILL.md](okf/hallucination/derived/hallucination.cat-jam-free.SKILL.md) - Corrective guidance for existence (do not rescue an unknown package, extra, or service name by inventing an install route or integration; the real install name comes first, and the unconfirmed name is never offered as something to try) and stale-recall (version-specific claims about the past are recall too; an unrecognised version is "beyond what I know", not "does not exist"). Directive rules the model must follow.
+- [okf/hallucination/derived/hallucination.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/hallucination/derived/hallucination.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective guidance for api-invention (never describe, tabulate or version a function, flag, extra or endpoint you cannot place; a confident "it does not exist" is the answer), existence (an unverified package name is never vouched for, installed, imported or given a sketch; lead with the real published name) and stale-recall (a remembered version or signature is dated, not current; name the check instead of asserting), plus a standalone rule for tool-less sessions (no tool-call markup, no fabricated tool results). Directive rules the model must follow.
+- [okf/hallucination/scores/cat-jam-free.md](okf/hallucination/scores/cat-jam-free.md)
+- [okf/hallucination/scores/cat-jam-free.with-skill.md](okf/hallucination/scores/cat-jam-free.with-skill.md)
 - [okf/hallucination/scores/longcat-2.5-preview-free.md](okf/hallucination/scores/longcat-2.5-preview-free.md)
+- [okf/hallucination/scores/nvidia__nemotron-3.5-super-vl.md](okf/hallucination/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/hallucination/scores/step-5-preview-free.md](okf/hallucination/scores/step-5-preview-free.md)
+- [okf/nestjs/derived/nestjs.cat-jam-free.SKILL.md](okf/nestjs/derived/nestjs.cat-jam-free.SKILL.md) - Corrective NestJS guidance for the exact area cat-jam-free tests weak on (guard attachment and the interceptor next.handle() mechanism). Loaded only in NestJS repos when this exact model is active.
 - [okf/nestjs/derived/nestjs.longcat-2.5-preview-free.SKILL.md](okf/nestjs/derived/nestjs.longcat-2.5-preview-free.SKILL.md) - Corrective NestJS knowledge for longcat-2.5-preview-free, targeting its gaps in lifecycle hooks (shutdown order, v11 reverse ordering, what triggers init) and guards/interceptors (guard usage, interceptor Observable mechanics).
 
 - [okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md](okf/nestjs/derived/nestjs.mimo-v2.5.SKILL.md) - Corrective NestJS guidance for the exact area mimo-v2.5 tests weak on (shutdown/lifecycle hook order and triggers). Loaded only in NestJS repos when this exact model is active.
+- [okf/nestjs/derived/nestjs.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/nestjs/derived/nestjs.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective NestJS guidance for nvidia/nemotron-3.5-super-vl, targeting the two areas this model showed gaps on in the closed-book nestjs benchmark: the full shutdown-hook sequence and its NestJS 11 ordering guarantee, and the guard attachment / interceptor next.handle() mechanism. Loaded only in NestJS repos when this exact model is active.
+
+- [okf/nestjs/scores/cat-jam-free.md](okf/nestjs/scores/cat-jam-free.md)
+- [okf/nestjs/scores/cat-jam-free.with-skill.md](okf/nestjs/scores/cat-jam-free.with-skill.md)
 - [okf/nestjs/scores/glm-5.3-flash.md](okf/nestjs/scores/glm-5.3-flash.md)
 - [okf/nestjs/scores/longcat-2.5-preview-free.md](okf/nestjs/scores/longcat-2.5-preview-free.md)
 - [okf/nestjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nestjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/nestjs/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/nestjs/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/nestjs/scores/mimo-v2.5.md](okf/nestjs/scores/mimo-v2.5.md)
 - [okf/nestjs/scores/muse-spark-1.2.md](okf/nestjs/scores/muse-spark-1.2.md)
+- [okf/nestjs/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/nestjs/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [okf/nestjs/scores/nvidia__nemotron-3.5-super-vl.md](okf/nestjs/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/nestjs/scores/space-bunny-free.md](okf/nestjs/scores/space-bunny-free.md)
+- [okf/nestjs/scores/step-5-preview-free.md](okf/nestjs/scores/step-5-preview-free.md)
 - [okf/nestjs/scores/tencent__hy3.md](okf/nestjs/scores/tencent__hy3.md)
+- [okf/nextjs/derived/nextjs.cat-jam-free.SKILL.md](okf/nextjs/derived/nextjs.cat-jam-free.SKILL.md) - Corrective Next.js App Router guidance for the areas cat-jam-free tests weak on (app-router client/server boundary, metadata). Loaded only in Next.js repos when this exact model is active.
 - [okf/nextjs/derived/nextjs.longcat-2.5-preview-free.SKILL.md](okf/nextjs/derived/nextjs.longcat-2.5-preview-free.SKILL.md) - Corrective Next.js App Router guidance for the exact areas longcat-2.5-preview-free tests weak on (data-fetching, metadata). Loaded only in Next.js repos when this exact model is active.
 - [okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md](okf/nextjs/derived/nextjs.mimo-v2.5.SKILL.md) - Corrective Next.js App Router guidance for the exact area mimo-v2.5 tests weak on (metadata). Loaded only in Next.js repos when this exact model is active.
+- [okf/nextjs/derived/nextjs.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/nextjs/derived/nextjs.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective Next.js App Router guidance for the areas nvidia/nemotron-3.5-super-vl tests weak on (caching, route-handlers). Loaded only in Next.js repos when this exact model is active.
+- [okf/nextjs/derived/nextjs.step-5-preview-free.SKILL.md](okf/nextjs/derived/nextjs.step-5-preview-free.SKILL.md) - Corrective Next.js App Router guidance for the areas step-5-preview-free tests weak on (data-fetching, metadata). Loaded only in Next.js repos when this exact model is active.
+- [okf/nextjs/scores/cat-jam-free.md](okf/nextjs/scores/cat-jam-free.md)
+- [okf/nextjs/scores/cat-jam-free.with-skill.md](okf/nextjs/scores/cat-jam-free.with-skill.md)
 - [okf/nextjs/scores/glm-5.3-flash.md](okf/nextjs/scores/glm-5.3-flash.md)
 - [okf/nextjs/scores/longcat-2.5-preview-free.md](okf/nextjs/scores/longcat-2.5-preview-free.md)
 - [okf/nextjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nextjs/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md](okf/nextjs/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/nextjs/scores/mimo-v2.5.md](okf/nextjs/scores/mimo-v2.5.md)
 - [okf/nextjs/scores/muse-spark-1.2.md](okf/nextjs/scores/muse-spark-1.2.md)
+- [okf/nextjs/scores/nvidia__nemotron-3.5-super-vl.md](okf/nextjs/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/nextjs/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/nextjs/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/nextjs/scores/space-bunny-free.md](okf/nextjs/scores/space-bunny-free.md)
+- [okf/nextjs/scores/step-5-preview-free.md](okf/nextjs/scores/step-5-preview-free.md)
+- [okf/nextjs/scores/step-5-preview-free.with-skill.md](okf/nextjs/scores/step-5-preview-free.with-skill.md)
 - [okf/nextjs/scores/tencent__hy3.md](okf/nextjs/scores/tencent__hy3.md)
+- [okf/pdf/derived/pdf.cat-jam-free.SKILL.md](okf/pdf/derived/pdf.cat-jam-free.SKILL.md) - Corrective PDF-editing guidance for cat-jam-free: rotated-page coordinates (get_text bboxes stay unrotated); apply_redactions defaults and keep flags; moving page regions with show_pdf_page(clip=) without flattening; insert_textbox's negative return; column relayout with measured widths and a full redraw; making room between paragraphs; page.replace_image; verifying edits on the text layer, not by render alone.
+
 - [okf/pdf/derived/pdf.deepseek-v4.1-flash.SKILL.md](okf/pdf/derived/pdf.deepseek-v4.1-flash.SKILL.md) - Corrective PDF-editing guidance for deepseek-v4.1-flash: what PyMuPDF's apply_redactions actually removes by default, deleting a table row without duplicating the rows you move, what insert_textbox does when text doesn't fit, removing the old table before a re-layout, paint order for new tables, anchoring inserted images to real content, deduplicating repeated images, and matching header style in new columns.
 
 - [okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md](okf/pdf/derived/pdf.glm-5.3-flash.SKILL.md) - Corrective PDF-editing guidance for glm-5.3-flash: PyMuPDF's apply_redactions removes covered table rules and shading by default, painting boxes is not removal, redact before you move a region, where insert_text puts the baseline, growing and re-laying tables without broken rules, replace_image is global, and scripts must check return values.
@@ -329,8 +414,14 @@ okf_version: 0.1
 
 - [okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md](okf/pdf/derived/pdf.mimo-v2.6-flash.SKILL.md) - Corrective PDF-editing guidance for mimo-v2.6-flash: PyMuPDF's real apply_redactions defaults and constants, keeping a cell's rules and shading, moving regions without duplicates, APIs that do not exist, subset fonts, rotated-page coordinates, and image replace/dedup details.
 
+- [okf/pdf/derived/pdf.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/pdf/derived/pdf.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective PDF-editing guidance for nvidia/nemotron-3.5-super-vl: rotated-page coordinates (get_text bboxes stay unrotated); PyMuPDF's real apply_redactions defaults and the explicit keep flags; never cover content with a fill rect; show_pdf_page region moves; insert_textbox is all-or-nothing; column relayout with measured widths and a full redraw; regenerate from source before any round-trip; page.replace_image and single-occurrence image swaps; insert_image xref reuse and garbage=4 dedup.
+
 - [okf/pdf/derived/pdf.space-bunny-free.SKILL.md](okf/pdf/derived/pdf.space-bunny-free.SKILL.md) - Corrective PDF-editing guidance for space-bunny-free: move table regions as vectors (show_pdf_page clip), never as rasters; PyMuPDF's real apply_redactions defaults; insert_textbox's negative return; baseline placement; bold flag bits and subset-font glyph coverage; image reuse and overlay; rotated-page coordinates; relayout and make-room procedures.
 
+- [okf/pdf/derived/pdf.step-5-preview-free.SKILL.md](okf/pdf/derived/pdf.step-5-preview-free.SKILL.md) - Corrective PDF-editing guidance for step-5-preview-free: rotated-page coordinates (get_text bboxes stay unrotated); PyMuPDF's real apply_redactions image default and the explicit keep flags; direct show_pdf_page region moves; column relayout with measured widths and a full redraw; regenerate from source before any round-trip; page.replace_image and single-occurrence image swaps; insert_image xref reuse and garbage=4 dedup.
+
+- [okf/pdf/scores/cat-jam-free.md](okf/pdf/scores/cat-jam-free.md)
+- [okf/pdf/scores/cat-jam-free.with-skill.md](okf/pdf/scores/cat-jam-free.with-skill.md)
 - [okf/pdf/scores/deepseek-v4.1-flash.md](okf/pdf/scores/deepseek-v4.1-flash.md)
 - [okf/pdf/scores/deepseek-v4.1-flash.with-skill.md](okf/pdf/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pdf/scores/glm-5.3-flash.md](okf/pdf/scores/glm-5.3-flash.md)
@@ -339,17 +430,32 @@ okf_version: 0.1
 - [okf/pdf/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pdf/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/pdf/scores/mimo-v2.6-flash.md](okf/pdf/scores/mimo-v2.6-flash.md)
 - [okf/pdf/scores/mimo-v2.6-flash.with-skill.md](okf/pdf/scores/mimo-v2.6-flash.with-skill.md)
+- [okf/pdf/scores/nvidia__nemotron-3.5-super-vl.md](okf/pdf/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/pdf/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/pdf/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/pdf/scores/space-bunny-free.md](okf/pdf/scores/space-bunny-free.md)
 - [okf/pdf/scores/space-bunny-free.with-skill.md](okf/pdf/scores/space-bunny-free.with-skill.md)
+- [okf/pdf/scores/step-5-preview-free.md](okf/pdf/scores/step-5-preview-free.md)
+- [okf/pdf/scores/step-5-preview-free.with-skill.md](okf/pdf/scores/step-5-preview-free.with-skill.md)
+- [okf/php/derived/php.cat-jam-free.SKILL.md](okf/php/derived/php.cat-jam-free.SKILL.md) - Corrective PHP knowledge for cat-jam-free, targeting its gaps in OOP: readonly properties and classes, and late static binding.
+
 - [okf/php/derived/php.longcat-2.5-preview-free.SKILL.md](okf/php/derived/php.longcat-2.5-preview-free.SKILL.md) - Corrective PHP knowledge for longcat-2.5-preview-free, targeting its gaps in OOP (readonly, late static binding), closures (first-class callable syntax, Closure::bind) and match vs switch control flow.
 
+- [okf/php/derived/php.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/php/derived/php.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective PHP knowledge for nvidia/nemotron-3.5-super-vl, targeting its gaps in OOP (readonly classes and inheritance, new static() vs new self()) and closures (implicit arrow-function capture, what first-class callable syntax replaces). Directive rules the model must follow.
+
+- [okf/php/scores/cat-jam-free.md](okf/php/scores/cat-jam-free.md)
+- [okf/php/scores/cat-jam-free.with-skill.md](okf/php/scores/cat-jam-free.with-skill.md)
 - [okf/php/scores/glm-5.3-flash.md](okf/php/scores/glm-5.3-flash.md)
 - [okf/php/scores/longcat-2.5-preview-free.md](okf/php/scores/longcat-2.5-preview-free.md)
 - [okf/php/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/php/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/php/scores/mimo-v2.5.md](okf/php/scores/mimo-v2.5.md)
 - [okf/php/scores/muse-spark-1.2.md](okf/php/scores/muse-spark-1.2.md)
+- [okf/php/scores/nvidia__nemotron-3.5-super-vl.md](okf/php/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/php/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/php/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/php/scores/space-bunny-free.md](okf/php/scores/space-bunny-free.md)
+- [okf/php/scores/step-5-preview-free.md](okf/php/scores/step-5-preview-free.md)
 - [okf/php/scores/tencent__hy3.md](okf/php/scores/tencent__hy3.md)
+- [okf/pptx/derived/pptx.cat-jam-free.SKILL.md](okf/pptx/derived/pptx.cat-jam-free.SKILL.md) - Corrective pptx-editing guidance for cat-jam-free: one a:tc per gridCol through merges, choose tables by header with a unique-row assert, placeholder table insertion, finishing row deletes/inserts (fills, bottom check, runs), dropping replaced image rels, full save-and-verify, and returning legacy .ppt.
+
 - [okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md](okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md) - Corrective pptx-editing guidance for deepseek-v4.1-flash: locate tables by header text with a unique-row assert, python-pptx merge and placeholder API facts, XML row add/delete with run-preserving fills, totals and frame height, drop_rel on shared images, verification, and legacy .ppt round-trip.
 
 - [okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md](okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md) - Corrective pptx-editing guidance for glm-5.3-flash: locate tables by header text (searching groups) with a unique-row assert, drop replaced image rels safely (drop_rel does not see r:embed), sync the graphic frame height after XML row edits, and re-band explicit row fills.
@@ -358,8 +464,15 @@ okf_version: 0.1
 
 - [okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md](okf/pptx/derived/pptx.mimo-v2.6-flash.SKILL.md) - Corrective pptx-editing guidance for mimo-v2.6-flash: locate tables by header text and assert a unique matching row, python-pptx has no row/column add or delete API (deepcopy/remove the a:tr), sync the frame and totals, content placeholders lack insert_table, drop_rel ignores r:embed, and verify content rather than structure.
 
+- [okf/pptx/derived/pptx.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/pptx/derived/pptx.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective pptx-editing guidance for nvidia/nemotron-3.5-super-vl: locate tables by header text with a unique-row assert, the real DrawingML merge model and element names (gridSpan on a:tc, a:txBody, a:tableStyleId), the TablePlaceholder-only insert_table, finishing a row or column insert (total, frame height, bottom check, copied cell formatting), re-applying explicit banding fills after a delete, and drop_rel's r:id-only reference count.
+
 - [okf/pptx/derived/pptx.space-bunny-free.SKILL.md](okf/pptx/derived/pptx.space-bunny-free.SKILL.md) - Corrective pptx-editing guidance for space-bunny-free: locate tables by header text with a unique-row assert, python-pptx merge and placeholder model, widening merged cells when inserting a column, and syncing the frame height.
 
+- [okf/pptx/derived/pptx.step-5-preview-free.SKILL.md](okf/pptx/derived/pptx.step-5-preview-free.SKILL.md) - Corrective pptx-editing guidance for step-5-preview-free: locate tables by header text with a unique-row assert, one a:tc per gridCol even through merges, TablePlaceholder.insert_table, bottom-of-slide check after a row insert, and dropping the replaced image's relationship.
+
+- [okf/pptx/scores/cat-jam-free.iter1.with-skill.md](okf/pptx/scores/cat-jam-free.iter1.with-skill.md)
+- [okf/pptx/scores/cat-jam-free.md](okf/pptx/scores/cat-jam-free.md)
+- [okf/pptx/scores/cat-jam-free.with-skill.md](okf/pptx/scores/cat-jam-free.with-skill.md)
 - [okf/pptx/scores/deepseek-v4.1-flash.md](okf/pptx/scores/deepseek-v4.1-flash.md)
 - [okf/pptx/scores/deepseek-v4.1-flash.with-skill.md](okf/pptx/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pptx/scores/glm-5.3-flash.md](okf/pptx/scores/glm-5.3-flash.md)
@@ -367,69 +480,121 @@ okf_version: 0.1
 - [okf/pptx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pptx/scores/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [okf/pptx/scores/mimo-v2.6-flash.md](okf/pptx/scores/mimo-v2.6-flash.md)
 - [okf/pptx/scores/mimo-v2.6-flash.with-skill.md](okf/pptx/scores/mimo-v2.6-flash.with-skill.md)
+- [okf/pptx/scores/nvidia__nemotron-3.5-super-vl.md](okf/pptx/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/pptx/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/pptx/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/pptx/scores/space-bunny-free.md](okf/pptx/scores/space-bunny-free.md)
 - [okf/pptx/scores/space-bunny-free.with-skill.md](okf/pptx/scores/space-bunny-free.with-skill.md)
+- [okf/pptx/scores/step-5-preview-free.md](okf/pptx/scores/step-5-preview-free.md)
+- [okf/pptx/scores/step-5-preview-free.with-skill.md](okf/pptx/scores/step-5-preview-free.with-skill.md)
+- [okf/python/scores/cat-jam-free.md](okf/python/scores/cat-jam-free.md)
 - [okf/python/scores/glm-5.3-flash.md](okf/python/scores/glm-5.3-flash.md)
 - [okf/python/scores/longcat-2.5-preview-free.md](okf/python/scores/longcat-2.5-preview-free.md)
 - [okf/python/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/python/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/python/scores/mimo-v2.5.md](okf/python/scores/mimo-v2.5.md)
 - [okf/python/scores/muse-spark-1.2.md](okf/python/scores/muse-spark-1.2.md)
+- [okf/python/scores/nvidia__nemotron-3.5-super-vl.md](okf/python/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/python/scores/space-bunny-free.md](okf/python/scores/space-bunny-free.md)
+- [okf/python/scores/step-5-preview-free.md](okf/python/scores/step-5-preview-free.md)
 - [okf/python/scores/tencent__hy3.md](okf/python/scores/tencent__hy3.md)
 - [okf/react/derived/react.claude-opus-4-8.SKILL.md](okf/react/derived/react.claude-opus-4-8.SKILL.md) - Corrective React guidance for the exact areas claude-opus-4-8 tests weak on (RSC boundaries, Suspense, refs). Loaded only in React repos when this exact model is active.
+- [okf/react/scores/cat-jam-free.md](okf/react/scores/cat-jam-free.md)
 - [okf/react/scores/claude-opus-4-8.md](okf/react/scores/claude-opus-4-8.md)
 - [okf/react/scores/glm-5.3-flash.md](okf/react/scores/glm-5.3-flash.md)
 - [okf/react/scores/longcat-2.5-preview-free.md](okf/react/scores/longcat-2.5-preview-free.md)
 - [okf/react/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/react/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/react/scores/mimo-v2.5.md](okf/react/scores/mimo-v2.5.md)
 - [okf/react/scores/muse-spark-1.2.md](okf/react/scores/muse-spark-1.2.md)
+- [okf/react/scores/nvidia__nemotron-3.5-super-vl.md](okf/react/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/react/scores/space-bunny-free.md](okf/react/scores/space-bunny-free.md)
+- [okf/react/scores/step-5-preview-free.md](okf/react/scores/step-5-preview-free.md)
 - [okf/react/scores/tencent__hy3.md](okf/react/scores/tencent__hy3.md)
+- [okf/ror/derived/ror.cat-jam-free.SKILL.md](okf/ror/derived/ror.cat-jam-free.SKILL.md) - Corrective Rails transaction guidance for cat-jam-free — how exceptions roll back a transaction block (and how ActiveRecord::Rollback differs), and when to use save!/create! instead of save/create. Loaded only in Rails repos when this exact model is active.
 - [okf/ror/derived/ror.mimo-v2.5.SKILL.md](okf/ror/derived/ror.mimo-v2.5.SKILL.md) - Corrective Rails migrations/schema guidance for the exact gaps mimo-v2.5 tests weak on — the purpose of the schema.rb/structure.sql dump, and the two classic dangerous-migration patterns on large production tables (locking column defaults/NOT NULL, and index builds). Loaded only in Rails repos when this exact model is active.
+- [okf/ror/scores/cat-jam-free.md](okf/ror/scores/cat-jam-free.md)
+- [okf/ror/scores/cat-jam-free.with-skill.md](okf/ror/scores/cat-jam-free.with-skill.md)
 - [okf/ror/scores/glm-5.3-flash.md](okf/ror/scores/glm-5.3-flash.md)
 - [okf/ror/scores/longcat-2.5-preview-free.md](okf/ror/scores/longcat-2.5-preview-free.md)
 - [okf/ror/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ror/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/ror/scores/mimo-v2.5.md](okf/ror/scores/mimo-v2.5.md)
 - [okf/ror/scores/muse-spark-1.2.md](okf/ror/scores/muse-spark-1.2.md)
+- [okf/ror/scores/nvidia__nemotron-3.5-super-vl.md](okf/ror/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/ror/scores/space-bunny-free.md](okf/ror/scores/space-bunny-free.md)
+- [okf/ror/scores/step-5-preview-free.md](okf/ror/scores/step-5-preview-free.md)
 - [okf/ror/scores/tencent__hy3.md](okf/ror/scores/tencent__hy3.md)
+- [okf/ruby/derived/ruby.cat-jam-free.SKILL.md](okf/ruby/derived/ruby.cat-jam-free.SKILL.md) - Corrective Ruby knowledge for cat-jam-free, targeting its gaps in object method mechanics: the method_missing contract and private/protected visibility rules.
+
+- [okf/ruby/derived/ruby.step-5-preview-free.SKILL.md](okf/ruby/derived/ruby.step-5-preview-free.SKILL.md) - Corrective Ruby knowledge for step-5-preview-free, targeting its gaps in argument passing: the Ruby 3.0 keyword/positional separation and the rules for `*` and `**` in method definitions, calls and destructuring.
+
+- [okf/ruby/scores/cat-jam-free.md](okf/ruby/scores/cat-jam-free.md)
+- [okf/ruby/scores/cat-jam-free.with-skill.md](okf/ruby/scores/cat-jam-free.with-skill.md)
 - [okf/ruby/scores/glm-5.3-flash.md](okf/ruby/scores/glm-5.3-flash.md)
 - [okf/ruby/scores/longcat-2.5-preview-free.md](okf/ruby/scores/longcat-2.5-preview-free.md)
 - [okf/ruby/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ruby/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/ruby/scores/mimo-v2.5.md](okf/ruby/scores/mimo-v2.5.md)
 - [okf/ruby/scores/muse-spark-1.2.md](okf/ruby/scores/muse-spark-1.2.md)
+- [okf/ruby/scores/nvidia__nemotron-3.5-super-vl.md](okf/ruby/scores/nvidia__nemotron-3.5-super-vl.md)
 - [okf/ruby/scores/space-bunny-free.md](okf/ruby/scores/space-bunny-free.md)
+- [okf/ruby/scores/step-5-preview-free.md](okf/ruby/scores/step-5-preview-free.md)
+- [okf/ruby/scores/step-5-preview-free.with-skill.md](okf/ruby/scores/step-5-preview-free.with-skill.md)
 - [okf/ruby/scores/tencent__hy3.md](okf/ruby/scores/tencent__hy3.md)
+- [okf/rust/derived/rust.cat-jam-free.SKILL.md](okf/rust/derived/rust.cat-jam-free.SKILL.md) - Corrective Rust ownership and async knowledge for cat-jam-free: when explaining moves, Copy/Clone, why an async fn needs a runtime, why a future fails a Send bound, or why blocking in async is harmful, state the underlying mechanism, not only the observable effect.
+
 - [okf/rust/derived/rust.glm-5.3-flash.SKILL.md](okf/rust/derived/rust.glm-5.3-flash.SKILL.md) - Corrective Rust async knowledge for glm-5.3-flash, targeting the one gap this model showed on the closed-book rust benchmark: it describes the effects of async (futures need a runtime; blocking starves tasks) without stating the underlying mechanism (std ships no executor; scheduling is cooperative and yields only at `.await`).
 
 - [okf/rust/derived/rust.longcat-2.5-preview-free.SKILL.md](okf/rust/derived/rust.longcat-2.5-preview-free.SKILL.md) - Corrective Rust async knowledge for longcat-2.5-preview-free: state the underlying mechanism of async behavior (std ships no executor; values held across `.await` live in the future's state machine; scheduling is cooperative and yields only at `.await`), not only its effects.
 
+- [okf/rust/derived/rust.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/rust/derived/rust.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective Rust async knowledge for nvidia/nemotron-3.5-super-vl: when explaining why an `async fn` does nothing on its own, why a blocking call inside a task is harmful, or why a future fails `tokio::spawn`, state the underlying mechanism (std ships no executor; tasks are cooperative and yield only at `.await`; the failure is the `Send` bound, not `'static`), not only the observable effect.
+
 - [okf/rust/derived/rust.space-bunny-free.SKILL.md](okf/rust/derived/rust.space-bunny-free.SKILL.md) - Corrective Rust async knowledge for space-bunny-free, targeting the one gap this model showed on the closed-book rust benchmark: it explains the effects of async (a runtime is needed; a blocking call stalls the worker) without stating the underlying mechanism (std ships no executor; scheduling is cooperative and a task yields only at `.await`).
 
+- [okf/rust/derived/rust.step-5-preview-free.SKILL.md](okf/rust/derived/rust.step-5-preview-free.SKILL.md) - Corrective Rust async knowledge for step-5-preview-free: when explaining why an `async fn` does nothing on its own or why a future fails a `Send` bound, state the underlying mechanism (std ships no executor; every value alive across an `.await` is stored inside the future's generated state machine), not only the observable effect.
+
+- [okf/rust/scores/cat-jam-free.md](okf/rust/scores/cat-jam-free.md)
+- [okf/rust/scores/cat-jam-free.with-skill.md](okf/rust/scores/cat-jam-free.with-skill.md)
 - [okf/rust/scores/glm-5.3-flash.md](okf/rust/scores/glm-5.3-flash.md)
 - [okf/rust/scores/longcat-2.5-preview-free.md](okf/rust/scores/longcat-2.5-preview-free.md)
 - [okf/rust/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/rust/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/rust/scores/longcat-2.5-preview-free.with-skill.md](okf/rust/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/rust/scores/mimo-v2.5.md](okf/rust/scores/mimo-v2.5.md)
 - [okf/rust/scores/muse-spark-1.2.md](okf/rust/scores/muse-spark-1.2.md)
+- [okf/rust/scores/nvidia__nemotron-3.5-super-vl.md](okf/rust/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/rust/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/rust/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/rust/scores/space-bunny-free.md](okf/rust/scores/space-bunny-free.md)
 - [okf/rust/scores/space-bunny-free.with-skill.md](okf/rust/scores/space-bunny-free.with-skill.md)
+- [okf/rust/scores/step-5-preview-free.md](okf/rust/scores/step-5-preview-free.md)
+- [okf/rust/scores/step-5-preview-free.with-skill.md](okf/rust/scores/step-5-preview-free.with-skill.md)
 - [okf/rust/scores/tencent__hy3.md](okf/rust/scores/tencent__hy3.md)
+- [okf/tanstack/derived/tanstack.cat-jam-free.SKILL.md](okf/tanstack/derived/tanstack.cat-jam-free.SKILL.md) - Corrective TanStack knowledge for cat-jam-free, targeting its query-keys, caching, query-fn and router-typesafety gaps: how query keys are hashed (object key order ignored), per-key cache state shared by observers, staleTime vs gcTime as independent axes with their defaults, the throw-to-fail contract behind mutations and suspense errors, and what the generated route tree actually type-checks.
+
 - [okf/tanstack/derived/tanstack.longcat-2.5-preview-free.SKILL.md](okf/tanstack/derived/tanstack.longcat-2.5-preview-free.SKILL.md) - Corrective TanStack Query + Router knowledge for longcat-2.5-preview-free, targeting query-keys (deterministic key hashing, per-key cache state, hierarchy for broad AND precise invalidation), router-loaders (router context as a typed tree-threaded object carrying the QueryClient, loaderDeps, preload respecting caching) and router-search (loaderDeps vs validateSearch, reading via useSearch(), untrusted-URL rationale, compile-time propagation) and router-typesafety (typed useLoaderData, the full typed navigation surface, refactors surfacing at every call site).
 
 - [okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md](okf/tanstack/derived/tanstack.mimo-v2.5.SKILL.md) - Corrective TanStack Router knowledge for mimo-v2.5, targeting the router-search gaps this model showed on the closed-book tanstack benchmark (reading search params via useSearch(), loaderDeps for search-driven loaders, and the type-safety surface useSearch() gets from validateSearch).
 
+- [okf/tanstack/derived/tanstack.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/tanstack/derived/tanstack.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective TanStack Query + Router knowledge for nvidia/nemotron-3.5-super-vl, targeting its query-keys, suspense, prefetch, router-loaders and router-search gaps: how query keys are hashed and that cache state is per key, the Suspense + ErrorBoundary pairing behind useSuspenseQuery, fetchQuery and preloading both respecting the cache, what actually runs on hover preload, router context as the typed tree-threaded carrier of the QueryClient, loaderDeps as the only way a loader sees search params, and the TanStack Router search API names (not React Router's).
+
+- [okf/tanstack/derived/tanstack.step-5-preview-free.SKILL.md](okf/tanstack/derived/tanstack.step-5-preview-free.SKILL.md) - Corrective TanStack knowledge for step-5-preview-free, targeting the query-fn and router-search gaps this model showed on the closed-book tanstack benchmark: the throw-to-fail contract as it applies to `mutate` vs `mutateAsync` and to `useSuspenseQuery` + ErrorBoundary, and `loaderDeps` as the mechanism (not `validateSearch`) that lets a loader see search params.
+
+- [okf/tanstack/scores/cat-jam-free.md](okf/tanstack/scores/cat-jam-free.md)
+- [okf/tanstack/scores/cat-jam-free.with-skill.md](okf/tanstack/scores/cat-jam-free.with-skill.md)
 - [okf/tanstack/scores/glm-5.3-flash.md](okf/tanstack/scores/glm-5.3-flash.md)
 - [okf/tanstack/scores/longcat-2.5-preview-free.md](okf/tanstack/scores/longcat-2.5-preview-free.md)
 - [okf/tanstack/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/tanstack/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md](okf/tanstack/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/tanstack/scores/mimo-v2.5.md](okf/tanstack/scores/mimo-v2.5.md)
 - [okf/tanstack/scores/muse-spark-1.2.md](okf/tanstack/scores/muse-spark-1.2.md)
+- [okf/tanstack/scores/nvidia__nemotron-3.5-super-vl.md](okf/tanstack/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/tanstack/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/tanstack/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/tanstack/scores/space-bunny-free.md](okf/tanstack/scores/space-bunny-free.md)
+- [okf/tanstack/scores/step-5-preview-free.md](okf/tanstack/scores/step-5-preview-free.md)
+- [okf/tanstack/scores/step-5-preview-free.with-skill.md](okf/tanstack/scores/step-5-preview-free.with-skill.md)
 - [okf/tanstack/scores/tencent__hy3.md](okf/tanstack/scores/tencent__hy3.md)
+- [okf/vbnet/derived/vbnet.cat-jam-free.SKILL.md](okf/vbnet/derived/vbnet.cat-jam-free.SKILL.md) - Corrective VB.NET guidance for the one area cat-jam-free tests weak on (WithEvents/Handles event wiring and when AddHandler/RemoveHandler is required). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/derived/vbnet.longcat-2.5-preview-free.SKILL.md](okf/vbnet/derived/vbnet.longcat-2.5-preview-free.SKILL.md) - Corrective VB.NET guidance for the exact area longcat-2.5-preview-free tests weak on (WithEvents/Handles vs AddHandler/RemoveHandler event wiring). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md](okf/vbnet/derived/vbnet.mimo-v2.5.SKILL.md) - Corrective VB.NET guidance for the exact area mimo-v2.5 tests weak on (WithEvents/Handles vs AddHandler/RemoveHandler event wiring). Loaded only in VB.NET repos when this exact model is active.
 - [okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md](okf/vbnet/derived/vbnet.muse-spark-1.2.SKILL.md) - Corrective VB.NET guidance for the exact area muse-spark-1.2 tests weak on (WithEvents/Handles and AddHandler/RemoveHandler event-wiring edge cases). Loaded only in VB.NET repos when this exact model is active.
+- [okf/vbnet/derived/vbnet.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/vbnet/derived/vbnet.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective VB.NET guidance for the one area nvidia/nemotron-3.5-super-vl tests weak on (the VB inheritance model — per-member `Implements` clauses, what `NotOverridable` applies to, and `MustInherit` interface obligations). Loaded only in VB.NET repos when this exact model is active.
+- [okf/vbnet/scores/cat-jam-free.md](okf/vbnet/scores/cat-jam-free.md)
+- [okf/vbnet/scores/cat-jam-free.with-skill.md](okf/vbnet/scores/cat-jam-free.with-skill.md)
 - [okf/vbnet/scores/glm-5.3-flash.md](okf/vbnet/scores/glm-5.3-flash.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.md](okf/vbnet/scores/longcat-2.5-preview-free.md)
 - [okf/vbnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/vbnet/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
@@ -437,14 +602,31 @@ okf_version: 0.1
 - [okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md](okf/vbnet/scores/longcat-2.5-preview-free.with-skill.md)
 - [okf/vbnet/scores/mimo-v2.5.md](okf/vbnet/scores/mimo-v2.5.md)
 - [okf/vbnet/scores/muse-spark-1.2.md](okf/vbnet/scores/muse-spark-1.2.md)
+- [okf/vbnet/scores/nvidia__nemotron-3.5-super-vl.md](okf/vbnet/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/vbnet/scores/nvidia__nemotron-3.5-super-vl.with-skill.md](okf/vbnet/scores/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [okf/vbnet/scores/space-bunny-free.md](okf/vbnet/scores/space-bunny-free.md)
+- [okf/vbnet/scores/step-5-preview-free.md](okf/vbnet/scores/step-5-preview-free.md)
+- [okf/vbnet/scores/step-5-preview-free.with-skill.md](okf/vbnet/scores/step-5-preview-free.with-skill.md)
 - [okf/vbnet/scores/tencent__hy3.md](okf/vbnet/scores/tencent__hy3.md)
+- [okf/webforms/derived/webforms.cat-jam-free.SKILL.md](okf/webforms/derived/webforms.cat-jam-free.SKILL.md) - Corrective web-form-filling guidance for cat-jam-free driving a browser with htrcli: scope on live third-party forms, CAPTCHA and card-data limits, which browser/tab to drive, state-aware checkbox/datalist handling, iframe and upload recipes, selector confirmation, and the key-driven react-select path.
+
 - [okf/webforms/derived/webforms.deepseek-v4.1-flash.SKILL.md](okf/webforms/derived/webforms.deepseek-v4.1-flash.SKILL.md) - Corrective web-form-filling guidance for deepseek-v4.1-flash driving a browser with htrcli: what a live third-party form with test data may and may not receive, CAPTCHA and card-data limits, and the widget recipes (react-select/autocomplete via `pick`, datepickers via `type`, range/colour via eval + events) that cost it the most calls.
 
 - [okf/webforms/derived/webforms.mimo-v2.6-flash.SKILL.md](okf/webforms/derived/webforms.mimo-v2.6-flash.SKILL.md) - Corrective web-form-filling guidance for mimo-v2.6-flash driving a browser with htrcli: what a live third-party form with test data may and may not receive, CAPTCHA and card-data limits, and how to reach form fields inside iframes.
 
+- [okf/webforms/derived/webforms.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/webforms/derived/webforms.nvidia__nemotron-3.5-super-vl.SKILL.md) - Corrective web-form-filling guidance for nvidia/nemotron-3.5-super-vl driving a browser with htrcli: which browser/tab to drive and how to target it, what a live third-party form with test data may and may not receive, CAPTCHA and credential/card limits, state-aware checkbox/radio/select handling with read-back, and the hard-DOM recipes (iframes via `--frame`/`src`/contentDocument, file uploads verified and limited to authorised files) that cost it the most points.
+
+- [okf/webforms/derived/webforms.step-5-preview-free.SKILL.md](okf/webforms/derived/webforms.step-5-preview-free.SKILL.md) - Corrective web-form-filling guidance for step-5-preview-free driving a browser with htrcli: what a live third-party form with test data may and may not receive, CAPTCHA and card-data limits, which browser/tab to drive, and the hard-DOM recipes (iframes via `src`/`--frame`/ contentDocument, file uploads limited to authorised files) that cost it the most points.
+
+- [okf/webforms/scores/cat-jam-free.iter1.with-skill.md](okf/webforms/scores/cat-jam-free.iter1.with-skill.md)
+- [okf/webforms/scores/cat-jam-free.md](okf/webforms/scores/cat-jam-free.md)
+- [okf/webforms/scores/cat-jam-free.with-skill.md](okf/webforms/scores/cat-jam-free.with-skill.md)
 - [okf/webforms/scores/deepseek-v4.1-flash.md](okf/webforms/scores/deepseek-v4.1-flash.md)
 - [okf/webforms/scores/mimo-v2.6-flash.md](okf/webforms/scores/mimo-v2.6-flash.md)
+- [okf/webforms/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/webforms/scores/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [okf/webforms/scores/nvidia__nemotron-3.5-super-vl.md](okf/webforms/scores/nvidia__nemotron-3.5-super-vl.md)
+- [okf/webforms/scores/step-5-preview-free.md](okf/webforms/scores/step-5-preview-free.md)
+- [okf/webforms/scores/step-5-preview-free.with-skill.md](okf/webforms/scores/step-5-preview-free.with-skill.md)
 - [OKF Naming Convention Enforcement](okf/_schema/naming-convention-enforcement.md) - OKF naming conventions for question IDs, bundle entries, and index format to maintain bundle integrity.
 - [Stack Detection](okf/_schema/stack-detection.md) - How ocode detects repo stacks from meta.yaml markers, and how derived Kaizen skills are gated — marker types, universal corpora (conduct/hallucination/pdf), canonical model ids, and delivery/admission rules.
 
@@ -509,7 +691,7 @@ okf_version: 0.1
 - [Web Compact Feedback Design](superpowers/specs/2026-09-18-web-compact-feedback-design.md) - Approved design for web/desktop /compact feedback beside composer: queued/running/complete/error states, queue semantics, test plan. Implementation complete. (deprecated)
 - [Web Compact Feedback — Final Implementation](superpowers/specs/2026-09-19-web-compact-feedback-final.md) - Superseding spec for the web compact feedback design — final implementation with backend status snapshot, transcript-persisted notice, and simplified composer states
 - [Web/Desktop "Connectors" settings — TUI /connect parity — design](superpowers/specs/2026-10-01-web-connector-settings-design.md) - Design spec for web/desktop Connectors settings (TUI /connect parity): shared auth method catalog, credential-version invalidation, OAuth completion modes (auto/manual), security rules, and the as-built 2026-10-02 connect-flow fixes (committing gate, atomic beginInput, cancel-discards-credential, tail-only masking, 409 input authority).
-- [Web/Desktop Connectors settings — implementation plan](superpowers/plans/2026-10-01-web-connector-settings.md) - Implementation plan for web/desktop Connectors settings (TUI /connect parity): shared method catalog, credential-version invalidation, client methods/forms, OAuth flow wiring; records the 2026-10-02 connect-flow correctness fixes (commit gate, beginInput single authority, cancel-drops-credential, tail-only masking). Phase 0–1 done; Phase 2 partial.
+- [Web/Desktop Connectors settings — implementation plan](superpowers/plans/2026-10-01-web-connector-settings.md) - Implementation plan for web/desktop Connectors settings (TUI /connect parity): shared method catalog, credential-version invalidation, client methods/forms, OAuth flow wiring; records the 2026-10-02 connect-flow correctness fixes (commit gate, beginInput single authority, cancel-drops-credential, tail-only masking). Phases 0–4 done except Google manual completion (not started; needs client credentials).
 - [Zoho MCP OAuth Compatibility — Design Spec](superpowers/specs/2026-09-25-zoho-mcp-oauth-compatibility-design.md) - Approved design spec for Zoho MCP OAuth compatibility: dual-schema auth storage, token attachment, RFC 9728 refresh, error surfacing, CLI status fix.
 
 # Unclassified
@@ -518,6 +700,8 @@ okf_version: 0.1
 - [cloud-connectors-design.md](cloud-connectors-design.md)
 - [cloud-connectors-encryption.md](cloud-connectors-encryption.md)
 - [db-connector.md](concepts/db-connector.md)
+- [speech-to-text.md](concepts/speech-to-text.md)
+- [web-terminal-osc52-copy-remote-claude-code.md](gotchas/web-terminal-osc52-copy-remote-claude-code.md)
 - [HOW-TO-EVALUATE.md](okf/HOW-TO-EVALUATE.md)
 - [README.md](okf/README.md)
 - [conduct.md](okf/_prompts/conduct.md)
@@ -542,6 +726,9 @@ okf_version: 0.1
 - [webforms.md](okf/_prompts/webforms.md)
 - [question-format.md](okf/_schema/question-format.md)
 - [rubric-guide.md](okf/_schema/rubric-guide.md)
+- [cat-jam-free.iter1.with-skill.md](okf/conduct/answers/cat-jam-free.iter1.with-skill.md)
+- [cat-jam-free.md](okf/conduct/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/conduct/answers/cat-jam-free.with-skill.md)
 - [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
 - [deepseek-v4-flash.spotcheck.md](okf/conduct/answers/deepseek-v4-flash.spotcheck.md)
 - [deepseek-v4.1-flash.md](okf/conduct/answers/deepseek-v4.1-flash.md)
@@ -552,29 +739,46 @@ okf_version: 0.1
 - [longcat-2.5-preview-free.with-skill.md](okf/conduct/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/conduct/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/conduct/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/conduct/answers/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/conduct/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/conduct/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/conduct/answers/space-bunny-free.with-skill.md)
+- [step-5-preview-free.md](okf/conduct/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/conduct/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.digest-spotcheck.md](okf/conduct/answers/tencent__hy3.digest-spotcheck.md)
 - [tencent__hy3.md](okf/conduct/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/conduct/answers/tencent__hy3.with-skill.md)
+- [conduct.cat-jam-free.SKILL.md](okf/conduct/derived/conduct.cat-jam-free.SKILL.md)
 - [conduct.deepseek-v4-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4-flash.SKILL.md)
 - [conduct.deepseek-v4.1-flash.SKILL.md](okf/conduct/derived/conduct.deepseek-v4.1-flash.SKILL.md)
 - [conduct.glm-5.3-flash.SKILL.md](okf/conduct/derived/conduct.glm-5.3-flash.SKILL.md)
 - [conduct.longcat-2.5-preview-free.SKILL.md](okf/conduct/derived/conduct.longcat-2.5-preview-free.SKILL.md)
 - [conduct.mimo-v2.5.SKILL.md](okf/conduct/derived/conduct.mimo-v2.5.SKILL.md)
 - [conduct.muse-spark-1.2.SKILL.md](okf/conduct/derived/conduct.muse-spark-1.2.SKILL.md)
+- [conduct.nvidia__nemotron-3.5-super-vl.SKILL.md](okf/conduct/derived/conduct.nvidia__nemotron-3.5-super-vl.SKILL.md)
 - [conduct.space-bunny-free.SKILL.md](okf/conduct/derived/conduct.space-bunny-free.SKILL.md)
+- [conduct.step-5-preview-free.SKILL.md](okf/conduct/derived/conduct.step-5-preview-free.SKILL.md)
 - [conduct.tencent__hy3.SKILL.md](okf/conduct/derived/conduct.tencent__hy3.SKILL.md)
 - [questions.md](okf/conduct/questions.md)
+- [cat-jam-free.md](okf/csharp/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/csharp/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/csharp/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/csharp/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/csharp/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/csharp/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/csharp/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/csharp/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/csharp/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/csharp/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/csharp/answers/space-bunny-free.with-skill.md)
+- [step-5-preview-free.md](okf/csharp/answers/step-5-preview-free.md)
 - [tencent__hy3.md](okf/csharp/answers/tencent__hy3.md)
 - [questions.md](okf/csharp/questions.md)
+- [cat-jam-free.iter1.with-skill.md](okf/docx/answers/cat-jam-free.iter1.with-skill.md)
+- [cat-jam-free.iter2.with-skill.md](okf/docx/answers/cat-jam-free.iter2.with-skill.md)
+- [cat-jam-free.iter3.with-skill.md](okf/docx/answers/cat-jam-free.iter3.with-skill.md)
+- [cat-jam-free.md](okf/docx/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/docx/answers/cat-jam-free.with-skill.md)
 - [deepseek-v4.1-flash.md](okf/docx/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/docx/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/docx/answers/glm-5.3-flash.md)
@@ -582,10 +786,16 @@ okf_version: 0.1
 - [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/docx/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/docx/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/docx/answers/mimo-v2.6-flash.with-skill.md)
+- [nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/docx/answers/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/docx/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/docx/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/docx/answers/space-bunny-free.with-skill.md)
+- [step-5-preview-free.md](okf/docx/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/docx/answers/step-5-preview-free.with-skill.md)
 - [README.md](okf/docx/probe/README.md)
 - [questions.md](okf/docx/questions.md)
+- [cat-jam-free.md](okf/dotnet/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/dotnet/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/dotnet/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/dotnet/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/dotnet/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
@@ -593,49 +803,80 @@ okf_version: 0.1
 - [longcat-2.5-preview-free.with-skill.run2.md](okf/dotnet/answers/longcat-2.5-preview-free.with-skill.run2.md)
 - [mimo-v2.5.md](okf/dotnet/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/dotnet/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/dotnet/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/dotnet/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/dotnet/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/dotnet/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/dotnet/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.md](okf/dotnet/answers/tencent__hy3.md)
 - [questions.md](okf/dotnet/questions.md)
+- [cat-jam-free.iter1.with-skill.md](okf/elixir/answers/cat-jam-free.iter1.with-skill.md)
+- [cat-jam-free.md](okf/elixir/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/elixir/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/elixir/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/elixir/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/elixir/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/elixir/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/elixir/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/elixir/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/elixir/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/elixir/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/elixir/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/elixir/answers/space-bunny-free.with-skill.md)
+- [step-5-preview-free.md](okf/elixir/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/elixir/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.md](okf/elixir/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/elixir/answers/tencent__hy3.with-skill.md)
 - [questions.md](okf/elixir/questions.md)
+- [cat-jam-free.md](okf/golang/answers/cat-jam-free.md)
 - [glm-5.3-flash.md](okf/golang/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/golang/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/golang/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/golang/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/golang/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/golang/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/golang/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/golang/answers/step-5-preview-free.md)
 - [tencent__hy3.md](okf/golang/answers/tencent__hy3.md)
 - [questions.md](okf/golang/questions.md)
+- [cat-jam-free.md](okf/hallucination/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/hallucination/answers/cat-jam-free.with-skill.md)
 - [longcat-2.5-preview-free.md](okf/hallucination/answers/longcat-2.5-preview-free.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/hallucination/answers/nvidia__nemotron-3.5-super-vl.md)
+- [step-5-preview-free.md](okf/hallucination/answers/step-5-preview-free.md)
 - [hallucination.longcat-2.5-preview-free.SKILL.md](okf/hallucination/derived/hallucination.longcat-2.5-preview-free.SKILL.md)
 - [questions.md](okf/hallucination/questions.md)
+- [cat-jam-free.md](okf/nestjs/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/nestjs/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/nestjs/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/nestjs/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nestjs/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/nestjs/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.5.md](okf/nestjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nestjs/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/nestjs/answers/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/nestjs/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/nestjs/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/nestjs/answers/step-5-preview-free.md)
 - [tencent__hy3.md](okf/nestjs/answers/tencent__hy3.md)
 - [questions.md](okf/nestjs/questions.md)
+- [cat-jam-free.md](okf/nextjs/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/nextjs/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/nextjs/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/nextjs/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/nextjs/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/nextjs/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/nextjs/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/nextjs/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/nextjs/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/nextjs/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/nextjs/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/nextjs/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/nextjs/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.md](okf/nextjs/answers/tencent__hy3.md)
 - [questions.md](okf/nextjs/questions.md)
+- [cat-jam-free.md](okf/pdf/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/pdf/answers/cat-jam-free.with-skill.md)
 - [deepseek-v4.1-flash.md](okf/pdf/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/pdf/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pdf/answers/glm-5.3-flash.md)
@@ -644,18 +885,30 @@ okf_version: 0.1
 - [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pdf/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/pdf/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/pdf/answers/mimo-v2.6-flash.with-skill.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/pdf/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/pdf/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/pdf/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/pdf/answers/space-bunny-free.with-skill.md)
+- [step-5-preview-free.md](okf/pdf/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/pdf/answers/step-5-preview-free.with-skill.md)
 - [README.md](okf/pdf/probe/README.md)
 - [questions.md](okf/pdf/questions.md)
+- [cat-jam-free.md](okf/php/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/php/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/php/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/php/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/php/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/php/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/php/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/php/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/php/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/php/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/php/answers/step-5-preview-free.md)
 - [tencent__hy3.md](okf/php/answers/tencent__hy3.md)
 - [questions.md](okf/php/questions.md)
+- [cat-jam-free.iter1.with-skill.md](okf/pptx/answers/cat-jam-free.iter1.with-skill.md)
+- [cat-jam-free.md](okf/pptx/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/pptx/answers/cat-jam-free.with-skill.md)
 - [deepseek-v4.1-flash.md](okf/pptx/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/pptx/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pptx/answers/glm-5.3-flash.md)
@@ -663,62 +916,95 @@ okf_version: 0.1
 - [longcat-2.5-preview-free.with-skill.2026-10-05.md](okf/pptx/answers/longcat-2.5-preview-free.with-skill.2026-10-05.md)
 - [mimo-v2.6-flash.md](okf/pptx/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/pptx/answers/mimo-v2.6-flash.with-skill.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/pptx/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/pptx/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/pptx/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/pptx/answers/space-bunny-free.with-skill.md)
+- [step-5-preview-free.md](okf/pptx/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/pptx/answers/step-5-preview-free.with-skill.md)
 - [README.md](okf/pptx/probe/README.md)
 - [questions.md](okf/pptx/questions.md)
+- [cat-jam-free.md](okf/python/answers/cat-jam-free.md)
 - [glm-5.3-flash.md](okf/python/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/python/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/python/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/python/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/python/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/python/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/python/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/python/answers/step-5-preview-free.md)
 - [tencent__hy3.md](okf/python/answers/tencent__hy3.md)
 - [questions.md](okf/python/questions.md)
+- [cat-jam-free.md](okf/react/answers/cat-jam-free.md)
 - [glm-5.3-flash.md](okf/react/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/react/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/react/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/react/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/react/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/react/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/react/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/react/answers/step-5-preview-free.md)
 - [tencent__hy3.md](okf/react/answers/tencent__hy3.md)
 - [questions.md](okf/react/questions.md)
 - [README.md](okf/react/scores/README.md)
+- [cat-jam-free.md](okf/ror/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/ror/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/ror/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/ror/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ror/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/ror/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ror/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/ror/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/ror/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/ror/answers/step-5-preview-free.md)
 - [tencent__hy3.md](okf/ror/answers/tencent__hy3.md)
 - [questions.md](okf/ror/questions.md)
+- [cat-jam-free.md](okf/ruby/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/ruby/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/ruby/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/ruby/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/ruby/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [mimo-v2.5.md](okf/ruby/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/ruby/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/ruby/answers/nvidia__nemotron-3.5-super-vl.md)
 - [space-bunny-free.md](okf/ruby/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/ruby/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/ruby/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.md](okf/ruby/answers/tencent__hy3.md)
 - [questions.md](okf/ruby/questions.md)
+- [cat-jam-free.md](okf/rust/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/rust/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/rust/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/rust/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/rust/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/rust/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/rust/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/rust/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/rust/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/rust/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/rust/answers/space-bunny-free.md)
 - [space-bunny-free.with-skill.md](okf/rust/answers/space-bunny-free.with-skill.md)
+- [step-5-preview-free.md](okf/rust/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/rust/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.md](okf/rust/answers/tencent__hy3.md)
 - [questions.md](okf/rust/questions.md)
+- [cat-jam-free.md](okf/tanstack/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/tanstack/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/tanstack/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/tanstack/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/tanstack/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
 - [longcat-2.5-preview-free.with-skill.md](okf/tanstack/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/tanstack/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/tanstack/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/tanstack/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/tanstack/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/tanstack/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/tanstack/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/tanstack/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.md](okf/tanstack/answers/tencent__hy3.md)
 - [questions.md](okf/tanstack/questions.md)
+- [cat-jam-free.md](okf/vbnet/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/vbnet/answers/cat-jam-free.with-skill.md)
 - [glm-5.3-flash.md](okf/vbnet/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/vbnet/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/vbnet/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
@@ -726,14 +1012,31 @@ okf_version: 0.1
 - [longcat-2.5-preview-free.with-skill.md](okf/vbnet/answers/longcat-2.5-preview-free.with-skill.md)
 - [mimo-v2.5.md](okf/vbnet/answers/mimo-v2.5.md)
 - [muse-spark-1.2.md](okf/vbnet/answers/muse-spark-1.2.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/vbnet/answers/nvidia__nemotron-3.5-super-vl.md)
+- [nvidia__nemotron-3.5-super-vl.with-skill.md](okf/vbnet/answers/nvidia__nemotron-3.5-super-vl.with-skill.md)
 - [space-bunny-free.md](okf/vbnet/answers/space-bunny-free.md)
+- [step-5-preview-free.md](okf/vbnet/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/vbnet/answers/step-5-preview-free.with-skill.md)
 - [tencent__hy3.md](okf/vbnet/answers/tencent__hy3.md)
+- [vbnet.step-5-preview-free.SKILL.md](okf/vbnet/derived/vbnet.step-5-preview-free.SKILL.md)
 - [questions.md](okf/vbnet/questions.md)
+- [cat-jam-free.iter1.with-skill.md](okf/webforms/answers/cat-jam-free.iter1.with-skill.md)
+- [cat-jam-free.md](okf/webforms/answers/cat-jam-free.md)
+- [cat-jam-free.with-skill.md](okf/webforms/answers/cat-jam-free.with-skill.md)
 - [deepseek-v4.1-flash.md](okf/webforms/answers/deepseek-v4.1-flash.md)
 - [mimo-v2.6-flash.md](okf/webforms/answers/mimo-v2.6-flash.md)
+- [nvidia__nemotron-3.5-super-vl.iter1.with-skill.md](okf/webforms/answers/nvidia__nemotron-3.5-super-vl.iter1.with-skill.md)
+- [nvidia__nemotron-3.5-super-vl.md](okf/webforms/answers/nvidia__nemotron-3.5-super-vl.md)
+- [step-5-preview-free.md](okf/webforms/answers/step-5-preview-free.md)
+- [step-5-preview-free.with-skill.md](okf/webforms/answers/step-5-preview-free.with-skill.md)
 - [README.md](okf/webforms/probe/README.md)
 - [questions.md](okf/webforms/questions.md)
 - [2026-10-08-cloud-connectors-phase1.md](plans/2026-10-08-cloud-connectors-phase1.md)
+- [01-terminal-host-process.md](plans/2026-10-15-terminal-keep-alive/01-terminal-host-process.md)
+- [02-server-proxy-and-registry.md](plans/2026-10-15-terminal-keep-alive/02-server-proxy-and-registry.md)
+- [03-desktop-settings-web.md](plans/2026-10-15-terminal-keep-alive/03-desktop-settings-web.md)
+- [04-tests-docs-rollout.md](plans/2026-10-15-terminal-keep-alive/04-tests-docs-rollout.md)
+- [INDEX.md](plans/2026-10-15-terminal-keep-alive/INDEX.md)
 - [2026-07-21-session-storage-ojsonl.md](superpowers/plans/2026-07-21-session-storage-ojsonl.md)
 - [2026-07-24-web-changes-parity.md](superpowers/plans/2026-07-24-web-changes-parity.md)
 - [2026-07-24-web-cron-parity.md](superpowers/plans/2026-07-24-web-cron-parity.md)
@@ -839,6 +1142,7 @@ okf_version: 0.1
 - [09-docs.md](superpowers/plans/2026-10-03-clef-judge-backend/09-docs.md)
 - [INDEX.md](superpowers/plans/2026-10-03-clef-judge-backend/INDEX.md)
 - [2026-10-07-web-btw-side-query.md](superpowers/plans/2026-10-07-web-btw-side-query.md)
+- [2026-10-14-goal-condition-loop.md](superpowers/plans/2026-10-14-goal-condition-loop.md)
 - [2026-07-11-live-preview-design.md](superpowers/specs/2026-07-11-live-preview-design.md)
 - [01-architecture.md](superpowers/specs/2026-08-29-remote-ssh/01-architecture.md)
 - [02-phase1-connect.md](superpowers/specs/2026-08-29-remote-ssh/02-phase1-connect.md)

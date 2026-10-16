@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/u007/ocode/internal/tool"
 )
@@ -27,6 +29,24 @@ type Status struct {
 	Playback            Playback `json:"playback"`
 	SelectionGeneration uint64   `json:"selection_generation"`
 }
+
+// SampleResult is the outcome of a one-off sample synthesis: the audio id to
+// fetch, the engine and voice actually used, and the text spoken. It is
+// served from the dedicated /api/tts/sample-audio endpoint and does not touch
+// the active TTS config, selection, or playback.
+type SampleResult struct {
+	AudioID string   `json:"audio_id"`
+	Engine  EngineID `json:"engine"`
+	Voice   string   `json:"voice"`
+	Text    string   `json:"text"`
+}
+
+// defaultSampleText is spoken when the caller does not supply a text.
+const defaultSampleText = "Hello. This is a sample of this text to speech voice."
+
+// maxSampleTextRunes caps the length of a caller-supplied sample text so a
+// sample stays short and cheap to synthesize.
+const maxSampleTextRunes = 300
 
 // Options wires the supervisor to the host. Root is the ocode data dir that
 // holds models/tts; ProcSup is the shared process supervisor every synthesis
@@ -44,6 +64,8 @@ type Supervisor struct {
 	err       string
 	playback  PlaybackManager
 	selection atomic.Uint64
+	sampleGen atomic.Uint64
+	sampleMu  sync.Mutex
 	installer *Installer
 	opts      Options
 	client    *http.Client
@@ -314,11 +336,124 @@ func (s *Supervisor) AudioPath(id string) (string, error) {
 	return filepath.Join(s.opts.Root, "models", "tts", "audio", id+".wav"), nil
 }
 
+// SampleAudioPath resolves a sample audio id to its file. The id must be a
+// "sample-<nonce>" value returned by SpeakSample; anything else is refused,
+// so a guessed or stale id never serves a file.
+func (s *Supervisor) SampleAudioPath(audioID string) (string, error) {
+	if !strings.HasPrefix(audioID, "sample-") {
+		return "", fmt.Errorf("tts: %q is not a sample audio id", audioID)
+	}
+	nonce := strings.TrimPrefix(audioID, "sample-")
+	if nonce == "" || !validSampleNonce(nonce) {
+		return "", fmt.Errorf("tts: invalid sample audio id %q", audioID)
+	}
+	return filepath.Join(s.opts.Root, "models", "tts", "audio", audioID+".wav"), nil
+}
+
+// validSampleNonce reports whether every character is safe to embed in a file
+// name (alphanumeric, hyphen, or underscore only).
+func validSampleNonce(nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	for _, r := range nonce {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Supervisor) Stop() Playback {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cancelSynth()
 	return s.playback.StopForSelection(s.selection.Load())
+}
+
+// SynthSeam, when non-nil, replaces synthText while synthesising a sample.
+// Production callers never set it; it exists so the synthesis happy path can be
+// exercised in CI without a real Python venv.
+var SynthSeam func(ctx context.Context, sup *tool.ProcessSupervisor, root string, m Manifest, id, text, outPath, voice string) error
+
+// AvailabilitySeam, when non-nil, overrides the installed/ready availability
+// check in SpeakSample (tests only).
+var AvailabilitySeam func(EngineID) (Availability, bool)
+
+// SpeakSample synthesizes a one-off sample for engine using voice (or the
+// manifest default) speaking text (or a default sentence). It does not touch
+// the active TTS config, selection, or playback: the result is served from the
+// dedicated sample-audio endpoint instead of /api/tts/audio. The engine must
+// already be installed (availability ready).
+func (s *Supervisor) SpeakSample(engineID EngineID, voice, text string) (SampleResult, error) {
+	if !s.sampleMu.TryLock() {
+		return SampleResult{}, errors.New("tts: another sample is already being synthesised")
+	}
+	defer s.sampleMu.Unlock()
+	m, ok := ManifestFor(engineID)
+	if !ok {
+		return SampleResult{}, fmt.Errorf("tts: no manifest for engine %q", engineID)
+	}
+	if voice == "" {
+		voice = m.Voice
+	} else if err := ValidateVoiceID(voice); err != nil {
+		return SampleResult{}, fmt.Errorf("tts: invalid voice %q: %w", voice, err)
+	} else if len(m.Voices) > 0 {
+		found := false
+		for _, v := range m.Voices {
+			if v == voice {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return SampleResult{}, fmt.Errorf("tts: voice %q is not available for engine %q", voice, engineID)
+		}
+	}
+	if text == "" {
+		text = defaultSampleText
+	} else if utf8.RuneCountInString(text) > maxSampleTextRunes {
+		return SampleResult{}, fmt.Errorf("tts: sample text is too long (max %d characters)", maxSampleTextRunes)
+	}
+	if s.opts.ProcSup == nil || s.opts.Root == "" {
+		return SampleResult{}, errors.New("tts: local engines are not wired to a process supervisor")
+	}
+	avail := AvailabilityUnavailable
+	if AvailabilitySeam != nil {
+		a, _ := AvailabilitySeam(engineID)
+		avail = a
+	} else {
+		e, ok := s.Engine(engineID)
+		if ok {
+			avail = e.Availability
+		}
+	}
+	if avail != AvailabilityReady {
+		return SampleResult{}, fmt.Errorf("tts: engine %q is not installed", engineID)
+	}
+	id := strconv.FormatUint(s.sampleGen.Add(1), 10)
+	out := filepath.Join(s.opts.Root, "models", "tts", "audio", "sample-"+id+".wav")
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return SampleResult{}, fmt.Errorf("tts: create audio dir: %w", err)
+	}
+	// Reap previous sample wav files so previews do not accumulate on disk.
+	if old, err := filepath.Glob(filepath.Join(s.opts.Root, "models", "tts", "audio", "sample-*.wav")); err == nil {
+		for _, f := range old {
+			_ = os.Remove(f)
+		}
+	}
+	// Write a fresh path (the glob ran before we create the new id's file).
+	ctx, cancel := context.WithTimeout(context.Background(), synthTimeout)
+	defer cancel()
+	synthFn := synthText
+	if SynthSeam != nil {
+		synthFn = SynthSeam
+	}
+	if err := synthFn(ctx, s.opts.ProcSup, s.opts.Root, m, id, text, out, voice); err != nil {
+		_ = os.Remove(out)
+		return SampleResult{}, err
+	}
+	return SampleResult{AudioID: "sample-" + id, Engine: engineID, Voice: voice, Text: text}, nil
 }
 
 func (s *Supervisor) Status() Status {

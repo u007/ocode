@@ -57,8 +57,16 @@ through the normal permission dialog, see "Permission design".
 | `PUT /api/config/pulse-model` | Body `{"model": "..."}`; empty string clears. `400` when the `model` key is absent. Returns `{"model": "..."}`. |
 | `GET /api/config/pulse-system-prompt` | `200 {"prompt": "<configured or empty>", "default": "<built-in prompt with the tool list rendered>"}`. |
 | `PUT /api/config/pulse-system-prompt` | Body `{"prompt": "..."}`; empty string clears; `400` when the key is absent. Persisted by `config.SavePulseSystemPrompt` and re-applied to the live assistant (`Agent.SetSystemPromptOverride` is atomic), so it takes effect on its next model call, no rebuild. |
+| `GET /api/config/pulse-auto-receive` | `200 {"enabled": true|false}`. Whether the assistant auto-receives stop indicators from other sessions. |
+| `PUT /api/config/pulse-auto-receive` | Body `{"enabled": true|false}`. Persisted; takes effect immediately. |
+| `GET /api/config/pulse-auto-gap-ms` | `200 {"gap_ms": 2000}`. The quiet gap (ms) after the last stop indicator before the assistant processes it. |
+| `PUT /api/config/pulse-auto-gap-ms` | Body `{"gap_ms": <ms>}`. Must be >= 0. Persisted. |
+| `GET /api/config/pulse-auto-compact` | `200 {"enabled": true|false}`. Whether the assistant auto-comacts its own context. |
+| `PUT /api/config/pulse-auto-compact` | Body `{"enabled": true|false}`. Persisted; takes effect immediately. |
+| `GET /api/config/pulse-compact-thresholds` | `200 {"token_threshold": 250000, "pct_threshold": 80}`. Auto-compaction thresholds; whichever is reached first triggers compaction. |
+| `PUT /api/config/pulse-compact-thresholds` | Body `{"token_threshold": <n>, "pct_threshold": <n>}`. Persisted. |
 
-All three sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
+All of these sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
 `HandlePulseAssistant`, `HandleGetPulseModel`, `HandleSetPulseModel`
 (`internal/server/pulse_assistant.go`).
 
@@ -69,6 +77,21 @@ All three sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
 - `ocode.pulse_system_prompt` (string): when non-empty, used **verbatim** as the
   assistant's system prompt (no tool list is appended). Edited through
   `/api/config/pulse-system-prompt`.
+- `ocode.pulse_auto_receive` (bool): when `true`, the Pulse assistant
+  automatically receives stop indicators (turn done, permission ask, question ask,
+  task complete) from other sessions. Default `false` (off). Edited through
+  `/api/config/pulse-auto-receive`.
+- `ocode.pulse_auto_gap_ms` (int): quiet gap (ms) after the last stop indicator
+  before the assistant processes it. Default `2000` (2s). Edited through
+  `/api/config/pulse-auto-gap-ms`.
+- `ocode.pulse_auto_compact` (bool): when `true`, auto-comacts the assistant's
+  own context when it hits the token or pct threshold. Default `false` (off).
+  Edited through `/api/config/pulse-auto-compact`.
+- `ocode.pulse_compact_token_threshold` (int): token count at which auto-compaction
+  fires. Default `250000` (250k). Edited through `/api/config/pulse-compact-thresholds`.
+- `ocode.pulse_compact_pct_threshold` (int): percent of model context window at
+  which auto-compaction fires. Default `80`. Edited through
+  `/api/config/pulse-compact-thresholds`.
 
 ## Model slot resolution
 
@@ -119,6 +142,38 @@ a tail block like `injectTodoTail`/`injectNotesTail`, never persisted. Memory
 changes between turns too (`memory_write`, a project going live), so it rides the
 same user-role block. The system prompt itself is constant per session, so it
 caches.
+
+## Auto-receive of stop indicators
+
+When `ocode.pulse_auto_receive` is `true`, the Pulse assistant automatically
+receives stop indicators from other sessions: turn done, permission ask, question
+ask, task complete. These surface on the board as rows with `needs_permission` or
+`needs_question` status, and the assistant sees them on its next turn via the
+`[ocode:pulse]` block.
+
+A quiet gap (`ocode.pulse_auto_gap_ms`, default 2000 ms) debounces rapid-fire
+indicators: the assistant only processes after the gap elapses with no new
+indicator. The Pulse assistant window on the dashboard shows a pulsing badge and
+plays a short ding when a new stop indicator arrives while auto-receive is on.
+
+The setting is persisted in `ocodeconfig.json` and toggled through
+`/api/config/pulse-auto-receive` (and `/api/config/pulse-auto-gap-ms` for the
+gap). Default: off.
+
+## Auto-compaction of the assistant's own context
+
+When `ocode.pulse_auto_compact` is `true`, the Pulse assistant auto-comacts its
+own context after each turn if it exceeds either threshold, whichever is reached
+first:
+
+- `ocode.pulse_compact_token_threshold` (default 250000 tokens)
+- `ocode.pulse_compact_pct_threshold` (default 80 percent of model context)
+
+This is independent of the global compaction config (`ocode.compact`). The check
+runs after every Pulse turn and uses `LastInputTokens`/`CompactedContextTokens`
+against `ModelWindow(model)`. Persisted through
+`/api/config/pulse-auto-compact` and `/api/config/pulse-compact-thresholds`.
+Default: off.
 
 ## Tools
 
@@ -271,6 +326,15 @@ assistant never appears as a card, never counts as a child, and is absent from
   call tools for fresher data.
 - Idle eviction (30 min) drops the live agent like any session; `GET
   /api/pulse/assistant` or the next message rebuilds it from the transcript.
+
+## Web surface
+
+- `web/src/components/Pulse/PulseAssistantWindow.tsx` reuses the real chat surface (`ChatPanel`
+  + `ChatInput`) and now exposes a **Logs** tab beside Chat. Both panels are force-mounted and
+  CSS-hidden while inactive so the log SSE stream and scroll position survive tab switches.
+  `LogPanel` is scoped to the assistant's own `pulse_...` session id (`host={undefined}`),
+  streams through `/api/logs` / `/api/logs/stream` with `session_id=pulse_...`, and offers the
+  standard kind filter and clear behaviour.
 
 ## References
 

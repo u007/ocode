@@ -35,6 +35,7 @@ vi.mock("../../api/client", () => ({
       preset: "full",
       overrides: {
         older_thinking: "preset",
+        latest_thinking: "preset",
         tool_calls: "preset",
         tool_output: "preset",
         activity_notices: "preset",

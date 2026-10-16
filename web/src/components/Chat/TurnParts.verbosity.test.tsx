@@ -44,7 +44,7 @@ function displayValue(
   }[preset];
   const policy: ChatDisplayPolicy = {
     older_thinking: (withOverride(overrides.older_thinking) === "preset" ? base.older_thinking : withOverride(overrides.older_thinking)) as ChatDisplayPolicy["older_thinking"],
-    latest_thinking: "expanded",
+    latest_thinking: (withOverride(overrides.latest_thinking) === "preset" ? "expanded" : withOverride(overrides.latest_thinking)) as ChatDisplayPolicy["latest_thinking"],
     tool_calls: (withOverride(overrides.tool_calls) === "preset" ? base.tool_calls : withOverride(overrides.tool_calls)) as ChatDisplayPolicy["tool_calls"],
     tool_output: (withOverride(overrides.tool_output) === "preset" ? base.tool_output : withOverride(overrides.tool_output)) as ChatDisplayPolicy["tool_output"],
     notices: (withOverride(overrides.activity_notices) === "preset" ? base.notices : withOverride(overrides.activity_notices)) as ChatDisplayPolicy["notices"],
@@ -55,6 +55,7 @@ function displayValue(
       preset,
       overrides: {
         older_thinking: withOverride(overrides.older_thinking),
+        latest_thinking: withOverride(overrides.latest_thinking),
         tool_calls: withOverride(overrides.tool_calls),
         tool_output: withOverride(overrides.tool_output),
         activity_notices: withOverride(overrides.activity_notices),

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import type { TTSEngine, TTSInstallState } from "@/api/types";
 import { useSpeech } from "../Speech/SpeechProvider";
@@ -27,6 +27,12 @@ export default function TTSForm() {
   const [engineErrors, setEngineErrors] = useState<Record<string, string>>({});
   const [modelId, setModelId] = useState<string>("default");
   const [modelVoiceState, setModelVoiceState] = useState<Record<string, string>>({});
+  const [samplePlaying, setSamplePlaying] = useState<string | null>(null);
+  const [sampleError, setSampleError] = useState<string | null>(null);
+  const [sampleErrorEngine, setSampleErrorEngine] = useState<string | null>(null);
+  const [sampleVoiceByEngine, setSampleVoiceByEngine] = useState<Record<string, string>>({});
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const sampleUrlRef = useRef<string | null>(null);
   const canRetry = status?.engine.availability !== "unavailable" && Boolean(status?.error || error);
 
   const refreshInstallStates = useCallback(async () => {
@@ -79,10 +85,81 @@ export default function TTSForm() {
 	const enable = (engine: TTSEngine) =>
     run(engine, async () => {
       await api.ttsEnable(engine.id, modelId);
-		await refresh();
 		});
 
+  const stopSample = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      audioRef.current = null;
+    }
+    if (sampleUrlRef.current) {
+      URL.revokeObjectURL(sampleUrlRef.current);
+      sampleUrlRef.current = null;
+    }
+    setSamplePlaying(null);
+    setSampleError(null);
+    setSampleErrorEngine(null);
+  }, []);
+
+  // Synthesise + play a short sample for one installed engine. Switching to a
+  // different engine's sample stops the current one first. This uses a dedicated
+  // <audio> so it never interrupts the user's current message playback.
+  const playSample = useCallback(
+    async (engine: TTSEngine) => {
+      stopSample();
+      setSampleError(null);
+      setSampleErrorEngine(engine.id);
+      const voice = sampleVoiceByEngine[engine.id] ?? engine.voice_id ?? undefined;
+      try {
+        const result = await api.ttsSample(engine.id, voice);
+        const blob = await api.ttsSampleAudioBlob(result.audio_id);
+        const url = URL.createObjectURL(blob);
+        sampleUrlRef.current = url;
+        setSamplePlaying(engine.id);
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.onended = () => {
+          if (samplePlaying === engine.id) {
+            setSamplePlaying(null);
+            if (sampleUrlRef.current === url) {
+              URL.revokeObjectURL(url);
+              sampleUrlRef.current = null;
+            }
+            audioRef.current = null;
+          }
+        };
+        audio.onerror = () => {
+          setSampleError(`Failed to play ${engine.label} sample`);
+          if (samplePlaying === engine.id) setSamplePlaying(null);
+          if (sampleUrlRef.current === url) {
+            URL.revokeObjectURL(url);
+            sampleUrlRef.current = null;
+          }
+          audioRef.current = null;
+        };
+        void audio.play().catch((err) => {
+          setSampleError(errorText(err));
+          if (samplePlaying === engine.id) setSamplePlaying(null);
+        });
+      } catch (err) {
+        setSampleError(errorText(err));
+        setSamplePlaying(null);
+      }
+    },
+    [stopSample],
+  );
+
+  useEffect(() => {
+    return () => {
+      stopSample();
+    };
+  }, [stopSample]);
+
   const renderLocalEngine = (engine: TTSEngine) => {
+
     const inst = installStates[engine.id];
     const state = inst?.state ?? "not-accepted";
     const busy = busyEngine === engine.id;
@@ -145,7 +222,19 @@ export default function TTSForm() {
           {engine.license_url && (
             <>
               {" "}
-              <a className="underline" href={engine.license_url} target="_blank" rel="noreferrer">view</a>
+              <a
+                className="underline"
+                href={engine.license_url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => {
+                  if (!engine.license_url || !isHTTPURL(engine.license_url)) return;
+                  e.preventDefault();
+                  openExternalURL(engine.license_url);
+                }}
+              >
+                view
+              </a>
             </>
           )}
         </p>
@@ -208,6 +297,46 @@ export default function TTSForm() {
           )}
           <span>Install state: {state}</span>
         </div>
+        {(state === "installed" || state === "enabled") && (
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            {engine.voices && engine.voices.length > 1 && (
+              <>
+                <label className="text-[10px] text-muted-foreground">Sample voice:</label>
+                <select
+                  value={sampleVoiceByEngine[engine.id] ?? engine.voice_id}
+                  onChange={(e) =>
+                    setSampleVoiceByEngine((previous) => ({
+                      ...previous,
+                      [engine.id]: e.target.value,
+                    }))
+                  }
+                  className="rounded border border-input bg-background px-2 py-0.5 text-[10px]"
+                >
+                  {engine.voices.map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              </>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              className="rounded border border-border bg-background px-2 py-0.5 text-[10px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => {
+                if (samplePlaying === engine.id) {
+                  void stopSample();
+                } else {
+                  void playSample(engine);
+                }
+              }}
+            >
+              {samplePlaying === engine.id ? "Stop sample" : "Play sample"}
+            </button>
+            {sampleError && sampleErrorEngine === engine.id && (
+              <span className="text-[10px] text-destructive">{sampleError}</span>
+            )}
+          </div>
+        )}
         {state === "downloading" && (
           <div>
             <div className="h-1.5 w-full overflow-hidden rounded bg-muted">

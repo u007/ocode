@@ -423,6 +423,7 @@ const (
 // explicitly invalid value before applying it.
 type ChatVerbosityOverrides struct {
 	OlderThinking   string `json:"older_thinking"`
+	LatestThinking  string `json:"latest_thinking"`
 	ToolCalls       string `json:"tool_calls"`
 	ToolOutput      string `json:"tool_output"`
 	ActivityNotices string `json:"activity_notices"`
@@ -465,8 +466,8 @@ func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
 }
 
 // ChatDisplayPolicy is the effective, renderer-facing form of a verbosity
-// config. LatestThinking is intentionally always expanded: users must be able
-// to follow the model's current reasoning in every preset.
+// config. The latest thinking block defaults to expanded so users can follow
+// the model's current reasoning, but it stays configurable like the others.
 type ChatDisplayPolicy struct {
 	OlderThinking  string `json:"older_thinking"`
 	LatestThinking string `json:"latest_thinking"`
@@ -481,6 +482,7 @@ func defaultChatVerbosityConfig() ChatVerbosityConfig {
 		Preset: ChatVerbosityFull,
 		Overrides: ChatVerbosityOverrides{
 			OlderThinking:   ChatDisplayPreset,
+			LatestThinking:  ChatDisplayPreset,
 			ToolCalls:       ChatDisplayPreset,
 			ToolOutput:      ChatDisplayPreset,
 			ActivityNotices: ChatDisplayPreset,
@@ -501,6 +503,9 @@ func (c ChatVerbosityConfig) withDefaults() ChatVerbosityConfig {
 	}
 	if c.Overrides.OlderThinking == "" {
 		c.Overrides.OlderThinking = ChatDisplayPreset
+	}
+	if c.Overrides.LatestThinking == "" {
+		c.Overrides.LatestThinking = ChatDisplayPreset
 	}
 	if c.Overrides.ToolCalls == "" {
 		c.Overrides.ToolCalls = ChatDisplayPreset
@@ -539,6 +544,8 @@ func chatVerbosityOverrideField(dst *ChatVerbosityOverrides, name string) *strin
 	switch name {
 	case "older_thinking":
 		return &dst.OlderThinking
+	case "latest_thinking":
+		return &dst.LatestThinking
 	case "tool_calls":
 		return &dst.ToolCalls
 	case "tool_output":
@@ -562,6 +569,7 @@ func (c ChatVerbosityConfig) Validate() error {
 		value string
 	}{
 		{"older_thinking", c.Overrides.OlderThinking},
+		{"latest_thinking", c.Overrides.LatestThinking},
 		{"tool_calls", c.Overrides.ToolCalls},
 		{"tool_output", c.Overrides.ToolOutput},
 		{"activity_notices", c.Overrides.ActivityNotices},
@@ -582,8 +590,7 @@ func resolveChatDisplayOverride(value, presetValue string) string {
 }
 
 // ResolveChatVerbosityPolicy converts persisted intent into the effective
-// renderer policy. The latest thinking block is a deliberate invariant across
-// all presets, including Quiet.
+// renderer policy. The latest thinking block is configurable like the others.
 func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, error) {
 	cfg = cfg.withDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -610,7 +617,7 @@ func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, err
 
 	return ChatDisplayPolicy{
 		OlderThinking:  resolveChatDisplayOverride(cfg.Overrides.OlderThinking, olderThinking),
-		LatestThinking: ChatDisplayExpanded,
+		LatestThinking: resolveChatDisplayOverride(cfg.Overrides.LatestThinking, ChatDisplayExpanded),
 		ToolCalls:      resolveChatDisplayOverride(cfg.Overrides.ToolCalls, toolCalls),
 		ToolOutput:     resolveChatDisplayOverride(cfg.Overrides.ToolOutput, toolOutput),
 		Notices:        resolveChatDisplayOverride(cfg.Overrides.ActivityNotices, notices),
@@ -946,6 +953,22 @@ type OcodeConfig struct {
 	// chat model; empty PulseSystemPrompt uses the built-in prompt.
 	PulseModel        string
 	PulseSystemPrompt string
+	// PulseAutoReceive makes the Pulse assistant automatically receive stop
+	// indicators (turn done, permission ask, question ask, task complete) from
+	// other sessions. Zero value (false) means off.
+	PulseAutoReceive bool
+	// PulseAutoGapMs is the quiet gap (ms) after the last stop indicator before
+	// injecting a summary into the Pulse assistant. Zero means a default.
+	PulseAutoGapMs int
+	// PulseAutoCompact auto-comacts the Pulse assistant's own context when it
+	// hits the token or pct threshold. Zero value means off.
+	PulseAutoCompact bool
+	// PulseCompactTokenThreshold is the token count at which auto-compaction
+	// fires. Zero means default (250000).
+	PulseCompactTokenThreshold int
+	// PulseCompactPctThreshold is the percent of model context at which
+	// auto-compaction fires. Zero means default (80).
+	PulseCompactPctThreshold int
 	CommitMsgModel    string
 	CommitMsgPrompt   string
 	TUI               TUIConfig
@@ -1314,6 +1337,11 @@ type ocodeConfigFile struct {
 	AutoContinueModel       string                      `json:"auto_continue_model,omitempty"`
 	PulseModel              string                      `json:"pulse_model,omitempty"`
 	PulseSystemPrompt       string                      `json:"pulse_system_prompt,omitempty"`
+	PulseAutoReceive        *bool                       `json:"pulse_auto_receive,omitempty"`
+	PulseAutoGapMs          *int                        `json:"pulse_auto_gap_ms,omitempty"`
+	PulseAutoCompact        *bool                       `json:"pulse_auto_compact,omitempty"`
+	PulseCompactTokenThreshold *int                       `json:"pulse_compact_token_threshold,omitempty"`
+	PulseCompactPctThreshold *int                        `json:"pulse_compact_pct_threshold,omitempty"`
 	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
 	UndoMaxAgeDelta         *int                        `json:"undo_max_age_delta,omitempty"`
 	MaxConcurrentAgents     *int                        `json:"max_concurrent_agents,omitempty"`
@@ -1909,6 +1937,36 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.PulseSystemPrompt = file.PulseSystemPrompt
 		}
 		delete(raw, "pulse_system_prompt")
+	}
+	if _, ok := raw["pulse_auto_receive"]; ok {
+		if file.PulseAutoReceive != nil {
+			cfg.PulseAutoReceive = *file.PulseAutoReceive
+		}
+		delete(raw, "pulse_auto_receive")
+	}
+	if _, ok := raw["pulse_auto_gap_ms"]; ok {
+		if file.PulseAutoGapMs != nil {
+			cfg.PulseAutoGapMs = *file.PulseAutoGapMs
+		}
+		delete(raw, "pulse_auto_gap_ms")
+	}
+	if _, ok := raw["pulse_auto_compact"]; ok {
+		if file.PulseAutoCompact != nil {
+			cfg.PulseAutoCompact = *file.PulseAutoCompact
+		}
+		delete(raw, "pulse_auto_compact")
+	}
+	if _, ok := raw["pulse_compact_token_threshold"]; ok {
+		if file.PulseCompactTokenThreshold != nil {
+			cfg.PulseCompactTokenThreshold = *file.PulseCompactTokenThreshold
+		}
+		delete(raw, "pulse_compact_token_threshold")
+	}
+	if _, ok := raw["pulse_compact_pct_threshold"]; ok {
+		if file.PulseCompactPctThreshold != nil {
+			cfg.PulseCompactPctThreshold = *file.PulseCompactPctThreshold
+		}
+		delete(raw, "pulse_compact_pct_threshold")
 	}
 
 	if _, ok := raw["commit_msg_model"]; ok {
@@ -2675,6 +2733,21 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.PulseSystemPrompt != "" {
 		payload["pulse_system_prompt"] = cfg.PulseSystemPrompt
+	}
+	if cfg.PulseAutoReceive {
+		payload["pulse_auto_receive"] = true
+	}
+	if cfg.PulseAutoGapMs > 0 {
+		payload["pulse_auto_gap_ms"] = cfg.PulseAutoGapMs
+	}
+	if cfg.PulseAutoCompact {
+		payload["pulse_auto_compact"] = true
+	}
+	if cfg.PulseCompactTokenThreshold > 0 {
+		payload["pulse_compact_token_threshold"] = cfg.PulseCompactTokenThreshold
+	}
+	if cfg.PulseCompactPctThreshold > 0 {
+		payload["pulse_compact_pct_threshold"] = cfg.PulseCompactPctThreshold
 	}
 	if cfg.RecapTimeoutSeconds > 0 {
 		payload["recap_timeout_seconds"] = cfg.RecapTimeoutSeconds
@@ -3873,6 +3946,50 @@ func SavePulseModel(model string) error {
 func SavePulseSystemPrompt(prompt string) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.PulseSystemPrompt = prompt
+		return nil
+	})
+}
+
+// SavePulseAutoReceive persists whether the Pulse assistant auto-receives stop
+// indicators from other sessions.
+func SavePulseAutoReceive(enabled bool) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseAutoReceive = enabled
+		return nil
+	})
+}
+
+// SavePulseAutoGapMs persists the quiet-gap ms for Pulse auto-receive.
+func SavePulseAutoGapMs(ms int) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseAutoGapMs = ms
+		return nil
+	})
+}
+
+// SavePulseAutoCompact persists whether the Pulse assistant auto-comacts its
+// own context.
+func SavePulseAutoCompact(enabled bool) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseAutoCompact = enabled
+		return nil
+	})
+}
+
+// SavePulseCompactTokenThreshold persists the token threshold for Pulse
+// auto-compaction.
+func SavePulseCompactTokenThreshold(threshold int) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseCompactTokenThreshold = threshold
+		return nil
+	})
+}
+
+// SavePulseCompactPctThreshold persists the pct threshold for Pulse
+// auto-compaction.
+func SavePulseCompactPctThreshold(pct int) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseCompactPctThreshold = pct
 		return nil
 	})
 }

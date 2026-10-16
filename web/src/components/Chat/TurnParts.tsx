@@ -51,8 +51,8 @@ const TOOL_OUTPUT_LANG: Record<string, string> = {
 };
 
 // ThinkingBlock renders reasoning tokens in a muted panel. The controlled
-// disclosure policy decides the default; the latest thinking block is always
-// expanded.
+// disclosure policy decides the default; the latest thinking block follows
+// the "latest_thinking" policy.
 export function ThinkingBlock({
   text,
   highlight = "",

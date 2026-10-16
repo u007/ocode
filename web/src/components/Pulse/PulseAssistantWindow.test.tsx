@@ -25,6 +25,7 @@ const mockSetPulseModel = vi.fn();
 const mockNewPulseChat = vi.fn();
 const mockSelectPulseChat = vi.fn();
 const mockListPulseChats = vi.fn();
+const mockGetPulseAutoReceive = vi.fn().mockResolvedValue({ enabled: false });
 vi.mock("../../api/client", () => ({
   api: {
     getPulseAssistant: (...a: unknown[]) => mockGetPulseAssistant(...a),
@@ -32,6 +33,7 @@ vi.mock("../../api/client", () => ({
     newPulseChat: (...a: unknown[]) => mockNewPulseChat(...a),
     selectPulseChat: (...a: unknown[]) => mockSelectPulseChat(...a),
     listPulseChats: (...a: unknown[]) => mockListPulseChats(...a),
+    getPulseAutoReceive: (...a: unknown[]) => mockGetPulseAutoReceive(...a),
   },
 }));
 
@@ -40,6 +42,11 @@ vi.mock("../../api/client", () => ({
 vi.mock("../Chat/ChatPanel", () => ({
   default: ({ sessionId, host }: { sessionId: string; host?: string }) => (
     <div data-testid="chat-panel" data-session={sessionId} data-host={host === undefined ? "none" : host} />
+  ),
+}));
+vi.mock("../Logs/LogPanel", () => ({
+  default: ({ active, sessionId, host }: { active: boolean; sessionId: string; host?: string }) => (
+    <div data-testid="log-panel" data-active={String(active)} data-session={sessionId} data-host={host === undefined ? "none" : host} />
   ),
 }));
 vi.mock("../Chat/ChatInput", () => ({
@@ -100,6 +107,9 @@ vi.mock("../Layout/ModelDialog", () => ({
         <button onClick={() => onPick(purpose, "")}>clear</button>
       </div>
     ) : null,
+}));
+vi.mock("../../stores/pulseStore", () => ({
+  usePulse: () => ({ counts: { needsYou: 0 } }),
 }));
 
 /** Opens the window through the shared store, then renders it. */
@@ -652,5 +662,36 @@ describe("usePulseAssistantHotkey", () => {
     fireEvent.keyDown(document.body, { key: "a" });
 
     expect(toggle).not.toHaveBeenCalled();
+  });
+});
+
+describe("PulseAssistantWindow logs tab", () => {
+  it("defaults to the chat tab with the logs panel force-mounted but inactive", async () => {
+    mountDrawer();
+    await screen.findByTestId("chat-panel");
+    const logPanel = await screen.findByTestId("log-panel");
+    expect(logPanel).toHaveAttribute("data-active", "false");
+    expect(logPanel).toHaveAttribute("data-session", "pulse_abc");
+    expect(logPanel).toHaveAttribute("data-host", "none");
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+  });
+
+  it("toggles to the Logs tab, activates LogPanel, and hides the composer", async () => {
+    mountDrawer();
+    await screen.findByTestId("chat-panel");
+    fireEvent.click(screen.getByRole("button", { name: "Logs" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("log-panel")).toHaveAttribute("data-active", "true"),
+    );
+    expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
+  });
+
+  it("switches back to Chat, re-showing the composer", async () => {
+    mountDrawer();
+    await screen.findByTestId("chat-panel");
+    fireEvent.click(screen.getByRole("button", { name: "Logs" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    await waitFor(() => expect(screen.getByTestId("chat-input")).toBeInTheDocument());
+    expect(screen.getByTestId("log-panel")).toHaveAttribute("data-active", "false");
   });
 });

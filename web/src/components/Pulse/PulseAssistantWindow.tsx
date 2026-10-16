@@ -10,9 +10,11 @@ import { useChat } from "../../hooks/useChat";
 import { useTurnWatchdogAll } from "../../hooks/useTurnWatchdog";
 import ChatPanel from "../Chat/ChatPanel";
 import ChatInput from "../Chat/ChatInput";
+import LogPanel from "../Logs/LogPanel";
 import PermissionDialog from "../Chat/PermissionDialog";
 import QuestionDialog from "../Chat/QuestionDialog";
 import ModelDialog from "../Layout/ModelDialog";
+import { usePulse } from "../../stores/pulseStore";
 import { OPEN_PULSE_ASSISTANT_SETTINGS_EVENT, shortModelName } from "../../lib/pulseAssistant";
 import { cn } from "../../lib/utils";
 import type { PulseAssistantInfo, PulseChatSummary } from "../../api/types";
@@ -113,6 +115,35 @@ function errorText(err: unknown): string {
 const DRAG_ID = "pulse-assistant-window";
 const KEYBOARD_RESIZE_STEP = 16;
 
+/** Play a short, friendly ding using the Web Audio API (no external file). */
+function playDing(): void {
+  try {
+    const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    // iOS/Safari starts AudioContext suspended until the first user gesture;
+    // resume it so the ding is actually audible.
+    if (ctx.state === "suspended") {
+      void ctx.resume();
+    }
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.exponentialRampToValueAtTime(1320, t + 0.1);
+    gain.gain.setValueAtTime(0.15, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.2);
+    ctx.close();
+  } catch {
+    // Audio may be blocked by the browser; silently ignore.
+  }
+}
+
 /** The window's viewport, kept current on resize. */
 function useViewport(): Viewport {
   const [vp, setVp] = useState<Viewport>(() => ({ width: window.innerWidth, height: window.innerHeight }));
@@ -199,6 +230,13 @@ function AssistantWindowFrame() {
   const draftRef = useRef<AssistantRect | null>(null);
   const resizeStart = useRef<{ x: number; y: number; rect: AssistantRect } | null>(null);
 
+  // Auto-receive of stop indicators from other sessions.
+  const [autoReceive, setAutoReceive] = useState(false);
+  const [autoReceiveLoading, setAutoReceiveLoading] = useState(true);
+  // Last seen needsYou count, to detect new stop indicators for the ding.
+  const lastNeedsYouRef = useRef(0);
+  const { counts } = usePulse();
+
   const rect = clampRect(draft ?? prefs.rect ?? defaultRect(vp), vp);
   const dragAllowed = !narrow && prefs.mode !== "maximized";
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -243,6 +281,33 @@ function AssistantWindowFrame() {
       stale = true;
     };
   }, [load, attempt]);
+
+  // Fetch whether auto-receive of stop indicators is enabled.
+  useEffect(() => {
+    let stale = false;
+    api.getPulseAutoReceive()
+      .then((res) => { if (!stale) setAutoReceive(res.enabled); })
+      .catch((err) => console.warn("PulseAssistantWindow: loading auto-receive failed:", err))
+      .finally(() => { if (!stale) setAutoReceiveLoading(false); });
+    return () => { stale = true; };
+  }, []);
+
+  // Ding when a new stop indicator arrives while auto-receive is on.
+// `firstSeenRef` prevents firing on initial load when needsYou is already > 0.
+  const firstSeenRef = useRef(false);
+  useEffect(() => {
+    if (!autoReceive || autoReceiveLoading) return;
+    const ny = counts.needsYou;
+    if (!firstSeenRef.current) {
+      firstSeenRef.current = true;
+      lastNeedsYouRef.current = ny;
+      return;
+    }
+    if (ny > lastNeedsYouRef.current && ny > 0) {
+      void playDing();
+    }
+    lastNeedsYouRef.current = ny;
+  }, [autoReceive, autoReceiveLoading, counts.needsYou]);
 
   const sessionId = info ? info.session_id : null;
 
@@ -385,6 +450,11 @@ function AssistantWindowFrame() {
         {minimised && askPending && (
           <Badge variant="secondary" role="status" data-testid="pulse-assistant-ask-badge" className="shrink-0">
             Needs approval
+          </Badge>
+        )}
+        {autoReceive && !autoReceiveLoading && counts.needsYou > 0 && (
+          <Badge variant="destructive" role="status" data-testid="pulse-assistant-stop-badge" className="shrink-0 animate-pulse">
+            {counts.needsYou} waiting
           </Badge>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
@@ -612,6 +682,8 @@ function AssistantChat({
   setSurface: (el: HTMLElement | null) => void;
   onAskChange: (pending: boolean) => void;
 }) {
+  const [activeTab, setActiveTab] = useState<"chat" | "logs">("chat");
+
   // Asks raised by the assistant's own tools. App renders these only for the
   // active tab, so without them here a paused turn would wait on a dialog
   // nobody can see. Confined to the chat surface like every session ask.
@@ -644,10 +716,23 @@ function AssistantChat({
 
   return (
     <div ref={setSurface} data-testid="pulse-assistant-surface" className="relative flex min-h-0 flex-1 flex-col">
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        <ChatPanel sessionId={sessionId} host={undefined} />
+      <div className="flex items-center gap-1 border-b border-border px-2 py-1">
+        <button type="button" aria-label="Chat" aria-pressed={activeTab === "chat"} onClick={() => setActiveTab("chat")} className={"rounded px-2 py-1 text-xs " + (activeTab === "chat" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-accent/50")}>
+          Chat
+        </button>
+        <button type="button" aria-label="Logs" aria-pressed={activeTab === "logs"} onClick={() => setActiveTab("logs")} className={"rounded px-2 py-1 text-xs " + (activeTab === "logs" ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-accent/50")}>
+          Logs
+        </button>
       </div>
-      <ChatInput sessionTabId={sessionId} isActive quickActions={false} />
+      <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div className={activeTab === "chat" ? "h-full" : "hidden"}>
+          <ChatPanel sessionId={sessionId} host={undefined} />
+        </div>
+        <div className={activeTab === "logs" ? "h-full" : "hidden absolute inset-0"}>
+          <LogPanel active={activeTab === "logs"} sessionId={sessionId} host={undefined} />
+        </div>
+      </div>
+      {activeTab === "chat" && <ChatInput sessionTabId={sessionId} isActive quickActions={false} />}
 
       {surface && pendingPermission && (
         <PermissionDialog

@@ -176,6 +176,24 @@ describe("ChatInput voice input", () => {
     expect(sendMessage).toHaveBeenCalledWith("final words");
   });
 
+  it("cancel stops recording without transcribing or sending anything", async () => {
+    const transcribe = vi.spyOn(api, "transcribeSpeech");
+    render(<ChatInput sessionTabId={TAB} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start voice input" }));
+    });
+    expect(screen.getByText("Recording… click to stop")).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Cancel recording" }));
+    });
+    expect(screen.queryByText("Recording… click to stop")).toBeNull();
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(textarea().value).toBe("");
+  });
+
   it("Enter still sends typed text while the mic is available", async () => {
     render(<ChatInput sessionTabId={TAB} />);
     fireEvent.change(textarea(), { target: { value: "typed" } });

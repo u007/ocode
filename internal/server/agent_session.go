@@ -1358,6 +1358,39 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	// (applyCompactResult), which takes as.mu itself.
 	as.agent.MaybeCompactAsync(as.messages)
 
+	// Pulse auto-compaction: when enabled, compact the Pulse assistant's own
+	// context if it exceeds the Pulse-specific token or pct threshold, whichever
+	// is reached first. Independent of the global compaction config.
+	if isPulseSession(sessionID) && h.pulseAutoCompact() {
+		used := as.agent.LastInputTokens()
+		if used == 0 {
+			used = as.agent.CompactedContextTokens()
+		}
+		window := int64(0)
+		if cl := as.agent.Client(); cl != nil {
+			model := cl.GetModel()
+			if cl.GetProvider() != "" {
+				model = cl.GetProvider() + "/" + model
+			}
+			window = agent.ModelWindow(model)
+		}
+		if window <= 0 {
+			window = 100_000
+		}
+		tokenThreshold := int64(h.pulseCompactTokenThreshold())
+		pctThreshold := int64(h.pulseCompactPctThreshold())
+		needCompact := false
+		if tokenThreshold > 0 && used > tokenThreshold {
+			needCompact = true
+		}
+		if pctThreshold > 0 && used > window*pctThreshold/100 {
+			needCompact = true
+		}
+		if needCompact {
+			as.agent.CompactAsync(as.messages, "")
+		}
+	}
+
 	return reply.String(), nil
 }
 

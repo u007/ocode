@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -272,6 +273,234 @@ func TestPulseModelSlotRoundTrip(t *testing.T) {
 	}
 	if code := put(`{}`); code != http.StatusBadRequest {
 		t.Fatalf("body without model: status %d, want 400", code)
+	}
+}
+
+func TestPulseAutoReceiveRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	h := newPulseAssistantHandler(t, home)
+
+	get := func() bool {
+		rec := httptest.NewRecorder()
+		h.HandleGetPulseAutoReceive(rec, httptest.NewRequest(http.MethodGet, "/api/config/pulse-auto-receive", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET status %d", rec.Code)
+		}
+		var b map[string]bool
+		if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b["enabled"]
+	}
+	put := func(enabled bool) int {
+		rec := httptest.NewRecorder()
+		body := `{"enabled":` + strconv.FormatBool(enabled) + `}`
+		h.HandleSetPulseAutoReceive(rec, httptest.NewRequest(http.MethodPut, "/api/config/pulse-auto-receive", strings.NewReader(body)))
+		return rec.Code
+	}
+
+	if get() {
+		t.Fatalf("default auto-receive = true, want false")
+	}
+	if code := put(true); code != http.StatusOK {
+		t.Fatalf("PUT status %d", code)
+	}
+	if !get() {
+		t.Fatalf("after set true = false, want true")
+	}
+	if code := put(false); code != http.StatusOK {
+		t.Fatalf("PUT false status %d", code)
+	}
+	if get() {
+		t.Fatalf("after set false = true, want false")
+	}
+	if code := put(true); code != http.StatusOK {
+		t.Fatalf("PUT true status %d", code)
+	}
+	// Persisted through the targeted saver.
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !cfg.Ocode.PulseAutoReceive {
+		t.Fatalf("persisted pulse_auto_receive = false, want true")
+	}
+}
+
+func TestPulseAutoGapMsRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	h := newPulseAssistantHandler(t, home)
+
+	get := func() int {
+		rec := httptest.NewRecorder()
+		h.HandleGetPulseAutoGapMs(rec, httptest.NewRequest(http.MethodGet, "/api/config/pulse-auto-gap-ms", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET status %d", rec.Code)
+		}
+		var b map[string]int
+		if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b["gap_ms"]
+	}
+	put := func(ms int) int {
+		rec := httptest.NewRecorder()
+		body := `{"gap_ms":` + strconv.Itoa(ms) + `}`
+		h.HandleSetPulseAutoGapMs(rec, httptest.NewRequest(http.MethodPut, "/api/config/pulse-auto-gap-ms", strings.NewReader(body)))
+		return rec.Code
+	}
+
+	if got := get(); got != 2000 {
+		t.Fatalf("default gap_ms = %d, want 2000", got)
+	}
+	if code := put(5000); code != http.StatusOK {
+		t.Fatalf("PUT status %d", code)
+	}
+	if got := get(); got != 5000 {
+		t.Fatalf("after set = %d, want 5000", got)
+	}
+	if code := put(-1); code != http.StatusBadRequest {
+		t.Fatalf("negative gap_ms status %d, want 400", code)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if cfg.Ocode.PulseAutoGapMs != 5000 {
+		t.Fatalf("persisted pulse_auto_gap_ms = %d, want 5000", cfg.Ocode.PulseAutoGapMs)
+	}
+}
+
+func TestPulseAutoCompactRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	h := newPulseAssistantHandler(t, home)
+
+	get := func() bool {
+		rec := httptest.NewRecorder()
+		h.HandleGetPulseAutoCompact(rec, httptest.NewRequest(http.MethodGet, "/api/config/pulse-auto-compact", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET status %d", rec.Code)
+		}
+		var b map[string]bool
+		if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b["enabled"]
+	}
+	put := func(enabled bool) int {
+		rec := httptest.NewRecorder()
+		body := `{"enabled":` + strconv.FormatBool(enabled) + `}`
+		h.HandleSetPulseAutoCompact(rec, httptest.NewRequest(http.MethodPut, "/api/config/pulse-auto-compact", strings.NewReader(body)))
+		return rec.Code
+	}
+
+	if get() {
+		t.Fatalf("default auto-compact = true, want false")
+	}
+	if code := put(true); code != http.StatusOK {
+		t.Fatalf("PUT status %d", code)
+	}
+	if !get() {
+		t.Fatalf("after set true = false, want true")
+	}
+	if code := put(false); code != http.StatusOK {
+		t.Fatalf("PUT false status %d", code)
+	}
+	if get() {
+		t.Fatalf("after set false = true, want false")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if cfg.Ocode.PulseAutoCompact {
+		t.Fatalf("persisted pulse_auto_compact = true, want false")
+	}
+}
+
+func TestPulseCompactThresholdsRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	setHomeTree(t, home)
+	h := newPulseAssistantHandler(t, home)
+
+	get := func() (int, int) {
+		rec := httptest.NewRecorder()
+		h.HandleGetPulseCompactThresholds(rec, httptest.NewRequest(http.MethodGet, "/api/config/pulse-compact-thresholds", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET status %d", rec.Code)
+		}
+		var b struct {
+			TokenThreshold int `json:"token_threshold"`
+			PctThreshold   int `json:"pct_threshold"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b.TokenThreshold, b.PctThreshold
+	}
+	put := func(token, pct *int) int {
+		rec := httptest.NewRecorder()
+		parts := []string{`{`}
+		if token != nil {
+			parts = append(parts, `"token_threshold":`+strconv.Itoa(*token))
+		}
+		if pct != nil {
+			if len(parts) > 1 {
+				parts = append(parts, ",")
+			}
+			parts = append(parts, `"pct_threshold":`+strconv.Itoa(*pct))
+		}
+		parts = append(parts, `}`)
+		body := strings.Join(parts, "")
+		h.HandleSetPulseCompactThresholds(rec, httptest.NewRequest(http.MethodPut, "/api/config/pulse-compact-thresholds", strings.NewReader(body)))
+		return rec.Code
+	}
+
+	token, pct := get()
+	if token != 250000 {
+		t.Fatalf("default token_threshold = %d, want 250000", token)
+	}
+	if pct != 80 {
+		t.Fatalf("default pct_threshold = %d, want 80", pct)
+	}
+	tk := 300000
+	pc := 75
+	if code := put(&tk, &pc); code != http.StatusOK {
+		t.Fatalf("PUT status %d", code)
+	}
+	token, pct = get()
+	if token != 300000 {
+		t.Fatalf("after set token_threshold = %d, want 300000", token)
+	}
+	if pct != 75 {
+		t.Fatalf("after set pct_threshold = %d, want 75", pct)
+	}
+	// Empty body is invalid.
+	if code := put(nil, nil); code != http.StatusBadRequest {
+		t.Fatalf("empty body status %d, want 400", code)
+	}
+	// Negative values are invalid.
+	neg := -5
+	if code := put(&neg, nil); code != http.StatusBadRequest {
+		t.Fatalf("negative token_threshold status %d, want 400", code)
+	}
+	neg = -5
+	if code := put(nil, &neg); code != http.StatusBadRequest {
+		t.Fatalf("negative pct_threshold status %d, want 400", code)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	// Negative puts were rejected, so the last accepted values (300000/75) persist.
+	if cfg.Ocode.PulseCompactTokenThreshold != 300000 {
+		t.Fatalf("persisted token_threshold = %d, want 300000 (negative puts rejected)", cfg.Ocode.PulseCompactTokenThreshold)
+	}
+	if cfg.Ocode.PulseCompactPctThreshold != 75 {
+		t.Fatalf("persisted pct_threshold = %d, want 75 (negative puts rejected)", cfg.Ocode.PulseCompactPctThreshold)
 	}
 }
 

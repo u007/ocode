@@ -12,6 +12,21 @@ import (
 	"github.com/u007/ocode/internal/agent"
 )
 
+// setHomeTree points HOME and every XDG/Windows equivalent at ONE temp tree so
+// path resolution is identical on darwin and Linux. A bare t.Setenv("HOME", …)
+// is not enough on Linux, where paths.GlobalDataDir() honours XDG_DATA_HOME and
+// would otherwise resolve against the real (or package-wide) data dir.
+func setHomeTree(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+}
+
 func TestProjectSlug(t *testing.T) {
 	slug1 := ProjectSlug()
 	if slug1 == "" {
@@ -332,7 +347,7 @@ func TestListAllIncludesOnlyCurrentDirClaudeSessions(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
 	}
@@ -368,13 +383,82 @@ func TestListAllIncludesOnlyCurrentDirClaudeSessions(t *testing.T) {
 	}
 }
 
+func TestListRefsForDirIsOcodeOnly(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	setHomeTree(t, tmpHome)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A raw Claude session for wd that has NOT been cloned must not appear.
+	claudeDir := filepath.Join(tmpHome, ".claude", "projects", claudeProjectSlug(wd))
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "claude-1.jsonl"), []byte(`{"type":"user","message":{"role":"user","content":"claude session one"},"timestamp":"2026-05-16T10:00:00Z"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A raw Claude session for another project must not appear either.
+	otherDir := filepath.Join(tmpHome, "other")
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	otherClaudeDir := filepath.Join(tmpHome, ".claude", "projects", claudeProjectSlug(otherDir))
+	if err := os.MkdirAll(otherClaudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherClaudeDir, "claude-other.jsonl"), []byte(`{"type":"user","message":{"role":"user","content":"claude session other"},"timestamp":"2026-05-16T11:00:00Z"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := ListRefsForDir(wd)
+	if err != nil {
+		t.Fatalf("ListRefsForDir: %v", err)
+	}
+	for _, r := range refs {
+		if r.Source == SourceClaude {
+			t.Fatalf("ListRefsForDir must not return Claude refs, got %#v", r)
+		}
+		if strings.HasPrefix(r.ID, "claude:") {
+			t.Fatalf("ListRefsForDir must not return claude: ids, got %#v", r)
+		}
+	}
+
+	// Cloning a Claude session adds it as an ocode ref (claude-<id>), listed once.
+	if _, err := CloneClaudeSession("claude-1"); err != nil {
+		t.Fatalf("CloneClaudeSession: %v", err)
+	}
+	refs, err = ListRefsForDir(wd)
+	if err != nil {
+		t.Fatalf("ListRefsForDir: %v", err)
+	}
+	var clones []Ref
+	for _, r := range refs {
+		if r.ID == "claude-claude-1" {
+			clones = append(clones, r)
+		}
+	}
+	if len(clones) != 1 {
+		t.Fatalf("expected exactly one ocode clone claude-claude-1, got %d: %#v", len(clones), refs)
+	}
+}
+
 func TestCloneClaudeSessionSavesOcodeSession(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	t.Setenv("HOME", tmpHome)
+	setHomeTree(t, tmpHome)
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
 	}
@@ -413,10 +497,16 @@ func TestCloneClaudeSessionSavesOcodeSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The cloned session (claude-claude-1) must appear exactly once: the raw
+	// Claude ref must be deduped out, not duplicated alongside the clone.
+	count := 0
 	for _, ref := range refs {
-		if ref.ID == "claude:claude-1" {
-			t.Fatalf("expected cloned Claude session to hide raw Claude ref, got %#v", refs)
+		if ref.ID == "claude-claude-1" {
+			count++
 		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one claude-claude-1 ref (clone deduped), got %d: %#v", count, refs)
 	}
 }
 
@@ -1163,6 +1253,57 @@ func TestListRefsForDirIncludesMigratedAndLegacySessions(t *testing.T) {
 	}
 	if byID["ses_mixed-ojsonl"].Title != "ojsonl one" {
 		t.Fatalf("missing/wrong legacy session ref: %+v", refs)
+	}
+}
+
+func TestListRefsPaginatedForDirIsDirScoped(t *testing.T) {
+	writeOcodeSession := func(wd, id, title string) {
+		dir, err := GetStorageDirForPath(wd)
+		if err != nil {
+			t.Fatalf("GetStorageDirForPath: %v", err)
+		}
+		if err := writeSqliteSessionFull(dir, Session{
+			ID:        id,
+			Title:     title,
+			Messages:  []agent.Message{{Role: "user", Content: "hi"}},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("writeSqliteSessionFull: %v", err)
+		}
+		if err := upsertIndexRow(dir, ocodeMeta{ID: id, Title: title, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+			t.Fatalf("upsertIndexRow: %v", err)
+		}
+	}
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	writeOcodeSession(dirA, "ses_dirA-one", "dir A one")
+	writeOcodeSession(dirA, "ses_dirA-two", "dir A two")
+	writeOcodeSession(dirB, "ses_dirB-one", "dir B one")
+
+	refsA, _, err := ListRefsPaginatedForDir(dirA, 0, 0)
+	if err != nil {
+		t.Fatalf("ListRefsPaginatedForDir(dirA): %v", err)
+	}
+	if len(refsA) != 2 {
+		t.Fatalf("dirA should list 2 sessions, got %d: %+v", len(refsA), refsA)
+	}
+	for _, r := range refsA {
+		if !strings.HasPrefix(r.ID, "ses_dirA") {
+			t.Fatalf("dirA listed a session from another dir: %#v", r)
+		}
+	}
+
+	refsB, _, err := ListRefsPaginatedForDir(dirB, 0, 0)
+	if err != nil {
+		t.Fatalf("ListRefsPaginatedForDir(dirB): %v", err)
+	}
+	if len(refsB) != 1 {
+		t.Fatalf("dirB should list 1 session, got %d: %+v", len(refsB), refsB)
+	}
+	if refsB[0].ID != "ses_dirB-one" {
+		t.Fatalf("dirB listed wrong session: %#v", refsB[0])
 	}
 }
 

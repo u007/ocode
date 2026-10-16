@@ -28,6 +28,7 @@ const OVERRIDE_CATEGORIES: Array<{
   label: string;
 }> = [
   { key: "older_thinking", label: "Older thinking" },
+  { key: "latest_thinking", label: "Latest thinking" },
   { key: "tool_calls", label: "Tool call details" },
   { key: "tool_output", label: "Tool output" },
   { key: "activity_notices", label: "Activity notices" },
@@ -46,10 +47,11 @@ const OVERRIDE_OPTIONS: Array<{ value: ChatDisplayOverride; label: string }> = [
  * The value type is narrowed to the four policy keys that carry a per-category
  * display mode, so reading the cell needs no cast.
  */
-type DisplayPolicyKey = "older_thinking" | "tool_calls" | "tool_output" | "notices";
+type DisplayPolicyKey = "older_thinking" | "latest_thinking" | "tool_calls" | "tool_output" | "notices";
 
 const POLICY_KEY_BY_OVERRIDE: Record<OverrideKey, DisplayPolicyKey> = {
   older_thinking: "older_thinking",
+  latest_thinking: "latest_thinking",
   tool_calls: "tool_calls",
   tool_output: "tool_output",
   activity_notices: "notices",
@@ -124,7 +126,7 @@ export default function ChatDisplayForm() {
           unchanged.
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
-          The latest thinking block always stays expanded.
+          Set "Latest thinking" to Always collapsed to collapse the latest thinking block automatically.
         </p>
       </div>
 

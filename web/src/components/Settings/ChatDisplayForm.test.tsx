@@ -26,6 +26,7 @@ const balancedConfig: ChatVerbosityConfig = {
   preset: "balanced" as const,
   overrides: {
     older_thinking: "collapsed" as const,
+    latest_thinking: "expanded" as const,
     tool_calls: "expanded" as const,
     tool_output: "preset" as const,
     activity_notices: "expanded" as const,
@@ -132,6 +133,7 @@ describe("ChatDisplayForm", () => {
       preset: "quiet",
       overrides: {
         older_thinking: "collapsed",
+        latest_thinking: "collapsed",
         tool_calls: "collapsed",
         tool_output: "collapsed",
         activity_notices: "collapsed",
@@ -143,6 +145,7 @@ describe("ChatDisplayForm", () => {
         preset: "quiet",
         overrides: {
           older_thinking: "collapsed",
+          latest_thinking: "expanded",
           tool_calls: "expanded",
           tool_output: "collapsed",
           activity_notices: "expanded",

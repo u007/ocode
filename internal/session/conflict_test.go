@@ -184,7 +184,7 @@ func TestLiveDivergentOverlapDropsSilently(t *testing.T) {
 func isolatedProjectRoot(t *testing.T) (projectRoot, sessionsDir string) {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeTree(t, home)
 	projectRoot = filepath.Join(home, "work", "proj")
 	var err error
 	sessionsDir, err = GetStorageDirForPath(projectRoot)

@@ -282,6 +282,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/pulse-model", s.authMiddleware(s.handleSetPulseModel))
 	s.mux.HandleFunc("GET /api/config/pulse-system-prompt", s.authMiddleware(s.handleGetPulseSystemPrompt))
 	s.mux.HandleFunc("PUT /api/config/pulse-system-prompt", s.authMiddleware(s.handleSetPulseSystemPrompt))
+	s.mux.HandleFunc("GET /api/config/pulse-auto-receive", s.authMiddleware(s.handler.HandleGetPulseAutoReceive))
+	s.mux.HandleFunc("PUT /api/config/pulse-auto-receive", s.authMiddleware(s.handler.HandleSetPulseAutoReceive))
+	s.mux.HandleFunc("GET /api/config/pulse-auto-gap-ms", s.authMiddleware(s.handler.HandleGetPulseAutoGapMs))
+	s.mux.HandleFunc("PUT /api/config/pulse-auto-gap-ms", s.authMiddleware(s.handler.HandleSetPulseAutoGapMs))
+	s.mux.HandleFunc("GET /api/config/pulse-auto-compact", s.authMiddleware(s.handler.HandleGetPulseAutoCompact))
+	s.mux.HandleFunc("PUT /api/config/pulse-auto-compact", s.authMiddleware(s.handler.HandleSetPulseAutoCompact))
+	s.mux.HandleFunc("GET /api/config/pulse-compact-thresholds", s.authMiddleware(s.handler.HandleGetPulseCompactThresholds))
+	s.mux.HandleFunc("PUT /api/config/pulse-compact-thresholds", s.authMiddleware(s.handler.HandleSetPulseCompactThresholds))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/model", s.authMiddleware(s.handleSetSessionModel))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}/model", s.authMiddleware(s.handleClearSessionModel))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/thinking-budget", s.authMiddleware(s.handleSetSessionThinkingBudget))
@@ -504,6 +512,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/tts/install", s.authMiddleware(s.handleTTSInstall))
 	s.mux.HandleFunc("POST /api/tts/enable", s.authMiddleware(s.handleTTSEnable))
 	s.mux.HandleFunc("POST /api/tts/model-voice", s.authMiddleware(s.handleTTSModelVoice))
+	s.mux.HandleFunc("POST /api/tts/sample", s.authMiddleware(s.handleTTSSample))
+	s.mux.HandleFunc("GET /api/tts/sample-audio/{id}", s.authMiddleware(s.handleTTSSampleAudio))
 	s.mux.HandleFunc("GET /api/stt", s.authMiddleware(s.handleGetSTT))
 	s.mux.HandleFunc("PUT /api/stt", s.authMiddleware(s.handleSetSTT))
 	s.mux.HandleFunc("POST /api/stt/transcribe", s.authMiddleware(s.handleTranscribeSTT))
@@ -1459,6 +1469,38 @@ func (s *Server) handleGetPulseSystemPrompt(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleSetPulseSystemPrompt(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetPulseSystemPrompt(w, r)
+}
+
+func (s *Server) handleGetPulseAutoReceive(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseAutoReceive(w, r)
+}
+
+func (s *Server) handleSetPulseAutoReceive(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseAutoReceive(w, r)
+}
+
+func (s *Server) handleGetPulseAutoGapMs(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseAutoGapMs(w, r)
+}
+
+func (s *Server) handleSetPulseAutoGapMs(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseAutoGapMs(w, r)
+}
+
+func (s *Server) handleGetPulseAutoCompact(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseAutoCompact(w, r)
+}
+
+func (s *Server) handleSetPulseAutoCompact(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseAutoCompact(w, r)
+}
+
+func (s *Server) handleGetPulseCompactThresholds(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPulseCompactThresholds(w, r)
+}
+
+func (s *Server) handleSetPulseCompactThresholds(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPulseCompactThresholds(w, r)
 }
 
 func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {

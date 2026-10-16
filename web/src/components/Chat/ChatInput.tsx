@@ -1426,6 +1426,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
             <MicOff className="h-4 w-4" />
           )}
         </button>
+        {voiceRecording && (
+          <button
+            type="button"
+            onClick={() => voice.cancel()}
+            disabled={voiceTranscribing}
+            aria-label="Cancel recording"
+            title="Cancel recording"
+            className="composer-control flex w-8 shrink-0 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
         <textarea
           ref={textareaRef}
           className="composer-control flex-1 resize-none overflow-y-auto max-h-40 rounded-lg border border-border bg-muted p-3 text-sm leading-[1.5em] text-foreground placeholder-muted-foreground focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"

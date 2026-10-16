@@ -93,6 +93,13 @@ below apply to both.
 - **OCR settings:** `OcrForm` in Settings.
 - **Local model config:** `local-models` section in Settings.
 
+### 8. Session list ✅
+
+- Backend: `GET /api/sessions` → `session.ListRefsPaginatedForDir(h.workDir, …)` merges ocode sessions with Claude Code sessions from `~/.claude/projects/<slug of workDir>`, deduplicating cloned sessions (`claude_original_session_id`) (`internal/server/handler.go`, `internal/session/session.go`). All Claude-origin session IDs carry the `claude:` prefix so they are clearly identifiable in the list.
+- Web: `GET /api/sessions` via `api.listSessions` (`web/src/api/client.ts`).
+- TUI: `/session list` → `session.ListRefs()` (`internal/tui/model.go`).
+- Parity: web/desktop now list Claude Code sessions for the served project, matching the TUI. The list is scoped to `h.workDir` (the served project root); remote sessions live on the remote instance and are fetched via `/api/remote/{host}/api/sessions`.
+
 ## Remaining gaps (TUI has it, web does not)
 
 ### 8. Memory management (`/mem`) — web gap
