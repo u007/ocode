@@ -618,9 +618,9 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		source := args[1]
-		// A bare name (no path or dot) is a bundled skill, installed into
-		// ~/.claude/skills. It never falls through to the GitHub installer.
-		if !strings.ContainsAny(source, "/.") {
+		// A bare name is a bundled skill, installed into ~/.claude/skills.
+		// It never falls through to the GitHub installer.
+		if skill.IsBundledSkillRef(source) {
 			return func() tea.Msg {
 				out, err := skill.InstallBundledToClaude(source)
 				if err != nil {

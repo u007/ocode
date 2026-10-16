@@ -4400,6 +4400,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	case skillsOutputMsg:
+		m.refreshCustomCommands()
 		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil

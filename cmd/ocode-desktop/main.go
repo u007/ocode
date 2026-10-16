@@ -7,7 +7,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -284,9 +287,11 @@ func main() {
 			// navigator.clipboard and execCommand("copy") alike. The shell's
 			// native clipboard has no gesture rule (see writePageClipboard).
 			if dw := mainWin.Load(); dw != nil {
-				if text, ok := pageClipboardText(message, origin, dw.host); ok {
+				if text, ok := pageClipboardText(message, origin, dw.host, dw.clipNonce); ok {
 					writePageClipboard(text)
 				}
+			} else if strings.HasPrefix(message, msgClipboardWrite) {
+				log.Printf("ocode-desktop: refused clipboard write: window not ready")
 			}
 		},
 		SingleInstance: &application.SingleInstanceOptions{
@@ -411,11 +416,20 @@ func main() {
 	// falls back to would otherwise reset on every reload).
 	const desktopWindowName = "main"
 
+	// Per-launch secret the page must echo on every clipboard write (see
+	// pageClipboardText). It rides in the window URL as ?clip=.
+	clipNonceBytes := make([]byte, 16)
+	if _, err := rand.Read(clipNonceBytes); err != nil {
+		log.Printf("ocode-desktop: generate clipboard nonce: %v", err)
+		os.Exit(1)
+	}
+	clipNonce := hex.EncodeToString(clipNonceBytes)
+
 	// Build the webview URL with the auth token (same ?token= param the TUI /rc
 	// command and EventSource use) and the stable windowId.
-	appURL := fmt.Sprintf("%s/?token=%s&windowId=%s", handle.URL, handle.Token, desktopWindowName)
+	appURL := fmt.Sprintf("%s/?token=%s&windowId=%s&clip=%s", handle.URL, handle.Token, desktopWindowName, clipNonce)
 	sessionURL := func(id string) string {
-		return fmt.Sprintf("%s/session/%s?token=%s&windowId=%s", handle.URL, url.PathEscape(id), handle.Token, desktopWindowName)
+		return fmt.Sprintf("%s/session/%s?token=%s&windowId=%s&clip=%s", handle.URL, url.PathEscape(id), handle.Token, desktopWindowName, clipNonce)
 	}
 	if sessionID != "" {
 		appURL = sessionURL(sessionID)
@@ -435,6 +449,7 @@ func main() {
 		if err == nil {
 			q := parsed.Query()
 			q.Set("windowId", desktopWindowName)
+			q.Set("clip", clipNonce)
 			// The desktop server boots with a random auth token that gates every
 			// /api/* route. The webview SPA reads it from the ?token= query param
 			// at load time and replays it as a Bearer header on every fetch. The
@@ -476,7 +491,7 @@ func main() {
 	if parsed, err := url.Parse(desktopURL); err == nil {
 		desktopHost = parsed.Host
 	}
-	mainWin.Store(&desktopWindow{window: window, sessionURL: sessionURL, host: desktopHost})
+	mainWin.Store(&desktopWindow{window: window, sessionURL: sessionURL, host: desktopHost, clipNonce: clipNonce})
 
 	// Set up the application menu. The Wails default binds CmdOrCtrl+W to
 	// "Close Window" (which on this single-window shell quits the whole app)
@@ -640,17 +655,35 @@ const msgOpenExternal = "ocode:open-external:"
 // the system clipboard. The text follows the prefix verbatim.
 const msgClipboardWrite = "ocode:clipboard-write:"
 
-// pageClipboardText extracts the text of a clipboard-write message. Only the
-// ocode page itself (appHost, the host:port the window was opened on) may
-// write: a page loaded in an iframe (embedded browser, preview) must not be
-// able to set the user's clipboard through the shell. The host is compared
-// rather than OriginInfo.IsMainFrame, which Wails fills in only on darwin.
-// darwin and Windows report the sending frame's URL; Linux reports the
-// webview's top URL, so there the check cannot tell an iframe apart. The
-// page's own guard against unsolicited OSC 52 writes lives in TerminalPanel.tsx.
-func pageClipboardText(message string, origin *application.OriginInfo, appHost string) (string, bool) {
-	text, ok := strings.CutPrefix(message, msgClipboardWrite)
-	if !ok || text == "" {
+// pageClipboardText extracts the text of a clipboard-write message. The wire
+// format is msgClipboardWrite + nonce + ":" + text. Only the ocode page itself
+// may write, and it must prove it holds the per-launch nonce (the ?clip= query
+// param on the window URL). Two checks, both required:
+//
+//   - The nonce must match the one the window was opened with. A cross-origin
+//     iframe cannot read the top window's location, so it never learns the
+//     nonce. This closes the gap the host check leaves open on Linux.
+//   - The host check: appHost is the host:port the window was opened on. A page
+//     loaded in an iframe (embedded browser, preview) must not be able to set
+//     the user's clipboard through the shell. The host is compared rather than
+//     OriginInfo.IsMainFrame, which Wails fills in only on darwin. darwin and
+//     Windows report the sending frame's URL; Linux reports the webview's top
+//     URL, so there the host check alone cannot tell an iframe apart.
+//
+// The page's own guard against unsolicited OSC 52 writes lives in TerminalPanel.tsx.
+func pageClipboardText(message string, origin *application.OriginInfo, appHost, nonce string) (string, bool) {
+	payload, ok := strings.CutPrefix(message, msgClipboardWrite)
+	if !ok {
+		return "", false
+	}
+	gotNonce, text, _ := strings.Cut(payload, ":")
+	// An empty expected nonce must never match, so a window that somehow has
+	// none refuses every write.
+	if nonce == "" || subtle.ConstantTimeCompare([]byte(gotNonce), []byte(nonce)) != 1 {
+		log.Printf("ocode-desktop: refused clipboard write: bad nonce")
+		return "", false
+	}
+	if text == "" {
 		return "", false
 	}
 	if origin == nil {
@@ -731,6 +764,9 @@ type desktopWindow struct {
 	// host is the host:port the window was opened on, the only page allowed
 	// to write the clipboard (see pageClipboardText).
 	host string
+	// clipNonce is the per-launch secret in the window URL's ?clip= param; the
+	// page must echo it to write the clipboard (see pageClipboardText).
+	clipNonce string
 }
 
 // sessionIDFromArgs extracts the -session/--session value from an argv (the

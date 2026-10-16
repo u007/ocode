@@ -1096,9 +1096,16 @@ export default function TerminalPanel({
       pressInTerminal = false;
       markUserInput();
     };
+    // A cancelled press (touch scroll, drag interruption) or a window blur never
+    // reaches pointerup, so it must not leave the flag set for a later release.
+    const onInputPressCancel = () => {
+      pressInTerminal = false;
+    };
     el.addEventListener("pointerdown", onInputPointerDown, true);
     el.addEventListener("keydown", markUserInput, true);
     window.addEventListener("pointerup", onInputPointerUp, true);
+    window.addEventListener("pointercancel", onInputPressCancel, true);
+    window.addEventListener("blur", onInputPressCancel);
     const osc52Disp = term.parser.registerOscHandler(52, (data) => {
       if (!readyRef.current) return true;
       const sep = data.indexOf(";");
@@ -1646,6 +1653,8 @@ export default function TerminalPanel({
       el.removeEventListener("pointerdown", onInputPointerDown, true);
       el.removeEventListener("keydown", markUserInput, true);
       window.removeEventListener("pointerup", onInputPointerUp, true);
+      window.removeEventListener("pointercancel", onInputPressCancel, true);
+      window.removeEventListener("blur", onInputPressCancel);
       window.removeEventListener("pointerup", snapshot.endSelection, true);
       window.removeEventListener("pointercancel", snapshot.endSelection, true);
       window.removeEventListener("blur", snapshot.endSelection);

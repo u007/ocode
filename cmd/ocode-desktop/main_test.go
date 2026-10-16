@@ -77,6 +77,7 @@ func TestMsgOpenExternalPrefixIsNotWailsReserved(t *testing.T) {
 
 func TestPageClipboardText(t *testing.T) {
 	const host = "127.0.0.1:52100"
+	const nonce = "9f2c4e1a7b3d5f60a1b2c3d4e5f60718"
 	page := &application.OriginInfo{Origin: "https://127.0.0.1:52100/session/abc?token=t"}
 	cases := []struct {
 		name    string
@@ -85,27 +86,34 @@ func TestPageClipboardText(t *testing.T) {
 		want    string
 		wantOK  bool
 	}{
-		{"ocode page", msgClipboardWrite + "hello\nworld", page, "hello\nworld", true},
+		{"ocode page", msgClipboardWrite + nonce + ":hello\nworld", page, "hello\nworld", true},
 		// IsMainFrame is only filled in on darwin; Windows/Linux leave it false.
-		{"page without IsMainFrame", msgClipboardWrite + "hi", &application.OriginInfo{Origin: "https://127.0.0.1:52100/"}, "hi", true},
-		{"pre-https migration page", msgClipboardWrite + "hi", &application.OriginInfo{Origin: "http://127.0.0.1:52100/?migrateTo=x"}, "hi", true},
-		{"external iframe refused", msgClipboardWrite + "hello", &application.OriginInfo{Origin: "https://evil.example/"}, "", false},
-		{"other local port refused", msgClipboardWrite + "hello", &application.OriginInfo{Origin: "http://127.0.0.1:5173/"}, "", false},
-		{"empty origin refused", msgClipboardWrite + "hello", &application.OriginInfo{}, "", false},
-		{"no origin refused", msgClipboardWrite + "hello", nil, "", false},
-		{"empty text", msgClipboardWrite, page, "", false},
+		{"page without IsMainFrame", msgClipboardWrite + nonce + ":hi", &application.OriginInfo{Origin: "https://127.0.0.1:52100/"}, "hi", true},
+		{"pre-https migration page", msgClipboardWrite + nonce + ":hi", &application.OriginInfo{Origin: "http://127.0.0.1:52100/?migrateTo=x"}, "hi", true},
+		{"external iframe refused", msgClipboardWrite + nonce + ":hello", &application.OriginInfo{Origin: "https://evil.example/"}, "", false},
+		{"other local port refused", msgClipboardWrite + nonce + ":hello", &application.OriginInfo{Origin: "http://127.0.0.1:5173/"}, "", false},
+		{"empty origin refused", msgClipboardWrite + nonce + ":hello", &application.OriginInfo{}, "", false},
+		{"no origin refused", msgClipboardWrite + nonce + ":hello", nil, "", false},
+		{"wrong nonce refused", msgClipboardWrite + "0000" + nonce[4:] + ":hello", page, "", false},
+		{"nonce prefix refused", msgClipboardWrite + nonce[:16] + ":hello", page, "", false},
+		{"empty nonce refused", msgClipboardWrite + ":hello", page, "", false},
+		{"missing nonce separator refused", msgClipboardWrite + "hello", page, "", false},
+		{"empty text", msgClipboardWrite + nonce + ":", page, "", false},
 		{"other message", msgFocusWindow, page, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := pageClipboardText(tc.message, tc.origin, host)
+			got, ok := pageClipboardText(tc.message, tc.origin, host, nonce)
 			if got != tc.want || ok != tc.wantOK {
 				t.Fatalf("pageClipboardText(%q) = %q, %v; want %q, %v", tc.message, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}
-	if _, ok := pageClipboardText(msgClipboardWrite+"x", page, ""); ok {
+	if _, ok := pageClipboardText(msgClipboardWrite+nonce+":x", page, "", nonce); ok {
 		t.Fatal("pageClipboardText accepted a write before the window host was known")
+	}
+	if _, ok := pageClipboardText(msgClipboardWrite+":x", page, host, ""); ok {
+		t.Fatal("pageClipboardText accepted a write from a window that has no nonce")
 	}
 }
 

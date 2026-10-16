@@ -3,6 +3,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { TerminalProvider } from "../../stores/terminalStore";
 import TerminalPanel, { writeClipboardText } from "./TerminalPanel";
 
+// lib/wails.ts reads the desktop clipboard nonce from ?clip= once, when it is
+// first imported. vi.hoisted runs before the static imports above, so the page
+// URL carries the nonce by the time that happens.
+vi.hoisted(() => {
+  window.history.replaceState({}, "", "/?clip=testnonce");
+});
+
 // Regression suite for terminal copy-on-selection (TUI parity): the TUI copies
 // a dragged selection to the system clipboard on mouse release
 // (internal/tui/model.go clipboard.WriteAll); the desktop/web terminal only
@@ -1324,6 +1331,33 @@ describe("terminal OSC 52 clipboard write", () => {
     expect(writeText).not.toHaveBeenCalled();
   });
 
+  it("ignores a release after a cancelled press in the terminal", async () => {
+    const now = vi.spyOn(performance, "now");
+    const { host, handler } = await openPanel();
+    now.mockReturnValue(1_000);
+    fireEvent.pointerDown(host);
+    fireEvent.pointerCancel(window);
+    // Past the input window, so only a release could reopen it.
+    now.mockReturnValue(6_001);
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(window);
+    expect(handler(`c;${b64("cancelled")}`)).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("ignores a release after the window blurs mid-press in the terminal", async () => {
+    const now = vi.spyOn(performance, "now");
+    const { host, handler } = await openPanel();
+    now.mockReturnValue(1_000);
+    fireEvent.pointerDown(host);
+    fireEvent.blur(window);
+    now.mockReturnValue(6_001);
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(window);
+    expect(handler(`c;${b64("blurred")}`)).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
   it("ignores clipboard read queries and replayed scrollback", async () => {
     const { container } = render(<Panel />);
     await waitFor(() => expect(h.sockets[0]?.onopen).toBeTruthy());
@@ -1353,7 +1387,7 @@ describe("writeClipboardText in the desktop shell", () => {
     const invoke = vi.fn();
     (window as unknown as { _wails: { invoke: typeof invoke } })._wails = { invoke };
     await writeClipboardText("native copy");
-    expect(invoke).toHaveBeenCalledWith("ocode:clipboard-write:native copy");
+    expect(invoke).toHaveBeenCalledWith("ocode:clipboard-write:testnonce:native copy");
     expect(writeText).not.toHaveBeenCalled();
   });
 });

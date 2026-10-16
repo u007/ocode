@@ -109,3 +109,63 @@ func TestInstallBundledToUnknownNameListsBundled(t *testing.T) {
 		t.Fatal("unknown name must not create a target directory")
 	}
 }
+
+// TestInstallBundledToCustomModifiedReportsBackup: a user-edited SKILL.md is
+// replaced on upgrade, but the backup is kept and the report names both the
+// customisation and the backup path, so the edits are never lost silently.
+func TestInstallBundledToCustomModifiedReportsBackup(t *testing.T) {
+	withBundledFS(t, fstest.MapFS{
+		"skills/alpha/SKILL.md": &fstest.MapFile{Data: []byte(skillA)},
+	})
+	dir := t.TempDir()
+	if _, err := installBundledTo("alpha", dir); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	installed := filepath.Join(dir, "alpha", "SKILL.md")
+	mustWrite(t, installed, skillA+"\nmy local edit\n")
+
+	withBundledFS(t, fstest.MapFS{
+		"skills/alpha/SKILL.md": &fstest.MapFile{Data: []byte(skillAv2)},
+	})
+	msg, err := installBundledTo("alpha", dir)
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	backups, err := filepath.Glob(installed + ".bak.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("want exactly one backup, got %v", backups)
+	}
+	if !strings.Contains(msg, "custom-modified") || !strings.Contains(msg, backups[0]) {
+		t.Fatalf("report %q should name the customisation and backup %s", msg, backups[0])
+	}
+	got, err := os.ReadFile(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "my local edit") {
+		t.Fatalf("backup lost the user's edit: %q", got)
+	}
+}
+
+// TestIsBundledSkillRef: only a bare name is a bundled skill. A path, a host
+// with a dot, or name@ref is a git source and must never reach the installer.
+func TestIsBundledSkillRef(t *testing.T) {
+	cases := []struct {
+		src  string
+		want bool
+	}{
+		{"standup", true},
+		{"org/repo", false},
+		{"x.git", false},
+		{"standup@1.0.0", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := IsBundledSkillRef(tc.src); got != tc.want {
+			t.Errorf("IsBundledSkillRef(%q) = %v, want %v", tc.src, got, tc.want)
+		}
+	}
+}

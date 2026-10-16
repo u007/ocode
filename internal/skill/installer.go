@@ -137,6 +137,13 @@ func InstallBundledToClaude(name string) (string, error) {
 	return out, nil
 }
 
+// IsBundledSkillRef reports whether a `/plugin install` argument names a
+// bundled skill rather than a git source: a bare name with no '/', '.' or '@'.
+// `name@ref` is a git source, so it is not a skill ref.
+func IsBundledSkillRef(src string) bool {
+	return src != "" && !strings.ContainsAny(src, "/.@")
+}
+
 // installBundledTo is InstallBundledToClaude with the target dir injected.
 func installBundledTo(name, dir string) (string, error) {
 	bundled, err := bundledSkills()
@@ -158,22 +165,55 @@ func installBundledTo(name, dir string) (string, error) {
 		return "", fmt.Errorf("no bundled skill %q (bundled: %s)", name, strings.Join(available, ", "))
 	}
 
-	inst, status, err := classifyInstalled(found, dir)
+	res, err := installBundledSkill(found, dir, true, func(s skillStatus) bool {
+		return s == statusUpToDate
+	})
 	if err != nil {
 		return "", err
 	}
-	switch status {
-	case statusSymlink:
-		return "", fmt.Errorf("%s is a symlink (%s); refusing to overwrite — remove the symlink first", name, inst.Dir)
-	case statusUpToDate:
+	switch {
+	case res.Status == statusSymlink:
+		return "", fmt.Errorf("%s is a symlink (%s); refusing to overwrite — remove the symlink first", name, filepath.Join(dir, name))
+	case res.Skipped:
 		return fmt.Sprintf("%s is already up to date in %s", name, dir), nil
+	case res.Status == statusCustomModified && res.Backup != "":
+		return fmt.Sprintf("%s %s in %s; the previous SKILL.md was custom-modified and is backed up to %s",
+			res.Action, name, dir, res.Backup), nil
 	}
+	return fmt.Sprintf("%s %s in %s", res.Action, name, dir), nil
+}
 
-	action, err := installOne(found, inst, dir, true)
+// bundledWrite is the outcome of installBundledSkill for one skill.
+type bundledWrite struct {
+	Status  skillStatus // classification of the installed copy before any write
+	Skipped bool        // the caller's keep rule left the copy alone
+	Action  string      // "installed", "updated" or "up-to-date"; "" when nothing was written
+	Backup  string      // path of the previous SKILL.md copy; "" when none was made
+}
+
+// installBundledSkill is the per-skill sequence shared by runInstallOrUpgrade
+// and installBundledTo: classify the installed copy in dir, never write through
+// a symlink, let keep decide whether to leave the copy alone, and otherwise
+// write the bundled SKILL.md (backing up a differing one first). Policy about
+// what to skip stays with the caller.
+func installBundledSkill(b bundledSkill, dir string, force bool, keep func(skillStatus) bool) (bundledWrite, error) {
+	inst, status, err := classifyInstalled(b, dir)
 	if err != nil {
-		return "", err
+		return bundledWrite{}, err
 	}
-	return fmt.Sprintf("%s %s in %s", action, name, dir), nil
+	res := bundledWrite{Status: status}
+	if status == statusSymlink {
+		return res, nil
+	}
+	if keep(status) {
+		res.Skipped = true
+		return res, nil
+	}
+	res.Action, res.Backup, err = installOne(b, inst, dir, force)
+	if err != nil {
+		return bundledWrite{}, err
+	}
+	return res, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -485,57 +525,43 @@ func runInstallOrUpgrade(names []string, force bool) error {
 		return nil
 	}
 
+	// Up-to-date copies are skipped unless forced (install still refreshes
+	// them, with a backup). Custom-modified copies are skipped only in a bulk
+	// upgrade; a named install or upgrade overwrites them, with a backup.
+	keep := func(s skillStatus) bool {
+		return (s == statusUpToDate && !force) || (s == statusCustomModified && !force && isBulkUpgrade(names))
+	}
+
 	var installed, updated, skipped, failed int
 	for _, b := range selected {
-		inst, status, err := classifyInstalled(b, target)
+		res, err := installBundledSkill(b, target, force, keep)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  ! %s: %v\n", b.Name, err)
 			failed++
 			continue
 		}
-		switch status {
-		case statusSymlink:
+		switch {
+		case res.Status == statusSymlink:
 			fmt.Fprintf(os.Stderr, "  ! %s: target is a symlink (%s) — refusing to overwrite; remove the symlink first\n",
-				b.Name, inst.Dir)
+				b.Name, filepath.Join(target, b.Name))
 			failed++
-			continue
 
-		case statusUpToDate:
-			if !force {
-				fmt.Fprintf(os.Stdout, "  = %s: up to date\n", b.Name)
-				skipped++
-				continue
+		case res.Skipped && res.Status == statusUpToDate:
+			fmt.Fprintf(os.Stdout, "  = %s: up to date\n", b.Name)
+			skipped++
+
+		case res.Skipped:
+			fmt.Fprintf(os.Stdout, "  ~ %s: custom-modified, skipped\n", b.Name)
+			skipped++
+
+		default:
+			fmt.Fprintf(os.Stdout, "  %s %s\n", res.Action, b.Name)
+			switch res.Action {
+			case "installed":
+				installed++
+			case "updated":
+				updated++
 			}
-			// force: still install (and back up) — covers the case where
-			// the user wants to refresh the on-disk copy even if hash/version
-			// match. Falls through to the outdated branch.
-
-		case statusCustomModified:
-			if !force && isBulkUpgrade(names) {
-				fmt.Fprintf(os.Stdout, "  ~ %s: custom-modified, skipped\n", b.Name)
-				skipped++
-				continue
-			}
-			// force mode (install) or named upgrade: still overwrite
-			// (with backup). The user explicitly asked for this skill.
-			// Falls through to installOne.
-
-		case statusMissing:
-			// proceed to install
-		}
-
-		action, err := installOne(b, inst, target, force)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ! %s: %v\n", b.Name, err)
-			failed++
-			continue
-		}
-		fmt.Fprintf(os.Stdout, "  %s %s\n", action, b.Name)
-		switch action {
-		case "installed":
-			installed++
-		case "updated":
-			updated++
 		}
 	}
 
@@ -587,13 +613,14 @@ func pickBundled(bundled []bundledSkill, names []string) []bundledSkill {
 
 // installOne writes the bundled skill to <globalDir>/<name>/SKILL.md. If a
 // non-empty SKILL.md already exists, it is first copied (not moved) to a
-// timestamped backup next to it. Returns the human-readable action label.
-func installOne(b bundledSkill, inst installedInfo, globalDir string, force bool) (string, error) {
+// timestamped backup next to it. Returns the human-readable action label and
+// the backup path ("" when no backup was made).
+func installOne(b bundledSkill, inst installedInfo, globalDir string, force bool) (string, string, error) {
 	dst := filepath.Join(globalDir, b.Name)
 	skillDst := filepath.Join(dst, "SKILL.md")
 
 	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return "", fmt.Errorf("create %s: %w", dst, err)
+		return "", "", fmt.Errorf("create %s: %w", dst, err)
 	}
 
 	// If there's an existing SKILL.md and its bytes differ from what we're
@@ -602,41 +629,44 @@ func installOne(b bundledSkill, inst installedInfo, globalDir string, force bool
 	// same dir before replacing it" and we don't want to silently lose
 	// their previous version.
 	action := "installed"
+	backup := ""
 	if len(inst.Bytes) > 0 {
 		sum := sha256.Sum256(b.Bytes)
 		newHash := hex.EncodeToString(sum[:])
 		if newHash == inst.Sha256Hex && !force {
 			// Content matches and not forced — should have been caught
 			// by the caller, but be defensive.
-			return "up-to-date", nil
+			return "up-to-date", "", nil
 		}
-		if err := backupFile(inst.SkillPath); err != nil {
-			return "", fmt.Errorf("backup existing SKILL.md: %w", err)
+		bak, err := backupFile(inst.SkillPath)
+		if err != nil {
+			return "", "", fmt.Errorf("backup existing SKILL.md: %w", err)
 		}
+		backup = bak
 		action = "updated"
 	}
 
 	// Write the new file. Create it 0o644; preserve umask.
 	if err := writeFileAtomic(skillDst, b.Bytes, 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", skillDst, err)
+		return "", "", fmt.Errorf("write %s: %w", skillDst, err)
 	}
 
 	// Write the bundled hash alongside so GetSkillStatus can later
 	// distinguish "outdated" from "custom-modified".
 	writeBundledHash(dst, b.Bytes)
 
-	return action, nil
+	return action, backup, nil
 }
 
-// backupFile moves src to "<dir-of-src>/<filename>.bak.<UTC-timestamp>".
-// The destination timestamp has 1-second resolution, so successive calls
-// in the same second would collide; in practice install/upgrade is slow
-// enough that this never happens.
+// backupFile moves src to "<dir-of-src>/<filename>.bak.<UTC-timestamp>" and
+// returns that destination path. The destination timestamp has 1-second
+// resolution, so successive calls in the same second would collide; in
+// practice install/upgrade is slow enough that this never happens.
 //
 // Uses rename when possible (atomic, preserves mode), falls back to
 // read+remove on cross-device errors so we still succeed when src is on
 // a different filesystem from its sibling.
-func backupFile(src string) error {
+func backupFile(src string) (string, error) {
 	dir := filepath.Dir(src)
 	base := filepath.Base(src)
 	ts := time.Now().UTC().Format("20060102T150405Z")
@@ -644,22 +674,25 @@ func backupFile(src string) error {
 
 	// Fast path: rename is atomic and keeps the source's mode bits.
 	if err := os.Rename(src, dst); err == nil {
-		return nil
+		return dst, nil
 	} else if !isCrossDeviceErr(err) {
 		// Non-cross-device rename failure (permission, missing parent,
 		// etc.) — surface to the caller.
-		return err
+		return "", err
 	}
 
 	// Cross-device fallback: read, write, remove.
 	body, err := os.ReadFile(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.WriteFile(dst, body, 0o644); err != nil {
-		return err
+		return "", err
 	}
-	return os.Remove(src)
+	if err := os.Remove(src); err != nil {
+		return "", err
+	}
+	return dst, nil
 }
 
 func isCrossDeviceErr(err error) bool {

@@ -256,9 +256,9 @@ func (h *Handler) HandleInstallPlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A bare name (no path or dot) is a bundled skill, installed into
-	// ~/.claude/skills, the same as `/plugin install <skill>` in the TUI.
-	if !strings.ContainsAny(req.Source, "/.") {
+	// A bare name is a bundled skill, installed into ~/.claude/skills, the
+	// same as `/plugin install <skill>` in the TUI.
+	if skill.IsBundledSkillRef(req.Source) {
 		report, err := skill.InstallBundledToClaude(req.Source)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())

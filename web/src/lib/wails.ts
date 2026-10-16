@@ -44,13 +44,22 @@ export function focusDesktopWindow(target: Window = window): boolean {
   return invokeWails("ocode:focus-window", target);
 }
 
+// The per-launch secret the desktop shell appends to the window URL as ?clip=
+// (cmd/ocode-desktop/main.go). Read once at module load: the router may rewrite
+// the location later, and the shell only accepts writes that echo this value.
+const clipboardNonce = new URLSearchParams(window.location.search).get("clip");
+
 /**
  * Put text on the system clipboard through the desktop shell's native
  * clipboard (cmd/ocode-desktop/main.go msgClipboardWrite). Unlike
  * navigator.clipboard and execCommand("copy"), WKWebView does not require it
  * to run inside a user gesture, so a copy that arrives over a websocket (a
- * terminal program's OSC 52) still lands. Returns false in a plain browser.
+ * terminal program's OSC 52) still lands. Returns false in a plain browser,
+ * and when the page was not opened with the clipboard nonce.
  */
 export function writeDesktopClipboard(text: string, target: Window = window): boolean {
-  return invokeWails(`ocode:clipboard-write:${text}`, target);
+  if (!clipboardNonce) {
+    return false;
+  }
+  return invokeWails(`ocode:clipboard-write:${clipboardNonce}:${text}`, target);
 }

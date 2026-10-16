@@ -236,7 +236,7 @@ export default function TopTabs({ activeTab, onTabSelect, onMenuToggle, loadingS
         <div className="w-6 h-6 rounded bg-blue-600 flex items-center justify-center text-xs font-bold">
           o
         </div>
-        <span className="font-semibold text-sm hidden sm:inline">{projectState.activeProject?.name}</span>
+        <span className="font-semibold text-sm hidden sm:inline">{projectState.activeProject?.name || "ocode"}</span>
       </div>
 
       {/* Main tabs — single row, horizontally scrollable */}
