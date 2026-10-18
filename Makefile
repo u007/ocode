@@ -1,4 +1,4 @@
-.PHONY: test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
+.PHONY: restart-app test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -440,3 +440,10 @@ install-all: install install-desktop
 
 debug-desktop:
 	bash scripts/capture-desktop-hang.sh
+
+
+# ── Restart the macOS desktop app ────────────────────────────────────────────
+# Close the running ocode.app (graceful, then forced) and relaunch it.
+# Usage: make restart-app
+restart-app:
+	./scripts/restart-app.sh

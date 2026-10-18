@@ -3717,21 +3717,24 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(delta),
     }),
-  getAutoContinue: (host?: string) =>
+  getAutoContinue: (sessionId?: string, host?: string) =>
     fetchJSON<{ enabled: boolean; model: string }>(
-      "/api/config/ocode/autocontinue",
+      sessionId
+        ? `/api/config/ocode/autocontinue?session_id=${encodeURIComponent(sessionId)}`
+        : "/api/config/ocode/autocontinue",
       undefined,
       host,
     ),
   setAutoContinue: (
     fields: { enabled?: boolean; model?: string; clear?: boolean },
+    sessionId?: string,
     host?: string,
   ) =>
     fetchJSON<{ enabled: boolean; model: string }>(
       "/api/config/ocode/autocontinue",
       {
         method: "PUT",
-        body: JSON.stringify(fields),
+        body: JSON.stringify(sessionId ? { ...fields, session_id: sessionId } : fields),
       },
       host,
     ),

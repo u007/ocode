@@ -415,6 +415,9 @@ const (
 	ChatDisplayPreset    = "preset"
 	ChatDisplayExpanded  = "expanded"
 	ChatDisplayCollapsed = "collapsed"
+	// ChatDisplayAuto is valid only for latest_thinking: expanded while the
+	// turn has no answer text yet, collapsed once answer text starts.
+	ChatDisplayAuto = "auto"
 )
 
 // ChatVerbosityOverrides controls individual rendered message categories. An
@@ -454,10 +457,10 @@ func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("unknown override category: %s", name)
 		}
 		if value == nil {
-			return fmt.Errorf("override category %s must be one of %q, %q, or %q", name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+			return fmt.Errorf("override category %s must be one of %s", name, chatOverrideChoices(name))
 		}
-		if !validChatDisplayOverride(*value) {
-			return fmt.Errorf("override category %s must be one of %q, %q, or %q", name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+		if !chatOverrideAllowed(name, *value) {
+			return fmt.Errorf("override category %s must be one of %s", name, chatOverrideChoices(name))
 		}
 		*dst = *value
 	}
@@ -466,8 +469,9 @@ func (o *ChatVerbosityOverrides) UnmarshalJSON(data []byte) error {
 }
 
 // ChatDisplayPolicy is the effective, renderer-facing form of a verbosity
-// config. The latest thinking block defaults to expanded so users can follow
-// the model's current reasoning, but it stays configurable like the others.
+// config. LatestThinking is expanded or collapsed, or "auto": expanded while the
+// latest turn has no answer text yet, collapsed once answer text starts. The
+// renderer evaluates "auto" per block; the resolver only picks the mode.
 type ChatDisplayPolicy struct {
 	OlderThinking  string `json:"older_thinking"`
 	LatestThinking string `json:"latest_thinking"`
@@ -537,6 +541,23 @@ func validChatDisplayOverride(value string) bool {
 	}
 }
 
+// chatOverrideAllowed checks one category's value. Only latest_thinking also
+// accepts "auto"; widening the shared check would let tool_calls="auto" through.
+func chatOverrideAllowed(name, value string) bool {
+	if validChatDisplayOverride(value) {
+		return true
+	}
+	return name == "latest_thinking" && value == ChatDisplayAuto
+}
+
+// chatOverrideChoices lists the legal values for one category in error messages.
+func chatOverrideChoices(name string) string {
+	if name == "latest_thinking" {
+		return fmt.Sprintf("%q, %q, %q, or %q", ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed, ChatDisplayAuto)
+	}
+	return fmt.Sprintf("%q, %q, or %q", ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+}
+
 // chatVerbosityOverrideField resolves a wire category name to the in-memory
 // field it controls. It returns nil for an unknown category so the decoder can
 // reject it instead of silently dropping the value.
@@ -575,8 +596,8 @@ func (c ChatVerbosityConfig) Validate() error {
 		{"activity_notices", c.Overrides.ActivityNotices},
 	}
 	for _, override := range overrides {
-		if !validChatDisplayOverride(override.value) {
-			return fmt.Errorf("chat_verbosity.overrides.%s must be one of %q, %q, or %q", override.name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+		if !chatOverrideAllowed(override.name, override.value) {
+			return fmt.Errorf("chat_verbosity.overrides.%s must be one of %s", override.name, chatOverrideChoices(override.name))
 		}
 	}
 	return nil
@@ -598,6 +619,7 @@ func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, err
 	}
 
 	olderThinking := ChatDisplayExpanded
+	latestThinking := ChatDisplayExpanded
 	toolCalls := ChatDisplayExpanded
 	toolOutput := ChatDisplayExpanded
 	notices := ChatDisplayExpanded
@@ -610,6 +632,7 @@ func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, err
 		toolCalls = ChatDisplayCollapsed
 	case ChatVerbosityQuiet:
 		olderThinking = ChatDisplayCollapsed
+		latestThinking = ChatDisplayAuto
 		toolCalls = ChatDisplayCollapsed
 		toolOutput = ChatDisplayCollapsed
 		notices = ChatDisplayCollapsed
@@ -617,7 +640,7 @@ func ResolveChatVerbosityPolicy(cfg ChatVerbosityConfig) (ChatDisplayPolicy, err
 
 	return ChatDisplayPolicy{
 		OlderThinking:  resolveChatDisplayOverride(cfg.Overrides.OlderThinking, olderThinking),
-		LatestThinking: resolveChatDisplayOverride(cfg.Overrides.LatestThinking, ChatDisplayExpanded),
+		LatestThinking: resolveChatDisplayOverride(cfg.Overrides.LatestThinking, latestThinking),
 		ToolCalls:      resolveChatDisplayOverride(cfg.Overrides.ToolCalls, toolCalls),
 		ToolOutput:     resolveChatDisplayOverride(cfg.Overrides.ToolOutput, toolOutput),
 		Notices:        resolveChatDisplayOverride(cfg.Overrides.ActivityNotices, notices),

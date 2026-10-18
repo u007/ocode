@@ -46,8 +46,10 @@ interface Props {
   restoreTargetIndex?: number;
   /** Stable identity supplied by the virtualized transcript renderer. */
   entryKey?: string;
-  /** The last thinking block in the latest assistant turn stays expanded. */
+  /** The last thinking block in the latest assistant turn follows the latest_thinking policy. */
   isLatestThinking?: boolean;
+  /** Answer text follows this thinking block in the latest turn (drives the "auto" policy). */
+  answerStarted?: boolean;
   /** Search selection temporarily opens disclosure regions. */
   forceOpen?: boolean;
 }
@@ -239,6 +241,7 @@ function MessageBubble({
   restoreTargetIndex,
   entryKey,
   isLatestThinking = false,
+  answerStarted = false,
   forceOpen = false,
 }: Props) {
   // ChatPanel supplies a stable object identity. The fallback keeps isolated
@@ -284,6 +287,7 @@ function MessageBubble({
             onSpeak={() => requestSpeech(message.reasoning_content || "")}
             blockKey={`${baseKey}:thinking`}
             isLatest={isLatestThinking}
+            answerStarted={answerStarted}
             forceOpen={forceOpen}
           />
         ) : null}

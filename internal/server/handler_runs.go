@@ -133,7 +133,7 @@ func (h *Handler) activeAgentForRuns(sessionID string) *agent.Agent {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if as, ok := h.agents[sessionID]; ok {
+	if as, ok := h.agents[agentKey(sessionID)]; ok {
 		return as.agent
 	}
 	return nil

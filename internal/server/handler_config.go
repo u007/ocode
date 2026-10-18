@@ -1075,7 +1075,7 @@ func (h *Handler) HandleSetAgent(w http.ResponseWriter, r *http.Request) {
 
 	if req.SessionID != "" {
 		h.mu.Lock()
-		if as, ok := h.agents[req.SessionID]; ok {
+		if as, ok := h.agents[agentKey(req.SessionID)]; ok {
 			as.agent.SetSpec(spec)
 		}
 		h.mu.Unlock()

@@ -121,6 +121,7 @@ func init() {
 		{name: "/export-claude", help: "Append chat to Claude Code JSONL", handler: runExportClaudeCmd},
 		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
+		{name: "/display", usage: "/display [full|balanced|quiet]", help: "Show or set the chat display preset (thinking block defaults)", handler: runDisplayCmd},
 		{name: "/effort", usage: "/effort [off|low|med|high|xhigh|max]", help: "Show or set the reasoning effort (thinking budget) level", handler: runEffortCmd},
 		{name: "/sound", usage: "/sound [on|off|test]", help: "Show status / toggle terminal bell on task completion", handler: runSoundCmd},
 		{name: "/voice", usage: "/voice [status|list|model <id>]", help: "Voice input status, models, and the transcription model (ctrl+x v records)", handler: runVoiceCmd},
@@ -361,6 +362,11 @@ func runResetIDCmd(m *model, args []string) tea.Cmd {
 
 func runThinkingCmd(m *model, args []string) tea.Cmd {
 	m.handleThinkingCmd(args)
+	return nil
+}
+
+func runDisplayCmd(m *model, args []string) tea.Cmd {
+	m.handleDisplayCmd(args)
 	return nil
 }
 

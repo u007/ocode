@@ -274,7 +274,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       }).catch(console.error);
     }
     if (purpose === "autocontinue" && !currentValues?.autocontinue) {
-      api.getAutoContinue(...hostArgs).then((res) => {
+      api.getAutoContinue(undefined, ...hostArgs).then((res) => {
         setAutoContinueModelState(res.model ?? "");
       }).catch(console.error);
     }
@@ -524,7 +524,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // model directly. Leave the on/off gate untouched — mirroring the
           // TUI's `/autocontinue model <name>`, which never toggles the gate.
           setAutoContinueModelState(modelId);
-          persist("Changing the auto-continue model", () => api.setAutoContinue({ model: modelId }, ...hostArgs));
+          persist("Changing the auto-continue model", () => api.setAutoContinue({ model: modelId }, undefined, ...hostArgs));
         }
         break;
       case "speechsummary":
@@ -660,7 +660,7 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           // Clear = judge model cleared, gate untouched (TUI parity: "auto"/
           // "none" clears the model, meaning StepLimitHit-only resumes).
           setAutoContinueModelState("");
-          persist("Clearing the auto-continue model", () => api.setAutoContinue({ clear: true }, ...hostArgs));
+          persist("Clearing the auto-continue model", () => api.setAutoContinue({ clear: true }, undefined, ...hostArgs));
         }
         break;
       case "speechsummary":

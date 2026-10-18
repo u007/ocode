@@ -112,6 +112,7 @@ func writeProfileStoreLocked() error {
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("rename profile auth: %w", err)
 	}
+	OnCredentialsSaved.Fire()
 	return nil
 }
 

@@ -369,3 +369,68 @@ func TestEvictIdleKeepsPendingQuestionAsk(t *testing.T) {
 		}
 	}
 }
+
+// TestBindNewOrVerifyCanonicalKeyOneEntry pins the raw-id split: a
+// "claude:<id>" bound through BindNewOrVerify must land on the canonical
+// "claude-<id>" entry, and binding it again must reuse that entry rather than
+// register a raw-keyed twin whose persistence would address another file.
+func TestBindNewOrVerifyCanonicalKeyOneEntry(t *testing.T) {
+	root := t.TempDir()
+	mgr := NewSessionManager(30*time.Minute, func() []string { return []string{root} }, nil)
+
+	snap, err := mgr.BindNewOrVerify("claude:X1", root, "")
+	if err != nil {
+		t.Fatalf("first bind: %v", err)
+	}
+	if snap.SessionID != "claude-X1" {
+		t.Fatalf("first bind SessionID = %q, want claude-X1", snap.SessionID)
+	}
+	if _, err := mgr.BindNewOrVerify("claude:X1", root, ""); err != nil {
+		t.Fatalf("second bind: %v", err)
+	}
+	if n := len(mgr.Snapshot()); n != 1 {
+		t.Fatalf("entries = %d, want 1 (raw and canonical ids must share one entry)", n)
+	}
+	if e := mgr.Lookup("claude-X1"); e == nil || e.SessionID != "claude-X1" {
+		t.Fatalf("canonical entry missing or mis-keyed: %+v", e)
+	}
+}
+
+// A root whose session storage cannot be probed must not hide a session that
+// lives in a healthy root, and must not turn a genuine miss into a plain 404.
+func TestSessionManagerResolveSkipsUnprobeableRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based probe failure does not apply to root")
+	}
+	broken := t.TempDir()
+	good := t.TempDir()
+	id := session.NewSessionID()
+	saveSessionToDir(t, good, id)
+
+	dir, err := session.GetStorageDirForPath(broken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	mgr := NewSessionManager(30*time.Minute, func() []string { return []string{broken, good} }, nil)
+
+	e, err := mgr.Resolve(id)
+	if err != nil {
+		t.Fatalf("session in healthy root must resolve past the broken one: %v", err)
+	}
+	if e.ProjectRoot != good {
+		t.Fatalf("root = %q, want %q", e.ProjectRoot, good)
+	}
+
+	_, err = mgr.Resolve(session.NewSessionID())
+	if err == nil || err == errSessionNotFound {
+		t.Fatalf("miss with an unprobeable root must report the probe error, got %v", err)
+	}
+}

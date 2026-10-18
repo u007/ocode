@@ -74,6 +74,12 @@ var commandCapabilities = []commandCapability{
 		WindowsAliases: []string{"md"},
 	},
 	{
+		ID:          "net.curl",
+		Behavior:    commandMutatingBounded,
+		Aliases:     []string{"curl"},
+		UnixAliases: []string{"curl"},
+	},
+	{
 		ID:             "shell.introspection",
 		Behavior:       commandAlwaysAllow,
 		Aliases:        []string{"pwd", "whoami", "hostname", "uname", "id", "tty", "date", "true", "false", ":", "echo", "printf", "which", "locale", "tput", "groups", "users", "uptime", "arch", "test", "[", "[["},

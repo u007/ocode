@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useResizableSidebar } from "../../hooks/useResizableSidebar";
 import ModelDefaultsForm from "./ModelDefaultsForm";
 import CommitMsgForm from "./CommitMsgForm";
 import CompactForm from "./CompactForm";
@@ -259,6 +260,13 @@ function NavSection({
 
 export default function SettingsPanel() {
   const [active, setActive] = useState<SettingsGroupId>("model-defaults");
+  const navPane = useResizableSidebar({
+    storageKey: "ocode.ui.settings-panel.width",
+    defaultWidth: 256,
+    minWidth: 160,
+    maxWidth: 420,
+  });
+
   useEffect(() => {
     const h = () => setActive("profiles")
     window.addEventListener("ocode:open-settings-profiles", h)
@@ -271,12 +279,25 @@ export default function SettingsPanel() {
   }, [])
 
   return (
-    <div className="absolute inset-0 flex overflow-hidden bg-card">
-      <nav className="w-64 shrink-0 overflow-y-auto border-r border-border py-3">
+    <div className="absolute inset-0 flex flex-col md:flex-row overflow-hidden bg-card">
+      <nav
+        className="shrink-0 overflow-auto border-b md:border-b-0 md:border-r border-border py-2 md:py-3 px-2 md:px-0 flex flex-row md:flex-col gap-1 md:gap-0 w-full md:w-[var(--nav-width)]"
+        style={{ "--nav-width": `${navPane.width}px` } as { [key: string]: string }}
+      >
         <NavSection title="ocode" groups={OCODE_GROUPS} active={active} onSelect={setActive} />
         <NavSection title="opencode" groups={OPENCODE_GROUPS} active={active} onSelect={setActive} />
       </nav>
-      <div className="flex-1 overflow-y-auto">{renderGroup(active)}</div>
+      <div
+        ref={navPane.handleRef}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize settings navigation"
+        title="Drag to resize · double-click to reset"
+        onPointerDown={navPane.onPointerDown}
+        onDoubleClick={navPane.resetToDefault}
+        className="hidden md:block w-1 shrink-0 cursor-col-resize bg-border hover:bg-accent active:bg-accent"
+      />
+      <div className="flex-1 min-w-0 overflow-y-auto">{renderGroup(active)}</div>
     </div>
   );
 }

@@ -28,6 +28,11 @@ export default function TTSForm() {
   const [modelId, setModelId] = useState<string>("default");
   const [modelVoiceState, setModelVoiceState] = useState<Record<string, string>>({});
   const [samplePlaying, setSamplePlaying] = useState<string | null>(null);
+  // Mirror of samplePlaying for the audio event handlers below: they are
+  // created inside playSample, whose deps exclude samplePlaying, so reading the
+  // state there would capture the pre-click value (null) and never clear the
+  // button when a sample ends on its own.
+  const samplePlayingRef = useRef<string | null>(null);
   const [sampleError, setSampleError] = useState<string | null>(null);
   const [sampleErrorEngine, setSampleErrorEngine] = useState<string | null>(null);
   const [sampleVoiceByEngine, setSampleVoiceByEngine] = useState<Record<string, string>>({});
@@ -122,7 +127,7 @@ export default function TTSForm() {
         const audio = new Audio(url);
         audioRef.current = audio;
         audio.onended = () => {
-          if (samplePlaying === engine.id) {
+          if (samplePlayingRef.current === engine.id) {
             setSamplePlaying(null);
             if (sampleUrlRef.current === url) {
               URL.revokeObjectURL(url);
@@ -133,7 +138,7 @@ export default function TTSForm() {
         };
         audio.onerror = () => {
           setSampleError(`Failed to play ${engine.label} sample`);
-          if (samplePlaying === engine.id) setSamplePlaying(null);
+          if (samplePlayingRef.current === engine.id) setSamplePlaying(null);
           if (sampleUrlRef.current === url) {
             URL.revokeObjectURL(url);
             sampleUrlRef.current = null;
@@ -142,15 +147,19 @@ export default function TTSForm() {
         };
         void audio.play().catch((err) => {
           setSampleError(errorText(err));
-          if (samplePlaying === engine.id) setSamplePlaying(null);
+          if (samplePlayingRef.current === engine.id) setSamplePlaying(null);
         });
       } catch (err) {
         setSampleError(errorText(err));
         setSamplePlaying(null);
       }
     },
-    [stopSample],
+    [stopSample, sampleVoiceByEngine],
   );
+
+  useEffect(() => {
+    samplePlayingRef.current = samplePlaying;
+  }, [samplePlaying]);
 
   useEffect(() => {
     return () => {

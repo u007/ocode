@@ -59,36 +59,40 @@ func TestChatVerbosityConfigValidateRejectsUnknownValues(t *testing.T) {
 
 func TestResolveChatVerbosityPolicy(t *testing.T) {
 	tests := []struct {
-		name              string
-		cfg               ChatVerbosityConfig
-		wantOlderThinking string
-		wantToolCalls     string
-		wantToolOutput    string
-		wantNotices       string
+		name               string
+		cfg                ChatVerbosityConfig
+		wantOlderThinking  string
+		wantLatestThinking string
+		wantToolCalls      string
+		wantToolOutput     string
+		wantNotices        string
 	}{
 		{
-			name:              "full",
-			cfg:               ChatVerbosityConfig{Preset: "full"},
-			wantOlderThinking: "expanded",
-			wantToolCalls:     "expanded",
-			wantToolOutput:    "expanded",
-			wantNotices:       "expanded",
+			name:               "full",
+			cfg:                ChatVerbosityConfig{Preset: "full"},
+			wantOlderThinking:  "expanded",
+			wantLatestThinking: "expanded",
+			wantToolCalls:      "expanded",
+			wantToolOutput:     "expanded",
+			wantNotices:        "expanded",
 		},
 		{
-			name:              "balanced",
-			cfg:               ChatVerbosityConfig{Preset: "balanced"},
-			wantOlderThinking: "collapsed",
-			wantToolCalls:     "collapsed",
-			wantToolOutput:    "expanded",
-			wantNotices:       "expanded",
+			name:               "balanced",
+			cfg:                ChatVerbosityConfig{Preset: "balanced"},
+			wantOlderThinking:  "collapsed",
+			wantLatestThinking: "expanded",
+			wantToolCalls:      "collapsed",
+			wantToolOutput:     "expanded",
+			wantNotices:        "expanded",
 		},
 		{
-			name:              "quiet",
-			cfg:               ChatVerbosityConfig{Preset: "quiet"},
-			wantOlderThinking: "collapsed",
-			wantToolCalls:     "collapsed",
-			wantToolOutput:    "collapsed",
-			wantNotices:       "collapsed",
+			name:               "quiet",
+			cfg:                ChatVerbosityConfig{Preset: "quiet"},
+			wantOlderThinking:  "collapsed",
+			wantLatestThinking: "auto",
+			wantToolCalls:      "collapsed",
+			wantToolOutput:     "collapsed",
+			wantNotices:        "collapsed",
 		},
 		{
 			// Balanced now collapses tool calls and expands tool output, so
@@ -102,10 +106,24 @@ func TestResolveChatVerbosityPolicy(t *testing.T) {
 					ToolOutput: "collapsed",
 				},
 			},
-			wantOlderThinking: "collapsed",
-			wantToolCalls:     "expanded",
-			wantToolOutput:    "collapsed",
-			wantNotices:       "expanded",
+			wantOlderThinking:  "collapsed",
+			wantLatestThinking: "expanded",
+			wantToolCalls:      "expanded",
+			wantToolOutput:     "collapsed",
+			wantNotices:        "expanded",
+		},
+		{
+			// An explicit latest_thinking override beats the quiet preset's auto.
+			name: "latest thinking override",
+			cfg: ChatVerbosityConfig{
+				Preset:    "quiet",
+				Overrides: ChatVerbosityOverrides{LatestThinking: "collapsed"},
+			},
+			wantOlderThinking:  "collapsed",
+			wantLatestThinking: "collapsed",
+			wantToolCalls:      "collapsed",
+			wantToolOutput:     "collapsed",
+			wantNotices:        "collapsed",
 		},
 	}
 
@@ -118,8 +136,8 @@ func TestResolveChatVerbosityPolicy(t *testing.T) {
 			if got.OlderThinking != tt.wantOlderThinking {
 				t.Errorf("OlderThinking = %q, want %q", got.OlderThinking, tt.wantOlderThinking)
 			}
-			if got.LatestThinking != "expanded" {
-				t.Errorf("LatestThinking = %q, want expanded", got.LatestThinking)
+			if got.LatestThinking != tt.wantLatestThinking {
+				t.Errorf("LatestThinking = %q, want %q", got.LatestThinking, tt.wantLatestThinking)
 			}
 			if got.ToolCalls != tt.wantToolCalls {
 				t.Errorf("ToolCalls = %q, want %q", got.ToolCalls, tt.wantToolCalls)
@@ -134,6 +152,26 @@ func TestResolveChatVerbosityPolicy(t *testing.T) {
 				t.Errorf("Status = %q, want expanded", got.Status)
 			}
 		})
+	}
+}
+
+// TestChatVerbosityAutoOnlyForLatestThinking pins the shared check: "auto" is
+// accepted for latest_thinking and rejected for every other category.
+func TestChatVerbosityAutoOnlyForLatestThinking(t *testing.T) {
+	cfg := ChatVerbosityConfig{Preset: "full", Overrides: ChatVerbosityOverrides{LatestThinking: "auto"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("latest_thinking=auto Validate() error = %v", err)
+	}
+	for _, name := range []string{"older_thinking", "tool_calls", "tool_output", "activity_notices"} {
+		var overrides ChatVerbosityOverrides
+		field := chatVerbosityOverrideField(&overrides, name)
+		if field == nil {
+			t.Fatalf("%s is not a known override category", name)
+		}
+		*field = "auto"
+		if err := (ChatVerbosityConfig{Preset: "full", Overrides: overrides}).Validate(); err == nil {
+			t.Errorf("%s=auto Validate() = nil, want error", name)
+		}
 	}
 }
 

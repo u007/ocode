@@ -296,6 +296,40 @@ func (s *Store) Set(key string, pt ProjectTerminals) error {
 	})
 }
 
+// RemoveTerminal drops one terminal id from a project's list. The read, filter
+// and write all run under the cross-process lock against freshly reloaded
+// state, so a concurrent PUT cannot be overwritten. The filtered list is a new
+// slice: the cached one is shared with Get callers and must not be mutated.
+// A missing project or id is a no-op.
+func (s *Store) RemoveTerminal(key, id string) error {
+	return s.withLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.reloadIfChangedLocked()
+		cleaned := normalizeKey(key)
+		pt, ok := s.cache[cleaned]
+		if !ok {
+			return nil
+		}
+		kept := make([]Terminal, 0, len(pt.Terminals))
+		for _, t := range pt.Terminals {
+			if t.ID != id {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == len(pt.Terminals) {
+			return nil
+		}
+		if len(kept) == 0 {
+			delete(s.cache, cleaned)
+		} else {
+			pt.Terminals = kept
+			s.cache[cleaned] = pt
+		}
+		return s.saveLocked()
+	})
+}
+
 // Remove deletes the terminal list for a project key (e.g. when the project is
 // removed). Deleting a non-existent key is a no-op.
 func (s *Store) Remove(key string) error {

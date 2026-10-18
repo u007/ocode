@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)
-description: 'Server side of the Pulse assistant: one global chat session (pulse_ id, dedicated root, state.json) that reads every local session and terminal and, through permission-gated write tools, sends messages, runs allowlisted slash commands and resolves asks. Endpoints (assistant, pulse-model, pulse-system-prompt), config keys, model slot, system-prompt override and per-turn board plus memory injection (user-role, never system-role), the twelve tools with caps, the permission design, assistant-owned memory files, recap deadline, exclusion from the board, and known limits.'
+description: 'Server side of the Pulse assistant: one global chat session (pulse_ id, dedicated root, state.json) that reads every local session and terminal and, through permission-gated write tools, sends messages, runs allowlisted slash commands and resolves asks. Endpoints (assistant, pulse-model, pulse-system-prompt), config keys, model slot, system-prompt override and per-turn board plus memory injection (user-role, never system-role), the permission design, assistant-owned memory files, recap deadline, exclusion from the board, and known limits.'
 tags:
   - pulse
   - assistant
@@ -10,9 +10,9 @@ tags:
   - server
   - api
   - prompt-cache
-timestamp: 2026-10-08T00:00:00Z
+timestamp: 2026-10-17T08:53:16Z
 ---
-# Pulse assistant — overview chat (server side)
+# Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)
 
 ## Purpose
 
@@ -84,7 +84,7 @@ All of these sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
 - `ocode.pulse_auto_gap_ms` (int): quiet gap (ms) after the last stop indicator
   before the assistant processes it. Default `2000` (2s). Edited through
   `/api/config/pulse-auto-gap-ms`.
-- `ocode.pulse_auto_compact` (bool): when `true`, auto-comacts the assistant's
+- `ocode.pulse_auto_compact` (bool): when `true`, auto-compacts the assistant's
   own context when it hits the token or pct threshold. Default `false` (off).
   Edited through `/api/config/pulse-auto-compact`.
 - `ocode.pulse_compact_token_threshold` (int): token count at which auto-compaction
@@ -109,7 +109,7 @@ Built in `buildAgentSession` when `isPulseSession(id)`, via
 - **Tools**: no builtins, no plugin/MCP tools. `Agent.RestrictToTools` replaces the
   whole tool map (NewAgent registers bash/task/advisor itself) and turns discovery
   off. The read tools and `memory_write` get explicit `allow` permission rules; the
-  four write tools get none (see "Permission design").
+  eight write tools get none (see "Permission design").
 - **System prompt**: `Agent.SetSystemPromptOverride` makes `BasePromptMessages`
   return one stable system message, replacing the env block, mode, recap and
   project context. Default text is `defaultPulseSystemPrompt` with the tool list
@@ -162,7 +162,7 @@ gap). Default: off.
 
 ## Auto-compaction of the assistant's own context
 
-When `ocode.pulse_auto_compact` is `true`, the Pulse assistant auto-comacts its
+When `ocode.pulse_auto_compact` is `true`, the Pulse assistant auto-compacts its
 own context after each turn if it exceeds either threshold, whichever is reached
 first:
 
@@ -198,6 +198,10 @@ error.
 | `session_command` | `session_id`, `command`, `args?` | `{session_id, command, result}` where `result` is the operation's own JSON | **asks**; fixed allowlist `/btw` `/cancel` `/compact` `/recap` `/title`, anything else is an error listing them, no send-as-text fallback |
 | `permission_resolve` | `session_id`, `request_id`, `decision` allow/deny | `{session_id, request_id, decision, accepted: true}` via `HandleResolvePermission` | **asks**; unknown request id is an error; always_* decisions are not offered |
 | `question_answer` | `session_id`, `request_id`, `answers` | `{session_id, request_id, accepted: true}` via `HandleAnswerQuestion` (same payload as `POST /api/questions`) | **asks**; unknown request id is an error |
+| `session_new` | `message` | `{session_id}`; starts a new local chat session with an initial message via the async chat path | **asks**; local only — remote/WSL hosts refused |
+| `session_close` | `session_id` | `{session_id, closed: true}` | **asks**; refuses the assistant's own session, child sessions, unknown ids |
+| `terminal_new` | `project_path?` | `{terminal_id}`; starts a new local pty shell | **asks**; Unix-only (Windows refuses); refuses remote hosts and unregistered projects; gated on terminal access |
+| `terminal_kill` | `terminal_id` | `{terminal_id, killed: true}`; kills the shell, removes history and shared tab entry | **asks**; refuses a terminal whose project is not a registered project root |
 | `agent_runs` | `session_id?` | `{sessions: [{session_id, runs: [...nested children]}]}` | transcripts omitted, results 500 runes; sessions without runs omitted; the assistant is excluded |
 
 ### Terminal tools
@@ -266,7 +270,7 @@ serve the Processes tab and the terminal panel. All of these apply the same gate
 ## Permission design
 
 The read tools and `memory_write` get explicit `allow` rules in
-`configurePulseAgent`. The four tools marked **asks** (`pulseTool.ask`) get NO
+`configurePulseAgent`. The eight tools marked **asks** (`pulseToolAsk`) get NO
 rule, so the permission manager's default applies: every call becomes a normal
 permission ask that the assistant window renders as a dialog, and the operator can "always
 allow" from it like any tool. `memory_write` is exempt because it only replaces the

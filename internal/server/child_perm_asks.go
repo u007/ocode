@@ -392,7 +392,7 @@ func (h *Handler) findChildPermAsk(sessionID, requestID string) (*agentSession, 
 	h.mu.Lock()
 	var candidates []candidate
 	if sessionID != "" {
-		if as, ok := h.agents[sessionID]; ok {
+		if as, ok := h.agents[agentKey(sessionID)]; ok {
 			candidates = append(candidates, candidate{sessionID, as})
 		}
 	} else {

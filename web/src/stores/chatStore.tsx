@@ -358,6 +358,9 @@ export interface SessionSlice {
   // the in-flight PUT cannot clobber the just-clicked state. Undefined = no
   // pending flip; fall back to the session's snapshot / the process default.
   advisorEnabled?: boolean;
+  // Optimistic per-session auto-continue on/off, same lifecycle as
+  // advisorEnabled above.
+  autoContinueEnabled?: boolean;
   // Optimistic per-session advisor MODEL + trigger set, same lifecycle as
   // advisorEnabled: written on pick, shadowing tuiStatus.advisor_model /
   // tuiStatus.advisor_checkpoints until a snapshot confirms it. The advisor
@@ -467,6 +470,8 @@ export type ChatAction =
   // Session-scoped: never touches the global s.advisorEnabled. `enabled:
   // undefined` clears the pending flip so the authoritative snapshot wins.
   | { type: "SET_SESSION_ADVISOR_ENABLED"; sessionId: string; enabled?: boolean }
+  // Optimistic per-session auto-continue gate (see SessionSlice.autoContinueEnabled).
+  | { type: "SET_SESSION_AUTO_CONTINUE_ENABLED"; sessionId: string; enabled?: boolean }
   // Optimistic per-session advisor model + trigger set (see
   // SessionSlice.advisorModel). Session-scoped: never touches the global
   // s.advisorModel, which is the default NEW chats start with.
@@ -774,6 +779,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return updateSession(state, action.sessionId, (s) => ({
         ...s,
         advisorEnabled: action.enabled,
+      }));
+    case "SET_SESSION_AUTO_CONTINUE_ENABLED":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        autoContinueEnabled: action.enabled,
       }));
     case "SET_SESSION_ADVISOR_CONFIG":
       // Session-scoped like SET_SESSION_ADVISOR_ENABLED: it must never touch
@@ -1143,6 +1153,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           // field (older payload) leaves the pending flip alone.
           const authoritative = action.status?.advisor_enabled;
           const confirmed = s.advisorEnabled !== undefined && authoritative === s.advisorEnabled;
+          const autoContinueAuthoritative = action.status?.auto_continue_enabled;
+          const autoContinueConfirmed =
+            s.autoContinueEnabled !== undefined && autoContinueAuthoritative === s.autoContinueEnabled;
           // Same reconciliation for the model + triggers: a session-tagged
           // snapshot carries THAT chat's advisor model, so once it agrees the
           // optimistic value has landed in tuiStatus and the override can go.
@@ -1153,6 +1166,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             ...s,
             tuiStatus: action.status,
             advisorEnabled: confirmed ? undefined : s.advisorEnabled,
+            autoContinueEnabled: autoContinueConfirmed ? undefined : s.autoContinueEnabled,
             advisorModel: modelConfirmed ? undefined : s.advisorModel,
             advisorCheckpoints: modelConfirmed ? undefined : s.advisorCheckpoints,
           };

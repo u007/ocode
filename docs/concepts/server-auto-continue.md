@@ -1,15 +1,15 @@
 ---
 type: Concept
 title: "Server-Side Auto-Continue Loop"
-description: 'Server-side auto-continue loop pattern: bounded chain with step-limit cutoff, typesafe/chat judge dispatch over a closed next-action set, the awaiting_confirmation/awaiting_decision split, and visible end-of-turn status.'
-tags: [server, auto-continue, agent-loop, architecture, typesafe, scheduled-jobs]
-timestamp: 2026-10-14T00:00:00Z
+description: 'Server-side auto-continue loop pattern: per-session on/off gate, bounded chain with step-limit cutoff, typesafe/chat judge dispatch over a closed next-action set, the awaiting_confirmation/awaiting_decision split, and visible end-of-turn status.'
+tags: [server, auto-continue, agent-loop, architecture, typesafe, scheduled-jobs, session]
+timestamp: 2026-10-17T09:14:24Z
 ---
 # Server-Side Auto-Continue Loop
 
 ## Overview
 
-The server-side auto-continue loop automatically re-polls the LLM after each turn completes when the agent has not explicitly stopped, enabling unattended multi-step workflows (scheduled jobs, headless API calls, cron dispatch). The loop is bounded: it chains a finite number of continuation steps before forcing a stop, preventing runaway token usage.
+The server-side auto-continue loop automatically re-polls the LLM after each turn completes when the agent has not explicitly stopped, enabling unattended multi-step workflows (scheduled jobs, headless API calls, cron dispatch). The on/off gate is scoped to one chat session, not the process: each session keeps its own override, and the process-wide config value is only the default for sessions that never toggled (see "Per-Session Gate"). The loop is bounded: it chains a finite number of continuation steps before forcing a stop, preventing runaway token usage.
 
 ## Architecture
 
@@ -54,11 +54,21 @@ The judge does not answer "continue or end". It picks one key from a closed set 
 
 | Parameter | Default | Description |
 |---|---|---|
-| `auto_continue_enabled` | `false` | Master toggle for the auto-continue feature |
+| `auto_continue_enabled` | `false` | Process-wide seed/default for new chat sessions — not a live global switch. Each chat session persists its own override in transcript metadata under the same key (`auto_continue_enabled`), seeded on build via `autoContinueSeed` (session override, else this default). The web sidebar toggles one session through `HandleSetAutoContinue` with `session_id`, which persists to that session's metadata and pushes a session-scoped status snapshot; a request without `session_id` keeps the legacy global-config path. |
 | `auto_continue_model` | (empty) | Model used for the next-action judge decision |
 | `autoContinueMinConfidenceDefault` | (constant, 0.6) | Confidence floor for resume-class actions — not a config key; decoupled from `permissions.auto.min_confidence` |
 | `autoContinueAnswerMinConfidence` | (constant, 0.80) | Confidence floor for answer-class actions (`proceed`/`skip`/`reject`); equals the permission default, deliberately not the configured permission floor |
 | `AutoContinueChainCap` | (constant) | Maximum consecutive auto-fired resumes per turn — not a config key; defined in code |
+
+### Per-Session Gate
+
+Auto-continue is per chat session, not per process. The gate a turn actually uses resolves in this order:
+
+1. **Live agent** — `Agent.AutoContinueEnabled()` reads an `atomic.Bool` field owned by that agent (`autoContinueEnabled`), seeded from the session's metadata override (or the process default) at build time and flippable at runtime via `SetAutoContinueEnabled`. It never re-reads `cfg.Ocode.AutoContinueEnabled`, so a later global-config write cannot retroactively change a built session.
+2. **Persisted metadata** — with no live agent, the server falls back to the session's transcript metadata key `auto_continue_enabled` (`sessionAutoContinueEnabled`, in `internal/server/autocontinue_session.go`).
+3. **Process default** — a session with no override uses the process-wide `cfg.Ocode.AutoContinueEnabled` (`autoContinueFlag`).
+
+Because the override is per session, toggling one chat never affects another: `HandleSetAutoContinue` with `session_id` (`internal/server/handler_slash_parity.go`) writes only that session's metadata and live agent, then pushes a session-scoped `status` snapshot. A request without `session_id` keeps the legacy global-config write (`config.SaveAutoContinueEnabled` + `pushStatusSnapshot`), which only seeds future sessions that never toggled.
 
 ### Typesafe Judge Path
 
@@ -130,4 +140,5 @@ A judge verdict line is rendered inline by the judge's `Detail` string, not as a
 - **Every resume prompt is fixed text keyed by action** — no judge composes prose; a new action is a new row in `autoContinueActions`, never a per-turn string.
 - **Naturally-ended turns only** — both judges are consulted only for a turn that ended on its own. A step-limit cutoff resumes deterministically without triage, and a pending permission/question sentinel blocks resume at the dispatcher (`autoContinueShouldResume` in `internal/server/agent_session.go`).
 - **Permission-aware** — auto-continue refuses to resume past an unresolved permission or question ask; the agent can raise asks mid-chain, but the loop stops until they are resolved.
+- **Per-session gate** — the on/off switch belongs to one chat session: each session's override lives in its transcript metadata, and the process-wide config is only the default for sessions that never toggled.
 - **Surfaced in transcript** — auto-continue outcomes are rendered as a transient TUI hint or a server transcript notice, not as an agent-status field.

@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ChatDisplayOverride, ChatVerbosityPreset } from "@/api/types";
+import type {
+  ChatDisplayOverride,
+  ChatDisplayPolicy,
+  ChatLatestThinkingOverride,
+  ChatVerbosityPreset,
+} from "@/api/types";
 import {
   DEFAULT_CHAT_VERBOSITY_CONFIG,
   resolveChatDisplayPolicy,
@@ -40,6 +45,12 @@ const OVERRIDE_OPTIONS: Array<{ value: ChatDisplayOverride; label: string }> = [
   { value: "collapsed", label: "Always collapsed" },
 ];
 
+// Latest thinking alone also offers Auto: open until the answer text starts, then collapsed.
+const LATEST_THINKING_OPTIONS: Array<{ value: ChatLatestThinkingOverride; label: string }> = [
+  ...OVERRIDE_OPTIONS,
+  { value: "auto", label: "Auto — collapse once the answer starts" },
+];
+
 /**
  * The config key differs from the policy key for one category: the config calls
  * it `activity_notices`, the policy `notices`. Mapping it here (instead of
@@ -57,7 +68,8 @@ const POLICY_KEY_BY_OVERRIDE: Record<OverrideKey, DisplayPolicyKey> = {
   activity_notices: "notices",
 };
 
-function displayLabel(value: "expanded" | "collapsed"): string {
+function displayLabel(value: ChatDisplayPolicy["latest_thinking"]): string {
+  if (value === "auto") return "Auto";
   return value === "collapsed" ? "Collapsed" : "Expanded";
 }
 
@@ -126,7 +138,8 @@ export default function ChatDisplayForm() {
           unchanged.
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
-          Set "Latest thinking" to Always collapsed to collapse the latest thinking block automatically.
+          Set "Latest thinking" to Auto to keep the latest thinking block open only until the answer starts, or
+          to Always collapsed to collapse it right away.
         </p>
       </div>
 
@@ -175,11 +188,11 @@ export default function ChatDisplayForm() {
               onChange={(event) =>
                 setOverrides((current) => ({
                   ...current,
-                  [key]: event.target.value as ChatDisplayOverride,
+                  [key]: event.target.value as ChatLatestThinkingOverride,
                 }))
               }
             >
-              {OVERRIDE_OPTIONS.map((option) => (
+              {(key === "latest_thinking" ? LATEST_THINKING_OPTIONS : OVERRIDE_OPTIONS).map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.value === "preset"
                     ? // The value stays "preset"; only the text is suffixed.

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ChatDisplayOverride } from "@/api/types";
 import {
   DEFAULT_CHAT_VERBOSITY_CONFIG,
   chatPolicyRevision,
@@ -12,17 +13,18 @@ describe("chat verbosity policy", () => {
   });
 
   it.each([
-    ["full", "expanded", "expanded", "expanded", "expanded"],
+    ["full", "expanded", "expanded", "expanded", "expanded", "expanded"],
     // Spec §9: balanced collapses older thinking AND tool-call details.
-    ["balanced", "collapsed", "collapsed", "expanded", "expanded"],
-    ["quiet", "collapsed", "collapsed", "collapsed", "collapsed"],
+    ["balanced", "collapsed", "collapsed", "expanded", "expanded", "expanded"],
+    // Quiet keeps the latest thinking open only until the answer starts.
+    ["quiet", "collapsed", "collapsed", "collapsed", "collapsed", "auto"],
   ] as const)(
     "resolves the %s preset matrix",
-    (preset, olderThinking, toolCalls, toolOutput, notices) => {
+    (preset, olderThinking, toolCalls, toolOutput, notices, latestThinking) => {
       const policy = resolveChatDisplayPolicy(normalizeChatVerbosityConfig({ preset }));
       expect(policy).toEqual({
         older_thinking: olderThinking,
-        latest_thinking: "expanded",
+        latest_thinking: latestThinking,
         tool_calls: toolCalls,
         tool_output: toolOutput,
         notices,
@@ -30,6 +32,30 @@ describe("chat verbosity policy", () => {
       });
     },
   );
+
+  describe.each(["full", "balanced", "quiet"] as const)("latest thinking override under %s", (preset) => {
+    const presetLatest = preset === "quiet" ? "auto" : "expanded";
+    it.each([
+      ["preset", presetLatest],
+      ["expanded", "expanded"],
+      ["collapsed", "collapsed"],
+      ["auto", "auto"],
+    ] as const)("override %s resolves latest thinking to %s", (override, expected) => {
+      const policy = resolveChatDisplayPolicy({ preset, overrides: { latest_thinking: override } });
+      expect(policy.latest_thinking).toBe(expected);
+    });
+  });
+
+  it("accepts auto for latest thinking only", () => {
+    expect(() => resolveChatDisplayPolicy({ preset: "full", overrides: { latest_thinking: "auto" } })).not.toThrow();
+
+    const auto = "auto" as unknown as ChatDisplayOverride;
+    for (const category of ["older_thinking", "tool_calls", "tool_output", "activity_notices"] as const) {
+      expect(() => resolveChatDisplayPolicy({ preset: "full", overrides: { [category]: auto } })).toThrow(
+        `Invalid chat display override for ${category}: auto`,
+      );
+    }
+  });
 
   it("applies independent overrides while preserving latest thinking", () => {
     // The preset cell is collapsed for both, so each override here re-opens a

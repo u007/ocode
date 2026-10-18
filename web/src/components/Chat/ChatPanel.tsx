@@ -416,13 +416,20 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   }, [messages, slice.hiddenQuestionRequestId, slice.pendingQuestion]);
   renderEntriesRef.current = renderEntries;
 
-  // The last thinking block in the latest assistant turn is always expanded,
-  // including while a newer turn is still streaming. Live parts take precedence
-  // over committed history because they represent the current turn's tail.
-  const latestThinkingKey = useMemo(() => {
+  // The last thinking block in the latest assistant turn follows the
+  // "latest_thinking" policy, including while a newer turn is still streaming.
+  // Live parts take precedence over committed history because they represent
+  // the current turn's tail. `answerStarted` is true once renderable answer
+  // text follows the block; tool-call-only follow-ups do not count.
+  const latestThinking = useMemo<{ key: string | null; answerStarted: boolean }>(() => {
     // Live parts are the current turn's tail: a thinking part there always wins.
     for (let i = live.length - 1; i >= 0; i--) {
-      if (live[i].kind === "thinking") return `live:${i}:thinking`;
+      if (live[i].kind === "thinking") {
+        const answerStarted = live
+          .slice(i + 1)
+          .some((part) => part.kind === "text" && hasRenderableText(part.text));
+        return { key: `live:${i}:thinking`, answerStarted };
+      }
     }
     // Otherwise scope to the latest assistant turn: entries after the last
     // committed user message. A newer turn therefore makes the previous
@@ -435,16 +442,26 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
         break;
       }
     }
+    let latestIndex = -1;
     for (let i = renderEntries.length - 1; i > lastUserIndex; i--) {
       const entry = renderEntries[i];
       if (entry.kind === "single" && entry.msg.role === "assistant" && entry.msg.reasoning_content) {
-        return `${getEntryKey(entry)}:thinking`;
+        latestIndex = i;
+        break;
       }
       if (entry.kind === "tool-group" && entry.assistant.reasoning_content) {
-        return `${getEntryKey(entry)}:thinking`;
+        latestIndex = i;
+        break;
       }
     }
-    return null;
+    if (latestIndex < 0) return { key: null, answerStarted: false };
+    // A block's own message content renders after its reasoning, so it counts too.
+    const answerStarted = renderEntries.slice(latestIndex).some((entry) =>
+      entry.kind === "single"
+        ? entry.msg.role === "assistant" && hasRenderableText(entry.msg.content)
+        : hasRenderableText(entry.assistant.content),
+    );
+    return { key: `${getEntryKey(renderEntries[latestIndex])}:thinking`, answerStarted };
   }, [live, renderEntries, getEntryKey]);
 
   // Consecutive live `notice` parts collapse into one disclosure when the
@@ -1766,7 +1783,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
               const entryKey = getEntryKey(entry);
               const isCurrentMatch = virtualItem.index === currentMatchEntryPos;
               const forceOpen = isCurrentMatch;
-              const isLatestThinking = latestThinkingKey === `${entryKey}:thinking`;
+              const isLatestThinking = latestThinking.key === `${entryKey}:thinking`;
+              const answerStarted = isLatestThinking && latestThinking.answerStarted;
               const highlight = searchOpen ? searchQuery : "";
               return (
                 <div
@@ -1803,6 +1821,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                         restoreTargetIndex={absoluteRestoreTarget(windowStartServerIndex, entry.originalIndex) ?? undefined}
                         entryKey={entryKey}
                         isLatestThinking={isLatestThinking}
+                        answerStarted={answerStarted}
                         forceOpen={forceOpen}
                       />
                     ) : (
@@ -1814,6 +1833,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                             onSpeak={() => requestSpeech(entry.assistant.reasoning_content || "")}
                             blockKey={`${entryKey}:thinking`}
                             isLatest={isLatestThinking}
+                            answerStarted={answerStarted}
                             forceOpen={forceOpen}
                           />
                         ) : null}
@@ -1877,16 +1897,19 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
               }
               const { part, index: i } = entry;
               const liveKey = `live:${i}`;
-              if (part.kind === "thinking")
+              if (part.kind === "thinking") {
+                const isLatest = latestThinking.key === `${liveKey}:thinking`;
                 return (
                   <ThinkingBlock
                     key={liveKey}
                     text={part.text}
                     onSpeak={() => requestSpeech(part.text || "")}
                     blockKey={`${liveKey}:thinking`}
-                    isLatest={latestThinkingKey === `${liveKey}:thinking`}
+                    isLatest={isLatest}
+                    answerStarted={isLatest && latestThinking.answerStarted}
                   />
                 );
+              }
               if (part.kind === "text")
                 return hasRenderableText(part.text) ? (
                   <AssistantText key={`live-${i}`} content={part.text} onSpeak={requestSpeech} />

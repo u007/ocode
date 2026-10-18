@@ -53,6 +53,8 @@ func StoredTranscriptStateForDir(wd, id string) (string, []agent.Message, error)
 	if id == "" {
 		return "", nil, nil
 	}
+	// The revision must be read from the same file writes land on (CanonicalID).
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return "", nil, err
@@ -105,6 +107,7 @@ func storedTranscriptStateForDir(dir, id string) (string, []agent.Message, error
 // missing session, or a schema-less sqlite file reports "" (the client keeps
 // the tab's persisted label), never an error the caller must branch on.
 func StoredTitleForDir(wd, id string) (string, error) {
+	id = CanonicalID(id)
 	if id == "" {
 		return "", nil
 	}

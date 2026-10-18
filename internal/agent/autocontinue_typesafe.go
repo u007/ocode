@@ -544,8 +544,13 @@ func (a *Agent) AutoContinueJudgeSync(messages []Message, stepErr error, prior [
 // on for this agent's config. Server turns consult it before spending a
 // triage call; the TUI tracks its own toggle state.
 func (a *Agent) AutoContinueEnabled() bool {
-	return a.config != nil && a.config.Ocode.AutoContinueEnabled
+	return a.autoContinueEnabled.Load()
 }
+
+// SetAutoContinueEnabled toggles the auto-continue feature for this agent at
+// runtime. It is the per-session write path used by the web sidebar; it never
+// touches global config.
+func (a *Agent) SetAutoContinueEnabled(enabled bool) { a.autoContinueEnabled.Store(enabled) }
 
 // AutoContinueChainCap is the single bound on consecutive auto-fired resumes
 // shared by every host (TUI, headless server, scheduler); the TUI aliases it and

@@ -183,4 +183,35 @@ describe("ChatDisplayForm", () => {
     await waitFor(() => expect(mockSet).toHaveBeenCalled());
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  it("offers Auto only on the Latest thinking row", async () => {
+    render(<ChatDisplayForm />);
+    await waitFor(() => expect((screen.getByLabelText("Latest thinking") as HTMLSelectElement).value).toBe("expanded"));
+
+    const optionTexts = (label: string) =>
+      Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map((option) => option.textContent);
+    expect(optionTexts("Latest thinking")).toContain("Auto — collapse once the answer starts");
+    expect(optionTexts("Older thinking")).not.toContain("Auto — collapse once the answer starts");
+    expect(optionTexts("Tool call details")).not.toContain("Auto — collapse once the answer starts");
+  });
+
+  it("shows Auto as the Follow preset value for Latest thinking under Quiet", async () => {
+    mockGet.mockResolvedValue({
+      preset: "quiet",
+      overrides: {
+        older_thinking: "preset",
+        latest_thinking: "preset",
+        tool_calls: "preset",
+        tool_output: "preset",
+        activity_notices: "preset",
+      },
+    });
+    render(<ChatDisplayForm />);
+    await waitFor(() => expect((screen.getByRole("radio", { name: /Quiet/ }) as HTMLInputElement).checked).toBe(true));
+
+    const optionTexts = Array.from((screen.getByLabelText("Latest thinking") as HTMLSelectElement).options).map(
+      (option) => option.textContent,
+    );
+    expect(optionTexts).toContain("Follow preset — Auto");
+  });
 });

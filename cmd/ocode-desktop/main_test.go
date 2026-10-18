@@ -122,3 +122,34 @@ func TestMsgClipboardWritePrefixIsNotWailsReserved(t *testing.T) {
 		t.Fatalf("msgClipboardWrite %q must not start with the reserved %q prefix", msgClipboardWrite, "wails:")
 	}
 }
+
+func TestAppBundleFromExecutable(t *testing.T) {
+	cases := []struct {
+		name    string
+		exe     string
+		want    string
+		wantErr bool
+	}{
+		{"packaged app", "/Applications/ocode.app/Contents/MacOS/ocode-desktop", "/Applications/ocode.app", false},
+		{"go run or dev binary", "/Users/me/www/ocode/bin/ocode-desktop", "", true},
+		{"bundle-less directory named MacOS", "/tmp/MacOS/Contents/ocode-desktop", "", true},
+		{"not a .app bundle", "/Applications/ocode/Contents/MacOS/ocode-desktop", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := appBundleFromExecutable(tc.exe)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("appBundleFromExecutable(%q) = %q, want error", tc.exe, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("appBundleFromExecutable(%q) error: %v", tc.exe, err)
+			}
+			if got != tc.want {
+				t.Fatalf("appBundleFromExecutable(%q) = %q, want %q", tc.exe, got, tc.want)
+			}
+		})
+	}
+}

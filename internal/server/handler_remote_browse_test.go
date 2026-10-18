@@ -27,7 +27,8 @@ func browseConfigFor(t *testing.T, s *Server, host, browserHost string) *httptes
 func TestRemoteBrowseConfigUsesHostBrowseOrigin(t *testing.T) {
 	ws := &fakeTestWorkspace{state: remote.ServeState{BrowsePort: 40263}}
 	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
-	s := &Server{handler: h}
+	s := &Server{handler: h, rl: newRateLimiter()}
+	s.browseProxyPort = 9999
 
 	w := browseConfigFor(t, s, "user@realhost", "localhost:9999")
 	if w.Code != http.StatusOK {
@@ -40,7 +41,7 @@ func TestRemoteBrowseConfigUsesHostBrowseOrigin(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if want := "http://localhost:40263"; body.BaseURL != want {
+	if want := "http://localhost:9999/api/remote/user@realhost/browse"; body.BaseURL != want {
 		t.Errorf("base_url = %q, want %q", body.BaseURL, want)
 	}
 	if !body.RemoteMode {

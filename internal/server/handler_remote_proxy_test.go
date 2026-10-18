@@ -48,8 +48,9 @@ func (f *fakeTestWorkspace) BrowseURL() string {
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d", f.state.BrowsePort)
 }
+func (f *fakeTestWorkspace) SyncConfig(force bool) error { return nil }
 
-func newTestProxyHandler(t *testing.T, host, path string, ws *fakeTestWorkspace) *Handler {
+func newTestProxyHandler(t *testing.T, host, path string, ws remoteHostWorkspace) *Handler {
 	t.Helper()
 	h := NewHandler()
 	h.SetWorkDir(t.TempDir())
@@ -837,3 +838,60 @@ func TestRemoteProxyRefusesMCPAuthForSSHHost(t *testing.T) {
 		t.Error("MCP auth proxy must refuse before opening a remote connection")
 	}
 }
+
+// Saves arriving while a sync runs must coalesce into one follow-up run, never
+// overlap, and the last save must still be pushed.
+func TestSyncConnectedRemoteHostsIsSingleFlight(t *testing.T) {
+	var mu sync.Mutex
+	active, maxActive, runs := 0, 0, 0
+	release := make(chan struct{})
+	ws := &syncCountingWorkspace{onSync: func() {
+		mu.Lock()
+		active++
+		runs++
+		if active > maxActive {
+			maxActive = active
+		}
+		first := runs == 1
+		mu.Unlock()
+		if first {
+			<-release
+		}
+		mu.Lock()
+		active--
+		mu.Unlock()
+	}}
+	h := newTestProxyHandler(t, "user@realhost", "/home/user/project", ws)
+	connectTestHost(t, h, "user@realhost", "/home/user/project")
+
+	h.SyncConnectedRemoteHosts()
+	for i := 0; i < 10; i++ {
+		h.SyncConnectedRemoteHosts()
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		h.remoteSyncMu.Lock()
+		idle := !h.remoteSyncRunning
+		h.remoteSyncMu.Unlock()
+		if idle {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if maxActive != 1 {
+		t.Fatalf("overlapping syncs: max concurrent = %d", maxActive)
+	}
+	if runs != 2 {
+		t.Fatalf("runs = %d, want 2 (one in flight + one coalesced follow-up)", runs)
+	}
+}
+
+type syncCountingWorkspace struct {
+	browseProxyTestWorkspace
+	onSync func()
+}
+
+func (w *syncCountingWorkspace) SyncConfig(bool) error { w.onSync(); return nil }

@@ -20,6 +20,7 @@ import (
 // must never take the cross-process write lock or run a CREATE TABLE. Same
 // discipline as StoredRevisionForDir.
 func TitleForDir(wd, id string) (string, bool, error) {
+	id = CanonicalID(id)
 	if wd == "" || id == "" {
 		return "", false, nil
 	}

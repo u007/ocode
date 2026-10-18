@@ -5417,6 +5417,18 @@ func canAutoAllowInRoot(pm *PermissionManager, command, prefix string) bool {
 			}
 		}
 	}
+	// curl/wget: never auto-allow a command with data-exfiltration risk
+	// (file upload, env-var refs, subshell expansion, ...). These are
+	// caught by the hard-block layer for `ask` decisions, but the auto-allow
+	// prefix path bypasses that layer, so check here too. A risky curl
+	// falls through to `ask` and is judged by the auto-permission layer
+	// (and the network guard) instead of silently auto-allowing.
+	// Not gated on prefix: "/usr/bin/curl", "command curl" and "env curl" carry
+	// a different prefix, and isExfiltrationRiskBash already peels wrappers and
+	// reduces binary paths to their basename. It is a no-op for other commands.
+	if isExfiltrationRiskBash(command) {
+		return false
+	}
 	paths := extractBashCommandPaths(prefix, fields)
 	if prefix == "cd" && len(paths) == 0 {
 		home := os.Getenv("HOME")
@@ -5540,12 +5552,35 @@ func extractBashCommandPaths(prefix string, fields []string) []string {
 	return paths
 }
 
+// isURLArg reports whether arg is a URL with a scheme (http://, https://,
+// ftp://, file://, ...). Such values are not filesystem paths and must not
+// be treated as path arguments by the auto-allow / sandbox scope logic.
+func isURLArg(arg string) bool {
+	idx := strings.Index(arg, "://")
+	if idx <= 0 {
+		return false
+	}
+	scheme := strings.ToLower(arg[:idx])
+	switch scheme {
+	case "http", "https", "ftp", "ftps", "file", "sftp", "scp", "rsync", "ssh", "git":
+		return true
+	}
+	return false
+}
+
 // isLikelyPathArg returns true if arg looks like a filesystem path. Bare
 // identifiers (e.g. literal patterns passed to grep, awk's variable names)
 // return false so they don't get treated as out-of-workdir paths and
 // inadvertently block the auto-allow.
 func isLikelyPathArg(arg string) bool {
 	if arg == "" {
+		return false
+	}
+	// URLs (http://, https://, ftp://, file://, ...) are not filesystem paths.
+	// Without this, a curl/wget URL is treated as a path argument, which
+	// breaks auto-allow path-scoping (the URL resolves outside the workdir)
+	// and pollutes the sandbox sensitive-path scan with URL-shaped "paths".
+	if isURLArg(arg) {
 		return false
 	}
 	// Glob metacharacters.

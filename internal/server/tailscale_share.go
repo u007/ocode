@@ -1,12 +1,17 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/u007/ocode/internal/tailscale"
 )
@@ -34,6 +39,7 @@ type tailscaleShareStatus struct {
 	URL       string `json:"url,omitempty"`
 	Kind      string `json:"kind,omitempty"`
 	Hint      string `json:"hint,omitempty"`
+	BrowseURL string `json:"browse_url,omitempty"`
 }
 
 // tailscaleShare caches one tailscale exposure per server process. Starting is
@@ -56,6 +62,15 @@ type tailscaleShare struct {
 	proc    *exec.Cmd
 	path    string
 
+	// Browse proxy exposure (second origin). browseProxyPort is the local port
+	// the browse proxy listener binds; browseURL is the shared HTTPS URL on
+	// the second Tailscale HTTPS port (8444 by default). browseProc/browsePath
+	// track the second mount for cleanup.
+	browseProxyPort int
+	browseURL       string
+	browseProc      *exec.Cmd
+	browsePath      string
+
 	// Test seams. Both are nil in production and are only ever set by tests in
 	// this package, so the exposure cannot be faked from outside it. They exist
 	// because the real entry points shell out to the tailscale binary, which a
@@ -67,6 +82,19 @@ type tailscaleShare struct {
 	// unproven DNS-name fallback). removeFn replaces RemoveSetPath.
 	exposeFn func(kind string) (url, resolvedKind string)
 	removeFn func(pathPrefix string)
+
+	// Browse-proxy test seams (nil in production). browseExposeFn returns the
+	// shared browse URL (or "" on failure); browseRemoveFn tears the mount down.
+	browseExposeFn func(target string) (url string)
+	browseRemoveFn func()
+}
+
+// setBrowseProxyPort records the local port the browse proxy listener binds,
+// so the share flow can expose it on the second Tailscale HTTPS port.
+func (t *tailscaleShare) setBrowseProxyPort(port int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.browseProxyPort = port
 }
 
 // expose runs the tailscale exposure for the given kind and returns the URL,
@@ -108,6 +136,7 @@ func (t *tailscaleShare) statusLocked() tailscaleShareStatus {
 		Running:   running,
 		Available: t.url != "" || tailscale.Installed(),
 		Hint:      t.hint,
+		BrowseURL: t.browseURL,
 	}
 	if running {
 		st.URL = t.url
@@ -184,6 +213,14 @@ func (t *tailscaleShare) start(kind string, port int) tailscaleShareStatus {
 	t.started = proven
 	if proven {
 		t.path = tailscale.SanitizePath(desktopTailscalePath)
+		// Expose the browse proxy on the second HTTPS port (best-effort).
+		// A failure here does not fail the main share.
+		if t.browseProxyPort != 0 {
+			browseURL := t.browseExpose(t.browseProxyPort)
+			if browseURL != "" {
+				t.browseURL = browseURL
+			}
+		}
 	}
 	st := t.statusLocked()
 	t.mu.Unlock()
@@ -263,6 +300,14 @@ func (t *tailscaleShare) stopLocked() bool {
 	killProc(proc)
 	if path != "" {
 		t.removeSetPath(path)
+	}
+	// Tear down the browse proxy mount.
+	t.mu.Lock()
+	browseURL := t.browseURL
+	t.browseURL = ""
+	t.mu.Unlock()
+	if browseURL != "" {
+		t.browseRemove()
 	}
 	return had
 }
@@ -352,4 +397,61 @@ func (s *Server) handleStopTailscaleShare(w http.ResponseWriter, r *http.Request
 		s.tsShare.stop()
 	}
 	writeJSON(w, http.StatusOK, s.tailscaleShareStatus())
+}
+
+// browseHTTPSProxyPort is the Tailscale HTTPS port for the browse-proxy mount.
+const browseHTTPSProxyPort = 8444
+
+// browseExpose exposes the browse proxy on the second Tailscale HTTPS port.
+// It runs `tailscale serve --bg --https=<port> http://localhost:<browseProxyPort>`
+// (root mount, no --set-path) and returns the advertised URL.
+func (t *tailscaleShare) browseExpose(browseProxyPort int) string {
+	if t.browseExposeFn != nil {
+		return t.browseExposeFn(fmt.Sprintf("localhost:%d", browseProxyPort))
+	}
+	if browseProxyPort == 0 {
+		return ""
+	}
+	tailscalePath := tailscale.CLIPath()
+	if tailscalePath == "" {
+		return ""
+	}
+	target := fmt.Sprintf("http://localhost:%d", browseProxyPort)
+	args := []string{"serve", "--bg", fmt.Sprintf("--https=%d", browseHTTPSProxyPort), target}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, tailscalePath, args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		log.Printf("tailscale browse serve failed to start: %v", err)
+		return ""
+	}
+	if err := cmd.Wait(); err != nil {
+		// Best-effort: the mount may still have been created.
+		log.Printf("tailscale browse serve wait: %v (output: %s)", err, out.String())
+	}
+	output := out.String()
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+			return line
+		}
+	}
+	return ""
+}
+
+// browseRemove tears down the browse proxy mount.
+func (t *tailscaleShare) browseRemove() {
+	if t.browseRemoveFn != nil {
+		t.browseRemoveFn()
+		return
+	}
+	tailscalePath := tailscale.CLIPath()
+	if tailscalePath == "" {
+		return
+	}
+	cmd := exec.Command(tailscalePath, "serve", fmt.Sprintf("--https=%d", browseHTTPSProxyPort), "off")
+	_ = cmd.Run()
 }

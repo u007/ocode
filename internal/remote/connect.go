@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -182,7 +183,7 @@ func runPrepareStages(opts ConnectOptions, progress *Progress) (Transport, *tool
 	if opts.NoSync {
 		progress.Start("sync", "credentials synced")
 		progress.Warn("skipped (--no-sync)")
-	} else if err := runSyncStage(progress, transport, opts.Target.String(), ver); err != nil {
+	} else if err := runSyncStage(progress, transport, opts.Target.String(), ver, false); err != nil {
 		_ = err
 	}
 
@@ -366,6 +367,13 @@ func openBrowserURL(url string) error {
 // accepted, narrow TOCTOU race) gets exactly one retry with a fresh port
 // before the failure is surfaced with ssh's own stderr.
 func startTunnelWithRetry(sup *tool.ProcessSupervisor, target Target, remotePort, browsePort int) (localPort int, tunnelCmd *exec.Cmd, err error) {
+	// Reclaim the fixed browse port if a stale ocode tunnel holds it from a
+	// previous ungraceful exit. Every attempt shares the same browse port, so
+	// one reclaim before the loop covers all of them.
+	if err := reclaimStaleTunnelPort(browsePort); err != nil {
+		log.Printf("remote: reclaim browse port %d: %v", browsePort, err)
+	}
+
 	for attempt := 0; attempt < 2; attempt++ {
 		localPort, err = FreeLocalPort()
 		if err != nil {
@@ -470,7 +478,7 @@ func superviseTunnel(sup *tool.ProcessSupervisor, tunnelCmd *exec.Cmd, fm *Forwa
 // the per-host skip-if-unchanged cache. The caller decides what to do with
 // errors: the CLI call site warns-and-continues, while
 // RemoteWorkspace.Connect treats it as fatal per the no-fallback rule.
-func runSyncStage(progress *Progress, transport Transport, hostKey, ver string) error {
+func runSyncStage(progress *Progress, transport Transport, hostKey, ver string, force bool) error {
 	progress.Start("sync", "syncing credentials")
 
 	payload, err := BuildSyncPayload()
@@ -483,9 +491,11 @@ func runSyncStage(progress *Progress, transport Transport, hostKey, ver string) 
 		progress.Warn("hash payload failed: " + err.Error())
 		return err
 	}
-	if cached, ok := CachedHash(hostKey); ok && cached == hash {
-		progress.Done("unchanged, skipped")
-		return nil
+	if !force {
+		if cached, ok := CachedHash(hostKey); ok && cached == hash {
+			progress.Done("unchanged, skipped")
+			return nil
+		}
 	}
 
 	frame, err := EncodeFrame(ver, payload)

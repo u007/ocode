@@ -94,3 +94,29 @@ func TestHandleSetChatVerbosityConfigRejectsUnknownCategory(t *testing.T) {
 		t.Fatalf("status = %d, want 400 for unknown override category, body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestHandleSetChatVerbosityConfigRejectsAutoOutsideLatestThinking(t *testing.T) {
+	h := testConfigHandler(t)
+	w := httptest.NewRecorder()
+	h.HandleSetChatVerbosityConfig(w, httptest.NewRequest(http.MethodPut, "/api/config/ocode/chat-verbosity", strings.NewReader(`{"preset":"full","overrides":{"tool_calls":"auto"}}`)))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for tool_calls=auto, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSetChatVerbosityConfigAcceptsAutoForLatestThinking(t *testing.T) {
+	h := testConfigHandler(t)
+	w := httptest.NewRecorder()
+	h.HandleSetChatVerbosityConfig(w, httptest.NewRequest(http.MethodPut, "/api/config/ocode/chat-verbosity", strings.NewReader(`{"preset":"full","overrides":{"latest_thinking":"auto"}}`)))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for latest_thinking=auto, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.ChatVerbosity
+	h.mu.Unlock()
+	if got.Overrides.LatestThinking != config.ChatDisplayAuto {
+		t.Fatalf("in-memory latest_thinking = %q, want auto", got.Overrides.LatestThinking)
+	}
+}

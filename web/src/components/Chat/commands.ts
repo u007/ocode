@@ -375,8 +375,8 @@ export interface CommandContext {
     getMemoryStatus?: () => Promise<import("../../api/types").MemoryStatusResponse>;
     setBashRule?: (prefix: string, level: "allow" | "deny" | "ask") => Promise<unknown>;
     getPermissions?: (sessionId?: string, host?: string) => Promise<PermissionsResponse>;
-    getAutoContinue?: (host?: string) => Promise<{ enabled: boolean; model: string }>;
-    setAutoContinue?: (fields: { enabled?: boolean; model?: string; clear?: boolean }, host?: string) => Promise<{ enabled: boolean; model: string }>;
+    getAutoContinue?: (sessionId?: string, host?: string) => Promise<{ enabled: boolean; model: string }>;
+    setAutoContinue?: (fields: { enabled?: boolean; model?: string; clear?: boolean }, sessionId?: string, host?: string) => Promise<{ enabled: boolean; model: string }>;
     connectProvider?: (provider: string, api_key: string) => Promise<{ provider: string; key: string }>;
     addProject?: (path: string) => Promise<unknown>;
     getDocsStatus?: (project?: string, host?: string) => Promise<{ enabled: boolean; text: string }>;
@@ -1970,16 +1970,16 @@ async function handleAutoContinue(args: string, ctx: CommandContext): Promise<Co
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const sub = parts[0]?.toLowerCase();
     if (!sub || sub === "status") {
-      const cur = await ctx.api.getAutoContinue(ctx.host);
+      const cur = await ctx.api.getAutoContinue(ctx.getSessionId?.() ?? undefined, ctx.host);
       const model = cur.model ? `\`${cur.model}\`` : "(none — StepLimitHit only)";
       return ok(`**Auto-continue:** ${cur.enabled ? "enabled" : "disabled"}\n**Judge model:** ${model}`);
     }
     if (["on", "true", "yes", "enable"].includes(sub)) {
-      const r = await ctx.api.setAutoContinue({ enabled: true }, ctx.host);
+      const r = await ctx.api.setAutoContinue({ enabled: true }, ctx.getSessionId?.() ?? undefined, ctx.host);
       return ok(`**Auto-continue:** enabled. Judge model: ${r.model ? `\`${r.model}\`` : "(none)"}`);
     }
     if (["off", "false", "no", "disable"].includes(sub)) {
-      await ctx.api.setAutoContinue({ enabled: false }, ctx.host);
+      await ctx.api.setAutoContinue({ enabled: false }, ctx.getSessionId?.() ?? undefined, ctx.host);
       return ok("**Auto-continue:** disabled.");
     }
     if (sub === "model") {
@@ -1990,10 +1990,10 @@ async function handleAutoContinue(args: string, ctx: CommandContext): Promise<Co
         return { handled: true, openModelPicker: true, modelPickerPurpose: "autocontinue" };
       }
       if (["auto", "none", "off"].includes(target.toLowerCase())) {
-        const r = await ctx.api.setAutoContinue({ clear: true }, ctx.host);
+        const r = await ctx.api.setAutoContinue({ clear: true }, ctx.getSessionId?.() ?? undefined, ctx.host);
         return ok(`**Auto-continue judge model cleared** — falling back to StepLimitHit only. Enabled: ${r.enabled}.`);
       }
-      const r = await ctx.api.setAutoContinue({ model: target }, ctx.host);
+      const r = await ctx.api.setAutoContinue({ model: target }, ctx.getSessionId?.() ?? undefined, ctx.host);
       // Setting the judge model does not enable the feature; say so when the
       // gate is off so the user doesn't configure a judge and assume it fires.
       const gate = r.enabled ? "" : "\n**Auto-continue is still DISABLED** — run `/autocontinue on` to arm it.";

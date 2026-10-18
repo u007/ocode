@@ -52,21 +52,21 @@ describe("/autocontinue command", () => {
     expect(result.handled).toBe(true);
     expect(result.messages?.[0]?.content).toContain("enabled");
     expect(result.messages?.[0]?.content).toContain("local/bonsai-8b");
-    expect(getAutoContinue).toHaveBeenCalledWith("devbox");
+    expect(getAutoContinue).toHaveBeenCalledWith(undefined, "devbox");
   });
 
   it("on/off write only the gate; `model auto` clears the judge model only", async () => {
     const { ctx: onCtx, setAutoContinue: setOn } = ctx();
     await dispatchCommand("/autocontinue on", onCtx);
-    expect(setOn).toHaveBeenCalledWith({ enabled: true }, "devbox");
+    expect(setOn).toHaveBeenCalledWith({ enabled: true }, undefined, "devbox");
 
     const { ctx: offCtx, setAutoContinue: setOff } = ctx();
     await dispatchCommand("/autocontinue off", offCtx);
-    expect(setOff).toHaveBeenCalledWith({ enabled: false }, "devbox");
+    expect(setOff).toHaveBeenCalledWith({ enabled: false }, undefined, "devbox");
 
     const { ctx: clearCtx, setAutoContinue: setClear } = ctx();
     await dispatchCommand("/autocontinue model auto", clearCtx);
-    expect(setClear).toHaveBeenCalledWith({ clear: true }, "devbox");
+    expect(setClear).toHaveBeenCalledWith({ clear: true }, undefined, "devbox");
   });
 
   // Setting a judge model does not arm auto-continue. The reply must say the

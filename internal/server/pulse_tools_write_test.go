@@ -343,7 +343,10 @@ func TestReadAndMemoryToolsDoNotAsk(t *testing.T) {
 		}
 	}
 	for _, pt := range h.pulseTools() {
-		want := map[string]bool{"session_send": true, "session_command": true, "permission_resolve": true, "question_answer": true}[pt.Name()]
+		want := map[string]bool{
+			"session_send": true, "session_command": true, "permission_resolve": true, "question_answer": true,
+			"session_new": true, "session_close": true, "terminal_new": true, "terminal_kill": true,
+		}[pt.Name()]
 		if pt.ask != want {
 			t.Errorf("%s ask=%v, want %v", pt.Name(), pt.ask, want)
 		}

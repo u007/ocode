@@ -326,6 +326,11 @@ type Handler struct {
 	// send the Authorization header, so the SPA exchanges its bearer for a
 	// single-file, short-lived token it can put in the URL.
 	mediaTokens *mediaTokenStore
+
+	// remoteSyncMu guards the single-flight state of SyncConnectedRemoteHosts.
+	remoteSyncMu      sync.Mutex
+	remoteSyncRunning bool
+	remoteSyncPending bool
 }
 
 // SetTerminalAccessPolicy configures the security boundary for the terminal
@@ -634,8 +639,8 @@ func NewHandler() *Handler {
 	// sync when idle agents are released.
 	h.sessions = NewSessionManager(defaultSessionIdleTimeout, h.sessionSearchRoots, func(sessionID string) {
 		h.mu.Lock()
-		as := h.agents[sessionID]
-		delete(h.agents, sessionID)
+		as := h.agents[agentKey(sessionID)]
+		delete(h.agents, agentKey(sessionID))
 		h.mu.Unlock()
 		// Drop the per-session turn lock too — otherwise one mutex leaks per
 		// session id the process has ever served (the map is keyed by id and
@@ -1152,6 +1157,12 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 				entry = h.sessions.Lookup(sid)
 			}
 		}
+		// Resolve is read-only, so a Claude Code transcript is cloned here, on
+		// the chat open, in the project the session is bound to.
+		if err := session.OpenClaudeCloneForDir(entry.ProjectRoot, sid); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("open session: %v", err))
+			return
+		}
 	} else {
 		// A model is only required to create a new session.
 		if model == "" {
@@ -1366,13 +1377,25 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	// Resolve canonicalizes a "claude:<id>" to its on-disk "claude-<id>". Read
+	// the file under that canonical id, but echo the id the client asked for:
+	// the web client keys its tab, prefetch and revision baseline on the id it
+	// requested, so a canonical echo would update the wrong entry.
+	storedID := entry.SessionID
 
-	msgs, total, err := session.PaginatedLoad(entry.ProjectRoot, id, limit, offset)
+	// Resolve is read-only; this GET is an open, so clone a Claude Code
+	// transcript into the owning project before the load.
+	if err := session.OpenClaudeCloneForDir(entry.ProjectRoot, storedID); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("open session: %v", err))
+		return
+	}
+
+	msgs, total, err := session.PaginatedLoad(entry.ProjectRoot, storedID, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	s, _ := session.LoadForDir(entry.ProjectRoot, id)
+	s, _ := session.LoadForDir(entry.ProjectRoot, storedID)
 	// s may be nil if file vanished between PaginatedLoad and LoadForDir; fall back to msgs metadata.
 	title := ""
 	created := time.Now()
@@ -1389,8 +1412,8 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 	// file to watch and reports nothing (mirrors HandleSessionState).
 	revision := ""
 	if entry.ProjectRoot != "" {
-		if rev, rerr := session.StoredRevisionForDir(entry.ProjectRoot, id); rerr != nil {
-			log.Printf("serve: session %s revision: %v", id, rerr)
+		if rev, rerr := session.StoredRevisionForDir(entry.ProjectRoot, storedID); rerr != nil {
+			log.Printf("serve: session %s revision: %v", storedID, rerr)
 		} else {
 			revision = rev
 		}

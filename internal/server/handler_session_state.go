@@ -300,6 +300,7 @@ func (h *Handler) HandleSessionStatus(w http.ResponseWriter, r *http.Request, id
 	// Advisor gate is per session too: stamp the chat's own value so one tab's
 	// toggle does not render on every other tab's sidebar.
 	h.applySessionAdvisorFields(&snap, id)
+	h.applySessionAutoContinueFields(&snap, id)
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	writeJSON(w, http.StatusOK, snap)
@@ -680,6 +681,7 @@ func (h *Handler) pushSessionStatusSnapshot(id string) {
 	h.applySessionPermissionFields(&snap, id)
 	h.applySessionThinkingBudget(&snap, id)
 	h.applySessionAdvisorFields(&snap, id)
+	h.applySessionAutoContinueFields(&snap, id)
 	if snap.SessionCreatedAt == "" {
 		if entry, err := h.sessions.Resolve(id); err == nil {
 			if s, err := session.LoadForDir(entry.ProjectRoot, id); err == nil && !s.CreatedAt.IsZero() {

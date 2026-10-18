@@ -4,6 +4,7 @@ import { eventBus } from "@/lib/eventBus";
 import type {
   ChatDisplayOverride,
   ChatDisplayPolicy,
+  ChatLatestThinkingOverride,
   ChatVerbosityConfig,
   ChatVerbosityPreset,
   ChatVerbosityResponse,
@@ -49,6 +50,10 @@ function isOverride(value: unknown): value is ChatDisplayOverride {
   return value === "preset" || value === "expanded" || value === "collapsed";
 }
 
+function isLatestThinkingOverride(value: unknown): value is ChatLatestThinkingOverride {
+  return isOverride(value) || value === "auto";
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -82,7 +87,7 @@ export function normalizeChatVerbosityConfig(input?: ConfigInput | null): ChatVe
     preset: (input?.preset || "full") as ChatVerbosityPreset,
     overrides: {
       older_thinking: (overrides.older_thinking || "preset") as ChatDisplayOverride,
-      latest_thinking: (overrides.latest_thinking || "preset") as ChatDisplayOverride,
+      latest_thinking: (overrides.latest_thinking || "preset") as ChatLatestThinkingOverride,
       tool_calls: (overrides.tool_calls || "preset") as ChatDisplayOverride,
       tool_output: (overrides.tool_output || "preset") as ChatDisplayOverride,
       activity_notices: (overrides.activity_notices || "preset") as ChatDisplayOverride,
@@ -95,7 +100,9 @@ function assertValidConfig(config: ChatVerbosityConfig): void {
     throw new Error(`Invalid chat verbosity preset: ${String(config.preset)}`);
   }
   for (const [name, value] of Object.entries(config.overrides)) {
-    if (!isOverride(value)) {
+    // `auto` is only meaningful for latest thinking; every other category rejects it.
+    const valid = name === "latest_thinking" ? isLatestThinkingOverride(value) : isOverride(value);
+    if (!valid) {
       throw new Error(`Invalid chat display override for ${name}: ${String(value)}`);
     }
   }
@@ -107,6 +114,7 @@ export function resolveChatDisplayPolicy(input?: ConfigInput | null): ChatDispla
   assertValidConfig(config);
 
   let olderThinking: ChatDisplayOverride = "expanded";
+  let latestThinking: ChatDisplayPolicy["latest_thinking"] = "expanded";
   let toolCalls: ChatDisplayOverride = "expanded";
   let toolOutput: ChatDisplayOverride = "expanded";
   let notices: ChatDisplayOverride = "expanded";
@@ -117,6 +125,8 @@ export function resolveChatDisplayPolicy(input?: ConfigInput | null): ChatDispla
     olderThinking = "collapsed";
     toolCalls = "collapsed";
   } else if (config.preset === "quiet") {
+    // Quiet opens the latest thinking block only until the answer starts.
+    latestThinking = "auto";
     olderThinking = "collapsed";
     toolCalls = "collapsed";
     toolOutput = "collapsed";
@@ -128,9 +138,10 @@ export function resolveChatDisplayPolicy(input?: ConfigInput | null): ChatDispla
     presetValue: "expanded" | "collapsed",
   ): "expanded" | "collapsed" => (value === "preset" ? presetValue : value);
 
+  const latestOverride = config.overrides.latest_thinking;
   return {
     older_thinking: resolveOverride(config.overrides.older_thinking, olderThinking),
-    latest_thinking: resolveOverride(config.overrides.latest_thinking, "expanded"),
+    latest_thinking: latestOverride === "preset" ? latestThinking : latestOverride,
     tool_calls: resolveOverride(config.overrides.tool_calls, toolCalls),
     tool_output: resolveOverride(config.overrides.tool_output, toolOutput),
     notices: resolveOverride(config.overrides.activity_notices, notices),

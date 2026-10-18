@@ -529,11 +529,11 @@ describe("ModelDialog remote session host", () => {
     );
 
     await waitFor(() => expect(hoisted.api.listModels).toHaveBeenCalledWith({ configured: true }, "devbox"));
-    await waitFor(() => expect(hoisted.api.getAutoContinue).toHaveBeenCalledWith("devbox"));
+    await waitFor(() => expect(hoisted.api.getAutoContinue).toHaveBeenCalledWith(undefined, "devbox"));
 
     fireEvent.click(await screen.findByText("gpt-c"));
     await waitFor(() =>
-      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ model: "openai/gpt-c" }, "devbox"),
+      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ model: "openai/gpt-c" }, undefined, "devbox"),
     );
   });
 
@@ -551,7 +551,7 @@ describe("ModelDialog remote session host", () => {
       </ProjectProvider>,
     );
 
-    await waitFor(() => expect(hoisted.api.getAutoContinue).toHaveBeenCalledWith("devbox"));
+    await waitFor(() => expect(hoisted.api.getAutoContinue).toHaveBeenCalledWith(undefined, "devbox"));
     // The LAST augmentation must carry the resolved host: the first render runs
     // before SeedRemoteTab's effect resolves it, so an assertion on any call
     // would pass on the stale-closure code.
@@ -586,7 +586,7 @@ describe("ModelDialog autocontinue purpose", () => {
     fireEvent.click(screen.getByText("gpt-c"));
 
     await waitFor(() =>
-      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ model: "openai/gpt-c" }),
+      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ model: "openai/gpt-c" }, undefined),
     );
     // The enabled/model write shape matters: no `enabled` key, so the gate is untouched.
     const arg = hoisted.api.setAutoContinue.mock.calls[0][0];
@@ -600,7 +600,7 @@ describe("ModelDialog autocontinue purpose", () => {
     fireEvent.click(screen.getByText("Clear (not set)"));
 
     await waitFor(() =>
-      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ clear: true }),
+      expect(hoisted.api.setAutoContinue).toHaveBeenCalledWith({ clear: true }, undefined),
     );
   });
 });

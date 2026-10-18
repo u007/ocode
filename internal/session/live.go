@@ -189,6 +189,9 @@ func SaveAsyncForDir(projectRoot, id string, title string, messages []agent.Mess
 
 // saveAsyncToDir is the shared enqueue core once the storage dir is known.
 func saveAsyncToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any) error {
+	// Key the live writer on the canonical id so "claude:<id>" and
+	// "claude-<id>" share one worker and one file (see CanonicalID).
+	id = CanonicalID(id)
 	if id == "" || len(messages) == 0 {
 		return nil
 	}
@@ -338,6 +341,8 @@ func FlushForDir(projectRoot, id string, timeout time.Duration) error {
 
 // flushDir is the shared drain core once the storage dir is known.
 func flushDir(dir, id string, timeout time.Duration) error {
+	// Flush the worker that SaveAsync enqueued to: both use the canonical id.
+	id = CanonicalID(id)
 	// The barrier is appended while holding liveRegistryMu (the same order
 	// tryRetire uses), so a worker cannot retire between the lookup and the
 	// append and strand the barrier on a dead worker. The barrier records

@@ -16,6 +16,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/http/pprof"
 	"net/netip"
 	"net/url"
@@ -30,8 +31,10 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/browse"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/reminders"
 	"github.com/u007/ocode/internal/remote"
@@ -91,6 +94,7 @@ type Server struct {
 	username         string
 	password         string
 	rl               *rateLimiter
+	removeSyncHooks  []func() // unregister the config/auth save hooks on Shutdown
 	mux              *http.ServeMux
 	handler          *Handler
 	webFS            fs.FS
@@ -132,8 +136,12 @@ type Server struct {
 	// browser panel; browseBase is its loopback base URL as advertised to
 	// the SPA by /api/browse/config. Both are set exactly once, via
 	// EnableBrowse, before the server starts serving.
-	browse     *browse.Server
-	browseBase string
+	browse          *browse.Server
+	browseBase      string
+	browseProxy     *httputil.ReverseProxy
+	browseProxyLn   net.Listener
+	browseProxyPort int
+	browseProxyHS   *http.Server
 	// htrNotice is written at boot and then, from background goroutines owned by
 	// the shared HTR daemon, for the lifetime of the server. Guarded by
 	// htrNoticeMu — see SetHTRNotice.
@@ -183,6 +191,14 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 	h.procSup = s.procSup
 	h.portMaps = newPortMapRegistry(s.procSup)
 	h.remoteHosts = newRemoteHostRegistry(s.procSup)
+	// Propagate local config/auth changes to already-connected remote
+	// hosts (SSH/WSL) without requiring a reconnect. Best-effort.
+	// The hooks are process-global, so Shutdown removes them: otherwise every
+	// New() leaves a permanent callback pinning its handler.
+	s.removeSyncHooks = []func(){
+		config.OnConfigSaved.Add(func() { h.SyncConnectedRemoteHosts() }),
+		auth.OnCredentialsSaved.Add(func() { h.SyncConnectedRemoteHosts() }),
+	}
 	s.tts = tts.NewSupervisor(tts.DefaultConfig(), tts.Options{Root: ttsCacheRoot(), ProcSup: s.procSup})
 	// Let the config handlers report exposure state without starting one.
 	h.tailscaleShareSnapshot = s.tsShare.status
@@ -457,6 +473,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/remote/{host}/status", s.authMiddleware(s.handler.HandleRemoteStatus))
 	s.mux.HandleFunc("POST /api/remote/{host}/connect", s.authMiddleware(s.handler.HandleRemoteConnect))
 	s.mux.HandleFunc("POST /api/remote/{host}/restart", s.authMiddleware(s.handler.HandleRemoteRestart))
+	s.mux.HandleFunc("POST /api/remote/{host}/sync", s.authMiddleware(s.handler.HandleRemoteSync))
 
 	// Files
 	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))
@@ -930,6 +947,12 @@ func (s *Server) pluginAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 	s.browseBase = baseURL
 	s.browse = bs
+	// The reverse proxy to the loopback browse origin. Used by the second
+	// listener (browse proxy), not the main mux — see StartBrowse.
+	s.browseProxy = newBrowseProxy(baseURL)
+	if s.browseProxy == nil {
+		panic("EnableBrowse: invalid browse base URL: " + baseURL)
+	}
 	s.mux.HandleFunc("GET /api/browse/config", s.authMiddleware(s.handleBrowseConfig))
 	s.mux.HandleFunc("POST /api/browse/grant", s.authMiddleware(s.handleBrowseGrant))
 	s.mux.HandleFunc("POST /api/browse/revoke", s.authMiddleware(s.handleBrowseRevoke))
@@ -950,6 +973,65 @@ func (s *Server) EnableBrowse(baseURL string, bs *browse.Server) {
 		s.publishBrowseNewTab(ev)
 	})
 }
+
+// browseProxyGate wraps a browse-proxy handler with the two protections the
+// proxy routes need because they sit OUTSIDE authMiddleware (iframes and
+// WebSockets cannot send an Authorization header):
+//
+//  1. A cheap structural pre-filter. The browse origin accepts a request only
+//     if it carries a one-time __grant (the first navigation) or the
+//     ocode_browse session cookie (every later request and subresource).
+//     Anything with neither is rejected here, so an unauthenticated flood
+//     never costs a loopback round-trip. This mirrors browse.authStore.
+//  2. Per-IP rate limiting, shared with the API auth path. A pre-filter
+//     rejection counts as a failure, so repeated unauthenticated probes lock
+//     the IP out (5 failures → 1 minute) exactly like bad credentials do.
+//
+// A request that passes the pre-filter still faces the browse origin's full
+// auth (grant redemption, cookie session, origin check for CDP); a 401/403
+// from there also counts as a rate-limit failure, so a forged __grant or
+// cookie cannot be replayed without limit. The listener is separate from the
+// SPA's, so a browsed page is cross-origin with /api/*.
+func (s *Server) browseProxyGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := realIP(r)
+		if s.rl.isBlocked(ip) {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		if r.URL.Query().Get("__grant") == "" {
+			if _, err := r.Cookie("ocode_browse"); err != nil {
+				s.rl.recordFailure(ip)
+				http.Error(w, "browse: unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		// A request that passed the pre-filter but is rejected downstream
+		// (forged grant, stale cookie) still counts against the IP.
+		rec := &statusRecorder{ResponseWriter: w}
+		next(rec, r)
+		if rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden {
+			s.rl.recordFailure(ip)
+		}
+	}
+}
+
+// statusRecorder captures the status a handler writes. Unwrap lets
+// http.ResponseController (used by httputil.ReverseProxy for Flush and for
+// the websocket Hijack) reach the underlying writer.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // publishBrowseNav fans a browse NavEvent onto the unified bus as a
 // project/global-scoped event. The stateKey rides inside ev.Data — it is NOT
@@ -1109,6 +1191,48 @@ func StartBrowse(srv *Server, token string, spaOrigin string, opts *BrowseOption
 	// Register endpoints before serving so a startup wiring mistake surfaces
 	// synchronously instead of as a 404 at first panel open.
 	srv.EnableBrowse(bBase, bs)
+
+	// Second listener: the browse proxy. This serves the browse-proxy routes
+	// (/b/, /__ocode_capture.js, /api/remote/{host}/browse/...) on its OWN
+	// port so browsed pages are cross-origin with the SPA (origin isolation).
+	// It binds the same host as the main server so a direct LAN client can
+	// reach it; over Tailscale the phone reaches it via the separate HTTPS
+	// mount (tailscale serve --https=<proxyHTTPSPort>).
+	proxyHost := "127.0.0.1"
+	if u, err := url.Parse(spaOrigin); err == nil && u.Hostname() != "" {
+		proxyHost = u.Hostname()
+	}
+	proxyLn, err := net.Listen("tcp", net.JoinHostPort(proxyHost, "0"))
+	if err != nil {
+		return fmt.Errorf("browse proxy listen: %w", err)
+	}
+	proxyPort := proxyLn.Addr().(*net.TCPAddr).Port
+	proxyMux := http.NewServeMux()
+	proxyMux.Handle("/b/", srv.browseProxyGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.browseProxy.ServeHTTP(w, r)
+	})))
+	proxyMux.Handle("/__ocode_capture.js", srv.browseProxyGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv.browseProxy.ServeHTTP(w, r)
+	})))
+	proxyMux.HandleFunc("/api/remote/{host}/browse/{rest...}", srv.browseProxyGate(func(w http.ResponseWriter, r *http.Request) {
+		srv.handleRemoteBrowseProxy(w, r, r.PathValue("host"))
+	}))
+	proxyHS := &http.Server{Handler: proxyMux}
+	srv.shutdownMu.Lock()
+	srv.browseProxyLn = proxyLn
+	srv.browseProxyPort = proxyPort
+	srv.browseProxyHS = proxyHS
+	srv.shutdownMu.Unlock()
+	if srv.tsShare != nil {
+		srv.tsShare.setBrowseProxyPort(proxyPort)
+	}
+	crashguard.Go(func() {
+		if err := proxyHS.Serve(proxyLn); err != nil && err != http.ErrServerClosed {
+			log.Printf("browse proxy: serve on %d exited: %v", proxyPort, err)
+		}
+	})
+	log.Printf("browse proxy: listening on %s:%d", proxyHost, proxyPort)
+
 	bhs := &http.Server{Handler: bs.Handler()}
 	srv.shutdownMu.Lock()
 	srv.browseLn = bln
@@ -1163,6 +1287,34 @@ func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleRemoteBrowseConfig(w, r, host)
 		return
 	}
+	// The browse proxy is served on a separate listener (browseProxyPort)
+	// so browsed pages are cross-origin with the SPA. Build the base URL
+	// from the request host so a remote client (phone) reaches the proxy
+	// on the same host it already uses for the main server.
+	// When the browse proxy listener is up (normal boot), point the SPA at
+	// it so browsed pages are cross-origin. Prefer the shared HTTPS URL when
+	// the instance is exposed via Tailscale (second mount on the browse port).
+	if s.browseProxyPort != 0 {
+		baseURL := ""
+		if s.handler.tailscaleShareSnapshot != nil {
+			if st := s.handler.tailscaleShareSnapshot(); st.Running && st.BrowseURL != "" {
+				baseURL = st.BrowseURL
+			}
+		}
+		if baseURL == "" {
+			reqHost := r.Host
+			if h, _, err := net.SplitHostPort(reqHost); err == nil {
+				reqHost = h
+			}
+			baseURL = "http://" + reqHost + ":" + strconv.Itoa(s.browseProxyPort)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"base_url":    baseURL,
+			"htr_notice":  s.HTRNotice(),
+			"remote_mode": s.remoteMode,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"base_url":    sameSiteBrowseBase(s.browseBase, r.Host),
 		"htr_notice":  s.HTRNotice(),
@@ -1190,6 +1342,27 @@ func sameSiteBrowseBase(base, reqHost string) string {
 	}
 	u.Host = net.JoinHostPort(reqName, u.Port())
 	return u.String()
+}
+
+// newBrowseProxy creates a reverse proxy to the browse origin (loopback
+// listener). It forwards all requests including WebSocket upgrades for CDP.
+func newBrowseProxy(baseURL string) *httputil.ReverseProxy {
+	target, err := url.Parse(baseURL)
+	if err != nil {
+		return nil
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.FlushInterval = -1 // immediate flush for streaming/screencast
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("browse proxy: %v", err)
+		http.Error(w, "browse proxy error", http.StatusBadGateway)
+	}
+	return proxy
 }
 
 // isLoopbackName: "localhost", "*.localhost", or a loopback IP literal
@@ -1889,6 +2062,9 @@ func (s *Server) serveHandler() http.Handler {
 // in-flight ones. It always returns by the time ctx expires — callers pass a
 // TTL context so a desktop quit never hangs.
 func (s *Server) Shutdown(ctx context.Context) error {
+	for _, remove := range s.removeSyncHooks {
+		remove()
+	}
 	if s.handler != nil {
 		s.handler.Shutdown(ctx)
 	}
@@ -1933,17 +2109,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownMu.Lock()
 	bhs := s.browseHTTPServer
 	bln := s.browseLn
+	bphs := s.browseProxyHS
+	bpln := s.browseProxyLn
 	s.shutdownMu.Unlock()
 	if bhs != nil {
 		if err := bhs.Shutdown(ctx); err != nil {
-			// A browse iframe may hold a long-lived WebSocket/HMR connection.
-			// Do not let it keep journal pools alive after shutdown's deadline;
-			// force-close any remaining browse connections.
 			_ = bhs.Close()
 		}
 	}
 	if bln != nil {
 		_ = bln.Close()
+	}
+	if bphs != nil {
+		if err := bphs.Shutdown(ctx); err != nil {
+			_ = bphs.Close()
+		}
+	}
+	if bpln != nil {
+		_ = bpln.Close()
 	}
 	snapshot.CloseAllJournals()
 	return nil

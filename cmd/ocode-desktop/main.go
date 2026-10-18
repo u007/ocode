@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -248,6 +249,7 @@ func main() {
 			// persist; the user resolves it in the UI (retry the save) or uses
 			// the native "Quit anyway" action, which clears the guard first.
 			if blocked, _ := quitGuard.Blocked(); blocked {
+				relaunchAfterQuit.Store(false)
 				return false
 			}
 			// Show the quitting indicator synchronously (before any block in OnShutdown)
@@ -616,10 +618,18 @@ func main() {
 	// before the process exits, so this blocks the quit only up to the timeout
 	// and guarantees shells aren't slaughtered mid-command.
 	app.OnShutdown(func() {
+		timeout := desktopShutdownTimeout()
+		// Arm the relaunch helper before the drain; its SIGKILL escalation sits
+		// relaunchKillMargin past the TTL that bounds Srv.Shutdown below, so a
+		// drain that uses its whole budget still gets to finish its teardown.
+		if relaunchAfterQuit.Load() {
+			if err := spawnRelaunchHelper(timeout); err != nil {
+				log.Printf("restart: relaunch helper not started, the app will not reopen: %v", err)
+			}
+		}
 		if handle == nil || handle.Srv == nil {
 			return
 		}
-		timeout := desktopShutdownTimeout()
 		window.SetTitle("ocode — Waiting for processes to gracefully shut down…")
 		log.Printf("ocode-desktop: graceful shutdown (timeout %s)", timeout)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -807,6 +817,142 @@ func desktopShutdownTimeout() time.Duration {
 	return defaultTimeout
 }
 
+// relaunchAfterQuit is set by restartDesktopApp just before it asks Wails to
+// quit. OnShutdown reads it to arm the relaunch helper, so a helper exists only
+// when the quit actually proceeds. ShouldQuit clears it when it refuses.
+var relaunchAfterQuit atomic.Bool
+
+// restartDesktopApp restarts the app through the normal graceful quit: Wails
+// runs OnShutdown, which drains sessions within desktopShutdownTimeout, and only
+// then does the relaunch helper reopen the bundle. Signalling the process
+// directly would skip that drain and could drop in-flight session saves.
+func restartDesktopApp(app *application.App, window *application.WebviewWindow, handle *desktop.Handle, quitGuard *desktop.QuitGuard) {
+	if _, err := currentAppBundle(); err != nil {
+		log.Printf("restart: %v", err)
+		app.Dialog.Error().
+			SetTitle("Restart unavailable").
+			SetMessage(err.Error()).
+			Show()
+		return
+	}
+	if blocked, _ := quitGuard.Blocked(); blocked {
+		confirmQuit(app, window, handle, quitGuard)
+		return
+	}
+	relaunchAfterQuit.Store(true)
+	showQuittingIndicator(window)
+	app.Quit()
+}
+
+// currentAppBundle returns the .app bundle containing this executable. A go-run
+// or bare-binary build sits outside any bundle; reopening an ancestor directory
+// would be wrong, so that is an error rather than a guess.
+func currentAppBundle() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve executable: %w", err)
+	}
+	return appBundleFromExecutable(exe)
+}
+
+// appBundleFromExecutable maps <bundle>.app/Contents/MacOS/<binary> to <bundle>.app.
+func appBundleFromExecutable(exe string) (string, error) {
+	macOS := filepath.Dir(exe)
+	contents := filepath.Dir(macOS)
+	bundle := filepath.Dir(contents)
+	if filepath.Base(macOS) != "MacOS" || filepath.Base(contents) != "Contents" || !strings.HasSuffix(bundle, ".app") {
+		return "", fmt.Errorf("executable %s is not inside a .app bundle; restart needs the packaged app", exe)
+	}
+	return bundle, nil
+}
+
+// spawnRelaunchHelper starts the detached helper that reopens the bundle once
+// this process has exited. It waits up to timeout + relaunchKillMargin (the
+// graceful-drain TTL plus time for the post-drain teardown), then SIGKILLs the
+// process and records that escalation in
+// desktop.log. It is deliberately not routed through tool.ProcessSupervisor:
+// the supervisor terminates its children on shutdown, and StartSupervised
+// signals the child's process group, the opposite of what this helper needs.
+//
+// The helper MUST NOT be a child of this process. kill_tree walks the app's
+// descendants with `pgrep -P`, so a helper still parented to the app could be
+// reached by it. The worker is therefore started inside a subshell that the
+// outer shell backgrounds and exits from, so it is reparented to launchd well
+// before the escalation path can run.
+//
+// The pid, bundle, timeout and log path are passed as argv, never interpolated:
+// Go's %q is a Go string literal, not shell-safe, and a path containing $ or a
+// backtick would expand or command-substitute inside the shell.
+// relaunchWorkerScript is the body of the detached relaunch helper. It takes
+// the app pid, bundle path, graceful-shutdown timeout (seconds) and log path as
+// positional parameters ($1..$4). Nothing is interpolated into it: Go's %q is a
+// Go string literal, not shell-safe, and a path containing $ or a backtick
+// would expand or command-substitute inside the shell.
+const relaunchWorkerScript = `kill_tree() {
+  for c in $(pgrep -P "$1" 2>/dev/null); do
+    kill_tree "$c"
+    kill "$c" 2>/dev/null || true
+  done
+}
+waited=0
+while kill -0 "$1" 2>/dev/null; do
+  if [ "$waited" -ge "$3" ]; then
+    printf '%s restart: still running after %ss graceful shutdown, sending SIGKILL\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$3" >> "$4"
+    kill_tree "$1"
+    kill -9 "$1" 2>/dev/null || true
+    break
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+sleep 1
+open "$2"
+`
+
+// relaunchHelperArgv builds the argv for /bin/sh that runs the relaunch worker
+// in a backgrounded subshell, so it is reparented to launchd and is never a
+// descendant of the app it signals. The pid, bundle, timeout and log path are
+// passed as ARGV, never interpolated into the script (see relaunchWorkerScript).
+func relaunchHelperArgv(pid int, bundle string, timeout time.Duration, logPath string) []string {
+	return []string{
+		"-c", "( " + relaunchWorkerScript + " ) &", "sh",
+		strconv.Itoa(pid), bundle, strconv.Itoa(int(timeout / time.Second)), logPath,
+	}
+}
+
+// relaunchKillMargin is how long past the graceful-drain TTL the helper waits
+// before SIGKILL. The helper is armed before the drain starts and the drain may
+// use its full TTL, so an equal deadline would kill the app mid-teardown
+// (session flush, window close) at the same instant the drain gives up.
+const relaunchKillMargin = 10 * time.Second
+
+func spawnRelaunchHelper(timeout time.Duration) error {
+	bundle, err := currentAppBundle()
+	if err != nil {
+		return err
+	}
+	logDir, err := paths.LogsDir()
+	if err != nil {
+		return fmt.Errorf("resolve logs dir: %w", err)
+	}
+	// ( … ) & reparents the worker to launchd; the outer shell exits at once.
+	cmd := exec.Command("/bin/sh", relaunchHelperArgv(os.Getpid(), bundle, timeout+relaunchKillMargin, filepath.Join(logDir, desktopLogName))...)
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		cmd.Stdin = devNull
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+	} else {
+		log.Printf("restart: open %s: %v", os.DevNull, err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("spawn helper: %w", err)
+	}
+	// Reap the short-lived outer shell so it does not linger as a zombie.
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
 // buildAppMenu builds the native application menu. It differs from the Wails
 // default in two deliberate ways:
 //
@@ -855,6 +1001,11 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow, handl
 		appMenu.AddRole(application.HideOthers)
 		appMenu.AddRole(application.UnHide)
 		appMenu.AddSeparator()
+		appMenu.Add("Restart ocode").
+			OnClick(func(*application.Context) {
+				restartDesktopApp(app, window, handle, quitGuard)
+			})
+		appMenu.AddSeparator()
 		appMenu.Add("Quit ocode").
 			SetAccelerator("CmdOrCtrl+q").
 			OnClick(func(*application.Context) {
@@ -874,6 +1025,8 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow, handl
 				openPulseInPage(window)
 			})
 		fileMenu.AddSeparator()
+		// "Restart ocode" is deliberately macOS-only (see restartDesktopApp:
+		// /bin/sh + `open` + a bundle path); it is not offered here.
 		fileMenu.Add("Quit ocode").
 			SetAccelerator("CmdOrCtrl+q").
 			OnClick(func(*application.Context) {

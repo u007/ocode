@@ -8,7 +8,7 @@ tags:
   - project
   - remote
   - terminal
-timestamp: 2026-09-30T07:37:09Z
+timestamp: 2026-10-18T00:41:42Z
 ---
 # Web/Desktop Server Project Scoping
 
@@ -70,15 +70,27 @@ per-request ssh/wsl.exe paths — they are not proxied.
 **Embedded browser.** A remote project's browser tab fetches its origin from the
 host, not from this machine. `GET /api/browse/config?host=<remote>`
 (`handleRemoteBrowseConfig`, `internal/server/handler_remote_browse.go`) returns
-the host's browse origin as the local end of the workspace's browse tunnel
-(`ServeState().BrowsePort`, same port number, `remote.StartTunnel`), with the
-hostname rewritten to the browser's loopback name by `sameSiteBrowseBase`.
-Grants, revoke and TLS bypass go through `/api/remote/{host}/api/browse/*`, so the
-host's own browse server mints and records them, and records the browser's
-`Origin` for the capture script's postMessage target. A `localhost` page in a
-remote project is therefore a `localhost` on the host. Local projects still use
-this machine's browse origin (no `host` param). Rules that keep this honest:
+an **absolute URL on the browse proxy's second listener**
+(`http://<host>:<proxyPort>/api/remote/<host>/browse`) rather than the tunneled
+loopback origin, because the workspace tunnel's local end is loopback-only and a
+remote client (a phone, another browser) cannot dial it. Browse content is served
+on a second listener bound to the main server's host: local projects at `/b/`
+and `/__ocode_capture.js` (reverse proxy to the loopback browse origin), remote
+projects at `/api/remote/{host}/browse/{rest...}` (`handleRemoteBrowseProxy`,
+prefix stripped, `Set-Cookie Path=/b/` rewritten). The second listener is a
+**different port** from the SPA, so browsed pages are cross-origin with the SPA
+(origin-scoped storage, no CORS headers). Grants, revoke and TLS bypass go
+through `/api/remote/{host}/api/browse/*`, so the host's own browse server mints
+and records them, and records the browser's `Origin` for the capture script's
+postMessage target. A `localhost` page in a remote project is therefore a
+`localhost` on the host. Local projects still use this machine's browse origin
+(no `host` param). Rules that keep this honest:
 
+- **The unauthenticated browse proxy never dials.** `handleRemoteBrowseProxy` sits
+  outside `authMiddleware`, so it only reuses a workspace the authenticated
+  `/api/browse/config` call already connected (`remoteHostRegistry.connectedWorkspace`);
+  an unconnected host is a 409, never an SSH connect. `browseProxyGate` also counts a
+  downstream 401/403 (forged `__grant`, stale cookie) against the per-IP lockout.
 - **The tunnel proves the browse forward.** `remote.tunnelArgs` binds the browse
   `-L` BEFORE the api `-L` under `ExitOnForwardFailure=yes`, and
   `RemoteWorkspace.Connect` waits on the api port (a fresh `FreeLocalPort`),
@@ -92,6 +104,20 @@ this machine's browse origin (no `host` param). Rules that keep this honest:
   project list (list not loaded, project removed); `BrowserPanel` then sets the
   tab error and fetches nothing. `PreviewHost` receives the ACTIVE project's own
   host, never a lookup, so an absent host there is a local project.
+- **Browse content is served on a second listener (origin isolation).** The
+  proxy routes skip the main server's auth middleware (iframes and WebSockets
+  cannot send an `Authorization` header), but the listener is a **separate
+  port** from the SPA, so browsed pages are cross-origin: a proxied page
+  cannot read the SPA's `localStorage`/`sessionStorage` or read `/api/*`
+  responses (no CORS headers). The security boundary is the browse origin's
+  own grant/cookie auth — grants minted only by the authenticated
+  `POST /api/browse/grant`, and `handleBrowse`/`handleCDP` reject a request
+  without a valid grant or cookie (401). `browseProxyGate` adds a cheap
+  pre-filter (reject a request carrying neither a `__grant` nor the
+  `ocode_browse` cookie before the upstream hop) and shares the API's per-IP
+  rate limiter (5 failures to 1 min lockout). Over Tailscale the phone reaches
+  the second listener via `tailscale serve --https=<proxy_port>`; on the LAN it
+  is reached directly on the same host as the main server.
 - **Remote origins are re-read per load.** The host's browse listener binds an
   ephemeral port that changes when `ocode serve --remote` restarts, so
   `getBrowseBase(host)` caches only the local origin; a remote one is read on

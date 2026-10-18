@@ -138,6 +138,7 @@ func ProjectSlugForPath(wd string) string {
 }
 
 func Save(id string, title string, messages []agent.Message, metadata map[string]any) error {
+	id = CanonicalID(id)
 	dir, err := GetStorageDir()
 	if err != nil {
 		return err
@@ -161,6 +162,9 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 // selection, same index updates — so sessions written by one path load via
 // the other.
 func SaveForDir(wd, id string, title string, messages []agent.Message, metadata map[string]any) error {
+	// Persist under the canonical on-disk id: a raw "claude:<id>" would write a
+	// different file than LoadForDir reads (see CanonicalID).
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return err
@@ -222,6 +226,7 @@ func saveToDir(dir, id string, title string, messages []agent.Message, metadata 
 // (ErrTranscriptConflict) instead of silently deleting the other writer's
 // rows.
 func Replace(id string, title string, messages []agent.Message, metadata map[string]any) error {
+	id = CanonicalID(id)
 	dir, err := GetStorageDir()
 	if err != nil {
 		return err
@@ -232,6 +237,7 @@ func Replace(id string, title string, messages []agent.Message, metadata map[str
 // ReplaceForDir persists an authoritative transcript replacement under the
 // storage dir associated with wd. See Replace.
 func ReplaceForDir(wd, id string, title string, messages []agent.Message, metadata map[string]any) error {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return err
@@ -253,6 +259,7 @@ func ReplaceForDir(wd, id string, title string, messages []agent.Message, metada
 // Any shape other than "sentinel row for this tool id at this seq" is an
 // error, never a rewrite.
 func RewriteAskResultForDir(projectRoot, id string, seq int, msg agent.Message) error {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
 		return err
@@ -284,6 +291,9 @@ func RewriteAskResultForDir(projectRoot, id string, seq int, msg agent.Message) 
 // already retried inside the store, and any other error is returned
 // immediately.
 func AppendUserMessageForDir(projectRoot, id, content string) error {
+	// Append to the canonical on-disk id: a raw "claude:<id>" would write a
+	// different file than LoadForDir reads (see CanonicalID).
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
 		return err
@@ -431,6 +441,7 @@ func ReconcileAppendForDir(projectRoot, id, title string, messages []agent.Messa
 // ReconcileAppendForDirWithMessages is the project-root-scoped form of
 // ReconcileAppendWithMessages.
 func ReconcileAppendForDirWithMessages(projectRoot, id, title string, messages []agent.Message, baseLen int, metadata map[string]any) ([]agent.Message, error) {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
 		return nil, err
@@ -1077,12 +1088,18 @@ func Load(id string) (*Session, error) {
 // LoadForDir loads a session from the storage associated with wd. It is used
 // by multi-project servers; Load continues to use the process/session workdir.
 func LoadForDir(wd, id string) (*Session, error) {
-	// Claude Code clones are stored under "claude-<id>" on disk while the
-	// "claude:<id>" form is used in refs and LoadAny. Translate here so the
-	// session can be loaded from wd's storage dir.
-	if strings.HasPrefix(id, "claude:") {
-		id = "claude-" + strings.TrimPrefix(id, "claude:")
+	// Resolve an empty wd once, so the storage dir and the Claude source dir
+	// cannot disagree when workDirOverride differs from the process cwd.
+	if wd == "" {
+		wd = effectiveWorkDir()
 	}
+	// Claude Code clones are stored as "claude-<id>" on disk while refs and
+	// URLs use "claude:<id>". Translate here so the clone loads from wd's
+	// storage. Loading is deliberately READ-ONLY: cloning on first open is
+	// OpenClaudeCloneForDir, called only from the open-session path. A read
+	// must not write, and a loader that clones can land in the wrong project
+	// when a lookup probes several roots (see SessionManager.Resolve).
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return nil, err
@@ -1094,6 +1111,7 @@ func LoadForDir(wd, id string) (*Session, error) {
 // storage dir, in any format LoadForDir reads. It stats the candidate files
 // and parses none of them, so it is safe on hot paths.
 func ExistsForDir(wd, id string) (bool, error) {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return false, err
@@ -1665,6 +1683,7 @@ var ErrNoStoredSession = errors.New("session: no stored transcript for id")
 // Delete removes a session file and updates the index — whichever
 // on-disk format the session id currently exists in.
 func Delete(id string) error {
+	id = CanonicalID(id)
 	dir, err := GetStorageDir()
 	if err != nil {
 		return err
@@ -1692,6 +1711,7 @@ func Delete(id string) error {
 // rewind resource moves with the per-session database and retains its token,
 // target, fingerprint, and lifecycle timestamps under the new session id.
 func RekeyForDir(projectRoot, oldID string) (string, error) {
+	oldID = CanonicalID(oldID)
 	if oldID == "" {
 		return "", ErrNoStoredSession
 	}
@@ -1833,13 +1853,78 @@ func LoadAny(id string) (*Session, error) {
 	return Load(id)
 }
 
+// CanonicalID maps the ref/URL form of a Claude Code session id ("claude:<id>")
+// to its on-disk form ("claude-<id>"); every other id is returned unchanged.
+// Persistence and loading must BOTH use the canonical form: writing a raw
+// "claude:<id>" targets a different file than the one loads read, so the turn
+// is silently orphaned.
+func CanonicalID(id string) string {
+	if strings.HasPrefix(id, "claude:") {
+		return "claude-" + strings.TrimPrefix(id, "claude:")
+	}
+	return id
+}
+
+// ClaudeSourceExistsForDir reports whether wd's Claude Code project dir holds
+// the transcript for id. It stats the source file and writes nothing, so the
+// registry can probe several roots without cloning into any of them.
+func ClaudeSourceExistsForDir(wd, id string) (bool, error) {
+	dir, err := claudeProjectDirForPath(wd)
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(dir, strings.TrimPrefix(CanonicalID(id), "claude-")+".jsonl")
+	_, err = os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat claude transcript %s: %w", path, err)
+}
+
+// OpenClaudeCloneForDir makes a Claude Code session openable from wd's ocode
+// storage by cloning its transcript as claude-<id> when no clone exists yet.
+// It is the ONLY write-on-open entry point for chat and view opens; Resolve and
+// the loaders never clone. A non-Claude id is a no-op, and an existing clone
+// costs one stat, so it is safe to call on every chat message.
+func OpenClaudeCloneForDir(wd, id string) error {
+	canonical := CanonicalID(id)
+	if !strings.HasPrefix(canonical, "claude-") {
+		return nil
+	}
+	exists, err := ExistsForDir(wd, canonical)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = CloneClaudeSessionForDir(wd, strings.TrimPrefix(canonical, "claude-"))
+	return err
+}
+
+// CloneClaudeSession copies the Claude Code transcript for id into the process
+// workdir's ocode storage as claude-<id>.
 func CloneClaudeSession(id string) (*Session, error) {
+	return CloneClaudeSessionForDir(effectiveWorkDir(), id)
+}
+
+// CloneClaudeSessionForDir copies the Claude Code transcript for id, read from
+// the Claude project dir of wd, into wd's ocode storage as claude-<id>. An
+// existing clone is loaded without re-reading the Claude source.
+func CloneClaudeSessionForDir(wd, id string) (*Session, error) {
 	cloneID := "claude-" + id
-	if s, err := Load(cloneID); err == nil {
-		return s, nil
+	exists, err := ExistsForDir(wd, cloneID)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return LoadForDir(wd, cloneID)
 	}
 
-	claudeSession, err := loadClaudeSession(id)
+	claudeSession, err := loadClaudeSessionForDir(wd, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1849,10 +1934,10 @@ func CloneClaudeSession(id string) (*Session, error) {
 	}
 	claudeSession.Metadata["source"] = string(SourceClaude)
 	claudeSession.Metadata["claude_original_session_id"] = id
-	if err := Save(cloneID, claudeSession.Title, claudeSession.Messages, claudeSession.Metadata); err != nil {
+	if err := SaveForDir(wd, cloneID, claudeSession.Title, claudeSession.Messages, claudeSession.Metadata); err != nil {
 		return nil, err
 	}
-	return Load(cloneID)
+	return LoadForDir(wd, cloneID)
 }
 
 func listClaudeSessions() ([]Ref, error) {
@@ -1884,7 +1969,7 @@ func listClaudeSessions() ([]Ref, error) {
 // whole .jsonl. It reads only until the first user message (for the title) and
 // uses the file mtime for updated_at — the last append is the last activity, so
 // mtime is an accurate sort key. Full transcripts (up to multi-MB) are only
-// parsed when a session is actually opened (loadClaudeSession).
+// parsed when a session is actually opened (loadClaudeSessionForDir).
 func claudeRefQuick(id, path string, modTime time.Time) Ref {
 	title := ""
 	f, err := os.Open(path)
@@ -1923,12 +2008,20 @@ func claudeRefQuick(id, path string, modTime time.Time) Ref {
 }
 
 func getClaudeProjectDir() (string, error) {
+	return claudeProjectDirForPath(effectiveWorkDir())
+}
+
+// claudeProjectDirForPath returns the Claude Code project dir of the project
+// containing wd.
+func claudeProjectDirForPath(wd string) (string, error) {
+	if wd == "" {
+		wd = effectiveWorkDir()
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	wd := paths.ProjectRoot(effectiveWorkDir())
-	return filepath.Join(home, ".claude", "projects", claudeProjectSlug(wd)), nil
+	return filepath.Join(home, ".claude", "projects", claudeProjectSlug(paths.ProjectRoot(wd))), nil
 }
 
 func claudeProjectSlug(path string) string {
@@ -1936,8 +2029,8 @@ func claudeProjectSlug(path string) string {
 	return strings.ReplaceAll(clean, "/", "-")
 }
 
-func loadClaudeSession(id string) (*Session, error) {
-	dir, err := getClaudeProjectDir()
+func loadClaudeSessionForDir(wd, id string) (*Session, error) {
+	dir, err := claudeProjectDirForPath(wd)
 	if err != nil {
 		return nil, err
 	}
@@ -2066,6 +2159,7 @@ func claudeContentText(raw json.RawMessage) string {
 // model picks from the web sidebar. Legacy .json/.ojsonl sessions are
 // migrated through the normal save path with the RAW transcript.
 func UpdateMetadataForDir(projectRoot, id string, mutate func(map[string]any)) error {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
 		return err

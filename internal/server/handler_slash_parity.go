@@ -280,6 +280,7 @@ func (h *Handler) bashRulesFromConfigLocked() []map[string]string {
 
 // HandleGetAutoContinue serves GET /api/config/ocode/autocontinue.
 func (h *Handler) HandleGetAutoContinue(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
 	enabled := false
 	model := ""
 	h.mu.Lock()
@@ -288,16 +289,22 @@ func (h *Handler) HandleGetAutoContinue(w http.ResponseWriter, r *http.Request) 
 		model = h.cfg.Ocode.AutoContinueModel
 	}
 	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": enabled, "model": model})
+	if sessionID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": enabled, "model": model})
+		return
+	}
+	enabled = h.effectiveSessionAutoContinueEnabled(sessionID, enabled)
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": enabled, "model": model, "session_id": sessionID})
 }
 
 // HandleSetAutoContinue serves PUT /api/config/ocode/autocontinue — the
 // /autocontinue on|off|model [name] write path.
 func (h *Handler) HandleSetAutoContinue(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Enabled *bool  `json:"enabled"`
-		Model   string `json:"model"`
-		Clear   bool   `json:"clear"`
+		Enabled   *bool  `json:"enabled"`
+		Model     string `json:"model"`
+		Clear     bool   `json:"clear"`
+		SessionID string `json:"session_id"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -307,6 +314,31 @@ func (h *Handler) HandleSetAutoContinue(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "nothing to update: provide enabled, model, or clear")
 		return
 	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(r.URL.Query().Get("session_id"))
+	}
+
+	// Per-session enabled toggle: scoped to that one chat, persisted to its
+	// transcript metadata, never touching global config or other sessions.
+	// A model/clear in the same request still applies below (model is global).
+	var sessionEnabled *bool
+	if sessionID != "" && req.Enabled != nil {
+		if h.sessionProjectRoot(sessionID) == "" {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if err := h.applySessionAutoContinueEnabled(sessionID, *req.Enabled); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		h.pushSessionStatusSnapshot(sessionID)
+		sessionEnabled = req.Enabled
+		if req.Model == "" && !req.Clear {
+			writeJSON(w, http.StatusOK, map[string]any{"enabled": *req.Enabled, "session_id": sessionID})
+			return
+		}
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -315,7 +347,7 @@ func (h *Handler) HandleSetAutoContinue(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if req.Enabled != nil {
+	if req.Enabled != nil && sessionID == "" {
 		if err := config.SaveAutoContinueEnabled(*req.Enabled); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -347,10 +379,15 @@ func (h *Handler) HandleSetAutoContinue(w http.ResponseWriter, r *http.Request) 
 	// same reasoning as HandleSetSmallModel's pushStatusSnapshot.
 	h.pushStatusSnapshot()
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"enabled": h.cfg.Ocode.AutoContinueEnabled,
 		"model":   h.cfg.Ocode.AutoContinueModel,
-	})
+	}
+	if sessionEnabled != nil {
+		resp["enabled"] = *sessionEnabled
+		resp["session_id"] = sessionID
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // HandleConnectProvider serves POST /api/auth/connect — the /connect
@@ -471,7 +508,7 @@ func (h *Handler) HandleDocsUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Lock()
-	as := h.agents[req.SessionID]
+	as := h.agents[agentKey(req.SessionID)]
 	h.mu.Unlock()
 	if as == nil || as.agent == nil {
 		writeError(w, http.StatusNotFound, "no live agent for session "+req.SessionID+" — send a message first, then retry")

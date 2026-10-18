@@ -77,7 +77,7 @@ func (rw *RemoteWorkspace) Connect() error {
 	// a freshly provisioned server has provider keys. Fatal for Connect:
 	// a sync failure blocks the turn with a logged error.
 	progress := NewProgress(io.Discard, "sync")
-	if err := runSyncStage(progress, rw.Transport, rw.Target.String(), version.Version); err != nil {
+	if err := runSyncStage(progress, rw.Transport, rw.Target.String(), version.Version, false); err != nil {
 		log.Printf("sync credentials to %s: %v", rw.Target.String(), err)
 		return fmt.Errorf("sync credentials to %s: %w", rw.Target.String(), err)
 	}
@@ -99,6 +99,14 @@ func (rw *RemoteWorkspace) Connect() error {
 	apiPort, err := FreeLocalPort()
 	if err != nil {
 		return fmt.Errorf("find API local port: %w", err)
+	}
+
+	// Reclaim the fixed browse port if a stale ocode tunnel holds it from a
+	// previous ungraceful exit (SIGKILL / force quit / crash). The tunnel ssh
+	// runs in its own session, so a dead ocode leaves it listening on the
+	// browse port forever and every new connect fails with "connection refused".
+	if err := reclaimStaleTunnelPort(rw.State.BrowsePort); err != nil {
+		log.Printf("remote: reclaim browse port %d: %v", rw.State.BrowsePort, err)
 	}
 
 	// Tunnel: local apiPort → remote API port.
@@ -194,6 +202,22 @@ func (rw *RemoteWorkspace) BrowseURL() string {
 		return ""
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d", rw.State.BrowsePort)
+}
+
+// SyncConfig pushes the local auth-profile store and global config files
+// (opencode.json, ocodeconfig.json) to the remote host, re-running the
+// sync stage over the already-established transport. force bypasses the
+// per-host skip-if-unchanged cache so a stale remote is overwritten even
+// when the local payload hash matches the last push.
+func (rw *RemoteWorkspace) SyncConfig(force bool) error {
+	if rw.Transport == nil {
+		return fmt.Errorf("remote workspace not connected")
+	}
+	progress := NewProgress(io.Discard, "sync")
+	if err := runSyncStage(progress, rw.Transport, rw.Target.String(), version.Version, force); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ensureBinary checks if the remote binary exists; provisions it if not.

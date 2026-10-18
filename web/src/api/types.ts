@@ -169,10 +169,12 @@ export interface TTSConfig {
 
 export type ChatVerbosityPreset = "full" | "balanced" | "quiet";
 export type ChatDisplayOverride = "preset" | "expanded" | "collapsed";
+/** Latest thinking adds `auto`: expanded until the answer starts, then collapsed. */
+export type ChatLatestThinkingOverride = ChatDisplayOverride | "auto";
 
 export interface ChatVerbosityOverrides {
   older_thinking: ChatDisplayOverride;
-  latest_thinking: ChatDisplayOverride;
+  latest_thinking: ChatLatestThinkingOverride;
   tool_calls: ChatDisplayOverride;
   tool_output: ChatDisplayOverride;
   activity_notices: ChatDisplayOverride;
@@ -185,7 +187,7 @@ export interface ChatVerbosityConfig {
 
 export interface ChatDisplayPolicy {
   older_thinking: "expanded" | "collapsed";
-  latest_thinking: "expanded" | "collapsed";
+  latest_thinking: "expanded" | "collapsed" | "auto";
   tool_calls: "expanded" | "collapsed";
   tool_output: "expanded" | "collapsed";
   notices: "expanded" | "collapsed";

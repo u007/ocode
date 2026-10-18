@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { ChatDisplayPolicy, ChatVerbosityConfig, ChatDisplayOverride } from "../../api/types";
+import type { ChatDisplayPolicy, ChatVerbosityConfig, ChatLatestThinkingOverride, ChatDisplayOverride } from "../../api/types";
 import {
   ChatDisplayContext,
   type ChatDisplayContextValue,
@@ -36,15 +36,15 @@ function displayValue(
   overrides: Partial<ChatVerbosityConfig["overrides"]> = {},
   disclosure: ChatDisclosureStore = makeStore(),
 ): ChatDisplayContextValue {
-  const withOverride = (value: ChatDisplayOverride | undefined) => value ?? "preset";
+  const withOverride = (value: ChatLatestThinkingOverride | undefined) => value ?? "preset";
   const base = {
-    full: { older_thinking: "expanded", tool_calls: "expanded", tool_output: "expanded", notices: "expanded" },
-    balanced: { older_thinking: "collapsed", tool_calls: "collapsed", tool_output: "expanded", notices: "expanded" },
-    quiet: { older_thinking: "collapsed", tool_calls: "collapsed", tool_output: "collapsed", notices: "collapsed" },
+    full: { older_thinking: "expanded", latest_thinking: "expanded", tool_calls: "expanded", tool_output: "expanded", notices: "expanded" },
+    balanced: { older_thinking: "collapsed", latest_thinking: "expanded", tool_calls: "collapsed", tool_output: "expanded", notices: "expanded" },
+    quiet: { older_thinking: "collapsed", latest_thinking: "auto", tool_calls: "collapsed", tool_output: "collapsed", notices: "collapsed" },
   }[preset];
   const policy: ChatDisplayPolicy = {
     older_thinking: (withOverride(overrides.older_thinking) === "preset" ? base.older_thinking : withOverride(overrides.older_thinking)) as ChatDisplayPolicy["older_thinking"],
-    latest_thinking: (withOverride(overrides.latest_thinking) === "preset" ? "expanded" : withOverride(overrides.latest_thinking)) as ChatDisplayPolicy["latest_thinking"],
+    latest_thinking: (withOverride(overrides.latest_thinking) === "preset" ? base.latest_thinking : withOverride(overrides.latest_thinking)) as ChatDisplayPolicy["latest_thinking"],
     tool_calls: (withOverride(overrides.tool_calls) === "preset" ? base.tool_calls : withOverride(overrides.tool_calls)) as ChatDisplayPolicy["tool_calls"],
     tool_output: (withOverride(overrides.tool_output) === "preset" ? base.tool_output : withOverride(overrides.tool_output)) as ChatDisplayPolicy["tool_output"],
     notices: (withOverride(overrides.activity_notices) === "preset" ? base.notices : withOverride(overrides.activity_notices)) as ChatDisplayPolicy["notices"],
@@ -54,11 +54,13 @@ function displayValue(
     config: {
       preset,
       overrides: {
-        older_thinking: withOverride(overrides.older_thinking),
+        // Only latest_thinking accepts "auto"; the other categories stay
+        // ChatDisplayOverride, so cast their shared helper's result back down.
+        older_thinking: withOverride(overrides.older_thinking) as ChatDisplayOverride,
         latest_thinking: withOverride(overrides.latest_thinking),
-        tool_calls: withOverride(overrides.tool_calls),
-        tool_output: withOverride(overrides.tool_output),
-        activity_notices: withOverride(overrides.activity_notices),
+        tool_calls: withOverride(overrides.tool_calls) as ChatDisplayOverride,
+        tool_output: withOverride(overrides.tool_output) as ChatDisplayOverride,
+        activity_notices: withOverride(overrides.activity_notices) as ChatDisplayOverride,
       },
     },
     policy,
@@ -71,25 +73,25 @@ describe("controlled thinking disclosure", () => {
     const store = makeStore();
     const { rerender } = render(
       <ChatDisplayContext.Provider value={displayValue("balanced", {}, store)}>
-        <ThinkingBlock text="older reasoning" blockKey="m1" isLatest={false} />
+        <ThinkingBlock text="older reasoning" blockKey="m1" isLatest={false} answerStarted={false} />
       </ChatDisplayContext.Provider>,
     );
     expect(screen.queryByText("older reasoning")).not.toBeInTheDocument();
 
     rerender(
       <ChatDisplayContext.Provider value={displayValue("full", {}, store)}>
-        <ThinkingBlock text="older reasoning" blockKey="m1" isLatest={false} />
+        <ThinkingBlock text="older reasoning" blockKey="m1" isLatest={false} answerStarted={false} />
       </ChatDisplayContext.Provider>,
     );
     expect(screen.getByText("older reasoning")).toBeInTheDocument();
   });
 
-  it("keeps the latest thinking expanded in every preset including Quiet", () => {
-    for (const preset of ["full", "balanced", "quiet"] as const) {
+  it("keeps the latest thinking expanded under Full and Balanced", () => {
+    for (const preset of ["full", "balanced"] as const) {
       const store = makeStore();
       const { unmount } = render(
         <ChatDisplayContext.Provider value={displayValue(preset, {}, store)}>
-          <ThinkingBlock text="latest reasoning" blockKey="m-latest" isLatest />
+          <ThinkingBlock text="latest reasoning" blockKey="m-latest" isLatest answerStarted />
         </ChatDisplayContext.Provider>,
       );
       expect(screen.getByText("latest reasoning")).toBeInTheDocument();
@@ -97,12 +99,69 @@ describe("controlled thinking disclosure", () => {
     }
   });
 
+  it("under auto, opens the latest block with no answer and collapses it once the answer starts", () => {
+    const store = makeStore();
+    const value = displayValue("quiet", {}, store);
+    const { rerender } = render(
+      <ChatDisplayContext.Provider value={value}>
+        <ThinkingBlock text="auto reasoning" blockKey="m-auto" isLatest answerStarted={false} />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.getByText("auto reasoning")).toBeInTheDocument();
+
+    rerender(
+      <ChatDisplayContext.Provider value={value}>
+        <ThinkingBlock text="auto reasoning" blockKey="m-auto" isLatest answerStarted />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.queryByText("auto reasoning")).not.toBeInTheDocument();
+  });
+
+  it("under auto, a committed block whose answer already started renders collapsed", () => {
+    render(
+      <ChatDisplayContext.Provider value={displayValue("quiet", {}, makeStore())}>
+        <ThinkingBlock text="committed reasoning" blockKey="m-committed" isLatest answerStarted />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.queryByText("committed reasoning")).not.toBeInTheDocument();
+  });
+
+  it("under auto, a block with only a tool call and no text stays open", () => {
+    // A tool-call follow-up contributes no answer text, so the caller passes
+    // answerStarted=false and the block keeps its open default.
+    render(
+      <ChatDisplayContext.Provider value={displayValue("quiet", {}, makeStore())}>
+        <ThinkingBlock text="tool reasoning" blockKey="m-tool" isLatest answerStarted={false} />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.getByText("tool reasoning")).toBeInTheDocument();
+  });
+
+  it("keeps explicit expanded and collapsed latest overrides fixed whatever the answer state", () => {
+    const expanded = displayValue("quiet", { latest_thinking: "expanded" }, makeStore());
+    const collapsed = displayValue("full", { latest_thinking: "collapsed" }, makeStore());
+    const { unmount } = render(
+      <ChatDisplayContext.Provider value={expanded}>
+        <ThinkingBlock text="fixed open" blockKey="m-fixed-open" isLatest answerStarted />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.getByText("fixed open")).toBeInTheDocument();
+    unmount();
+
+    render(
+      <ChatDisplayContext.Provider value={collapsed}>
+        <ThinkingBlock text="fixed closed" blockKey="m-fixed-closed" isLatest answerStarted={false} />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.queryByText("fixed closed")).not.toBeInTheDocument();
+  });
+
   it("keeps a manual collapse of the latest block until a policy revision clears it", () => {
     const store = makeStore();
     const value = displayValue("quiet", {}, store);
     const { rerender } = render(
       <ChatDisplayContext.Provider value={value}>
-        <ThinkingBlock text="latest manual reasoning" blockKey="m-latest-manual" isLatest />
+        <ThinkingBlock text="latest manual reasoning" blockKey="m-latest-manual" isLatest answerStarted={false} />
       </ChatDisplayContext.Provider>,
     );
     expect(screen.getByText("latest manual reasoning")).toBeInTheDocument();
@@ -111,7 +170,7 @@ describe("controlled thinking disclosure", () => {
 
     rerender(
       <ChatDisplayContext.Provider value={value}>
-        <ThinkingBlock text="latest manual reasoning" blockKey="m-latest-manual" isLatest />
+        <ThinkingBlock text="latest manual reasoning" blockKey="m-latest-manual" isLatest answerStarted={false} />
       </ChatDisplayContext.Provider>,
     );
     expect(screen.queryByText("latest manual reasoning")).not.toBeInTheDocument();
@@ -120,12 +179,39 @@ describe("controlled thinking disclosure", () => {
     expect(screen.getByText("latest manual reasoning")).toBeInTheDocument();
   });
 
+  it("lets a manual choice win over the auto default across the answer flip", () => {
+    const store = makeStore();
+    const value = displayValue("quiet", {}, store);
+    const { rerender } = render(
+      <ChatDisplayContext.Provider value={value}>
+        <ThinkingBlock text="manual auto reasoning" blockKey="m-auto-manual" isLatest answerStarted={false} />
+      </ChatDisplayContext.Provider>,
+    );
+    // The user collapses the open block before the answer arrives...
+    fireEvent.click(screen.getByRole("button", { name: /🧠 Thinking/ }));
+    rerender(
+      <ChatDisplayContext.Provider value={value}>
+        <ThinkingBlock text="manual auto reasoning" blockKey="m-auto-manual" isLatest answerStarted />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.queryByText("manual auto reasoning")).not.toBeInTheDocument();
+
+    // ...and re-opens it after the answer started. The flip must not override that.
+    fireEvent.click(screen.getByRole("button", { name: /🧠 Thinking/ }));
+    rerender(
+      <ChatDisplayContext.Provider value={value}>
+        <ThinkingBlock text="manual auto reasoning" blockKey="m-auto-manual" isLatest answerStarted />
+      </ChatDisplayContext.Provider>,
+    );
+    expect(screen.getByText("manual auto reasoning")).toBeInTheDocument();
+  });
+
   it("keeps a manual disclosure choice across an unmount/remount", () => {
     const store = makeStore();
     const value = displayValue("quiet", {}, store);
     const { unmount } = render(
       <ChatDisplayContext.Provider value={value}>
-        <ThinkingBlock text="manual reasoning" blockKey="m-manual" isLatest={false} />
+        <ThinkingBlock text="manual reasoning" blockKey="m-manual" isLatest={false} answerStarted={false} />
       </ChatDisplayContext.Provider>,
     );
     fireEvent.click(screen.getByRole("button", { name: /🧠 Thinking/ }));
@@ -134,7 +220,7 @@ describe("controlled thinking disclosure", () => {
 
     render(
       <ChatDisplayContext.Provider value={value}>
-        <ThinkingBlock text="manual reasoning" blockKey="m-manual" isLatest={false} />
+        <ThinkingBlock text="manual reasoning" blockKey="m-manual" isLatest={false} answerStarted={false} />
       </ChatDisplayContext.Provider>,
     );
     expect(screen.getByText("manual reasoning")).toBeInTheDocument();

@@ -38,7 +38,7 @@ describe("chat block copy controls", () => {
   afterEach(() => copyTextToClipboard.mockClear());
 
   it("copies thinking text and labels the raw item as source", async () => {
-    withDisplay(<ThinkingBlock text="some reasoning" />);
+    withDisplay(<ThinkingBlock text="some reasoning" answerStarted={false} />);
     await copyDefault();
     expect(copyTextToClipboard).toHaveBeenLastCalledWith("some reasoning");
     fireEvent.click(screen.getByTestId("block-copy-menu"));

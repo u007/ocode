@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,6 +183,9 @@ func (m *SessionManager) Register(sessionID, projectRoot string) *sessionEntry {
 // a different non-empty windowId update it (e.g. user moved tab), empty
 // windowId leaves existing value intact.
 func (m *SessionManager) RegisterWithWindow(sessionID, projectRoot, windowID string) *sessionEntry {
+	// Key the registry on the canonical id so "claude:<id>" and "claude-<id>"
+	// are one entry (see session.CanonicalID).
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.entries[sessionID]
@@ -216,6 +221,7 @@ func (e *projectMismatchError) Error() string {
 // — or be observed racing with — a later rebinding, so persistence paths
 // that act on ProjectRoot after the manager lock is released must use this.
 func (m *SessionManager) SnapshotEntry(sessionID string) (sessionEntry, bool) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e, ok := m.entries[sessionID]; ok {
@@ -237,6 +243,7 @@ func (m *SessionManager) SnapshotEntry(sessionID string) (sessionEntry, bool) {
 // project (a missing session silently starts with empty history); that is
 // preserved by binding to the default root and continuing.
 func (m *SessionManager) BindNewOrVerify(sessionID, projectRoot, windowID string) (sessionEntry, error) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	if e, ok := m.entries[sessionID]; ok {
 		if projectRoot != "" && e.ProjectRoot != "" && projectRoot != e.ProjectRoot {
@@ -279,6 +286,7 @@ func (m *SessionManager) BindNewOrVerify(sessionID, projectRoot, windowID string
 // SetWindowID updates the window binding for an existing session. No-op if
 // session unknown or windowID empty.
 func (m *SessionManager) SetWindowID(sessionID, windowID string) {
+	sessionID = session.CanonicalID(sessionID)
 	if windowID == "" {
 		return
 	}
@@ -294,14 +302,16 @@ func (m *SessionManager) SetWindowID(sessionID, windowID string) {
 // (registered or resolved), without touching the disk. Returns nil when the
 // session is not yet known.
 func (m *SessionManager) Lookup(sessionID string) *sessionEntry {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.entries[sessionID]
 }
 
 // Resolve returns the registry entry for sessionID, resolving an unknown id
-// by checking each registered project's storage dir (LoadForDir) and caching
-// the owning project root. It errors only when the session exists in no
+// by probing each registered project root and caching the owning root. It is
+// read-only: it never clones a Claude Code transcript (see the open paths in
+// session.OpenClaudeCloneForDir). It errors only when the session exists in no
 // registered project. Results are cached, so a later Resolve of the same id
 // never touches the disk again.
 func (m *SessionManager) Resolve(sessionID string) (*sessionEntry, error) {
@@ -309,22 +319,63 @@ func (m *SessionManager) Resolve(sessionID string) (*sessionEntry, error) {
 		return e, nil
 	}
 
-	// Search the registered project roots for the session's on-disk home.
-	// The first project whose storage dir contains the session wins.
-	var root string
-	for _, candidate := range m.projectRoots() {
-		if candidate == "" {
-			continue
+	// Canonicalize once, at the boundary. A Claude Code session arrives as
+	// "claude:<id>" but is stored as "claude-<id>"; registering the raw form
+	// would make every persistence call (entry.SessionID) write to a file no
+	// load ever reads, silently orphaning the turn.
+	canonical := session.CanonicalID(sessionID)
+	if canonical != sessionID {
+		if e := m.Lookup(canonical); e != nil {
+			return e, nil
 		}
-		if _, err := session.LoadForDir(candidate, sessionID); err == nil {
-			root = candidate
-			break
+	}
+
+	// Resolve is read-only: it probes the registered roots and never writes a
+	// clone. Cloning a Claude Code transcript happens only on an explicit open
+	// (session.OpenClaudeCloneForDir). Pass 1 takes the first root that already
+	// holds the session's ocode storage, so an existing clone wins over the same
+	// transcript under another root. Pass 2 runs only when no clone exists, and
+	// takes the first root whose Claude project dir holds the source transcript.
+	roots := m.projectRoots()
+	// A probe failure in one root (deleted or unreadable project dir) must not
+	// hide a session that lives in a healthy root, so it is logged and the scan
+	// continues. It only surfaces when no root owns the session: a session that
+	// might live in the broken root is then an error, not a confident 404.
+	var probeErr error
+	firstOwner := func(probe func(root string) (bool, error)) string {
+		for _, candidate := range roots {
+			if candidate == "" {
+				continue
+			}
+			owns, err := probe(candidate)
+			if err != nil {
+				log.Printf("serve: probe session %s under %s: %v", canonical, candidate, err)
+				if probeErr == nil {
+					probeErr = fmt.Errorf("probe session %s under %s: %w", canonical, candidate, err)
+				}
+				continue
+			}
+			if owns {
+				return candidate
+			}
 		}
+		return ""
+	}
+	root := firstOwner(func(candidate string) (bool, error) {
+		return session.ExistsForDir(candidate, canonical)
+	})
+	if root == "" && strings.HasPrefix(canonical, "claude-") {
+		root = firstOwner(func(candidate string) (bool, error) {
+			return session.ClaudeSourceExistsForDir(candidate, canonical)
+		})
 	}
 	if root == "" {
+		if probeErr != nil {
+			return nil, probeErr
+		}
 		return nil, errSessionNotFound
 	}
-	return m.Register(sessionID, root), nil
+	return m.Register(canonical, root), nil
 }
 
 // errSessionNotFound is returned by Resolve when the session exists in no
@@ -343,6 +394,7 @@ const defaultSessionIdleTimeout = 30 * time.Minute
 
 // setAgent attaches (or detaches, with nil) the built agent to the entry.
 func (m *SessionManager) setAgent(sessionID string, as *agentSession) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	if e := m.entries[sessionID]; e != nil {
 		e.agent = as
@@ -364,6 +416,8 @@ func (m *SessionManager) setAgent(sessionID string, as *agentSession) {
 // registers a fresh one under newID (the rekey still needs a resolvable
 // target for a registry-only session). Returns the moved entry.
 func (m *SessionManager) Rekey(oldID, newID, projectRoot string) *sessionEntry {
+	oldID = session.CanonicalID(oldID)
+	newID = session.CanonicalID(newID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if oldID == "" || newID == "" || oldID == newID {
@@ -385,6 +439,7 @@ func (m *SessionManager) Rekey(oldID, newID, projectRoot string) *sessionEntry {
 
 // touch updates the entry's last-activity stamp (used at turn start).
 func (m *SessionManager) touch(sessionID string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	if e := m.entries[sessionID]; e != nil {
 		e.lastActivity = time.Now()
@@ -398,6 +453,7 @@ func (m *SessionManager) touch(sessionID string) {
 // means the turn (or continuation) just finished and the authoritative
 // `messages` broadcast/persisted transcript supersedes whatever was buffered.
 func (m *SessionManager) setTurnActive(sessionID string, active bool) {
+	sessionID = session.CanonicalID(sessionID)
 	now := time.Now()
 	m.mu.Lock()
 	if e := m.entries[sessionID]; e != nil {
@@ -425,6 +481,7 @@ func (m *SessionManager) setTurnActive(sessionID string, active bool) {
 // have been released between the failure and this call, and creating an entry
 // for it would put a project-less ghost session on the dashboard.
 func (m *SessionManager) setTurnError(sessionID, msg string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -438,6 +495,7 @@ func (m *SessionManager) setTurnError(sessionID, msg string) {
 // passes h.bus.LastSeq() right after publishing), so a client can filter out
 // frames it already received live during a reconnect race.
 func (m *SessionManager) appendLiveFrame(sessionID, event string, data any, seq uint64) {
+	sessionID = session.CanonicalID(sessionID)
 	if !liveFrameEvents[event] {
 		return
 	}
@@ -463,6 +521,7 @@ func (m *SessionManager) appendLiveFrame(sessionID, event string, data any, seq 
 // IsTurnActive reports whether a turn is currently running on the session.
 // Used by profile reconciliation to avoid tearing down an agent mid-turn.
 func (m *SessionManager) IsTurnActive(sessionID string) bool {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -475,6 +534,7 @@ func (m *SessionManager) IsTurnActive(sessionID string) bool {
 // automatic) are in flight for the session. Used by the Stop path so it can
 // interrupt a compaction that is running with no active turn.
 func (m *SessionManager) IsCompacting(sessionID string) bool {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -488,6 +548,7 @@ func (m *SessionManager) IsCompacting(sessionID string) bool {
 // three values are read under the same manager lock, so a start event cannot
 // accidentally carry a later group's timestamp/generation.
 func (m *SessionManager) BeginCompaction(sessionID string) (ok bool, startedAt time.Time, generation uint64) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[sessionID]
@@ -513,6 +574,7 @@ func (m *SessionManager) BeginCompaction(sessionID string) (ok bool, startedAt t
 // when idle is true; an earlier pass must not clear a client while another
 // pass is still running.
 func (m *SessionManager) EndCompaction(sessionID string, compactionErr string) (idle bool, wasActive bool, aggregateErr string, generation uint64) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[sessionID]
@@ -544,6 +606,7 @@ func (m *SessionManager) EndCompaction(sessionID string, compactionErr string) (
 // TurnTiming returns the stored turn start/end for a session. Zero times mean
 // no turn has run yet (or the entry does not exist).
 func (m *SessionManager) TurnTiming(sessionID string) (startedAt, endedAt time.Time) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -634,6 +697,7 @@ func (m *SessionManager) EvictIdle() []string {
 // turn start. The pending-ask check happens under as.mu alone, after
 // releasing m.mu; the entry is then re-verified under m.mu before clearing.
 func (m *SessionManager) ReleaseAgent(sessionID string) bool {
+	sessionID = session.CanonicalID(sessionID)
 	// Phase 1: snapshot under m.mu only. Capture the agent pointer itself —
 	// re-reading e.agent later, unsynchronized, would race a concurrent
 	// setAgent (e.g. a session rebuild) and could see it go nil.
@@ -705,6 +769,7 @@ var bootstrapStageOrder = map[string]int{
 // endpoint reports, never a gate on agent construction. A transition to ""
 // resets a failed bootstrap for a retry.
 func (m *SessionManager) SetBootstrapStage(sessionID, stage string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[sessionID]
@@ -738,6 +803,7 @@ func validBootstrapTransition(from, to string) bool {
 // SetBootstrapFailed records a bootstrap failure at the failing stage so the
 // state endpoint can report which stage broke.
 func (m *SessionManager) SetBootstrapFailed(sessionID, stage string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -748,6 +814,7 @@ func (m *SessionManager) SetBootstrapFailed(sessionID, stage string) {
 // SetBootstrapError records the failure message on the entry (used by the
 // state endpoint's bootstrap_error field).
 func (m *SessionManager) SetBootstrapError(sessionID, errMsg string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -759,6 +826,7 @@ func (m *SessionManager) SetBootstrapError(sessionID, errMsg string) {
 // reconcile last_seq). The bus sequence is global and monotonic, so the
 // latest observed value is simply stored per session.
 func (m *SessionManager) SetLastSeq(sessionID string, seq uint64) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -769,6 +837,7 @@ func (m *SessionManager) SetLastSeq(sessionID string, seq uint64) {
 // PushPending records a user message content that has been persisted to disk
 // but whose turn has not started yet.
 func (m *SessionManager) PushPending(sessionID, content string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -780,6 +849,7 @@ func (m *SessionManager) PushPending(sessionID, content string) {
 // session. Rewind uses it to discard any stale queue left by an earlier turn
 // and retain exactly the newly committed user content, in order.
 func (m *SessionManager) ReplacePending(sessionID string, contents []string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -789,6 +859,7 @@ func (m *SessionManager) ReplacePending(sessionID string, contents []string) {
 
 // PendingFront returns the oldest persisted-but-unturned message content.
 func (m *SessionManager) PendingFront(sessionID string) (string, bool) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[sessionID]
@@ -803,6 +874,7 @@ func (m *SessionManager) PendingFront(sessionID string) (string, bool) {
 // decide which trailing rows to withhold from a fresh agent's context — see
 // pendingStripLen.
 func (m *SessionManager) PendingContents(sessionID string) []string {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[sessionID]
@@ -815,6 +887,7 @@ func (m *SessionManager) PendingContents(sessionID string) []string {
 // ShiftPending drops the oldest pending message after its turn has started
 // (the message has been appended to the in-memory transcript by runTurn).
 func (m *SessionManager) ShiftPending(sessionID string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil && len(e.pending) > 0 {
@@ -826,6 +899,7 @@ func (m *SessionManager) ShiftPending(sessionID string) {
 // Bootstrap strips exactly this many trailing messages from the on-disk
 // transcript.
 func (m *SessionManager) PendingCount(sessionID string) int {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -838,6 +912,7 @@ func (m *SessionManager) PendingCount(sessionID string) int {
 // turn must emit session_started (correlated to the creating tab's
 // requestID), even if that first turn runs after a bootstrap failure.
 func (m *SessionManager) SetSessionStart(sessionID, requestID string) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.entries[sessionID]; e != nil {
@@ -848,6 +923,7 @@ func (m *SessionManager) SetSessionStart(sessionID, requestID string) {
 // ConsumeSessionStart returns and clears the pending session_started marker.
 // The bool reports whether a marker was set.
 func (m *SessionManager) ConsumeSessionStart(sessionID string) (string, bool) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[sessionID]
@@ -882,6 +958,7 @@ type SessionState struct {
 // session is known to the registry (false for sessions in no registered
 // project).
 func (m *SessionManager) State(sessionID string) (SessionState, bool) {
+	sessionID = session.CanonicalID(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[sessionID]

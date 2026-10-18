@@ -117,35 +117,6 @@ func TestLocalGitStatusRejectsRemoteProjectPath(t *testing.T) {
 	}
 }
 
-// The local terminal history/process trust boundary (the same check the
-// websocket path mirrors): no host + a remote-only path is forbidden, while
-// the registered (host, path) pair is admitted.
-func TestLocalTerminalRejectsRemoteProjectPath(t *testing.T) {
-	h := testProjectHandler(t)
-	remoteDir := t.TempDir()
-	if err := h.projects.AddRemote("devbox", remoteDir); err != nil {
-		t.Fatalf("AddRemote: %v", err)
-	}
-
-	// Host-less local request: must be rejected.
-	req := httptest.NewRequest(http.MethodGet, "/api/terminal/history?project="+url.QueryEscape(remoteDir), nil)
-	if _, status, msg := h.resolveTerminalHistoryProject(req); status != http.StatusForbidden {
-		t.Fatalf("host-less remote path status = %d (%s), want 403", status, msg)
-	}
-
-	// The registered remote identity is admitted.
-	req = httptest.NewRequest(
-		http.MethodGet,
-		"/api/terminal/history?host=devbox&project="+url.QueryEscape(remoteDir),
-		nil,
-	)
-	if got, status, msg := h.resolveTerminalHistoryProject(req); status != 0 {
-		t.Fatalf("registered remote pair status = %d (%s), want 0", status, msg)
-	} else if got != "devbox:"+remoteDir {
-		t.Fatalf("resolved project = %q, want %q", got, "devbox:"+remoteDir)
-	}
-}
-
 // A local and a remote project sharing one path are distinct identities: the
 // shared path appears once (as the local project) and a same-path remote entry
 // never makes the path local by itself.

@@ -112,7 +112,7 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 	// slice out of range). Lock the agent session to read it; if the session
 	// has gone away, fall back to the last stored messages.
 	h.mu.Lock()
-	as := h.agents[sessionID]
+	as := h.agents[agentKey(sessionID)]
 	h.mu.Unlock()
 
 	var msgs []agent.Message
@@ -154,6 +154,7 @@ func (h *Handler) finishSessionTitle(sessionID, title string) {
 	h.applySessionPermissionFields(&snap, sessionID)
 	h.applySessionThinkingBudget(&snap, sessionID)
 	h.applySessionAdvisorFields(&snap, sessionID)
+	h.applySessionAutoContinueFields(&snap, sessionID)
 	h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "status", Data: snap})
 }
 
@@ -262,7 +263,7 @@ func (h *Handler) HandleGenerateSessionTitle(w http.ResponseWriter, r *http.Requ
 	// Prefer live agentSession messages (may include unsaved turn), else use disk.
 	var msgs []agent.Message
 	h.mu.Lock()
-	as := h.agents[id]
+	as := h.agents[agentKey(id)]
 	h.mu.Unlock()
 	if as != nil {
 		as.mu.Lock()

@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/session"
 )
 
 // Write tools of the Pulse assistant (docs/concepts/pulse-assistant.md). They
@@ -162,6 +165,42 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 				"content":    str("The message to send, as the operator would type it"),
 			},
 			run: h.pulseSessionSendTool,
+		},
+		{
+			name: "session_new",
+			desc: "Start a new chat session in a project, optionally with an initial message, and return its session id. Local projects only for now (remote SSH/WSL hosts are refused here; use session_send on a session created on the host). Needs the operator's approval.",
+			ask:  true,
+			props: map[string]any{
+				"project_path": str("Project root of the new session (local server project root)"),
+				"host":         str("Remote host ([user@]host[:port] or wsl:<distro>); currently unsupported, refused when set"),
+				"content":      str("Initial message to send in the new session (required)"),
+			},
+			run: h.pulseSessionNewTool,
+		},
+		{
+			name: "terminal_new",
+			desc: "Start a new terminal (pty shell) in a project and return its terminal id. Local projects only for now (remote SSH/WSL hosts are refused here). Needs the operator's approval.",
+			ask:  true,
+			props: map[string]any{
+				"project_path": str("Project root of the new terminal (local server project root)"),
+				"host":         str("Remote host; currently unsupported, refused when set"),
+				"title":        str("Optional tab title"),
+			},
+			run: h.pulseTerminalNewTool,
+		},
+		{
+			name:  "session_close",
+			desc:  "Close (tear down the resident agent for) an existing session. Safe on idle sessions. Needs the operator's approval.",
+			ask:   true,
+			props: map[string]any{"session_id": str("Session id to close")},
+			run:   h.pulseSessionCloseTool,
+		},
+		{
+			name:  "terminal_kill",
+			desc:  "Kill a terminal's shell and remove its tab/history. Needs the operator's approval.",
+			ask:   true,
+			props: map[string]any{"terminal_id": str("Terminal id from terminal_tabs")},
+			run:   h.pulseTerminalKillTool,
 		},
 		{
 			name: "session_command",
@@ -357,4 +396,152 @@ func pulseRecapWithTimeout(timeout time.Duration, fn func(ctx context.Context) (
 		return "", fmt.Errorf("recap timed out after %s", timeout)
 	}
 	return text, err
+}
+
+// pulseSessionNewTool starts a new local chat session (with an initial message)
+// and returns its id. Remote/WSL hosts are refused here because creating the
+// session must happen where the agent runs; ask the operator or use
+// session_send on one that already exists.
+func (h *Handler) pulseSessionNewTool(raw json.RawMessage) (string, error) {
+	var args struct {
+		ProjectPath string `json:"project_path"`
+		Host        string `json:"host"`
+		Content     string `json:"content"`
+	}
+	if err := decodePulseArgs(raw, &args); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(args.Host) != "" {
+		return "", fmt.Errorf("creating sessions on remote hosts is not supported from the Pulse assistant yet; create it on the host or use session_send on an existing session")
+	}
+	projectRoot := strings.TrimSpace(args.ProjectPath)
+	if projectRoot == "" {
+		return "", errors.New("project_path is required")
+	}
+	if args.Content == "" {
+		return "", errors.New("content is required")
+	}
+	if h.projectHostFor(projectRoot) != "" {
+		return "", fmt.Errorf("project_path %q looks like a remote path; pass host= for remotes (not yet supported)", projectRoot)
+	}
+	expanded, err := projects.ExpandHome(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("expand project path %q: %w", projectRoot, err)
+	}
+	projectRoot = expanded
+	if projectRoot == "" {
+		return "", errors.New("project_path is required")
+	}
+	allowed := false
+	for _, root := range h.allowedProjectRoots() {
+		if projectRoot == root {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Errorf("project %q is not a registered project root", projectRoot)
+	}
+	sid := session.NewSessionID()
+	// async: true → HandleChat persists the first message and returns 202
+	// without running the child's turn inline. Without it the sync path runs
+	// the whole turn inside this tool call (and a mid-turn pause would be
+	// reported as a success with no reply), blocking the Pulse assistant.
+	out, err := pulseCall("POST", "/api/chat", map[string]any{
+		"session_id":   sid,
+		"project_path": projectRoot,
+		"content":      args.Content,
+		"async":        true,
+	}, h.HandleChat)
+	if err != nil {
+		return "", fmt.Errorf("create session in %s: %w", projectRoot, err)
+	}
+	createdID, err := pulseCreatedSessionID(out)
+	if err != nil {
+		return "", fmt.Errorf("create session in %s: %w", projectRoot, err)
+	}
+	return marshalPulseString(map[string]any{"session_id": createdID, "project_path": projectRoot})
+}
+
+// pulseCreatedSessionID reads the session id from the async POST /api/chat
+// reply. The server always names the session it bound; an empty id means it
+// was not bound, so the tool must fail rather than report the id it generated.
+func pulseCreatedSessionID(out json.RawMessage) (string, error) {
+	var resp ChatResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return "", fmt.Errorf("decode create-session response: %w", err)
+	}
+	if resp.SessionID == "" {
+		return "", errors.New("create-session response carried no session id")
+	}
+	return resp.SessionID, nil
+}
+
+// pulseSessionCloseTool closes a session's resident agent.
+func (h *Handler) pulseSessionCloseTool(raw json.RawMessage) (string, error) {
+	var args struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := decodePulseArgs(raw, &args); err != nil {
+		return "", err
+	}
+	if err := h.pulseWriteTarget(args.SessionID); err != nil {
+		return "", err
+	}
+	if _, err := pulseCall(http.MethodPost, "/api/sessions/"+args.SessionID+"/close", nil,
+		func(w http.ResponseWriter, r *http.Request) { h.HandleCloseSession(w, r, args.SessionID) }); err != nil {
+		return "", fmt.Errorf("close session %s: %w", args.SessionID, err)
+	}
+	return marshalPulseString(map[string]any{"session_id": args.SessionID, "closed": true})
+}
+
+// pulseTerminalKillTool kills a terminal shell, drops its history and removes
+// its shared tab entry. It refuses a terminal whose project this server is not
+// allowed to serve.
+func (h *Handler) pulseTerminalKillTool(raw json.RawMessage) (string, error) {
+	var args struct {
+		TerminalID string `json:"terminal_id"`
+	}
+	if err := decodePulseArgs(raw, &args); err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(args.TerminalID)
+	if id == "" {
+		return "", errors.New("terminal_id is required")
+	}
+	// Only a live terminal can be killed, and only when its project is one
+	// this server may serve. This stops the assistant from tearing down a
+	// shell in a project the operator never opened here.
+	sess := h.terminalSessions.lookup(id)
+	if sess == nil {
+		return "", fmt.Errorf("terminal %s is not live on this server", id)
+	}
+	allowed := false
+	for _, root := range h.allowedProjectRoots() {
+		if sess.project == root {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Errorf("terminal %s belongs to project %q, which is not a registered project root", id, sess.project)
+	}
+	project := sess.project
+	if _, err := pulseCall(http.MethodDelete, "/api/terminal/"+id, nil,
+		func(w http.ResponseWriter, r *http.Request) {
+			r.SetPathValue("id", id)
+			h.HandleTerminalKill(w, r)
+		}); err != nil {
+		return "", fmt.Errorf("kill terminal %s: %w", id, err)
+	}
+	// HandleTerminalKill only tears down the shell and its disk history; the
+	// shared tab list is owned by the client. Drop the entry here so every
+	// connected client stops showing the dead terminal.
+	if h.termTabsStore != nil {
+		if err := h.termTabsStore.RemoveTerminal(project, id); err != nil {
+			return "", fmt.Errorf("terminal %s killed but removing its tab entry failed: %w", id, err)
+		}
+		h.bus.Publish("terminal_tabs_changed", "", "", nil)
+	}
+	return marshalPulseString(map[string]any{"terminal_id": id, "killed": true})
 }

@@ -64,9 +64,31 @@ func newTestSession(h *Handler, id string, client agent.LLMClient) *agentSession
 		credVersion: auth.CredentialVersion(),
 	}
 	h.mu.Lock()
-	h.agents[id] = as
+	h.agents[agentKey(id)] = as
 	h.mu.Unlock()
 	return as
+}
+
+// TestAgentLookupCanonicalKey pins that h.agents is keyed by the canonical
+// session id: an agent stored under "claude-<id>" is found by the "claude:<id>"
+// ref form the web client sends, and an agent stored under the ref form is
+// found by the canonical id.
+func TestAgentLookupCanonicalKey(t *testing.T) {
+	h := NewHandler()
+	stored := &agentSession{}
+	h.replaceAgentSession("claude-abc", stored)
+	if got := h.lookupAgentSession("claude:abc"); got != stored {
+		t.Fatalf("lookup by claude: ref = %p, want the agent stored under claude-abc (%p)", got, stored)
+	}
+
+	viaRef := &agentSession{}
+	h.replaceAgentSession("claude:def", viaRef)
+	if got := h.lookupAgentSession("claude-def"); got != viaRef {
+		t.Fatalf("lookup by canonical id = %p, want the agent stored under claude:def (%p)", got, viaRef)
+	}
+	if n := len(h.agents); n != 2 {
+		t.Fatalf("h.agents has %d entries, want 2 (one per session)", n)
+	}
 }
 
 func chatRequest(t *testing.T, h *Handler, body map[string]any) *httptest.ResponseRecorder {

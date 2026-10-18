@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/projects"
 )
 
@@ -103,4 +104,59 @@ func (h *Handler) HandleRemoteRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// HandleRemoteSync re-pushes the local auth-profile store and global config
+// files to an already-connected remote host. force=true bypasses the
+// per-host skip-if-unchanged cache.
+func (h *Handler) HandleRemoteSync(w http.ResponseWriter, r *http.Request) {
+	p, status, message := h.remoteLifecycleProject(r)
+	if status != 0 {
+		writeError(w, status, message)
+		return
+	}
+	if !h.requireRemoteHosts(w) {
+		return
+	}
+	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
+	if err := h.remoteHosts.SyncHost(p.Host, p.RemotePort, force); err != nil {
+		log.Printf("remote sync: %s failed: %v", p.Host, err)
+		writeRemoteLifecycleError(w, err, "remote-sync")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "synced"})
+}
+
+// SyncConnectedRemoteHosts fans out a cache-aware sync to every connected
+// remote host in a background goroutine. Best-effort; errors are logged.
+// Safe to call from config/auth save paths; it never blocks the caller.
+//
+// Runs are single-flight: a call made while a sync is in progress marks one
+// follow-up run (so the latest save is still pushed) instead of starting an
+// overlapping sync, however fast saves arrive.
+func (h *Handler) SyncConnectedRemoteHosts() {
+	if h.remoteHosts == nil {
+		return
+	}
+	h.remoteSyncMu.Lock()
+	if h.remoteSyncRunning {
+		h.remoteSyncPending = true
+		h.remoteSyncMu.Unlock()
+		return
+	}
+	h.remoteSyncRunning = true
+	h.remoteSyncMu.Unlock()
+	crashguard.Go(func() {
+		for {
+			h.remoteHosts.SyncConnectedHosts()
+			h.remoteSyncMu.Lock()
+			if !h.remoteSyncPending {
+				h.remoteSyncRunning = false
+				h.remoteSyncMu.Unlock()
+				return
+			}
+			h.remoteSyncPending = false
+			h.remoteSyncMu.Unlock()
+		}
+	})
 }

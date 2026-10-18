@@ -248,3 +248,35 @@ func TestSetRejectsEmptyKey(t *testing.T) {
 		t.Fatal("Set with a blank key must error rather than write a junk entry")
 	}
 }
+
+// RemoveTerminal must filter into a new slice: the slice Get hands out shares
+// the cache's backing array, so an in-place filter would corrupt it.
+func TestRemoveTerminalDoesNotMutateGetSnapshotAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "terminals.json")
+	s := mustStore(t, path)
+	if err := s.Set("/srv/app", ProjectTerminals{Terminals: list("a", "b", "c")}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	before := s.Get("/srv/app")
+	if err := s.RemoveTerminal("/srv/app", "b"); err != nil {
+		t.Fatalf("RemoveTerminal: %v", err)
+	}
+	if got := idsOf(before); len(got) != 3 || got[1] != "b" {
+		t.Fatalf("earlier Get snapshot mutated: %v", got)
+	}
+	if got := idsOf(mustStore(t, path).Get("/srv/app")); len(got) != 2 || got[0] != "a" || got[1] != "c" {
+		t.Fatalf("persisted list = %v, want [a c]", got)
+	}
+	if err := s.RemoveTerminal("/srv/app", "missing"); err != nil {
+		t.Fatalf("missing id must be a no-op: %v", err)
+	}
+	if err := s.RemoveTerminal("/srv/app", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveTerminal("/srv/app", "c"); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustStore(t, path).Get("/srv/app"); len(got.Terminals) != 0 {
+		t.Fatalf("last removal should clear project, got %v", idsOf(got))
+	}
+}

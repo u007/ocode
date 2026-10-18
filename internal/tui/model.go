@@ -1645,8 +1645,10 @@ type model struct {
 	pendingJobMsgs           []message
 	expandedToolOutputs      map[int]bool
 	toolOutputRegions        []toolOutputRegion
-	expandedThinking         map[int]bool
+	expandedThinking         map[int]bool // manual click choices only; absent = follow chatDisplay
 	thinkingRegions          []toolOutputRegion
+	chatVerbosity            config.ChatVerbosityConfig // shared display intent, shown by /display
+	chatDisplay              config.ChatDisplayPolicy   // effective renderer policy for thinking blocks
 	expandedCompaction       map[int]bool
 	compactionRegions        []toolOutputRegion
 	dotFrame                 int
@@ -2730,6 +2732,7 @@ func newModel(opts ...RunOptions) model {
 		a.SetChangesSession(o.SessionID)
 	}
 
+	chatVerbosity, chatDisplay := resolveChatDisplay(cfg)
 	m := model{
 		viewport: vp,
 		input:    ta,
@@ -2769,6 +2772,8 @@ func newModel(opts ...RunOptions) model {
 		}(),
 		ocrEnabledSet: true,
 		config:        cfg,
+		chatVerbosity: chatVerbosity,
+		chatDisplay:   chatDisplay,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the
 		// Claude Code integration only when running inside a VS Code terminal.
 		agent:     a,
@@ -8520,7 +8525,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 		if idx, ok := m.thinkingForClick(mouse); ok {
-			m.expandedThinking[idx] = !m.expandedThinking[idx]
+			// Flip the effective state, not the stored choice, so the click always changes what is on screen.
+			m.expandedThinking[idx] = !m.thinkingExpanded(idx, m.latestThinkingTurn())
 			m.renderTranscript()
 			return m, nil, true
 		}
@@ -9207,7 +9213,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// valid. The popup blocks input only until dismissed.
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
 		cmd == "/btw" || cmd == "/by-the-way" ||
-		cmd == "/help" || cmd == "/thinking" || cmd == "/details" || cmd == "/sound" ||
+		cmd == "/help" || cmd == "/thinking" || cmd == "/display" || cmd == "/details" || cmd == "/sound" ||
 		cmd == "/login" ||
 		cmd == "/logout" ||
 		cmd == "/sync-logout" ||
@@ -11434,6 +11440,65 @@ func (m *model) handleThinkingCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Thinking blocks are now %s.", status)})
 }
 
+// handleDisplayCmd shows or sets the shared chat display preset. Setting it
+// persists the preset to chat_verbosity and re-resolves the policy at once, so
+// thinking blocks without a manual click pick up the new defaults. Per-category
+// overrides are kept; only the preset changes.
+func (m *model) handleDisplayCmd(args []string) {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: m.displayStatusText()})
+		return
+	}
+	preset := strings.ToLower(strings.TrimSpace(args[0]))
+	switch preset {
+	case config.ChatVerbosityFull, config.ChatVerbosityBalanced, config.ChatVerbosityQuiet:
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown display preset %q. Use one of: full, balanced, quiet.", args[0])})
+		return
+	}
+
+	ocfg, err := config.LoadOcodeConfigCopy()
+	if err != nil {
+		log.Printf("display: load chat verbosity: %v", err)
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Could not load the display config: %v", err)})
+		return
+	}
+	verbosity := ocfg.ChatVerbosity
+	verbosity.Preset = preset
+	policy, err := config.ResolveChatVerbosityPolicy(verbosity)
+	if err != nil {
+		log.Printf("display: resolve chat verbosity: %v", err)
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Could not apply display preset %s: %v", preset, err)})
+		return
+	}
+	if err := config.SaveOcodeChatVerbosity(verbosity); err != nil {
+		log.Printf("display: save chat verbosity: %v", err)
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Could not save display preset %s: %v", preset, err)})
+		return
+	}
+	m.chatVerbosity = verbosity
+	m.chatDisplay = policy
+	if m.config != nil {
+		m.config.Ocode.ChatVerbosity = verbosity
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Display preset set to %s.", preset)})
+	m.rerenderTranscriptAndMaybeScroll()
+}
+
+// displayStatusText reports the preset and the effective thinking policy.
+func (m model) displayStatusText() string {
+	latest := m.chatDisplay.LatestThinking
+	if latest == config.ChatDisplayAuto {
+		latest = "auto (expanded until the answer starts)"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Display preset: %s\n", m.chatVerbosity.Preset)
+	fmt.Fprintf(&b, "Older thinking: %s\n", m.chatDisplay.OlderThinking)
+	fmt.Fprintf(&b, "Latest thinking: %s\n", latest)
+	b.WriteString("Set with: /display full|balanced|quiet")
+	return b.String()
+}
+
 // handleEffortCmd shows or sets the reasoning effort (thinking budget) level.
 // With no args it prints the current level and the accepted parameters; with a
 // level argument it sets the level (and persists it). Unlike the ctrl+d shortcut
@@ -11588,6 +11653,7 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 			restoreTodoState(sess.Metadata)
 			m.restoreSessionMetadata(sess.Metadata)
 			m.messages = []message{}
+			m.resetThinkingChoices()
 			m.clearPermAskState()
 			m.clearQuestionAskState()
 			m.resetTranscriptWindow()
@@ -11999,6 +12065,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 
 	m.messages = []message{}
+	m.resetThinkingChoices()
 	m.clearPermAskState()
 	m.clearQuestionAskState()
 	m.invalidateDelayedChatInput()
@@ -14960,15 +15027,16 @@ func (m *model) appendAgentMessage(am agent.Message) {
 		}
 		if am.ReasoningContent != "" && m.showThinking {
 			if m.streamingThinkingIdx >= 0 && m.streamingThinkingIdx < len(m.messages) && m.messages[m.streamingThinkingIdx].role == roleThinking {
-				// Streamed live — replace partial buffer with the canonical text
-				// and collapse to last-3-lines view now that streaming is done.
+				// Streamed live — replace partial buffer with the canonical text.
+				// Its expanded state still follows chatDisplay unless the user clicked it.
 				m.messages[m.streamingThinkingIdx].text = am.ReasoningContent
-				delete(m.expandedThinking, m.streamingThinkingIdx)
 			} else {
 				m.messages = append(m.messages, message{
 					role: roleThinking,
 					text: am.ReasoningContent,
 				})
+				// A fresh block starts from the policy: an index can be reused after /new.
+				delete(m.expandedThinking, len(m.messages)-1)
 			}
 		}
 		m.streamingThinkingIdx = -1
@@ -16513,6 +16581,7 @@ func (m *model) commitRCRequestRewind(req server.RCRequest) (int, error) {
 	m.clearPermAskState()
 	m.clearQuestionAskState()
 	m.messages = nil
+	m.resetThinkingChoices()
 	for _, am := range result.KeptPrefix {
 		copyMsg := am
 		m.messages = append(m.messages, message{
@@ -17747,6 +17816,85 @@ func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
 	return 0, false
 }
 
+// thinkingTurnState describes the latest turn's thinking for one transcript
+// render pass. latestIdx is the last non-empty thinking block after the last
+// user message (-1 when there is none); answerStarted reports whether answer
+// text follows that block in the same turn.
+type thinkingTurnState struct {
+	latestIdx     int
+	answerStarted bool
+}
+
+// latestThinkingTurn scans back from the tail to the last user message, so it
+// costs one turn's worth of messages rather than the whole transcript.
+func (m model) latestThinkingTurn() thinkingTurnState {
+	state := thinkingTurnState{latestIdx: -1}
+	answerAfter := false
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		if msg.role == roleUser {
+			break
+		}
+		if msg.role == roleThinking && strings.TrimSpace(msg.text) != "" {
+			state.latestIdx = i
+			state.answerStarted = answerAfter
+			break
+		}
+		if isAnswerMessage(msg) {
+			answerAfter = true
+		}
+	}
+	return state
+}
+
+// isAnswerMessage reports whether msg is visible assistant answer text. The
+// text of a tool-call message also carries the call hints, so the raw content
+// decides. Tool results, compaction summaries and local notices (raw == nil)
+// are not answers.
+func isAnswerMessage(msg message) bool {
+	return msg.role == roleAssistant && msg.raw != nil && msg.raw.Role == "assistant" && strings.TrimSpace(msg.raw.Content) != ""
+}
+
+// resetThinkingChoices drops manual click choices when the transcript is
+// replaced. The map is keyed by message index, and a new transcript reuses
+// those indices, so a stale choice would otherwise override the policy.
+func (m *model) resetThinkingChoices() {
+	m.expandedThinking = make(map[int]bool)
+}
+
+// thinkingExpanded is the effective state of the thinking block at i. A manual
+// click choice wins; otherwise chatDisplay decides. Only "auto" depends on the
+// turn state, and only for the latest block.
+func (m model) thinkingExpanded(i int, turn thinkingTurnState) bool {
+	if manual, ok := m.expandedThinking[i]; ok {
+		return manual
+	}
+	if i != turn.latestIdx {
+		return m.chatDisplay.OlderThinking == config.ChatDisplayExpanded
+	}
+	if m.chatDisplay.LatestThinking == config.ChatDisplayAuto {
+		return !turn.answerStarted
+	}
+	return m.chatDisplay.LatestThinking == config.ChatDisplayExpanded
+}
+
+// resolveChatDisplay loads the shared chat_verbosity intent and its effective
+// renderer policy. An unset intent resolves to the documented defaults inside
+// ResolveChatVerbosityPolicy. An invalid value is logged; the policy is then
+// left zero, so thinking blocks render collapsed until /display sets a preset.
+func resolveChatDisplay(cfg *config.Config) (config.ChatVerbosityConfig, config.ChatDisplayPolicy) {
+	verbosity := config.ChatVerbosityConfig{}
+	if cfg != nil {
+		verbosity = cfg.Ocode.ChatVerbosity
+	}
+	verbosity = config.NormalizeChatVerbosityConfig(verbosity)
+	policy, err := config.ResolveChatVerbosityPolicy(verbosity)
+	if err != nil {
+		log.Printf("chat display: %v", err)
+	}
+	return verbosity, policy
+}
+
 func (m model) thinkingForClick(mouse tea.Mouse) (int, bool) {
 	// Exclude the scrollbar column and the right-edge chrome to its right. These
 	// hit-tests are Y-only, so without this an X bound a release on the scrollbar
@@ -18165,7 +18313,7 @@ type msgRenderCacheEntry struct {
 // pays for the expensive lipgloss/markdown render. The returned block is
 // byte-identical to the inline switch it replaced, so the caller's heightNow /
 // region bookkeeping is unaffected.
-func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]string) msgRenderCacheEntry {
+func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]string, thinkingTurn thinkingTurnState) msgRenderCacheEntry {
 	width := m.viewport.Width()
 
 	// Determine kind + key inputs without rendering.
@@ -18181,7 +18329,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 			return msgRenderCacheEntry{kind: blockKindPlain, wrapped: []string{""}, stripped: []string{""}}
 		}
 		kind = blockKindThinking
-		expanded = m.expandedThinking[i]
+		expanded = m.thinkingExpanded(i, thinkingTurn)
 	case roleAssistant:
 		if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
 			_, isQuestion := parseQuestionPrompt(msg.raw.Content)
@@ -18511,6 +18659,7 @@ func (m *model) renderTranscript() {
 		m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 		nlAcc = 1
 	}
+	thinkingTurn := m.latestThinkingTurn()
 	firstRendered := true
 	for i := windowStart; i < len(m.messages); i++ {
 		msg := m.messages[i]
@@ -18521,7 +18670,7 @@ func (m *model) renderTranscript() {
 			m.rawTranscriptCont = append(m.rawTranscriptCont, false)
 		}
 		firstRendered = false
-		entry := m.renderMessageBlock(i, msg, toolNames)
+		entry := m.renderMessageBlock(i, msg, toolNames, thinkingTurn)
 		startLine := nlAcc
 		m.transcriptMsgStartLine[i] = startLine
 		nlAcc += len(entry.wrapped)
@@ -19364,6 +19513,8 @@ func (m *model) applyThinkingDelta(kind, text string) {
 		if m.expandedThinking == nil {
 			m.expandedThinking = make(map[int]bool)
 		}
+		// A fresh block starts from the policy: an index can be reused after /new.
+		delete(m.expandedThinking, m.streamingThinkingIdx)
 		m.rerenderTranscriptAndMaybeScroll()
 		m.lastDeltaRender = time.Now()
 		return

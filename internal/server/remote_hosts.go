@@ -34,6 +34,10 @@ type remoteHostWorkspace interface {
 	// remote reports no browse origin). It is the one place that encodes the
 	// same-port-number tunnel contract; handlers must not re-derive it.
 	BrowseURL() string
+	// SyncConfig pushes the local auth-profile store and global config
+	// files to the already-connected remote host. force bypasses the
+	// per-host skip-if-unchanged cache.
+	SyncConfig(force bool) error
 }
 
 // remoteHostStatus is the JSON body of the remote host lifecycle endpoints.
@@ -198,6 +202,35 @@ func (reg *remoteHostRegistry) isRegistered(host string, port int, path string) 
 // override).
 func (reg *remoteHostRegistry) workspaceFor(host, path string) (remoteHostWorkspace, error) {
 	return reg.workspaceForPort(host, path, 0)
+}
+
+// connectedWorkspace returns the workspace for a connection ONLY if it is
+// already connected. It never dials, so callers that sit outside authMiddleware
+// (the browse proxy) cannot be used to trigger SSH connects or provisioning.
+// port follows workspaceForPort's rule: non-zero overrides the parsed target's.
+func (reg *remoteHostRegistry) connectedWorkspace(host string, port int) (remoteHostWorkspace, bool) {
+	target, err := remote.ParseTarget(host)
+	if err != nil {
+		return nil, false
+	}
+	if port > 0 {
+		target.Port = port
+	}
+	if err := target.Validate(); err != nil {
+		return nil, false
+	}
+	reg.mu.Lock()
+	e, ok := reg.byConn[remoteConnectionKey(host, target.Port)]
+	reg.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.connected || e.workspace == nil {
+		return nil, false
+	}
+	return e.workspace, true
 }
 
 // workspaceForPort is like workspaceFor but also sets the SSH port on the
@@ -615,4 +648,49 @@ func (reg *remoteHostRegistry) proxyFor(host string, port int) (*httputil.Revers
 	p := e.proxy
 	e.mu.Unlock()
 	return p, p != nil
+}
+
+// SyncHost pushes local config/auth to one connected remote host. force
+// bypasses the per-host skip-if-unchanged cache. Returns an error if the
+// host is not currently connected.
+func (reg *remoteHostRegistry) SyncHost(host string, port int, force bool) error {
+	reg.mu.Lock()
+	entry, ok := reg.byConn[remoteConnectionKey(host, port)]
+	reg.mu.Unlock()
+	if !ok || entry == nil || !entry.connected || entry.workspace == nil {
+		return fmt.Errorf("remote host not connected: %s", host)
+	}
+	entry.mu.Lock()
+	ws := entry.workspace
+	entry.mu.Unlock()
+	return ws.SyncConfig(force)
+}
+
+// SyncConnectedHosts fans out a cache-aware sync to every currently
+// connected remote host. Best-effort: per-host errors are logged and do
+// not abort the fan-out. Used to propagate local config/auth changes to
+// remote servers without a reconnect.
+func (reg *remoteHostRegistry) SyncConnectedHosts() {
+	reg.mu.Lock()
+	type item struct {
+		key string
+		ws  remoteHostWorkspace
+	}
+	items := make([]item, 0, len(reg.byConn))
+	for key, e := range reg.byConn {
+		if e == nil || !e.connected || e.workspace == nil {
+			continue
+		}
+		e.mu.Lock()
+		ws := e.workspace
+		e.mu.Unlock()
+		items = append(items, item{key: key, ws: ws})
+	}
+	reg.mu.Unlock()
+
+	for _, it := range items {
+		if err := it.ws.SyncConfig(false); err != nil {
+			log.Printf("remote sync: %s failed: %v", it.key, err)
+		}
+	}
 }

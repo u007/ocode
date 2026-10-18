@@ -1,9 +1,13 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -42,6 +46,10 @@ func TestCredential(ctx context.Context, id string) error {
 		return probeBearer(ctx, "https://ollama.com/api/usage", ResolveKey(id))
 	case "runinfra":
 		return probeBearer(ctx, "https://api.runinfra.ai/v1/models", ResolveKey(id))
+	case "opencode":
+		return probeOpenAIInference(ctx, "https://opencode.ai/zen/v1", ResolveKey(id), true)
+	case "opencode-go":
+		return probeOpenAIInference(ctx, "https://opencode.ai/zen/go/v1", ResolveKey(id), true)
 	case "copilot":
 		cred, ok := Get(id)
 		if !ok || cred.AccessToken == "" {
@@ -57,8 +65,13 @@ func TestCredential(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	// Generic openai-compatible providers: try /models with bearer.
+	// Generic openai-compatible providers: probe /models (and a single
+	// inference) when a base URL is known; otherwise fall back to "assume ok"
+	// so providers without a known endpoint are not falsely rejected.
 	if k := ResolveKey(id); k != "" {
+		if bu := GetBaseURL(id); bu != "" {
+			return probeOpenAIInference(ctx, bu, k, false)
+		}
 		return nil // unknown endpoint — assume ok rather than fail
 	}
 	return fmt.Errorf("no credential")
@@ -122,4 +135,103 @@ func probeAnthropicOAuth(ctx context.Context, token string) error {
 		return fmt.Errorf("probe returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// probeOpenAIInference verifies a credential by sending a single minimal
+// chat-completion request (one user message, max_tokens=1) and failing on any
+// non-2xx response. It first lists models to pick a usable model id, since
+// providers reject requests that name an unknown model even when the key is
+// valid. Returns an error describing the failure.
+func probeOpenAIInference(ctx context.Context, baseURL, key string, sessionHeader bool) error {
+	if key == "" {
+		return fmt.Errorf("no credential")
+	}
+	base := strings.TrimRight(baseURL, "/")
+	// Pick a model from /models.
+	req, err := http.NewRequestWithContext(ctx, "GET", base+"/models", nil)
+	if err != nil {
+		return fmt.Errorf("build models request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	if sessionHeader {
+		req.Header.Set("X-Opencode-Session", "ocode-auth-probe")
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("models request: %w", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("read models response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("models probe returned %d", resp.StatusCode)
+	}
+	// Parse model ids from either OpenAI shape.
+	var m struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []struct {
+			ID string `json:"id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return fmt.Errorf("parse models response: %w", err)
+	}
+	var ids []string
+	for _, d := range m.Data {
+		ids = append(ids, d.ID)
+	}
+	for _, d := range m.Models {
+		ids = append(ids, d.ID)
+	}
+	modelID := firstChatModelID(ids)
+	if modelID == "" {
+		return fmt.Errorf("models probe listed no chat model to verify the credential against")
+	}
+	// Send a single-message completion.
+	payload := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":1}`, modelID)
+	creq, err := http.NewRequestWithContext(ctx, "POST", base+"/chat/completions", bytes.NewReader([]byte(payload)))
+	if err != nil {
+		return fmt.Errorf("build completion request: %w", err)
+	}
+	creq.Header.Set("Authorization", "Bearer "+key)
+	creq.Header.Set("Content-Type", "application/json")
+	if sessionHeader {
+		creq.Header.Set("X-Opencode-Session", "ocode-auth-probe")
+	}
+	cresp, err := (&http.Client{Timeout: 30 * time.Second}).Do(creq)
+	if err != nil {
+		return fmt.Errorf("completion request: %w", err)
+	}
+	defer cresp.Body.Close()
+	if cresp.StatusCode >= 400 {
+		return fmt.Errorf("inference probe returned %d", cresp.StatusCode)
+	}
+	return nil
+}
+
+// nonChatModelHints are id fragments of models that cannot serve
+// /chat/completions; probing one would report a valid key as rejected.
+var nonChatModelHints = []string{"embed", "whisper", "tts", "transcribe", "moderation", "rerank", "dall-e", "image", "audio", "speech"}
+
+// firstChatModelID returns the first id that does not look like a non-chat
+// model, or "" when every listed id does.
+func firstChatModelID(ids []string) string {
+	for _, id := range ids {
+		lower := strings.ToLower(id)
+		chat := id != ""
+		for _, hint := range nonChatModelHints {
+			if strings.Contains(lower, hint) {
+				chat = false
+				break
+			}
+		}
+		if chat {
+			return id
+		}
+	}
+	return ""
 }

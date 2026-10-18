@@ -10,13 +10,14 @@
  * locked TanStack source and by the structural assertions below (the live tail
  * is inline inside the scroll container, visually merged with history).
  */
-import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
 import { render, screen, fireEvent, act, within, cleanup } from "@testing-library/react";
 import { useLayoutEffect, useEffect, useRef } from "react";
 import ChatPanel from "./ChatPanel";
 import { ChatProvider, useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { dropPrefetchedSession, prefetchSession } from "../../lib/sessionPrefetch";
-import type { Message } from "../../api/types";
+import { __resetChatVerbosityForTests } from "../../lib/chatVerbosity";
+import type { ChatVerbosityConfig, Message } from "../../api/types";
 
 // --- Mock the API so the initial load + prepend pagination are controllable.
 const hoisted = vi.hoisted(() => ({
@@ -2091,5 +2092,151 @@ describe("ChatPanel keeps an un-pinned reader's row across window slides", () =>
     });
     await advanceFrame();
     expect(f.get()).toBe(300);
+  });
+});
+
+describe("ChatPanel latest thinking under the auto policy", () => {
+  const verbosityConfig = (preset: ChatVerbosityConfig["preset"]): ChatVerbosityConfig => ({
+    preset,
+    overrides: {
+      older_thinking: "preset",
+      latest_thinking: "preset",
+      tool_calls: "preset",
+      tool_output: "preset",
+      activity_notices: "preset",
+    },
+  });
+
+  beforeEach(() => {
+    __resetChatVerbosityForTests();
+    vi.mocked(api.getChatVerbosityConfig).mockResolvedValue(verbosityConfig("quiet"));
+  });
+
+  afterEach(() => {
+    __resetChatVerbosityForTests();
+    vi.mocked(api.getChatVerbosityConfig).mockResolvedValue(verbosityConfig("full"));
+  });
+
+  const thinkingToggle = () => screen.getByRole("button", { name: /🧠 Thinking/ });
+
+  it("collapses a committed latest block once its answer arrives", async () => {
+    const sessionId = "sess-auto-committed";
+    const base: Message[] = [
+      mk("user", "plan it"),
+      { role: "assistant", content: "", reasoning_content: "committed reasoning" },
+    ];
+    let dispatch: (a: unknown) => void = () => {};
+    render(
+      <ChatProvider>
+        <DispatchCapture onCapture={(d) => (dispatch = d)} />
+        <LiveSeed sessionId={sessionId} messages={base} />
+        <ChatPanel sessionId={sessionId} />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+    expect(thinkingToggle()).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("committed reasoning")).toBeInTheDocument();
+
+    act(() => {
+      dispatch({ type: "SET_MESSAGES", sessionId, messages: [...base, mk("assistant", "The answer.")] });
+    });
+    await tick();
+    await flushRAF();
+    expect(thinkingToggle()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("committed reasoning")).not.toBeInTheDocument();
+    expect(screen.getByText("The answer.")).toBeInTheDocument();
+  });
+
+  it("keeps a committed latest block open through a tool-call-only follow-up", async () => {
+    const sessionId = "sess-auto-tool-only";
+    const base: Message[] = [
+      mk("user", "read it"),
+      {
+        role: "assistant",
+        content: "",
+        reasoning_content: "tool reasoning",
+        tool_calls: [{ id: "call-f1", function: { name: "read", arguments: '{"path":"a.go"}' } }],
+      },
+      { role: "tool", content: "file body", tool_call_id: "call-f1" },
+    ];
+    let dispatch: (a: unknown) => void = () => {};
+    render(
+      <ChatProvider>
+        <DispatchCapture onCapture={(d) => (dispatch = d)} />
+        <LiveSeed sessionId={sessionId} messages={base} />
+        <ChatPanel sessionId={sessionId} />
+      </ChatProvider>,
+    );
+    await tick();
+    await flushRAF();
+    expect(thinkingToggle()).toHaveAttribute("aria-expanded", "true");
+
+    act(() => {
+      dispatch({
+        type: "SET_MESSAGES",
+        sessionId,
+        messages: [
+          ...base,
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [{ id: "call-f2", function: { name: "grep", arguments: '{"pattern":"x"}' } }],
+          },
+          { role: "tool", content: "no match", tool_call_id: "call-f2" },
+        ],
+      });
+    });
+    await tick();
+    await flushRAF();
+    expect(thinkingToggle()).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("tool reasoning")).toBeInTheDocument();
+  });
+
+  it("collapses a live latest block once answer text streams in", async () => {
+    const sessionId = "sess-auto-live";
+    let dispatch: (a: unknown) => void = () => {};
+    render(
+      <ChatProvider>
+        <DispatchCapture onCapture={(d) => (dispatch = d)} />
+        <LiveSeed sessionId={sessionId} messages={[mk("user", "hi")]} />
+        <ChatPanel sessionId={sessionId} />
+      </ChatProvider>,
+    );
+    await tick();
+    act(() => {
+      dispatch({ type: "LIVE_DELTA", sessionId, kind: "thinking", delta: "live reasoning" });
+    });
+    await tick();
+    expect(thinkingToggle()).toHaveAttribute("aria-expanded", "true");
+
+    act(() => {
+      dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: "live answer" });
+    });
+    await tick();
+    expect(thinkingToggle()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("live reasoning")).not.toBeInTheDocument();
+    expect(screen.getByText(/live answer/)).toBeInTheDocument();
+  });
+
+  it("keeps a live latest block open for whitespace-only text and for a streamed tool call", async () => {
+    const sessionId = "sess-auto-live-noop";
+    let dispatch: (a: unknown) => void = () => {};
+    render(
+      <ChatProvider>
+        <DispatchCapture onCapture={(d) => (dispatch = d)} />
+        <LiveSeed sessionId={sessionId} messages={[mk("user", "hi")]} />
+        <ChatPanel sessionId={sessionId} />
+      </ChatProvider>,
+    );
+    await tick();
+    act(() => {
+      dispatch({ type: "LIVE_DELTA", sessionId, kind: "thinking", delta: "live reasoning" });
+      dispatch({ type: "LIVE_DELTA", sessionId, kind: "text", delta: "\n\n" });
+      dispatch({ type: "LIVE_TOOL_START", sessionId, tool: "read", callId: "live-call", command: '{"path":"a.go"}' });
+    });
+    await tick();
+    expect(thinkingToggle()).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("live reasoning")).toBeInTheDocument();
   });
 });

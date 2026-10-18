@@ -452,6 +452,174 @@ func TestListRefsForDirIsOcodeOnly(t *testing.T) {
 	}
 }
 
+func TestOpenClaudeCloneForDirClonesOnFirstOpen(t *testing.T) {
+	tmpHome := t.TempDir()
+	projectDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHomeTree(t, tmpHome)
+
+	claudeDir := filepath.Join(tmpHome, ".claude", "projects", claudeProjectSlug(projectDir))
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join([]string{
+		`{"type":"user","message":{"role":"user","content":"hello from claude"},"timestamp":"2026-05-16T10:00:00Z"}`,
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"hello back"}]},"timestamp":"2026-05-16T10:01:00Z"}`,
+	}, "\n") + "\n"
+	sourcePath := filepath.Join(claudeDir, "claude-2.jsonl")
+	if err := os.WriteFile(sourcePath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	exists, err := ExistsForDir(projectDir, "claude-claude-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("clone must not exist before the first open")
+	}
+
+	if err := OpenClaudeCloneForDir(projectDir, "claude:claude-2"); err != nil {
+		t.Fatalf("OpenClaudeCloneForDir claude: id on first open: %v", err)
+	}
+	sess, err := LoadForDir(projectDir, "claude:claude-2")
+	if err != nil {
+		t.Fatalf("load clone: %v", err)
+	}
+	if sess.ID != "claude-claude-2" {
+		t.Fatalf("expected cloned session id, got %s", sess.ID)
+	}
+	if len(sess.Messages) != 2 || sess.Messages[0].Content != "hello from claude" {
+		t.Fatalf("unexpected cloned messages: %#v", sess.Messages)
+	}
+	exists, err = ExistsForDir(projectDir, "claude-claude-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("first open must persist the clone into the project's storage")
+	}
+
+	// Once cloned, reopening reads the clone, not the Claude source.
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadForDir(projectDir, "claude:claude-2"); err != nil {
+		t.Fatalf("reopen after clone: %v", err)
+	}
+
+	// LoadForDir is read-only and must not clone: a project with no clone and
+	// no Claude transcript cannot open the id either way.
+	if _, err := LoadForDir(otherDir, "claude:claude-2"); err == nil {
+		t.Fatal("LoadForDir must not clone from a project that has no transcript")
+	}
+	if err := OpenClaudeCloneForDir(otherDir, "claude:claude-2"); err == nil {
+		t.Fatal("expected error opening a Claude session from a project that has no transcript for it")
+	}
+}
+
+// writeClaudeSourceForTest puts a minimal Claude Code transcript for id under
+// the Claude project dir that projectDir maps to, and returns its path.
+func writeClaudeSourceForTest(t *testing.T, tmpHome, projectDir, id string) string {
+	t.Helper()
+	claudeDir := filepath.Join(tmpHome, ".claude", "projects", claudeProjectSlug(projectDir))
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"type":"user","message":{"role":"user","content":"hello from claude"},"timestamp":"2026-05-16T10:00:00Z"}` + "\n"
+	path := filepath.Join(claudeDir, id+".jsonl")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// ClaudeSourceExistsForDir is a pure probe: it reports the source transcript
+// and never creates an ocode clone.
+func TestClaudeSourceExistsForDirDoesNotClone(t *testing.T) {
+	tmpHome := t.TempDir()
+	projectDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHomeTree(t, tmpHome)
+	writeClaudeSourceForTest(t, tmpHome, projectDir, "claude-2")
+
+	ok, err := ClaudeSourceExistsForDir(projectDir, "claude:claude-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("source transcript must be reported for its own project")
+	}
+	exists, err := ExistsForDir(projectDir, "claude-claude-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("probing the source must not create the clone")
+	}
+	ok, err = ClaudeSourceExistsForDir(otherDir, "claude:claude-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("a project without the transcript must not report it")
+	}
+}
+
+// OpenClaudeCloneForDir clones on the first open only. Later opens are a
+// stat, and an ocode-native id is a no-op.
+func TestOpenClaudeCloneForDirClonesOnceAndSkipsOcodeIDs(t *testing.T) {
+	tmpHome := t.TempDir()
+	projectDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHomeTree(t, tmpHome)
+	sourcePath := writeClaudeSourceForTest(t, tmpHome, projectDir, "claude-2")
+
+	if err := OpenClaudeCloneForDir(projectDir, "claude:claude-2"); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	exists, err := ExistsForDir(projectDir, "claude-claude-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("first open must persist the clone")
+	}
+
+	// The clone now answers the open; the source is no longer needed.
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := OpenClaudeCloneForDir(projectDir, "claude:claude-2"); err != nil {
+		t.Fatalf("reopen after clone: %v", err)
+	}
+
+	if err := OpenClaudeCloneForDir(projectDir, "ses_native"); err != nil {
+		t.Fatalf("ocode id must be a no-op: %v", err)
+	}
+	exists, err = ExistsForDir(projectDir, "ses_native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("an ocode-native id must not create a clone")
+	}
+}
+
 func TestCloneClaudeSessionSavesOcodeSession(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
@@ -1580,5 +1748,158 @@ func TestSaveHealsOversizedStoredTitle(t *testing.T) {
 	}
 	if got := readStoredTitleRaw(t, dir, id); len([]rune(got)) > MaxStoredTitleRunes {
 		t.Fatalf("healed title = %d runes, want <= %d (a stored oversized title must be re-bounded on the next save)", len([]rune(got)), MaxStoredTitleRunes)
+	}
+}
+
+// TestCanonicalIDPersistenceClosesTheSplit pins the H5 fix: a raw "claude:<id>"
+// handed to the persistence/revision entry points must land on the SAME file
+// the loader reads ("claude-<id>"). Before the fix, AppendUserMessageForDir
+// wrote claude:<id>.sqlite while LoadForDir read claude-<id>.sqlite, silently
+// orphaning the appended turn.
+func TestCanonicalIDPersistenceClosesTheSplit(t *testing.T) {
+	if got := CanonicalID("claude:abc"); got != "claude-abc" {
+		t.Fatalf("CanonicalID(claude:abc) = %q, want claude-abc", got)
+	}
+	if got := CanonicalID("ses_123"); got != "ses_123" {
+		t.Fatalf("CanonicalID must leave a plain id unchanged, got %q", got)
+	}
+	if got := CanonicalID("claude-abc"); got != "claude-abc" {
+		t.Fatalf("CanonicalID must be idempotent, got %q", got)
+	}
+
+	tmpHome := t.TempDir()
+	projectDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHomeTree(t, tmpHome)
+	claudeDir := filepath.Join(tmpHome, ".claude", "projects", claudeProjectSlug(projectDir))
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-05-16T10:00:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(claudeDir, "c2.jsonl"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := OpenClaudeCloneForDir(projectDir, "claude:c2"); err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+
+	// Append using the RAW ref form, exactly as a client id would arrive.
+	if err := AppendUserMessageForDir(projectDir, "claude:c2", "SECOND"); err != nil {
+		t.Fatalf("append with raw claude: id: %v", err)
+	}
+
+	s, err := LoadForDir(projectDir, "claude:c2")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(s.Messages) != 2 {
+		t.Fatalf("appended message was orphaned: got %d messages, want 2 (%#v)", len(s.Messages), s.Messages)
+	}
+
+	// No stray file under the raw id may exist.
+	dir, err := GetStorageDirForPath(projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.Contains(e.Name(), "claude:") {
+			t.Fatalf("stray raw-id file written: %s", e.Name())
+		}
+	}
+}
+
+// TestLiveWriteCanonicalIDRoundTrip pins that the async live-write path keys
+// its worker and its file on the canonical id: a snapshot enqueued under the
+// raw "claude:<id>" must be flushed by "claude-<id>" and loaded under either
+// form, and the reverse direction must hold too.
+func TestLiveWriteCanonicalIDRoundTrip(t *testing.T) {
+	tmpHome := t.TempDir()
+	projectDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHomeTree(t, tmpHome)
+
+	msgs := []agent.Message{{Role: "user", Content: "async hello"}}
+	if err := SaveAsyncForDir(projectDir, "claude:live1", "Live", msgs, nil); err != nil {
+		t.Fatalf("save async under raw claude: id: %v", err)
+	}
+	if err := FlushForDir(projectDir, "claude-live1", 5*time.Second); err != nil {
+		t.Fatalf("flush under canonical id: %v", err)
+	}
+	if ok, err := ExistsForDir(projectDir, "claude:live1"); err != nil || !ok {
+		t.Fatalf("ExistsForDir(claude:live1) = %v, %v; want true, nil", ok, err)
+	}
+	s, err := LoadForDir(projectDir, "claude-live1")
+	if err != nil {
+		t.Fatalf("load under canonical id: %v", err)
+	}
+	if len(s.Messages) != 1 || s.Messages[0].Content != "async hello" {
+		t.Fatalf("async write not visible under canonical id: %#v", s.Messages)
+	}
+
+	if err := SaveAsyncForDir(projectDir, "claude-live2", "Live", msgs, nil); err != nil {
+		t.Fatalf("save async under canonical id: %v", err)
+	}
+	if err := FlushForDir(projectDir, "claude:live2", 5*time.Second); err != nil {
+		t.Fatalf("flush under raw claude: id: %v", err)
+	}
+	if _, err := LoadForDir(projectDir, "claude:live2"); err != nil {
+		t.Fatalf("load under raw claude: id: %v", err)
+	}
+}
+
+// TestListAllDedupesClaudeClone pins the clone-vs-original rule: a Claude
+// transcript that already has an ocode clone is hidden behind that clone, and
+// one with no clone stays listed as its claude: ref.
+func TestListAllDedupesClaudeClone(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	setHomeTree(t, tmpHome)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claudeDir := filepath.Join(tmpHome, ".claude", "projects", claudeProjectSlug(wd))
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-05-16T10:00:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(claudeDir, "cloned.jsonl"), []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "kept.jsonl"), []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := OpenClaudeCloneForDir(wd, "claude:cloned"); err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+
+	refs, err := ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		listed[ref.ID] = true
+	}
+	if listed["claude:cloned"] {
+		t.Fatalf("original claude ref listed although a clone exists: %#v", refs)
+	}
+	if !listed["claude:kept"] {
+		t.Fatalf("claude ref with no clone was dropped: %#v", refs)
 	}
 }

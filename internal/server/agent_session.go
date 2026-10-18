@@ -45,12 +45,19 @@ const turnHeartbeatInterval = 10 * time.Second
 // session makes every other session look stuck. That was the original
 // "session doesn't run while another session is running" bug.
 
+// agentKey is the h.agents map key for a session id. Every read and write of
+// h.agents goes through it, so "claude:<id>" and "claude-<id>" address one
+// agent (see session.CanonicalID).
+func agentKey(id string) string {
+	return session.CanonicalID(id)
+}
+
 // lookupAgentSession returns the live agent session for id, or nil. It holds
 // h.mu only for the map read.
 func (h *Handler) lookupAgentSession(id string) *agentSession {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.agents[id]
+	return h.agents[agentKey(id)]
 }
 
 // spentUSDMetadataKey is the session-metadata key holding the per-session
@@ -614,6 +621,9 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// default. Per-session on purpose: one chat's advisor toggle must never
 	// leak into another chat, and a resume/restart re-seeds from metadata.
 	ag.SetAdvisorEnabled(h.advisorSeed(sessionID, h.advisorFlag()))
+	// Seed the runtime auto-continue gate the same per-session way, so one
+	// chat's toggle never leaks into another chat.
+	ag.SetAutoContinueEnabled(h.autoContinueSeed(sessionID, h.autoContinueFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
 	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks()}
 	// Give this session's sub-agents a working permission-ask callback. Without
@@ -750,11 +760,11 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 // registry is empty after the denyAll below, so sharing it costs nothing.
 func (h *Handler) replaceAgentSession(id string, as *agentSession) {
 	h.mu.Lock()
-	old, ok := h.agents[id]
+	old, ok := h.agents[agentKey(id)]
 	if ok && old != as && old.childAsks != nil {
 		as.childAsks = old.childAsks
 	}
-	h.agents[id] = as
+	h.agents[agentKey(id)] = as
 	h.mu.Unlock()
 	if ok && old != as {
 		// Never let a rebuild regress the session's spend or token history: the
@@ -794,14 +804,14 @@ func (h *Handler) registerAgentSession(id string, as *agentSession, projectRoot 
 	}
 	permMode, hasPermMode := sessionPermissionModeForDir(permRoot, id)
 	h.mu.Lock()
-	if existing, ok := h.agents[id]; ok {
+	if existing, ok := h.agents[agentKey(id)]; ok {
 		h.mu.Unlock()
 		if as.agent != nil {
 			as.agent.Shutdown()
 		}
 		return existing
 	}
-	h.agents[id] = as
+	h.agents[agentKey(id)] = as
 	if as.agent != nil && hasPermMode {
 		if pm := as.agent.Permissions(); pm != nil {
 			pm.SetMode(permMode)
@@ -1033,7 +1043,7 @@ func (h *Handler) findPendingSession(sessionID, requestID string, isPendingAsk f
 	h.mu.Lock()
 	var candidates []candidate
 	if sessionID != "" {
-		if as, ok := h.agents[sessionID]; ok {
+		if as, ok := h.agents[agentKey(sessionID)]; ok {
 			candidates = append(candidates, candidate{sessionID, as})
 		}
 	} else {

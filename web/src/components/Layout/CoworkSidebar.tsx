@@ -176,7 +176,7 @@ export default function CoworkSidebar({
   // authoritative model for a real session is `tuiStatus.main_model`, which is
   // that tab's own status snapshot (per-session since the multiproject event
   // work), so switching tabs shows each session's own model, not one global.
-  const { tuiStatus, messages, model: sessionModel, advisorEnabled: sessionAdvisorEnabled } = useChatSelector((s) =>
+  const { tuiStatus, messages, model: sessionModel, advisorEnabled: sessionAdvisorEnabled, autoContinueEnabled: sessionAutoContinueEnabled } = useChatSelector((s) =>
     getSessionSlice(s, sessionId),
   );
   // Draft ("new-*") tab's locally-picked permission mode. Hook lives here
@@ -195,6 +195,11 @@ export default function CoworkSidebar({
     tuiStatus?.advisor_enabled ??
     config.advisorEnabled ??
     globalAdvisorEnabled;
+  const autoContinueOn =
+    sessionAutoContinueEnabled ??
+    tuiStatus?.auto_continue_enabled ??
+    config.autoContinueEnabled ??
+    false;
   // The speech-summary block has no per-session snapshot, so the persisted
   // the only source — no `tuiStatus?.x ?? config.x` chain, unlike the rows above.
   // Undefined until the fetch resolves, which renders as off exactly like the
@@ -326,7 +331,7 @@ export default function CoworkSidebar({
       api.getSmallModelWithEnabled(sessionHost).catch(() => null),
       api.getExplorerModel(sessionHost).catch(() => null),
       api.getContextModel(sessionHost).catch(() => null),
-      api.getAutoContinue(sessionHost).catch(() => null),
+      api.getAutoContinue(undefined, sessionHost).catch(() => null),
       // Speech-summary settings are a persisted global config (no per-session
       // snapshot), but they still belong to the HOST that runs the session —
       // a remote project's summary model lives on the remote.
@@ -644,20 +649,37 @@ export default function CoworkSidebar({
   // The handler also broadcasts a fresh status snapshot, so a refetch keeps
   // every open sidebar in sync.
   const toggleAutoContinue = async () => {
-    const current = tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled ?? false;
+    const current = autoContinueOn;
     const next = !current;
     setAutoContinueLoading(true);
+    const targetSessionId = sessionId && !isDraftTab ? sessionId : undefined;
+    if (targetSessionId) {
+      dispatch({ type: "SET_SESSION_AUTO_CONTINUE_ENABLED", sessionId: targetSessionId, enabled: next });
+    } else {
+      setConfig((prev) => ({ ...prev, autoContinueEnabled: next }));
+    }
     try {
-      await api.setAutoContinue({ enabled: next }, sessionHost);
-      if (sessionId) {
-        const status = await api.getSessionStatus(sessionId, sessionHost);
-        dispatch({ type: "SET_TUI_STATUS", sessionId, status });
-      } else {
-        setConfig((prev) => ({ ...prev, autoContinueEnabled: next }));
+      await api.setAutoContinue({ enabled: next }, targetSessionId, ...(sessionHost ? [sessionHost] : []));
+      if (targetSessionId) {
+        const status = await api.getSessionStatus(targetSessionId, sessionHost);
+        dispatch({ type: "SET_TUI_STATUS", sessionId: targetSessionId, status });
+        dispatch({ type: "SET_SESSION_AUTO_CONTINUE_ENABLED", sessionId: targetSessionId, enabled: undefined });
       }
     } catch (e) {
       console.error("toggle auto-continue error", e);
       reportActionError(e, "Toggling auto-continue");
+      if (targetSessionId) {
+        dispatch({ type: "SET_SESSION_AUTO_CONTINUE_ENABLED", sessionId: targetSessionId, enabled: current });
+        api
+          .getSessionStatus(targetSessionId, sessionHost)
+          .then((status) => {
+            dispatch({ type: "SET_TUI_STATUS", sessionId: targetSessionId, status });
+            dispatch({ type: "SET_SESSION_AUTO_CONTINUE_ENABLED", sessionId: targetSessionId, enabled: undefined });
+          })
+          .catch(() => {});
+      } else {
+        setConfig((prev) => ({ ...prev, autoContinueEnabled: current }));
+      }
     } finally {
       setAutoContinueLoading(false);
     }
@@ -996,8 +1018,8 @@ export default function CoworkSidebar({
           >
             <div className="flex items-center justify-between gap-2">
               <span className="text-muted-foreground">Auto-continue</span>
-              <span className={`font-mono text-[11px] ${(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled) ? "text-emerald-400" : "text-muted-foreground"}`}>
-                {(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled) ? "●on" : "○off"}
+              <span className={`font-mono text-[11px] ${autoContinueOn ? "text-emerald-400" : "text-muted-foreground"}`}>
+                {autoContinueOn ? "●on" : "○off"}
               </span>
             </div>
             <div className="text-foreground font-mono truncate">
@@ -1008,7 +1030,7 @@ export default function CoworkSidebar({
             <span className="text-xs text-muted-foreground">Auto-continue enabled</span>
             <input
               type="checkbox"
-              checked={Boolean(tuiStatus?.auto_continue_enabled ?? config.autoContinueEnabled)}
+              checked={Boolean(autoContinueOn)}
               disabled={autoContinueLoading}
               onChange={toggleAutoContinue}
               className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"

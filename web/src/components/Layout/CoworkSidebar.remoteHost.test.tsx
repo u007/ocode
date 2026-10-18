@@ -110,7 +110,7 @@ describe("CoworkSidebar remote-host model threading", () => {
     expect(api.getExplorerModel).toHaveBeenCalledWith("devbox");
     expect(api.getContextModel).toHaveBeenCalledWith("devbox");
     expect(api.getPermissionModel).toHaveBeenCalledWith("devbox");
-    expect(api.getAutoContinue).toHaveBeenCalledWith("devbox");
+    expect(api.getAutoContinue).toHaveBeenCalledWith(undefined, "devbox");
     expect(api.getRecapConfig).toHaveBeenCalledWith("devbox");
     expect(api.getAdvisor).toHaveBeenCalledWith("devbox");
   });
@@ -140,7 +140,7 @@ describe("CoworkSidebar remote-host model threading", () => {
     renderSidebar();
     fireEvent.click(await screen.findByLabelText("Auto-continue enabled"));
     await waitFor(() =>
-      expect(api.setAutoContinue).toHaveBeenCalledWith({ enabled: true }, "devbox"),
+      expect(api.setAutoContinue).toHaveBeenCalledWith({ enabled: true }, "session-1", "devbox"),
     );
     fireEvent.click(await screen.findByLabelText("Auto-permission"));
     await waitFor(() =>

@@ -526,6 +526,11 @@ type Agent struct {
 	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
 	advisorEnabled atomic.Bool
+	// autoContinueEnabled is a runtime gate for the auto-continue feature. It
+	// is seeded from cfg.Ocode.AutoContinueEnabled at construction and can be
+	// flipped at runtime per session (e.g. from the web sidebar) WITHOUT
+	// persisting to global config.
+	autoContinueEnabled atomic.Bool
 	// advisorConfig is this SESSION's advisor configuration (model, Claude Code
 	// backend, trigger set) — see advisor_config.go. Seeded from cfg at
 	// construction, then replaced by the handler with the session's own pinned
@@ -1341,6 +1346,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// block identical across toggles so the provider prompt cache survives.
 	a.tools["advisor"] = AdvisorTool{cfg: cfg, mainAgent: a}
 	a.advisorEnabled.Store(cfg == nil || cfg.Ocode.Advisor.Enabled)
+	a.autoContinueEnabled.Store(cfg != nil && cfg.Ocode.AutoContinueEnabled)
 	// Seed the session's advisor config from the process-wide default. The
 	// server immediately overwrites this with the session's own PINNED value
 	// right after NewAgent returns, so a global change never reaches an
@@ -2737,8 +2743,54 @@ func (a *Agent) pendingTasksForRecap() (count int, detail string) {
 	return count, detail
 }
 
+// recapHasEnoughContextHeadroom reports whether the conversation's current
+// context occupancy leaves enough room to run the recap on the session's own
+// (main) model instead of a smaller/cheaper recap model. The recap is a
+// standalone summary call (see runRecapCtx), so this is NOT a prompt-cache
+// decision; it trades a cheaper/weaker recap model for the session's main
+// model when the main window still has headroom, matching the spirit of
+// compaction's inline summary. The threshold is deliberately generous:
+// below 80% occupancy, or at least 50 000 tokens of headroom remaining.
+func (a *Agent) recapHasEnoughContextHeadroom() bool {
+	if a == nil || a.client == nil {
+		return false
+	}
+	used := a.LastInputTokens()
+	if used <= 0 {
+		used = a.CompactedContextTokens()
+	}
+	model := a.client.GetModel()
+	if a.client.GetProvider() != "" {
+		model = a.client.GetProvider() + "/" + model
+	}
+	window := ModelWindow(model)
+	if window <= 0 {
+		// Unknown window: cannot prove headroom, so keep the configured
+		// recap/small-model path (safer default, preserves prior behaviour).
+		return false
+	}
+	if used <= 0 {
+		// No occupancy reading yet (fresh session / before first turn): the
+		// context is effectively empty, so the main model is the safe choice.
+		return true
+	}
+	if float64(used)/float64(window) < 0.8 {
+		return true
+	}
+	if window-used >= 50000 {
+		return true
+	}
+	return false
+}
+
 func (a *Agent) recapClient() LLMClient {
 	if a.config == nil {
+		return a.client
+	}
+	// When there is enough context headroom, run the recap on the session's
+	// own model (the original model running the chat) instead of a
+	// smaller/cheaper recap model -- mirroring compaction's inline summary.
+	if a.recapHasEnoughContextHeadroom() {
 		return a.client
 	}
 	// Prefer recap model when set (always used if non-empty; RecapModelEnabled

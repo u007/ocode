@@ -52,13 +52,16 @@ const TOOL_OUTPUT_LANG: Record<string, string> = {
 
 // ThinkingBlock renders reasoning tokens in a muted panel. The controlled
 // disclosure policy decides the default; the latest thinking block follows
-// the "latest_thinking" policy.
+// the "latest_thinking" policy. Under "auto" it is open until the answer text
+// starts, which the caller reports through `answerStarted` (only meaningful
+// when `isLatest`).
 export function ThinkingBlock({
   text,
   highlight = "",
   onSpeak,
   blockKey = "thinking",
   isLatest = false,
+  answerStarted,
   forceOpen = false,
 }: {
   text: string;
@@ -66,11 +69,14 @@ export function ThinkingBlock({
   onSpeak?: SpeakAction;
   blockKey?: string;
   isLatest?: boolean;
+  answerStarted: boolean;
   forceOpen?: boolean;
 }) {
   const { policy, disclosure } = useChatDisplay();
   const policyDefault = isLatest
-    ? policy.latest_thinking === "expanded"
+    ? policy.latest_thinking === "auto"
+      ? !answerStarted
+      : policy.latest_thinking === "expanded"
     : policy.older_thinking === "expanded";
   const open = useSyncExternalStore(
     (onStoreChange) => disclosure.subscribe(blockKey, onStoreChange),

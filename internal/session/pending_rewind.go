@@ -111,6 +111,7 @@ const selectPendingRewindColumns = `
 // never updates session meta or the project index: creating or cancelling a
 // rewind must not look like a transcript write to revision/session ordering.
 func PreparePendingRewindForDir(projectRoot, id string, targetIndex int, targetContent string, userSeq int) (*PendingRewind, error) {
+	id = CanonicalID(id)
 	if id == "" {
 		return nil, ErrNoStoredSession
 	}
@@ -139,6 +140,7 @@ func PreparePendingRewindForDir(projectRoot, id string, targetIndex int, targetC
 // discoverable for lost-response recovery. This phase introduces no cleanup
 // policy that could remove a committed row before the promised 24-hour window.
 func PendingRewindStatusForDir(projectRoot, id, token string) (*PendingRewind, error) {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
 		return nil, err
@@ -149,6 +151,7 @@ func PendingRewindStatusForDir(projectRoot, id, token string) (*PendingRewind, e
 // CancelPendingRewindForDir removes an armed or stale resource without changing
 // messages, meta, history_gen, StoredRevisionForDir, or index ordering.
 func CancelPendingRewindForDir(projectRoot, id, token string) error {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
 		return err
@@ -169,6 +172,7 @@ func CancelPendingRewindForDir(projectRoot, id, token string) error {
 // committed with its committed_user_seq. Known transcript/target mismatches
 // commit only the stale transition; all other failures roll back completely.
 func CommitPendingRewindForDir(projectRoot, id, token, content string) (*PendingRewindCommitResult, error) {
+	id = CanonicalID(id)
 	dir, err := GetStorageDirForPath(projectRoot)
 	if err != nil {
 		return nil, err

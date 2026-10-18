@@ -7,7 +7,7 @@ tags:
   - web
   - tui
   - cron
-timestamp: 2026-09-29T17:46:12Z
+timestamp: 2026-10-17T08:53:20Z
 ---
 # Web/Desktop UI Parity — Current Status
 
@@ -93,50 +93,50 @@ below apply to both.
 - **OCR settings:** `OcrForm` in Settings.
 - **Local model config:** `local-models` section in Settings.
 
-### 8. Session list ✅
+### 8. Session list
 
-- Backend: `GET /api/sessions` → `session.ListRefsPaginatedForDir(h.workDir, …)` merges ocode sessions with Claude Code sessions from `~/.claude/projects/<slug of workDir>`, deduplicating cloned sessions (`claude_original_session_id`) (`internal/server/handler.go`, `internal/session/session.go`). All Claude-origin session IDs carry the `claude:` prefix so they are clearly identifiable in the list.
+- Backend: `GET /api/sessions` → `session.ListRefsPaginatedForDir(h.workDir, …)` lists ocode sessions only; it does not merge Claude Code sessions (`internal/server/handler.go`, `internal/session/session.go`). A Claude Code session reaches web by opening its `claude:<id>`: `session.LoadForDir` clones it from `~/.claude/projects/<slug of project root>` into that project's storage on first open (`CloneClaudeSessionForDir`), then loads the clone. The TUI's `LoadAny` performs the same clone.
 - Web: `GET /api/sessions` via `api.listSessions` (`web/src/api/client.ts`).
 - TUI: `/session list` → `session.ListRefs()` (`internal/tui/model.go`).
-- Parity: web/desktop now list Claude Code sessions for the served project, matching the TUI. The list is scoped to `h.workDir` (the served project root); remote sessions live on the remote instance and are fetched via `/api/remote/{host}/api/sessions`.
+- Parity: web/desktop list ocode sessions for the served project. Claude Code sessions are reached by opening their `claude:<id>` (cloned on first open via `CloneClaudeSessionForDir`), matching the TUI's `LoadAny` clone behavior. The list is scoped to `h.workDir` (the served project root); remote sessions live on the remote instance and are fetched via `/api/remote/{host}/api/sessions`.
 
 ## Remaining gaps (TUI has it, web does not)
 
-### 8. Memory management (`/mem`) — web gap
+### 9. Memory management (`/mem`) — web gap
 
 - **TUI:** Full implementation — `internal/tui/memory.go` with `/mem [on|off|status|update [user|project|global] [focus]]`.
 - **Web:** Settings-only toggle (`MemoryEnabled` in `FeaturesForm`). No panel for browsing or editing memory files.
 - **API:** No dedicated `/api/memory` endpoint. Toggle only via `GET/PUT /api/config/ocode/features`.
 - **Gap:** No web UI for inspecting or editing user/project/global memory files.
 
-### 9. Learn / skill authoring (`/learn`) — TUI only
+### 10. Learn / skill authoring (`/learn`) — TUI only
 
 - **TUI:** `internal/tui/learn.go` + `internal/skill/learn.go` — list project-root skills, guide skill creation/update.
 - **Web:** Skill listing via `GET /api/skills` (surfaced in slash autocomplete). No creation/update UI.
 - **API:** No HTTP endpoint for skill authoring.
 
-### 10. Goal condition loop (`/goal`) and `/orchestrate` — parity ✅
+### 11. Goal condition loop (`/goal`) and `/orchestrate` — parity ✅
 
 - **TUI:** `/goal` (`runGoalCmd`, `internal/tui/commands.go`) sets, shows and clears the condition; the judge runs after every TUI and `/rc` turn. `/orchestrate` runs the orchestrator pipeline once (rewritten to the `orchestrator` agent in `internal/tui/model.go`).
 - **Web:** `/goal` (`handleGoal`, `web/src/components/Chat/commands.ts`) over `GET/PUT/DELETE /api/sessions/{id}/goal`. `/orchestrate` frames the goal as an orchestrator-pipeline request.
 - **Shared engine:** `internal/agent/goal.go`. Concept doc: `docs/concepts/goal-condition-loop.md`.
 
-### 11. Doc sync (`/doc-sync`) — TUI only
+### 12. Doc sync (`/doc-sync`) — TUI only
 
 - **TUI:** `internal/tui/doc_sync.go` — update AGENTS.md/rules/skills to reflect current changes.
 - **Web:** No equivalent.
 
-### 12. Knowledge bundle (`/docs`) — TUI only
+### 13. Knowledge bundle (`/docs`) — TUI only
 
 - **TUI:** `internal/tui/docs_knowledge.go` — init/update/cleanup/status for OKF knowledge bundle.
 - **Web:** No equivalent.
 
-### 13. Kaizen skill digest — no web needed
+### 14. Kaizen skill digest — no web needed
 
 - TUI: automatic prompt-injection of per-model Kaizen tuning directives (`internal/tui/model.go`).
 - Not an interactive feature — no dedicated web UI is the right shape.
 
-### 14. Claude export (`/export-claude`) — TUI only
+### 15. Claude export (`/export-claude`) — TUI only
 
 - **TUI:** `internal/tui/export.go` — export in Claude Code JSONL format.
 - **Web:** JSON export exists (`GET /api/sessions/{id}/export`). No Claude format endpoint.

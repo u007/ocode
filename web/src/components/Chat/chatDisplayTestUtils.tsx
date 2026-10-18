@@ -1,6 +1,5 @@
 import { useMemo, type ReactNode } from "react";
 import type {
-  ChatDisplayOverride,
   ChatDisplayPolicy,
   ChatVerbosityConfig,
   ChatVerbosityPreset,
@@ -76,5 +75,5 @@ export function ChatDisplayTestProvider({
 }
 
 /** Convenience for two-region tests that only need a default Full context. */
-export const FULL_CHAT_DISPLAY_OVERRIDES: Record<keyof ChatVerbosityConfig["overrides"], ChatDisplayOverride> =
+export const FULL_CHAT_DISPLAY_OVERRIDES: ChatVerbosityConfig["overrides"] =
   DEFAULT_CHAT_VERBOSITY_CONFIG.overrides;

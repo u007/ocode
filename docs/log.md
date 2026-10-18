@@ -1,6 +1,12 @@
 # Directory Update Log
 
 
+
+## 2026-10-17
+
+* **Update**: Server-Side Auto-Continue Loop ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
+* **Update**: Web/Desktop UI Parity — Current Status ([web-desktop-parity-todo.md](/web-desktop-parity-todo.md))
+* **Update**: Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side) ([concepts/pulse-assistant.md](/concepts/pulse-assistant.md))
 ## 2026-10-16
 
 * **Update**: TTS speech playback ([tts-speech-playback.md](/tts-speech-playback.md))
