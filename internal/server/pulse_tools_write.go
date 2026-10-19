@@ -235,6 +235,16 @@ func (h *Handler) pulseWriteTools() []*pulseTool {
 			},
 			run: h.pulseQuestionAnswerTool,
 		},
+		{
+			name: "question_dismiss",
+			desc: "Dismiss (cancel) a pending question another session is waiting on, without answering it. The request_id is on the board row's pending ask (or session_ask). Needs the operator's approval.",
+			ask:  true,
+			props: map[string]any{
+				"session_id": str("Session that asked the question"),
+				"request_id": str("The question's request id (tool call id)"),
+			},
+			run: h.pulseQuestionDismissTool,
+		},
 	}
 }
 
@@ -544,4 +554,26 @@ func (h *Handler) pulseTerminalKillTool(raw json.RawMessage) (string, error) {
 		h.bus.Publish("terminal_tabs_changed", "", "", nil)
 	}
 	return marshalPulseString(map[string]any{"terminal_id": id, "killed": true})
+}
+
+func (h *Handler) pulseQuestionDismissTool(raw json.RawMessage) (string, error) {
+	var args struct {
+		SessionID string `json:"session_id"`
+		RequestID string `json:"request_id"`
+	}
+	if err := decodePulseArgs(raw, &args); err != nil {
+		return "", err
+	}
+	if args.RequestID == "" {
+		return "", errors.New("request_id is required")
+	}
+	if err := h.pulseWriteTarget(args.SessionID); err != nil {
+		return "", err
+	}
+	if _, err := pulseCall(http.MethodPost, "/api/questions/cancel",
+		map[string]any{"request_id": args.RequestID, "session_id": args.SessionID},
+		h.HandleDismissQuestion); err != nil {
+		return "", fmt.Errorf("dismiss question %s on %s: %w", args.RequestID, args.SessionID, err)
+	}
+	return marshalPulseString(map[string]any{"session_id": args.SessionID, "request_id": args.RequestID, "dismissed": true})
 }

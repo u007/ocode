@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -136,6 +137,12 @@ func (h *Handler) pulseReadTools() []*pulseTool {
 			desc:  "List live sub-agent runs (task dispatches) as a nested tree, grouped by session. Optionally restrict to one session. Run transcripts are omitted; use session_read on the parent for context.",
 			props: map[string]any{"session_id": str("Only this session's runs (default: every session that has runs)")},
 			run:   h.pulseAgentRunsTool,
+		},
+		{
+			name:  "session_ask",
+			desc:  "Read the pending permission/question ask(s) a session is currently paused on, with details (tool, options, multiple-select). Unless terminal access is enabled on this server, a permission carries only its request_id, tool, scope and agent (no command, args, rule, summary or deny reason). Use this before permission_resolve / question_answer / question_dismiss so you know the request_id and the available options. Returns {session_id, permissions: [PermissionEvent...], questions: [QuestionEvent...]} (empty arrays when nothing is pending).",
+			props: map[string]any{"session_id": str("Session id, as shown on the board")},
+			run:   h.pulseSessionAskTool,
 		},
 	}
 }
@@ -607,4 +614,55 @@ func (h *Handler) pulseAgentRunsTool(raw json.RawMessage) (string, error) {
 			Truncated bool               `json:"truncated,omitempty"`
 		}{append([]pulseSessionRuns{}, groups[:n]...), truncated}
 	})
+}
+
+// --- session_ask ---
+
+type pulseAskResult struct {
+	SessionID   string            `json:"session_id"`
+	Permissions []PermissionEvent `json:"permissions"`
+	Questions   []QuestionEvent   `json:"questions"`
+}
+
+func (h *Handler) pulseSessionAskTool(raw json.RawMessage) (string, error) {
+	var args struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := decodePulseArgs(raw, &args); err != nil {
+		return "", err
+	}
+	id := args.SessionID
+	if id == "" {
+		return "", errors.New("session_id is required")
+	}
+	if isPulseSession(id) {
+		return "", fmt.Errorf("refusing to read the assistant's own session %q", id)
+	}
+	if _, err := h.sessions.Resolve(id); err != nil {
+		return "", fmt.Errorf("session %q not found: %w", id, err)
+	}
+
+	// Command lines reach the model only when the same gate that guards
+	// pulseTerminalRows passes. Without it, a permission keeps only what
+	// permission_resolve needs: an allowlist, because DenyReason, Rule and
+	// Summary can all quote the command. The event is rebuilt, never edited in
+	// place, so the live ask state is never mutated.
+	showCommands := h.terminalAccessAllowed()
+	res := pulseAskResult{SessionID: id, Permissions: []PermissionEvent{}, Questions: []QuestionEvent{}}
+	if pa := h.livePendingAsks(id); pa != nil {
+		for _, p := range pa.Permissions {
+			if !showCommands {
+				p = PermissionEvent{
+					RequestID:        p.RequestID,
+					Tool:             p.Tool,
+					Scope:            p.Scope,
+					AgentName:        p.AgentName,
+					ModelUnavailable: p.ModelUnavailable,
+				}
+			}
+			res.Permissions = append(res.Permissions, p)
+		}
+		res.Questions = append(res.Questions, pa.Questions...)
+	}
+	return marshalPulseString(res)
 }

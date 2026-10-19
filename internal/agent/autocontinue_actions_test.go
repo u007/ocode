@@ -377,3 +377,38 @@ func TestAutoContinueChatJudgeActionKeyword(t *testing.T) {
 		t.Fatalf("chat judge should be told what already fired:\n%s", prompt)
 	}
 }
+
+// Todo-specific actions are offered only when the plan has open items.
+func TestAutoContinueTodoActionsRequireOpenTodo(t *testing.T) {
+	root := t.TempDir()
+	writeSessionTodo(t, root, "ses-open", "- [✓] t1 one\n- [ ] t2 two\n")
+
+	a, h := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue_todo", 0.9, "mid_task"))
+	a.SetWorkDir(root)
+	a.SetSessionID("ses-open")
+	dec, err := a.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	keys := verdictCriteriaKeys(t, h)
+	for _, k := range []string{"continue_todo", "validate_todo", "skip_todo"} {
+		if !keys[k] {
+			t.Fatalf("%s must be offered with an open todo item", k)
+		}
+	}
+	_ = dec
+
+	// No open items: none offered.
+	root2 := t.TempDir()
+	writeSessionTodo(t, root2, "ses-done", "- [✓] t1 one\n")
+	a2, h2 := newAutoContinueTypesafeJudge(t, autoContinueVerdictReply("continue", 0.9, "finished"))
+	a2.SetWorkDir(root2)
+	a2.SetSessionID("ses-done")
+	a2.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "done"}}, nil, nil)
+	keys2 := verdictCriteriaKeys(t, h2)
+	for _, k := range []string{"continue_todo", "validate_todo", "skip_todo"} {
+		if keys2[k] {
+			t.Fatalf("%s must not be offered without an open todo item", k)
+		}
+	}
+}

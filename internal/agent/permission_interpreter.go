@@ -831,7 +831,7 @@ func normalizeNetworkEffectHost(target string) string {
 //
 // numericVars carries the variables this command line assigns a plain integer
 // to, and is what lets a shell-assigned PORT stay on the carve-out (see
-// isLocalhostSubprocessToken). Without it every such URL asks.
+// isLocalSubprocessToken). Without it every such URL asks.
 func subprocessTargetsLocalhost(command string) bool {
 	return subprocessTargetsLocalhostWithVars(command, nil)
 }
@@ -841,7 +841,19 @@ func subprocessTargetsLocalhost(command string) bool {
 // command itself; pass the set when the caller has already parsed sibling
 // fragments whose "p=8080" assignments this command's "$p" depends on.
 func subprocessTargetsLocalhostWithVars(command string, numericVars map[string]bool) bool {
+	return subprocessTargetsHostWithVars(command, numericVars, isLocalhostDomain)
+}
+
+// subprocessTargetsHostWithVars is the token walk shared by both carve-outs,
+// parameterised by the host predicate: isLocalhostDomain for loopback, and
+// isLocalNetworkHost for loopback-or-RFC1918. The numeric-port proof, the
+// redirect-flag veto and the data-value skip live here once, so the two
+// carve-outs cannot drift apart. A command with no fields has no target.
+func subprocessTargetsHostWithVars(command string, numericVars map[string]bool, onHost func(string) bool) bool {
 	fields := splitShellFields(command)
+	if len(fields) == 0 {
+		return false
+	}
 	if numericVars == nil {
 		numericVars = numericAssignedVars(command)
 	}
@@ -854,10 +866,10 @@ func subprocessTargetsLocalhostWithVars(command string, numericVars map[string]b
 			return false
 		}
 	}
-	sawLoopback := false
+	sawHost := false
 	for i, token := range fields[1:] {
-		if isLocalhostSubprocessToken(token, numericVars) {
-			sawLoopback = true
+		if isLocalSubprocessToken(token, numericVars, onHost) {
+			sawHost = true
 			continue
 		}
 		// fields[i] is the previous word: a value given to a data flag
@@ -870,7 +882,7 @@ func subprocessTargetsLocalhostWithVars(command string, numericVars map[string]b
 			return false
 		}
 	}
-	return sawLoopback
+	return sawHost
 }
 
 // loopbackRedirectFlags name the flags that redirect a request away from the
@@ -960,7 +972,7 @@ func isPossibleRemoteTargetToken(token string) bool {
 
 // numericAssignedVars returns the set of variable names this command line
 // assigns a plain decimal integer to ("p=8080", "PORT=8080"). Only those may be
-// treated as a numeric PORT by isLocalhostSubprocessToken.
+// treated as a numeric PORT by isLocalSubprocessToken.
 //
 // This is the guard that makes a shell-assigned port safe to honor. The port is
 // only uninteresting because it cannot change WHICH HOST is contacted — but
@@ -1233,9 +1245,11 @@ func shellPortIsNumeric(port string, numericVars map[string]bool) bool {
 	return numericVars[t]
 }
 
-// isLocalhostSubprocessToken reports whether a token names a loopback target.
+// isLocalSubprocessToken reports whether a token names a target that onHost
+// accepts: loopback for the localhost carve-out, loopback or RFC1918 for the
+// LAN one. The port proof is the same for both.
 //
-// A loopback URL whose PORT is a shell variable normally defeats url.Parse
+// A URL whose PORT is a shell variable normally defeats url.Parse
 // (`invalid port ":$p" after host`), so the host is recovered by hand here —
 // but only when the port is provably numeric (shellPortIsNumeric). Without that
 // check the carve-out is an exfiltration bypass: p='1@evil.com' makes
@@ -1245,19 +1259,19 @@ func shellPortIsNumeric(port string, numericVars map[string]bool) bool {
 // wearing a loopback literal, and honoring it would make this a universal
 // bypass. A userinfo component (@) is treated the way curl treats it: whatever
 // follows the last '@' is the real host.
-func isLocalhostSubprocessToken(token string, numericVars map[string]bool) bool {
+func isLocalSubprocessToken(token string, numericVars map[string]bool, onHost func(string) bool) bool {
 	t := strings.Trim(token, `"'<>`)
 	if t == "" {
 		return false
 	}
 	if strings.Contains(t, "://") {
-		if isLocalhostDomain(extractDomainFromURL(t)) {
+		if onHost(extractDomainFromURL(t)) {
 			return true
 		}
 		// url.Parse rejected it (non-numeric port). Recover host and port by
 		// hand, and only accept when the port is provably numeric.
 		if host, port, ok := splitURLAuthorityForLoopback(t); ok && shellPortIsNumeric(port, numericVars) {
-			return isLocalhostDomain(host)
+			return onHost(host)
 		}
 		return false
 	}
@@ -1285,7 +1299,7 @@ func isLocalhostSubprocessToken(token string, numericVars map[string]bool) bool 
 	if !shellPortIsNumeric(port, numericVars) {
 		return false
 	}
-	return isLocalhostDomain(host) || host == "0.0.0.0"
+	return onHost(host) || host == "0.0.0.0"
 }
 
 // splitURLAuthorityForLoopback splits "http://host:port" into its host and port
@@ -1326,4 +1340,180 @@ func splitURLAuthorityForLoopback(rawURL string) (host, port string, ok bool) {
 		return "", "", false
 	}
 	return host, port, true
+}
+
+// subprocessTargetsLocalNetworkWithVars reports whether every network target in
+// the command is provably on the local network (loopback or RFC1918 private).
+// It needs the shared walk's conditions (at least one such token, no token that
+// is or could expand to a remote host, no connection-redirecting flag) and, on
+// top of them, a request isPlainLocalNetworkRequest accepts. A LAN host is a
+// different machine from the one running ocode, so this carve-out is held to
+// the stricter allow-by-construction gate.
+func subprocessTargetsLocalNetworkWithVars(command string, numericVars map[string]bool) bool {
+	if numericVars == nil {
+		numericVars = numericAssignedVars(command)
+	}
+	if !isPlainLocalNetworkRequest(command, numericVars) {
+		return false
+	}
+	return subprocessTargetsHostWithVars(command, numericVars, isLocalNetworkHost)
+}
+
+func subprocessTargetsLocalNetwork(command string) bool {
+	return subprocessTargetsLocalNetworkWithVars(command, nil)
+}
+
+// isPlainLocalNetworkRequest is the allow-by-construction gate for the LAN
+// carve-out. The command must be a curl or wget GET built only from the flags in
+// lanPlainGetFlags, with no command substitution, and every LAN target must be
+// literal text. Anything else (a body, an upload, a multipart form, a non-GET
+// verb, userinfo, or a query assembled from shell expansions) is not a request
+// this carve-out can vouch for, so it falls through to the normal guards. A new
+// body or upload flag is refused by default; nothing has to be denylisted.
+func isPlainLocalNetworkRequest(command string, numericVars map[string]bool) bool {
+	fields := splitShellFields(command)
+	if len(fields) < 2 {
+		return false
+	}
+	if fields[0] != "curl" && fields[0] != "wget" {
+		return false
+	}
+	// Command substitution runs an arbitrary command and can inject its output
+	// into any word, including a flag value that is not itself a target, so it
+	// voids the carve-out wherever it appears.
+	if strings.Contains(command, "$(") || strings.ContainsRune(command, '`') {
+		return false
+	}
+	for i := 1; i < len(fields); i++ {
+		token := fields[i]
+		if strings.HasPrefix(token, "-") {
+			skip, ok := lanPlainFlag(fields, i)
+			if !ok {
+				return false
+			}
+			i += skip
+			continue
+		}
+		if isLocalSubprocessToken(token, numericVars, isLocalNetworkHost) {
+			if !lanTargetIsPlain(token) {
+				return false
+			}
+			continue
+		}
+		// Not a LAN target, so it may be a remote host or an expansion the
+		// carve-out cannot prove harmless ("evil/x?k=$SECRET"). Refuse it.
+		return false
+	}
+	return true
+}
+
+// lanPlainGetFlags are the only options a LAN request may carry, mapped to
+// whether the option consumes a value. Each one keeps curl or wget a plain GET:
+// output and timing controls and the fail/quiet/head switches. Anything not
+// listed is refused, which keeps --post-data, --post-file, --json,
+// --data-urlencode, --body-data, --body-file, -d/--data*, -F/--form, -T/
+// --upload-file and -H out of the carve-out.
+var lanPlainGetFlags = map[string]bool{
+	// curl
+	"-s": false, "--silent": false,
+	"-S": false, "--show-error": false,
+	"-f": false, "--fail": false,
+	"-I": false, "--head": false,
+	"-o": true, "--output": true,
+	"-w": true, "--write-out": true,
+	"-m": true, "--max-time": true,
+	"--connect-timeout": true,
+	"-X":                true, "--request": true, // value must be GET or HEAD
+	// wget
+	"-q": false, "--quiet": false,
+	"--spider": false,
+	"-O":       true, "--output-document": true,
+}
+
+// lanPlainFlag checks the option at fields[i] against lanPlainGetFlags. It
+// returns how many following words the option consumed as its value, and
+// whether the option is allowed. An attached value ("-o/dev/null", "-XGET",
+// "--request=GET") is read from the same word; a detached one is the next word.
+// The verb check reads only the value of -X/--request, so an argument such as
+// "-o delete" or a path segment "put" cannot change the verdict.
+func lanPlainFlag(fields []string, i int) (skip int, ok bool) {
+	tok := fields[i]
+	name, value, attached := tok, "", false
+	switch {
+	case strings.HasPrefix(tok, "--"):
+		name, value, attached = strings.Cut(tok, "=")
+	case len(tok) > 2:
+		if takes, known := lanPlainGetFlags[tok[:2]]; known && takes {
+			name, value, attached = tok[:2], tok[2:], true
+		}
+	}
+	takes, known := lanPlainGetFlags[name]
+	if !known {
+		return 0, lanBooleanCluster(tok)
+	}
+	if !takes {
+		return 0, !attached
+	}
+	if !attached {
+		if i+1 >= len(fields) {
+			return 0, false
+		}
+		value = fields[i+1]
+		skip = 1
+	}
+	if name == "-X" || name == "--request" {
+		verb := strings.ToUpper(value)
+		return skip, verb == "GET" || verb == "HEAD"
+	}
+	return skip, true
+}
+
+// lanBooleanCluster reports whether a single-dash word is only value-less short
+// flags bundled together, such as "-sS". A "--" word is never a cluster.
+func lanBooleanCluster(tok string) bool {
+	if len(tok) < 2 || tok[0] != '-' || tok[1] == '-' {
+		return false
+	}
+	for _, r := range tok[1:] {
+		takes, known := lanPlainGetFlags["-"+string(r)]
+		if !known || takes {
+			return false
+		}
+	}
+	return true
+}
+
+// lanTargetIsPlain reports whether a LAN target is literal request text: no
+// userinfo, and nothing after the authority outside the literal set. A port is
+// the one expansion allowed in the authority; isLocalSubprocessToken has already
+// proven it numeric, so it is not re-checked here.
+func lanTargetIsPlain(target string) bool {
+	t := strings.Trim(target, `"'<>`)
+	if _, after, found := strings.Cut(t, "://"); found {
+		t = after
+	}
+	authority, rest := t, ""
+	if i := strings.IndexAny(t, "/?#"); i >= 0 {
+		authority, rest = t[:i], t[i:]
+	}
+	if strings.Contains(authority, "@") {
+		return false
+	}
+	for _, r := range rest {
+		if !isLANLiteralRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isLANLiteralRune reports whether r may appear in a LAN request's path or
+// query: ASCII letters and digits plus the unreserved and query-syntax
+// characters. Shell-meaningful characters ($, backtick, ;, quotes, backslash,
+// space, #) are excluded, so an expansion can never reach the request text.
+func isLANLiteralRune(r rune) bool {
+	if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+		return true
+	}
+	return strings.ContainsRune("-._~%&=+,:/?", r)
 }

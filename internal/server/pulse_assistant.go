@@ -110,11 +110,11 @@ type pulseAssistantState struct {
 // auto-receive feature. Kind is one of "turn_done", "terminal_stop",
 // "permission_ask", "question_ask".
 type pulseStopIndicator struct {
-	ID        string    `json:"id"`        // session_id or terminal_id
-	Kind      string    `json:"kind"`      // turn_done | terminal_stop | permission_ask | question_ask
-	Summary   string    `json:"summary"`   // human-readable one-liner
-	At        time.Time `json:"at"`        // when the stop occurred
-	Project   string    `json:"project"`   // project basename, for display
+	ID      string    `json:"id"`      // session_id or terminal_id
+	Kind    string    `json:"kind"`    // turn_done | terminal_stop | permission_ask | question_ask
+	Summary string    `json:"summary"` // human-readable one-liner
+	At      time.Time `json:"at"`      // when the stop occurred
+	Project string    `json:"project"` // project basename, for display
 }
 
 // pulseStopIndicatorMax keeps the ring buffer small.
@@ -180,11 +180,11 @@ func (h *Handler) recordPulseStopIndicator(id, kind, summary, project string) {
 		return
 	}
 	h.pulseStopIndicators = append(h.pulseStopIndicators, pulseStopIndicator{
-		ID:        id,
-		Kind:      kind,
-		Summary:   summary,
-		At:        time.Now(),
-		Project:   project,
+		ID:      id,
+		Kind:    kind,
+		Summary: summary,
+		At:      time.Now(),
+		Project: project,
 	})
 	if len(h.pulseStopIndicators) > pulseStopIndicatorMax {
 		h.pulseStopIndicators = h.pulseStopIndicators[len(h.pulseStopIndicators)-pulseStopIndicatorMax:]

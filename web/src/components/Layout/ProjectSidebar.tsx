@@ -769,6 +769,8 @@ function AddRemoteDialog({
   onClose,
   onAdd,
   initialPath = "",
+  initialHost = "",
+  initialPort,
   heading = "Add Remote Project",
   submitLabel = "Add Remote",
 }: {
@@ -778,6 +780,11 @@ function AddRemoteDialog({
   /** Prefill for the remote path — used by "Duplicate as remote…" so the
    *  source project's path does not have to be retyped. */
   initialPath?: string;
+  /** Prefill for the remote host — used by "Duplicate as remote…" so a
+   *  duplicated remote project keeps its host (editable). */
+  initialHost?: string;
+  /** Prefill for the remote SSH port (optional). */
+  initialPort?: number;
   heading?: string;
   submitLabel?: string;
 }) {
@@ -790,14 +797,14 @@ function AddRemoteDialog({
 
   useEffect(() => {
     if (open) {
-      setHost("");
+      setHost(initialHost);
       setPath(initialPath);
-      setPort("");
+      setPort(initialPort ? String(initialPort) : "");
       setError(null);
       setLoading(false);
       setTimeout(() => hostRef.current?.focus(), 50);
     }
-  }, [open, initialPath]);
+  }, [open, initialPath, initialHost, initialPort]);
 
   if (!open) return null;
 
@@ -1319,6 +1326,8 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
       onClose={() => setDuplicatingRemote(null)}
       onAdd={handleDuplicateRemote}
       initialPath={duplicatingRemote?.path ?? ""}
+      initialHost={duplicatingRemote?.host ?? ""}
+      initialPort={duplicatingRemote?.remote_port}
       heading={duplicatingRemote ? `Duplicate "${duplicatingRemote.name}" as remote` : "Duplicate as remote"}
       submitLabel="Duplicate"
     />

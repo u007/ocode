@@ -38,8 +38,8 @@ func (f *fakeWorkspace) Disconnect() error {
 }
 func (f *fakeWorkspace) ServeState() remote.ServeState    { return f.state }
 func (f *fakeWorkspace) ServeTransport() remote.Transport { return f.transport }
-func (f *fakeWorkspace) BrowseURL() string              { return "" }
-func (f *fakeWorkspace) SyncConfig(force bool) error { return nil }
+func (f *fakeWorkspace) BrowseURL() string                { return "" }
+func (f *fakeWorkspace) SyncConfig(force bool) error      { return nil }
 
 func TestWorkspaceFor_SingleConnect(t *testing.T) {
 	// 20 goroutines calling workspaceFor("h", "/p") concurrently should

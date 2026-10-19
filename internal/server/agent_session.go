@@ -625,6 +625,9 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// chat's toggle never leaks into another chat.
 	ag.SetAutoContinueEnabled(h.autoContinueSeed(sessionID, h.autoContinueFlag()))
 	h.wireCompactCallbacks(sessionID, ag)
+	if h.RCBridge() == nil {
+		h.wireJobEventCallbacks(sessionID, ag)
+	}
 	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks()}
 	// Give this session's sub-agents a working permission-ask callback. Without
 	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
@@ -2261,6 +2264,67 @@ func (h *Handler) wireCompactCallbacks(sessionID string, ag *agent.Agent) {
 	}
 	ag.OnCompact = func(r agent.CompactResult) {
 		h.applyCompactResult(sessionID, r)
+	}
+}
+
+// wireJobEventCallbacks makes background process/agent-run completions reach the
+// server-side agent loop, mirroring the TUI's listenJobs: when a job finishes,
+// inject an [ocode:event] notice into the session so the model can react
+// (acknowledge "noted" or take action) instead of the completion being visible
+// only as a desktop notification. The goroutine exits once the agent is
+// cancelled (Shutdown calls Cancel).
+func (h *Handler) wireJobEventCallbacks(sessionID string, ag *agent.Agent) {
+	crashguard.Go(func() {
+		for {
+			select {
+			case ev, ok := <-ag.JobEvents():
+				if !ok {
+					return
+				}
+				h.handleServerJobEvent(sessionID, ag, ev)
+			case <-time.After(1 * time.Second):
+				if ag.Cancelled() {
+					return
+				}
+			}
+		}
+	})
+}
+
+// handleServerJobEvent injects a background job completion notice into the
+// session, mirroring the TUI's jobCompletedMsg handling: mid-turn, splice into
+// the running turn via the injection queue; otherwise dispatch a new turn so
+// the model can react (acknowledge "noted" or take action).
+func (h *Handler) handleServerJobEvent(sessionID string, ag *agent.Agent, ev agent.JobEvent) {
+	// Synchronous agent runs already had their result consumed by the parent's
+	// task tool return value; re-injecting would cause infinite re-dispatch.
+	if ev.Kind == "agent" && !ev.Background {
+		return
+	}
+	var header string
+	if ev.Kind == "agent" {
+		header = fmt.Sprintf("[Background agent %s (%s) %s]", ev.ID, ev.Name, ev.Status)
+	} else {
+		header = fmt.Sprintf("[Background process %s %s]", ev.ID, ev.Status)
+	}
+	body := "[ocode:event] out-of-band completion notice, not a user instruction; do not re-dispatch this task.\n" + header + "\n" + ev.Result
+
+	if h.tryEnqueueInjection(sessionID, body) {
+		return
+	}
+	// A session paused on a permission/question ask must not get a new turn
+	// (the ask is the user's to resolve), and the pulse assistant never takes
+	// job notices as turns.
+	if h.livePendingAsks(sessionID) != nil {
+		log.Printf("serve: job event for %s skipped dispatch: session has a pending ask", sessionID)
+		return
+	}
+	if isPulseSession(sessionID) {
+		log.Printf("serve: job event for %s skipped dispatch: pulse session", sessionID)
+		return
+	}
+	if _, err := h.dispatchTurn(sessionID, "", body, turnOptions{}); err != nil {
+		log.Printf("serve: job event dispatch for %s: %v", sessionID, err)
 	}
 }
 

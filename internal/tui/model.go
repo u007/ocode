@@ -16477,12 +16477,18 @@ func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
 // It first tries tailscale funnel (public internet), then tailscale serve
 // (tailnet-only). sessionID is used with --set-path so multiple ocode
 // instances can coexist without overwriting each other's tailscale config.
-// Returns the public URL, including the session-specific tailscale path prefix,
-// and the background process (if any) so the caller can kill it later. The
-// setupHint is a one-time enable URL shown when
-// funnel or serve isn't enabled on the tailnet yet.
-func startTailscaleExpose(target, sessionID string) (url string, proc *exec.Cmd, setupHint string) {
-	return tailscale.StartExpose(target, sessionID)
+// Returns the public URL (including the session-specific tailscale path
+// prefix), a background process handle for cleanup, and the one-time setup
+// hint shown when funnel or serve isn't enabled on the tailnet yet.
+//
+// The final return is the PROVEN exposure kind: "funnel", "serve", or "" when
+// nothing was actually mounted (tailscale unavailable, or both commands were
+// rejected). The URL is still a best-guess DNSName in that last case; callers
+// that OPEN it on the user's behalf must require a non-empty kind, because an
+// unproven URL resolves to the tailnet's root mount rather than this session
+// (and a dead root backend answers 502).
+func startTailscaleExpose(target, sessionID string) (url string, proc *exec.Cmd, setupHint, kind string) {
+	return tailscale.StartExposeWithKind(target, sessionID)
 }
 
 // tailscaleExpose runs `tailscale <cmd> --bg [--set-path /path] <target>` and
@@ -18222,6 +18228,7 @@ func (m *model) announceBriefing() {
 	m.briefingAnnounced = name
 	m.appendDiscoveryNotice(name + " loaded")
 }
+
 // scrollToCompactionBanner scrolls the viewport so the compaction summary
 // (divider + banner) is visible. Called after /compact succeeds so the user
 // sees the result instead of being scrolled past it.
@@ -24435,8 +24442,12 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		// different process (or nothing) on the same port.
 		tailscaleURL := ""
 		setupHint := ""
-		tsURL, tsProc, tsHint := startTailscaleExpose(boundAddr, m.sessionID)
-		if tsURL != "" {
+		tsURL, tsProc, tsHint, tsKind := startTailscaleExpose(boundAddr, m.sessionID)
+		// Only adopt a PROVEN mount. StartExposeWithKind still returns a
+		// best-guess DNSName URL with kind "" when serve/funnel failed; opening
+		// that would route to the tailnet's root mount (a dead backend answers
+		// 502 on every request), so fall back to the working local URL instead.
+		if tsURL != "" && tsKind != "" {
 			tailscaleURL = buildRCSessionURL(tsURL, m.sessionID, token)
 			url = tailscaleURL
 			// Remember our mount so /rc off can remove exactly this path.

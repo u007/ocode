@@ -187,6 +187,35 @@ func Running() (string, bool) {
 	return p, true
 }
 
+// normalizeExposeTarget guarantees the target carries a URL scheme.
+//
+// tailscale's CLI accepts a bare "localhost:port" but REJECTS any other bare
+// host:port with `non-localhost target "http://host:port" must include a
+// scheme`. /rc passes the server's bound address (a LAN IP), so without this
+// the serve/funnel command exits non-zero, no mount is created, and the
+// caller can end up advertising a URL that resolves to the tailnet's root
+// mount (a dead backend -> 502). An already-schemed target is left untouched.
+func normalizeExposeTarget(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.Contains(target, "://") {
+		return target
+	}
+	if strings.Contains(target, ":") && !strings.HasPrefix(target, "/") && !isAllDigits(target) {
+		return "http://" + target
+	}
+	return target
+}
+
+// isAllDigits reports whether s is a non-empty run of ASCII digits (a bare port).
+func isAllDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
 // Expose tries `tailscale <cmd> --bg [--set-path] <target>` (cmd is "funnel"
 // or "serve") and returns the advertised URL plus the background process.
 // The process must be killed when no longer needed; the --set-path mount must
@@ -196,6 +225,14 @@ func Running() (string, bool) {
 // (exec.CommandContext), so a hung CLI is killed rather than leaking a
 // long-lived child, and a caller passing cmd.Wait() cannot block forever.
 func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.Cmd) error) (string, *exec.Cmd, string) {
+	url, proc, hint, _ := exposeAttempt(tailscalePath, cmd, target, pathPrefix, wait)
+	return url, proc, hint
+}
+
+// exposeAttempt is Expose plus the CLI's combined output. A failed attempt
+// returns a nil process, and its output is the only place the reason lives
+// when the CLI prints neither a URL nor an enable link.
+func exposeAttempt(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.Cmd) error) (url string, proc *exec.Cmd, hint, output string) {
 	args := []string{cmd, "--bg"}
 	if cmd == "funnel" {
 		// Funnel must NOT share 443 with the tailnet-only serve routes: the same
@@ -208,7 +245,7 @@ func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.C
 	if pathPrefix != "" {
 		args = append(args, "--set-path", pathPrefix)
 	}
-	args = append(args, target)
+	args = append(args, normalizeExposeTarget(target))
 	ctx, cancel := context.WithTimeout(context.Background(), exposeTimeout)
 	serveCmd := exec.CommandContext(ctx, tailscalePath, args...)
 	var out bytes.Buffer
@@ -218,39 +255,45 @@ func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.C
 	if err := serveCmd.Start(); err != nil {
 		cancel()
 		log.Printf("tailscale %s failed to start: %v", cmd, err)
-		return "", nil, ""
+		return "", nil, "", err.Error()
 	}
 
+	var runErr error
 	if wait != nil {
 		done := make(chan error, 1)
 		go func() { done <- wait(serveCmd) }()
-		<-done
+		runErr = <-done
 		// The context kills the child at exposeTimeout, so this is bounded. If
 		// the caller's wait never reaped the process, this Wait does; if it did,
 		// this returns immediately with "already called". Either way the child
 		// has exited before the output buffer is read below.
 		_ = serveCmd.Wait()
 	} else {
-		_ = serveCmd.Wait()
+		runErr = serveCmd.Wait()
 	}
 	cancel()
 
-	output := out.String()
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
-			return line, serveCmd, ""
+	output = out.String()
+	// Only a zero exit proves a mount. tailscale prints its one-time enable link
+	// (an https:// line) on a FAILED run, so the URL scan must not run on a
+	// non-zero exit, or that link is reported as a live exposure.
+	if runErr == nil {
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+				return line, serveCmd, "", output
+			}
 		}
 	}
 
-	// Parse the one-time enable hint when funnel/serve isn't enabled yet.
+	// A failed run: the one-time enable hint, when funnel/serve isn't enabled yet.
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "https://") || strings.HasPrefix(line, "http://") {
-			return "", nil, line
+			return "", nil, line, output
 		}
 	}
-	return "", nil, ""
+	return "", nil, "", output
 }
 
 // StartExpose makes the local target (host:port) reachable via tailscale
@@ -258,9 +301,11 @@ func Expose(tailscalePath, cmd, target, pathPrefix string, wait func(cmd *exec.C
 // so instances coexist. The target must be the address the server actually
 // listens on: a server bound to the LAN IP only is unreachable at
 // localhost:<port>, and tailscale would silently proxy to whatever else owns
-// that loopback port. Returns the public URL including the path prefix, the
-// background process for cleanup, and a one-time setup hint when the tailnet
-// needs enabling.
+// that loopback port. A target without a scheme (e.g. "192.168.1.5:4096") is
+// normalized to http:// by Expose; tailscale rejects a bare non-localhost
+// host:port, which silently produced no mount. Returns the public URL including
+// the path prefix, the background process for cleanup, and a one-time setup
+// hint when the tailnet needs enabling.
 func StartExpose(target, id string) (url string, proc *exec.Cmd, setupHint string) {
 	u, p, h, _ := StartExposeWithKind(target, id)
 	return u, p, h
@@ -283,13 +328,49 @@ func StartExposeWithKind(target, id string) (url string, proc *exec.Cmd, setupHi
 	pathPrefix := SanitizePath(id)
 	wait := func(cmd *exec.Cmd) error { return cmd.Wait() }
 
-	if u, p, hint := Expose(tailscalePath, "funnel", target, pathPrefix, wait); u != "" {
-		return URLWithPathPrefix(u, pathPrefix), p, hint, "funnel"
+	u, p, funnelHint, _ := exposeAttempt(tailscalePath, "funnel", target, pathPrefix, wait)
+	if u != "" {
+		return URLWithPathPrefix(u, pathPrefix), p, funnelHint, "funnel"
 	}
-	if u, p, hint := Expose(tailscalePath, "serve", target, pathPrefix, wait); u != "" {
-		return URLWithPathPrefix(u, pathPrefix), p, hint, "serve"
+	// A failed funnel attempt can still have written its PUBLIC mount before the
+	// CLI failed to print a URL. Remove it before serve runs: otherwise serve is
+	// reported while a funnel listener is live on the same path. Only the funnel
+	// listener is removed; see the serve note below.
+	if pathPrefix != "" {
+		removeMount(tailscalePath, "funnel", pathPrefix)
 	}
-	return URLWithPathPrefix(DNSName(tailscalePath), pathPrefix), nil, "", ""
+	u, p, serveHint, serveOutput := exposeAttempt(tailscalePath, "serve", target, pathPrefix, wait)
+	if u != "" {
+		return URLWithPathPrefix(u, pathPrefix), p, serveHint, "serve"
+	}
+	// No removal after a failed serve: tailscale_share upgrades a live serve
+	// mount to funnel on this same path, and removing it here would kill a
+	// working share when the re-mount fails.
+	// The caller still gets a best-guess URL for the manual dialog, but kind is
+	// "" because NOTHING was actually mounted. A caller that opens the URL (as
+	// /rc does) must require a non-empty kind: the guess resolves to the
+	// tailnet root mount, and a root mount whose backend is gone answers 502.
+	return URLWithPathPrefix(DNSName(tailscalePath), pathPrefix), nil, failureHint(serveHint, serveOutput, funnelHint), ""
+}
+
+// failureHint is the setup hint when neither listener exposed anything. The
+// serve attempt is the primary failure: its enable link, or else its own
+// output, which is the only place its reason appears. The funnel hint is
+// appended, never substituted, so a funnel enable link cannot hide the real
+// serve error.
+func failureHint(serveHint, serveOutput, funnelHint string) string {
+	primary := serveHint
+	if primary == "" {
+		primary = strings.TrimSpace(serveOutput)
+	}
+	switch {
+	case funnelHint == "":
+		return primary
+	case primary == "":
+		return "funnel: " + funnelHint
+	default:
+		return primary + "\nfunnel: " + funnelHint
+	}
 }
 
 // StartServeExpose starts a TAILNET-ONLY `tailscale serve` mount for target
@@ -332,24 +413,35 @@ func RemoveSetPath(pathPrefix string) {
 	if tailscalePath == "" {
 		return
 	}
-	// Each listener needs its own --https: funnel lives on FunnelHTTPSPort while
-	// serve uses the 443 default, so one shared argv would target only one of
-	// them and orphan the other's mount — leaving a PUBLIC funnel live after the
-	// user pressed Stop.
-	attempts := [][]string{
-		{"funnel", fmt.Sprintf("--https=%d", FunnelHTTPSPort), "--set-path", pathPrefix, "off"},
-		{"serve", "--set-path", pathPrefix, "off"},
+	// Both listeners are tried: a funnel mount and a serve mount can share a
+	// path, and removing only one would orphan the other.
+	removeMount(tailscalePath, "funnel", pathPrefix)
+	removeMount(tailscalePath, "serve", pathPrefix)
+}
+
+// removeMount runs one best-effort `tailscale <cmd> --set-path <prefix> off`
+// for a single listener. Each listener needs its own --https: funnel lives on
+// FunnelHTTPSPort while serve uses the 443 default, so one shared argv would
+// target only one of them and orphan the other's mount — leaving a PUBLIC
+// funnel live after the user pressed Stop. A failure is logged, not returned:
+// the caller has no mount to fall back to.
+func removeMount(tailscalePath, cmd, pathPrefix string) {
+	if pathPrefix == "" {
+		return
 	}
-	for _, args := range attempts {
-		ctx, cancel := context.WithTimeout(context.Background(), exposeTimeout)
-		c := exec.CommandContext(ctx, tailscalePath, args...)
-		var out bytes.Buffer
-		c.Stdout = &out
-		c.Stderr = &out
-		err := c.Run()
-		cancel()
-		if err != nil {
-			log.Printf("tailscale %s: %v\n  output: %s", strings.Join(args, " "), err, strings.TrimRight(out.String(), "\n"))
-		}
+	args := []string{cmd}
+	if cmd == "funnel" {
+		args = append(args, fmt.Sprintf("--https=%d", FunnelHTTPSPort))
+	}
+	args = append(args, "--set-path", pathPrefix, "off")
+	ctx, cancel := context.WithTimeout(context.Background(), exposeTimeout)
+	c := exec.CommandContext(ctx, tailscalePath, args...)
+	var out bytes.Buffer
+	c.Stdout = &out
+	c.Stderr = &out
+	err := c.Run()
+	cancel()
+	if err != nil {
+		log.Printf("tailscale %s: %v\n  output: %s", strings.Join(args, " "), err, strings.TrimRight(out.String(), "\n"))
 	}
 }

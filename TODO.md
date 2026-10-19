@@ -6206,3 +6206,5 @@ From the `/review-changes` pass on the Pulse-tools + Claude-clone change set.
 - **Still cloning on read:** `session.Load` and `LoadAny` (`internal/session/session.go` ~1074, ~1843) clone a Claude transcript on read. They use the process default project, not the multi-root probe, so they were left out of this change.
 - **Not opened first:** any read handler that calls `Resolve` on a never-opened Claude session now returns not-found until one of the open paths runs. Not every handler has been audited.
 - **Unmigrated clone files:** `claude:X.sqlite` / `.ojsonl` files written before the canonicalization fix stay on disk under the old name. No migration exists.
+
+- (2026-10-19) LAN IP auto-permission: docs/concepts/auto-permission-enforced-categories.md and network-guard docs should mention that RFC1918 addresses are treated as on-host for guard applicability (Jev decides). Also note deliberately unhandled: IPv4-mapped IPv6 (::ffff:192.168.x), decimal/octal IP forms, and DNS names resolving to private ranges remain non-LAN (fail closed); link-local (169.254.x) and cloud metadata stay escalated.

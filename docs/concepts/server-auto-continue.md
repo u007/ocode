@@ -29,12 +29,15 @@ The judge does not answer "continue or end". It picks one key from a closed set 
 |---|---|---|---|
 | `continue` | resume | cut off mid-work / truncated | no |
 | `next` | resume | current item done, todo plan has open items (offered only then; the gate reads the judged agent's own plan through `tool.ReadTodoSnapshot(a.todoScope())` — project root + session id, the same address the todo tools use — never the TUI's process-global current todo session, so it works per session on the server) | no |
+| `continue_todo` | resume | stopped with open todo item(s) still unstarted or in progress; continues the ready open item(s) without repeating work already present in the transcript (offered only when the plan has open items) | no |
+| `validate_todo` | resume | an open todo item claims completion but shows no verification; verifies it before marking done (offered only when the plan has open items) | yes |
+| `skip_todo` | resume | an open todo item is blocked or optional and the rest of the plan does not depend on it; skips it, records it in TODO.md, and continues (offered only when the plan has open items) | no |
 | `retry` | resume | stopped on a transient failure (network, rate limit, flaky test) | yes |
 | `fix_errors` | resume | latest output shows a failing build/tests and the reply stopped | no |
 | `verify` | resume | claims done, shows no test/build run | yes |
 | `review_first` | resume | large/risky diff declared done without self-review | yes |
 | `write_plan` | resume | large task, no todo plan, reply is wandering | yes |
-| `ask_advisor` | resume | torn between approaches or stuck; offered only when the advisor is enabled and installed | yes |
+| `ask_advisor` | resume | torn between approaches, stuck, needs an answer it cannot derive, or unable to solve the current item; offered only when the advisor is enabled and installed, and at most once per chain | yes |
 | `summarize` | resume | work done, no final summary | yes |
 | `proceed` | answer | reply asks a yes/no go-ahead on a plan it already described; step is reversible | no |
 | `skip` | answer | reply asks whether to do an optional/blocked sub-item | no |
@@ -49,6 +52,41 @@ The judge does not answer "continue or end". It picks one key from a closed set 
 - `proceed` is vetoed when the reply's own quoted commands (fenced blocks and inline backtick spans, via `replyProposesHarmfulCommand`) are classified harmful by `IsHarmfulBashCommand` — git history rewrites, force pushes, `git stash`, destructive `rm`. `reject` on the same reply is the safe answer and stays allowed.
 
 **Once-per-chain** actions are dropped from the offered set when their key is already in the chain history (`chain_actions_fired` in the state). The history has the same lifetime as the chain counter: the server keeps it in `runTurn` alongside `autoContinueCount`, the TUI in `m.autoContinueActions` (reset by `settleAutoContinueChain` and on new session). Each fired action counts toward `AutoContinueChainCap`.
+
+### Todo-specific actions and item prioritisation
+
+Three resume-class actions operate on the open todo plan (`continue_todo`,
+`validate_todo`, `skip_todo`). They are offered only when the plan has open
+items, and the judge receives the open items as structured state
+(`todo_open_items`: id, text, status), bounded to 15 items / 200 chars per
+text.
+
+The action keys stay static; the item is selected through a `todo_item` choice
+question whose choices are the open item ids plus `none`. `none` is the
+no-target answer: the judge must choose it for any action that is not
+todo-specific, so the question never forces a pick.
+
+The item is honoured only when it matters:
+
+- Only `NeedsTodo` actions (`continue_todo`, `validate_todo`, `skip_todo`) read
+  the item. For every other action the answer is ignored and `TodoID` stays empty.
+- A valid item id (one of the judged snapshot's open items) with confidence at
+  least `autoContinueMinConfidenceDefault` is recorded as `TodoID` and
+  interpolated into the `{todo}` placeholder of the fixed prompt.
+- A todo-specific action with no valid item (`none`, an unknown id, or a
+  low-confidence pick) is **not resumed**: the decision carries the action key,
+  `Resume=false`, and a detail line saying no open item was named. There is no
+  placeholder-less prompt, so the agent is never told to continue or skip an
+  unnamed item.
+
+**One plan read per judge call.** `runAutoContinueJudgeTypesafe` reads the
+session plan once (`tool.ReadTodoSnapshot`) and passes that snapshot to the
+state (`todo_open_items`), the item question's choices and the item validation.
+The judge is never validated against a plan other than the one it was shown.
+
+The resumed prompt is sent verbatim by the hosts (server + TUI); interpolation
+happens inside `runAutoContinueJudgeTypesafe` before the prompt leaves the
+agent, so no host change is required.
 
 ### Key Parameters
 
@@ -92,7 +130,7 @@ The rubric sent to the judge (`typesafeAutoContinueInstructions`) carries this s
 
 **Since 2026-10-04**, the auto-continue judge is reached through the same `Decider` seam as the other judges. `runAutoContinueJudgeTypesafe` takes a `Decider` parameter instead of a concrete `*TypesafeClient`. The caller resolves it via `resolveDecider(slotAutoContinue)` (`internal/agent/decider.go`), which reads the `auto_continue_model` config key (unchanged; not moved or renamed). The key still accepts any decision-backend id — `isDecisionModel` is the single gate, not a hardcoded `typesafe/` prefix.
 
-**Since 2026-10-14** the verdict is the action set above and `AutoContinueJudgeSync`/`AutoContinueJudgeAsync` take the chain history (`prior []string`) and return an `AutoContinueDecision` (`Resume`, `Action`, `Prompt`, `Detail`); the hosts send `Prompt` verbatim. The step-limit path bypasses the judge and fires `continue` with `AutoContinueStepLimitPrompt`.
+**Since 2026-10-14** the verdict is the action set above and `AutoContinueJudgeSync`/`AutoContinueJudgeAsync` take the chain history (`prior []string`) and return an `AutoContinueDecision` (`Resume`, `Action`, `Prompt`, `Detail`); the hosts send `Prompt` verbatim (todo-specific prompts are already interpolated with the prioritised item id, if any). The step-limit path bypasses the judge and fires `continue` with `AutoContinueStepLimitPrompt`.
 
 ### Chat Judge Path
 

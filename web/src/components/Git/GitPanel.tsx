@@ -1260,7 +1260,7 @@ export default function GitPanel({
                   </span>
                   <button
                     onClick={() => onOpenFile?.(c.path, projectPath)}
-                    className="text-xs font-mono truncate text-left hover:underline min-w-0 flex-1"
+                    className="text-xs font-mono break-words text-left hover:underline min-w-0 flex-1"
                     title={c.path}
                   >
                     {c.path}
@@ -2119,7 +2119,7 @@ function FileSection({
                     >
                       {badge.label}
                     </span>
-                    <span className="font-mono text-foreground truncate flex-1">
+                    <span className="font-mono text-foreground break-words min-w-0 flex-1" title={f.path}>
                       {f.path}
                     </span>
                     {rowActions?.(f)}
@@ -2161,7 +2161,7 @@ function FileDiff({
     <div className="p-3">
       {/* file header */}
       <div className="flex items-center justify-between gap-2 mb-2 pb-2 border-b border-border">
-        <span className="font-mono text-xs text-foreground truncate flex-1">
+        <span className="font-mono text-xs text-foreground break-words min-w-0 flex-1" title={file.path}>
           {file.path}
           <span className="ml-2 text-[10px] uppercase tracking-wider text-muted-foreground">
             {staged ? "staged" : file.status}

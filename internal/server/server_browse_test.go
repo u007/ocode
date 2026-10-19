@@ -205,3 +205,111 @@ func TestBrowseUploadEndpointSavesFilesAndRevokeCleans(t *testing.T) {
 		t.Fatalf("upload dir still present after revoke: %v", err)
 	}
 }
+
+// TestBrowseConfigLoopbackHostUsesSameSiteOrigin proves that when the SPA is
+// loaded from a loopback host (desktop webview / local browser), the browse
+// origin shares that host so the SameSite=Lax cookie stays first-party.
+// Non-loopback hosts keep the tailnet URL (when available).
+func TestBrowseConfigLoopbackHostUsesSameSiteOrigin(t *testing.T) {
+	cases := []struct {
+		reqHost string
+		want    string
+	}{
+		{"localhost:4096", "http://localhost:64435"},
+		{"127.0.0.1:4096", "http://127.0.0.1:64435"},
+		{"[::1]:4096", "http://[::1]:64435"},
+	}
+	for _, tc := range cases {
+		// A local desktop client: loopback peer, no proxy headers.
+		body := browseConfigBaseURL(t, "127.0.0.1:5555", tc.reqHost, nil, "")
+		if body != tc.want {
+			t.Errorf("Host %s: base_url = %q, want %q", tc.reqHost, body, tc.want)
+		}
+	}
+}
+
+// browseConfigBaseURL serves GET /api/browse/config on a server whose browse
+// proxy listens on 64435, with the tailnet URL tailnetURL reported as running
+// (empty means tailscale is not running), and returns the base_url.
+func browseConfigBaseURL(t *testing.T, remoteAddr, reqHost string, headers map[string]string, tailnetURL string) string {
+	t.Helper()
+	s := New("127.0.0.1:0", "", "", nil)
+	s.EnableBrowse("http://127.0.0.1:54321", browse.New("", nil))
+	s.shutdownMu.Lock()
+	s.browseProxyPort = 64435
+	s.shutdownMu.Unlock()
+	if tailnetURL != "" {
+		s.handler.tailscaleShareSnapshot = func() tailscaleShareStatus {
+			return tailscaleShareStatus{Running: true, Available: true, URL: tailnetURL, BrowseURL: tailnetURL}
+		}
+	}
+	r := httptest.NewRequest("GET", "/api/browse/config", nil)
+	r.RemoteAddr = remoteAddr
+	r.Host = reqHost
+	for k, v := range headers {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, r)
+	var body struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode browse config (Host %s, peer %s): %v", reqHost, remoteAddr, err)
+	}
+	return body.BaseURL
+}
+
+// TestBrowseConfigDecidesByPeerNotHost pins the review fix: Host is
+// client-supplied, so a proxied or remote request that presents a loopback Host
+// must NOT get the localhost origin. The tailnet URL is served instead when
+// tailscale is running. A genuine local client keeps the same-site origin even
+// when tailscale is running.
+func TestBrowseConfigDecidesByPeerNotHost(t *testing.T) {
+	const tailnet = "https://host.ts.net:8443/browse"
+	const local = "http://localhost:64435"
+	cases := []struct {
+		name       string
+		remoteAddr string
+		reqHost    string
+		headers    map[string]string
+		want       string
+	}{
+		{
+			name:       "local desktop client keeps same-site origin",
+			remoteAddr: "127.0.0.1:5555", reqHost: "localhost:4096",
+			want: local,
+		},
+		{
+			name:       "tailscale serve proxy to loopback with loopback Host gets tailnet URL",
+			remoteAddr: "127.0.0.1:5555", reqHost: "localhost:4096",
+			headers: map[string]string{"Tailscale-User-Login": "james@example.com"},
+			want:    tailnet,
+		},
+		{
+			name:       "X-Forwarded-For from a loopback proxy gets tailnet URL",
+			remoteAddr: "127.0.0.1:5555", reqHost: "localhost:4096",
+			headers: map[string]string{"X-Forwarded-For": "100.64.0.9"},
+			want:    tailnet,
+		},
+		{
+			name:       "X-Forwarded-Host alone counts as proxied",
+			remoteAddr: "[::1]:5555", reqHost: "localhost:4096",
+			headers: map[string]string{"X-Forwarded-Host": "host.ts.net"},
+			want:    tailnet,
+		},
+		{
+			name:       "spoofed loopback Host from a remote peer gets tailnet URL",
+			remoteAddr: "100.64.0.9:44321", reqHost: "localhost:4096",
+			want: tailnet,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := browseConfigBaseURL(t, tc.remoteAddr, tc.reqHost, tc.headers, tailnet)
+			if got != tc.want {
+				t.Fatalf("base_url = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

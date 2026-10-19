@@ -13,8 +13,12 @@ import (
 // awaiting_* reasons (Jev cannot write prose, so it picks a typed category
 // explaining the verdict).
 const (
-	typesafeAutoContinueVerdictKey = "verdict"
-	typesafeAutoContinueReasonKey  = "reason"
+	typesafeAutoContinueVerdictKey  = "verdict"
+	typesafeAutoContinueReasonKey   = "reason"
+	typesafeAutoContinueTodoItemKey = "todo_item"
+	// typesafeAutoContinueTodoNoneChoice is the todo_item answer for "no target".
+	// It cannot collide with an item id: ids are t<N>.
+	typesafeAutoContinueTodoNoneChoice = "none"
 )
 
 // autoContinueMinConfidenceDefault is the TypeSafe confidence floor for a
@@ -120,6 +124,9 @@ type autoContinueAction struct {
 	// a judge that keeps asking for a plan, an advisor or a summary would
 	// otherwise loop the same instruction until the chain cap.
 	OncePerChain bool
+	// NeedsTodo actions target one open todo item: the prompt's {todo} is only
+	// filled from a judged item id, and without one the action is not resumed.
+	NeedsTodo bool
 }
 
 // autoContinueActions is the full option set, in the order presented to the
@@ -131,6 +138,15 @@ var autoContinueActions = []autoContinueAction{
 	{Key: "next", Summary: "item done, plan has open items", Class: actionResume,
 		Criteria: "the current step is done and the todo plan still has open items; the assistant should move to the next one",
 		Prompt:   "That item is done. Move to the next open item in the todo plan; do not repeat work already completed."},
+	{Key: "continue_todo", Summary: "continue an open todo item", Class: actionResume, NeedsTodo: true,
+		Criteria: "the reply stopped with one or more open todo items still unstarted or in progress, and concrete work remains on them; the assistant should continue the ready open item(s) without repeating work already present in the transcript",
+		Prompt:   "Continue the work on todo item {todo} (and any other ready open items), picking it from the plan; do not repeat work already present in the transcript."},
+	{Key: "validate_todo", Summary: "validate an open todo item", Class: actionResume, OncePerChain: true, NeedsTodo: true,
+		Criteria: "an open todo item claims completion but shows no test, build or runtime verification of it; the assistant should verify it before marking it done",
+		Prompt:   "Validate the work claimed done for todo item {todo}: run the relevant tests/build and report; update the item's status only after verification passes."},
+	{Key: "skip_todo", Summary: "skip an open todo item", Class: actionResume, NeedsTodo: true,
+		Criteria: "an open todo item is blocked or optional and the rest of the plan does not depend on it; the assistant should skip it, record it in TODO.md with the reason, and continue",
+		Prompt:   "Skip todo item {todo}, record it in TODO.md with the reason, and continue with the rest of the plan."},
 	{Key: "retry", Summary: "transient failure, retrying once", Class: actionResume, OncePerChain: true,
 		Criteria: "the reply stopped on a transient failure (network error, rate limit, flaky test, timeout) that is likely to succeed on a second attempt",
 		Prompt:   "Retry the step that failed once. If it fails again, stop and report the failure instead of retrying further."},
@@ -147,7 +163,7 @@ var autoContinueActions = []autoContinueAction{
 		Criteria: "the task is large or multi-step, there is no todo plan, and the reply is wandering or jumped straight into edits",
 		Prompt:   "Stop and write a todo plan with todowrite that covers the whole task, then start on the first item."},
 	{Key: "ask_advisor", Summary: "stuck, consulting the advisor", Class: actionResume, OncePerChain: true,
-		Criteria: "the reply is torn between approaches, stuck, or unsure how to proceed and an advisor is available",
+		Criteria: "the reply is torn between approaches, stuck, unsure how to proceed, needs an answer it cannot derive, or is unable to solve the current item, and an advisor is available",
 		Prompt:   "Consult the advisor tool with your exact question and the options you are weighing, then act on its answer."},
 	{Key: "summarize", Summary: "done but unsummarised", Class: actionResume, OncePerChain: true,
 		Criteria: "the work is done but the reply never summarised what changed and what remains",
@@ -205,6 +221,8 @@ func (a *Agent) autoContinueOffered(prior []string, allowAnswers bool, todoOpen 
 			continue
 		case act.Key == "next" && !todoOpen:
 			continue
+		case act.NeedsTodo && !todoOpen:
+			continue
 		case act.Class == actionAnswer && !allowAnswers:
 			continue
 		}
@@ -223,6 +241,34 @@ func (a *Agent) autoContinueOffered(prior []string, allowAnswers bool, todoOpen 
 // makes the judge resume into it.
 func (a *Agent) autoContinueTodoOpen() bool {
 	return tool.ReadTodoSnapshot(a.todoScope()).HasOpenItems
+}
+
+// autoContinueTodoItems projects one todo snapshot into the judge's open-item
+// state (id + text + status): at most autoContinueTodoItemsCap items, each text
+// cut to autoContinueTodoTextCap runes. It reads nothing itself, so a judge call
+// uses the single snapshot it read at the start (runAutoContinueJudgeTypesafe).
+// An absent plan yields nil.
+const autoContinueTodoItemsCap = 15
+const autoContinueTodoTextCap = 200
+
+func autoContinueTodoItems(snap tool.TodoSnapshot) []map[string]any {
+	if !snap.HasOpenItems || len(snap.OpenItems) == 0 {
+		return nil
+	}
+	n := len(snap.OpenItems)
+	if n > autoContinueTodoItemsCap {
+		n = autoContinueTodoItemsCap
+	}
+	out := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		it := snap.OpenItems[i]
+		text := it.Text
+		if cut := truncateRunes(text, autoContinueTodoTextCap); cut != text {
+			text = cut + "…"
+		}
+		out = append(out, map[string]any{"id": it.ID, "text": text, "status": it.Status})
+	}
+	return out
 }
 
 // advisorAvailable reports whether a resumed turn could actually call the
@@ -248,6 +294,9 @@ Rules:
 - A reply that ends by asking the user something is NOT a cut-off mid-task reply. Classify the question: a plain yes/no go-ahead on a plan the reply has already described in full is a confirmation, and only "proceed", "skip" or "reject" may answer it. Any other question — an open choice between approaches, a missing or ambiguous requirement, a destructive or irreversible action — is a decision for the user: choose "await_user".
 - Never choose "proceed" when the described step deletes data, rewrites git history, force-pushes, deploys, or otherwise cannot be undone.
 - The state lists actions already fired in this chain; do not ask for the same plan, review, advisor or retry twice.
+- The state may include open todo items (id, text, status); prefer the todo-specific actions (continue_todo, validate_todo, skip_todo) over the generic ones when they fit, and name the item you are acting on in your reasoning.
+- If the reply already contains the result for an item, skip that item rather than repeating it (preexisting reply).
+- Use "ask_advisor" when the reply needs an answer the model cannot derive or cannot solve the current item, unless an advisor has already been consulted in this chain.
 - When the state says the turn was ended by the step limit, the reply is a forced summary of unfinished work: choose "continue".
 - When the state says the turn failed with an error, choose "end": the caller surfaces the error instead.
 Choose a resume or answer action only when the evidence is unambiguous; otherwise choose "end" so the turn finishes.`
@@ -262,6 +311,11 @@ type AutoContinueDecision struct {
 	Action string
 	Prompt string
 	Detail string
+	// TodoID is the optional todo item id the judge prioritised when choosing a
+	// todo-specific action (continue_todo/validate_todo/skip_todo). Empty when
+	// the judge did not name one or the action is not todo-specific. When set,
+	// it has already been interpolated into Prompt.
+	TodoID string
 }
 
 // runAutoContinueJudgeTypesafe consults the TypeSafe System One model (Jev)
@@ -291,9 +345,14 @@ type AutoContinueDecision struct {
 // verdict (and fire the wrong resume prompt). Instead the state reports the
 // real end reason (buildTypesafeAutoContinueState) and Jev decides.
 func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message, stepErr error, prior []string) (AutoContinueDecision, error) {
-	todoOpen := a.autoContinueTodoOpen()
+	// One read of the plan per judge call. The state, the item question and the
+	// item validation below all use this snapshot, so the judge is never asked
+	// about one plan and then validated against a different one.
+	snap := tool.ReadTodoSnapshot(a.todoScope())
+	todoOpen := snap.HasOpenItems
+	todoItems := autoContinueTodoItems(snap)
 	offered := a.autoContinueOffered(prior, true, todoOpen)
-	state := a.buildTypesafeAutoContinueState(messages, stepErr, prior, todoOpen)
+	state := a.buildTypesafeAutoContinueState(messages, stepErr, prior, snap)
 	reasonCriteria := make(map[string]string, len(typesafeAutoContinueReasons))
 	for _, r := range typesafeAutoContinueReasons {
 		reasonCriteria[r.Key] = r.Label
@@ -313,6 +372,27 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 			Instructions: typesafeAutoContinueInstructions + "\nName the single best description of how the last reply ended, or \"finished\" if it completed the request.",
 			Criteria:     reasonCriteria,
 		},
+	}
+	// Todo item question: when the plan has open items, the judge names the item
+	// a todo-specific action targets. "none" is the explicit no-target answer, so
+	// the question never forces a pick on a non-todo action. This keeps the action
+	// keys static while still targeting a specific item.
+	if todoOpen {
+		criteria := make(map[string]string, len(todoItems)+1)
+		for _, it := range todoItems {
+			id, _ := it["id"].(string)
+			text, _ := it["text"].(string)
+			if id == "" {
+				continue
+			}
+			criteria[id] = text
+		}
+		criteria[typesafeAutoContinueTodoNoneChoice] = "no single open item is the target; the chosen action is not todo-specific"
+		questions[typesafeAutoContinueTodoItemKey] = TypesafeQuestion{
+			Type:         "choice",
+			Instructions: typesafeAutoContinueInstructions + "\nIf you chose continue_todo, validate_todo or skip_todo, name the single open todo item it should target; for any other action choose \"none\".",
+			Criteria:     criteria,
+		}
 	}
 
 	model := deciderLabel(client)
@@ -349,7 +429,29 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 		return AutoContinueDecision{Detail: fmt.Sprintf("%s returned unknown choice %q", model, ans.Choice)}, nil
 	}
 	dec := AutoContinueDecision{Action: act.Key}
-
+	prompt := act.Prompt
+	// A todo-specific action is only actionable against one open item. The item
+	// id is honoured only here: a non-todo action ignores whatever the item
+	// question said, so a low-information pick cannot steer it. The id must be
+	// one of the snapshot's items and clear the item confidence floor; "none",
+	// an unknown id or a low-confidence pick leaves it empty and nothing resumes.
+	if act.NeedsTodo {
+		todoID := ""
+		if ti, ok := resp.Answers[typesafeAutoContinueTodoItemKey]; ok && ti.Type == "choice" && ti.Confidence >= a.resolveAutoContinueMinConfidence() {
+			for _, it := range todoItems {
+				if id, _ := it["id"].(string); id == ti.Choice {
+					todoID = id
+					break
+				}
+			}
+		}
+		if todoID == "" {
+			dec.Detail = fmt.Sprintf("%s chose %s but named no open todo item — not resuming", model, act.Key)
+			return dec, nil
+		}
+		dec.TodoID = todoID
+		prompt = strings.ReplaceAll(act.Prompt, "{todo}", todoID)
+	}
 	if act.Class == actionEnd {
 		dec.Detail = fmt.Sprintf("%s: %s%s (%.0f%% confidence)", model, act.Summary, reason, ans.Confidence*100)
 		return dec, nil
@@ -381,7 +483,7 @@ func (a *Agent) runAutoContinueJudgeTypesafe(client Decider, messages []Message,
 		return dec, nil
 	}
 	dec.Resume = true
-	dec.Prompt = act.Prompt
+	dec.Prompt = prompt
 	dec.Detail = fmt.Sprintf("%s: %s, %s (%.0f%% confidence)%s — resuming", model, act.Key, act.Summary, ans.Confidence*100, reason)
 	return dec, nil
 }
@@ -456,7 +558,7 @@ func quotedCommandCandidates(text string) []string {
 // a Step error; the TUI and server resume deterministically on StepLimitHit).
 // The error/step-limit branches are the fallback for a direct caller, keeping
 // the rubric honest if one is ever handed a cut-off or failed turn.
-func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error, prior []string, todoOpen bool) map[string]any {
+func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error, prior []string, snap tool.TodoSnapshot) map[string]any {
 	if prior == nil {
 		prior = []string{}
 	}
@@ -464,7 +566,8 @@ func (a *Agent) buildTypesafeAutoContinueState(messages []Message, stepErr error
 		"transcript_tail":     typesafeTranscriptTail(messages, 6),
 		"turn_ended":          a.typesafeTurnEnded(stepErr),
 		"chain_actions_fired": prior,
-		"todo_has_open_items": todoOpen,
+		"todo_has_open_items": snap.HasOpenItems,
+		"todo_open_items":     autoContinueTodoItems(snap),
 		"advisor_available":   a.advisorAvailable(),
 	}
 	if a.config != nil {
@@ -487,8 +590,8 @@ func typesafeTranscriptTail(messages []Message, n int) []map[string]any {
 		if content == "" {
 			continue
 		}
-		if len(content) > 4000 {
-			content = content[:4000] + "…(truncated)"
+		if cut := truncateRunes(content, 4000); cut != content {
+			content = cut + "…(truncated)"
 		}
 		entries = append(entries, map[string]any{"role": m.Role, "content": content})
 	}

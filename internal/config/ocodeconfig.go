@@ -992,10 +992,10 @@ type OcodeConfig struct {
 	// PulseCompactPctThreshold is the percent of model context at which
 	// auto-compaction fires. Zero means default (80).
 	PulseCompactPctThreshold int
-	CommitMsgModel    string
-	CommitMsgPrompt   string
-	TUI               TUIConfig
-	MaxSteps          int `json:"max_steps,omitempty"`
+	CommitMsgModel           string
+	CommitMsgPrompt          string
+	TUI                      TUIConfig
+	MaxSteps                 int `json:"max_steps,omitempty"`
 	// MaxImageDim caps the longest edge (px) of an embedded image; larger
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
@@ -1315,73 +1315,73 @@ type browserConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact                 compactConfigFile           `json:"compact"`
-	Advisor                 advisorConfigFile           `json:"advisor"`
-	Permissions             permissionConfigFile        `json:"permissions"`
-	Plugins                 pluginsConfigFile           `json:"plugins"`
-	Browser                 browserConfigFile           `json:"browser"`
-	TTS                     TTSConfig                   `json:"tts,omitempty"`
-	STT                     STTConfig                   `json:"stt,omitempty"`
-	ChatVerbosity           *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
-	QuickActions            *QuickActionsConfig         `json:"quick_actions,omitempty"`
-	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
-	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
-	DB                      DBConfig                    `json:"db"`
-	Security                securityConfigFile          `json:"security"`
-	Discovery               discoveryConfigFile         `json:"discovery"`
-	DocSearch               docSearchConfigFile         `json:"doc_search"`
-	Search                  searchConfigFile            `json:"search"`
-	NetworkGuard            networkGuardConfigFile      `json:"network_guard"`
-	ContentGuard            contentGuardConfigFile      `json:"content_guard"`
-	Goal                    goalConfigFile              `json:"goal"`
-	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
-	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
-	AutoShareOnStart        *bool                       `json:"auto_share_on_start,omitempty"`
-	ProfileDebug            *bool                       `json:"profile_debug,omitempty"`
-	TerminalScrollbackLines *int                        `json:"terminal_scrollback_lines,omitempty"`
-	TerminalFontFamily      string                      `json:"terminal_font_family,omitempty"`
-	TerminalFontSize        *int                        `json:"terminal_font_size,omitempty"`
-	TerminalShell           string                      `json:"terminal_shell,omitempty"`
-	ExtraAllowedPaths       []string                    `json:"extra_allowed_paths,omitempty"`
-	Editor                  string                      `json:"editor,omitempty"`
-	EditorMode              string                      `json:"editor_mode,omitempty"`
-	IDEMode                 string                      `json:"ide_mode,omitempty"`
-	SmallModel              string                      `json:"small_model,omitempty"`
-	SmallModelEnabled       *bool                       `json:"small_model_enabled,omitempty"`
-	RecapModel              string                      `json:"recap_model,omitempty"`
-	RecapModelEnabled       *bool                       `json:"recap_model_enabled,omitempty"`
-	ExplorerModel           string                      `json:"explorer_model,omitempty"`
-	ExplorerModelEnabled    *bool                       `json:"explorer_model_enabled,omitempty"`
-	ContextModel            string                      `json:"context_model,omitempty"`
-	ContextModelEnabled     *bool                       `json:"context_model_enabled,omitempty"`
-	SpeechSummaryModel      string                      `json:"speech_summary_model,omitempty"`
-	SpeechSummaryEnabled    *bool                       `json:"speech_summary_enabled,omitempty"`
-	AutoContinueEnabled     *bool                       `json:"auto_continue_enabled,omitempty"`
-	AutoContinueModel       string                      `json:"auto_continue_model,omitempty"`
-	PulseModel              string                      `json:"pulse_model,omitempty"`
-	PulseSystemPrompt       string                      `json:"pulse_system_prompt,omitempty"`
-	PulseAutoReceive        *bool                       `json:"pulse_auto_receive,omitempty"`
-	PulseAutoGapMs          *int                        `json:"pulse_auto_gap_ms,omitempty"`
-	PulseAutoCompact        *bool                       `json:"pulse_auto_compact,omitempty"`
-	PulseCompactTokenThreshold *int                       `json:"pulse_compact_token_threshold,omitempty"`
-	PulseCompactPctThreshold *int                        `json:"pulse_compact_pct_threshold,omitempty"`
-	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
-	UndoMaxAgeDelta         *int                        `json:"undo_max_age_delta,omitempty"`
-	MaxConcurrentAgents     *int                        `json:"max_concurrent_agents,omitempty"`
-	CommitMsgModel          string                      `json:"commit_msg_model,omitempty"`
-	CommitMsgPrompt         string                      `json:"commit_msg_prompt,omitempty"`
-	TUI                     tuiConfigFile               `json:"tui"`
-	MaxSteps                int                         `json:"max_steps,omitempty"`
-	MaxImageDim             int                         `json:"image_max_dim,omitempty"`
-	UploadDir               string                      `json:"upload_dir,omitempty"`
-	BackendURL              string                      `json:"backend_url,omitempty"`
-	SyncURL                 string                      `json:"sync_url,omitempty"`
-	FakeAgent               string                      `json:"fake_agent,omitempty"`
-	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
-	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
-	ComputerUse             *ComputerUseConfig          `json:"computer_use,omitempty"`
-	SystemPermissions       *sysperm.Config             `json:"system_permissions,omitempty"`
-	Profiles                map[string]ProfileDelta     `json:"profiles,omitempty"`
+	Compact                    compactConfigFile           `json:"compact"`
+	Advisor                    advisorConfigFile           `json:"advisor"`
+	Permissions                permissionConfigFile        `json:"permissions"`
+	Plugins                    pluginsConfigFile           `json:"plugins"`
+	Browser                    browserConfigFile           `json:"browser"`
+	TTS                        TTSConfig                   `json:"tts,omitempty"`
+	STT                        STTConfig                   `json:"stt,omitempty"`
+	ChatVerbosity              *chatVerbosityConfigFile    `json:"chat_verbosity,omitempty"`
+	QuickActions               *QuickActionsConfig         `json:"quick_actions,omitempty"`
+	ExternalPlugins            map[string]PluginConfig     `json:"external_plugins,omitempty"`
+	LocalModels                map[string]LocalModelConfig `json:"local_models,omitempty"`
+	DB                         DBConfig                    `json:"db"`
+	Security                   securityConfigFile          `json:"security"`
+	Discovery                  discoveryConfigFile         `json:"discovery"`
+	DocSearch                  docSearchConfigFile         `json:"doc_search"`
+	Search                     searchConfigFile            `json:"search"`
+	NetworkGuard               networkGuardConfigFile      `json:"network_guard"`
+	ContentGuard               contentGuardConfigFile      `json:"content_guard"`
+	Goal                       goalConfigFile              `json:"goal"`
+	MemoryEnabled              *bool                       `json:"memory_enabled,omitempty"`
+	DocPromptEnabled           *bool                       `json:"doc_prompt_enabled,omitempty"`
+	AutoShareOnStart           *bool                       `json:"auto_share_on_start,omitempty"`
+	ProfileDebug               *bool                       `json:"profile_debug,omitempty"`
+	TerminalScrollbackLines    *int                        `json:"terminal_scrollback_lines,omitempty"`
+	TerminalFontFamily         string                      `json:"terminal_font_family,omitempty"`
+	TerminalFontSize           *int                        `json:"terminal_font_size,omitempty"`
+	TerminalShell              string                      `json:"terminal_shell,omitempty"`
+	ExtraAllowedPaths          []string                    `json:"extra_allowed_paths,omitempty"`
+	Editor                     string                      `json:"editor,omitempty"`
+	EditorMode                 string                      `json:"editor_mode,omitempty"`
+	IDEMode                    string                      `json:"ide_mode,omitempty"`
+	SmallModel                 string                      `json:"small_model,omitempty"`
+	SmallModelEnabled          *bool                       `json:"small_model_enabled,omitempty"`
+	RecapModel                 string                      `json:"recap_model,omitempty"`
+	RecapModelEnabled          *bool                       `json:"recap_model_enabled,omitempty"`
+	ExplorerModel              string                      `json:"explorer_model,omitempty"`
+	ExplorerModelEnabled       *bool                       `json:"explorer_model_enabled,omitempty"`
+	ContextModel               string                      `json:"context_model,omitempty"`
+	ContextModelEnabled        *bool                       `json:"context_model_enabled,omitempty"`
+	SpeechSummaryModel         string                      `json:"speech_summary_model,omitempty"`
+	SpeechSummaryEnabled       *bool                       `json:"speech_summary_enabled,omitempty"`
+	AutoContinueEnabled        *bool                       `json:"auto_continue_enabled,omitempty"`
+	AutoContinueModel          string                      `json:"auto_continue_model,omitempty"`
+	PulseModel                 string                      `json:"pulse_model,omitempty"`
+	PulseSystemPrompt          string                      `json:"pulse_system_prompt,omitempty"`
+	PulseAutoReceive           *bool                       `json:"pulse_auto_receive,omitempty"`
+	PulseAutoGapMs             *int                        `json:"pulse_auto_gap_ms,omitempty"`
+	PulseAutoCompact           *bool                       `json:"pulse_auto_compact,omitempty"`
+	PulseCompactTokenThreshold *int                        `json:"pulse_compact_token_threshold,omitempty"`
+	PulseCompactPctThreshold   *int                        `json:"pulse_compact_pct_threshold,omitempty"`
+	RecapTimeoutSeconds        *int                        `json:"recap_timeout_seconds,omitempty"`
+	UndoMaxAgeDelta            *int                        `json:"undo_max_age_delta,omitempty"`
+	MaxConcurrentAgents        *int                        `json:"max_concurrent_agents,omitempty"`
+	CommitMsgModel             string                      `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt            string                      `json:"commit_msg_prompt,omitempty"`
+	TUI                        tuiConfigFile               `json:"tui"`
+	MaxSteps                   int                         `json:"max_steps,omitempty"`
+	MaxImageDim                int                         `json:"image_max_dim,omitempty"`
+	UploadDir                  string                      `json:"upload_dir,omitempty"`
+	BackendURL                 string                      `json:"backend_url,omitempty"`
+	SyncURL                    string                      `json:"sync_url,omitempty"`
+	FakeAgent                  string                      `json:"fake_agent,omitempty"`
+	Ocr                        *ocr.OcrConfig              `json:"ocr,omitempty"`
+	ImageGen                   *ImageGenConfig             `json:"imagegen,omitempty"`
+	ComputerUse                *ComputerUseConfig          `json:"computer_use,omitempty"`
+	SystemPermissions          *sysperm.Config             `json:"system_permissions,omitempty"`
+	Profiles                   map[string]ProfileDelta     `json:"profiles,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled *bool  `json:"ocr_enabled,omitempty"`

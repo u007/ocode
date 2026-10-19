@@ -12,6 +12,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/termtabs"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // pulseToolByName fetches one tool from a fresh set.
@@ -49,7 +50,7 @@ func mustPulseTool(t *testing.T, h *Handler, name, args string) string {
 func TestPulseToolsShape(t *testing.T) {
 	h := pulseTestHandler(t)
 	tools := h.pulseTools()
-	want := []string{"agent_runs", "memory_read", "memory_write", "permission_resolve", "pulse_board", "question_answer", "session_close", "session_command", "session_new", "session_read", "session_recap", "session_send", "terminal_kill", "terminal_new", "terminal_read", "terminal_screen", "terminal_tabs"}
+	want := []string{"agent_runs", "memory_read", "memory_write", "permission_resolve", "pulse_board", "question_answer", "question_dismiss", "session_ask", "session_close", "session_command", "session_new", "session_read", "session_recap", "session_send", "terminal_kill", "terminal_new", "terminal_read", "terminal_screen", "terminal_tabs"}
 	var got []string
 	for _, pt := range tools {
 		got = append(got, pt.Name())
@@ -493,5 +494,125 @@ func TestPulseSystemPrompt(t *testing.T) {
 	}
 	if got := pulseSystemPrompt("  custom prompt  ", tools); got != "  custom prompt  " {
 		t.Fatalf("custom prompt must be used verbatim, got %q", got)
+	}
+}
+
+func TestSessionAskReadsPendingAsks(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	as := h.lookupAgentSession(id)
+	as.mu.Lock()
+	as.messages = append(as.messages,
+		permissionAskMessage("p-1", samplePermissionRequest()),
+		questionAskMessage("q-1", []tool.QuestionPrompt{
+			{Header: "H", Question: "Which one?", Options: []tool.QuestionOption{{Label: "A", Description: "desc A"}}, Multiple: true},
+		}),
+	)
+	as.mu.Unlock()
+
+	out := mustPulseTool(t, h, "session_ask", `{"session_id":"`+id+`"}`)
+	if !strings.Contains(out, `"request_id":"p-1"`) || !strings.Contains(out, `"tool":"bash"`) {
+		t.Fatalf("permission ask missing: %s", out)
+	}
+	if !strings.Contains(out, `"request_id":"q-1"`) || !strings.Contains(out, `"question":"Which one?"`) {
+		t.Fatalf("question ask missing: %s", out)
+	}
+	if !strings.Contains(out, `"label":"A"`) || !strings.Contains(out, `"multiple":true`) {
+		t.Fatalf("question options/multiple missing: %s", out)
+	}
+}
+
+func TestSessionAskEmptyWhenNothingPending(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	out := mustPulseTool(t, h, "session_ask", `{"session_id":"`+id+`"}`)
+	if !strings.Contains(out, `"permissions":[]`) || !strings.Contains(out, `"questions":[]`) {
+		t.Fatalf("expected empty asks, got %s", out)
+	}
+}
+
+func TestSessionAskRefusesOwnSession(t *testing.T) {
+	h := pulseTestHandler(t)
+	_, err := runPulseTool(t, h, "session_ask", `{"session_id":"`+pulseSessionPrefix+`x"}`)
+	if err == nil {
+		t.Fatal("session_ask on own pulse session must be refused")
+	}
+}
+
+func TestSessionAskReadsChildPermissionAsk(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	as := h.lookupAgentSession(id)
+	// Park a sub-agent permission ask the way runTurn/child dispatch does.
+	req := samplePermissionRequest()
+	ev := newPermissionEvent("c-9", req)
+	if as.childAsks == nil {
+		as.childAsks = newChildPermAsks()
+	}
+	if !as.childAsks.add("c-9", &childPermAsk{req: req, event: ev, respCh: make(chan agent.PermissionResponse, 1)}) {
+		t.Fatal("could not park child ask")
+	}
+
+	out := mustPulseTool(t, h, "session_ask", `{"session_id":"`+id+`"}`)
+	if !strings.Contains(out, `"request_id":"c-9"`) || !strings.Contains(out, `"tool":"bash"`) {
+		t.Fatalf("child ask not surfaced: %s", out)
+	}
+}
+
+// TestSessionAskRedactsCommandsWithoutTerminalAccess pins the gate: a command
+// line reaches the model only when terminal access is allowed (the same gate
+// pulseTerminalRows applies). The request_id and tool stay so the operator can
+// still resolve the ask, and the redaction must not mutate the live ask, which
+// the terminal-access run after it proves.
+func TestSessionAskRedactsCommandsWithoutTerminalAccess(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	as := h.lookupAgentSession(id)
+	// DenyReason and Summary quote the command, and Rule carries the prefix:
+	// all three must stay out of the redacted result, not just Command.
+	req := samplePermissionRequest()
+	req.DenyReason = "rm -rf build is destructive"
+	req.Summary = "clean the build dir with rm -rf build"
+	as.mu.Lock()
+	as.messages = append(as.messages, permissionAskMessage("p-1", req))
+	as.mu.Unlock()
+
+	out := mustPulseTool(t, h, "session_ask", `{"session_id":"`+id+`"}`)
+	if strings.Contains(out, "rm -rf build") {
+		t.Fatalf("command leaked without terminal access: %s", out)
+	}
+	if strings.Contains(out, "bash.prefix.rm") {
+		t.Fatalf("rule (carries the command prefix) leaked without terminal access: %s", out)
+	}
+	if !strings.Contains(out, `"request_id":"p-1"`) || !strings.Contains(out, `"tool":"bash"`) {
+		t.Fatalf("redacted ask must keep request_id and tool: %s", out)
+	}
+
+	h.terminalLoopback = true
+	out = mustPulseTool(t, h, "session_ask", `{"session_id":"`+id+`"}`)
+	if !strings.Contains(out, "rm -rf build") {
+		t.Fatalf("command missing with terminal access allowed: %s", out)
+	}
+}
+
+func TestSessionAskErrorsOnUnknownSession(t *testing.T) {
+	h := pulseTestHandler(t)
+	_, err := runPulseTool(t, h, "session_ask", `{"session_id":"ses_no_such_session"}`)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("session_ask on a session that does not exist must fail with not found, got %v", err)
+	}
+}
+
+func TestQuestionDismissRefusesNonPending(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	_, err := runPulseTool(t, h, "question_dismiss",
+		`{"session_id":"`+id+`","request_id":"does-not-exist"}`)
+	if err == nil {
+		t.Fatal("dismissing a non-pending question must error")
+	}
+}
+
+func TestPermissionResolveOnNonPendingAskErrors(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	_, err := runPulseTool(t, h, "permission_resolve",
+		`{"session_id":"`+id+`","request_id":"does-not-exist","decision":"allow"}`)
+	if err == nil {
+		t.Fatal("resolving a non-pending permission must error")
 	}
 }

@@ -2907,7 +2907,14 @@ func (a *Agent) runAutoContinueJudge(client LLMClient, messages []Message, prior
 	if len(tail) > tailN {
 		tail = tail[len(tail)-tailN:]
 	}
-	offered := a.autoContinueOffered(prior, false, a.autoContinueTodoOpen())
+	// The prose judge answers with a bare key and can name no todo item, so the
+	// NeedsTodo actions (whose prompts carry a {todo} placeholder) are never offered.
+	var offered []autoContinueAction
+	for _, act := range a.autoContinueOffered(prior, false, a.autoContinueTodoOpen()) {
+		if !act.NeedsTodo {
+			offered = append(offered, act)
+		}
+	}
 	var b strings.Builder
 	b.WriteString("You are judging how an AI coding assistant's most recent reply, below, ended, and choosing the " +
 		"single next action for the harness. The assistant gets no new human input unless you choose an action that ends the turn.\n" +

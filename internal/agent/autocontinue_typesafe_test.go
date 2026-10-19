@@ -5,10 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // newAutoContinueTypesafeJudge stands up a fake /systemone endpoint answering
@@ -380,7 +384,7 @@ func TestAutoContinueTypesafeStateTailBounded(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		msgs = append(msgs, Message{Role: "assistant", Content: "long content here"})
 	}
-	state := a.buildTypesafeAutoContinueState(msgs, nil, nil, false)
+	state := a.buildTypesafeAutoContinueState(msgs, nil, nil, tool.TodoSnapshot{})
 	tail := state["transcript_tail"].([]map[string]any)
 	if len(tail) != 6 {
 		t.Fatalf("tail = %d entries, want 6", len(tail))
@@ -391,14 +395,14 @@ func TestAutoContinueTypesafeStateTurnEndedReflectsReason(t *testing.T) {
 	a := &Agent{config: &config.Config{}}
 	msgs := []Message{{Role: "assistant", Content: "partial"}}
 
-	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil, nil, false)["turn_ended"].(string); !strings.Contains(got, "finished") {
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil, nil, tool.TodoSnapshot{})["turn_ended"].(string); !strings.Contains(got, "finished") {
 		t.Fatalf("natural-stop turn_ended = %q, want the natural completion wording", got)
 	}
-	if got, _ := a.buildTypesafeAutoContinueState(msgs, errors.New("boom"), nil, false)["turn_ended"].(string); !strings.Contains(got, "boom") {
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, errors.New("boom"), nil, tool.TodoSnapshot{})["turn_ended"].(string); !strings.Contains(got, "boom") {
 		t.Fatalf("errored-turn turn_ended = %q, want the error", got)
 	}
 	a.stepLimitHit.Store(true)
-	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil, nil, false)["turn_ended"].(string); !strings.Contains(got, "step limit") {
+	if got, _ := a.buildTypesafeAutoContinueState(msgs, nil, nil, tool.TodoSnapshot{})["turn_ended"].(string); !strings.Contains(got, "step limit") {
 		t.Fatalf("step-limited turn_ended = %q, want the step-limit wording", got)
 	}
 }
@@ -406,7 +410,7 @@ func TestAutoContinueTypesafeStateTurnEndedReflectsReason(t *testing.T) {
 func TestAutoContinueTypesafeStateContentCapped(t *testing.T) {
 	a := &Agent{config: &config.Config{}}
 	big := strings.Repeat("x", 5000)
-	state := a.buildTypesafeAutoContinueState([]Message{{Role: "assistant", Content: big}}, nil, nil, false)
+	state := a.buildTypesafeAutoContinueState([]Message{{Role: "assistant", Content: big}}, nil, nil, tool.TodoSnapshot{})
 
 	tail, ok := state["transcript_tail"].([]map[string]any)
 	if !ok || len(tail) != 1 {
@@ -443,5 +447,198 @@ func TestAutoContinueTypesafeReasonLabelRendered(t *testing.T) {
 	// The raw key must not leak through: the label is the user-facing text.
 	if strings.Contains(detail, "reason: mid_task") {
 		t.Fatalf("detail rendered the raw reason key instead of its label: %q", detail)
+	}
+}
+
+func autoContinueVerdictReplyWithTodo(choice string, confidence float64, reason, todoID string, todoConf float64) string {
+	todoPart := ""
+	if todoID != "" {
+		todoPart = `,"todo_item":{"type":"choice","choice":"` + todoID + `","probabilities":{},"confidence":` + jsonFloat(todoConf) + `}`
+	}
+	return `{"model":"jev-latest","answers":{"verdict":{"type":"choice","choice":"` + choice + `","probabilities":{"continue":0.5,"end":0.5},"confidence":` + jsonFloat(confidence) + `},"reason":{"type":"choice","choice":"` + reason + `","probabilities":{},"confidence":0.8}` + todoPart + `},"usage":{"input_tokens":7,"output_tokens":2}}`
+}
+
+func TestAutoContinueTodoIDInterpolation(t *testing.T) {
+	root := t.TempDir()
+	writeSessionTodo(t, root, "ses-open", "- [✓] t1 one\n- [ ] t2 two\n")
+
+	// valid todo_item -> TodoID set and placeholder filled
+	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReplyWithTodo("continue_todo", 0.9, "mid_task", "t2", 0.9))
+	a.SetWorkDir(root)
+	a.SetSessionID("ses-open")
+	dec, err := a.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+	if err != nil || !dec.Resume {
+		t.Fatalf("expected resume, got %+v err=%v", dec, err)
+	}
+	if dec.TodoID != "t2" {
+		t.Fatalf("TodoID = %q, want t2", dec.TodoID)
+	}
+	if !strings.Contains(dec.Prompt, "t2") {
+		t.Fatalf("prompt should contain t2: %q", dec.Prompt)
+	}
+	if strings.Contains(dec.Prompt, "{todo}") {
+		t.Fatalf("placeholder not filled: %q", dec.Prompt)
+	}
+
+	// no todo_item named for a todo-specific action -> not resumed, no prompt
+	a2, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReplyWithTodo("continue_todo", 0.9, "mid_task", "", 0.9))
+	a2.SetWorkDir(root)
+	a2.SetSessionID("ses-open")
+	dec2, err := a2.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if dec2.Resume || dec2.TodoID != "" || dec2.Prompt != "" {
+		t.Fatalf("unnamed todo action must not resume, got %+v", dec2)
+	}
+
+	// invalid todo_item (not an open item) -> not resumed
+	a3, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReplyWithTodo("continue_todo", 0.9, "mid_task", "t99", 0.9))
+	a3.SetWorkDir(root)
+	a3.SetSessionID("ses-open")
+	dec3, _ := a3.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+	if dec3.Resume || dec3.TodoID != "" {
+		t.Fatalf("invalid TodoID must not resume a todo action, got %+v", dec3)
+	}
+
+	// low confidence todo_item -> not resumed
+	a4, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReplyWithTodo("continue_todo", 0.9, "mid_task", "t2", 0.3))
+	a4.SetWorkDir(root)
+	a4.SetSessionID("ses-open")
+	dec4, _ := a4.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+	if dec4.Resume || dec4.TodoID != "" {
+		t.Fatalf("low-confidence TodoID must not resume a todo action, got %+v", dec4)
+	}
+}
+
+// A todo-specific action is actionable only against a named open item. "none",
+// a missing answer, an unknown id and a below-floor pick all leave it unresumed,
+// so the agent is never told to continue or skip an unnamed item.
+func TestAutoContinueTodoActionWithoutItemNotResumed(t *testing.T) {
+	root := t.TempDir()
+	writeSessionTodo(t, root, "ses-open", "- [✓] t1 one\n- [ ] t2 two\n")
+	cases := []struct {
+		name, action, todoAnswer string
+		todoConf                 float64
+	}{
+		{"skip_todo none", "skip_todo", "none", 0.9},
+		{"continue_todo none", "continue_todo", "none", 0.9},
+		{"validate_todo no answer", "validate_todo", "", 0.9},
+		{"skip_todo unknown id", "skip_todo", "t99", 0.9},
+		{"skip_todo low confidence", "skip_todo", "t2", 0.3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReplyWithTodo(tc.action, 0.9, "mid_task", tc.todoAnswer, tc.todoConf))
+			a.SetWorkDir(root)
+			a.SetSessionID("ses-open")
+			dec, err := a.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if dec.Resume || dec.TodoID != "" || dec.Prompt != "" {
+				t.Fatalf("todo action without a named item must not resume, got %+v", dec)
+			}
+			if !strings.Contains(dec.Detail, "no open todo item") {
+				t.Fatalf("detail should explain the deferral, got %q", dec.Detail)
+			}
+		})
+	}
+}
+
+// A non-todo action ignores whatever the item question said: the named item is
+// not recorded and not interpolated into the fixed prompt.
+func TestAutoContinueNonTodoActionIgnoresTodoItem(t *testing.T) {
+	root := t.TempDir()
+	writeSessionTodo(t, root, "ses-open", "- [✓] t1 one\n- [ ] t2 two\n")
+	a, _ := newAutoContinueTypesafeJudge(t, autoContinueVerdictReplyWithTodo("next", 0.9, "mid_task", "t2", 0.9))
+	a.SetWorkDir(root)
+	a.SetSessionID("ses-open")
+	dec, err := a.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+	if err != nil || !dec.Resume || dec.Action != "next" {
+		t.Fatalf("expected next to resume, got %+v err=%v", dec, err)
+	}
+	if dec.TodoID != "" {
+		t.Fatalf("non-todo action must not record TodoID, got %q", dec.TodoID)
+	}
+	if strings.Contains(dec.Prompt, "t2") {
+		t.Fatalf("non-todo prompt must not carry the item: %q", dec.Prompt)
+	}
+}
+
+// The plan is read once per judge call. The judge is shown t2 as open; the plan
+// then finishes on disk while Jev is still answering. Validation must still
+// accept t2 from the snapshot the judge was shown, not re-read the plan.
+func TestAutoContinueTodoPlanReadOncePerJudgeCall(t *testing.T) {
+	root := t.TempDir()
+	writeSessionTodo(t, root, "ses-open", "- [✓] t1 one\n- [ ] t2 two\n")
+	planPath := filepath.Join(root, ".ocode", "todo", "ses-open.md")
+	reply := autoContinueVerdictReplyWithTodo("continue_todo", 0.9, "mid_task", "t2", 0.9)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := os.WriteFile(planPath, []byte("# Todo (revision 2)\n\n- [✓] t1 one\n- [✓] t2 two\n"), 0o644); err != nil {
+			t.Errorf("rewrite plan: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{}
+	cfg.Ocode.AutoContinueModel = "typesafe/jev-latest"
+	cfg.Ocode.AutoContinueEnabled = true
+	a := newTestAgent(nil, nil, cfg, nil)
+	prev := newClientFn
+	t.Cleanup(func() { newClientFn = prev })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return newTypesafeClient("k", "jev-latest", srv.URL)
+	}
+	a.SetWorkDir(root)
+	a.SetSessionID("ses-open")
+	dec, err := a.AutoContinueJudgeSync([]Message{{Role: "assistant", Content: "Item 1 done."}}, nil, nil)
+	if err != nil || !dec.Resume || dec.TodoID != "t2" {
+		t.Fatalf("expected continue_todo on t2 from the judged snapshot, got %+v err=%v", dec, err)
+	}
+}
+
+// Todo text is cut on a rune boundary. A byte cut through a 3-byte rune would
+// put invalid UTF-8 into the JSON state sent to Jev.
+func TestAutoContinueTodoItemTextTruncatesOnRuneBoundary(t *testing.T) {
+	long := strings.Repeat("待", autoContinueTodoTextCap+50)
+	snap := tool.TodoSnapshot{HasOpenItems: true, OpenItems: []tool.TodoSnapshotItem{
+		{ID: "t1", Text: long, Status: "pending"},
+		{ID: "t2", Text: "短", Status: "pending"},
+	}}
+	items := autoContinueTodoItems(snap)
+	if len(items) != 2 {
+		t.Fatalf("want 2 items, got %d", len(items))
+	}
+	got, _ := items[0]["text"].(string)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated text is not valid UTF-8: %q", got)
+	}
+	if want := strings.Repeat("待", autoContinueTodoTextCap) + "…"; got != want {
+		t.Fatalf("truncated text = %q, want %q", got, want)
+	}
+	if short, _ := items[1]["text"].(string); short != "短" {
+		t.Fatalf("short text should be untouched, got %q", short)
+	}
+}
+
+func TestTypesafeTranscriptTailTruncatesOnRuneBoundary(t *testing.T) {
+	got := typesafeTranscriptTail([]Message{{Role: "assistant", Content: strings.Repeat("日", 5000)}}, 1)
+	content := got[0]["content"].(string)
+	if !utf8.ValidString(content) || !strings.HasSuffix(content, "…(truncated)") {
+		t.Fatalf("tail content invalid or untruncated: valid=%v", utf8.ValidString(content))
+	}
+}
+
+func TestProseAutoContinueJudgeNeverResumesTodoAction(t *testing.T) {
+	a := newTestAgent(&advisorMockLLMClient{}, nil, nil, nil)
+	dec, err := a.runAutoContinueJudge(&advisorMockLLMClient{response: "continue_todo"}, []Message{{Role: "assistant", Content: "x"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Resume || strings.Contains(dec.Prompt, "{todo}") {
+		t.Fatalf("prose judge resumed a todo action: %+v", dec)
 	}
 }

@@ -106,8 +106,8 @@ func TestRestrictToToolsReplacesBuiltins(t *testing.T) {
 		}
 		t.Fatalf("tools = %v, want only pulse_board", names)
 	}
-	if !a.skipDiscovery {
-		t.Fatal("discovery must be off")
+	if a.skipDiscovery {
+		t.Fatal("discovery must stay on for pulse assistant")
 	}
 }
 

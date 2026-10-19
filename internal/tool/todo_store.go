@@ -1023,14 +1023,23 @@ func (t TodoUpdateTool) execute(ctx context.Context, args json.RawMessage) (stri
 	return todoUpdate(scope, params.Revision, params.Op, params.ItemID, params.Status, params.Text, store, tcID)
 }
 
+// TodoSnapshotItem is one open todo item exposed to the auto-continue judge.
+type TodoSnapshotItem struct {
+	ID     string
+	Text   string
+	Status string // "pending" | "in_progress" | "done"
+}
+
 // TodoSnapshot describes one session's plan for the re-anchor and
 // auto-continue paths. HasOpenItems is true when at least one item is pending
 // or in-progress, which is the gate for both: a finished or absent list injects
-// nothing and never offers `next`.
+// nothing and never offers `next`. OpenItems lists the open items (id + text +
+// status) so a judge can reason about a specific item.
 type TodoSnapshot struct {
 	Revision     int
 	Content      string // canonical serialized items (no header), or ""
 	HasOpenItems bool
+	OpenItems    []TodoSnapshotItem
 }
 
 // ReadTodoSnapshot returns the scoped session's plan. An unreadable file is
@@ -1046,13 +1055,18 @@ func ReadTodoSnapshot(scope TodoScope) TodoSnapshot {
 		return TodoSnapshot{}
 	}
 	open := false
+	var openItems []TodoSnapshotItem
 	for _, it := range items {
 		if it.status == " " || it.status == "•" {
 			open = true
-			break
+			state := "pending"
+			if it.status == "•" {
+				state = "in_progress"
+			}
+			openItems = append(openItems, TodoSnapshotItem{ID: it.id, Text: it.text, Status: state})
 		}
 	}
-	return TodoSnapshot{Revision: rev, Content: serializeItems(items), HasOpenItems: open}
+	return TodoSnapshot{Revision: rev, Content: serializeItems(items), HasOpenItems: open, OpenItems: openItems}
 }
 
 // TodoSummaryItem is one todo line reduced to what a cross-session dashboard

@@ -32,7 +32,9 @@ describe("languageForFile", () => {
   });
 
   it("falls back to plaintext for unknown or extensionless paths", () => {
-    expect(languageForFile("Makefile")).toBe("plaintext");
+    expect(languageForFile("Makefile")).toBe("makefile");
+    expect(languageForFile("GNUmakefile")).toBe("makefile");
+    expect(languageForFile("build.mk")).toBe("makefile");
     expect(languageForFile("data.unknownext")).toBe("plaintext");
     expect(languageForFile("")).toBe("plaintext");
   });

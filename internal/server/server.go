@@ -1295,18 +1295,35 @@ func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 	// it so browsed pages are cross-origin. Prefer the shared HTTPS URL when
 	// the instance is exposed via Tailscale (second mount on the browse port).
 	if s.browseProxyPort != 0 {
+		reqHost := r.Host
+		if h, _, err := net.SplitHostPort(reqHost); err == nil {
+			reqHost = h
+		}
+		reqHost = strings.Trim(reqHost, "[]")
+		// Same-site: when the SPA is loaded directly from this machine (desktop
+		// webview or a local browser), the browse origin MUST share that host
+		// so the SameSite=Lax browse cookie is treated as first-party. A
+		// cross-origin (tailnet) browse origin makes the cookie third-party,
+		// which WKWebView/Safari ITP blocks, breaking local-mode navigation
+		// with 401 "browse: unauthorized". Remote, phone and proxied clients
+		// keep the Tailscale HTTPS URL so they can reach the proxy. The peer
+		// address decides, never Host: a proxied tailnet request arrives from
+		// 127.0.0.1 with a loopback Host, so Host alone would send it local.
+		// Known limitation: a client tunnelled to this server over SSH -L or a
+		// port forward also arrives from 127.0.0.1 with no proxy headers, so it
+		// is indistinguishable from the local desktop webview here and gets the
+		// local-origin base URL rather than the Tailscale one. No header or
+		// listener distinguishes the two reliably, so the shortcut is kept.
 		baseURL := ""
-		if s.handler.tailscaleShareSnapshot != nil {
-			if st := s.handler.tailscaleShareSnapshot(); st.Running && st.BrowseURL != "" {
-				baseURL = st.BrowseURL
+		if !(isLoopbackRequest(r) && !requestViaProxy(r) && isLoopbackName(reqHost)) {
+			if s.handler.tailscaleShareSnapshot != nil {
+				if st := s.handler.tailscaleShareSnapshot(); st.Running && st.BrowseURL != "" {
+					baseURL = st.BrowseURL
+				}
 			}
 		}
 		if baseURL == "" {
-			reqHost := r.Host
-			if h, _, err := net.SplitHostPort(reqHost); err == nil {
-				reqHost = h
-			}
-			baseURL = "http://" + reqHost + ":" + strconv.Itoa(s.browseProxyPort)
+			baseURL = "http://" + net.JoinHostPort(reqHost, strconv.Itoa(s.browseProxyPort))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"base_url":    baseURL,
@@ -1320,6 +1337,31 @@ func (s *Server) handleBrowseConfig(w http.ResponseWriter, r *http.Request) {
 		"htr_notice":  s.HTRNotice(),
 		"remote_mode": s.remoteMode,
 	})
+}
+
+// proxyForwardingHeaders are set by a reverse proxy in front of this server:
+// tailscale serve/funnel adds the X-Forwarded-* and Tailscale-User-* family.
+var proxyForwardingHeaders = []string{
+	"Forwarded",
+	"X-Forwarded-For",
+	"X-Forwarded-Host",
+	"X-Forwarded-Proto",
+	"Tailscale-User-Login",
+	"Tailscale-User-Name",
+	"Tailscale-Headers-Info",
+}
+
+// requestViaProxy reports whether a reverse proxy relayed the request. A
+// request that carries any forwarding header came through a proxy, even when
+// that proxy connects from loopback. Presence is what counts, so an empty
+// header value still counts.
+func requestViaProxy(r *http.Request) bool {
+	for _, h := range proxyForwardingHeaders {
+		if len(r.Header.Values(h)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // sameSiteBrowseBase rewrites base's hostname to the loopback hostname the

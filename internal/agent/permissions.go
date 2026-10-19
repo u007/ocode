@@ -1261,6 +1261,51 @@ func isLoopbackHost(host string) bool {
 	return err == nil && addr.IsLoopback()
 }
 
+// isPrivateLANHost reports whether host is a private LAN address (RFC 1918
+// IPv4 ranges or IPv6 unique-local addresses). It never includes loopback,
+// link-local, or unspecified addresses.
+func isPrivateLANHost(host string) bool {
+	h := strings.TrimPrefix(host, "[")
+	h = strings.TrimSuffix(h, "]")
+	addr, err := netip.ParseAddr(h)
+	if err != nil {
+		return false
+	}
+	if addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
+		return false
+	}
+	if addr.Is4() {
+		b := addr.As4()
+		if b[0] == 10 {
+			return true
+		}
+		if b[0] == 172 && b[1] >= 16 && b[1] <= 31 {
+			return true
+		}
+		if b[0] == 192 && b[1] == 168 {
+			return true
+		}
+		return false
+	}
+	// IPv6 unique local addresses (fc00::/7).
+	v6 := addr.As16()
+	return v6[0]&0xfe == 0xfc
+}
+
+// isLocalNetworkHost reports whether host is loopback OR a private LAN address.
+func isLocalNetworkHost(host string) bool {
+	h := strings.TrimPrefix(host, "[")
+	h = strings.TrimSuffix(h, "]")
+	if h == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(h)
+	if err == nil && addr.IsLoopback() {
+		return true
+	}
+	return isPrivateLANHost(h)
+}
+
 // isLoopbackHostForPermissionGuard is the deliberately PERMISSIVE loopback test
 // used only by the self-escalation guard (isLocalhostURL -> permissionApiLoopback).
 // That guard must over-ask and never under-ask: the inet_aton-style shorthands

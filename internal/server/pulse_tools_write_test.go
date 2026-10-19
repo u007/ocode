@@ -241,7 +241,39 @@ func TestPermissionResolveToolDeniesPendingAsk(t *testing.T) {
 	})
 }
 
-// ---- the permission design: write tools Ask, read tools and memory_write do not.
+func TestQuestionAnswerCustomAndMultiple(t *testing.T) {
+	h, id, _ := writeTarget(t)
+	as := h.lookupAgentSession(id)
+	as.mu.Lock()
+	as.messages = append(as.messages, questionAskMessage("q-1", []tool.QuestionPrompt{
+		{Header: "H1", Question: "Pick one", Options: []tool.QuestionOption{{Label: "A", Description: "opt A"}}, Multiple: false},
+		{Header: "H2", Question: "Type something", Options: []tool.QuestionOption{}, Multiple: false},
+	}))
+	as.mu.Unlock()
+
+	answers := `[
+		{"header":"H1","question":"Pick one","answers":[{"label":"A","custom":false}]},
+		{"header":"H2","question":"Type something","answers":[{"label":"","text":"free-text entry","custom":true}]}
+	]`
+	out, err := runPulseTool(t, h, "question_answer",
+		`{"session_id":"`+id+`","request_id":"q-1","answers":`+answers+`}`)
+	if err != nil {
+		t.Fatalf("question_answer: %v", err)
+	}
+	if !strings.Contains(out, `"accepted":true`) {
+		t.Fatalf("result = %s", out)
+	}
+	pulseWaitFor(t, "the question to be answered", func() bool {
+		as.mu.Lock()
+		defer as.mu.Unlock()
+		for _, m := range as.messages {
+			if m.ToolID == "q-1" && strings.Contains(m.Content, "free-text entry") && strings.Contains(m.Content, `"custom":true`) {
+				return true
+			}
+		}
+		return false
+	})
+}
 
 type askScriptClient struct {
 	mu    sync.Mutex
@@ -345,7 +377,8 @@ func TestReadAndMemoryToolsDoNotAsk(t *testing.T) {
 	for _, pt := range h.pulseTools() {
 		want := map[string]bool{
 			"session_send": true, "session_command": true, "permission_resolve": true, "question_answer": true,
-			"session_new": true, "session_close": true, "terminal_new": true, "terminal_kill": true,
+			"question_dismiss": true,
+			"session_new":      true, "session_close": true, "terminal_new": true, "terminal_kill": true,
 		}[pt.Name()]
 		if pt.ask != want {
 			t.Errorf("%s ask=%v, want %v", pt.Name(), pt.ask, want)

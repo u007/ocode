@@ -121,10 +121,23 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   gql: "graphql",
   // No bundled grammar — keep explicit so intent is documented.
   toml: "plaintext",
+  mk: "makefile",
+  mak: "makefile",
 };
 
 /** Monaco language identifier for `filePath` (extension-based). */
 export function languageForFile(filePath: string): string {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
+  const normalized = filePath.replace(/\\/g, "/");
+  const base = normalized.split("/").pop()?.toLowerCase() ?? "";
+  // Basename-driven grammars (files that conventionally have no extension).
+  if (
+    base === "makefile" ||
+    base === "gnumakefile" ||
+    base.startsWith("makefile.") ||
+    base.startsWith("gnumakefile.")
+  ) {
+    return "makefile";
+  }
+  const ext = base.split(".").pop() ?? "";
   return LANGUAGE_BY_EXT[ext] ?? "plaintext";
 }

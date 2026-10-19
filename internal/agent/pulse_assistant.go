@@ -45,7 +45,10 @@ func (a *Agent) RestrictToTools(tools []tool.Tool) {
 	for _, t := range tools {
 		a.tools[t.Name()] = t
 	}
-	a.skipDiscovery = true
+	// Discovery stays ON so the pulse assistant can discover available
+	// skills and commands from the current chat request. Only MCP tools
+	// (none registered for pulse) could attach, so no bash/file/task tools
+	// leak in.
 }
 
 // injectPulseTail appends the board as one user-role message. User-role on

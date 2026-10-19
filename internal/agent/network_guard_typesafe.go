@@ -172,12 +172,16 @@ func extractEgressTargets(toolName string, args json.RawMessage) []egressTarget 
 		// it — the tool will reject it downstream, and inventing a destination
 		// for it would only cost a round trip.
 		host := extractDomainFromURL(raw)
+		// Loopback here means "local network", not strictly this machine: a LAN
+		// host counts as Loopback only for a plain request. Even so, a literal
+		// query or path on a LAN host can still carry data, which is accepted.
+		// The URL's query and path must be literal text, so a secret cannot ride along.
 		return []egressTarget{{
 			Tool:     toolName,
 			Kind:     egressKindURL,
 			Value:    networkGuardClip(raw),
 			Host:     host,
-			Loopback: host != "" && isLocalhostDomain(host),
+			Loopback: host != "" && (isLocalhostDomain(host) || (isPrivateLANHost(host) && lanTargetIsPlain(raw))),
 		}}
 	case "websearch":
 		var p struct {
@@ -241,11 +245,14 @@ func bashEgressTargets(command string) []egressTarget {
 			Kind:  egressKindCommand,
 			Value: networkGuardClip(line),
 			Host:  host,
-			// The shared proof, not a host comparison: it requires a loopback
-			// token AND no possible remote target AND no connection-redirecting
-			// flag, so a proxied or --resolve'd "localhost" is correctly treated
-			// as remote.
-			Loopback: host != "" && isLocalhostDomain(host) && subprocessTargetsLocalhost(line),
+			// The shared proofs, not a host comparison. Loopback here means "local
+			// network", not strictly this machine: a LAN host additionally needs a
+			// plain request, but a literal query or path on it can still carry data.
+			// Loopback is on-host whatever the request carries.
+			// Each proof requires no possible remote target and no
+			// connection-redirecting flag, so a proxied or --resolve'd "localhost"
+			// is correctly treated as remote.
+			Loopback: host != "" && (subprocessTargetsLocalhost(line) || subprocessTargetsLocalNetwork(line)),
 		})
 	}
 	return out
