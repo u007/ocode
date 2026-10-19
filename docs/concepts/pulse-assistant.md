@@ -10,7 +10,7 @@ tags:
   - server
   - api
   - prompt-cache
-timestamp: 2026-10-17T08:53:16Z
+timestamp: 2026-10-19T00:00:00Z
 ---
 # Pulse assistant — overview chat that reads and, with approval, acts on sessions (server side)
 
@@ -77,6 +77,10 @@ All of these sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
 - `ocode.pulse_system_prompt` (string): when non-empty, used **verbatim** as the
   assistant's system prompt (no tool list is appended). Edited through
   `/api/config/pulse-system-prompt`.
+- `ocode.pulse_activation_model` (string): decision-judge model for the activation gate
+  (see "Activation gate"). Empty uses `typesafe/jev-latest`. Hand-edited in
+  `ocodeconfig.json`; the condition itself is not config, it lives in the assistant's
+  private root.
 - `ocode.pulse_auto_receive` (bool): when `true`, the Pulse assistant
   automatically receives stop indicators (turn done, permission ask, question ask,
   task complete) from other sessions. Default `false` (off). Edited through
@@ -160,6 +164,61 @@ The setting is persisted in `ocodeconfig.json` and toggled through
 `/api/config/pulse-auto-receive` (and `/api/config/pulse-auto-gap-ms` for the
 gap). Default: off.
 
+## Activation gate
+
+Auto-receive alone only puts stops on the board; nothing starts the assistant until the
+operator types. The **activation gate** (`internal/server/pulse_activation.go`,
+judge `agent.JudgePulseActivation` in `internal/agent/pulse_activation.go`) makes
+notifications push, without paying for an assistant turn per notification:
+
+1. The assistant writes an English **activation condition** with `activation_write`
+   (for example "wake me when a session fails, asks a permission or question, or a build
+   terminal finishes; skip routine turn completions"). It is stored at
+   `<pulse root>/activation.md`, atomic, max 4000 characters
+   (`PulseActivationMaxConditionLen`). Empty clears it.
+2. A loop (`pulseActivationLoop`, ticks every 2 s while an `/api/events` client is
+   connected, exits 30 s after the last one, restarted by `GET /api/pulse/assistant`)
+   refreshes the stop-indicator transitions, waits for the quiet gap
+   (`ocode.pulse_auto_gap_ms`), then judges the new batch.
+3. The judge is slot `pulse_activation` (default `typesafe/jev-latest`, override
+   `ocode.pulse_activation_model`): one `choice` question, `wake` or `skip`, sent as
+   structured state `{condition, events[<=20]}` through the shared state budget.
+   A `wake` needs confidence >= 0.5 (`pulseActivationMinConfidence`).
+4. Only a confident `wake` calls `HandleSendMessage` (async) on the current assistant
+   chat with a user-role message opening `[ocode:pulse-activation]` that lists the events
+   as data (each summary one line, clipped). That is the only thing that starts its LLM loop.
+
+**Indicator kinds** recorded: `turn_done`, `terminal_stop`, and (new with the gate)
+`permission_ask` / `question_ask`, recorded once on the transition into an ask
+(`recordPulseAskStops`, called from `gatherLivePulseInputs`). The assistant's own session
+never produces indicators.
+
+**Fail toward saving tokens, never toward waking.** No condition, auto-receive off, no
+assistant chat minted yet, an unconfigured judge, a judge error, an invalid answer, a
+low-confidence `wake` or an over-budget state all leave the assistant idle. The stop is
+still on the board for the next turn. An error is recorded in the decision log and its
+batch is resolved, so one failing judge cannot wedge the gate on the same batch.
+
+**Pacing.** A batch is held (not judged, not dropped) while the assistant is mid-turn,
+compacting or paused on an ask (`pulseSessionBusy`) and for 15 s after a wake
+(`pulseActivationMinInterval`), so a loose condition cannot become a continuous token
+drain. Held batches are judged on a later tick. Indicators recorded before the loop first
+started, or before the latest `activation_write`, are history and are never judged.
+
+**Tools** (`activation_read`, `activation_write`) carry explicit allow rules like
+`memory_write`: they only touch the assistant's own file, cannot act on any session, and
+the worst a bad condition does is wake the assistant, whose write tools still ask the
+operator. `activation_read` returns `{prompt, max_chars, judge_model, auto_receive,
+active, recent_decisions, note?}`; `recent_decisions` is the last 20 gate outcomes
+(`woke`/`skipped`/`error`, token counts) from memory, so the assistant can see what its
+condition did and tune it. `active` is `auto_receive && prompt != ""`; the `note` says
+why when it is false.
+
+**Why a decision judge and not the small chat model.** The gate runs on every stop, so it
+must cost far less than a turn, and a decision backend returns a typed choice with a
+confidence rather than free text (see the decision-judge rules in `CLAUDE.md`). It
+therefore needs a decision backend: with none configured the gate never wakes.
+
 ## Auto-compaction of the assistant's own context
 
 When `ocode.pulse_auto_compact` is `true`, the Pulse assistant auto-compacts its
@@ -205,6 +264,8 @@ error.
 | `session_close` | `session_id` | `{session_id, closed: true}` | **asks**; refuses the assistant's own session, child sessions, unknown ids |
 | `terminal_new` | `project_path?` | `{terminal_id}`; starts a new local pty shell | **asks**; Unix-only (Windows refuses); refuses remote hosts and unregistered projects; gated on terminal access |
 | `terminal_kill` | `terminal_id` | `{terminal_id, killed: true}`; kills the shell, removes history and shared tab entry | **asks**; refuses a terminal whose project is not a registered project root |
+| `activation_read` | none | `{prompt, max_chars, judge_model, auto_receive, active, recent_decisions: [{at, events, outcome, detail, input_tokens?, output_tokens?}], note?}` | read; allow rule; see "Activation gate" |
+| `activation_write` | `prompt` (full replacement, `""` clears) | same body as `activation_read` after the write | allow rule (own file only); over 4000 characters is rejected and the old condition kept; a write skips the backlog recorded before it |
 | `agent_runs` | `session_id?` | `{sessions: [{session_id, runs: [...nested children]}]}` | transcripts omitted, results 500 runes; sessions without runs omitted; the assistant is excluded |
 
 ### Terminal tools
@@ -272,7 +333,7 @@ serve the Processes tab and the terminal panel. All of these apply the same gate
 
 ## Permission design
 
-The read tools and `memory_write` get explicit `allow` rules in
+The read tools, `memory_write` and `activation_write` get explicit `allow` rules in
 `configurePulseAgent`. The eight tools marked **asks** (`pulseToolAsk`) get NO
 rule, so the permission manager's default applies: every call becomes a normal
 permission ask that the assistant window renders as a dialog, and the operator can "always
@@ -346,6 +407,7 @@ assistant never appears as a card, never counts as a child, and is absent from
 ## References
 
 - `internal/server/pulse_assistant.go`, `pulse_tools.go`, `pulse_terminal.go`
+- `internal/server/pulse_activation.go`, `internal/agent/pulse_activation.go` (activation gate)
 - `internal/agent/pulse_assistant.go` (`SetSystemPromptOverride`, `SetPulseSnapshot`, `RestrictToTools`)
 - `internal/server/agent_session.go` (`buildAgentSession` pulse branch)
-- Tests: `handler_pulse_assistant_test.go`, `pulse_tools_test.go`, `pulse_rows_test.go`, `internal/agent/pulse_assistant_test.go`
+- Tests: `pulse_activation_test.go` (server and agent), `handler_pulse_assistant_test.go`, `pulse_tools_test.go`, `pulse_rows_test.go`, `internal/agent/pulse_assistant_test.go`

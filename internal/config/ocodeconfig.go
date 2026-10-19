@@ -976,6 +976,10 @@ type OcodeConfig struct {
 	// chat model; empty PulseSystemPrompt uses the built-in prompt.
 	PulseModel        string
 	PulseSystemPrompt string
+	// PulseActivationModel is the decision-judge model that gates whether a
+	// stop indicator wakes the Pulse assistant (the assistant-authored activation
+	// condition). Empty uses the default judge model (typesafe/jev-latest).
+	PulseActivationModel string
 	// PulseAutoReceive makes the Pulse assistant automatically receive stop
 	// indicators (turn done, permission ask, question ask, task complete) from
 	// other sessions. Zero value (false) means off.
@@ -1360,6 +1364,7 @@ type ocodeConfigFile struct {
 	AutoContinueModel          string                      `json:"auto_continue_model,omitempty"`
 	PulseModel                 string                      `json:"pulse_model,omitempty"`
 	PulseSystemPrompt          string                      `json:"pulse_system_prompt,omitempty"`
+	PulseActivationModel       string                      `json:"pulse_activation_model,omitempty"`
 	PulseAutoReceive           *bool                       `json:"pulse_auto_receive,omitempty"`
 	PulseAutoGapMs             *int                        `json:"pulse_auto_gap_ms,omitempty"`
 	PulseAutoCompact           *bool                       `json:"pulse_auto_compact,omitempty"`
@@ -1960,6 +1965,12 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.PulseSystemPrompt = file.PulseSystemPrompt
 		}
 		delete(raw, "pulse_system_prompt")
+	}
+	if _, ok := raw["pulse_activation_model"]; ok {
+		if file.PulseActivationModel != "" {
+			cfg.PulseActivationModel = file.PulseActivationModel
+		}
+		delete(raw, "pulse_activation_model")
 	}
 	if _, ok := raw["pulse_auto_receive"]; ok {
 		if file.PulseAutoReceive != nil {
@@ -2756,6 +2767,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.PulseSystemPrompt != "" {
 		payload["pulse_system_prompt"] = cfg.PulseSystemPrompt
+	}
+	if cfg.PulseActivationModel != "" {
+		payload["pulse_activation_model"] = cfg.PulseActivationModel
 	}
 	if cfg.PulseAutoReceive {
 		payload["pulse_auto_receive"] = true

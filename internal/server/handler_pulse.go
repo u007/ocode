@@ -219,7 +219,46 @@ func (h *Handler) gatherLivePulseInputs() []PulseInput {
 
 		out = append(out, in)
 	}
+	h.recordPulseAskStops(out)
 	return out
+}
+
+// recordPulseAskStops records a permission_ask / question_ask stop indicator
+// when a session newly pauses on an ask. An ask that stays pending is recorded
+// once, on the transition, and a session that resolves it re-arms the detector.
+func (h *Handler) recordPulseAskStops(inputs []PulseInput) {
+	h.pulseMu.Lock()
+	defer h.pulseMu.Unlock()
+	live := make(map[string]bool, len(inputs))
+	for _, in := range inputs {
+		if isPulseSession(in.SessionID) {
+			continue
+		}
+		live[in.SessionID] = true
+		kind := ""
+		if in.PendingAsk != nil {
+			switch in.PendingAsk.Kind {
+			case PulseAskKindPermission:
+				kind = "permission_ask"
+			case PulseAskKindQuestion:
+				kind = "question_ask"
+			}
+		}
+		if kind != "" && kind != h.pulsePreviousAsk[in.SessionID] {
+			h.recordPulseStopIndicator(in.SessionID, kind, pulseOneLine(in.PendingAsk.Summary, pulseBoardTaskRunes), filepath.Base(in.ProjectPath))
+		}
+		if kind == "" {
+			delete(h.pulsePreviousAsk, in.SessionID)
+		} else {
+			h.pulsePreviousAsk[in.SessionID] = kind
+		}
+	}
+	// Drop sessions no longer live so the map tracks resident sessions only.
+	for id := range h.pulsePreviousAsk {
+		if !live[id] {
+			delete(h.pulsePreviousAsk, id)
+		}
+	}
 }
 
 // gatherDiskPulseInputs lists recent sessions for every LOCAL project so the

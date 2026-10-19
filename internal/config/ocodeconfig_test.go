@@ -2186,3 +2186,27 @@ func TestSavePulseAutoReceiveDoesNotClobberOtherKeys(t *testing.T) {
 		t.Fatalf("PulseAutoReceive = false, want true")
 	}
 }
+
+// TestPulseActivationModelRoundTrip proves ocode.pulse_activation_model is read
+// from disk and written back by unrelated saves instead of being dropped.
+func TestPulseActivationModelRoundTrip(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+
+	if err := withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseActivationModel = "typesafe/jev-test"
+		return nil
+	}); err != nil {
+		t.Fatalf("set activation model: %v", err)
+	}
+	// An unrelated Pulse save rewrites the file; the key must survive it.
+	if err := SavePulseAutoGapMs(1234); err != nil {
+		t.Fatalf("SavePulseAutoGapMs: %v", err)
+	}
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if cfg.PulseActivationModel != "typesafe/jev-test" {
+		t.Fatalf("PulseActivationModel = %q, want typesafe/jev-test", cfg.PulseActivationModel)
+	}
+}

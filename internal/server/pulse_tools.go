@@ -80,7 +80,8 @@ func (t *pulseTool) Execute(args json.RawMessage) (string, error) { return t.run
 func (h *Handler) pulseTools() []*pulseTool {
 	tools := h.pulseReadTools()
 	tools = append(tools, h.pulseWriteTools()...)
-	return append(tools, h.pulseMemoryTools()...)
+	tools = append(tools, h.pulseMemoryTools()...)
+	return append(tools, h.pulseActivationTools()...)
 }
 
 func (h *Handler) pulseReadTools() []*pulseTool {
