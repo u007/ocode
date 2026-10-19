@@ -63,6 +63,43 @@ Never run a destructive git command and then describe it as "I cleaned things up
 - Keep status / activity rows single-line and clamped with `.Width(w).MaxHeight(1)` so they cannot wrap and push the bottom chrome past the terminal height.
 - Tool calls: when you emit an `assistant` message with `tool_calls`, the next `tool` message must carry the matching `tool_call_id` exactly. Mismatched ids cause Anthropic-format providers (the route used for `minimax-m*`) to reject the turn — see `internal/agent/client.go` and the strict-mode notes around it.
 
+## Delegation and Planning (hard triggers)
+
+Soft "you should consider delegating" guidance is NOT reliably followed by this
+model family. Measured delegation rate on `minimax-m3.1-flash-free` is far below
+`deepseek-v4.1-flash` and `space-bunny-free` (see `docs/concepts/` for the
+method), and the model is observed reading the context-agent rule in the system
+prompt and then rationalising around it ("this is a why/how question about the
+codebase — I can explore code directly"). So use the hard triggers below instead
+of judgement calls. They are triggers, not a mandate to delegate everything.
+
+- **Plan first on multi-step work.** Before your first edit on any task that will
+  touch 2+ files or need 3+ tool calls, call `todowrite` to record the plan.
+  Read it back with `todoread` before mutating it, and use `todo_update` for
+  targeted status changes (a full `todowrite` replaces the list and is rejected
+  if it drops open items).
+- **Route codebase questions through the `context` sub-agent.** For any
+  "where / how / what / why" question about THIS repository, dispatch
+  `task` with `agent="context"` BEFORE you grep, glob, or read files yourself.
+  When the OKF bundle is active the `context` agent subsumes `explore` (it is
+  the only agent that can read `docs/`), so it is the correct dispatch target.
+  Use `knowledge_lookup` for pure knowledge questions ("what did we decide",
+  "do we have a playbook for").
+- **Never write to `docs/` yourself.** The `context` sub-agent is the sole
+  automated writer of the OKF bundle. Dispatch it to write or deprecate a page.
+- **Do not read `docs/` files directly with `read`/`grep`/`glob`** — ask the
+  `context` agent. The one exception is a single `docs/index.md` existence check
+  to confirm whether the bundle is active at all.
+- **Direct `grep`/`glob`/`read` is still correct** for: the file the user
+  explicitly named, a path you already know exactly, and single-file lookups
+  where the answer is one read away. A "where does X live?" sweep is NOT a
+  single-file lookup — dispatch `context`.
+
+Do NOT "always delegate". Trivial single-file edits and straightforward
+diagnostics are faster done directly. The goal is that the routing rules in the
+system prompt actually fire, not that every turn spawns a sub-agent — the
+dispatch guard (`subagentDispatchLimit`) refuses runaway loops.
+
 ## Domain Knowledge
 - Repo: `ocode` — a Go 1.23 terminal coding agent built on Charm TUI (Bubble Tea / Lipgloss). See `CLAUDE.md` for repo-wide rules.
 - LLM providers: OpenAI, Anthropic, Google, Z.AI, Alibaba, plus `opencode-go` for DeepSeek V4 routing. The `minimax-m*` family is reached as `minimax/minimax-m*` in this codebase (see `internal/auth/providers.go`, `internal/agent/sampling_params_test.go`). The bare model id (the value returned by `client.GetModel()`) is what the `.OCODE.md` stem must match — so this file's stem is `minimax-m*`, not `minimax/minimax-m*`.
