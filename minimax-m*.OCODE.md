@@ -90,10 +90,14 @@ of judgement calls. They are triggers, not a mandate to delegate everything.
 - **Do not read `docs/` files directly with `read`/`grep`/`glob`** — ask the
   `context` agent. The one exception is a single `docs/index.md` existence check
   to confirm whether the bundle is active at all.
-- **Direct `grep`/`glob`/`read` is still correct** for: the file the user
-  explicitly named, a path you already know exactly, and single-file lookups
-  where the answer is one read away. A "where does X live?" sweep is NOT a
-  single-file lookup — dispatch `context`.
+- **Direct `grep`/`glob`/`read` is still correct** ONLY for a file the user
+  explicitly named in their message, or a path you already had before this turn
+  started. It is NOT correct for a code-location sweep, even when the sweep has
+  already turned up a candidate file, even when the candidate looks like an
+  obvious answer, and even when you believe you have "strong leads". Those
+  reasons are exactly how this rule gets skipped. If the question is "where is
+  X?" or "which file/function does Y?", dispatch `context` FIRST — you cannot
+  know the file before you dispatch, and that is the point.
 
 Do NOT "always delegate". Trivial single-file edits and straightforward
 diagnostics are faster done directly. The goal is that the routing rules in the
