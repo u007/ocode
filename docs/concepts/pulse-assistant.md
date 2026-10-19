@@ -199,18 +199,45 @@ low-confidence `wake` or an over-budget state all leave the assistant idle. The 
 still on the board for the next turn. An error is recorded in the decision log and its
 batch is resolved, so one failing judge cannot wedge the gate on the same batch.
 
-**Pacing.** A batch is held (not judged, not dropped) while the assistant is mid-turn,
-compacting or paused on an ask (`pulseSessionBusy`) and for 15 s after a wake
-(`pulseActivationMinInterval`), so a loose condition cannot become a continuous token
-drain. Held batches are judged on a later tick. Indicators recorded before the loop first
-started, or before the latest `activation_write`, are history and are never judged.
+**Bursts are processed in bulk, deferred, never raced** (`pulseActivationTick`):
+
+- *Debounce.* A backlog is judged once its newest indicator has been quiet for
+  `ocode.pulse_auto_gap_ms`, so a burst is one judge call, not one per notification. A steady
+  trickle cannot starve it: the oldest indicator waits at most 30 s
+  (`pulseActivationMaxHold`), and a full chunk is judged at once.
+- *Coalescing.* Repeats of the same (kind, id) collapse to the latest with an `(xN)` count
+  (`coalescePulseStops`), so the judge's budget goes to distinct events.
+- *Chunks.* At most `PulseActivationBatchMax` (50) indicators are judged per pass, oldest
+  first, and the cursor moves only past that chunk. A bigger backlog is judged on the next
+  passes; nothing is truncated away.
+- *Hold, don't drop.* No judge call is spent while the assistant is mid-turn, compacting,
+  paused on an ask, or inside the 15 s cooldown after a wake
+  (`pulseActivationMinInterval`); the backlog keeps growing and is judged as one bigger batch
+  later. If the assistant becomes unavailable *during* the judge call (the operator typed),
+  or the send itself loses that race, the verdict is parked as a *held wake* and delivered
+  on a later pass **without a second judge call**. A held wake is delivered before anything
+  newer is judged, and is dropped as `stale` after 5 min or when the condition is rewritten.
+- *Stale verdicts.* `activation_write` bumps a generation after writing the file, and a pass
+  reads the generation before the condition. A verdict made under an older condition is
+  recorded as `stale` and never sent. A write also moves the cursor past the existing
+  backlog and drops any held wake.
+- *No re-entrancy.* `tickMu.TryLock` makes a second concurrent pass a no-op, so one batch is
+  never judged or woken twice. The cursor, the held wake and `lastWake` are only advanced by
+  the pass holding it (plus the condition write, which only moves the cursor forward).
+- *Lock order* is `pulseMu` -> `pulseAct.mu`, never reversed; `h.mu` is a leaf. No lock is held
+  across the process-table walk (`detectPulseTerminalStops` walks first), a judge call or a
+  send.
+
+Indicators recorded before the loop first started, or before the latest `activation_write`,
+are history and are never judged. Decision outcomes: `woke`, `skipped`, `deferred` (held),
+`stale`, `error`.
 
 **Tools** (`activation_read`, `activation_write`) carry explicit allow rules like
 `memory_write`: they only touch the assistant's own file, cannot act on any session, and
 the worst a bad condition does is wake the assistant, whose write tools still ask the
 operator. `activation_read` returns `{prompt, max_chars, judge_model, auto_receive,
 active, recent_decisions, note?}`; `recent_decisions` is the last 20 gate outcomes
-(`woke`/`skipped`/`error`, token counts) from memory, so the assistant can see what its
+(`woke`/`skipped`/`deferred`/`stale`/`error`, token counts) from memory, so the assistant can see what its
 condition did and tune it. `active` is `auto_receive && prompt != ""`; the `note` says
 why when it is false.
 

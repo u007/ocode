@@ -653,7 +653,9 @@ The Pulse dashboard's overview chat is one current `pulse_…` session at a time
   (`internal/server/pulse_activation.go`); only a confident `wake` sends the assistant a
   user-role `[ocode:pulse-activation]` message. No condition, judge error, low confidence or
   no decision backend must leave it idle, and a held batch (assistant busy, 15 s cooldown)
-  is judged later, never dropped to "wake anyway". Concept: `docs/concepts/pulse-assistant.md`.
+  is judged later, never dropped to "wake anyway". The pass is non-reentrant (`tickMu.TryLock`),
+  lock order is `pulseMu` -> `pulseAct.mu`, and a verdict from an older condition generation is
+  discarded (`stale`), never sent. Concept: `docs/concepts/pulse-assistant.md`.
 - **Recap runs under `pulseRecapTimeout` (90 s)** via `Agent.RecapCtx`; a timeout is
   an error, never "Recap timed out." text passed off as a recap.
 

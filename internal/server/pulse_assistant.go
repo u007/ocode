@@ -646,8 +646,8 @@ func (h *Handler) pulseBoardSnapshot() string {
 	// Pulse auto-receive: inject stop indicators as a [ocode:pulse-stop]
 	// section when enabled, after the quiet gap with no new indicator.
 	if h.pulseAutoReceive() {
+		h.detectPulseTerminalStops()
 		h.pulseMu.Lock()
-		h.detectPulseTerminalStopsLocked()
 		gap := time.Duration(h.pulseAutoGapMs()) * time.Millisecond
 		cutoff := now.Add(-gap)
 		var recent []pulseStopIndicator
@@ -678,15 +678,19 @@ func (h *Handler) pulseBoardSnapshot() string {
 	return board + "\n" + mem
 }
 
-// detectPulseTerminalStopsLocked records a terminal_stop indicator for every
-// terminal whose foreground program went from running back to the shell (Claude
-// Code finishing, a build ending). Shared by the board snapshot and the
-// activation loop so both see the same transitions. The caller holds pulseMu.
-func (h *Handler) detectPulseTerminalStopsLocked() {
+// detectPulseTerminalStops records a terminal_stop indicator for every terminal
+// whose foreground program went from running back to the shell (Claude Code
+// finishing, a build ending). Shared by the board snapshot and the activation
+// loop so both see the same transitions. The process-table walk runs before
+// pulseMu is taken, so recorders never wait on it.
+func (h *Handler) detectPulseTerminalStops() {
 	if !h.terminalAccessAllowed() {
 		return
 	}
-	for _, tr := range h.pulseTerminalRows() {
+	rows := h.pulseTerminalRows()
+	h.pulseMu.Lock()
+	defer h.pulseMu.Unlock()
+	for _, tr := range rows {
 		wasRunning := h.pulsePreviousTerminalRunning[tr.ID]
 		if wasRunning && !tr.Running {
 			h.recordPulseStopIndicator(tr.ID, "terminal_stop", "terminal idle ("+tr.Command+")", filepath.Base(tr.Project))

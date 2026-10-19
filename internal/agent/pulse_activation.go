@@ -17,11 +17,15 @@ import (
 // uninteresting notifications cost one cheap decision call and no chat tokens.
 
 const (
-	pulseActivationKey    = "activate"
-	pulseActivationWake   = "wake"
-	pulseActivationSkip   = "skip"
-	pulseActivationBatch  = 20
-	pulseActivationCutRns = 300
+	pulseActivationKey  = "activate"
+	pulseActivationWake = "wake"
+	pulseActivationSkip = "skip"
+	// PulseActivationBatchMax is how many events one judge call sees. A larger
+	// backlog is judged in further chunks by the host, never silently truncated.
+	// 50 events at the clip below is ~25 KB of the 96 KB decision-state budget.
+	PulseActivationBatchMax = 50
+	pulseActivationBatch    = PulseActivationBatchMax
+	pulseActivationCutRns   = 200
 	// PulseActivationMaxConditionLen bounds the condition the assistant writes.
 	// It rides in every judge request, so it must stay small next to the 96 KB
 	// decision-state budget.
