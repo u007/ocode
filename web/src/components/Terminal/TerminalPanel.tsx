@@ -23,6 +23,7 @@ import "@xterm/xterm/css/xterm.css";
 import { registerFileLinkProvider } from "./terminalLinkProvider";
 import { openExternalURL } from "../../lib/externalLinks";
 import { buildTerminalOptions } from "./terminalOptions";
+import { attachImeHygiene } from "./terminalImeHygiene";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
 import { apiPath, apiWsPath, remoteApiBase, authHeaders, authToken, isRemoteSession } from "@/api/client";
@@ -877,6 +878,7 @@ export default function TerminalPanel({
       setFindResult({ count: e.resultCount, index: e.resultIndex });
     });
     term.open(el);
+    const detachImeHygiene = term.textarea ? attachImeHygiene(term.textarea) : null;
     // Links: WebLinksAddon handles http(s) URLs (e.g. Vite's localhost link),
     // registerFileLinkProvider handles file paths (src/foo.ts:12, .ocode/uploads)
     // and dispatches ocode:open-file to open the editor.
@@ -1648,6 +1650,7 @@ export default function TerminalPanel({
       el.removeEventListener("touchmove", onTouchMove);
       el.removeEventListener("touchend", onTouchEnd);
       el.removeEventListener("touchcancel", onTouchEnd);
+      detachImeHygiene?.();
       el.removeEventListener("keydown", snapshot.input, true);
       el.removeEventListener("pointerdown", onSnapshotPointerDown, true);
       el.removeEventListener("pointerdown", onInputPointerDown, true);

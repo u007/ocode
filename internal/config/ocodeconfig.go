@@ -2280,8 +2280,8 @@ func applyChatVerbosityConfig(dst *ChatVerbosityConfig, src *chatVerbosityConfig
 			if dst == nil {
 				return fmt.Errorf("chat_verbosity.overrides: unknown override category: %s", name)
 			}
-			if value == nil || !validChatDisplayOverride(*value) {
-				return fmt.Errorf("chat_verbosity.overrides.%s must be one of %q, %q, or %q", name, ChatDisplayPreset, ChatDisplayExpanded, ChatDisplayCollapsed)
+			if value == nil || !chatOverrideAllowed(name, *value) {
+				return fmt.Errorf("chat_verbosity.overrides.%s must be one of %s", name, chatOverrideChoices(name))
 			}
 			*dst = *value
 		}
