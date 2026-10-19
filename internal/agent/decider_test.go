@@ -28,6 +28,7 @@ func TestDecider_SlotModelDefaults(t *testing.T) {
 		slotNetworkGuard,
 		slotContentGuard,
 		slotGoal,
+		slotPulseActivation,
 	}
 	for _, s := range slots {
 		if got := a.slotModel(s); got != defaultJudgeModel {

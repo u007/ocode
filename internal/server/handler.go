@@ -179,6 +179,28 @@ type Handler struct {
 	// terminal, used to detect terminal-stop transitions. Guarded by pulseMu.
 	pulsePreviousTerminalRunning map[string]bool
 
+	// pulsePreviousAsk records the last-seen pending-ask indicator kind per
+	// session ("" when none), used to detect a session newly pausing on a
+	// permission or question ask. Guarded by pulseMu.
+	pulsePreviousAsk map[string]pulseAskMark
+
+	// pulseDetectMu serialises each "snapshot live state, then apply the
+	// transition to pulsePrevious*" pass (gatherLivePulseInputs,
+	// detectPulseTerminalStops). Two concurrent passes would otherwise apply
+	// snapshots out of order: the older snapshot overwrites the newer one's
+	// previous-state and the same stop is recorded twice. Lock order:
+	// pulseDetectMu -> pulseMu -> pulseAct.mu.
+	pulseDetectMu sync.Mutex
+
+	// pulseStopSeq numbers stop indicators so the activation gate can resume
+	// after the last one it judged without relying on timestamps. Guarded by pulseMu.
+	pulseStopSeq uint64
+
+	// pulseAct is the Pulse activation gate's bookkeeping
+	// (pulse_activation.go). It has its own lock and is never held across a
+	// judge call or an assistant turn.
+	pulseAct pulseActivationState
+
 	// termTabsStore persists which terminal tabs are open, so a terminal
 	// started in one client is visible in another (the session-tab store above
 	// does the same for session tabs). Nil when the data dir could not be
@@ -630,6 +652,7 @@ func NewHandler() *Handler {
 		closePending:                 make(map[string]bool),
 		pulsePreviousTurnActive:      make(map[string]bool),
 		pulsePreviousTerminalRunning: make(map[string]bool),
+		pulsePreviousAsk:             make(map[string]pulseAskMark),
 	}
 
 	// The session registry is the single authority for session → project root

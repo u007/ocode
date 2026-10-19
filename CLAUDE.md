@@ -70,8 +70,8 @@ two when both exist, so a second file would never be seen. Do not recreate it.
   compaction, small-model or interpreter-effects paths. `*TypesafeClient`
   satisfies it unchanged; `isDecisionModel` is the single place that decides
   which ids route to a decision backend. `resolveDecider(slot)` resolves one of
-  eight `judgeSlot`s (permission, auto_continue, discovery, doc_search,
-  code_search, network_guard, content_guard, goal); all currently default to
+  nine `judgeSlot`s (permission, auto_continue, discovery, doc_search,
+  code_search, network_guard, content_guard, goal, pulse_activation); all currently default to
   `typesafe/jev-latest`. Judges label their requests with `deciderLabel(client)`
   — provider-qualified, never a hardcoded prefix — so the usage ledger does not
   book one backend's tokens to another.
@@ -647,6 +647,15 @@ The Pulse dashboard's overview chat is one current `pulse_…` session at a time
 - **No pre-built agent on `GET /api/pulse/assistant`:** the first message builds it,
   so profile resolution matches the message path (a pre-build forced a rebuild and
   an illegal bootstrap transition).
+- **The activation gate fails toward idle, never toward waking.** The assistant's own
+  English condition (`activation_read`/`activation_write`, `<pulse root>/activation.md`) is
+  applied by the `pulse_activation` decision judge to each stop-indicator batch
+  (`internal/server/pulse_activation.go`); only a confident `wake` sends the assistant a
+  user-role `[ocode:pulse-activation]` message. No condition, judge error, low confidence or
+  no decision backend must leave it idle, and a held batch (assistant busy, 15 s cooldown)
+  is judged later, never dropped to "wake anyway". The pass is non-reentrant (`tickMu.TryLock`),
+  lock order is `pulseMu` -> `pulseAct.mu`, and a verdict from an older condition generation is
+  discarded (`stale`), never sent. Concept: `docs/concepts/pulse-assistant.md`.
 - **Recap runs under `pulseRecapTimeout` (90 s)** via `Agent.RecapCtx`; a timeout is
   an error, never "Recap timed out." text passed off as a recap.
 

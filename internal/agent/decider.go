@@ -21,6 +21,9 @@ const (
 	slotNetworkGuard judgeSlot = "network_guard"
 	slotContentGuard judgeSlot = "content_guard"
 	slotGoal         judgeSlot = "goal"
+	// slotPulseActivation gates whether a Pulse stop indicator wakes the Pulse
+	// assistant (JudgePulseActivation).
+	slotPulseActivation judgeSlot = "pulse_activation"
 )
 
 // defaultJudgeModel is what every slot resolves to when nothing is configured.
@@ -93,6 +96,8 @@ func (a *Agent) slotModel(slot judgeSlot) string {
 		v = oc.ContentGuard.JudgeModel
 	case slotGoal:
 		v = oc.Goal.JudgeModel
+	case slotPulseActivation:
+		v = oc.PulseActivationModel
 	}
 	if v = strings.TrimSpace(v); v != "" {
 		return v

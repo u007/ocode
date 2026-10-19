@@ -129,11 +129,20 @@ func (h *Handler) gatherPulseInputs(scope string, now time.Time) []PulseInput {
 	return out
 }
 
+// pulseAfterSnapshot is a test seam: it runs between taking the live snapshot
+// and applying its transitions, the window pulseDetectMu exists to close.
+var pulseAfterSnapshot func()
+
 // gatherLivePulseInputs reads every session in the in-process registry. These are
 // the sessions with resident agents: running turns, parked asks, and turns that
 // recently failed — the set the "live" scope is about.
 func (h *Handler) gatherLivePulseInputs() []PulseInput {
+	h.pulseDetectMu.Lock()
+	defer h.pulseDetectMu.Unlock()
 	entries := h.sessions.Snapshot()
+	if pulseAfterSnapshot != nil {
+		pulseAfterSnapshot()
+	}
 
 	// Resident agent sessions, snapshotted under h.mu once. Each one's messages
 	// are read under its own as.mu below, because a running turn mutates them
@@ -219,7 +228,58 @@ func (h *Handler) gatherLivePulseInputs() []PulseInput {
 
 		out = append(out, in)
 	}
+	h.recordPulseAskStops(out)
 	return out
+}
+
+// pulseAskMark is the last ask indicator seen for a session and when.
+type pulseAskMark struct {
+	kind string
+	seen time.Time
+}
+
+// pulseAskMarkTTL is how long a session's mark outlives its last sighting. A
+// session evicted from the registry while its ask is pending, then re-registered
+// from the transcript with the same ask, must not be reported a second time, so a
+// mark is not dropped just because the session is briefly absent.
+const pulseAskMarkTTL = time.Hour
+
+// recordPulseAskStops records a permission_ask / question_ask stop indicator
+// when a session newly pauses on an ask. An ask that stays pending is recorded
+// once, on the transition, and a session that resolves it re-arms the detector.
+func (h *Handler) recordPulseAskStops(inputs []PulseInput) {
+	now := time.Now()
+	h.pulseMu.Lock()
+	defer h.pulseMu.Unlock()
+	for _, in := range inputs {
+		if isPulseSession(in.SessionID) {
+			continue
+		}
+		kind := ""
+		if in.PendingAsk != nil {
+			switch in.PendingAsk.Kind {
+			case PulseAskKindPermission:
+				kind = "permission_ask"
+			case PulseAskKindQuestion:
+				kind = "question_ask"
+			}
+		}
+		if kind != "" && kind != h.pulsePreviousAsk[in.SessionID].kind {
+			h.recordPulseStopIndicator(in.SessionID, kind, pulseOneLine(in.PendingAsk.Summary, pulseBoardTaskRunes), filepath.Base(in.ProjectPath))
+		}
+		if kind == "" {
+			delete(h.pulsePreviousAsk, in.SessionID)
+		} else {
+			h.pulsePreviousAsk[in.SessionID] = pulseAskMark{kind: kind, seen: now}
+		}
+	}
+	// Forget sessions not seen for a long while so the map cannot grow with every
+	// session id the process has ever served.
+	for id, m := range h.pulsePreviousAsk {
+		if now.Sub(m.seen) > pulseAskMarkTTL {
+			delete(h.pulsePreviousAsk, id)
+		}
+	}
 }
 
 // gatherDiskPulseInputs lists recent sessions for every LOCAL project so the
