@@ -224,7 +224,22 @@ batch is resolved, so one failing judge cannot wedge the gate on the same batch.
 - *No re-entrancy.* `tickMu.TryLock` makes a second concurrent pass a no-op, so one batch is
   never judged or woken twice. The cursor, the held wake and `lastWake` are only advanced by
   the pass holding it (plus the condition write, which only moves the cursor forward).
-- *Lock order* is `pulseMu` -> `pulseAct.mu`, never reversed; `h.mu` is a leaf. No lock is held
+- *One stop, one indicator.* Detection is "snapshot live state, then apply the transition
+  to the previous-state maps". `pulseDetectMu` serialises that whole pass
+  (`gatherLivePulseInputs`, `detectPulseTerminalStops`), because the gate's tick and the
+  board poll both run it: an older snapshot applied after a newer one would reset the
+  previous-state and report the same stop twice.
+- *The ring never drops an unjudged stop.* It is trimmed to 200 (`pulseStopIndicatorMax`),
+  but only below the gate's cursor; unjudged indicators are kept up to a hard cap of 1000,
+  and dropping past that is logged.
+- *Restart.* The cursor is re-seeded on every loop start, so stops recorded while no
+  dashboard was connected are history, not replayed as news. The loop is also started from
+  `/api/events` (after the client subscribes), and its idle exit re-checks the subscriber
+  count under the lock `startPulseActivation` takes, so it is never left stopped with a
+  client connected.
+- *Last check before sending.* The condition generation is re-read immediately before the
+  send, so a rewrite that lands after the verdict still cannot wake on the old condition.
+- *Lock order* is `pulseDetectMu` -> `pulseMu` -> `pulseAct.mu`, never reversed; `h.mu` is a leaf. No lock is held
   across the process-table walk (`detectPulseTerminalStops` walks first), a judge call or a
   send.
 

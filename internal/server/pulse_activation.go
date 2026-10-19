@@ -73,7 +73,6 @@ type pulseActivationState struct {
 	tickMu    sync.Mutex
 	mu        sync.Mutex
 	started   bool
-	inited    bool   // cursor has been seeded from the stop-indicator counter
 	cursor    uint64 // seq of the last stop indicator already judged
 	gen       uint64 // bumped after every condition write; a verdict from an older gen is stale
 	lastWake  time.Time
@@ -274,11 +273,9 @@ func (h *Handler) startPulseActivation() {
 		return
 	}
 	h.pulseAct.started = true
-	// Indicators recorded before the gate first ran are history, not news.
-	if !h.pulseAct.inited {
-		h.pulseAct.inited = true
-		h.pulseAct.cursor = h.pulseStopSeq
-	}
+	// Indicators recorded while the gate was not running (first start, or the
+	// dashboard was closed) are history, not news: the board still shows them.
+	h.pulseAct.cursor = h.pulseStopSeq
 	h.pulseAct.mu.Unlock()
 	h.pulseMu.Unlock()
 	crashguard.Go(h.pulseActivationLoop)
@@ -295,10 +292,19 @@ func (h *Handler) pulseActivationLoop() {
 		if h.bus.SubscriberCount() == 0 {
 			idle += pulseActivationTick
 			if idle >= emitterIdleExit {
+				// Re-check under the lock start() takes: a client that connected
+				// since the check above subscribed BEFORE calling start(), so
+				// either we see it here and keep running, or start() sees
+				// started=false and spawns a replacement. The gate is never left
+				// idle with a client connected.
 				h.pulseAct.mu.Lock()
-				h.pulseAct.started = false
+				if h.bus.SubscriberCount() == 0 {
+					h.pulseAct.started = false
+					h.pulseAct.mu.Unlock()
+					return
+				}
 				h.pulseAct.mu.Unlock()
-				return
+				idle = 0
 			}
 			continue
 		}
@@ -393,6 +399,9 @@ func (h *Handler) pulseActivationFree(id string, now time.Time) error {
 	return h.pulseSessionBusy(id)
 }
 
+// errPulseActivationStale marks a wake whose condition has since been rewritten.
+var errPulseActivationStale = errors.New("condition changed since the verdict")
+
 // pulseActivationDeliver sends a judged wake, or parks it when the assistant is
 // not free. A send that fails because the assistant became busy between the
 // check and the send (the operator typed, a compaction began) is parked too: the
@@ -400,6 +409,14 @@ func (h *Handler) pulseActivationFree(id string, now time.Time) error {
 func (h *Handler) pulseActivationDeliver(id string, held *pulseHeldWake, now time.Time) (delivered bool, parked bool, err error) {
 	if reason := h.pulseActivationFree(id, now); reason != nil {
 		return false, true, nil
+	}
+	// Last check before the send: a condition rewritten since this verdict was
+	// made must not wake the assistant on the old one.
+	h.pulseAct.mu.Lock()
+	stale := h.pulseAct.gen != held.gen
+	h.pulseAct.mu.Unlock()
+	if stale {
+		return false, false, errPulseActivationStale
 	}
 	if err := pulseActivationSend(h, id, held.batch, held.detail); err != nil {
 		if h.pulseSessionBusy(id) != nil {
@@ -513,14 +530,22 @@ func (h *Handler) pulseActivationTick(now time.Time) {
 			d.Outcome = "woke"
 		case parked:
 			// The assistant became unavailable during the judge call. Keep the
-			// verdict; the next pass delivers it.
-			d.Outcome = "deferred"
-			d.Detail += "; assistant busy, wake held"
+			// verdict; the next pass delivers it. The generation is checked under
+			// the same lock that publishes the hold, so a rewrite that landed
+			// meanwhile is logged as stale, not as a wake that was never held.
 			h.pulseAct.mu.Lock()
 			if h.pulseAct.gen == gen {
 				h.pulseAct.held = w
+				d.Outcome = "deferred"
+				d.Detail += "; assistant busy, wake held"
+			} else {
+				d.Outcome = "stale"
+				d.Detail = "condition changed while judging; verdict discarded"
 			}
 			h.pulseAct.mu.Unlock()
+		case errors.Is(sendErr, errPulseActivationStale):
+			d.Outcome = "stale"
+			d.Detail = "condition changed while judging; verdict discarded"
 		default:
 			d.Outcome = "error"
 			d.Detail = "wake failed: " + sendErr.Error()
@@ -556,6 +581,8 @@ func (h *Handler) pulseActivationDeliverHeld(id string, held *pulseHeldWake, gen
 	}
 	ok, parked, err := h.pulseActivationDeliver(id, held, now)
 	switch {
+	case errors.Is(err, errPulseActivationStale):
+		drop("stale", "condition changed while the wake was held; dropped")
 	case ok:
 		h.pulseAct.mu.Lock()
 		if h.pulseAct.held == held {

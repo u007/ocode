@@ -129,11 +129,20 @@ func (h *Handler) gatherPulseInputs(scope string, now time.Time) []PulseInput {
 	return out
 }
 
+// pulseAfterSnapshot is a test seam: it runs between taking the live snapshot
+// and applying its transitions, the window pulseDetectMu exists to close.
+var pulseAfterSnapshot func()
+
 // gatherLivePulseInputs reads every session in the in-process registry. These are
 // the sessions with resident agents: running turns, parked asks, and turns that
 // recently failed — the set the "live" scope is about.
 func (h *Handler) gatherLivePulseInputs() []PulseInput {
+	h.pulseDetectMu.Lock()
+	defer h.pulseDetectMu.Unlock()
 	entries := h.sessions.Snapshot()
+	if pulseAfterSnapshot != nil {
+		pulseAfterSnapshot()
+	}
 
 	// Resident agent sessions, snapshotted under h.mu once. Each one's messages
 	// are read under its own as.mu below, because a running turn mutates them

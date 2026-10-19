@@ -184,6 +184,14 @@ type Handler struct {
 	// permission or question ask. Guarded by pulseMu.
 	pulsePreviousAsk map[string]string
 
+	// pulseDetectMu serialises each "snapshot live state, then apply the
+	// transition to pulsePrevious*" pass (gatherLivePulseInputs,
+	// detectPulseTerminalStops). Two concurrent passes would otherwise apply
+	// snapshots out of order: the older snapshot overwrites the newer one's
+	// previous-state and the same stop is recorded twice. Lock order:
+	// pulseDetectMu -> pulseMu -> pulseAct.mu.
+	pulseDetectMu sync.Mutex
+
 	// pulseStopSeq numbers stop indicators so the activation gate can resume
 	// after the last one it judged without relying on timestamps. Guarded by pulseMu.
 	pulseStopSeq uint64

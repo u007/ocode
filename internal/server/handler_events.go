@@ -50,6 +50,8 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	// a client is connected. Each loop self-exits ~30s after the last
 	// subscriber leaves; the once-guards restart them on the next connection.
 	h.startRunsEmitter()
+	// Subscribed above, so a gate loop that is just exiting sees this client.
+	h.startPulseActivation()
 	h.startWatchEmitters()
 	h.startLogsEmitter()
 	h.startTerminalProcessesEmitter()

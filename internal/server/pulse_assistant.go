@@ -118,8 +118,13 @@ type pulseStopIndicator struct {
 	seq     uint64    // monotonic id assigned by recordPulseStopIndicator
 }
 
-// pulseStopIndicatorMax keeps the ring buffer small.
-const pulseStopIndicatorMax = 200
+// pulseStopIndicatorMax keeps the ring buffer small. The activation gate
+// extends it, up to pulseStopIndicatorHardMax, rather than drop an indicator it
+// has not judged yet (assistant busy, wake held).
+const (
+	pulseStopIndicatorMax     = 200
+	pulseStopIndicatorHardMax = 1000
+)
 
 // pulseStopIndicatorKinds are the valid kinds.
 var pulseStopIndicatorKinds = map[string]bool{
@@ -189,8 +194,22 @@ func (h *Handler) recordPulseStopIndicator(id, kind, summary, project string) {
 		At:      time.Now(),
 		Project: project,
 	})
-	if len(h.pulseStopIndicators) > pulseStopIndicatorMax {
-		h.pulseStopIndicators = h.pulseStopIndicators[len(h.pulseStopIndicators)-pulseStopIndicatorMax:]
+	if over := len(h.pulseStopIndicators) - pulseStopIndicatorMax; over > 0 {
+		// Drop only what the gate has already judged (seq <= cursor); the slice is
+		// in seq order, so those are a prefix. Lock order pulseMu -> pulseAct.mu.
+		h.pulseAct.mu.Lock()
+		cursor := h.pulseAct.cursor
+		h.pulseAct.mu.Unlock()
+		judged := 0
+		for judged < len(h.pulseStopIndicators) && h.pulseStopIndicators[judged].seq <= cursor {
+			judged++
+		}
+		drop := min(over, judged)
+		if extra := len(h.pulseStopIndicators) - drop - pulseStopIndicatorHardMax; extra > 0 {
+			drop += extra
+			log.Printf("serve: pulse stop indicators over the %d hard cap; dropped %d the gate had not judged", pulseStopIndicatorHardMax, extra)
+		}
+		h.pulseStopIndicators = h.pulseStopIndicators[drop:]
 	}
 }
 
@@ -687,6 +706,8 @@ func (h *Handler) detectPulseTerminalStops() {
 	if !h.terminalAccessAllowed() {
 		return
 	}
+	h.pulseDetectMu.Lock()
+	defer h.pulseDetectMu.Unlock()
 	rows := h.pulseTerminalRows()
 	h.pulseMu.Lock()
 	defer h.pulseMu.Unlock()

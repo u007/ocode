@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -353,5 +355,133 @@ func TestRecordPulseAskStops_RecordsTransitionsOnce(t *testing.T) {
 	h.recordPulseAskStops([]PulseInput{{SessionID: "pulse_x", PendingAsk: &PulseAsk{Kind: PulseAskKindPermission}}})
 	if count() != 2 {
 		t.Fatalf("the assistant's own ask was recorded")
+	}
+}
+
+// Two passes that snapshot live state concurrently (the gate's tick and a board
+// poll) must record one turn_done per finished turn. Pass B snapshots "running",
+// the turn then ends, and pass A snapshots "idle" and records the stop. If B
+// were allowed to apply its older snapshot afterwards it would overwrite the
+// previous-state with "running", and the next pass would record the same stop a
+// second time. pulseDetectMu makes A wait for B instead.
+func TestPulseDetect_StaleSnapshotCannotDuplicateAStop(t *testing.T) {
+	f := newActivationFixture(t)
+	h := f.h
+	const id = "ses_detect"
+	h.sessions.Register(id, t.TempDir())
+	count := func() int {
+		h.pulseMu.Lock()
+		defer h.pulseMu.Unlock()
+		n := 0
+		for _, si := range h.pulseStopIndicators {
+			if si.Kind == "turn_done" && si.ID == id {
+				n++
+			}
+		}
+		return n
+	}
+
+	h.sessions.setTurnActive(id, true)
+	h.gatherLivePulseInputs() // previous-state: running
+
+	snapshotted := make(chan struct{})
+	release := make(chan struct{})
+	// Only the first caller stalls. (sync.Once would also block the second caller
+	// until the first returned, which would hide the very race under test.)
+	var stalled atomic.Bool
+	pulseAfterSnapshot = func() {
+		if stalled.CompareAndSwap(false, true) {
+			close(snapshotted)
+			<-release
+		}
+	}
+	t.Cleanup(func() { pulseAfterSnapshot = nil })
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { // pass B: snapshots "running", then stalls
+		defer wg.Done()
+		h.gatherLivePulseInputs()
+	}()
+	<-snapshotted
+	h.sessions.setTurnActive(id, false) // the turn ends while B is stalled
+	go func() {                         // pass A: snapshots "idle"
+		defer wg.Done()
+		h.gatherLivePulseInputs()
+	}()
+	// A must be held behind B. Give it time to prove it is not racing ahead, then
+	// let B finish; with the lock A then runs strictly after B.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	h.gatherLivePulseInputs() // a later pass sees whatever previous-state is left
+	if got := count(); got != 1 {
+		t.Fatalf("%d turn_done indicators for one finished turn, want exactly 1", got)
+	}
+}
+
+// The ring is trimmed to 200, but never below what the gate has not judged yet:
+// a long busy or held period must not silently lose notifications.
+func TestRecordPulseStop_KeepsUnjudgedPastTheSoftCap(t *testing.T) {
+	f := newActivationFixture(t)
+	h := f.h
+	ringLen := func() (int, uint64) {
+		h.pulseMu.Lock()
+		defer h.pulseMu.Unlock()
+		return len(h.pulseStopIndicators), h.pulseStopIndicators[0].seq
+	}
+	for i := 0; i < 500; i++ {
+		f.stop("turn_done", "ses_x", "turn finished")
+	}
+	if n, _ := ringLen(); n != 500 {
+		t.Fatalf("ring holds %d with nothing judged, want all 500", n)
+	}
+	// Judge everything up to #480; the next record may trim only that prefix.
+	h.pulseAct.mu.Lock()
+	h.pulseAct.cursor = 480
+	h.pulseAct.mu.Unlock()
+	f.stop("turn_done", "ses_x", "turn finished")
+	n, first := ringLen()
+	if n != pulseStopIndicatorMax {
+		t.Fatalf("ring holds %d after judging a prefix, want %d", n, pulseStopIndicatorMax)
+	}
+	if first > 481 {
+		t.Fatalf("ring starts at seq %d, dropping unjudged indicators (first unjudged is 481)", first)
+	}
+	// With nothing ever judged the ring still has a hard ceiling.
+	h.pulseAct.mu.Lock()
+	h.pulseAct.cursor = 0
+	h.pulseAct.mu.Unlock()
+	for i := 0; i < 1500; i++ {
+		f.stop("turn_done", "ses_x", "turn finished")
+	}
+	if n, _ := ringLen(); n > pulseStopIndicatorHardMax {
+		t.Fatalf("ring holds %d, over the %d hard cap", n, pulseStopIndicatorHardMax)
+	}
+}
+
+// Stops recorded while the gate was not running are history, on every start,
+// not just the first: a reconnecting dashboard must not replay an hour of stops.
+func TestStartPulseActivation_ReseedsTheCursorOnEveryStart(t *testing.T) {
+	f := newActivationFixture(t)
+	h := f.h
+	f.stop("turn_done", "ses_a", "turn finished")
+	h.startPulseActivation()
+	h.pulseAct.mu.Lock()
+	first := h.pulseAct.cursor
+	h.pulseAct.started = false // as if the loop had idle-exited
+	h.pulseAct.mu.Unlock()
+	f.stop("turn_done", "ses_b", "turn finished")
+	h.startPulseActivation()
+	h.pulseAct.mu.Lock()
+	second := h.pulseAct.cursor
+	h.pulseAct.started = false // let the stray loop be replaced; it exits on its own
+	h.pulseAct.mu.Unlock()
+	h.pulseMu.Lock()
+	seq := h.pulseStopSeq
+	h.pulseMu.Unlock()
+	if first != 1 || second != seq || second <= first {
+		t.Fatalf("cursors = %d then %d (stop seq %d), want the cursor to follow the counter on each start", first, second, seq)
 	}
 }
