@@ -26,6 +26,12 @@ const (
 	PulseActivationBatchMax = 50
 	pulseActivationBatch    = PulseActivationBatchMax
 	pulseActivationCutRns   = 200
+	// Per-field clips for the other event fields. Typical events are a few
+	// hundred bytes; pulseActivationStateCap is what actually guarantees the
+	// marshalled state fits, by shrinking summaries when it does not.
+	pulseActivationCutKind    = 40
+	pulseActivationCutProject = 80
+	pulseActivationCutID      = 120
 	// PulseActivationMaxConditionLen bounds the condition the assistant writes.
 	// It rides in every judge request, so it must stay small next to the 96 KB
 	// decision-state budget.
@@ -36,6 +42,10 @@ const (
 	// floor. Jev's confidence runs below probabilities[choice], so this is not
 	// the permission floor reused.
 	pulseActivationMinConfidence = 0.5
+	// pulseActivationStateCap is the marshalled-state size the gate aims under,
+	// well inside decisionStateBudgetBytes (96 KB), which refuses rather than
+	// projects "events". Above it, summaries are shrunk before the call.
+	pulseActivationStateCap = 64 * 1024
 )
 
 // PulseActivationEvent is one stop indicator offered to the gate.
@@ -82,17 +92,20 @@ Rules:
 
 // pulseActivationEvents projects events into the judge's state with bounded
 // text, newest last, capped at pulseActivationBatch (the oldest are dropped).
-func pulseActivationEvents(events []PulseActivationEvent) []map[string]any {
+func pulseActivationEvents(events []PulseActivationEvent, summaryRunes int) []map[string]any {
 	if len(events) > pulseActivationBatch {
 		events = events[len(events)-pulseActivationBatch:]
 	}
 	out := make([]map[string]any, 0, len(events))
 	for _, e := range events {
+		// Every free-text field is clipped, not just the summary: a terminal id or
+		// a project basename can be arbitrarily long, and one over-long event would
+		// push the whole batch over the decision-state budget and fail it.
 		out = append(out, map[string]any{
-			"kind":    e.Kind,
-			"project": e.Project,
-			"id":      e.ID,
-			"summary": truncateRunes(strings.TrimSpace(e.Summary), pulseActivationCutRns),
+			"kind":    truncateRunes(e.Kind, pulseActivationCutKind),
+			"project": truncateRunes(e.Project, pulseActivationCutProject),
+			"id":      truncateRunes(e.ID, pulseActivationCutID),
+			"summary": truncateRunes(strings.TrimSpace(e.Summary), summaryRunes),
 			"at":      e.At.UTC().Format(time.RFC3339),
 		})
 	}
@@ -120,9 +133,9 @@ func JudgePulseActivation(ctx context.Context, cfg *config.Config, condition str
 		return PulseActivationVerdict{Choice: pulseActivationSkip, Detail: err.Error(), Err: err}
 	}
 	label := deciderLabel(d)
-	state := map[string]any{
-		"condition": condition,
-		"events":    pulseActivationEvents(events),
+	state, err := pulseActivationState(condition, events)
+	if err != nil {
+		return PulseActivationVerdict{Choice: pulseActivationSkip, Label: label, Detail: err.Error(), Err: err}
 	}
 	resp, err := d.DecideCtx(ctx, state, pulseActivationQuestions())
 	if err != nil {
@@ -159,4 +172,30 @@ func JudgePulseActivation(ctx context.Context, cfg *config.Config, condition str
 	v.Activate = true
 	v.Detail = fmt.Sprintf("%s: wake (%.0f%% confidence)", label, ans.Confidence*100)
 	return v
+}
+
+// pulseActivationState builds the judge's structured state and keeps its
+// MARSHALLED size under pulseActivationStateCap. It shrinks event summaries in
+// steps (200, 80, 0 runes) and says so in a top-level "clipped" field, so the
+// judge knows it is looking at partial text. If even summary-less events do not
+// fit, it returns an error rather than sending an over-budget state; the host
+// treats that as a judge failure (retried, never a wake).
+func pulseActivationState(condition string, events []PulseActivationEvent) (map[string]any, error) {
+	for i, runes := range []int{pulseActivationCutRns, 80, 0} {
+		state := map[string]any{
+			"condition": condition,
+			"events":    pulseActivationEvents(events, runes),
+		}
+		if i > 0 {
+			state["clipped"] = "event summaries were shortened to fit the request size limit"
+		}
+		size, err := marshalledDecisionStateSize(state)
+		if err != nil {
+			return nil, err
+		}
+		if size <= pulseActivationStateCap {
+			return state, nil
+		}
+	}
+	return nil, fmt.Errorf("pulse activation state is over the %d byte cap even without event summaries", pulseActivationStateCap)
 }

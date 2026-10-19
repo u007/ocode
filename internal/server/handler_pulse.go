@@ -232,18 +232,29 @@ func (h *Handler) gatherLivePulseInputs() []PulseInput {
 	return out
 }
 
+// pulseAskMark is the last ask indicator seen for a session and when.
+type pulseAskMark struct {
+	kind string
+	seen time.Time
+}
+
+// pulseAskMarkTTL is how long a session's mark outlives its last sighting. A
+// session evicted from the registry while its ask is pending, then re-registered
+// from the transcript with the same ask, must not be reported a second time, so a
+// mark is not dropped just because the session is briefly absent.
+const pulseAskMarkTTL = time.Hour
+
 // recordPulseAskStops records a permission_ask / question_ask stop indicator
 // when a session newly pauses on an ask. An ask that stays pending is recorded
 // once, on the transition, and a session that resolves it re-arms the detector.
 func (h *Handler) recordPulseAskStops(inputs []PulseInput) {
+	now := time.Now()
 	h.pulseMu.Lock()
 	defer h.pulseMu.Unlock()
-	live := make(map[string]bool, len(inputs))
 	for _, in := range inputs {
 		if isPulseSession(in.SessionID) {
 			continue
 		}
-		live[in.SessionID] = true
 		kind := ""
 		if in.PendingAsk != nil {
 			switch in.PendingAsk.Kind {
@@ -253,18 +264,19 @@ func (h *Handler) recordPulseAskStops(inputs []PulseInput) {
 				kind = "question_ask"
 			}
 		}
-		if kind != "" && kind != h.pulsePreviousAsk[in.SessionID] {
+		if kind != "" && kind != h.pulsePreviousAsk[in.SessionID].kind {
 			h.recordPulseStopIndicator(in.SessionID, kind, pulseOneLine(in.PendingAsk.Summary, pulseBoardTaskRunes), filepath.Base(in.ProjectPath))
 		}
 		if kind == "" {
 			delete(h.pulsePreviousAsk, in.SessionID)
 		} else {
-			h.pulsePreviousAsk[in.SessionID] = kind
+			h.pulsePreviousAsk[in.SessionID] = pulseAskMark{kind: kind, seen: now}
 		}
 	}
-	// Drop sessions no longer live so the map tracks resident sessions only.
-	for id := range h.pulsePreviousAsk {
-		if !live[id] {
+	// Forget sessions not seen for a long while so the map cannot grow with every
+	// session id the process has ever served.
+	for id, m := range h.pulsePreviousAsk {
+		if now.Sub(m.seen) > pulseAskMarkTTL {
 			delete(h.pulsePreviousAsk, id)
 		}
 	}

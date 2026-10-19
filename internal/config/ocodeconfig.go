@@ -3978,6 +3978,15 @@ func SavePulseModel(model string) error {
 	})
 }
 
+// SavePulseActivationModel persists the decision-judge model of the Pulse
+// activation gate. Empty clears it, restoring the default (typesafe/jev-latest).
+func SavePulseActivationModel(model string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.PulseActivationModel = model
+		return nil
+	})
+}
+
 // SavePulseSystemPrompt persists the Pulse assistant's system prompt override.
 // Empty clears it, restoring the built-in prompt.
 func SavePulseSystemPrompt(prompt string) error {

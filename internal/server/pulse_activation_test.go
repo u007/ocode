@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,30 +159,89 @@ func TestPulseActivation_WaitsForQuietGap(t *testing.T) {
 	}
 }
 
-// Judge failures and send failures must not wake, must surface in the decision
-// log, and must not wedge the gate on the same batch forever.
-func TestPulseActivation_ErrorsAreRecordedAndResolved(t *testing.T) {
+// A judge failure is not a verdict: the batch stays pending and is retried with
+// backoff, so a transient outage cannot swallow a permission ask. Only after
+// pulseActivationJudgeTries consecutive failures is it given up on, and only then
+// does the cursor move past it.
+func TestPulseActivation_JudgeErrorRetriesWithBackoffThenGivesUp(t *testing.T) {
 	f := newActivationFixture(t)
 	f.setCondition(t, "anything")
-
 	f.judge = func(string, []agent.PulseActivationEvent) agent.PulseActivationVerdict {
 		return agent.PulseActivationVerdict{Err: errors.New("jev down"), Detail: "jev down"}
 	}
-	f.stop("turn_done", "ses_a", "turn finished")
-	f.h.pulseActivationTick(later())
-	f.h.pulseActivationTick(later())
-	if f.judged != 1 || len(f.woken) != 0 {
-		t.Fatalf("after judge error: judged=%d woken=%d, want 1 and 0 (batch resolved)", f.judged, len(f.woken))
-	}
+	f.stop("permission_ask", "ses_a", "rm -rf build")
+	t0 := later()
 
-	f.judge = func(string, []agent.PulseActivationEvent) agent.PulseActivationVerdict {
-		return agent.PulseActivationVerdict{Activate: true, Choice: "wake", Detail: "stub"}
+	f.h.pulseActivationTick(t0)
+	if f.judged != 1 {
+		t.Fatalf("first attempt: judged=%d, want 1", f.judged)
 	}
-	f.sendErr = errors.New("busy")
+	f.h.pulseActivationTick(t0.Add(time.Second)) // inside the 5s backoff
+	if f.judged != 1 {
+		t.Fatalf("judged again inside the backoff: judged=%d", f.judged)
+	}
+	f.h.pulseActivationTick(t0.Add(6 * time.Second)) // backoff over: same stop offered again
+	if f.judged != 2 {
+		t.Fatalf("not retried after the backoff: judged=%d, want 2", f.judged)
+	}
+	f.h.pulseActivationTick(t0.Add(10 * time.Second)) // inside the doubled 10s backoff
+	if f.judged != 2 {
+		t.Fatalf("backoff did not double: judged=%d", f.judged)
+	}
+	f.h.pulseActivationTick(t0.Add(17 * time.Second)) // third and last attempt
+	if f.judged != 3 {
+		t.Fatalf("third attempt missing: judged=%d", f.judged)
+	}
+	f.h.pulseActivationTick(t0.Add(10 * time.Minute)) // given up: nothing left to offer
+	if f.judged != 3 {
+		t.Fatalf("a batch that was given up on was offered again: judged=%d", f.judged)
+	}
+	dec := f.h.pulseAct.recent()
+	if len(dec) != 3 || !strings.Contains(dec[0].Detail, "retrying") || !strings.Contains(dec[2].Detail, "giving up") {
+		t.Fatalf("decisions = %+v", dec)
+	}
+	for _, d := range dec {
+		if d.Outcome != "error" {
+			t.Fatalf("outcome = %q, want error", d.Outcome)
+		}
+	}
+}
+
+// The point of retrying: the stop that hit the outage is the one that wakes the
+// assistant once the judge is back.
+func TestPulseActivation_StopSurvivesAJudgeOutage(t *testing.T) {
+	f := newActivationFixture(t)
+	f.setCondition(t, "anything")
+	down := true
+	f.judge = func(string, []agent.PulseActivationEvent) agent.PulseActivationVerdict {
+		if down {
+			return agent.PulseActivationVerdict{Err: errors.New("timeout"), Detail: "timeout"}
+		}
+		return agent.PulseActivationVerdict{Activate: true, Choice: "wake", Detail: "stub: wake"}
+	}
+	f.stop("permission_ask", "ses_a", "rm -rf build")
+	t0 := later()
+	f.h.pulseActivationTick(t0)
+	if len(f.woken) != 0 {
+		t.Fatalf("woke during the outage")
+	}
+	down = false
+	f.h.pulseActivationTick(t0.Add(6 * time.Second))
+	if len(f.woken) != 1 || f.woken[0][0].ID != "ses_a" {
+		t.Fatalf("the stop from before the outage was lost: %+v", f.woken)
+	}
+}
+
+// Send failures that are not "the assistant is busy" are final and must not
+// start the cooldown.
+func TestPulseActivation_SendFailureIsRecordedAndDoesNotCool(t *testing.T) {
+	f := newActivationFixture(t)
+	f.setCondition(t, "anything")
+	f.sendErr = errors.New("handler 400")
 	f.stop("turn_done", "ses_b", "turn finished")
 	f.h.pulseActivationTick(later())
 	dec := f.h.pulseAct.recent()
-	if len(dec) != 2 || dec[0].Outcome != "error" || dec[1].Outcome != "error" || !strings.Contains(dec[1].Detail, "wake failed") {
+	if len(dec) != 1 || dec[0].Outcome != "error" || !strings.Contains(dec[0].Detail, "wake failed") {
 		t.Fatalf("decisions = %+v", dec)
 	}
 	f.h.pulseAct.mu.Lock()
@@ -188,6 +249,26 @@ func TestPulseActivation_ErrorsAreRecordedAndResolved(t *testing.T) {
 	f.h.pulseAct.mu.Unlock()
 	if woke {
 		t.Fatalf("a failed wake started the cooldown")
+	}
+}
+
+// The cooldown starts at the send attempt: anything reading lastWake while the
+// send is in flight must already see it.
+func TestPulseActivation_CooldownIsVisibleDuringTheSend(t *testing.T) {
+	f := newActivationFixture(t)
+	f.setCondition(t, "anything")
+	var duringSend time.Time
+	prev := pulseActivationSend
+	pulseActivationSend = func(h *Handler, id string, batch []pulseStopIndicator, detail string) error {
+		h.pulseAct.mu.Lock()
+		duringSend = h.pulseAct.lastWake
+		h.pulseAct.mu.Unlock()
+		return prev(h, id, batch, detail)
+	}
+	f.stop("turn_done", "ses_a", "turn finished")
+	f.h.pulseActivationTick(later())
+	if duringSend.IsZero() {
+		t.Fatalf("lastWake was not set until after the send returned")
 	}
 }
 
@@ -483,5 +564,136 @@ func TestStartPulseActivation_ReseedsTheCursorOnEveryStart(t *testing.T) {
 	h.pulseMu.Unlock()
 	if first != 1 || second != seq || second <= first {
 		t.Fatalf("cursors = %d then %d (stop seq %d), want the cursor to follow the counter on each start", first, second, seq)
+	}
+}
+
+// While auto-receive is off the board still records stops; when it is switched
+// on later, that backlog is history and must not be judged as fresh news.
+func TestPulseActivation_TogglingAutoReceiveOnDoesNotReplayTheBacklog(t *testing.T) {
+	f := newActivationFixture(t)
+	f.setCondition(t, "anything")
+	f.h.mu.Lock()
+	f.h.cfg.Ocode.PulseAutoReceive = false
+	f.h.mu.Unlock()
+	for i := 0; i < 300; i++ { // more than the soft ring cap
+		f.stop("permission_ask", "ses_old"+strings.Repeat("x", i%7), "ask")
+	}
+	f.h.pulseActivationTick(later()) // gate runs but is off: history
+	f.h.mu.Lock()
+	f.h.cfg.Ocode.PulseAutoReceive = true
+	f.h.mu.Unlock()
+	f.h.pulseActivationTick(later())
+	if f.judged != 0 {
+		t.Fatalf("the backlog from while auto-receive was off was judged (%d calls)", f.judged)
+	}
+	f.stop("turn_done", "ses_new", "turn finished")
+	f.h.pulseActivationTick(later())
+	if f.judged != 1 {
+		t.Fatalf("a stop after enabling was not judged")
+	}
+	// And the ring is trimmed again now that the cursor has caught up.
+	f.stop("turn_done", "ses_new2", "turn finished")
+	f.h.pulseMu.Lock()
+	n := len(f.h.pulseStopIndicators)
+	f.h.pulseMu.Unlock()
+	if n > pulseStopIndicatorMax {
+		t.Fatalf("ring still holds %d after the cursor caught up", n)
+	}
+}
+
+// With no condition (or no chat) the gate must not pay for a scan of every
+// session transcript and the terminal process table every two seconds.
+func TestPulseActivation_NoConditionDoesNotScanSessions(t *testing.T) {
+	f := newActivationFixture(t)
+	h := f.h
+	h.sessions.Register("ses_scan", t.TempDir())
+	h.sessions.setTurnActive("ses_scan", true)
+	h.pulseActivationTick(later())
+	h.pulseMu.Lock()
+	_, scanned := h.pulsePreviousTurnActive["ses_scan"]
+	h.pulseMu.Unlock()
+	if scanned {
+		t.Fatalf("gate scanned live sessions with no activation condition set")
+	}
+	f.setCondition(t, "anything")
+	h.pulseActivationTick(later())
+	h.pulseMu.Lock()
+	_, scanned = h.pulsePreviousTurnActive["ses_scan"]
+	h.pulseMu.Unlock()
+	if !scanned {
+		t.Fatalf("gate did not scan once a condition was set")
+	}
+}
+
+// A session evicted from the registry while its ask is pending, then back with
+// the same ask, is the same stop: it must be reported once.
+func TestRecordPulseAskStops_EvictionDoesNotReportTheSameAskTwice(t *testing.T) {
+	h := pulseTestHandler(t)
+	ask := []PulseInput{{SessionID: "ses_a", ProjectPath: "/p/proj", PendingAsk: &PulseAsk{Kind: PulseAskKindPermission, Summary: "do it?"}}}
+	count := func() int {
+		h.pulseMu.Lock()
+		defer h.pulseMu.Unlock()
+		return len(h.pulseStopIndicators)
+	}
+	h.recordPulseAskStops(ask)
+	h.recordPulseAskStops(nil) // evicted: absent from the snapshot
+	h.recordPulseAskStops(ask) // re-registered with the same pending ask
+	if count() != 1 {
+		t.Fatalf("an evicted-and-restored ask was reported %d times, want 1", count())
+	}
+	// Resolving it while present re-arms the detector as before.
+	h.recordPulseAskStops([]PulseInput{{SessionID: "ses_a"}})
+	h.recordPulseAskStops(ask)
+	if count() != 2 {
+		t.Fatalf("a genuinely new ask was not reported, count=%d", count())
+	}
+	// A long-gone session's mark is eventually forgotten.
+	h.pulseMu.Lock()
+	h.pulsePreviousAsk["ses_gone"] = pulseAskMark{kind: "permission_ask", seen: time.Now().Add(-2 * pulseAskMarkTTL)}
+	h.pulseMu.Unlock()
+	h.recordPulseAskStops(nil)
+	h.pulseMu.Lock()
+	_, kept := h.pulsePreviousAsk["ses_gone"]
+	h.pulseMu.Unlock()
+	if kept {
+		t.Fatalf("a mark past its TTL was kept")
+	}
+}
+
+func TestPulseActivationModelEndpoints(t *testing.T) {
+	f := newActivationFixture(t)
+	h := f.h
+	do := func(method, body string) (int, map[string]string) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, "/api/config/pulse-activation-model", strings.NewReader(body))
+		if method == http.MethodGet {
+			h.HandleGetPulseActivationModel(rec, req)
+		} else {
+			h.HandleSetPulseActivationModel(rec, req)
+		}
+		var out map[string]string
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+	if code, out := do(http.MethodGet, ""); code != 200 || out["model"] != "" || out["effective"] != "typesafe/jev-latest" {
+		t.Fatalf("default = %d %v", code, out)
+	}
+	if code, out := do(http.MethodPut, `{"model":" typesafe/jev-next "}`); code != 200 || out["model"] != "typesafe/jev-next" || out["effective"] != "typesafe/jev-next" {
+		t.Fatalf("set = %d %v", code, out)
+	}
+	// The gate reads the live config on its next call.
+	f.setCondition(t, "x")
+	if got := pulseActivationJudgeModel(h.cfg); got != "typesafe/jev-next" {
+		t.Fatalf("judge model = %q", got)
+	}
+	// A chat model is refused: the gate asks typed questions and never generates text.
+	if code, _ := do(http.MethodPut, `{"model":"openai/gpt-4o"}`); code != http.StatusBadRequest {
+		t.Fatalf("chat model accepted, code=%d", code)
+	}
+	if code, _ := do(http.MethodPut, `{}`); code != http.StatusBadRequest {
+		t.Fatalf("missing model accepted, code=%d", code)
+	}
+	if code, out := do(http.MethodPut, `{"model":""}`); code != 200 || out["effective"] != "typesafe/jev-latest" {
+		t.Fatalf("clear = %d %v", code, out)
 	}
 }

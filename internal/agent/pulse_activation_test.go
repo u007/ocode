@@ -156,3 +156,67 @@ func (c *captureDecider) DecideCtx(ctx context.Context, state any, q map[string]
 	*c.state = state
 	return c.goalStubDecider.DecideCtx(ctx, state, q)
 }
+
+func manyEvents(n int, kind, project, id, summary string) []PulseActivationEvent {
+	out := make([]PulseActivationEvent, n)
+	for i := range out {
+		out[i] = PulseActivationEvent{Kind: kind, Project: project, ID: id, Summary: summary, At: time.Now()}
+	}
+	return out
+}
+
+// One over-long field must not push a whole batch over the request limit.
+func TestPulseActivationState_ClipsEveryFreeTextField(t *testing.T) {
+	long := strings.Repeat("x", 10_000)
+	state, err := pulseActivationState("cond", manyEvents(3, long, long, long, long))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range state["events"].([]map[string]any) {
+		if n := len([]rune(e["kind"].(string))); n > pulseActivationCutKind {
+			t.Fatalf("kind not clipped: %d runes", n)
+		}
+		if n := len([]rune(e["project"].(string))); n > pulseActivationCutProject {
+			t.Fatalf("project not clipped: %d runes", n)
+		}
+		if n := len([]rune(e["id"].(string))); n > pulseActivationCutID {
+			t.Fatalf("id not clipped: %d runes", n)
+		}
+	}
+	if _, clipped := state["clipped"]; clipped {
+		t.Fatalf("a small batch should not need summary shrinking")
+	}
+}
+
+// Marshalled size, not payload size, decides: '<' marshals to 6 bytes (\u003c),
+// so a full batch of them is several times its rune count.
+func TestPulseActivationState_ShrinksSummariesToFitAndSaysSo(t *testing.T) {
+	events := manyEvents(PulseActivationBatchMax, "turn_done", strings.Repeat("<", 20), "ses_x", strings.Repeat("<", 200))
+	state, err := pulseActivationState("cond", events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size, err := marshalledDecisionStateSize(state)
+	if err != nil || size > pulseActivationStateCap {
+		t.Fatalf("state marshals to %d bytes (err %v), want <= %d", size, err, pulseActivationStateCap)
+	}
+	if _, clipped := state["clipped"]; !clipped {
+		t.Fatalf("summaries were shrunk but the judge was not told")
+	}
+}
+
+// When even summary-less events do not fit, refuse instead of sending an
+// over-budget state; the judge is never called and nothing wakes.
+func TestJudgePulseActivation_OverBudgetBatchIsRefusedNotSent(t *testing.T) {
+	stub := &goalStubDecider{resp: pulseActivationResp("wake", 1)}
+	stubPulseActivationJudge(t, stub)
+	hostile := strings.Repeat("<", 200)
+	events := manyEvents(PulseActivationBatchMax, strings.Repeat("<", 40), strings.Repeat("<", 80), strings.Repeat("<", 120), hostile)
+	v := JudgePulseActivation(context.Background(), &config.Config{}, "cond", events)
+	if v.Activate || v.Err == nil || !strings.Contains(v.Detail, "cap") {
+		t.Fatalf("over-budget batch: %+v", v)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("judge called %d times with an over-budget state", stub.calls)
+	}
+}

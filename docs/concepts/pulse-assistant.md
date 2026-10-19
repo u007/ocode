@@ -55,6 +55,8 @@ through the normal permission dialog, see "Permission design".
 | `GET /api/pulse/assistant` | `200 {"session_id": "pulse_...", "model": "<effective model id>"}`. First call mints and persists the id; every call registers the session entry but does NOT build the agent: the first message builds it through the normal path (a pre-build under the endpoint's profile resolution differed from the message path's and forced a rebuild plus an illegal bootstrap transition). `400 no model configured` when neither slot nor chat model is set. |
 | `GET /api/config/pulse-model` | `200 {"model": "..."}`, empty string when unset. |
 | `PUT /api/config/pulse-model` | Body `{"model": "..."}`; empty string clears. `400` when the `model` key is absent. Returns `{"model": "..."}`. |
+| `GET /api/config/pulse-activation-model` | `200 {"model": "<configured or empty>", "effective": "<model the activation gate uses>"}`. |
+| `PUT /api/config/pulse-activation-model` | Body `{"model": "typesafe/<model>"}`; empty string clears (back to `typesafe/jev-latest`). `400` for a model that is not a decision backend (`agent.DecisionBackendName`), since the gate asks typed questions and never generates text. Persisted by `config.SavePulseActivationModel`; applies on the gate's next judge call. |
 | `GET /api/config/pulse-system-prompt` | `200 {"prompt": "<configured or empty>", "default": "<built-in prompt with the tool list rendered>"}`. |
 | `PUT /api/config/pulse-system-prompt` | Body `{"prompt": "..."}`; empty string clears; `400` when the key is absent. Persisted by `config.SavePulseSystemPrompt` and re-applied to the live assistant (`Agent.SetSystemPromptOverride` is atomic), so it takes effect on its next model call, no rebuild. |
 | `GET /api/config/pulse-auto-receive` | `200 {"enabled": true|false}`. Whether the assistant auto-receives stop indicators from other sessions. |
@@ -78,9 +80,9 @@ All of these sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
   assistant's system prompt (no tool list is appended). Edited through
   `/api/config/pulse-system-prompt`.
 - `ocode.pulse_activation_model` (string): decision-judge model for the activation gate
-  (see "Activation gate"). Empty uses `typesafe/jev-latest`. Hand-edited in
-  `ocodeconfig.json`; the condition itself is not config, it lives in the assistant's
-  private root.
+  (see "Activation gate"). Empty uses `typesafe/jev-latest`. Edited through
+  `/api/config/pulse-activation-model` (or `ocodeconfig.json`); the condition itself is not
+  config, it lives in the assistant's private root.
 - `ocode.pulse_auto_receive` (bool): when `true`, the Pulse assistant
   automatically receives stop indicators (turn done, permission ask, question ask,
   task complete) from other sessions. Default `false` (off). Edited through
@@ -217,6 +219,16 @@ batch is resolved, so one failing judge cannot wedge the gate on the same batch.
   or the send itself loses that race, the verdict is parked as a *held wake* and delivered
   on a later pass **without a second judge call**. A held wake is delivered before anything
   newer is judged, and is dropped as `stale` after 5 min or when the condition is rewritten.
+- *A judge failure is not a verdict.* A timeout, backend error or missing key leaves the
+  cursor where it is and retries the same stops with exponential backoff (5 s, 10 s), at most
+  3 consecutive attempts (`pulseActivationJudgeTries`); only then is the batch given up on
+  and logged as `error`. A transient outage therefore cannot swallow a permission ask.
+- *Nothing to judge against means no scan.* With auto-receive off, no condition, or no
+  assistant chat, a pass does not scan sessions or the terminal process table; it only moves
+  the cursor to the current counter (`pulseActivationSkipHistory`) and drops any held wake. So
+  the ring can be trimmed again, and switching the gate on later never replays old stops.
+- *Cooldown starts at the attempt.* `lastWake` is set before the send and restored if the
+  send fails, so nothing reading it while the (async) send is in flight sees a stale value.
 - *Stale verdicts.* `activation_write` bumps a generation after writing the file, and a pass
   reads the generation before the condition. A verdict made under an older condition is
   recorded as `stale` and never sent. A write also moves the cursor past the existing
@@ -229,6 +241,15 @@ batch is resolved, so one failing judge cannot wedge the gate on the same batch.
   (`gatherLivePulseInputs`, `detectPulseTerminalStops`), because the gate's tick and the
   board poll both run it: an older snapshot applied after a newer one would reset the
   previous-state and report the same stop twice.
+- *An ask is reported once even across eviction.* `pulsePreviousAsk` keeps a mark per session
+  and drops it only when the session is seen without an ask, or after an hour unseen
+  (`pulseAskMarkTTL`); a session evicted while its ask is pending and restored with the same
+  ask is the same stop.
+- *The judge request is size-bounded.* Every event field is clipped (kind 40, project 80, id
+  120, summary 200 runes), and `pulseActivationState` keeps the MARSHALLED state under 64 KB
+  by shrinking summaries (200, 80, 0) and adding a top-level `clipped` note so the judge knows
+  it sees partial text. If even that does not fit it refuses, which is a judge failure (retried,
+  never a wake).
 - *The ring never drops an unjudged stop.* It is trimmed to 200 (`pulseStopIndicatorMax`),
   but only below the gate's cursor; unjudged indicators are kept up to a hard cap of 1000,
   and dropping past that is logged.

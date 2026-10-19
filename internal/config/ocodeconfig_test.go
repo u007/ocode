@@ -2210,3 +2210,32 @@ func TestPulseActivationModelRoundTrip(t *testing.T) {
 		t.Fatalf("PulseActivationModel = %q, want typesafe/jev-test", cfg.PulseActivationModel)
 	}
 }
+
+// SavePulseActivationModel persists the gate's judge model and an empty value
+// clears it, without disturbing neighbouring Pulse keys.
+func TestSavePulseActivationModelRoundTrip(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	if err := SavePulseAutoGapMs(777); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePulseActivationModel("typesafe/jev-next"); err != nil {
+		t.Fatalf("SavePulseActivationModel: %v", err)
+	}
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PulseActivationModel != "typesafe/jev-next" || cfg.PulseAutoGapMs != 777 {
+		t.Fatalf("model=%q gap=%d, want typesafe/jev-next and 777", cfg.PulseActivationModel, cfg.PulseAutoGapMs)
+	}
+	if err := SavePulseActivationModel(""); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadFullOcodeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PulseActivationModel != "" {
+		t.Fatalf("clear did not clear: %q", cfg.PulseActivationModel)
+	}
+}

@@ -182,7 +182,7 @@ type Handler struct {
 	// pulsePreviousAsk records the last-seen pending-ask indicator kind per
 	// session ("" when none), used to detect a session newly pausing on a
 	// permission or question ask. Guarded by pulseMu.
-	pulsePreviousAsk map[string]string
+	pulsePreviousAsk map[string]pulseAskMark
 
 	// pulseDetectMu serialises each "snapshot live state, then apply the
 	// transition to pulsePrevious*" pass (gatherLivePulseInputs,
@@ -652,7 +652,7 @@ func NewHandler() *Handler {
 		closePending:                 make(map[string]bool),
 		pulsePreviousTurnActive:      make(map[string]bool),
 		pulsePreviousTerminalRunning: make(map[string]bool),
-		pulsePreviousAsk:             make(map[string]string),
+		pulsePreviousAsk:             make(map[string]pulseAskMark),
 	}
 
 	// The session registry is the single authority for session → project root

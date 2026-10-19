@@ -47,6 +47,12 @@ const (
 	// pulseActivationHeldTTL is how long a judged wake waits for the assistant
 	// to become free before it is dropped as stale.
 	pulseActivationHeldTTL = 5 * time.Minute
+	// pulseActivationJudgeTries is how many consecutive judge failures (timeout,
+	// backend error, missing key) a batch gets before it is given up on, with
+	// exponential backoff from pulseActivationRetryBase between tries. A
+	// transient outage must not silently discard a permission ask.
+	pulseActivationJudgeTries = 3
+	pulseActivationRetryBase  = 5 * time.Second
 	// pulseActivationDecisionMax is how many recent decisions are kept in memory
 	// for activation_read.
 	pulseActivationDecisionMax = 20
@@ -70,14 +76,18 @@ type pulseActivationDecision struct {
 type pulseActivationState struct {
 	// tickMu makes a gate pass non-reentrant: a second concurrent pass is
 	// skipped (TryLock), so one batch can never be judged or woken twice.
-	tickMu    sync.Mutex
-	mu        sync.Mutex
-	started   bool
-	cursor    uint64 // seq of the last stop indicator already judged
-	gen       uint64 // bumped after every condition write; a verdict from an older gen is stale
-	lastWake  time.Time
-	held      *pulseHeldWake
-	decisions []pulseActivationDecision
+	tickMu   sync.Mutex
+	mu       sync.Mutex
+	started  bool
+	cursor   uint64 // seq of the last stop indicator already judged
+	gen      uint64 // bumped after every condition write; a verdict from an older gen is stale
+	lastWake time.Time
+	// judgeFails counts consecutive judge errors on the current backlog;
+	// retryAfter is the earliest time the next attempt may run.
+	judgeFails int
+	retryAfter time.Time
+	held       *pulseHeldWake
+	decisions  []pulseActivationDecision
 }
 
 // pulseHeldWake is a batch the judge already said to wake on, parked because
@@ -229,6 +239,7 @@ func (h *Handler) pulseActivationWriteTool(raw json.RawMessage) (string, error) 
 	h.pulseAct.gen++
 	dropped := h.pulseAct.held
 	h.pulseAct.held = nil
+	h.pulseAct.judgeFails, h.pulseAct.retryAfter = 0, time.Time{}
 	h.pulseAct.mu.Unlock()
 	h.pulseMu.Unlock()
 	// Resolve the "deferred" entry the dropped wake left in the decision log, so
@@ -418,15 +429,23 @@ func (h *Handler) pulseActivationDeliver(id string, held *pulseHeldWake, now tim
 	if stale {
 		return false, false, errPulseActivationStale
 	}
+	// The cooldown starts at the attempt, not after it: the send returns before
+	// the turn is marked active, and anything reading lastWake in that window
+	// must already see this wake. A failed send restores the previous value.
+	// (Only the serialised tick sends, so nothing else writes lastWake here.)
+	h.pulseAct.mu.Lock()
+	prevWake := h.pulseAct.lastWake
+	h.pulseAct.lastWake = now
+	h.pulseAct.mu.Unlock()
 	if err := pulseActivationSend(h, id, held.batch, held.detail); err != nil {
+		h.pulseAct.mu.Lock()
+		h.pulseAct.lastWake = prevWake
+		h.pulseAct.mu.Unlock()
 		if h.pulseSessionBusy(id) != nil {
 			return false, true, nil
 		}
 		return false, false, err
 	}
-	h.pulseAct.mu.Lock()
-	h.pulseAct.lastWake = now
-	h.pulseAct.mu.Unlock()
 	return true, false, nil
 }
 
@@ -441,19 +460,34 @@ func (h *Handler) pulseActivationTick(now time.Time) {
 		return
 	}
 	defer h.pulseAct.tickMu.Unlock()
+	// Nothing to do without auto-receive, a condition and an assistant chat to
+	// wake. In that case do not even scan sessions and terminals: whatever is
+	// recorded meanwhile (the board and polls still record) is history, so the
+	// cursor follows the counter and enabling the gate later cannot replay it.
 	if !h.pulseAutoReceive() {
+		h.pulseActivationSkipHistory()
+		return
+	}
+	if cond, err := readPulseActivationPrompt(); err != nil {
+		log.Printf("serve: pulse activation: %v", err)
+		return
+	} else if cond == "" {
+		h.pulseActivationSkipHistory()
+		return
+	}
+	id, err := h.pulseActivationTarget()
+	if err != nil {
+		log.Printf("serve: pulse activation: %v", err)
+		return
+	}
+	if id == "" {
+		h.pulseActivationSkipHistory()
 		return
 	}
 	// Refresh the transitions the board would otherwise only see on a turn. The
 	// process-table walk runs outside pulseMu so recorders are never blocked on it.
 	h.gatherLivePulseInputs()
 	h.detectPulseTerminalStops()
-
-	id, err := h.pulseActivationTarget()
-	if err != nil {
-		log.Printf("serve: pulse activation: %v", err)
-		return
-	}
 
 	// A held wake goes first and ends the pass: judging newer chunks ahead of it
 	// would reorder the report.
@@ -496,6 +530,12 @@ func (h *Handler) pulseActivationTick(now time.Time) {
 	if h.pulseActivationFree(id, now) != nil {
 		return
 	}
+	h.pulseAct.mu.Lock()
+	backingOff := now.Before(h.pulseAct.retryAfter)
+	h.pulseAct.mu.Unlock()
+	if backingOff {
+		return // the judge failed on this backlog; wait out the backoff
+	}
 
 	coalesced := coalescePulseStops(batch)
 	events := make([]agent.PulseActivationEvent, len(coalesced))
@@ -518,8 +558,28 @@ func (h *Handler) pulseActivationTick(now time.Time) {
 		d.Outcome = "stale"
 		d.Detail = "condition changed while judging; verdict discarded"
 	case verdict.Err != nil:
+		// A judge failure is not a verdict. Keep the batch pending and retry with
+		// backoff; only after pulseActivationJudgeTries in a row is it given up on.
 		d.Outcome = "error"
 		log.Printf("serve: pulse activation judge: %v", verdict.Err)
+		h.pulseAct.mu.Lock()
+		h.pulseAct.judgeFails++
+		giveUp := h.pulseAct.judgeFails >= pulseActivationJudgeTries
+		if giveUp {
+			d.Detail += fmt.Sprintf("; giving up on this batch after %d failed attempts", h.pulseAct.judgeFails)
+			h.pulseAct.judgeFails, h.pulseAct.retryAfter = 0, time.Time{}
+		} else {
+			backoff := pulseActivationRetryBase << (h.pulseAct.judgeFails - 1)
+			h.pulseAct.retryAfter = now.Add(backoff)
+			d.Detail += fmt.Sprintf("; retrying in %s (attempt %d of %d)", backoff, h.pulseAct.judgeFails, pulseActivationJudgeTries)
+		}
+		h.pulseAct.mu.Unlock()
+		h.pulseAct.record(d)
+		if !giveUp {
+			return // cursor stays put: the same stops are offered again
+		}
+		resolve()
+		return
 	case !verdict.Activate:
 		d.Outcome = "skipped"
 	default:
@@ -552,8 +612,26 @@ func (h *Handler) pulseActivationTick(now time.Time) {
 			log.Printf("serve: pulse activation send: %v", sendErr)
 		}
 	}
+	h.pulseAct.mu.Lock()
+	h.pulseAct.judgeFails, h.pulseAct.retryAfter = 0, time.Time{}
+	h.pulseAct.mu.Unlock()
 	h.pulseAct.record(d)
 	resolve()
+}
+
+// pulseActivationSkipHistory moves the cursor past everything recorded so far
+// and drops any held wake. It is what the gate does while it has nothing to
+// judge against (auto-receive off, no condition, no assistant chat).
+func (h *Handler) pulseActivationSkipHistory() {
+	h.pulseMu.Lock()
+	defer h.pulseMu.Unlock()
+	h.pulseAct.mu.Lock()
+	defer h.pulseAct.mu.Unlock()
+	if h.pulseStopSeq > h.pulseAct.cursor {
+		h.pulseAct.cursor = h.pulseStopSeq
+	}
+	h.pulseAct.held = nil
+	h.pulseAct.judgeFails, h.pulseAct.retryAfter = 0, time.Time{}
 }
 
 // pulseActivationDeliverHeld retries a parked wake. A condition change or the
@@ -620,4 +698,49 @@ func (h *Handler) sendPulseActivation(id string, batch []pulseStopIndicator, det
 		map[string]any{"content": pulseActivationMessage(batch, detail), "async": true},
 		func(w http.ResponseWriter, r *http.Request) { h.HandleSendMessage(w, r, id) })
 	return err
+}
+
+// HandleGetPulseActivationModel serves GET /api/config/pulse-activation-model:
+// {"model": "<configured, empty when unset>", "effective": "<model the gate uses>"}.
+func (h *Handler) HandleGetPulseActivationModel(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := h.cfg
+	model := ""
+	if cfg != nil {
+		model = cfg.Ocode.PulseActivationModel
+	}
+	effective := pulseActivationJudgeModel(cfg)
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]string{"model": model, "effective": effective})
+}
+
+// HandleSetPulseActivationModel serves PUT /api/config/pulse-activation-model
+// with {"model": "<provider/model>"}; the empty string clears it. Only decision
+// backends are accepted: the gate asks typed questions and never generates text,
+// so a chat model would leave it permanently "unconfigured". It takes effect on
+// the gate's next judge call.
+func (h *Handler) HandleSetPulseActivationModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model *string `json:"model"`
+	}
+	if err := readBodyJSON(r, &req); err != nil || req.Model == nil {
+		writeError(w, http.StatusBadRequest, `invalid body (want {"model": "<id>"}; "" clears)`)
+		return
+	}
+	model := strings.TrimSpace(*req.Model)
+	if model != "" && agent.DecisionBackendName(model) == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%q is not a decision model; use a typesafe/<model> or a cloudflare-workers clef model", model))
+		return
+	}
+	if err := config.SavePulseActivationModel(model); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist pulse activation model: %v", err))
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.PulseActivationModel = model
+	}
+	effective := pulseActivationJudgeModel(h.cfg)
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]string{"model": model, "effective": effective})
 }

@@ -296,6 +296,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/pulse/assistant/chats", s.authMiddleware(s.handleListPulseChats))
 	s.mux.HandleFunc("GET /api/config/pulse-model", s.authMiddleware(s.handleGetPulseModel))
 	s.mux.HandleFunc("PUT /api/config/pulse-model", s.authMiddleware(s.handleSetPulseModel))
+	s.mux.HandleFunc("GET /api/config/pulse-activation-model", s.authMiddleware(s.handler.HandleGetPulseActivationModel))
+	s.mux.HandleFunc("PUT /api/config/pulse-activation-model", s.authMiddleware(s.handler.HandleSetPulseActivationModel))
 	s.mux.HandleFunc("GET /api/config/pulse-system-prompt", s.authMiddleware(s.handleGetPulseSystemPrompt))
 	s.mux.HandleFunc("PUT /api/config/pulse-system-prompt", s.authMiddleware(s.handleSetPulseSystemPrompt))
 	s.mux.HandleFunc("GET /api/config/pulse-auto-receive", s.authMiddleware(s.handler.HandleGetPulseAutoReceive))
