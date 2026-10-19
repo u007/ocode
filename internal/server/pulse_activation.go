@@ -228,9 +228,15 @@ func (h *Handler) pulseActivationWriteTool(raw json.RawMessage) (string, error) 
 	h.pulseAct.mu.Lock()
 	h.pulseAct.cursor = h.pulseStopSeq
 	h.pulseAct.gen++
+	dropped := h.pulseAct.held
 	h.pulseAct.held = nil
 	h.pulseAct.mu.Unlock()
 	h.pulseMu.Unlock()
+	// Resolve the "deferred" entry the dropped wake left in the decision log, so
+	// the assistant does not read a wake as still pending.
+	if dropped != nil {
+		h.pulseAct.record(pulseActivationDecision{At: time.Now(), Events: len(dropped.batch), Outcome: "stale", Detail: "condition rewritten while the wake was held; dropped"})
+	}
 	return marshalPulseString(h.pulseActivationStatus(strings.TrimSpace(*args.Prompt)))
 }
 
