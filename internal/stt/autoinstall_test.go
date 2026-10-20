@@ -32,7 +32,7 @@ func writeFakePython(t *testing.T, log string, pipFails bool) string {
 		"echo \"$@\" >> " + log + "\n" +
 		"if [ \"$1\" = --version ]; then echo 'Python 3.18.0'; exit 0; fi\n" +
 		"if [ \"$1\" = -m ] && [ \"$2\" = venv ]; then\n" +
-		"  mkdir -p \"$3/bin\" && cp \"$0\" \"$3/bin/python\" && exit 0\n" +
+		"  /bin/mkdir -p \"$3/bin\" && /bin/cp \"$0\" \"$3/bin/python\" && exit 0\n" +
 		"fi\n" +
 		"if [ \"$1\" = -m ] && [ \"$2\" = pip ] && [ -n \"" + pipFailFlag(pipFails) + "\" ]; then\n" +
 		"  echo 'ERROR: Could not find a version that satisfies onnxruntime' >&2; exit 1\n" +
@@ -47,6 +47,23 @@ func writeFakePython(t *testing.T, log string, pipFails bool) string {
 	return path
 }
 
+// isolatePath hides every interpreter except the test's fake from the
+// interpreter search, so a test that expects a managed venv to be built cannot
+// be short-circuited by the HOST's real Python. On a developer machine that
+// Python usually has onnx-asr installed, so installLocal's "another caller
+// already installed it" scan would return it and the venv would never be
+// built; the hermetic test would then assert against the wrong interpreter.
+//
+// PATH holds ONLY the fake's directory: the scan consults every PATH entry for
+// the unversioned "python3" as well as the versioned names, so keeping the
+// host's PATH would reintroduce the real Python. The fake therefore calls
+// /bin/mkdir and /bin/cp by absolute path — it cannot rely on PATH itself.
+func isolatePath(t *testing.T, fake string) {
+	t.Helper()
+	isolateInterpreterSearch(t)
+	t.Setenv("PATH", filepath.Dir(fake))
+}
+
 // An unpinned host with a base Python but no onnx_asr builds the managed venv,
 // pip-installs the packages into it and returns the venv's interpreter.
 func TestInstallLocalBuildsManagedVenv(t *testing.T) {
@@ -56,7 +73,7 @@ func TestInstallLocalBuildsManagedVenv(t *testing.T) {
 	t.Setenv("HOME", cache)
 	log := filepath.Join(t.TempDir(), "calls.log")
 	base := writeInstallablePython(t, log)
-	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	isolatePath(t, base)
 
 	py, err := installLocal(context.Background(), []string{"sentencepiece"})
 	if err != nil {
@@ -98,7 +115,7 @@ func TestTranscribeAsksBeforeInstalling(t *testing.T) {
 	t.Setenv("HOME", cache)
 	log := filepath.Join(t.TempDir(), "calls.log")
 	base := writeInstallablePython(t, log)
-	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	isolatePath(t, base)
 	wav := filepath.Join(t.TempDir(), "a.wav")
 	if err := os.WriteFile(wav, []byte("RIFFxxxxWAVE"), 0o600); err != nil {
 		t.Fatal(err)
@@ -138,7 +155,7 @@ func TestStatusForReportsInstallableModelAvailable(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("HOME", cache)
 	base := writeInstallablePython(t, filepath.Join(t.TempDir(), "calls.log"))
-	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	isolatePath(t, base)
 
 	st := StatusFor(Options{})
 	for _, m := range st.Models {
@@ -172,7 +189,7 @@ func TestInstallLocalSurfacesPipOutput(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("HOME", cache)
 	base := writeFakePython(t, filepath.Join(t.TempDir(), "calls.log"), true)
-	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	isolatePath(t, base)
 
 	err := Install(context.Background(), Options{})
 	if err == nil {
@@ -194,7 +211,7 @@ func TestInstallLocalRepairsBrokenVenv(t *testing.T) {
 	t.Setenv("HOME", cache)
 	log := filepath.Join(t.TempDir(), "calls.log")
 	base := writeInstallablePython(t, log)
-	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	isolatePath(t, base)
 
 	// A leftover venv whose python cannot run pip.
 	broken := pyinterpVenvPython(managedVenvDir())
@@ -222,7 +239,7 @@ func TestPartialTranscribeNeverInstalls(t *testing.T) {
 	t.Setenv("HOME", cache)
 	log := filepath.Join(t.TempDir(), "calls.log")
 	base := writeInstallablePython(t, log)
-	t.Setenv("PATH", filepath.Dir(base)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	isolatePath(t, base)
 	raw, err := os.ReadFile(filepath.Join("testdata", "speech-16k.wav"))
 	if err != nil {
 		t.Fatal(err)

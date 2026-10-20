@@ -129,8 +129,13 @@ goroutine is a data race, which the race detector catches.
 The 409 `stt_install_required` contract is untouched: the `installRequirement`
 check in `internal/stt/transcribe.go` runs **before** any worker is started, so
 a missing dependency still asks the user to approve the install instead of
-failing obscurely. The gate is only partly covered by automated tests — see
-TODO.md, "Open: local speech-to-text worker follow-ups".
+failing obscurely. The gate is covered hermetically by
+`internal/stt/install_gate_test.go` and the hermetic `autoinstall_test.go`
+tests: they pin both `PATH` and `pyinterp.ExtraCandidateDirs` /
+`FrameworkCandidateGlobs` at a fake interpreter, so the host's real Python
+(which may already have onnx-asr) cannot short-circuit the scan. Pinning only
+one half is not enough — the search also probes absolute directories, and the
+python.org framework Python is usually on `PATH` as well.
 
 ## Gotchas
 
