@@ -73,6 +73,25 @@ func minorRange(r Range) []int {
 	return minors
 }
 
+// ExtraCandidateDirs are the absolute directories probed in addition to PATH.
+// They are consulted because a user who installed Python with a package
+// manager often has it outside PATH for a non-login shell.
+//
+// It is a package var so a test can restrict the search to a controlled set:
+// these directories are probed by absolute path, so a test that only rewrites
+// PATH cannot stop them from finding the host's real Python. A host with
+// onnx-asr installed anywhere would otherwise make ocode's install gate
+// unreachable in a hermetic test.
+var ExtraCandidateDirs = []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"}
+
+// FrameworkCandidateGlobs are the absolute-path patterns probed for a
+// framework-installed Python (the python.org installer on macOS). Like
+// ExtraCandidateDirs, it is a var so a test can remove the host's real
+// interpreter from the search.
+var FrameworkCandidateGlobs = []string{
+	"/Library/Frameworks/Python.framework/Versions/3.%d/bin/python3",
+}
+
 // Candidates lists the argv prefixes to probe for r, in preference order: the
 // newest supported minor first, then the unversioned names. Versioned names are
 // probed deliberately: a too-new python3 is usually what PATH resolves, and a
@@ -95,7 +114,7 @@ func Candidates(r Range) [][]string {
 		candidates = append(candidates, []string{"python3." + strconv.Itoa(m)})
 	}
 	candidates = append(candidates, []string{"python3"}, []string{"python"})
-	for _, dir := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"} {
+	for _, dir := range ExtraCandidateDirs {
 		for _, m := range minors {
 			candidates = append(candidates, []string{filepath.Join(dir, "python3."+strconv.Itoa(m))})
 		}
@@ -109,9 +128,11 @@ func Candidates(r Range) [][]string {
 	}
 	if runtime.GOOS == "darwin" {
 		for _, m := range minors {
-			matches, _ := filepath.Glob(fmt.Sprintf("/Library/Frameworks/Python.framework/Versions/3.%d/bin/python3", m))
-			for _, match := range matches {
-				candidates = append(candidates, []string{match})
+			for _, pattern := range FrameworkCandidateGlobs {
+				matches, _ := filepath.Glob(fmt.Sprintf(pattern, m))
+				for _, match := range matches {
+					candidates = append(candidates, []string{match})
+				}
 			}
 		}
 	}

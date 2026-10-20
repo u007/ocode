@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -213,8 +214,16 @@ func stopWorkerLocked(w *worker) {
 	}
 }
 
+// workerStartAttempts counts every attempt to spawn a worker, successful or
+// not. It exists for tests: a worker attempt that FAILS (a fake interpreter
+// that cannot speak the protocol) leaves no active worker, so asserting on
+// "is a worker running" cannot tell "the gate ran first" from "the worker was
+// started and then failed". Counting attempts can.
+var workerStartAttempts atomic.Int64
+
 // startWorker spawns the Python worker and waits for its handshake.
 func startWorker(ctx context.Context, key workerKey, interpreter []string) (*worker, error) {
+	workerStartAttempts.Add(1)
 	script, err := workerScriptPath()
 	if err != nil {
 		return nil, err
@@ -474,4 +483,12 @@ func workerLoadCount() int {
 		return 0
 	}
 	return workerState.active.loads
+}
+
+// workerStartCount returns how many times a worker spawn has been attempted
+// since the process started. A test that needs to prove "no worker was
+// started" must count attempts, not check whether a worker is running: a
+// failed spawn leaves no active worker, so the two are different questions.
+func workerStartCount() int64 {
+	return workerStartAttempts.Load()
 }
