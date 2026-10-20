@@ -8,7 +8,7 @@ tags:
   - anthropic
   - tools
   - discovery
-timestamp: 2026-10-02T02:52:33Z
+timestamp: 2026-10-20T01:37:07Z
 ---
 # Prompt Cache Stability
 
@@ -95,6 +95,35 @@ Rules for any change that touches tools or the base prompt:
   next model call. A directory is seen once per session; compaction
   (`runCompact`) clears the seen set because the injected blocks were never
   persisted and are gone with the splice.
+- **Per-model hard triggers belong in `{MODEL}.OCODE.md`, not in a shared
+  fragment.** A model-specific file (e.g. `minimax-m*.OCODE.md` in the project
+  root) is injected as the `[ocode:model_context]` system message
+  (`internal/agent/prompt.go`), so it sits in the cached prefix **for that
+  model only** — it cannot change any other model's behaviour, and it does not
+  re-cache the prefix for anyone else. The shared `docPromptContent` fragment
+  is a `const`, so editing it re-caches the system prefix **once for every
+  model**. When a behaviour needs to differ per model (e.g. a weak model that
+  skips the `context`-agent routing rule), put it in the per-model file; only
+  change the shared fragment when the rule is genuinely universal. A shared
+  `prompt.go` fragment for this trigger was tried and reverted: its isolated
+  arm (9/18) was statistically indistinguishable from the arm with both
+  changes (p = 0.34) while it re-caches the system prefix for every model, so
+  the per-model `OCODE.md` file is the only shipped change.
+  - **Do not put a carve-out in a hard trigger.** A soft exception ("direct
+    grep/read is correct for a path you already know exactly") becomes a
+    licence the model grants itself: measured on `minimax-m3.1-flash-free` in
+    a 42-run A/B, a trigger WITH that carve-out scored 0/12 delegations, while
+    the same trigger with the carve-out removed scored 9/18 (Fisher exact
+    two-sided p = 0.004; 22% fewer tool calls; correctness 18/18 vs 12/12) —
+    the model's own reasoning quoted the rule and then used the exception to
+    override it. A hard trigger is either unconditional or it is not a hard
+    trigger.
+  - **A per-model file is inert until it is committed.** `readContextFileAt`
+    (`internal/agent/context.go`) uses the git HEAD version of a tracked file
+    when the working tree has unstaged changes, so an uncommitted
+    `{MODEL}.OCODE.md` edit is silently ignored at load time (it logs "using
+    HEAD version of ... due to unstaged changes"). Verify with
+    `agent.LoadModelContextWithSourceAt(root, "<model-id>")` after committing.
 - **Anthropic breakpoints (`applyAnthropicConversationBreakpoints` in
   `client.go`):** tools (last tool), system (single block), and the last two
   user-role messages (tool results are user-role). The marker on the most
