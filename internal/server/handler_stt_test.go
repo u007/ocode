@@ -195,3 +195,24 @@ func TestPrewarmSTTNeverApprovesAnInstall(t *testing.T) {
 	}
 	t.Fatal("the prewarm never ran")
 }
+
+// TestCancelPrewarmSTTReportsTheSeam checks that the cancel endpoint delegates to
+// stt.CancelPrewarm and reports its result, so the web recorder can stop a load
+// that is still in progress when the recording is discarded.
+func TestCancelPrewarmSTTReportsTheSeam(t *testing.T) {
+	orig := sttCancelPrewarmFunc
+	t.Cleanup(func() { sttCancelPrewarmFunc = orig })
+	sttCancelPrewarmFunc = func() bool { return true }
+
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPost, "/api/stt/prewarm/cancel", nil)
+	w := httptest.NewRecorder()
+	s.handleCancelPrewarmSTT(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"cancelled":true`) {
+		t.Fatalf("body = %s, want cancelled:true", body)
+	}
+}

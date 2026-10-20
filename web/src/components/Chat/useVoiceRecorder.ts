@@ -81,6 +81,9 @@ export interface UseVoiceRecorderOptions {
    * is ignored, because the transcription starts the worker itself.
    */
   prewarm?: () => Promise<unknown>;
+  /** Aborts an in-flight prewarm when the recording is discarded, so ~2 GB
+   *  does not stay resident for a clip nobody will transcribe. Best-effort. */
+  cancelPrewarm?: () => Promise<unknown>;
 }
 
 export interface VoiceRecorder {
@@ -128,6 +131,8 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   canPreviewRef.current = options.canPreview;
   const prewarmRef = useRef(options.prewarm);
   prewarmRef.current = options.prewarm;
+  const cancelPrewarmRef = useRef(options.cancelPrewarm);
+  cancelPrewarmRef.current = options.cancelPrewarm;
   // Set on unmount: an in-flight recording is discarded, never transcribed.
   const discardRef = useRef(false);
   // Set by stop() while getUserMedia is still waiting on the permission prompt.
@@ -339,9 +344,13 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
       // Still waiting on the permission prompt: cancel the start.
       cancelStartRef.current = true;
     }
+    // The prewarm was only for this recording: stop a load still in progress
+    // rather than leaving ~2 GB resident for a clip nobody will transcribe.
+    void cancelPrewarmRef.current?.().catch(() => undefined);
     setPartial("");
     setPhase("idle");
   }, [setPhase, stopPartials]);
+
 
   const toggle = useCallback(() => {
     if (stateRef.current === "idle") void start();
@@ -366,6 +375,7 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
         }
       }
       releaseStream();
+      void cancelPrewarmRef.current?.().catch(() => undefined);
     };
   }, [releaseStream, stopPartials]);
 

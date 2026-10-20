@@ -77,6 +77,12 @@ done
 			`printf '{"op":"ready","pid":%s,"load_count":1}\n' "$$"`,
 			`exit 3`)
 	}
+	if opts.stallHandshake {
+		body = strings.ReplaceAll(body,
+			`printf '{"op":"ready","pid":%s,"load_count":1}\n' "$$"`,
+			`sleep 10
+printf '{"op":"ready","pid":%s,"load_count":1}\n' "$$"`)
+	}
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +96,9 @@ type fakeWorkerOptions struct {
 	dieAfterFirst bool
 	// silentHandshake makes the worker exit before answering the handshake.
 	silentHandshake bool
+	// stallHandshake makes the worker sleep before answering the handshake, so
+	// a test can cancel a prewarm while the load is still in flight.
+	stallHandshake bool
 }
 
 // TestWorkerReusesOneProcessForManyCalls is the protocol-level check that

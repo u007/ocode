@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,4 +205,48 @@ func containsAny(s string, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+// TestPrewarmCancelAbortsAnInFlightLoad checks that a discarded recording
+// stops a model load that is still in progress, instead of leaving the model
+// resident for a clip that will never be transcribed.
+func TestPrewarmCancelAbortsAnInFlightLoad(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls.log")
+	py := fakeWorkerPython(t, log, fakeWorkerOptions{stallHandshake: true})
+	stopActiveWorker()
+	t.Cleanup(stopActiveWorker)
+
+	opts := Options{Model: "parakeet-tdt-0.6b-v3", Python: py, ModelDir: t.TempDir()}
+
+	done := make(chan error, 1)
+	go func() { done <- Prewarm(context.Background(), opts) }()
+
+	// Wait until the child has actually spawned, so the cancel reaches a load
+	// that is in flight rather than a prewarm that has not started yet.
+	deadline := time.After(5 * time.Second)
+	for {
+		data, _ := os.ReadFile(log)
+		if strings.Contains(string(data), "MODEL_LOADED") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the worker never started")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if !CancelPrewarm() {
+		t.Fatal("CancelPrewarm reported no in-flight prewarm")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Prewarm returned %v, want nil for a cancelled prewarm", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Prewarm did not return after CancelPrewarm")
+	}
+	if workerPID() != 0 {
+		t.Fatalf("worker still running (pid %d) after a cancelled prewarm", workerPID())
+	}
 }

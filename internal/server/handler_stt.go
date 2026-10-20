@@ -158,3 +158,17 @@ func (s *Server) handlePrewarmSTT(w http.ResponseWriter, r *http.Request) {
 	}()
 	writeJSON(w, http.StatusOK, map[string]any{"started": true})
 }
+
+// sttCancelPrewarmFunc is the canceller. A package var for the same reason as
+// sttPrewarmFunc: a test can substitute it and observe the call.
+var sttCancelPrewarmFunc = stt.CancelPrewarm
+
+// handleCancelPrewarmSTT aborts a model load the client no longer needs.
+//
+// The web recorder calls this when a recording is discarded before the model
+// finished loading, so ~2 GB does not stay resident for a clip that will never
+// be transcribed. Cancelling a finished prewarm is a no-op (the worker is kept
+// warm); the response says which happened so the client does not have to care.
+func (s *Server) handleCancelPrewarmSTT(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": sttCancelPrewarmFunc()})
+}

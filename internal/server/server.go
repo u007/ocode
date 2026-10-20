@@ -537,6 +537,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/stt", s.authMiddleware(s.handleSetSTT))
 	s.mux.HandleFunc("POST /api/stt/transcribe", s.authMiddleware(s.handleTranscribeSTT))
 	s.mux.HandleFunc("POST /api/stt/prewarm", s.authMiddleware(s.handlePrewarmSTT))
+	s.mux.HandleFunc("POST /api/stt/prewarm/cancel", s.authMiddleware(s.handleCancelPrewarmSTT))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-mode", s.authMiddleware(s.handleGetPermissionModeConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-mode", s.authMiddleware(s.handleSetPermissionModeConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/tui", s.authMiddleware(s.handleGetTUIConfigSection))
@@ -663,6 +664,9 @@ func (s *Server) registerRoutes() {
 
 	// Info
 	s.mux.HandleFunc("GET /api/skills", s.authMiddleware(s.handleListSkills))
+	s.mux.HandleFunc("GET /api/skills/manage", s.authMiddleware(s.handleListManageableSkills))
+	s.mux.HandleFunc("PUT /api/skills/{name}/enable", s.authMiddleware(s.handleEnableSkill))
+	s.mux.HandleFunc("PUT /api/skills/{name}/disable", s.authMiddleware(s.handleDisableSkill))
 	s.mux.HandleFunc("GET /api/commands", s.authMiddleware(s.handleListCommands))
 	s.mux.HandleFunc("GET /api/command-context/{name}", s.authMiddleware(s.handleCommandContext))
 	s.mux.HandleFunc("GET /api/github/pr/{owner}/{repo}/{number}", s.authMiddleware(s.handleGitHubPR))
@@ -2933,6 +2937,15 @@ func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListSkills(w, r)
 }
+func (s *Server) handleListManageableSkills(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListManageableSkills(w, r)
+}
+func (s *Server) handleEnableSkill(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetSkillEnabled(w, r, r.PathValue("name"), true)
+}
+func (s *Server) handleDisableSkill(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetSkillEnabled(w, r, r.PathValue("name"), false)
+}
 func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListCommands(w, r)
 }
@@ -3088,7 +3101,9 @@ type ModelInfo struct {
 	Name     string `json:"name"`
 	Model    string `json:"model"`
 	Provider string `json:"provider"`
-	Active   bool   `json:"active"`
+	// Active is omitted when false (absent reads as false), which drops one
+	// key from every row of the full registry list.
+	Active bool `json:"active,omitempty"`
 	// DisplayName is the human-readable name from the models.dev registry
 	// (e.g. "Ox Alpha Free" for the zen codename "opencode/x-preview-f-free").
 	// Empty when the registry doesn't know the model — UIs fall back to the

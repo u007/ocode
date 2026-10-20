@@ -50,6 +50,10 @@ var (
 	// while the user is still speaking. It is best-effort: a failure is
 	// ignored, because the first transcription will start the worker itself.
 	voicePrewarm = stt.Prewarm
+	// voiceCancelPrewarm stops a load that is still in progress when the
+	// recording is discarded, instead of leaving the model resident for a clip
+	// that will never be transcribed.
+	voiceCancelPrewarm = stt.CancelPrewarm
 	// voicePartial decodes the audio captured so far. Partials are display
 	// only: their result never reaches the composer or the submit path.
 	voicePartial = func(ctx context.Context, rec voiceRecorder, opts stt.Options) (stt.Result, error) {
@@ -387,6 +391,11 @@ func (m *model) cancelVoice() tea.Cmd {
 	m.voice.note = "recording cancelled"
 	m.voice.partial = ""
 	m.voice.partialBusy = false
+	// The prewarm existed only for this recording. Stop a load that is still in
+	// progress rather than leaving ~2 GB resident for a clip nobody will
+	// transcribe; a load that already finished is left warm for the next
+	// utterance.
+	voiceCancelPrewarm()
 	if rec == nil {
 		return nil
 	}
@@ -410,6 +419,9 @@ func (m *model) abortVoice() {
 	m.voice.phase = voiceIdle
 	m.voice.partial = ""
 	m.voice.partialBusy = false
+	// Quitting must not leave a model load running: the child is not tied to
+	// the TUI's lifetime and would otherwise stay resident for the idle window.
+	voiceCancelPrewarm()
 }
 
 // submitVoiceTranscript sends a finished transcript through the chat Enter

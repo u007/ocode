@@ -41,6 +41,7 @@ import type {
   InstallPluginResult,
   CommandEntry,
   SkillEntry,
+  ManageableSkillsResponse,
   CronJob,
   CronJobsResponse,
   CronJobPatchRequest,
@@ -1239,7 +1240,7 @@ export const api = {
       host,
     );
   },
-  listModels: (
+  listModels: async (
     opts?: { provider?: string; refresh?: boolean; configured?: boolean },
     host?: string,
   ) => {
@@ -1250,11 +1251,13 @@ export const api = {
     // the server that answers (the host's own state for a remote session).
     if (opts?.configured) params.set("configured", "true");
     const qs = params.toString();
-    return fetchJSON<ModelInfo[]>(
+    const rows = await fetchJSON<ModelInfo[]>(
       `/api/models${qs ? `?${qs}` : ""}`,
       undefined,
       host,
     );
+    // The server omits `active` when false; decode it back to a definite boolean.
+    return rows.map((m) => ({ ...m, active: m.active === true }));
   },
   listAgents: (host?: string) =>
     fetchJSON<AgentInfo[]>("/api/config/agents", undefined, host),
@@ -1842,7 +1845,24 @@ export const api = {
     }
   },
 
+  /** Cancels an in-flight speech-model prewarm (best-effort). Used when the
+   *  recording is discarded before the model finishes loading, so ~2 GB does
+   *  not stay resident for a clip nobody will transcribe. A finished prewarm
+   *  is a no-op. */
+  cancelPrewarmSpeech: async () => {
+    try {
+      const res = await fetch(apiPath("/api/stt/prewarm/cancel"), {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  },
+
   getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
+
   setTUISettings: (cfg: TUISettings) =>
     fetchJSON<TUISettings>("/api/config/ocode/tui", {
       method: "PUT",
@@ -3683,6 +3703,40 @@ export const api = {
   // ── Dynamic commands / skills ──
   listCommands: () => fetchJSON<CommandEntry[]>("/api/commands"),
   listSkills: () => fetchJSON<SkillEntry[]>("/api/skills"),
+
+  // ── Skill enable/disable (chat sidebar) ──────────────────────────────────
+  // "Enabled" means DISCOVERABLE: advertised in the skill catalog, discovery
+  // corpus, Kaizen digest and slash list, and loadable by the skill tool. A
+  // disabled skill is still returned by the manage listing so the UI can switch
+  // it back on; an already-attached body is never retracted.
+  //
+  // `projectPath` selects the project whose .ocode/settings.json holds the
+  // preference (the sidebar writes project scope). `sessionId` asks the server
+  // to rebuild that chat's agent so the change lands without a restart.
+  getManageableSkills: (host?: string, projectPath?: string) => {
+    const qs = new URLSearchParams();
+    if (projectPath) qs.set("path", projectPath);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<ManageableSkillsResponse>(`/api/skills/manage${suffix}`, undefined, host);
+  },
+
+  setSkillEnabled: (
+    name: string,
+    enabled: boolean,
+    host?: string,
+    projectPath?: string,
+    sessionId?: string,
+  ) => {
+    const qs = new URLSearchParams();
+    if (projectPath) qs.set("path", projectPath);
+    if (sessionId) qs.set("session_id", sessionId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<{ name: string; enabled: boolean; project_root: string }>(
+      `/api/skills/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}${suffix}`,
+      { method: "PUT" },
+      host,
+    );
+  },
 
   // ── Command context (repo-analysis prompts for /review, /learn, ...) ──
   // `project` selects which registered repo root the prompt is assembled from
