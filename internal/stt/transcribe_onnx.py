@@ -79,7 +79,7 @@ def main() -> int:
 
     import onnx_asr  # imported here so a missing package yields a clear error
 
-    model = onnx_asr.load_model(model_name, path=model_dir)
+    model = onnx_asr.load_model(model_name, path=model_dir, providers=["CPUExecutionProvider"])
     result = model.recognize(wav_path)
     if not isinstance(result, str):
         result = getattr(result, "text", str(result))

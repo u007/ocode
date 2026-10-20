@@ -75,6 +75,12 @@ export interface UseVoiceRecorderOptions {
    * clip, so only a local engine should get them. Absent or failing means off.
    */
   canPreview?: () => Promise<boolean>;
+  /**
+   * Starts loading the local model in the background so the first
+   * transcription does not wait for the model load. Best-effort: a rejection
+   * is ignored, because the transcription starts the worker itself.
+   */
+  prewarm?: () => Promise<unknown>;
 }
 
 export interface VoiceRecorder {
@@ -120,6 +126,8 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   const partialAllowedRef = useRef(false);
   const canPreviewRef = useRef(options.canPreview);
   canPreviewRef.current = options.canPreview;
+  const prewarmRef = useRef(options.prewarm);
+  prewarmRef.current = options.prewarm;
   // Set on unmount: an in-flight recording is discarded, never transcribed.
   const discardRef = useRef(false);
   // Set by stop() while getUserMedia is still waiting on the permission prompt.
@@ -213,6 +221,10 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     cancelStartRef.current = false;
     discardRef.current = false;
     setPhase("recording");
+
+    // Load the model in the background so the final transcription does not
+    // wait for it. Fire-and-forget: a rejection is ignored.
+    void prewarmRef.current?.().catch(() => undefined);
 
     let stream: MediaStream;
     try {

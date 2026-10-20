@@ -137,6 +137,13 @@ func StatusFor(opts Options) Status {
 // Transcribe decodes audioPath with the selected model. Local engines need
 // WAV, so other containers are converted with ffmpeg first.
 func Transcribe(ctx context.Context, opts Options, audioPath string) (Result, error) {
+	return transcribe(ctx, opts, audioPath, false)
+}
+
+// transcribe decodes audioPath. partial marks a live preview decode, which
+// is display-only: it must not queue behind another request and must not
+// start a worker of its own.
+func transcribe(ctx context.Context, opts Options, audioPath string, partial bool) (Result, error) {
 	id := ResolveModel(opts.Model)
 	s, _ := lookup(id)
 	if err := checkSize(audioPath); err != nil {
@@ -182,7 +189,7 @@ func Transcribe(ctx context.Context, opts Options, audioPath string) (Result, er
 		if err != nil {
 			return Result{}, fmt.Errorf("speech-to-text: local model: %w", err)
 		}
-		text, err := transcribeOnnx(ctx, py.Command, s.Repo, s.Upstream, filepath.Join(modelDir, id), wav)
+		text, err := transcribeLocal(ctx, py.Command, s.Repo, s.Upstream, filepath.Join(modelDir, id), wav, partial)
 		if err != nil {
 			return Result{}, err
 		}
@@ -205,7 +212,7 @@ func PartialTranscribe(ctx context.Context, opts Options, rec *Recording) (Resul
 	// A live partial is polled repeatedly and its failure is simply not shown;
 	// it must never start a multi-minute install, whatever the caller approved.
 	opts.InstallApproved = false
-	return Transcribe(ctx, opts, snap)
+	return transcribe(ctx, opts, snap, true)
 }
 
 func (o Options) modelRoot() (string, error) {

@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -128,4 +130,31 @@ func (s *Server) handleTranscribeSTT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// sttPrewarmFunc is the prewarm call. It is a package var so a test can
+// substitute a slow prewarm and prove the handler answers before the load
+// finishes.
+var sttPrewarmFunc = stt.Prewarm
+
+// handlePrewarmSTT starts the local speech model in the background so it is
+// loaded by the time the user finishes speaking.
+//
+// It is best-effort: a failure is reported as a non-OK status, but the
+// client treats it as advisory and the transcription that follows starts the
+// worker itself. The request must not block the caller for the whole load,
+// or the microphone prompt would wait behind it — so the load runs in the
+// background and the handler answers immediately.
+func (s *Server) handlePrewarmSTT(w http.ResponseWriter, r *http.Request) {
+	opts := s.sttOptions(sttSelectedModel())
+	// Answer as soon as the request is accepted; the load continues in the
+	// background. The caller's next action is to talk, not to wait.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), stt.PrewarmTimeout)
+		defer cancel()
+		if err := sttPrewarmFunc(ctx, opts); err != nil {
+			log.Printf("stt: prewarm: %v", err)
+		}
+	}()
+	writeJSON(w, http.StatusOK, map[string]any{"started": true})
 }

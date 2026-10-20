@@ -616,3 +616,50 @@ func TestVoiceRefusesToRecordWhileInstallPending(t *testing.T) {
 		t.Fatalf("note = %q, want it to point at /voice install", m.voice.note)
 	}
 }
+
+// TestVoicePrewarmsOnStart checks that starting a recording also asks the
+// local engine to load its model, so the model is ready by the time the user
+// finishes speaking.
+//
+// The prewarm is best-effort: it must not stop the recording, and it must
+// not be reported to the user.
+func TestVoicePrewarmsOnStart(t *testing.T) {
+	stubVoice(t, availableStatus())
+	prewarmed := make(chan struct{}, 1)
+	origPrewarm := voicePrewarm
+	t.Cleanup(func() { voicePrewarm = origPrewarm })
+	voicePrewarm = func(ctx context.Context, opts stt.Options) error {
+		select {
+		case prewarmed <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+
+	m := newVoiceTestModel()
+	m, _ = press(t, m, voiceKey("ctrl+x"))
+	m, cmd := press(t, m, voiceKey("v"))
+	if cmd == nil || m.voice.phase != voiceStarting {
+		t.Fatalf("phase=%v, want starting", m.voice.phase)
+	}
+	// The start command is a batch: the prewarm runs beside the microphone
+	// start. Execute every command in the batch.
+	m = runMsg(t, m, cmd)
+	if m.voice.phase != voiceRecording {
+		t.Fatalf("phase=%v, the recording never started", m.voice.phase)
+	}
+
+	select {
+	case <-prewarmed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("starting a recording did not prewarm the speech model")
+	}
+	// The recording must still be running: a prewarm failure or a slow
+	// prewarm must never break dictation.
+	if m.voice.phase != voiceRecording {
+		t.Fatalf("phase = %v, want voiceRecording", m.voice.phase)
+	}
+	if m.voice.note != "" {
+		t.Fatalf("note = %q, want no user-visible message", m.voice.note)
+	}
+}

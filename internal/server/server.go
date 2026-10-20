@@ -536,6 +536,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/stt", s.authMiddleware(s.handleGetSTT))
 	s.mux.HandleFunc("PUT /api/stt", s.authMiddleware(s.handleSetSTT))
 	s.mux.HandleFunc("POST /api/stt/transcribe", s.authMiddleware(s.handleTranscribeSTT))
+	s.mux.HandleFunc("POST /api/stt/prewarm", s.authMiddleware(s.handlePrewarmSTT))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-mode", s.authMiddleware(s.handleGetPermissionModeConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-mode", s.authMiddleware(s.handleSetPermissionModeConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/tui", s.authMiddleware(s.handleGetTUIConfigSection))

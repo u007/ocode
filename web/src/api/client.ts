@@ -1825,6 +1825,23 @@ export const api = {
     opts?: { installApproved?: boolean },
   ) => transcribeAudio(audio, filename, opts?.installApproved),
 
+  /** Starts loading the local speech model in the background so the first
+   *  transcription does not wait for the model load. Best-effort: the server
+   *  answers as soon as the load is scheduled, and a failure is not fatal
+   *  (the transcription starts the worker itself). */
+  prewarmSpeech: async () => {
+    try {
+      const res = await fetch(apiPath("/api/stt/prewarm"), {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      if (!res.ok) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
   setTUISettings: (cfg: TUISettings) =>
     fetchJSON<TUISettings>("/api/config/ocode/tui", {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/stt"
 )
@@ -45,6 +46,10 @@ var (
 	voiceInstall    = stt.Install
 	voiceStatusFor  = stt.StatusFor
 	voiceMicCheck   = stt.RecordingAvailable
+	// voicePrewarm starts the resident STT worker so the model is loaded
+	// while the user is still speaking. It is best-effort: a failure is
+	// ignored, because the first transcription will start the worker itself.
+	voicePrewarm = stt.Prewarm
 	// voicePartial decodes the audio captured so far. Partials are display
 	// only: their result never reaches the composer or the submit path.
 	voicePartial = func(ctx context.Context, rec voiceRecorder, opts stt.Options) (stt.Result, error) {
@@ -226,6 +231,19 @@ func (m *model) startVoice() tea.Cmd {
 		rec, err := voiceStart(voiceDir())
 		if err == nil && rec == nil {
 			err = errors.New("no microphone recorder")
+		}
+		if err == nil {
+			// Load the model in the background while the user is already
+			// speaking, so the first transcription does not wait for the load.
+			// It is best-effort: a failure is ignored, because the
+			// transcription that follows starts the worker itself.
+			//
+			// A goroutine is used rather than a second tea.Cmd so the start
+			// command keeps returning a single message: the recording must
+			// not wait for the model load.
+			crashguard.Go(func() {
+				_ = voicePrewarm(context.Background(), opts)
+			})
 		}
 		return voiceStartedMsg{rec: rec, err: err}
 	}

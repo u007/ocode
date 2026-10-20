@@ -19,6 +19,7 @@ okf_version: 0.1
 
 # architecture
 
+- [Local Speech-to-Text Runs in a Resident Worker](architecture/stt-resident-worker.md) - Decision: the local STT engine keeps the model loaded in one child process (JSON-lines over stdio) instead of spawning a process per utterance, and pins the onnxruntime CPU provider
 - [Shared LSP Broker Server-State and Routing Gotchas](architecture/lsp-broker-shared-server-gotchas.md) - Updated with confirmed spec violations from 2026-08-21 review: Manager sharing enabled by default, docs map unbounded/didClose absent, conflicting didOpen/didChange overwrites, daemon inherits terminal fds
 - [Shell Sandbox Backend Availability Status](architecture/shell-sandbox-backend-status.md) - Decision on handling sandbox backend availability (available, unsupported, unavailable) with fail-closed requirements and API status definitions.
 - [Shell Sandbox Is Write-Integrity Only, Not Confidentiality](architecture/shell-sandbox-integrity-only-mode.md) - Decision to document the sandbox as integrity-only/write-confined with explicit confidentiality limitations, since global reads and network egress remain open.

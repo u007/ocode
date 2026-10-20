@@ -397,3 +397,49 @@ describe("useVoiceRecorder preview gating", () => {
     }
   });
 });
+
+describe("useVoiceRecorder prewarm", () => {
+  it("starts loading the model when the recording starts", async () => {
+    const prewarm = vi.fn().mockResolvedValue(undefined);
+    const onTranscript = vi.fn();
+    const transcribe = vi.fn().mockResolvedValue({ text: "hello there", model: "m" });
+    const { result } = renderHook(() =>
+      useVoiceRecorder({ transcribe, onTranscript, canPreview: async () => true, prewarm }),
+    );
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(prewarm).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rejected prewarm does not break the recording", async () => {
+    const prewarm = vi.fn().mockRejectedValue(new Error("no model"));
+    const onTranscript = vi.fn();
+    const transcribe = vi.fn().mockResolvedValue({ text: "hello there", model: "m" });
+    const { result } = renderHook(() =>
+      useVoiceRecorder({ transcribe, onTranscript, canPreview: async () => true, prewarm }),
+    );
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(prewarm).toHaveBeenCalledTimes(1);
+    expect(result.current.state).toBe("recording");
+    expect(result.current.error).toBeNull();
+  });
+
+  it("works without a prewarm hook at all", async () => {
+    const onTranscript = vi.fn();
+    const transcribe = vi.fn().mockResolvedValue({ text: "hello there", model: "m" });
+    const { result } = renderHook(() => useVoiceRecorder({ transcribe, onTranscript }));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.state).toBe("recording");
+  });
+});

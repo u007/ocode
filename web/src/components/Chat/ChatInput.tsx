@@ -1079,6 +1079,9 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           return m?.engine === "local" && !m.needs_install;
         })
         .catch(() => false),
+    // Load the model while the user is talking, so the final transcription
+    // does not wait for the load. Best-effort.
+    prewarm: () => api.prewarmSpeech(),
   });
   const voiceRecording = voice.state === "recording";
   const voiceTranscribing = voice.state === "transcribing";
