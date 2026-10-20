@@ -86,7 +86,7 @@ never writes to the terminal (the TUI runs in the alt-screen).
 - **Keyed by model.** The key is (upstream, repo, modelDir, provider). A model
   change stops the old worker and starts a new one.
 - **Idle unload.** The worker is stopped after 2 minutes without a request
-  (`workerIdleTimeout`). The fp32 export holds roughly 2.4 GB of weights, so it
+  (`workerIdleTimeout`). The fp32 export holds roughly 2.2 GB of resident memory (measured via vmmap on macOS, fp32 export), so it
   must not outlive the user's session.
 - **No controlling terminal.** The child is spawned with `Setsid`, so it can
   never open `/dev/tty` and steal the foreground process group from the TUI.
