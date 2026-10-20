@@ -179,6 +179,14 @@ Measured with the real model: cold first transcription 9.49 s (a disk-cold
 model load), prewarm 1.54 s with the model files already in the page cache,
 and first transcription after the prewarm 0.17 s.
 
+- **Cancellation.** A recording can be discarded before the model finishes
+  loading; `stt.CancelPrewarm` aborts an in-flight load. A load that has
+  already finished is a no-op, so the warm worker is kept for the next
+  utterance. The TUI calls it from `cancelVoice`/`abortVoice`; the web
+  recorder calls `POST /api/stt/prewarm/cancel`. The cancellation only ever
+  interrupts a load still in progress — a worker that is already serving a
+  transcription is never touched.
+
 ## Deferred
 
 - **int8 quantization** — MEASURED AND REJECTED. Over a 217-clip corpus
