@@ -33,8 +33,10 @@ given, so on Apple Silicon it selected `CoreMLExecutionProvider` first. CoreML
 compiles the model to the Apple Neural Engine format on every fresh process,
 and onnx-asr's CoreML path only supports part of the graph anyway (16 of 42
 nodes on the encoder), so the "GPU" mostly bought a compile bill. Passing
-`providers=["CPUExecutionProvider"]` loads the same model in about a second.
-CoreML's `ModelCacheDirectory` does **not** avoid the compile.
+`providers=["CPUExecutionProvider"]` loads the same model in roughly 1.5 s when
+the model files are already in the OS page cache (measured 7.7 s on a cold
+disk, against 15.9 s for CoreML). CoreML's `ModelCacheDirectory` does **not**
+avoid the compile.
 
 ## The decision
 
@@ -50,11 +52,20 @@ Measured through `stt.Transcribe()` on a 2.7 s clip:
 
 | | before | after |
 |---|---|---|
-| per utterance | 16.8-21.6 s | 2.2-3.2 s (CPU pin), then 0.15-0.19 s (warm worker) |
-| 12 s dictation (4 previews + final) | ~9.5 s of loads | 0.83 s total |
+| per utterance (2.7 s clip) | 16.8-21.6 s | 2.2-3.2 s (CPU pin, fresh process), then 0.15-0.19 s (warm worker) |
+| a 12 s dictation (previews at 3, 6, 9 s, then the final 12 s) | ~9.5 s of model loads plus ~2 s of inference | ~2.1 s of inference, no loads |
 | model loads | one per call, plus one per preview tick | one per process |
 
 The transcript is unchanged.
+
+Re-measured on 2026-10-20 (M1 Max, 16 kHz mono `say`-generated speech, CPU
+provider, median of four runs after one warm-up): 0.22 s for a 3 s clip,
+0.26 s for 6 s, 0.38 s for 9 s and 1.21 s for 12 s (range 0.92-1.63 s). Decode
+cost is **superlinear near 12 s** — twelve seconds of audio costs about three
+times nine seconds — and moves with machine load, so treat these as orders of
+magnitude rather than constants. The end-to-end win for a twelve-second
+dictation is roughly 5x (the loads disappear); the per-call win is 10-100x,
+because a 2-3 s utterance is dominated by a load the worker no longer pays.
 
 ## The protocol
 
@@ -159,8 +170,9 @@ install-approval contract belongs to the transcription path, and a prewarm
 that silently started a pip install would be a surprise. A prewarm failure
 costs a moment of latency, never a lost recording.
 
-Measured with the real model: cold first transcription 9.49 s, prewarm
-1.54 s, first transcription after the prewarm 0.17 s.
+Measured with the real model: cold first transcription 9.49 s (a disk-cold
+model load), prewarm 1.54 s with the model files already in the page cache,
+and first transcription after the prewarm 0.17 s.
 
 ## Deferred
 
