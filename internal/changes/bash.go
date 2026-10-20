@@ -272,7 +272,14 @@ type fileFingerprint struct {
 // still produces /etc/passwd as a candidate. The candidate set is
 // then intersected with the post-walk diff, so the comment is filtered
 // out unless the actual command also wrote to /etc/passwd.
-var pathTokenRegex = regexp.MustCompile(`(?:^|\s|=|;|\||"|\(|')?"?([A-Za-z0-9_./~+-]+/[A-Za-z0-9_./~+-]+)`)
+//
+// A token must start right after a boundary: start of line, whitespace, `=`,
+// `;`, `|`, a quote, or `(`. The quote and `(` boundaries are what let
+// `open("internal/x.go", "w")` and `p='a/b.txt'` yield their path. The boundary
+// is required: an optional one lets a match start mid-token, turning
+// `$HOME/foo` into `HOME/foo` and `https://example.com/a` into
+// `example.com/a`.
+var pathTokenRegex = regexp.MustCompile(`(?:^|[\s=;|"'(])([A-Za-z0-9_./~+-]+/[A-Za-z0-9_./~+-]+)`)
 
 // walkStatus is the outcome of one fingerprint walk. It exists because
 // "no map" has two very different meanings: the recorder never ran (fine,

@@ -21,10 +21,10 @@ An *enabled* skill is one that is **advertised and loadable**. It is surfaced in
 1. **Base-prompt skill catalog** — `skill.BuildCatalogForModel` (via `LoadSkillsForModel`).
 2. **Discovery corpus** — `Agent.discoveryDocs` (`internal/agent/discovery_glue.go`).
 3. **Kaizen digest block** — `KaizenDigestBlock` / `KaizenDigestAdmittedForModels` (via `KaizenSkillsForModel`).
-4. **Slash-command list** — `GET /api/skills` and the web's `loadDynamicCommands`.
+4. **Slash-command list** — `GET /api/skills` and the web's `loadDynamicCommands` (project-scoped when the caller names a project — see API).
 5. **Context-budget breakdown** — `internal/contextbudget`.
 
-Disabling a skill does NOT pre-remove it from the system prompt; it removes it from every *offer* path above. The single gate is `skill.DisabledForRoot(root)` (the four offer surfaces resolve `root` as the session's project root, EXCEPT the slash list, which is global-layer only — see API).
+Disabling a skill does NOT pre-remove it from the system prompt; it removes it from every *offer* path above. The single gate is `skill.DisabledForRoot(root)` (the offer surfaces resolve `root` as the session's project root; the slash list does too when the request names a project, and is global-layer only when it does not — see API).
 
 ### Disabling also makes the `skill` / `load_skill` tool refuse
 
@@ -57,13 +57,14 @@ effectiveDisabled = (global.Disabled ∪ project.Disabled) − (global.Enabled �
 - An `enabled` entry at **either** scope overrides a `disabled` entry at **either** scope.
 - Enable/disable **move** the name between the project's two lists (not just delete), so a project can rescue a globally disabled skill.
 - Names are exact / case-sensitive identifiers (plugin skills are `plugin:name`). Lists are trimmed, deduped and sorted on load and before every save.
-- `config.EffectiveDisabledSkills(root)` returns `(map[string]bool, error)`; an unreadable project file degrades to the global layer and returns the error rather than emptying every catalog.
+- `config.EffectiveDisabledSkills(root)` returns `(map[string]bool, error)`. The two layers load **independently** and the map is never nil: an unreadable project file degrades to the global layer, an unreadable global config degrades to the project layer, and every layer error comes back (joined) rather than emptying every catalog or hiding a readable layer.
+- Project `.ocode/settings.json` is edited by **splicing only the `skills` member** into the file's own bytes (`spliceTopLevelKey`, `internal/config/json_splice.go`). Key order, indentation, other values and `//` / `/* */` comments survive a toggle, so a git-tracked file diffs by the skills lines only. Comments are tolerated on read (blanked, not removed, so byte offsets stay valid). A file that is not a JSON(C) object — including one with a trailing comma — is refused with an error and never overwritten.
 
 ## Caching and rebuild
 
-- `skill.DisabledForRoot(root)` caches the resolved set for **3 seconds**; `skill.InvalidateSkillCache()` clears both the skills cache and this one. The toggle handler calls it.
-- The catalog/corpus/digest are baked into the system prompt **at agent construction**, so a toggle must rebuild that chat's agent: `Handler.rebuildAgentForPreferenceChange(sessionID, "skill")` (shared with the MCP toggle). It is skipped while a turn is active.
-- The deferral still lands: `agentSession.disabledSkills` snapshots the set at build time, and `Handler.reconcileProfileAgent` compares it with the current set on the next turn — a difference forces a rebuild. Applies to every live session in that project.
+- `skill.DisabledForRoot(root)` caches the resolved set for **3 seconds**; `skill.InvalidateSkillCache()` clears both the skills cache and this one. The toggle handler calls it. A **degraded** read (any layer errored) is never cached as the truth: the last good set stays in force (re-stamped so a broken file is retried once per TTL), and with none yet the degraded set is returned uncached. Otherwise a file caught mid-edit would re-advertise every disabled skill for the TTL and flip the catalog (rebuilding the agent) twice.
+- The catalog/corpus/digest are baked into the system prompt **at agent construction**, so a toggle must rebuild that chat's agent: `Handler.rebuildAgentForPreferenceChange(sessionID, "skill")` (shared with the MCP toggle). It takes the per-session turn lock with `TryLock` (a turn job holds it for its whole run, so this excludes a turn that is running *or about to start*), then `as.mu` for the transcript snapshot, and defers when either is busy. Only the requesting session is rebuilt eagerly.
+- The deferral still lands: `agentSession.disabledSkills` snapshots the set at build time, and `Handler.reconcileProfileAgent` compares it with the current set on the next turn — a difference forces a rebuild. Applies to every live session in that project, which is why the other sessions need no eager rebuild: the catalog only matters inside a turn, and every turn starts with that comparison. The `skill` tool reads the live preference, so a stale catalog can never *load* a disabled skill.
 
 ## API
 
@@ -71,13 +72,13 @@ effectiveDisabled = (global.Disabled ∪ project.Disabled) − (global.Enabled �
 - `PUT /api/skills/{name}/enable` and `PUT /api/skills/{name}/disable?path=&session_id=`.
 - Root resolution (`Handler.skillPrefsRoot`): `session_id` (canonical, already home-expanded project root from the session registry) → `path` (must be an exact member of `allowedProjectRoots()`) → the server's `workDir` → `""` (global layer). Deliberately **no `os.Getwd()` fallback** — a Finder/Dock-launched desktop app boots with cwd `/`.
 - Unknown skill name → **404** and no preference entry written. Kaizen (per-model tuned) skills → **400** (not user-toggleable).
-- `GET /api/skills` (installer/status + slash list) filters by the **GLOBAL layer only** (`skill.DisabledForRoot("")`) — it does NOT resolve the request's project. Rationale: the SPA fetches this endpoint ONCE for the whole page with no project scope, so filtering by any single project (the server default or a cached active tab) would let one project hide a skill from every other project — an over-filter, which is worse than the alternative. Consequence: a project-scoped disable may still appear in `/`-autocomplete, but the `skill`/`load_skill` tool refuses it (it resolves against the session's own project root) and the sidebar list shows it disabled. Its `GetSkillStatus()`-failure fallback uses the RAW loader (`LoadSkillsForRoot("")`) plus the same global filter — deliberately NOT the cwd's project layer.
-- Web client: `api.getManageableSkills(host?, projectPath?)` and `api.setSkillEnabled(name, enabled, host?, projectPath?, sessionId?)`.
+- `GET /api/skills` (installer/status + slash list) is **project-scoped when the caller names a project** (`?path=` — must be a registered root, else 400 — or `?session_id=`, resolved by `Handler.scopedSkillRoot`, which is `skillPrefsRoot` minus the `workDir` fallback) and then honours that project's full effective disabled set. **Unscoped**, it is the shared project-agnostic list: the GLOBAL layer only (`skill.DisabledForRoot("")`), so one project's disable cannot hide a skill from another. Its `GetSkillStatus()`-failure fallback lists `skill.LoadSkillsForRoot(root)` when scoped and `skill.LoadGlobalSkills()` (user-global + bundled, **never the process cwd**) when not.
+- Web client: `api.getManageableSkills(host?, projectPath?)`, `api.setSkillEnabled(name, enabled, host?, projectPath?, sessionId?)` and `api.listSkills(host?, projectPath?)`.
 
 ## Web UI
 
 - CoworkSidebar **Skills** section (`DEFAULT_SECTIONS.skills = false`, collapsed by default). Enabled rows first, disabled rows dimmed below; count badge `enabled/total`.
-- After a successful toggle the client refetches the list and calls `reloadDynamicCommands()` (`web/src/components/Chat/commands.ts`) so the `/`-autocomplete drops/restores the name without a page reload. `reloadDynamicCommands` removes only the names this module appended (never built-ins), re-fetches, notifies mounted `useCommands` consumers, and a generation counter drops additions from a superseded load.
+- The slash list follows the sidebar's active project: the skills effect calls `setDynamicCommandsScope({host, projectPath})` (a no-op when unchanged), and after a successful toggle the client refetches the list and calls `reloadDynamicCommands({host, projectPath})` (`web/src/components/Chat/commands.ts`) so the `/`-autocomplete drops/restores the name without a page reload. `reloadDynamicCommands` removes only the names this module appended (never built-ins), re-fetches, notifies mounted `useCommands` consumers, and a generation counter drops additions from a superseded load.
 
 ## Tests
 
@@ -86,16 +87,15 @@ All mutation-verified:
 - `internal/config/skill_prefs_test.go`
 - `internal/skill/enabled_test.go`
 - `internal/tool/skill_tool_test.go` (`TestSkillToolRefusesDisabledSkill`)
-- `internal/server/handler_skills_test.go` (`TestReconcileProfileAgentRebuildsOnSkillToggle` covers the deferred path; `TestHandleListSkillsUsesGlobalLayerOnly` pins that a project-scoped disable does NOT leak into `/api/skills`, while a global one does)
+- `internal/server/handler_skills_test.go` (`TestReconcileProfileAgentRebuildsOnSkillToggle` covers the deferred path; `TestHandleListSkillsScoping` pins that a scoped `/api/skills` honours the project's disables, the unscoped list does not leak them, and a global one hides everywhere; `TestRebuildAgentForPreferenceChangeRespectsTurnLock` pins the rebuild exclusion; `TestLoadGlobalSkillsIgnoresProcessCwd`)
+- `internal/config/json_splice_test.go` (byte-preserving edits, comments, malformed refusal)
 - `internal/server/handler_skills_routes_test.go` (real-mux route test — a handler-only test cannot catch a missing or shadowed route)
 - `web/src/components/Layout/CoworkSidebar.skills.test.tsx`
 - `web/src/components/Chat/commands.dynamic.test.tsx`
 
 ## Known limitation
 
-The web slash list is filtered by the GLOBAL layer only, so a project-scoped disable still autocompletes (the `skill`/`load_skill` tool enforces it, and the sidebar shows it off).
-
-Full per-tab scoping is a recorded TODO (`TODO.md`, "skill enable/disable follow-ups"): make the command registry per-tab (`useCommands(scope)` from `resolveSessionHost` + `activeTabId`, with `api.listSkills(host, path)` forwarding the scope), or drop skill names from the static registry and let autocomplete query `GET /api/skills/manage` for the active session.
+The slash list is one module-global registry (`COMMANDS`), not per tab: it is scoped to the **sidebar's active project** and reloads when that changes. A window showing several projects at once shows the active one's list. Making the registry per-tab (`useCommands(scope)`) remains a recorded TODO (`TODO.md`, "skill enable/disable follow-ups"). Enforcement never depends on it: the `skill`/`load_skill` tool refuses a disabled skill against the session's own project root.
 
 ## Design note (deliberate split)
 

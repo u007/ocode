@@ -453,6 +453,32 @@ func skillSearchPaths() []string {
 // Each base root also gets a "<root>/kaizen" entry appended, because
 // loadSkillsFromPaths descends only a single level (<path>/<name>/SKILL.md).
 func SkillSearchPathsForRoot(root string) []string {
+	var projectDirs []string
+	if root != "" {
+		projectDirs = ProjectLocalSkillDirs(root)
+	} else if cwd, err := os.Getwd(); err == nil {
+		projectDirs = ProjectLocalSkillDirs(cwd)
+	}
+	return skillSearchPathsWith(projectDirs)
+}
+
+// globalSkillSearchPaths is SkillSearchPathsForRoot without any project layer:
+// the user-global dirs and the bundled set only. It never consults the process
+// cwd, which for a multi-project server is some unrelated directory.
+func globalSkillSearchPaths() []string {
+	return skillSearchPathsWith(nil)
+}
+
+// LoadGlobalSkills loads every skill discoverable WITHOUT a project: user-global
+// and bundled skills only. Unlike LoadSkillsForRoot("") — which falls back to the
+// working directory's project skills — the result is the same whatever directory
+// the process was started in, so it is safe for a surface shared by every
+// project.
+func LoadGlobalSkills() []Skill {
+	return loadSkillsFromPaths(globalSkillSearchPaths())
+}
+
+func skillSearchPathsWith(projectDirs []string) []string {
 	var paths []string
 
 	home, err := os.UserHomeDir()
@@ -462,11 +488,7 @@ func SkillSearchPathsForRoot(root string) []string {
 		paths = append(paths, filepath.Join(home, ".claude", "skills"))
 	}
 
-	if root != "" {
-		paths = append(paths, ProjectLocalSkillDirs(root)...)
-	} else if cwd, err := os.Getwd(); err == nil {
-		paths = append(paths, ProjectLocalSkillDirs(cwd)...)
-	}
+	paths = append(paths, projectDirs...)
 
 	// Embedded (bundled) skills — appended LAST so disk skills (global and
 	// project, above) win via loadSkillsFromPaths' first-wins-on-name rule.

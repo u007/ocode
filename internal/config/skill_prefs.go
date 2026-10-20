@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,10 +110,10 @@ func loadProjectSkillPrefs(root string) (SkillsConfig, error) {
 		}
 		return prefs, fmt.Errorf("read project settings: %w", err)
 	}
-	// Decode into a raw map so unknown keys are preserved on the next save and
-	// a malformed sibling key cannot block skill toggling.
+	// Decode into a raw map so a malformed sibling key cannot block skill
+	// toggling. Comments are tolerated (blanked, not removed, to keep offsets).
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(blankJSONCComments(data), &raw); err != nil {
 		return prefs, fmt.Errorf("parse project settings: %w", err)
 	}
 	block, ok := raw[projectSettingsSkillsKey]
@@ -127,8 +129,11 @@ func loadProjectSkillPrefs(root string) (SkillsConfig, error) {
 }
 
 // saveProjectSkillPrefs writes ONLY the "skills" block of a project's
-// .ocode/settings.json, preserving every other key byte-for-byte at the JSON
-// value level (same key-preserving merge as saveProjectSettings).
+// .ocode/settings.json. It splices that one member into the file's own bytes
+// (spliceTopLevelKey), so key order, indentation, formatting and // comments of
+// everything else survive a toggle and a git-tracked settings file diffs by
+// just the skills lines. A file that is not a JSON(C) object is refused, never
+// overwritten.
 func saveProjectSkillPrefs(root string, prefs SkillsConfig) error {
 	path := ProjectSettingsPathForRoot(root)
 	if path == "" {
@@ -138,12 +143,13 @@ func saveProjectSkillPrefs(root string, prefs SkillsConfig) error {
 		return fmt.Errorf("create .ocode directory: %w", err)
 	}
 
-	raw := make(map[string]json.RawMessage)
+	var existing []byte
+	exists := true
 	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("parse existing settings: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
+		existing = data
+	} else if os.IsNotExist(err) {
+		exists = false
+	} else {
 		return fmt.Errorf("read settings file: %w", err)
 	}
 
@@ -153,21 +159,21 @@ func saveProjectSkillPrefs(root string, prefs SkillsConfig) error {
 	}
 	// An empty block is deleted rather than written as {} so a project that
 	// ends up all-default leaves settings.json exactly as it found it.
-	if len(block.Disabled) == 0 && len(block.Enabled) == 0 {
-		delete(raw, projectSettingsSkillsKey)
-	} else {
-		data, err := json.Marshal(block)
-		if err != nil {
-			return fmt.Errorf("marshal project skills: %w", err)
-		}
-		raw[projectSettingsSkillsKey] = data
+	empty := len(block.Disabled) == 0 && len(block.Enabled) == 0
+	if empty && !exists {
+		return nil
 	}
-
-	data, err := json.MarshalIndent(raw, "", "  ")
+	out, err := spliceTopLevelKey(existing, projectSettingsSkillsKey, block, empty)
 	if err != nil {
-		return fmt.Errorf("marshal settings: %w", err)
+		return fmt.Errorf("parse existing settings: %w", err)
 	}
-	return writeFileAtomic(path, data, 0o644)
+	if exists && bytes.Equal(out, existing) {
+		return nil
+	}
+	if len(bytes.TrimSpace(existing)) == 0 {
+		out = append(out, '\n') // a file we just created ends with a newline
+	}
+	return writeFileAtomic(path, out, 0o644)
 }
 
 // writeFileAtomic writes via a temp file + rename so a reader (the skill loader,
@@ -205,21 +211,24 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // EffectiveDisabledSkills resolves the two-layer preference set for a project
 // root and returns it as a lookup set. root may be empty (no project layer).
 //
-// Reads are inherently best-effort: an unreadable project settings file leaves
-// the global layer in force rather than failing, because this sits on the skill
-// loading path — failing closed here would silently empty every skill catalog.
-// The error is returned so callers that care (the sidebar) can surface it.
+// The two layers load independently and the result is ALWAYS non-nil: a layer
+// that cannot be read contributes nothing while the other stays in force. This
+// sits on the skill loading path, so failing closed would silently empty every
+// skill catalog, and letting a bad global config hide a readable project layer
+// would silently re-enable that project's disabled skills. Every layer error is
+// still returned (joined) so callers that care can tell the set is degraded:
+// the sidebar surfaces it, and the cache in internal/skill declines to keep it.
 func EffectiveDisabledSkills(root string) (map[string]bool, error) {
 	var global SkillsConfig
-	if err := loadGlobalSkills(&global); err != nil {
-		return nil, err
+	globalErr := loadGlobalSkills(&global)
+	if globalErr != nil {
+		global = SkillsConfig{}
 	}
-	project, err := loadProjectSkillPrefs(root)
-	if err != nil {
-		// Degrade to global-only but report the problem to the caller.
+	project, projectErr := loadProjectSkillPrefs(root)
+	if projectErr != nil {
 		project = SkillsConfig{}
 	}
-	return resolveDisabledSet(global, project), err
+	return resolveDisabledSet(global, project), errors.Join(globalErr, projectErr)
 }
 
 // loadGlobalSkills reads only the global "skills" block, through the same

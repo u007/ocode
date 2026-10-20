@@ -391,13 +391,13 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **While a goal is evaluable (active or paused), the goal judge owns the post-turn
   verdict.** The auto-continue judge is not dispatched alongside it: server
   `autoContinueShouldResume` (`internal/server/agent_session.go:1376`), TUI
-  `streamDoneMsg` (`internal/tui/model.go:5631`).
+  `streamDoneMsg` (`internal/tui/model.go:5418`).
 - **A pending permission or question ask never auto-resumes a goal.** Server
   `agent_session.go:1299`; TUI post-turn decisions sit behind `queueDrainBlocked()`.
 - **Pause never clears.** A paused goal keeps its condition, and `GoalMarkHumanTurn`
   reactivates it. Only `ClearGoal` removes it: `/goal clear`, `/new`, `/clear`, or a
   session switch. Human turns never reactivate `met` or `impossible`.
-- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:11936`).
+- **`/new` and `/clear` clear the goal** (`handleNewCmd`, `internal/tui/model.go:12075`).
 - **The 50-turn cap is sticky.** Only `SetGoal` (a new `/goal <text>`) resets `Turns`;
   a human turn does not. The judge still runs on a capped turn: a `not_met` pauses as
   `capped`, but `met` and `impossible` still close the goal.
@@ -407,7 +407,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
-  `internal/tui/model.go:21233`), so the TUI's carry-forward copy cannot overwrite it.
+  `internal/tui/model.go:21472`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## Task Output Contracts (`expected_output`)
 An optional `expected_output` on a `task` dispatch is verified (shape, not truth)

@@ -380,3 +380,29 @@ func TestSaveSkillEnabledConcurrentTogglesAllSurvive(t *testing.T) {
 		}
 	}
 }
+
+// A global config that cannot be loaded must not hide a readable project layer:
+// the project's disables stay in force, the set is non-nil, and the error is
+// still reported so callers can tell it is degraded.
+func TestEffectiveDisabledSkillsUnreadableGlobalKeepsProjectLayer(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	root := t.TempDir()
+	cfgPath := writeTestGlobalSkills(t, SkillsConfig{Disabled: []string{"docx"}})
+	if err := os.WriteFile(cfgPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestProjectSettings(t, root, map[string]any{
+		"skills": map[string]any{"disabled": []string{"stt"}},
+	})
+
+	got, err := EffectiveDisabledSkills(root)
+	if err == nil {
+		t.Fatal("expected an error for an unreadable global config")
+	}
+	if got == nil || !got["stt"] {
+		t.Fatalf("project layer lost after global load failure: %v", got)
+	}
+	if got["docx"] {
+		t.Fatalf("unreadable global layer must contribute nothing: %v", got)
+	}
+}

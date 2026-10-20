@@ -178,6 +178,14 @@ const dynamicNames = new Set<string>();
 // Bumped by reloadDynamicCommands. A load that started before a reload must not
 // push its (now stale) additions.
 let dynamicGeneration = 0;
+// The project/host the slash list is scoped to (see setDynamicCommandsScope).
+// Empty means the shared, project-agnostic list.
+export interface DynamicCommandsScope {
+  host?: string;
+  projectPath?: string;
+}
+let dynamicScope: DynamicCommandsScope = {};
+const scopeKey = (s: DynamicCommandsScope) => `${s.host ?? ""}\u0000${s.projectPath ?? ""}`;
 // useCommands subscribers, notified after a reload so every slash menu/palette
 // re-renders with the new list instead of holding its mount-time copy.
 const dynamicListeners = new Set<() => void>();
@@ -190,13 +198,14 @@ export function loadDynamicCommands(): Promise<void> {
   if (dynamicLoadPromise) return dynamicLoadPromise;
 
   const gen = dynamicGeneration;
+  const scope = dynamicScope;
   dynamicLoadPromise = (async () => {
     const [commands, skills] = await Promise.all([
       api.listCommands().catch((err) => {
         console.error("failed to load custom commands", err);
         return [] as { name: string; description?: string }[];
       }),
-      api.listSkills().catch((err) => {
+      api.listSkills(scope.host, scope.projectPath).catch((err) => {
         console.error("failed to load skills", err);
         return [] as { name: string; description?: string }[];
       }),
@@ -235,7 +244,8 @@ export function loadDynamicCommands(): Promise<void> {
  *  is a discovery surface, so a disabled skill must stop appearing in it without
  *  a page reload. Every `useCommands` consumer is notified once the fresh list
  *  has been merged. */
-export function reloadDynamicCommands(): Promise<void> {
+export function reloadDynamicCommands(scope?: DynamicCommandsScope): Promise<void> {
+  if (scope) dynamicScope = scope;
   dynamicGeneration++;
   if (dynamicNames.size > 0) {
     const kept = COMMANDS.filter((c) => !dynamicNames.has(c.name));
@@ -249,6 +259,14 @@ export function reloadDynamicCommands(): Promise<void> {
   return done.then(() => {
     for (const notify of dynamicListeners) notify();
   });
+}
+
+/** Scope the slash list to a project so a skill disabled for THAT project stops
+ *  being offered. A no-op when the scope is unchanged (cheap to call from an
+ *  effect); otherwise it reloads. */
+export function setDynamicCommandsScope(scope: DynamicCommandsScope): Promise<void> {
+  if (scopeKey(scope) === scopeKey(dynamicScope)) return Promise.resolve();
+  return reloadDynamicCommands(scope);
 }
 
 /** React hook: ensures dynamic commands are loaded and returns the merged
@@ -375,7 +393,7 @@ export interface CommandContext {
     /** LSP server status + aggregated diagnostic counts (/lsp). */
     getLSPStatuses: (host?: string) => Promise<{ lsp_servers: import("../../api/types").LSPStatus[] }>;
     /** Available skills (/skills). */
-    listSkills: () => Promise<import("../../api/types").SkillEntry[]>;
+    listSkills: (host?: string, projectPath?: string) => Promise<import("../../api/types").SkillEntry[]>;
     /** MCP server status (/mcp). */
     getMCP: (host?: string, sessionId?: string) => Promise<import("../../api/types").MCPStatus[]>;
     /** GitHub PR details + diff (/github pr). */
@@ -3008,7 +3026,7 @@ async function handleAgents(args: string, ctx: CommandContext): Promise<CommandR
 
 async function handleSkills(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const skills = await ctx.api.listSkills();
+    const skills = await ctx.api.listSkills(dynamicScope.host, dynamicScope.projectPath);
     if (!skills.length) {
       return {
         handled: true,

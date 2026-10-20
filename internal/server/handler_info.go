@@ -13,28 +13,37 @@ import (
 	"github.com/u007/ocode/internal/skill"
 )
 
+// HandleListSkills serves the slash-command / autocomplete skill list.
+//
+// The list is project-scoped when the caller identifies a project (?session_id=
+// or ?path=, resolved exactly like the sidebar's /api/skills/manage), and then
+// honours that project's full effective disabled set — a skill disabled for the
+// project stops being offered in its slash menu. Without a project it is the
+// shared, project-agnostic list: the GLOBAL disable layer only, listing only
+// user-global and bundled skills. It must not borrow the server's default
+// project or the process cwd (a desktop app boots with cwd "/"), or one
+// project's local skills and disables would leak into every other project.
 func (h *Handler) HandleListSkills(w http.ResponseWriter, r *http.Request) {
-	// This list is a SHARED, effectively global surface: the SPA's
-	// loadDynamicCommands fetches it ONCE for the whole page with no project
-	// scope. Filtering it by the server's default project would therefore let
-	// one project hide a skill from EVERY other project on the server (an
-	// over-filter, which is worse than the alternative).
-	//
-	// So apply the GLOBAL layer only. A global disable is a statement about
-	// every project and hides the name everywhere. A project-scoped disable is
-	// surfaced per-project by GET /api/skills/manage (the sidebar list) and
-	// enforced by the skill tool, which always resolves against the session's
-	// own project root — the name may still appear in the shared autocomplete,
-	// but loading it is refused there.
-	disabled := skill.DisabledForRoot("")
+	root, err := h.scopedSkillRoot(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// root == "" means "no project layer": DisabledForRoot returns the global
+	// lists only, the same scope SaveSkillEnabled writes for a blank root.
+	disabled := skill.DisabledForRoot(root)
 
 	statuses, err := skill.GetSkillStatus()
 	if err != nil {
-		// Fallback: raw discovery (the installer index was unreadable). Use the
-		// RAW loader and apply the same GLOBAL filter, so a global disable is
-		// honoured here too and the cwd's project layer cannot over-filter the
-		// shared list.
-		basic := skill.LoadSkillsForRoot("")
+		// Fallback: raw discovery (the installer index was unreadable), filtered
+		// by the same disabled set. Unscoped, it lists global skills only so the
+		// cwd's project layer cannot leak into the shared list.
+		var basic []skill.Skill
+		if root != "" {
+			basic = skill.LoadSkillsForRoot(root)
+		} else {
+			basic = skill.LoadGlobalSkills()
+		}
 		type entry struct {
 			Name        string `json:"name"`
 			Description string `json:"description"`

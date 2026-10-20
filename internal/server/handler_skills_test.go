@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
@@ -275,12 +276,13 @@ func TestReconcileProfileAgentRebuildsOnSkillToggle(t *testing.T) {
 	}
 }
 
-// TestHandleListSkillsUsesGlobalLayerOnly pins the shared-list rule: the SPA
-// fetches /api/skills ONCE for the whole page with no project scope, so a
-// project-scoped disable must NOT remove the name for every other project. Only
-// the GLOBAL layer filters this endpoint; per-project filtering lives in
-// /api/skills/manage and enforcement lives in the skill tool.
-func TestHandleListSkillsUsesGlobalLayerOnly(t *testing.T) {
+// TestHandleListSkillsScoping pins the slash-list contract: an UNSCOPED request
+// is the shared, project-agnostic list (global disable layer only, so one
+// project's disable cannot hide a skill from every other project), while a
+// request that names a project (?path= or ?session_id=) also honours that
+// project's own disables — otherwise the slash menu would keep offering a skill
+// the project switched off.
+func TestHandleListSkillsScoping(t *testing.T) {
 	home := t.TempDir()
 	setHomeTree(t, home)
 	skill.InvalidateSkillCache()
@@ -301,9 +303,9 @@ func TestHandleListSkillsUsesGlobalLayerOnly(t *testing.T) {
 	project := t.TempDir()
 	h.workDir = project
 
-	listed := func(t *testing.T, path string) []string {
+	listed := func(t *testing.T, query string) []string {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "/api/skills?path="+url.QueryEscape(path), nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/skills"+query, nil)
 		rec := httptest.NewRecorder()
 		h.HandleListSkills(rec, req)
 		if rec.Code != http.StatusOK {
@@ -321,28 +323,123 @@ func TestHandleListSkillsUsesGlobalLayerOnly(t *testing.T) {
 		}
 		return names
 	}
+	scoped := "?path=" + url.QueryEscape(project)
 
-	if names := listed(t, project); !containsString(names, "alpha") {
+	if names := listed(t, scoped); !containsString(names, "alpha") {
 		t.Fatalf("precondition: alpha not listed: %v", names)
 	}
 
-	// A PROJECT-scoped disable applies to that project only; the shared list must
-	// keep the name so another project is unaffected.
+	// A PROJECT-scoped disable hides the name for that project's slash list...
 	if err := config.SaveSkillEnabled(project, "alpha", false); err != nil {
 		t.Fatalf("project disable: %v", err)
 	}
 	skill.InvalidateSkillCache()
-	if names := listed(t, project); !containsString(names, "alpha") {
+	if names := listed(t, scoped); containsString(names, "alpha") {
+		t.Fatalf("a project-disabled skill is still offered in that project's list: %v", names)
+	}
+	// ...but not in the shared list, so another project is unaffected.
+	if names := listed(t, ""); !containsString(names, "alpha") {
 		t.Fatalf("a project-scoped disable leaked into the shared /api/skills list: %v", names)
 	}
 
-	// A GLOBAL disable is a statement about every project, so it hides the name.
+	// A GLOBAL disable is a statement about every project: it hides the name
+	// everywhere, scoped or not.
 	if err := config.SaveSkillEnabled("", "alpha", false); err != nil {
 		t.Fatalf("global disable: %v", err)
 	}
 	skill.InvalidateSkillCache()
-	if names := listed(t, project); containsString(names, "alpha") {
-		t.Fatalf("a global disable was not applied to /api/skills: %v", names)
+	for _, q := range []string{"", scoped} {
+		if names := listed(t, q); containsString(names, "alpha") {
+			t.Fatalf("a global disable was not applied to /api/skills%s: %v", q, names)
+		}
+	}
+
+	// An unregistered ?path= is rejected, never silently widened to the default.
+	req := httptest.NewRequest(http.MethodGet, "/api/skills?path="+url.QueryEscape(t.TempDir()), nil)
+	rec := httptest.NewRecorder()
+	h.HandleListSkills(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unregistered path: status = %d, want 400", rec.Code)
+	}
+}
+
+// The unscoped fallback listing (used when the installer index is unreadable)
+// must not pick up the process cwd's project skills: LoadSkillsForRoot("")
+// resolves a blank root against the cwd, which on a multi-project server is an
+// unrelated directory.
+func TestLoadGlobalSkillsIgnoresProcessCwd(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	skill.InvalidateSkillCache()
+	t.Cleanup(skill.InvalidateSkillCache)
+
+	cwdProject := t.TempDir()
+	writeServerSkill(t, cwdProject, "cwd-only")
+	t.Chdir(cwdProject)
+
+	for _, s := range skill.LoadGlobalSkills() {
+		if s.Name == "cwd-only" {
+			t.Fatalf("LoadGlobalSkills leaked the cwd project's skill: %s", s.Source)
+		}
+	}
+	// Control: the cwd-resolving loader does see it, so the test can fail.
+	found := false
+	for _, s := range skill.LoadSkillsForRoot("") {
+		found = found || s.Name == "cwd-only"
+	}
+	if !found {
+		t.Fatal("control failed: LoadSkillsForRoot(\"\") should resolve against the cwd")
+	}
+}
+
+// A toggle must not rebuild an agent out from under a turn that is running or
+// about to start: the turn lock is the gate, and a refused rebuild leaves the
+// resident session (and its transcript) untouched.
+func TestRebuildAgentForPreferenceChangeRespectsTurnLock(t *testing.T) {
+	h, root := skillTestHandler(t)
+	id := session.NewSessionID()
+	h.sessions.Register(id, root)
+	ready := make(chan struct{})
+	close(ready)
+	h.mcpCache = &mcpCache{ready: ready, tools: []tool.Tool{}, errs: nil}
+
+	as, stage, err := h.buildAgentSession(id, "opencode-go/deepseek-v4-flash", nil, root)
+	if err != nil {
+		t.Fatalf("build agent: %v (stage %s)", err, stage)
+	}
+	defer as.agent.Shutdown()
+	h.replaceAgentSession(id, as)
+
+	// A job holding the turn lock (running, or between persist and runTurn).
+	lock := h.sessionTurnLock(id)
+	lock.Lock()
+	h.rebuildAgentForPreferenceChange(id, "skill")
+	if got := h.lookupAgentSession(id); got != as {
+		lock.Unlock()
+		t.Fatal("agent was rebuilt while the session turn lock was held")
+	}
+	lock.Unlock()
+
+	// A busy session (as.mu owned by another writer) is likewise left alone.
+	as.mu.Lock()
+	h.rebuildAgentForPreferenceChange(id, "skill")
+	same := h.lookupAgentSession(id) == as
+	as.mu.Unlock()
+	if !same {
+		t.Fatal("agent was rebuilt while the session mutex was held")
+	}
+
+	// Idle: the rebuild goes through and carries the transcript over.
+	as.mu.Lock()
+	as.messages = append(as.messages, agent.Message{Role: "user", Content: "hello"})
+	as.mu.Unlock()
+	h.rebuildAgentForPreferenceChange(id, "skill")
+	reb := h.lookupAgentSession(id)
+	if reb == as {
+		t.Fatal("idle session was not rebuilt")
+	}
+	defer reb.agent.Shutdown()
+	if len(reb.messages) != 1 || reb.messages[0].Content != "hello" {
+		t.Fatalf("rebuilt session lost the transcript: %+v", reb.messages)
 	}
 }
 

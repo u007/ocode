@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/config"
@@ -202,5 +203,82 @@ func TestExcludeDisabledForRootDoesNotMutateInput(t *testing.T) {
 	}
 	if !hasSkill(out, "beta") {
 		t.Fatalf("ExcludeDisabledForRoot dropped beta: %v", skillNames(out))
+	}
+}
+
+func ageDisabledCache(t *testing.T, root string) {
+	t.Helper()
+	disabledCacheMu.Lock()
+	defer disabledCacheMu.Unlock()
+	e, ok := disabledCache[prefsRoot(root)]
+	if !ok {
+		t.Fatalf("no cached disabled set for %q", root)
+	}
+	e.ts = time.Now().Add(-time.Hour)
+	disabledCache[prefsRoot(root)] = e
+}
+
+// A failed preference read must not be cached as the truth: while the project
+// settings file is unreadable the last good set stays in force instead of every
+// disabled skill reappearing for a TTL (and the catalog flapping twice).
+func TestDisabledForRootKeepsLastGoodSetWhenReadFails(t *testing.T) {
+	disabledSkillEnv(t)
+	InvalidateDisabledSkillCache()
+	root := t.TempDir()
+	if err := config.SaveSkillEnabled(root, "alpha", false); err != nil {
+		t.Fatal(err)
+	}
+	if !DisabledForRoot(root)["alpha"] {
+		t.Fatal("setup: alpha should be disabled")
+	}
+
+	// Corrupt the file mid-edit and let the cache entry expire.
+	path := config.ProjectSettingsPathForRoot(root)
+	if err := os.WriteFile(path, []byte("{\"skills\": "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ageDisabledCache(t, root)
+	if !DisabledForRoot(root)["alpha"] {
+		t.Fatal("a failed read re-enabled a disabled skill; the last good set must stay in force")
+	}
+
+	// Once the file is valid again the new truth is picked up on the next miss.
+	if err := os.WriteFile(path, []byte(`{"skills":{"disabled":["beta"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ageDisabledCache(t, root)
+	got := DisabledForRoot(root)
+	if got["alpha"] || !got["beta"] {
+		t.Fatalf("recovered set = %v, want only beta", got)
+	}
+}
+
+// With no good set yet, a degraded result is returned but never cached, so the
+// very next call retries the read.
+func TestDisabledForRootDoesNotCacheDegradedResult(t *testing.T) {
+	disabledSkillEnv(t)
+	InvalidateDisabledSkillCache()
+	root := t.TempDir()
+	path := config.ProjectSettingsPathForRoot(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := DisabledForRoot(root); got == nil {
+		t.Fatal("DisabledForRoot must never return nil")
+	}
+	disabledCacheMu.Lock()
+	cached := len(disabledCache)
+	disabledCacheMu.Unlock()
+	if cached != 0 {
+		t.Fatalf("a degraded result was cached (%d entries)", cached)
+	}
+	if err := os.WriteFile(path, []byte(`{"skills":{"disabled":["alpha"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !DisabledForRoot(root)["alpha"] {
+		t.Fatal("repaired file not picked up on the next call")
 	}
 }

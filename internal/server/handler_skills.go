@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/skill"
@@ -53,6 +54,24 @@ type skillManageEntry struct {
 // boots with cwd "/", so resolving against it would read the wrong project and
 // write .ocode/settings.json into "/".
 func (h *Handler) skillPrefsRoot(r *http.Request) (string, error) {
+	root, err := h.scopedSkillRoot(r)
+	if err != nil || root != "" {
+		return root, err
+	}
+	if h.workDir != "" {
+		return h.workDir, nil
+	}
+	// No project: fall through to the GLOBAL layer. Deliberately NOT os.Getwd() —
+	// a Finder/Dock-launched desktop app starts with cwd "/", which would both
+	// read the wrong project's settings and write .ocode/settings.json into "/".
+	return "", nil
+}
+
+// scopedSkillRoot resolves the project the CALLER named — its session's root, or
+// an explicit ?path= that is a registered project — and returns "" when it named
+// none. It never falls back to the server's default project: read-only surfaces
+// shared across projects use it so an unscoped request stays project-agnostic.
+func (h *Handler) scopedSkillRoot(r *http.Request) (string, error) {
 	if r != nil {
 		// The session registry holds the CANONICAL project root (already
 		// home-expanded by projects.Add on the server that owns it), so it is
@@ -72,12 +91,6 @@ func (h *Handler) skillPrefsRoot(r *http.Request) (string, error) {
 			return "", fmt.Errorf("path %q is not a project registered with this server", path)
 		}
 	}
-	if h.workDir != "" {
-		return h.workDir, nil
-	}
-	// No project: fall through to the GLOBAL layer. Deliberately NOT os.Getwd() —
-	// a Finder/Dock-launched desktop app starts with cwd "/", which would both
-	// read the wrong project's settings and write .ocode/settings.json into "/".
 	return "", nil
 }
 
@@ -144,6 +157,15 @@ func (h *Handler) HandleListManageableSkills(w http.ResponseWriter, r *http.Requ
 // (mirroring the MCP toggle) and instead lands on the next turn, which
 // reconcileProfileAgent triggers by comparing the session's snapshotted
 // disabled set against the current one.
+//
+// Only the REQUESTING session is rebuilt eagerly. Every other live session on the
+// project (or every session, for a global toggle) keeps its old catalog only
+// until its next turn: the catalog is consumed by the model, which can act only
+// inside a turn, and each turn starts with reconcileProfileAgent comparing the
+// session's snapshotted disabled set with the current one and rebuilding on a
+// difference (TestReconcileProfileAgentRebuildsOnSkillToggle). The skill tool
+// itself checks the live preference, so a stale catalog can never LOAD a
+// disabled skill.
 func (h *Handler) HandleSetSkillEnabled(w http.ResponseWriter, r *http.Request, name string, enabled bool) {
 	name = strings.TrimSpace(name)
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
@@ -220,26 +242,54 @@ func (h *Handler) rebuildAgentForSkills(sessionID string) {
 
 // rebuildAgentForPreferenceChange force-rebuilds a session's agent after a
 // preference that is baked into its construction (MCP tool set, skill catalog)
-// changed. No-op when there is no live agent; deferred while a turn is active so
-// in-flight work keeps its agent (the next turn reconciles).
+// changed. No-op when there is no live agent; deferred while a turn is running
+// or starting so in-flight work keeps its agent (the next turn reconciles — for
+// skills via reconcileProfileAgent's disabled-set comparison).
+//
+// Exclusion: the per-session turn lock is held by a turn job for its whole run
+// (persist -> reconcile -> runTurn), so TryLock on it excludes both a running
+// turn and one that is about to start; checking IsTurnActive alone left a window
+// where a turn began between the check and the swap and its rows were lost from
+// the rebuilt transcript. as.mu then guards the transcript snapshot against the
+// other writers (auto-compaction splice, rewind). Lock order matches the turn
+// path: turn lock -> as.mu -> h.mu.
 func (h *Handler) rebuildAgentForPreferenceChange(sessionID, what string) {
-	as := h.lookupAgentSession(sessionID)
-	if as == nil {
-		return
-	}
 	entry := h.sessions.Lookup(sessionID)
 	if entry == nil {
 		return
 	}
-	if h.sessions.IsTurnActive(sessionID) {
+	deferred := func(why string) {
 		debuglog.Log.Append(debuglog.Entry{
 			Kind:      debuglog.KindAgent,
-			Message:   what + " toggle deferred: turn active for session " + sessionID,
+			Message:   what + " toggle deferred: " + why + " for session " + sessionID,
 			SessionID: sessionID,
 		})
+	}
+
+	turnLock := h.sessionTurnLock(sessionID)
+	if !turnLock.TryLock() {
+		deferred("turn active")
 		return
 	}
-	newAs, stage, err := h.buildAgentSession(sessionID, as.model, as.messages, entry.ProjectRoot)
+	defer turnLock.Unlock()
+	if h.sessions.IsTurnActive(sessionID) {
+		deferred("turn active")
+		return
+	}
+
+	// Looked up only now, under the turn lock, so the session we rebuild is the
+	// one a starting turn would also see.
+	as := h.lookupAgentSession(sessionID)
+	if as == nil {
+		return
+	}
+	if !as.mu.TryLock() {
+		deferred("session busy")
+		return
+	}
+	messages := append([]agent.Message(nil), as.messages...)
+	newAs, stage, err := h.buildAgentSession(sessionID, as.model, messages, entry.ProjectRoot)
+	as.mu.Unlock() // not held across replace: it shuts the old agent down
 	if err != nil {
 		log.Printf("serve error: rebuild agent for %s after %s toggle (stage %s): %v", sessionID, what, stage, err)
 		return
