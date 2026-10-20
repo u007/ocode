@@ -771,12 +771,14 @@ function AddRemoteDialog({
   initialPath = "",
   initialHost = "",
   initialPort,
+  initialName = "",
+  allowName = false,
   heading = "Add Remote Project",
   submitLabel = "Add Remote",
 }: {
   open: boolean;
   onClose: () => void;
-  onAdd: (host: string, path: string, port?: number) => Promise<void>;
+  onAdd: (host: string, path: string, port?: number, name?: string) => Promise<void>;
   /** Prefill for the remote path — used by "Duplicate as remote…" so the
    *  source project's path does not have to be retyped. */
   initialPath?: string;
@@ -785,12 +787,19 @@ function AddRemoteDialog({
   initialHost?: string;
   /** Prefill for the remote SSH port (optional). */
   initialPort?: number;
+  /** Prefill for the display name (optional). Used by "Duplicate as remote…"
+   *  to carry the source project's name, editable by the user. */
+  initialName?: string;
+  /** When true, show an editable display-name field. Only meaningful for the
+   *  duplicate flow; plain "Add Remote" derives the name from host:path. */
+  allowName?: boolean;
   heading?: string;
   submitLabel?: string;
 }) {
   const [host, setHost] = useState("");
   const [path, setPath] = useState("");
   const [port, setPort] = useState("");
+  const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const hostRef = useRef<HTMLInputElement>(null);
@@ -800,11 +809,12 @@ function AddRemoteDialog({
       setHost(initialHost);
       setPath(initialPath);
       setPort(initialPort ? String(initialPort) : "");
+      setName(initialName);
       setError(null);
       setLoading(false);
       setTimeout(() => hostRef.current?.focus(), 50);
     }
-  }, [open, initialPath, initialHost, initialPort]);
+  }, [open, initialPath, initialHost, initialPort, initialName]);
 
   if (!open) return null;
 
@@ -818,7 +828,7 @@ function AddRemoteDialog({
     setLoading(true);
     setError(null);
     try {
-      await onAdd(h, p, parsedPort);
+      await onAdd(h, p, parsedPort, name.trim() || undefined);
       onClose();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -850,6 +860,9 @@ function AddRemoteDialog({
           onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") onClose(); }}
         />
         <Input value={port} onChange={(e) => setPort(e.target.value)} placeholder="SSH port (optional; ignored for WSL)" inputMode="numeric" className="h-7 text-xs" />
+        {allowName && (
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name (optional)" className="h-7 text-xs" />
+        )}
         {error && <div className="text-[11px] text-destructive">{error}</div>}
         <div className="text-[11px] text-muted-foreground">
           SSH: uses system <code className="bg-muted px-1 rounded">ssh</code> config. WSL: <code className="bg-muted px-1 rounded">wsl:</code>distro on Windows.
@@ -1304,14 +1317,15 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
   // "Duplicate as remote…": reuse the source project's path, name and group
   // for a NEW (host, path) entry. The backend rejects a target that is already
   // saved (409), which the dialog surfaces verbatim.
-  const handleDuplicateRemote = useCallback(async (host: string, path: string, port?: number) => {
+  const handleDuplicateRemote = useCallback(async (host: string, path: string, port?: number, name?: string) => {
     const source = duplicatingRemote;
     if (!source) return;
+    const resolvedName = (name && name.trim()) ? name.trim() : source.name;
     await duplicateProjectAsRemote({
       host,
       path,
       ...(port ? { port } : {}),
-      ...(source.name ? { name: source.name } : {}),
+      ...(resolvedName ? { name: resolvedName } : {}),
       ...(source.group ? { group: source.group } : {}),
     });
   }, [duplicatingRemote, duplicateProjectAsRemote]);
@@ -1328,6 +1342,8 @@ export default function ProjectSidebar({ isOpen, onToggle, width, isMobile, onOp
       initialPath={duplicatingRemote?.path ?? ""}
       initialHost={duplicatingRemote?.host ?? ""}
       initialPort={duplicatingRemote?.remote_port}
+      initialName={duplicatingRemote?.name ?? ""}
+      allowName
       heading={duplicatingRemote ? `Duplicate "${duplicatingRemote.name}" as remote` : "Duplicate as remote"}
       submitLabel="Duplicate"
     />

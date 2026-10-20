@@ -50,6 +50,20 @@ interface FlatTree {
   folders: string[];
 }
 
+// Height of one result row, in pixels.
+//
+// The row is a cmdk item with `py-3` (12px top + 12px bottom) around a
+// single 20px line of `text-sm`, so the content box is 44px. The path text is
+// truncated to one line (see the `truncate` class on the path span) so a long
+// path cannot wrap and grow the row — a fixed height is what lets the
+// virtualizer compute the exact scroll extent.
+//
+// This MUST match the virtualizer's `estimateSize`. If the estimate is
+// smaller than the real row height, the virtualizer's total size is shorter
+// than the real content and the last rows are clipped off the bottom of the
+// list: they exist in the DOM but can never be scrolled into view.
+const FILE_ROW_HEIGHT = 44;
+
 function flattenTree(nodes: FileNode[], out: FlatTree = { files: [], folders: [] }): FlatTree {
   for (const n of nodes) {
     if (n.is_dir) {
@@ -65,6 +79,9 @@ function flattenTree(nodes: FileNode[], out: FlatTree = { files: [], folders: []
 export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, projectPath, projectHost, initialQuery }: Props) {
   const [tree, setTree] = useState<FlatTree>({ files: [], folders: [] });
   const [query, setQuery] = useState("");
+  // True when the server's tree walk hit its node cap, so the index is
+  // incomplete and some files on disk are not searchable.
+  const [treeTruncated, setTreeTruncated] = useState(false);
   // The choice is per project (and remote host); follow a project switch.
   const hiddenProjectKey = showHiddenFilesProjectKey(projectPath, projectHost);
   const [showHiddenFiles, setShowHiddenFiles] = useState(() => loadShowHiddenFiles(hiddenProjectKey));
@@ -101,9 +118,11 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
       .then((res) => res.json())
       .then((data: FileTreeResponse) => {
         if (controller.signal.aborted) return;
-        if (data.truncated) {
-          console.warn("File tree truncated; not all files are searchable");
-        }
+        // The server caps the tree walk (maxTreeNodes) so a huge project
+        // cannot hang the request. When it truncates, files that exist are
+        // missing from the index — say so in the UI, otherwise the user
+        // searches for a file that is on disk and is told it does not exist.
+        setTreeTruncated(!!data.truncated);
         setTree(flattenTree(data.children));
       })
       .catch((err) => {
@@ -148,7 +167,12 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
   const virtualizer = useVirtualizer({
     count: filteredFiles.length,
     getScrollElement: () => scrollContainerRef.current,
-    estimateSize: () => 42,
+    // The row height is FIXED (see FILE_ROW_HEIGHT): the path text is
+    // truncated to one line, so every row is exactly the same height. The
+    // estimate must match it exactly — a mismatch makes the virtualizer's
+    // total size shorter than the real content, which clips the tail of the
+    // list and leaves the last matches unreachable by scrolling.
+    estimateSize: () => FILE_ROW_HEIGHT,
     overscan: 8,
   });
 
@@ -182,7 +206,7 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
           <CommandList ref={scrollContainerRef}>
             <CommandEmpty>{keywords.length > 0 ? "No matching files" : "No files found"}</CommandEmpty>
             <CommandGroup
-              heading={`Files${keywords.length > 0 ? ` — ${filteredFiles.length} match${filteredFiles.length === 1 ? "" : "es"}${filteredFiles.length !== entries.length ? ` of ${entries.length}` : ""}` : ""}`}
+              heading={`Files${keywords.length > 0 ? ` — ${filteredFiles.length} match${filteredFiles.length === 1 ? "" : "es"}${filteredFiles.length !== entries.length ? ` of ${entries.length}` : ""}` : ""}${treeTruncated ? " — results may be incomplete (truncated)" : ""}`}
             >
               <div
                 ref={listRef}
@@ -212,7 +236,14 @@ export default function FilePicker({ open, onClose, onOpenFile, onOpenFolder, pr
                         }}
                       >
                         {isFolder && <Folder className="shrink-0 text-muted-foreground" />}
-                        <span className="font-mono text-sm">{path}</span>
+                        {/* truncate + min-w-0 keep the path on ONE line. Without
+                            it a long path wraps, the row grows past
+                            FILE_ROW_HEIGHT, and the virtualizer's scroll extent
+                            no longer matches the content — the tail of the
+                            list becomes unreachable by scrolling. */}
+                        <span className="min-w-0 truncate font-mono text-sm" title={path}>
+                          {path}
+                        </span>
                         {isFolder && <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">folder</span>}
                       </CommandItem>
                     </div>

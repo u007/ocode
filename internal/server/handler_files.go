@@ -120,8 +120,8 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	showHidden := parseBoolParam(r.URL.Query().Get("show_hidden"))
-	count := 0
-	node, err := buildFileTree(anchor, base, 0, maxDepth, &count, showHidden)
+	walk := &fileTreeWalk{limit: maxTreeNodes}
+	node, err := buildFileTree(anchor, base, 0, maxDepth, walk, map[string]bool{}, showHidden)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -141,7 +141,7 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, FileTreeResponse{
 		Children:  node.Children,
-		Truncated: count >= maxTreeNodes,
+		Truncated: walk.truncated,
 		IsGitRepo: isGitRepo,
 	})
 }
@@ -1388,13 +1388,58 @@ var ignoredDirNames = map[string]bool{
 // huge monorepo can't hang the request goroutine indefinitely.
 const maxTreeNodes = 20000
 
+// maxSymlinkTreeNodes bounds how many nodes symlinked directories may
+// contribute to a tree walk IN TOTAL.
+//
+// A symlinked directory is followed (the Files tab and the picker both let
+// the user open one), but it must not be able to consume the tree's budget:
+// a project that symlinks a shared asset directory (a photo library, a
+// monorepo package, a vendored tree) would otherwise spend all
+// maxTreeNodes inside that link and silently drop every not-yet-visited
+// sibling subtree — including the project root's own files, which are then
+// unsearchable. Measured on a real project: one symlink holding 40731 files
+// left the index with 19738 of 177489 files and ZERO root-level files.
+//
+// The budget is collective, so a project with many symlinks still leaves the
+// bulk of the node budget for its own files. The subtree is still walked (so
+// a linked folder shows its contents), it just cannot starve the rest of the
+// tree. A linked folder is also openable on demand: expanding it issues its
+// own request, whose root is that folder, and that request is not bounded by
+// this budget.
+const maxSymlinkTreeNodes = 2000
+
+// fileTreeWalk is the shared state of one tree walk.
+type fileTreeWalk struct {
+	// visited counts the nodes this walk has visited, against limit.
+	visited int
+	// limit is the maximum number of nodes this walk may visit. It is
+	// maxTreeNodes for a whole tree.
+	limit int
+	// symlinkVisited counts the nodes contributed by symlinked subtrees.
+	// It is capped separately (see maxSymlinkTreeNodes) so symlinks can
+	// never take more than a fixed share of the tree's budget, no matter
+	// how many of them a project has.
+	symlinkVisited int
+	// ancestors holds the resolved real paths of the directories on the
+	// CURRENT path from the walk root. A symlink whose target is already
+	// an ancestor is a cycle (a/loop -> a) and is not descended into:
+	// without this, the walk would recurse until the budget ran out and
+	// index the same subtree dozens of times under ever-deeper paths.
+	ancestors map[string]bool
+	// truncated records that the walk stopped early because it hit its
+	// limit, so the result set is incomplete.
+	truncated bool
+}
+
 // buildFileTree walks the directory tree rooted at cur and returns a FileNode
 // whose Path values are relative to base (the resolved root), so the frontend
 // contract stays the same whether the root is "." or an absolute path.
 // maxDepth caps how deep the walk descends; maxDepth == 0 means unlimited.
-// count tracks the total nodes visited across the whole walk and stops
-// descending further once maxTreeNodes is reached.
-func buildFileTree(base, cur string, depth, maxDepth int, count *int, showHidden bool) (FileNode, error) {
+// w carries the walk's node budget; it is shared across the whole tree, and a
+// symlinked subtree gets its own budget (see maxSymlinkTreeNodes).
+// ancestors is the set of resolved real paths of the directories on the path
+// to cur; it is used to detect symlink cycles.
+func buildFileTree(base, cur string, depth, maxDepth int, w *fileTreeWalk, ancestors map[string]bool, showHidden bool) (FileNode, error) {
 	info, err := os.Stat(cur)
 	if err != nil {
 		return FileNode{}, err
@@ -1410,9 +1455,27 @@ func buildFileTree(base, cur string, depth, maxDepth int, count *int, showHidden
 		IsDir: info.IsDir(),
 	}
 
-	*count++
-	if !info.IsDir() || (maxDepth > 0 && depth >= maxDepth) || *count >= maxTreeNodes {
+	w.visited++
+	if !node.IsDir || (maxDepth > 0 && depth >= maxDepth) {
 		return node, nil
+	}
+	if w.visited >= w.limit {
+		w.truncated = true
+		return node, nil
+	}
+
+	// Track the resolved real path of this directory so a symlink that
+	// points at an ancestor (a cycle) can be detected below.
+	realCur, realErr := filepath.EvalSymlinks(cur)
+	if realErr != nil {
+		realCur = cur
+	}
+	if ancestors == nil {
+		ancestors = map[string]bool{}
+	}
+	if !ancestors[realCur] {
+		ancestors[realCur] = true
+		defer delete(ancestors, realCur)
 	}
 
 	entries, err := os.ReadDir(cur)
@@ -1421,46 +1484,136 @@ func buildFileTree(base, cur string, depth, maxDepth int, count *int, showHidden
 	}
 
 	// DirEntry.IsDir reports the link itself, so a symlink to a directory
-	// reports false here even though buildFileTree (via os.Stat) treats it
-	// as a directory. Classify symlinks by their target so linked folders
+	// reports false here. Classify symlinks by their target so linked folders
 	// sort with directories. A broken/unreadable target stays a file.
 	type sortableEntry struct {
 		entry fs.DirEntry
 		isDir bool
+		link  bool
 	}
 	sortable := make([]sortableEntry, len(entries))
 	for i, e := range entries {
 		isDir := e.IsDir()
+		link := false
 		if !isDir && e.Type()&fs.ModeSymlink != 0 {
+			link = true
 			if st, err := os.Stat(filepath.Join(cur, e.Name())); err == nil && st.IsDir() {
 				isDir = true
 			}
 		}
-		sortable[i] = sortableEntry{entry: e, isDir: isDir}
+		sortable[i] = sortableEntry{entry: e, isDir: isDir, link: link}
 	}
-	sort.Slice(sortable, func(i, j int) bool {
+	// VISIT order: files before directories, each name-sorted.
+	//
+	// The node budget is consumed as the walk proceeds and it stops DEAD when
+	// exhausted, so a directory visited first can swallow the remaining
+	// budget and starve the files that come after it — including a
+	// directory's own files. Visiting a directory's files first guarantees
+	// every file in that directory is indexed before any subtree competes
+	// for the budget, so a project root's own files (README.md, package.json,
+	// …) are always searchable even in a huge tree.
+	visit := make([]fs.DirEntry, 0, len(sortable))
+	sort.SliceStable(sortable, func(i, j int) bool {
 		if sortable[i].isDir != sortable[j].isDir {
-			return sortable[i].isDir
+			return !sortable[i].isDir
 		}
 		return sortable[i].entry.Name() < sortable[j].entry.Name()
 	})
-	for i := range entries {
-		entries[i] = sortable[i].entry
+	for i := range sortable {
+		visit = append(visit, sortable[i].entry)
 	}
 
-	for _, e := range entries {
-		if *count >= maxTreeNodes {
+	for _, e := range visit {
+		if w.visited >= w.limit {
+			w.truncated = true
 			break
 		}
 		if !showHidden && (strings.HasPrefix(e.Name(), ".") || ignoredDirNames[e.Name()]) {
 			continue
 		}
-		child, err := buildFileTree(base, filepath.Join(cur, e.Name()), depth+1, maxDepth, count, showHidden)
+		childPath := filepath.Join(cur, e.Name())
+		childInfo, err := os.Lstat(childPath)
+		if err != nil {
+			continue
+		}
+		// A symlinked directory is walked, but with its OWN node budget so it
+		// cannot consume the whole tree's budget (see maxSymlinkTreeNodes).
+		if childInfo.Mode()&fs.ModeSymlink != 0 {
+			target, statErr := os.Stat(childPath)
+			if statErr != nil || !target.IsDir() {
+				// A symlink to a file (or a broken link) is just an entry.
+				relChild, relErr := filepath.Rel(base, childPath)
+				if relErr != nil {
+					relChild = childPath
+				}
+				w.visited++
+				node.Children = append(node.Children, FileNode{
+					Name:  e.Name(),
+					Path:  relChild,
+					IsDir: false,
+				})
+				continue
+			}
+			// The subtree may not exceed the remaining collective symlink
+			// budget, so a project with many symlinks still leaves the bulk
+			// of the node budget for its own files.
+			budget := maxSymlinkTreeNodes - w.symlinkVisited
+			if budget <= 0 {
+				w.truncated = true
+				continue
+			}
+			// A symlink that points at one of its own ancestors is a cycle.
+			// Descending into it would recurse until the budget ran out and
+			// index the same subtree under ever-deeper paths
+			// (a/loop/loop/.../file.txt). The link is still LISTED, it is
+			// just not walked.
+			realTarget, evalErr := filepath.EvalSymlinks(childPath)
+			if evalErr != nil {
+				realTarget = ""
+			}
+			if evalErr == nil && ancestors[realTarget] {
+				relChild, relErr := filepath.Rel(base, childPath)
+				if relErr != nil {
+					relChild = childPath
+				}
+				w.visited++
+				node.Children = append(node.Children, FileNode{
+					Name:  e.Name(),
+					Path:  relChild,
+					IsDir: true,
+				})
+				continue
+			}
+			sw := &fileTreeWalk{limit: budget}
+			child, err := buildFileTree(base, childPath, depth+1, maxDepth, sw, ancestors, showHidden)
+			// The subtree's nodes still count against the tree's total, so the
+			// overall truncation signal stays honest.
+			w.visited += sw.visited
+			w.symlinkVisited += sw.visited
+			if sw.truncated {
+				w.truncated = true
+			}
+			if err != nil {
+				continue
+			}
+			node.Children = append(node.Children, child)
+			continue
+		}
+		child, err := buildFileTree(base, childPath, depth+1, maxDepth, w, ancestors, showHidden)
 		if err != nil {
 			continue
 		}
 		node.Children = append(node.Children, child)
 	}
+	// Display order: directories first, then files, each name-sorted. The
+	// frontend renders the tree in the order the server sends it, so the
+	// response order must not depend on the visit order above.
+	sort.SliceStable(node.Children, func(i, j int) bool {
+		if node.Children[i].IsDir != node.Children[j].IsDir {
+			return node.Children[i].IsDir
+		}
+		return node.Children[i].Name < node.Children[j].Name
+	})
 
 	return node, nil
 }

@@ -563,6 +563,7 @@ func (s *Store) DuplicateAsRemote(host, path string, port int, name, group strin
 	}
 
 	now := time.Now()
+	name = strings.TrimSpace(name)
 	if name == "" {
 		name = canonicalHost + ":" + path
 	}

@@ -2,6 +2,12 @@
 
 
 
+
+## 2026-10-20
+
+* **Update**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
+* **Update**: File search result ordering: shortest path first ([concepts/file-search-shortest-path-ordering.md](/concepts/file-search-shortest-path-ordering.md))
+* **Creation**: File tree walk: node budget, symlink budget, and truncation ([concepts/file-tree-walk-budget.md](/concepts/file-tree-walk-budget.md))
 ## 2026-10-17
 
 * **Update**: Server-Side Auto-Continue Loop ([concepts/server-auto-continue.md](/concepts/server-auto-continue.md))
