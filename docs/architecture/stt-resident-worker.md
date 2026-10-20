@@ -33,10 +33,10 @@ given, so on Apple Silicon it selected `CoreMLExecutionProvider` first. CoreML
 compiles the model to the Apple Neural Engine format on every fresh process,
 and onnx-asr's CoreML path only supports part of the graph anyway (16 of 42
 nodes on the encoder), so the "GPU" mostly bought a compile bill. Passing
-`providers=["CPUExecutionProvider"]` loads the same model in roughly 1.5 s when
-the model files are already in the OS page cache (measured 7.7 s on a cold
-disk, against 15.9 s for CoreML). CoreML's `ModelCacheDirectory` does **not**
-avoid the compile.
+`providers=["CPUExecutionProvider"]` loads the same model in roughly 1.6 s with
+the model files in the OS page cache (measured 7.7 s when they were not, during
+a period of memory pressure, against 15.9 s for CoreML). CoreML's
+`ModelCacheDirectory` does **not** avoid the compile.
 
 ## The decision
 
