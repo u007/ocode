@@ -770,6 +770,31 @@ type PluginsConfig struct {
 	AST bool `json:"ast"`
 }
 
+// SkillsConfig records which discovered skills the user switched off.
+//
+// A disabled skill is not DISCOVERABLE: it is absent from the base-prompt skill
+// catalog, the discovery corpus, the Kaizen digest block, the skills-as-slash
+// commands list and the context-budget breakdown. It is also fully off for the
+// agent: the skill/load_skill tool refuses to resolve it.
+//
+// Two independent lists give the layering the sidebar exposes:
+//
+//   - Disabled hides a skill.
+//   - Enabled force-enables one, overriding a Disabled entry from EITHER scope.
+//
+// The global lists live in ocodeconfig.json; a project may override them in
+// .ocode/settings.json under the same "skills" key (see skill_prefs.go for the
+// exact set algebra). Empty lists are the default, so an untouched install
+// behaves exactly as before.
+//
+// Already-attached skill bodies are deliberately NOT retracted: disabling only
+// governs what may be discovered from then on ("those already included just let
+// it be").
+type SkillsConfig struct {
+	Disabled []string `json:"disabled,omitempty"`
+	Enabled  []string `json:"enabled,omitempty"`
+}
+
 // SecurityConfig holds security-related settings.
 // DiscoveryConfig gates the opt-in discovery-based skill/MCP retrieval
 // feature. When Enabled is false, the rest of the block is ignored and
@@ -904,6 +929,9 @@ type OcodeConfig struct {
 	LocalModels map[string]LocalModelConfig
 	Security    SecurityConfig
 	Discovery   DiscoveryConfig
+	// Skills is the global enable/disable layer for discovered skills; a
+	// project's .ocode/settings.json may override it. See SkillsConfig.
+	Skills SkillsConfig
 	// DocSearch, Search, NetworkGuard and ContentGuard select the decision-judge
 	// model for one judge call site each. They are separate fields rather than one
 	// shared judge setting because doc_search and Search used to share discovery's
@@ -1273,6 +1301,14 @@ type discoveryConfigFile struct {
 	JudgeModel string `json:"judge_model,omitempty"`
 }
 
+// skillsConfigFile is the on-disk shape of the global skill enable/disable
+// layer. The same shape is used by a project's .ocode/settings.json, so one
+// decoder serves both scopes (see skill_prefs.go).
+type skillsConfigFile struct {
+	Disabled []string `json:"disabled,omitempty"`
+	Enabled  []string `json:"enabled,omitempty"`
+}
+
 // Each judge_model field below selects the decision-judge model for ONE judge call
 // site. All default to typesafe/jev-latest, the constant those judges used before
 // per-slot selection existed, so an unconfigured install is unchanged.
@@ -1333,6 +1369,7 @@ type ocodeConfigFile struct {
 	DB                         DBConfig                    `json:"db"`
 	Security                   securityConfigFile          `json:"security"`
 	Discovery                  discoveryConfigFile         `json:"discovery"`
+	Skills                     *skillsConfigFile           `json:"skills,omitempty"`
 	DocSearch                  docSearchConfigFile         `json:"doc_search"`
 	Search                     searchConfigFile            `json:"search"`
 	NetworkGuard               networkGuardConfigFile      `json:"network_guard"`
@@ -1753,6 +1790,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["discovery"]; ok {
 		applyDiscoveryConfig(&cfg.Discovery, file.Discovery)
 		delete(raw, "discovery")
+	}
+
+	if _, ok := raw["skills"]; ok {
+		applySkillsConfig(&cfg.Skills, file.Skills)
+		delete(raw, "skills")
 	}
 
 	if _, ok := raw["doc_search"]; ok {
@@ -2614,7 +2656,14 @@ func lockOcodeConfig() (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	lockPath := path + ".lock"
+	return lockFilePath(path + ".lock")
+}
+
+// lockFilePath is the shared advisory-lock primitive: an exclusive-create lock
+// file with a bounded wait, used by both the global config and each project's
+// .ocode/settings.json (their lock files live in different directories, so they
+// never contend with each other).
+func lockFilePath(lockPath string) (func(), error) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
@@ -2708,6 +2757,11 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
+	}
+	// Only written when at least one list is non-empty, so an untouched install
+	// gains no new key. `Skills` itself marshals as {"disabled","enabled"}.
+	if len(cfg.Skills.Disabled) > 0 || len(cfg.Skills.Enabled) > 0 {
+		payload["skills"] = cfg.Skills
 	}
 	if len(cfg.ExternalPlugins) > 0 {
 		payload["external_plugins"] = cfg.ExternalPlugins
