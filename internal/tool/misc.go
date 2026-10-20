@@ -82,7 +82,7 @@ func (t SkillTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 		return "", fmt.Errorf("invalid skill name %q", params.Name)
 	}
 
-	s, err := skill.LoadSkillForRoot(params.Name, workDirFromContext(ctx))
+	s, err := skill.LoadEnabledSkillForRoot(params.Name, workDirFromContext(ctx))
 	if err != nil {
 		return "", err
 	}

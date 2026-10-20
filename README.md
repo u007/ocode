@@ -237,7 +237,7 @@ Pre-built binaries and installers are available in the [Releases folder](https:/
 | `bash` | Shell execution with background support, circular output buffer (256KB), `Ctrl+B` foreground→background, **live streaming** of combined stdout/stderr into the transcript |
 | `bash_output`, `kill_shell`, `list_processes` | Inspect / kill / list background shells |
 | `grep`, `glob`, `list`, `repo_overview`, `repo_clone` | Search, file glob, directory listing, repository analysis & cloning |
-| `rgrep` | Ripgrep-backed search (registered when `rg` is on PATH): honors .gitignore/.ignore at every depth even outside git repos, searches hidden files, hard-excludes .git/node_modules |
+| `rgrep` | Ripgrep-backed search (registered when `rg` is on PATH): honors .gitignore/.ignore at every depth even outside git repos, searches hidden files, hard-excludes .git/node_modules. `grep` runs through the same engine when `rg` is available; the in-process walk is the fallback. `rg` is looked up once per app start |
 | `lsp`, `lsp_diagnostics`, `ast`, `ast_grep`, `format` | Go-to-definition / hover / symbol search / diagnostics; semantic `ast` (auto-enabled when any LSP server is on PATH); structural `ast_grep` (opt-in `plugins.ast`); formatter dispatch |
 | `agent` / `task` | Delegate work to sub-agents with permission isolation, DAG deps, and contract verification |
 | `websearch`, `webfetch` | Web search and page fetching via DuckDuckGo |
@@ -699,6 +699,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/image` | `[status|enable|disable|model [provider/model]]` | Image generation status / toggle / model selection |
 | `/computer` | `[status|enable|disable]` | Show computer-use status or enable/disable desktop control for new sessions |
 | `/localmodel` | | Manage locally-run chat/completion model instances (e.g. Bonsai 8B 1-bit) that LM Studio can't serve |
+| `/localserver` | | Inspect or repair the cached local embed server (llama-server) binary; `fix` reinstalls it |
 | `/usage` | `[hour|day|week|month|last-month|last-3-month|all]` | Show LLM token usage summary by model and date range |
 | `/cron` | `[list|describe <id>|remove <id>|add <kind> <args> <message...>]` | Manage scheduled jobs (see `docs/scheduled-jobs.md`) |
 | `/help` | | Show help for all commands |

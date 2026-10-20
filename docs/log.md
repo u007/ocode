@@ -5,6 +5,11 @@
 
 ## 2026-10-20
 
+* **Update**: Per-Project Skill Enable/Disable ([concepts/skill-enable-disable.md](/concepts/skill-enable-disable.md))
+* **Update**: Per-Project Skill Enable/Disable ([concepts/skill-enable-disable.md](/concepts/skill-enable-disable.md))
+* **Creation**: Per-Project Skill Enable/Disable ([concepts/skill-enable-disable.md](/concepts/skill-enable-disable.md))
+* **Creation**: Local embed server (llama-server) fails with "Exec format error" ([gotchas/local-embed-server-exec-format-error.md](/gotchas/local-embed-server-exec-format-error.md))
+* **Creation**: A received TLS alert is not a net.Error: bad record MAC hard-failed an LLM turn ([gotchas/llm-tls-bad-record-mac-retry.md](/gotchas/llm-tls-bad-record-mac-retry.md))
 * **Update**: Prompt Cache Stability ([concepts/prompt-cache-stability.md](/concepts/prompt-cache-stability.md))
 * **Update**: File search result ordering: shortest path first ([concepts/file-search-shortest-path-ordering.md](/concepts/file-search-shortest-path-ordering.md))
 * **Creation**: File tree walk: node budget, symlink budget, and truncation ([concepts/file-tree-walk-budget.md](/concepts/file-tree-walk-budget.md))

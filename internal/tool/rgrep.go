@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,9 +43,25 @@ var rgFallbackPaths = []string{
 	"/usr/local/bin/rg",
 }
 
+// rgBinOnce and rgBinPath hold the process-wide resolution. rg is looked up
+// once per app instance, not per search: a PATH lookup plus fallback stats on
+// every grep call is pure overhead, and the answer does not change while the
+// app runs.
+var (
+	rgBinOnce sync.Once
+	rgBinPath string
+)
+
+// cachedRgBin returns the ripgrep binary resolved on first use, or "" when it
+// was not found. The result is memoised for the life of the process.
+func cachedRgBin() string {
+	rgBinOnce.Do(func() { rgBinPath = resolveRgBin() })
+	return rgBinPath
+}
+
 // rgBinResolver is an indirection point so tests can simulate a missing
-// binary without touching the real PATH.
-var rgBinResolver = resolveRgBin
+// binary without touching the real PATH. Production uses cachedRgBin.
+var rgBinResolver = cachedRgBin
 
 // lookPathFn mirrors exec.LookPath's signature for test injection.
 type lookPathFn func(name string) (string, error)

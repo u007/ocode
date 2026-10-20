@@ -1,10 +1,12 @@
 package server
 
 import (
+	"errors"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/remote"
 )
 
@@ -291,6 +293,16 @@ func (h *Handler) portMapWatchdogPass() {
 // offered to the policy, and a disabled one is forgotten.
 func (h *Handler) monitorPortMaps(entry *portMapEntry) {
 	maps, err := h.projects.PortMaps(entry.ref)
+	if errors.Is(err, projects.ErrRemoteProjectNotFound) {
+		// The project was removed. Its persisted forwards went with it, so the
+		// only thing left to reconcile is the live ssh children: stop them and
+		// stop visiting this entry, rather than logging the same miss every tick.
+		entry.fm.StopAll()
+		h.portMaps.drop(entry)
+		log.Printf("port forwards: remote project %s:%s was removed; stopped its forwards and dropped its monitor",
+			entry.ref.Host, entry.ref.Path)
+		return
+	}
 	if err != nil {
 		// Logged, not swallowed: a store read failure means the monitor is
 		// blind for this project and only a user action can revive a forward.

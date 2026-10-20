@@ -18,6 +18,7 @@ import (
 	"github.com/u007/ocode/internal/crashguard"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/usage"
 )
@@ -628,7 +629,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if h.RCBridge() == nil {
 		h.wireJobEventCallbacks(sessionID, ag)
 	}
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks()}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot)}
 	// Give this session's sub-agents a working permission-ask callback. Without
 	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
 	// server never wires OnSubAgentMessage and a child's messages never reach
@@ -728,7 +729,13 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	if entry.WindowID != "" {
 		cur = h.resolveSessionProfile(entry)
 	}
-	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion {
+	// A sidebar skill toggle changes the injected catalog, corpus, digest and
+	// slash list, all baked in at build time. Compare against the CURRENT
+	// effective set so the rebuild also lands when the toggle happened mid-turn
+	// (that path deliberately defers the swap). skill.DisabledForRoot is
+	// TTL-cached and invalidated by the toggle itself, so this is cheap.
+	skillsChanged := !sameSkillSet(as.disabledSkills, skill.DisabledForRoot(entry.ProjectRoot))
+	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion && !skillsChanged {
 		return as, nil
 	}
 	newAs, stage, err := h.buildAgentSession(id, model, as.messages, entry.ProjectRoot)

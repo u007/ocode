@@ -172,6 +172,15 @@ export const COMMANDS: CommandDef[] = [
 
 let dynamicLoaded = false;
 let dynamicLoadPromise: Promise<void> | null = null;
+// Names this module appended to COMMANDS, so a reload can remove exactly them
+// (built-ins are never touched).
+const dynamicNames = new Set<string>();
+// Bumped by reloadDynamicCommands. A load that started before a reload must not
+// push its (now stale) additions.
+let dynamicGeneration = 0;
+// useCommands subscribers, notified after a reload so every slash menu/palette
+// re-renders with the new list instead of holding its mount-time copy.
+const dynamicListeners = new Set<() => void>();
 
 /** Fetch custom commands + skills once and append them (deduped, sorted) to
  *  the shared COMMANDS array. Safe to call from multiple mount points — the
@@ -180,6 +189,7 @@ export function loadDynamicCommands(): Promise<void> {
   if (dynamicLoaded) return Promise.resolve();
   if (dynamicLoadPromise) return dynamicLoadPromise;
 
+  const gen = dynamicGeneration;
   dynamicLoadPromise = (async () => {
     const [commands, skills] = await Promise.all([
       api.listCommands().catch((err) => {
@@ -209,12 +219,36 @@ export function loadDynamicCommands(): Promise<void> {
       add(s.name, s.description || "Skill", Sparkles);
     }
 
+    if (gen !== dynamicGeneration) return; // a reload superseded this load
     additions.sort((a, b) => a.name.localeCompare(b.name));
+    for (const c of additions) dynamicNames.add(c.name);
     COMMANDS.push(...additions);
     dynamicLoaded = true;
   })();
 
   return dynamicLoadPromise;
+}
+
+/** Discard the dynamically-added commands/skills and re-fetch them.
+ *
+ *  Used after a skill is enabled/disabled from the chat sidebar: the slash list
+ *  is a discovery surface, so a disabled skill must stop appearing in it without
+ *  a page reload. Every `useCommands` consumer is notified once the fresh list
+ *  has been merged. */
+export function reloadDynamicCommands(): Promise<void> {
+  dynamicGeneration++;
+  if (dynamicNames.size > 0) {
+    const kept = COMMANDS.filter((c) => !dynamicNames.has(c.name));
+    COMMANDS.length = 0;
+    COMMANDS.push(...kept);
+    dynamicNames.clear();
+  }
+  dynamicLoaded = false;
+  dynamicLoadPromise = null;
+  const done = loadDynamicCommands();
+  return done.then(() => {
+    for (const notify of dynamicListeners) notify();
+  });
 }
 
 /** React hook: ensures dynamic commands are loaded and returns the merged
@@ -225,13 +259,16 @@ export function useCommands(): CommandDef[] {
 
   useEffect(() => {
     let cancelled = false;
-    loadDynamicCommands().then(() => {
+    const refresh = () => {
       // Copy the shared array into local state so React re-renders with the
       // merged list. Guard against setState-after-unmount.
       if (!cancelled) setCommands([...COMMANDS]);
-    });
+    };
+    dynamicListeners.add(refresh);
+    loadDynamicCommands().then(refresh);
     return () => {
       cancelled = true;
+      dynamicListeners.delete(refresh);
     };
   }, []);
 

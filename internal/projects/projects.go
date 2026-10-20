@@ -29,6 +29,11 @@ var ErrProjectExists = errors.New("project already exists")
 // 409 Conflict, not a server error.
 var ErrPortMapDirection = errors.New("remote port already forwarded in the other direction")
 
+// ErrRemoteProjectNotFound is wrapped by the PortMap operations when the remote
+// project is not in the store (removed, or never added). Callers test it with
+// errors.Is; the message text is unchanged.
+var ErrRemoteProjectNotFound = errors.New("not found")
+
 // Project represents a saved project root.
 type Project struct {
 	Path       string    `json:"path"`
@@ -330,7 +335,7 @@ func (s *Store) findRemoteIdx(ref ProjectRef) (int, error) {
 			return i, nil
 		}
 	}
-	return -1, fmt.Errorf("remote project %s:%s not found", ref.Host, ref.Path)
+	return -1, fmt.Errorf("remote project %s:%s %w", ref.Host, ref.Path, ErrRemoteProjectNotFound)
 }
 
 // PortMaps returns ref's persisted extra port forwards.

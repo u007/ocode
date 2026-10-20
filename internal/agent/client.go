@@ -1083,6 +1083,35 @@ func isServerUnavailableError(err error) bool {
 	return false
 }
 
+// isTransientTLSRecordError reports whether err is a TLS record-layer integrity
+// failure that is worth retrying. The observed failure (2026-10-20) was:
+//
+//	llm request failed after 1 attempt(s): Post
+//	"https://opencode.ai/zen/go/v1/messages": remote error: tls: bad record MAC
+//
+// It reached isRetryableLLMClientError as a *url.Error wrapping a
+// *net.OpError{Op: "remote error"} whose Err is crypto/tls's unexported
+// `alert` value. That type reports neither Timeout() nor Temporary(), and its
+// text matches none of the generic arms below, so a single corrupted TLS record
+// hard-failed the turn.
+//
+// "bad record MAC" means the AEAD tag did not verify: the bytes were corrupted
+// in flight (a gateway or middlebox glitch, not a malformed request from us).
+// The request is safe to re-send — the response is either delivered whole or
+// not at all, and the deltaEmitted gate in the retry loop still refuses to
+// re-send after partial streamed content, so retrying cannot duplicate output.
+//
+// Deliberately narrow: only this record-integrity alert. TLS *configuration*
+// failures (certificate verification, "first record does not look like a TLS
+// handshake", protocol-version or no-application-protocol mismatches) are
+// permanent and fail identically on every attempt, so they must not match here.
+func isTransientTLSRecordError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "tls: bad record mac")
+}
+
 // isRetryableLLMClientError reports whether err represents a transient client /
 // transport failure worth retrying. Typed provider status errors
 // (*providerStatusError) are classified purely by their HTTP code via
@@ -1126,6 +1155,9 @@ func isRetryableLLMClientError(err error) bool {
 	// optimising for at the price of a lost turn.
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
+		return true
+	}
+	if isTransientTLSRecordError(err) {
 		return true
 	}
 	lower := strings.ToLower(err.Error())

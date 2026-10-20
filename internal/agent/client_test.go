@@ -1499,6 +1499,135 @@ func TestChatRetriesDNSResolutionFailure(t *testing.T) {
 	}
 }
 
+// tlsBadRecordMACTransportErr reproduces the exact error shape Go's HTTP client
+// produced for the reported 2026-10-20 opencode-go failure: a received TLS alert
+// is surfaced as *net.OpError{Op: "remote error"} wrapping crypto/tls's
+// unexported alert value, whose text is "tls: bad record MAC".
+func tlsBadRecordMACTransportErr() error {
+	return &net.OpError{Op: "remote error", Err: errors.New("tls: bad record MAC")}
+}
+
+// TestIsRetryableLLMErrorRetriesTLSBadRecordMAC pins that a corrupted TLS record
+// is classified as transient. It previously matched none of the text arms and
+// reported neither Timeout() nor Temporary(), so the whole turn hard-failed as
+// "llm request failed after 1 attempt(s)".
+func TestIsRetryableLLMErrorRetriesTLSBadRecordMAC(t *testing.T) {
+	remote := error(&url.Error{
+		Op:  "Post",
+		URL: "https://opencode.ai/zen/go/v1/messages",
+		Err: tlsBadRecordMACTransportErr(),
+	})
+	// The fixture must reproduce the reported text verbatim, or the test could
+	// pass on a shape the classifier never actually sees.
+	if !strings.Contains(remote.Error(), "remote error: tls: bad record MAC") {
+		t.Fatalf("fixture does not reproduce the observed error text: %v", remote)
+	}
+	local := error(&url.Error{
+		Op:  "Post",
+		URL: "https://opencode.ai/zen/go/v1/messages",
+		Err: errors.New("tls: bad record MAC"),
+	})
+
+	for name, err := range map[string]error{"remote alert": remote, "local record failure": local} {
+		if !isRetryableLLMError(err) {
+			t.Errorf("%s: TLS bad record MAC classified non-retryable: %v", name, err)
+		}
+	}
+}
+
+// TestIsRetryableLLMErrorKeepsTLSConfigurationFailuresPermanent guards the
+// narrowness of isTransientTLSRecordError: certificate, handshake and version
+// mismatches are deterministic, so retrying only burns the budget and delays the
+// error the user needs to see.
+func TestIsRetryableLLMErrorKeepsTLSConfigurationFailuresPermanent(t *testing.T) {
+	for _, text := range []string{
+		"tls: failed to verify certificate: x509: certificate signed by unknown authority",
+		"tls: failed to verify certificate: x509: certificate has expired or is not yet valid",
+		"tls: first record does not look like a TLS handshake",
+		"remote error: tls: handshake failure",
+		"remote error: tls: protocol version not supported",
+		"remote error: tls: unknown certificate authority",
+		"tls: no application protocol",
+	} {
+		err := error(&url.Error{Op: "Post", URL: "https://example.test/v1", Err: errors.New(text)})
+		if isRetryableLLMError(err) {
+			t.Errorf("permanent TLS configuration failure classified retryable: %v", err)
+		}
+	}
+}
+
+// TestChatRetriesTLSBadRecordMAC pins the user-visible symptom: a single
+// corrupted TLS record no longer fails the turn on the first attempt, it is
+// retried and the second attempt can succeed.
+func TestChatRetriesTLSBadRecordMAC(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return nil, tlsBadRecordMACTransportErr()
+		}
+		return statusResponse(http.StatusOK, openAIChatOKStream), nil
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	msg, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("expected TLS bad record MAC to be retried to success, got %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 attempts (corrupted record then success), got %d", got)
+	}
+	if msg == nil || msg.Content != "ok" {
+		t.Fatalf("expected final message content %q, got %+v", "ok", msg)
+	}
+}
+
+// TestChatTLSBadRecordMACUsesUsualMaxRetries pins the budget for a persistent
+// record-integrity failure: the non-429 path (llmMaxRetries+1 attempts), with
+// the cause preserved in the final message rather than laundered away.
+func TestChatTLSBadRecordMACUsesUsualMaxRetries(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, tlsBadRecordMACTransportErr()
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(llmMaxRetries+1) {
+		t.Fatalf("expected %d attempts (usual max retry), got %d", llmMaxRetries+1, got)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("llm request failed after %d attempt(s)", llmMaxRetries+1)) ||
+		!strings.Contains(err.Error(), "bad record MAC") {
+		t.Fatalf("unexpected error format: %v", err)
+	}
+}
+
+// TestChatTLSConfigurationFailureDoesNotRetry is the end-to-end counterpart to
+// the classifier guard: a permanent certificate failure must still fail on the
+// first attempt.
+func TestChatTLSConfigurationFailureDoesNotRetry(t *testing.T) {
+	var calls int32
+	stubLLMHTTP(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, errors.New("tls: failed to verify certificate: x509: certificate signed by unknown authority")
+	}))
+
+	client := &GenericClient{Provider: "opencode-go", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 attempt for a permanent TLS configuration failure, got %d", got)
+	}
+	if !strings.Contains(err.Error(), "llm request failed after 1 attempt(s)") {
+		t.Fatalf("unexpected error format: %v", err)
+	}
+}
+
 // TestChatRetriesThinkingModeReasoningContent400 pins that the opencode-go
 // thinking-mode 400 ("reasoning_content ... must be passed back") is retried
 // instead of hard-failing the turn on the first attempt. Before the fix this

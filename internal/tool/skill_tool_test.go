@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/bundled"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/skill"
 )
 
@@ -101,5 +102,36 @@ func TestSkillToolUsesSessionProjectRoot(t *testing.T) {
 	out := runSkillTool(t, WithWorkDir(context.Background(), proj), "local-only")
 	if !strings.Contains(out, "project skill") {
 		t.Fatalf("project-local skill not resolved from the session root:\n%s", out)
+	}
+}
+
+// TestSkillToolRefusesDisabledSkill pins the "disabled means fully off" rule:
+// the agent-facing tool must not resolve a skill the user switched off, and the
+// refusal is byte-identical to "no such skill" so the model has nothing to retry
+// against.
+func TestSkillToolRefusesDisabledSkill(t *testing.T) {
+	skillToolEnv(t)
+	root := t.TempDir()
+	dir := filepath.Join(root, "skills", "hidden")
+	writeSkillToolFixture(t, filepath.Join(dir, "SKILL.md"), "---\nname: hidden\ndescription: d\n---\nbody\n")
+
+	ctx := WithWorkDir(context.Background(), root)
+	if out := runSkillTool(t, ctx, "hidden"); !strings.Contains(out, "body") {
+		t.Fatalf("precondition: enabled skill did not load:\n%s", out)
+	}
+
+	if err := config.SaveSkillEnabled(root, "hidden", false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	skill.InvalidateSkillCache()
+	t.Cleanup(skill.InvalidateSkillCache)
+
+	args, _ := json.Marshal(map[string]string{"name": "hidden"})
+	_, err := SkillTool{}.ExecuteCtx(ctx, args)
+	if err == nil {
+		t.Fatal("disabled skill was loaded; want a not-found refusal")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("refusal should read as not-found, got: %v", err)
 	}
 }

@@ -8,7 +8,8 @@ import { reportActionError } from "../../lib/actionErrors";
 import { truncateTitle } from "../../lib/title";
 import { setSpeechSummaryConfig, speechSummaryDisplay } from "../../lib/speechSummaryConfig";
 import { useSpeechOptional } from "../Speech/SpeechProvider";
-import type { AgentInfo, LSPStatus, MCPStatus } from "../../api/types";
+import type { AgentInfo, LSPStatus, MCPStatus, ManageableSkill } from "../../api/types";
+import { reloadDynamicCommands } from "../Chat/commands";
 import PluginsPanel from "./PluginsPanel";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
 import {
@@ -23,6 +24,7 @@ import {
   Puzzle,
   Radio,
   Loader2,
+  BookOpen,
 } from "lucide-react";
 
 interface Props {
@@ -86,6 +88,7 @@ const DEFAULT_SECTIONS: Record<string, boolean> = {
   git: true,
   permissions: true,
   mcp: false,
+  skills: false,
   extra_dirs: false,
 };
 
@@ -152,6 +155,14 @@ export default function CoworkSidebar({
   // the sidebar reflects the toggle state for THIS conversation.
   const [mcpServers, setMcpServers] = useState<MCPStatus[]>([]);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
+  // Skills for the active project, with their effective enabled state. "Enabled"
+  // means DISCOVERABLE (catalog / discovery corpus / Kaizen digest / slash list,
+  // and loadable by the skill tool). Disabled skills stay in this list so they
+  // can be switched back on, and disabling never retracts a skill body that was
+  // already attached to the running conversation.
+  const [skills, setSkills] = useState<ManageableSkill[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillBusy, setSkillBusy] = useState<string | null>(null);
 
   const [titleGenerating, setTitleGenerating] = useState(false);
   const dispatch = useChatDispatch();
@@ -310,6 +321,30 @@ export default function CoworkSidebar({
       cancelled = true;
     };
   }, [sessionHost, sessionId]);
+
+  // Skills for the active project. A session id resolves the project root on the
+  // server that owns it (canonical, home-expanded — important for remote
+  // projects); the path is a fallback for a draft tab that has no session yet.
+  useEffect(() => {
+    let cancelled = false;
+    setSkillsLoading(true);
+    // Optional call so an older server / partial test mock leaves the section
+    // empty instead of breaking the whole sidebar.
+    api
+      .getManageableSkills?.(sessionHost, activeProject?.path)
+      ?.then((res) => {
+        if (!cancelled) setSkills(res.skills ?? []);
+      })
+      ?.catch((e) => {
+        console.error("failed to load skills", e);
+      })
+      ?.finally(() => {
+        if (!cancelled) setSkillsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionHost, sessionId, activeProject?.path]);
 
   useEffect(() => {
     api.listAgents(sessionHost).then(setAgents).catch(console.error);
@@ -777,6 +812,46 @@ export default function CoworkSidebar({
       setMcpBusy(null);
     }
   };
+
+  // Skill on/off for THIS project. The preference is written to the project's
+  // .ocode/settings.json (the global config is the default layer), the server
+  // rebuilds this chat's agent so the new catalog takes effect, and the slash
+  // list is reloaded because it is a discovery surface too.
+  const toggleSkill = async (name: string) => {
+    const current = skills.find((s) => s.name === name);
+    if (!current) return;
+    const next = !current.enabled;
+    setSkillBusy(name);
+    // Optimistic flip; the refetch below reconciles with the server.
+    setSkills((prev) =>
+      prev.map((s) => (s.name === name ? { ...s, enabled: next } : s)),
+    );
+    try {
+      const sid = sessionId && !sessionId.startsWith("new-") ? sessionId : undefined;
+      await api.setSkillEnabled(name, next, sessionHost, activeProject?.path, sid);
+      const fresh = await api.getManageableSkills(sessionHost, activeProject?.path);
+      setSkills(fresh.skills ?? []);
+      // A disabled skill must also disappear from the slash commands; a
+      // re-enabled one must come back.
+      void reloadDynamicCommands().catch(console.error);
+    } catch (e) {
+      console.error("toggle skill error", e);
+      reportActionError(e, `Toggling skill ${name}`);
+      setSkills((prev) =>
+        prev.map((s) => (s.name === name ? { ...s, enabled: current.enabled } : s)),
+      );
+    } finally {
+      setSkillBusy(null);
+    }
+  };
+
+  // Enabled skills on top, disabled ones dimmed below (the server already sorts
+  // this way; re-deriving keeps the contract if that ever changes).
+  const orderedSkills = [...skills].sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  const enabledSkillCount = skills.filter((s) => s.enabled).length;
 
   const content = (
     <>
@@ -1530,6 +1605,76 @@ title="Sandbox: shell commands run without prompts, but the OS blocks writes out
                 </div>
               ) : (
                 <div className="text-xs text-muted-foreground">No MCP servers</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Skills Section — per-project discoverability. Enabled skills are
+            listed first; disabled ones stay visible but dimmed below so they can
+            be restored. Disabling does NOT retract a skill body already attached
+            to the running conversation. */}
+        <div className="border-b border-border">
+          <button
+            onClick={() => toggleSection("skills")}
+            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted"
+          >
+            {expandedSections.skills ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+            <BookOpen className="w-4 h-4 text-sky-400" />
+            Skills
+            {skills.length > 0 && (
+              <span className="ml-auto text-[11px] font-mono text-muted-foreground">
+                {enabledSkillCount}/{skills.length}
+              </span>
+            )}
+          </button>
+          {expandedSections.skills && (
+            <div className="px-4 pb-3">
+              {skillsLoading && skills.length === 0 ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Loading…
+                </div>
+              ) : orderedSkills.length > 0 ? (
+                <div className="space-y-1">
+                  {orderedSkills.map((s) => (
+                    <label
+                      key={s.name}
+                      className={`flex items-center justify-between gap-2 cursor-pointer rounded px-1 py-1 hover:bg-muted${
+                        s.enabled ? "" : " opacity-60"
+                      }`}
+                      title={s.description || s.name}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={`font-mono text-[11px] ${s.enabled ? "text-emerald-400" : "text-muted-foreground"}`}
+                        >
+                          {s.enabled ? "●" : "○"}
+                        </span>
+                        <span
+                          className={`truncate font-mono text-xs ${s.enabled ? "text-foreground" : "text-muted-foreground"}`}
+                          title={s.name}
+                        >
+                          {s.name}
+                        </span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        aria-label={`Skill ${s.name}`}
+                        checked={s.enabled}
+                        disabled={skillBusy === s.name}
+                        onChange={() => toggleSkill(s.name)}
+                        className="w-8 h-4 rounded-full appearance-none bg-accent checked:bg-emerald-600 relative before:content-[''] before:absolute before:w-3 before:h-3 before:bg-white before:rounded-full before:top-0.5 before:left-0.5 checked:before:translate-x-4 before:transition-all disabled:opacity-50"
+                      />
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">No skills found</div>
               )}
             </div>
           )}

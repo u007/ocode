@@ -316,9 +316,16 @@ func skillDoc(s skill.Skill) discovery.Doc {
 func (a *Agent) discoveryDocs() []discovery.Doc {
 	var docs []discovery.Doc
 	activeModel, root := a.discoveryModelRoot()
+	disabledSkills := skill.DisabledForRoot(root)
 	for _, s := range skill.LoadSkillsForRoot(root) {
 		if s.TunedFor != "" {
 			continue // Kaizen skills are gated separately below
+		}
+		// A skill the user switched off must never enter the discovery corpus:
+		// the corpus is an advertisement surface, so a disabled skill would be
+		// suggested (and loadable) exactly as if it were enabled.
+		if disabledSkills[s.Name] {
+			continue
 		}
 		docs = append(docs, skillDoc(s))
 	}

@@ -56,6 +56,7 @@ func runGrep(t *testing.T, ctx context.Context, argsJSON string) string {
 // output must be byte-identical to the pre-judge implementation for every
 // output_mode (values captured from the implementation before this change).
 func TestGrepJudgeAbsentGolden(t *testing.T) {
+	withoutRipgrep(t)
 	dir := grepJudgeFixture(t)
 	ctx := grepJudgeCtx(t, dir, nil)
 
@@ -102,6 +103,7 @@ func TestGrepJudgeAbsentGolden(t *testing.T) {
 // TestGrepJudgeAbsentTruncatedInputGolden pins the large-file cap note with no
 // judge attached.
 func TestGrepJudgeAbsentTruncatedInputGolden(t *testing.T) {
+	withoutRipgrep(t)
 	dir := t.TempDir()
 	writeFixture(t, dir, "big.txt", "foo\n"+strings.Repeat("x", 200))
 	prev := maxGrepFileBytes
@@ -117,6 +119,7 @@ func TestGrepJudgeAbsentTruncatedInputGolden(t *testing.T) {
 // TestGrepJudgeReceivesPerFileResults pins the candidate shape: one
 // SearchResult per matching file, with the count and a line-numbered summary.
 func TestGrepJudgeReceivesPerFileResults(t *testing.T) {
+	withoutRipgrep(t)
 	dir := grepJudgeFixture(t)
 	var mu sync.Mutex
 	var got SearchJudgeRequest

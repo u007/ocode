@@ -171,6 +171,7 @@ func init() {
 		{name: "/localmodel", usage: localModelUsage,
 			help:    "Manage locally-run chat/completion model instances (e.g. Bonsai 8B 1-bit) that LM Studio can't serve",
 			handler: runLocalModelCmd},
+		{name: "/localserver", usage: "/localserver [status|fix|reinstall|path]", help: "Inspect or repair the cached local embed server (llama-server) binary; fix reinstalls it", handler: runLocalServerCmd},
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},
 		{name: "/orchestrate", usage: "/orchestrate <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runOrchestrateCmd},
 		{name: "/autocontinue", usage: "/autocontinue [on|off|status|model [name]]", help: "Auto-resume any turn cut off by /max-step (or judged interrupted by an optional judge model — chat YES/NO or typesafe decision-only), across TUI and web turns", handler: runAutoContinueCmd},
@@ -1950,6 +1951,10 @@ func runDiscoverCmd(m *model, args []string) tea.Cmd {
 
 func runLocalModelCmd(m *model, args []string) tea.Cmd {
 	return m.handleLocalModelCmd(args)
+}
+
+func runLocalServerCmd(m *model, args []string) tea.Cmd {
+	return m.handleLocalServerCmd(args)
 }
 
 func runDocsCmd(m *model, args []string) tea.Cmd {

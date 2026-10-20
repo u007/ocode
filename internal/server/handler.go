@@ -547,6 +547,14 @@ type agentSession struct {
 	// web/desktop Connectors settings write auth.json). See
 	// reconcileProfileAgent.
 	credVersion int64
+	// disabledSkills snapshots the effective disabled-skill set this agent was
+	// built with. The base-prompt skill catalog, the discovery corpus and the
+	// Kaizen digest block are all baked in at construction, so a sidebar toggle
+	// must rebuild the agent to take effect. reconcileProfileAgent compares this
+	// against the CURRENT set on the next turn, which is how a toggle made while
+	// a turn was running still lands (the mid-turn rebuild is deferred, exactly
+	// like an MCP toggle). Nil/empty means "nothing disabled".
+	disabledSkills map[string]bool
 	// liveAppend mirrors a mid-turn transcript row into the in-flight
 	// live-persist view (set by wireLivePersist for headless turns). Without it,
 	// rows appended directly to messages — the auto-continue notice and resume

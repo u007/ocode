@@ -90,6 +90,7 @@ func TestIgnoreMatcherUsesSearchRootNotCwd(t *testing.T) {
 // the guard against the desktop backend RSS spike traced to an agent issuing
 // repo-wide greps with neither filter set.
 func TestGrepToolUnscopedCap(t *testing.T) {
+	withoutRipgrep(t)
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
 	os.Chdir(tmpDir)

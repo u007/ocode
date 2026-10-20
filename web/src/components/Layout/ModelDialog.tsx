@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useDeferredValue, useRef } from "react";
 import { api } from "../../api/client";
 import { useChatDispatch, useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
@@ -295,13 +295,20 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     }
   }, [open, dispatch, purpose, currentValues?.explorer, currentValues?.context, currentValues?.autocontinue, currentValues?.summary, currentValues?.speechsummary, loadList, hostArgs]);
 
-  const filteredModels = models.filter(
-    (m) =>
-      m.name.toLowerCase().includes(search.toLowerCase()) ||
-      m.model.toLowerCase().includes(search.toLowerCase()) ||
-      m.provider.toLowerCase().includes(search.toLowerCase()) ||
-      (m.display_name ?? "").toLowerCase().includes(search.toLowerCase())
-  );
+  // The input shows `search` immediately; the list follows `deferredSearch` so a
+  // keystroke never blocks on filtering the full registry (~10k rows).
+  const deferredSearch = useDeferredValue(search);
+  const filteredModels = useMemo(() => {
+    const query = deferredSearch.toLowerCase();
+    if (query === "") return models;
+    return models.filter(
+      (m) =>
+        m.name.toLowerCase().includes(query) ||
+        m.model.toLowerCase().includes(query) ||
+        m.provider.toLowerCase().includes(query) ||
+        (m.display_name ?? "").toLowerCase().includes(query),
+    );
+  }, [models, deferredSearch]);
 
   // Mirror the TUI model picker in two capability layers, per verified TUI
   // behavior (internal/tui/picker.go + the ctrl+f handler in
@@ -341,24 +348,41 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     // speech-summary picker, so there is no TUI behaviour to mirror.
     purpose === "speechsummary";
   const supportsFavoriteToggle = purpose === "main" || purpose === "permission";
-  const sections = supportsSections ? partitionModelSections(filteredModels) : null;
+  // Derived lists are memoised on the filtered list: the navigation memo below
+  // keys on `cappedProviders` and `sections`, so unstable objects here would
+  // rebuild the nav rows and re-render the list on every arrow-key move.
+  const sections = useMemo(
+    () => (supportsSections ? partitionModelSections(filteredModels) : null),
+    [supportsSections, filteredModels],
+  );
   // Flat provider grouping for purposes without favorites sections. Must NOT
   // reuse partitionModelSections here: that dedupes recent/favorite models
   // out of the provider groups, which would make them invisible when the
   // sections aren't rendered. Every model stays reachable.
-  const groupedModels = filteredModels.reduce((acc, m) => {
-    const provider = m.provider || "Other";
-    (acc[provider] ??= []).push(m);
-    return acc;
-  }, {} as Record<string, ModelInfo[]>);
-  const providerGroups = sections ? sections.providers : groupedModels;
+  const groupedModels = useMemo(
+    () =>
+      filteredModels.reduce((acc, m) => {
+        const provider = m.provider || "Other";
+        (acc[provider] ??= []).push(m);
+        return acc;
+      }, {} as Record<string, ModelInfo[]>),
+    [filteredModels],
+  );
   // Mounting every provider row makes the dialog's first paint slow on the
   // full registry (~8k models). Cap the unfiltered render and point at the
   // search box; search filters the full list, so nothing becomes unreachable.
   // The client-appended Local Models group is exempt: those rows are the
   // typically-local judge models, and must not be pushed out by a large
   // configured registry.
-  const cappedProviders = capProviderGroups(providerGroups, undefined, LOCAL_MODELS_UNCAPPED);
+  const cappedProviders = useMemo(
+    () =>
+      capProviderGroups(
+        sections ? sections.providers : groupedModels,
+        undefined,
+        LOCAL_MODELS_UNCAPPED,
+      ),
+    [sections, groupedModels],
+  );
 
   // Navigation identity follows rendered order, not just ModelInfo.name: a
   // recent/favorite model can also be present in a provider group in a

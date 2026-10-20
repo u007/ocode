@@ -139,7 +139,11 @@ describe("api session-scoped members forward host", () => {
     const cases: Array<[string, () => Promise<unknown>]> = [
       ["getSession", () => api.getSession("s1", undefined, H)],
       ["truncateSession", () => api.truncateSession("s1", 1, H)],
-      ["listModels", () => api.listModels(undefined, H)],
+      ["listModels", () => {
+        // The model list contract is an array; the shared mock returns an object.
+        fetchSpy.mockResolvedValueOnce(new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }));
+        return api.listModels(undefined, H);
+      }],
       ["listAgentRuns", () => api.listAgentRuns("s1", H)],
       ["setSessionModel", () => api.setSessionModel("s1", "m", H)],
       ["clearSessionModel", () => api.clearSessionModel("s1", H)],

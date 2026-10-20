@@ -294,6 +294,21 @@ func (m *ForwardManager) Stop(remotePort int) error {
 	return nil
 }
 
+// StopAll closes every live forward. It is for a manager whose project was
+// removed: nothing persisted can name its forwards any more, so its ssh
+// children must be stopped here or they outlive the project untracked.
+func (m *ForwardManager) StopAll() {
+	m.mu.Lock()
+	ports := make([]int, 0, len(m.live))
+	for port := range m.live {
+		ports = append(ports, port)
+	}
+	m.mu.Unlock()
+	for _, port := range ports {
+		_ = m.Stop(port)
+	}
+}
+
 // ProjectPortMap is the runtime shape ForwardManager operates on — a
 // dependency-free mirror of internal/projects.PortMap (this package cannot
 // import internal/projects: projects already imports internal/remote for

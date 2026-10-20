@@ -364,6 +364,27 @@ func TestPortMapWatchdogPassRestartsOnlyEnabledDeadForwards(t *testing.T) {
 	}
 }
 
+// TestPortMapWatchdogPassDropsEntryForRemovedProject guards against the monitor
+// re-reading a removed project's forwards on every tick: the first pass after
+// removal must forget the entry, so no later pass has anything to report.
+func TestPortMapWatchdogPassDropsEntryForRemovedProject(t *testing.T) {
+	h, _ := newTestPortMapsHandler(t, "example.invalid", "/srv/app")
+	entry := watchdogTestEntry(t, h, "/srv/app")
+
+	if err := h.projects.RemoveRemote(entry.ref.Host, entry.ref.Path); err != nil {
+		t.Fatalf("RemoveRemote: %v", err)
+	}
+
+	h.portMapWatchdogPass()
+
+	h.portMaps.mu.Lock()
+	remaining := len(h.portMaps.byKey)
+	h.portMaps.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("registry kept %d entries after the project was removed, want 0", remaining)
+	}
+}
+
 // TestPortMapWatchdogPassSkipsLiveForwards guards against a pass that
 // restarts a working forward every tick.
 func TestPortMapWatchdogPassSkipsLiveForwards(t *testing.T) {

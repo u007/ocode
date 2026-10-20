@@ -472,6 +472,12 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	// With ripgrep installed, grep runs through it: same params and output
+	// shape, but the search uses rg's engine instead of the in-process walk
+	// below. That walk is the fallback for machines without rg.
+	if rgBinResolver() != "" {
+		return (&RgrepTool{}).ExecuteCtx(ctx, args)
+	}
 	defer maybeFreeOSMemory()
 	var params grepParams
 	if err := json.Unmarshal(args, &params); err != nil {
@@ -600,8 +606,11 @@ func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 			scanner.Buffer(scanBuf, int(maxGrepFileBytes))
 			lineNum := 1
 			for scanner.Scan() {
-				line := scanner.Text()
-				if re.MatchString(line) {
+				// Match on the scanner's bytes and only build a string for lines
+				// that match: most lines do not, and Text() allocated for each.
+				raw := scanner.Bytes()
+				if re.Match(raw) {
+					line := string(raw)
 					fr.count++
 					if params.OutputMode == "content" {
 						fr.lines = append(fr.lines, fmt.Sprintf("%d:%s", lineNum, line))

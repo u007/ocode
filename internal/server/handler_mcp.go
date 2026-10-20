@@ -1,14 +1,12 @@
 package server
 
 import (
-	"log"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
-	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -163,38 +161,12 @@ func (h *Handler) HandleSetMCPEnabled(w http.ResponseWriter, r *http.Request, na
 }
 
 // rebuildAgentForMCP rebuilds the resident agent for a single session so its
-// MCP tool set reflects a just-toggled server. Unlike reconcileProfileAgent it
-// forces the rebuild regardless of profile/model state, because the tool set
-// (not the client) is what changed. It is a no-op when the session has no live
-// agent, or when a turn is currently active: tearing the agent down mid-turn
-// would disturb in-flight work, so the rebuild is deferred to the next turn
-// (which reconciles on its own).
+// MCP tool set reflects a just-toggled server. It delegates to
+// rebuildAgentForPreferenceChange, which shares the deferred-mid-turn policy
+// with the skill toggle: tearing the agent down mid-turn would disturb in-flight
+// work, so the swap waits for the next turn.
 func (h *Handler) rebuildAgentForMCP(sessionID string) {
-	as := h.lookupAgentSession(sessionID)
-	if as == nil {
-		return
-	}
-	entry := h.sessions.Lookup(sessionID)
-	if entry == nil {
-		return
-	}
-	if h.sessions.IsTurnActive(sessionID) {
-		// The running turn keeps its tool set; the next turn will rebuild with
-		// the new one. Log so the deferral is visible in the logs tab.
-		debuglog.Log.Append(debuglog.Entry{
-			Kind:      debuglog.KindMCP,
-			Message:   "mcp toggle deferred: turn active for session " + sessionID,
-			SessionID: sessionID,
-		})
-		return
-	}
-	newAs, stage, err := h.buildAgentSession(sessionID, as.model, as.messages, entry.ProjectRoot)
-	if err != nil {
-		log.Printf("serve error: rebuild agent for %s after mcp toggle (stage %s): %v", sessionID, stage, err)
-		return
-	}
-	newAs.agent.SetParentAdvisorInFlight(as.agent.AdvisorGuard())
-	h.replaceAgentSession(sessionID, newAs)
+	h.rebuildAgentForPreferenceChange(sessionID, "mcp")
 }
 
 // mcpToolsForSession enumerates MCP tools honoring a session's per-session

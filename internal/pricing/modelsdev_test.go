@@ -1,6 +1,11 @@
 package pricing
 
-import "testing"
+import (
+	"bytes"
+	"log"
+	"strings"
+	"testing"
+)
 
 func TestLookupReturnsBundledPricing(t *testing.T) {
 	got, ok := Lookup("gpt-4o")
@@ -16,6 +21,26 @@ func TestLookupReturnsBundledPricing(t *testing.T) {
 func TestLookupRejectsUnknownModel(t *testing.T) {
 	if _, ok := Lookup("does-not-exist"); ok {
 		t.Fatal("expected unknown model lookup to fail")
+	}
+}
+
+// TestLookupWarnsOncePerUnknownModel guards against the unknown-model warning
+// firing on every LLM call for the same model.
+func TestLookupWarnsOncePerUnknownModel(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	const model = "warn-once-test-model"
+	for range 3 {
+		if _, ok := Lookup(model); ok {
+			t.Fatal("expected unknown model lookup to fail")
+		}
+	}
+
+	if got := strings.Count(buf.String(), model); got != 1 {
+		t.Fatalf("unknown model warning logged %d times, want 1; log:\n%s", got, buf.String())
 	}
 }
 

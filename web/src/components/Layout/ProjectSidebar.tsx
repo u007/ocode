@@ -585,22 +585,6 @@ function SortableProjectRow({
             <ProjectBadges indicators={indicators} />
             <SessionDot status={status} />
           </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn(
-              "p-1 h-5 w-5 opacity-0 pointer-events-none group-focus-within:opacity-100 group-focus-within:pointer-events-auto text-muted-foreground hover:text-destructive shrink-0",
-              isActive && "opacity-100 pointer-events-auto"
-            )}
-            title={`Remove ${project.name} from the project list`}
-            aria-label={`Remove ${project.name} from the project list`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove();
-            }}
-          >
-            <Trash2 className="w-3 h-3" />
-          </Button>
         </div>
       </ContextMenu>
     </div>

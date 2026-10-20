@@ -130,6 +130,7 @@ func InvalidateSkillCache() {
 	skillCacheMu.Lock()
 	skillCache = map[string]skillCacheEntry{}
 	skillCacheMu.Unlock()
+	InvalidateDisabledSkillCache()
 }
 
 func loadSkillsFromPaths(paths []string) []Skill {
@@ -218,7 +219,7 @@ func LoadSkills() []Skill {
 	if cwd, err := os.Getwd(); err == nil {
 		root = cwd
 	}
-	return excludeKaizen(LoadSkillsForRoot(root))
+	return ExcludeDisabledForRoot(root, excludeKaizen(LoadSkillsForRoot(root)))
 }
 
 // LoadSkillsForModel loads every skill discoverable from root and returns the
@@ -240,7 +241,7 @@ func LoadSkillsForModel(root, activeModel string) []Skill {
 			out = append(out, s)
 		}
 	}
-	return out
+	return ExcludeDisabledForRoot(root, out)
 }
 
 // KaizenDigestAdmittedForModels reports, for each given model id, whether at
@@ -256,8 +257,12 @@ func KaizenDigestAdmittedForModels(root string, models []string) map[string]bool
 		return out
 	}
 	detected := stackdetect.Detect(root)
+	disabled := DisabledForRoot(root)
 	for _, s := range LoadSkillsForRoot(root) {
 		if s.TunedFor == "" || !s.ForceInjected() {
+			continue
+		}
+		if disabled[s.Name] {
 			continue
 		}
 		for _, id := range models {
@@ -290,7 +295,7 @@ func KaizenSkillsForModel(root, activeModel string) []Skill {
 			out = append(out, s)
 		}
 	}
-	return out
+	return ExcludeDisabledForRoot(root, out)
 }
 
 // excludeKaizen returns the subset of skills that are NOT Kaizen skills

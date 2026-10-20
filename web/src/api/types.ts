@@ -1258,6 +1258,24 @@ export interface SkillEntry {
   description?: string;
   status?: string;
   source?: string;
+  /** Present on the manage listing: false means the skill is switched off for
+   *  this project (still returned so it can be re-enabled). */
+  enabled?: boolean;
+}
+
+/** One row of GET /api/skills/manage — every discoverable, non-Kaizen skill for
+ *  a project with its effective enabled state. Enabled means DISCOVERABLE: it is
+ *  advertised in the skill catalog / discovery corpus / slash list and the skill
+ *  tool will load it. Already-attached skill bodies are never retracted. */
+export interface ManageableSkill extends SkillEntry {
+  when_to_use?: string;
+  plugin?: string;
+  enabled: boolean;
+}
+
+export interface ManageableSkillsResponse {
+  project_root: string;
+  skills: ManageableSkill[];
 }
 
 export interface DirectoryEntry {

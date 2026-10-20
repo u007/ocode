@@ -5484,6 +5484,17 @@ func TestRetryableLLMErrorDetection(t *testing.T) {
 	if !isRetryableLLMError(err429Full) {
 		t.Fatal("expected full 429 error message to be retryable")
 	}
+	// A corrupted TLS record is transient and must still offer a manual retry
+	// once the agent's own retries are exhausted.
+	tlsBadMAC := fmt.Errorf("llm request failed after 4 attempt(s): Post %q: remote error: tls: bad record MAC", "https://opencode.ai/zen/go/v1/messages")
+	if !isRetryableLLMError(tlsBadMAC) {
+		t.Fatal("expected TLS bad record MAC error to be retryable")
+	}
+	// ...but a permanent TLS configuration failure must not.
+	tlsCert := fmt.Errorf("llm request failed after 1 attempt(s): tls: failed to verify certificate: x509: certificate signed by unknown authority")
+	if isRetryableLLMError(tlsCert) {
+		t.Fatal("expected TLS certificate verification failure to be non-retryable")
+	}
 }
 
 func TestRenderStatusOmitsIDEChip(t *testing.T) {

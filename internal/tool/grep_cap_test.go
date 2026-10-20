@@ -11,6 +11,7 @@ import (
 // silently truncated, and files below the cap must behave identically to
 // before.
 func TestGrepLargeFileCapped(t *testing.T) {
+	withoutRipgrep(t)
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
@@ -82,4 +83,14 @@ func TestGrepLargeFileNoMatch(t *testing.T) {
 	if strings.Contains(res, "big2.log") {
 		t.Fatalf("no-match capped file must not appear: %s", res)
 	}
+}
+
+// withoutRipgrep makes rg look uninstalled for one test, so GrepTool runs its
+// in-process walk. Without it, GrepTool delegates to ripgrep whenever rg is on
+// this machine, and the walker's own caps and output are never exercised.
+func withoutRipgrep(t *testing.T) {
+	t.Helper()
+	prev := rgBinResolver
+	rgBinResolver = func() string { return "" }
+	t.Cleanup(func() { rgBinResolver = prev })
 }

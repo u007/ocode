@@ -267,13 +267,12 @@ type fileFingerprint struct {
 // tokens in a shell command. It matches strings that look like
 // absolute paths (/foo, /foo/bar) or relative paths with at least
 // one slash (./foo, ../foo, foo/bar). It is intentionally NOT a
-// general shell parser — comments and quoted strings fall through
-// here, so a comment like
+// general shell parser — comments fall through here, so a comment like
 // `echo "this mentions /etc/passwd but doesn't touch it"`
 // still produces /etc/passwd as a candidate. The candidate set is
 // then intersected with the post-walk diff, so the comment is filtered
 // out unless the actual command also wrote to /etc/passwd.
-var pathTokenRegex = regexp.MustCompile(`(?:^|\s|=|;|\|)([A-Za-z0-9_./~+-]+/[A-Za-z0-9_./~+-]+)`)
+var pathTokenRegex = regexp.MustCompile(`(?:^|\s|=|;|\||"|\(|')?"?([A-Za-z0-9_./~+-]+/[A-Za-z0-9_./~+-]+)`)
 
 // walkStatus is the outcome of one fingerprint walk. It exists because
 // "no map" has two very different meanings: the recorder never ran (fine,

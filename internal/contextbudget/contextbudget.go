@@ -373,7 +373,7 @@ func Build(in Input) Report {
 
 	// ── Skills (full contents available on demand) ─────────────────────────
 	sk := Section{Title: "Skills (full contents available on demand, not pre-injected)"}
-	allSkills := skill.LoadSkillsForRoot(workDir)
+	allSkills := skill.ExcludeDisabledForRoot(workDir, skill.LoadSkillsForRoot(workDir))
 	if len(allSkills) == 0 {
 		sk.Rows = append(sk.Rows, Row{Label: "(none found)"})
 	} else {

@@ -243,7 +243,10 @@ Detection alone only clears the lie; something has to re-open the forward. One
   project's *persisted* forwards against `IsLive`: disabled → `forget`, live →
   `noteHealthy`, dead + enabled → `policy.tryStart`. Every restart, every failure, and the
   give-up are logged (`port forwards: monitor restarted|failed|gave up …`), and a store-read
-  failure is logged too rather than swallowed.
+  failure is logged too rather than swallowed. A project removed from the store
+  (`projects.ErrRemoteProjectNotFound`) is handled once: its live ssh children are stopped
+  (`ForwardManager.StopAll`), its registry entry is dropped (`portMapRegistry.drop`), and one
+  `port forwards: remote project … was removed` line is logged. It is not re-logged every tick.
 - **The user's own actions are the escape hatch:** Enable and Add clear the give-up
   (`entry.policy.reset`, `internal/server/handler_portmaps.go:209` and `:269` — the
   deliberate "try it now"); Disable and Remove forget the port

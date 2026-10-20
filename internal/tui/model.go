@@ -480,6 +480,13 @@ type localModelActionMsg struct {
 	err         error  // non-nil when the operation failed (config map is not updated)
 }
 
+// localServerActionMsg is emitted when an async /localserver fix (reinstall)
+// operation completes.
+type localServerActionMsg struct {
+	text string
+	err  error
+}
+
 // localModelBulkActionMsg aggregates multiple localModelActionMsg results from
 // a bulk enable operation (sequential spawns inside one tea.Cmd). Handled in
 // Update() by iterating results, applying each config mutation and appending
@@ -3974,6 +3981,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerenderTranscriptAndMaybeScroll()
 	case localModelActionMsg:
 		m.applyLocalModelResult(msg)
+		m.rerenderTranscriptAndMaybeScroll()
+	case localServerActionMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + msg.err.Error()})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
+		}
 		m.rerenderTranscriptAndMaybeScroll()
 	case localModelBulkActionMsg:
 		for _, res := range msg.results {
@@ -9245,6 +9259,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		// mid-stream is exactly the point: arming or disarming auto-resume takes
 		// effect on the very turn at risk of being cut off.
 		cmd == "/localmodel" ||
+		cmd == "/localserver" ||
 		cmd == "/autocontinue" ||
 		// /explorer-model and /context-model are synchronous local config
 		// commands like /small-model and /recap: they never start an agent
@@ -9350,7 +9365,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		// Resolve against the project work dir: m.workDir is the source of
 		// truth for project resolution (not os.Getwd), so skills installed
 		// under a /cd target are matched even when the process cwd differs.
-		if matched := findSkillByName(skill.LoadSkillsForRoot(m.workDir), skillName); matched != nil {
+		if matched := findSkillByName(skill.ExcludeDisabledForRoot(m.workDir, skill.LoadSkillsForRoot(m.workDir)), skillName); matched != nil {
 			if m.agent != nil {
 				m.agent.ResetSubagentDispatch()
 				skillPrompt := fmt.Sprintf("Run the **%s** skill.\n\n%s", matched.Name, matched.ForModel())
@@ -10652,6 +10667,40 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 		return m.handleDiscoverIgnoreCmd(args[1:])
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover [enable|disable|status|model [name]|ignore [add|remove|clear] [path]]"})
+		return nil
+	}
+}
+
+// handleLocalServerCmd implements /localserver status|fix|reinstall|path.
+func (m *model) handleLocalServerCmd(args []string) tea.Cmd {
+	cacheDir := agent.DiscoveryCacheDir()
+	sub := ""
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+	switch sub {
+	case "", "status":
+		status := discovery.LocalServerStatus(cacheDir)
+		m.messages = append(m.messages, message{role: roleAssistant, text: status})
+		return nil
+	case "path":
+		p := discovery.LocalServerBinaryPath(cacheDir)
+		if p == "" {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Local server binary not found in cache."})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Local server binary: " + p})
+		}
+		return nil
+	case "fix", "reinstall":
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Reinstalling local embed server (this may take a minute)..."})
+		return func() tea.Msg {
+			if err := discovery.ReinstallLocalServer(cacheDir); err != nil {
+				return localServerActionMsg{text: "", err: err}
+			}
+			return localServerActionMsg{text: "Local embed server reinstalled successfully. If an embed server was already running, restart it (or run /localserver status) to confirm."}
+		}
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localserver [status|fix|reinstall|path]"})
 		return nil
 	}
 }
@@ -16378,6 +16427,14 @@ func isRetryableLLMError(err error) bool {
 	lower := strings.ToLower(err.Error())
 	// Check for rate limit errors (429) - these are also retryable
 	if strings.Contains(lower, " (429)") {
+		return true
+	}
+	// A corrupted TLS record ("remote error: tls: bad record MAC") is transient
+	// transport damage, retried inside the agent's client; if every attempt
+	// failed, still offer the manual retry like the other transport blips.
+	// Permanent TLS configuration failures (certificate/handshake/version
+	// mismatches) are deliberately NOT matched here.
+	if strings.Contains(lower, "tls: bad record mac") {
 		return true
 	}
 	return strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof")

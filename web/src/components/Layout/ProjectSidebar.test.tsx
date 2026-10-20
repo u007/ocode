@@ -537,10 +537,12 @@ describe("ProjectSidebar project removal confirmation", () => {
     expect(actionsFake.removeProject).toHaveBeenCalledWith("/home/user/app", "devbox");
   });
 
-  it("the expanded row's trash button also confirms", async () => {
+  it("the expanded row has no inline trash button; Remove lives only in the context menu", async () => {
     render(<ProjectSidebar isOpen={true} onToggle={vi.fn()} />);
-    fireEvent.click(screen.getByTitle("Remove proj from the project list"));
+    expect(screen.queryByTitle("Remove proj from the project list")).toBeNull();
 
+    fireEvent.contextMenu(screen.getByText("proj"));
+    fireEvent.click(screen.getByText("Remove"));
     expect(confirmDialog()).not.toBeNull();
     expect(actionsFake.removeProject).not.toHaveBeenCalled();
     clickConfirm();

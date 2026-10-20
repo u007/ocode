@@ -13,6 +13,10 @@ type ModelPricing struct {
 	CacheWritePerMillion float64
 }
 
+// unknownModelWarned records model names already reported by Lookup's
+// unknown-model warning, so each one logs once per process.
+var unknownModelWarned sync.Map
+
 // registryLookup, when set, is consulted before the hardcoded fallback map.
 // The agent package registers its models.dev-backed lookup here at init so
 // every pricing.Lookup caller (spend calc, usage report, model picker) shares
@@ -121,7 +125,10 @@ func Lookup(model string) (ModelPricing, bool) {
 	// Model not found in any source — log a warning so users aren't surprised
 	// by silent $0 pricing. The caller always gets false and can decide how to
 	// handle it (e.g. fall back to default_cost, show "unknown" in UI).
-	log.Printf("[PRICING] unknown model %q — no pricing data found; falling back to $0", model)
+	// Lookup runs on every LLM call, so warn once per model name.
+	if _, seen := unknownModelWarned.LoadOrStore(model, struct{}{}); !seen {
+		log.Printf("[PRICING] unknown model %q — no pricing data found; falling back to $0", model)
+	}
 	return ModelPricing{}, false
 }
 

@@ -14,16 +14,37 @@ import (
 )
 
 func (h *Handler) HandleListSkills(w http.ResponseWriter, r *http.Request) {
+	// This list is a SHARED, effectively global surface: the SPA's
+	// loadDynamicCommands fetches it ONCE for the whole page with no project
+	// scope. Filtering it by the server's default project would therefore let
+	// one project hide a skill from EVERY other project on the server (an
+	// over-filter, which is worse than the alternative).
+	//
+	// So apply the GLOBAL layer only. A global disable is a statement about
+	// every project and hides the name everywhere. A project-scoped disable is
+	// surfaced per-project by GET /api/skills/manage (the sidebar list) and
+	// enforced by the skill tool, which always resolves against the session's
+	// own project root — the name may still appear in the shared autocomplete,
+	// but loading it is refused there.
+	disabled := skill.DisabledForRoot("")
+
 	statuses, err := skill.GetSkillStatus()
 	if err != nil {
-		basic := skill.LoadSkills()
+		// Fallback: raw discovery (the installer index was unreadable). Use the
+		// RAW loader and apply the same GLOBAL filter, so a global disable is
+		// honoured here too and the cwd's project layer cannot over-filter the
+		// shared list.
+		basic := skill.LoadSkillsForRoot("")
 		type entry struct {
 			Name        string `json:"name"`
 			Description string `json:"description"`
 		}
-		out := make([]entry, len(basic))
-		for i, s := range basic {
-			out[i] = entry{Name: s.Name, Description: s.Description}
+		out := make([]entry, 0, len(basic))
+		for _, s := range basic {
+			if s.TunedFor != "" || disabled[s.Name] {
+				continue
+			}
+			out = append(out, entry{Name: s.Name, Description: s.Description})
 		}
 		writeJSON(w, http.StatusOK, out)
 		return
@@ -34,9 +55,12 @@ func (h *Handler) HandleListSkills(w http.ResponseWriter, r *http.Request) {
 		Status string `json:"status"`
 		Source string `json:"source,omitempty"`
 	}
-	out := make([]entry, len(statuses))
-	for i, s := range statuses {
-		out[i] = entry{Name: s.Name, Status: s.Status.String(), Source: s.Source}
+	out := make([]entry, 0, len(statuses))
+	for _, s := range statuses {
+		if disabled[s.Name] {
+			continue
+		}
+		out = append(out, entry{Name: s.Name, Status: s.Status.String(), Source: s.Source})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

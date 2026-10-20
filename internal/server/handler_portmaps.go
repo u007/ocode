@@ -96,6 +96,19 @@ func (reg *portMapRegistry) entry(target remote.Target, path string) *portMapEnt
 	return e
 }
 
+// drop forgets e's manager once its remote project is gone from the store, so
+// the watchdog stops visiting it. A later request for the same project makes a
+// fresh entry through entry().
+func (reg *portMapRegistry) drop(e *portMapEntry) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	for key, cur := range reg.byKey {
+		if cur == e {
+			delete(reg.byKey, key)
+		}
+	}
+}
+
 func portMapRef(rw remoteWork) projects.ProjectRef {
 	return projects.ProjectRef{Host: rw.Target.String(), Path: rw.Path}
 }

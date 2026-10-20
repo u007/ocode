@@ -410,3 +410,100 @@ func TestNotifyBashWriteRefusesBeyondRegistryCeiling(t *testing.T) {
 		}
 	}
 }
+
+// TestTargetTokensHandlesQuotedPaths verifies that paths inside quotes
+// (common in python scripts, heredocs, and shell commands) are extracted
+// as candidates, so the fingerprint diff is properly filtered instead of
+// keeping every touched file.
+func TestTargetTokensHandlesQuotedPaths(t *testing.T) {
+	workDir := filepath.Join(string(filepath.Separator)+"Users", "james", "www", "ocode")
+	rec := newTestRecorder(t, workDir, NewRegistry())
+
+	cases := []struct {
+		name    string
+		command string
+		keep    []string
+	}{
+		{
+			name:    "python open with double-quoted path",
+			command: `cd ` + workDir + ` && python3 -c 'open("internal/projects/projects.go", "w").write("x")'`,
+			keep:    []string{"internal/projects/projects.go"},
+		},
+		{
+			name:    "python variable with double-quoted path",
+			command: `cd ` + workDir + ` && python3 - <<'PY'
+p="web/src/components/Layout/ProjectSidebar.tsx"
+s=open(p).read()
+open(p,"w").write(s)
+PY`,
+			keep:    []string{"web/src/components/Layout/ProjectSidebar.tsx"},
+		},
+		{
+			name:    "single-quoted path",
+			command: `cd ` + workDir + ` && cat > 'internal/config/skill_prefs.go' <<'EOF'
+package config
+EOF`,
+			keep:    []string{"internal/config/skill_prefs.go"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rec.targetTokens(tc.command)
+			for _, k := range tc.keep {
+				if _, ok := got[k]; !ok {
+					t.Errorf("targetTokens dropped quoted path %q; got %v", k, keysOf(got))
+				}
+			}
+		})
+	}
+}
+
+// TestStatBashRecorderQuotedPathNoLeak reproduces the cross-file leak: a bash
+// command with a quoted path touches file A, while an unrelated concurrent
+// change creates file B between Pre() and Post(). Only A should be recorded.
+func TestStatBashRecorderQuotedPathNoLeak(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg := NewRegistry()
+	rec := NewStatBashRecorder(tmpDir, reg).(*StatBashRecorder)
+
+	// Baseline file A (will be modified by the command).
+	fileA := filepath.Join(tmpDir, "subdir", "fileA.txt")
+	if err := os.MkdirAll(filepath.Dir(fileA), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileA, []byte("before"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pre := rec.Pre()
+	if !pre.complete {
+		t.Fatal("Pre() incomplete on small tempdir")
+	}
+
+	// Simulate the command modifying file A (quoted path in the command).
+	if err := os.WriteFile(fileA, []byte("after"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a concurrent unrelated change creating file B.
+	fileB := filepath.Join(tmpDir, "other", "fileB.txt")
+	if err := os.MkdirAll(filepath.Dir(fileB), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileB, []byte("concurrent"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := `cd ` + tmpDir + ` && python3 -c 'open("subdir/fileA.txt", "w").write("after")'`
+	rec.Post(pre, cmd, 0)
+
+	// Only fileA should be in the registry.
+	list := reg.List()
+	if len(list) != 1 {
+		t.Fatalf("expected 1 change, got %d: %v", len(list), list)
+	}
+	if list[0].OriginalPath != fileA {
+		t.Errorf("expected %s, got %s", fileA, list[0].OriginalPath)
+	}
+}
