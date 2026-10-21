@@ -1120,7 +1120,7 @@ function HomeApp() {
         getConfigModel: (host?) => api.getConfigModel(host),
         setConfigModel: (model, host?) => api.setConfigModel(model, host),
         getFeaturesConfig: () => api.getFeaturesConfig(),
-        setFeaturesConfig: (memoryEnabled, docPromptEnabled) => api.setFeaturesConfig(memoryEnabled, docPromptEnabled),
+        setFeaturesConfig: (memoryEnabled, docPromptEnabled, suggestedResponsesEnabled) => api.setFeaturesConfig(memoryEnabled, docPromptEnabled, suggestedResponsesEnabled),
         getPathsInfo: () => api.getPathsInfo(),
         getPathsConfig: () => api.getPathsConfig(),
         setPathsConfig: (paths, uploadDir) => api.setPathsConfig(paths, uploadDir),
@@ -2151,6 +2151,8 @@ function HomeApp() {
           untrustedFailure={pendingPermission.untrusted_failure}
           agentName={pendingPermission.agent_name}
           context={askContext}
+          sessionId={activeTabId ?? undefined}
+          host={activeSessionHost}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}
         />

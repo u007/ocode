@@ -19,6 +19,24 @@ import (
 // resuming the agent loop while a permission dialog is still up.
 var ErrPermissionPending = errors.New("a permission decision is pending for this session; resolve it before sending a new message")
 
+// ErrTurnCancelled marks a turn that the USER stopped (Stop button / Esc),
+// as opposed to one that failed. The distinction matters to the web/desktop
+// client: a cancellation is an expected outcome of the user's own action, so
+// it must NOT paint a red error banner or offer the "Retry the last message"
+// affordance. A genuine failure (provider 500, network error) still does.
+//
+// It is a sentinel rather than a bare string so publishTurnError can mark the
+// event frame without string-matching on the error text, and so the client
+// receives an explicit "cancelled": true flag instead of having to guess.
+var ErrTurnCancelled = errors.New("cancelled")
+
+// IsTurnCancelled reports whether err is (or wraps) the user-cancellation
+// sentinel. The server wraps it with context in some paths, so errors.Is is
+// used rather than a string comparison.
+func IsTurnCancelled(err error) bool {
+	return errors.Is(err, ErrTurnCancelled)
+}
+
 // RunState is a minimal cross-package view of one top-level agent run.
 // The desktop shell polls this for dock-badge counts and finished-run
 // notifications; it deliberately excludes transcripts (see agentRunDTO for

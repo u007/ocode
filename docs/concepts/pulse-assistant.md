@@ -57,7 +57,7 @@ through the normal permission dialog, see "Permission design".
 | `PUT /api/config/pulse-model` | Body `{"model": "..."}`; empty string clears. `400` when the `model` key is absent. Returns `{"model": "..."}`. |
 | `GET /api/config/pulse-activation-model` | `200 {"model": "<configured or empty>", "effective": "<model the activation gate uses>"}`. |
 | `PUT /api/config/pulse-activation-model` | Body `{"model": "typesafe/<model>"}`; empty string clears (back to `typesafe/jev-latest`). `400` for a model that is not a decision backend (`agent.DecisionBackendName`), since the gate asks typed questions and never generates text. Persisted by `config.SavePulseActivationModel`; applies on the gate's next judge call. |
-| `GET /api/config/pulse-system-prompt` | `200 {"prompt": "<configured or empty>", "default": "<built-in prompt with the tool list rendered>"}`. |
+| `GET /api/config/pulse-system-prompt` | `200 {"prompt": "<operator instructions or empty>", "default": "<built-in prompt with the tool list rendered>", "effective": "<exact prompt the assistant sees — built-in plus appended instructions if any>"}`. `prompt` is what the operator wrote (empty = none); `default` is `pulseBaseSystemPrompt`; `effective` is `pulseSystemPrompt`. |
 | `PUT /api/config/pulse-system-prompt` | Body `{"prompt": "..."}`; empty string clears; `400` when the key is absent. Persisted by `config.SavePulseSystemPrompt` and re-applied to the live assistant (`Agent.SetSystemPromptOverride` is atomic), so it takes effect on its next model call, no rebuild. |
 | `GET /api/config/pulse-auto-receive` | `200 {"enabled": true|false}`. Whether the assistant auto-receives stop indicators from other sessions. |
 | `PUT /api/config/pulse-auto-receive` | Body `{"enabled": true|false}`. Persisted; takes effect immediately. |
@@ -76,9 +76,15 @@ All of these sit behind `authMiddleware`, like `GET /api/pulse`. Handlers:
 
 - `ocode.pulse_model` (string): model slot. Written only by
   `config.SavePulseModel`, a targeted load-modify-write (never a snapshot save).
-- `ocode.pulse_system_prompt` (string): when non-empty, used **verbatim** as the
-  assistant's system prompt (no tool list is appended). Edited through
-  `/api/config/pulse-system-prompt`.
+- `ocode.pulse_system_prompt` (string): the operator's extra instructions,
+  appended to the built-in prompt as a final "Operator instructions" section
+  (`pulseCustomPromptHeader` / `pulseCustomPromptTail`). The built-in prompt — tool list
+  (`pulseBaseSystemPrompt`, `{{TOOLS}}` filled from registered tools), the per-line
+  stop-report format (`<project>`/`<session>`: waiting for `<kind>` — `<summary>`), the
+  "N stops this round, nothing needs me." terminal rule, and the activation-gate
+  protocol (`activation_read` / `activation_write`) — is preserved unchanged. Empty value
+  = built-in prompt alone (byte-identical, prompt-cache stable). Edited through
+  `/api/config/pulse-system-prompt`; reset button "Clear instructions".
 - `ocode.pulse_activation_model` (string): decision-judge model for the activation gate
   (see "Activation gate"). Empty uses `typesafe/jev-latest`. Edited through
   `/api/config/pulse-activation-model` (or `ocodeconfig.json`); the condition itself is not
@@ -118,9 +124,13 @@ Built in `buildAgentSession` when `isPulseSession(id)`, via
   eight write tools get none (see "Permission design").
 - **System prompt**: `Agent.SetSystemPromptOverride` makes `BasePromptMessages`
   return one stable system message, replacing the env block, mode, recap and
-  project context. Default text is `defaultPulseSystemPrompt` with the tool list
-  filled from the **registered** tools (`pulseSystemPrompt`), so the prompt can
-  never advertise a tool that is not installed.
+  project context. Default text is `pulseBaseSystemPrompt` (built-in) with the
+  tool list filled from registered tools plus the operator's custom instructions
+  appended (`pulseSystemPrompt`); with no custom instructions the result is
+  byte-identical to the built-in prompt (`CLAUDE.md` "Prompt Cache Stability"). The
+  prompt can never advertise a tool that is not installed; a short custom instruction
+  (e.g. "Answer in at most two sentences.") cannot delete the contract-carrying
+  sections (tool list, stop-report format, grouping rule, activation-gate protocol).
 - **Board**: `Agent.SetPulseSnapshot(h.pulseBoardSnapshot)`. Each Step appends one
   block wrapped `[ocode:pulse]` ... `[/ocode:pulse]`, one line per live row:
   `status | project basename | session_id | title (<=80 runes) | ask or current task (<=120 runes)`.

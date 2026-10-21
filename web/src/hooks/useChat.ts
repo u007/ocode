@@ -33,6 +33,13 @@ function dispatchedModel(response: { model?: unknown } | null | undefined): stri
   return typeof response?.model === "string" ? response.model.trim() : "";
 }
 
+/** Stable empty list for the suggested-responses selector.
+ *
+ *  A module-level constant, NOT a fresh `[]` per call: the store's default
+ *  comparator is Object.is, so a fresh array would fail the equality check on
+ *  every unrelated store update and re-render every mounted composer. */
+const EMPTY_SUGGESTIONS: string[] = [];
+
 // sessionId is the tab this hook is scoped to — a real session id, a
 // temporary `new-<ts>` tab id (before the first message creates a session),
 // or null when no tab is active.
@@ -80,6 +87,14 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   );
   const hiddenQuestionRequestId = useChatSelector(
     (s) => getSessionSlice(s, sessionId).hiddenQuestionRequestId,
+  );
+  // The follow-up options the agent proposed at the end of its last reply.
+  // Shallow-compared for the same reason as `recentInputs`: the store replaces
+  // the array on every new proposal, and a streamed token must not hand the
+  // composer a fresh array and re-render it.
+  const suggestions = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).suggestions ?? EMPTY_SUGGESTIONS,
+    (a, b) => a.length === b.length && a.every((text, i) => text === b[i]),
   );
   // True while this session's transcript is scrolled away from its tail.
   // Written by ChatPanel's scroll handler (they are siblings under App.tsx, so
@@ -514,6 +529,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     pendingQuestion,
     hiddenQuestionRequestId,
     askContext,
+    // The composer's suggested-responses row. A narrow, shallow-compared
+    // selector: it changes only when the agent proposes a new set.
+    suggestions,
     // Consumed by the composer's "recent inputs" strip. Both are narrow
     // selectors: `transcriptScrolledUp` is a boolean that only flips when the
     // reader crosses the tail threshold, and `recentInputs` is shallow-compared

@@ -624,8 +624,18 @@ func TestPulseSystemPromptEndpointRoundTripAndLiveReapply(t *testing.T) {
 	if prompt, _ := get(); prompt != "CUSTOM PROMPT" {
 		t.Fatalf("after set prompt=%q", prompt)
 	}
-	if got := as.agent.BasePromptMessages()[0].Content; !strings.HasSuffix(got, "CUSTOM PROMPT") || strings.Contains(got, "READ") {
+	// The custom text is APPENDED to the built-in prompt, so the live agent
+	// keeps every contract the built-in one carries (the tool list, the
+	// stop-report format) and gains the operator's instruction.
+	got := as.agent.BasePromptMessages()[0].Content
+	if !strings.Contains(got, "CUSTOM PROMPT") {
 		t.Fatalf("live agent did not re-apply: %q", got)
+	}
+	if !strings.Contains(got, "- session_send:") {
+		t.Fatalf("live agent lost the built-in tool list: %.200s", got)
+	}
+	if !strings.Contains(got, "stops this round, nothing needs me.") {
+		t.Fatalf("live agent lost the built-in stop-report rule: %.200s", got)
 	}
 	cfg, err := config.Load()
 	if err != nil || cfg.Ocode.PulseSystemPrompt != "CUSTOM PROMPT" {
@@ -636,8 +646,12 @@ func TestPulseSystemPromptEndpointRoundTripAndLiveReapply(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		defer again.agent.Shutdown()
-		if got := again.agent.BasePromptMessages()[0].Content; !strings.HasSuffix(got, "CUSTOM PROMPT") {
+		got := again.agent.BasePromptMessages()[0].Content
+		if !strings.Contains(got, "CUSTOM PROMPT") {
 			t.Fatalf("rebuilt agent prompt = %q", got)
+		}
+		if !strings.Contains(got, "- session_send:") {
+			t.Fatalf("rebuilt agent lost the built-in tool list: %.200s", got)
 		}
 	}
 
@@ -646,6 +660,9 @@ func TestPulseSystemPromptEndpointRoundTripAndLiveReapply(t *testing.T) {
 	}
 	if got := as.agent.BasePromptMessages()[0].Content; !strings.Contains(got, "- session_send:") {
 		t.Fatalf("clear did not restore the default: %.100s", got)
+	}
+	if got := as.agent.BasePromptMessages()[0].Content; strings.Contains(got, "CUSTOM PROMPT") {
+		t.Fatalf("clear left the custom instructions behind: %.100s", got)
 	}
 	if code := put(`{}`); code != http.StatusBadRequest {
 		t.Fatalf("missing key = %d, want 400", code)

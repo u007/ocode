@@ -26,6 +26,7 @@ import { buildTerminalOptions } from "./terminalOptions";
 import { attachImeHygiene } from "./terminalImeHygiene";
 import TerminalFindBar from "./TerminalFindBar";
 import { restoreTerminalHistory, TerminalHistoryError } from "./terminalHistory";
+import { noteRemoteHostReachable, remoteHostRetryInMs } from "@/lib/remoteHostGate";
 import { apiPath, apiWsPath, remoteApiBase, authHeaders, authToken, isRemoteSession } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 import { createTerminalSnapshot } from "./terminalSnapshot";
@@ -1238,7 +1239,34 @@ export default function TerminalPanel({
     let serverHistoryPartial = false;
     const terminalDecoder = new TextDecoder();
 
+    // Holds the panel until a remote host's retry window closes, then runs
+    // `next`. The banner prints once: a wake or restore re-entering while the
+    // timer is armed just moves it to the window's end.
+    const waitForRemoteHost = (waitMs: number, next: () => void) => {
+      if (reconnectTimerRef.current === null) {
+        term.write(
+          "\r\n\x1b[33m[remote host unreachable — next attempt in " +
+            Math.ceil(waitMs / 1000) +
+            "s]\x1b[0m\r\n",
+        );
+      }
+      if (reconnectTimerRef.current !== null) clearTimeout(reconnectTimerRef.current);
+      reconnectingRef.current = true;
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        next();
+      }, waitMs);
+    };
+
     const connectSocket = (historyOffset?: number) => {
+      // A remote host inside its retry window is not dialled: each attempt
+      // holds a connection for the whole ssh timeout, and that starves the
+      // browser's connections for everything else. Wait out the window instead.
+      const waitMs = host ? remoteHostRetryInMs(host) : 0;
+      if (waitMs > 0) {
+        waitForRemoteHost(waitMs, () => connectSocket(historyOffset));
+        return;
+      }
       const { url, protocols } = buildTerminalWsConnection({
         token: authToken(),
         projectPath,
@@ -1302,6 +1330,7 @@ export default function TerminalPanel({
         // replaced). Ignore it so the supersede can't steal the fit/resize or
         // reset the live socket's backoff state.
         if (disposed || socketRef.current !== nextSocket) return;
+        if (host) noteRemoteHostReachable(host);
         readyRef.current = true;
         fitAndResize.current();
         // A fresh connection succeeded — cancel any pending reconnect
@@ -1536,70 +1565,85 @@ export default function TerminalPanel({
         connectSocket();
       }, TERMINAL_HISTORY_RESTORE_TIMEOUT_MS);
     };
-    armRestoreTimeout();
+    // The restore starts only once the host can be asked. A remote host inside
+    // its retry window is not asked for history (the request would hang for the
+    // whole ssh timeout), so the mount waits out the window and restores then.
+    const startRestore = () => {
+      armRestoreTimeout();
 
-    void restoreTerminalHistory({
-      id,
-      projectPath,
-      host,
-      decoder: terminalDecoder,
-      maxBytes: TERMINAL_HISTORY_RESTORE_MAX_BYTES,
-      signal: restoreController.signal,
-      onText: (text) => {
-        if (restoreCancelled || restoreController.signal.aborted) return;
-        // Progress: the restore is alive, so give it another full window.
-        armRestoreTimeout();
-        serverHistoryPartial = true;
-        // xterm parses writes asynchronously; wait for the page callback so
-        // at most one page is queued in the parser at a time.
-        return new Promise<void>((resolve) => {
-          term.write(text, () => resolve());
-        });
-      },
-    }).then((result) => {
-      restoreSettled = true;
-      if (restoreTimer !== null) {
-        clearTimeout(restoreTimer);
-        restoreTimer = null;
-      }
-      if (restoreCancelled) return;
-      // The bounded restore timer may have already fired — it aborts the fetch
-      // and attaches the live socket. If the fetch had still resolved, calling
-      // connectSocket here would open a second socket for the same pty. Bail
-      // the same way the .catch path does.
-      if (restoreController.signal.aborted) return;
-      if (result.kind === "missing") {
-        // Only announce the fallback when there is actually a cached
-        // buffer to fall back to; a brand-new terminal has nothing to restore.
-        if (savedBuffer) {
-          term.write(savedBuffer.text);
-          term.write("\r\n\x1b[2m── local terminal cache fallback; server history unavailable ──\x1b[0m\r\n");
+      void restoreTerminalHistory({
+        id,
+        projectPath,
+        host,
+        decoder: terminalDecoder,
+        maxBytes: TERMINAL_HISTORY_RESTORE_MAX_BYTES,
+        signal: restoreController.signal,
+        onText: (text) => {
+          if (restoreCancelled || restoreController.signal.aborted) return;
+          // Progress: the restore is alive, so give it another full window.
+          armRestoreTimeout();
+          serverHistoryPartial = true;
+          // xterm parses writes asynchronously; wait for the page callback so
+          // at most one page is queued in the parser at a time.
+          return new Promise<void>((resolve) => {
+            term.write(text, () => resolve());
+          });
+        },
+      }).then((result) => {
+        restoreSettled = true;
+        if (restoreTimer !== null) {
+          clearTimeout(restoreTimer);
+          restoreTimer = null;
         }
+        if (restoreCancelled) return;
+        // The bounded restore timer may have already fired — it aborts the fetch
+        // and attaches the live socket. If the fetch had still resolved, calling
+        // connectSocket here would open a second socket for the same pty. Bail
+        // the same way the .catch path does.
+        if (restoreController.signal.aborted) return;
+        if (result.kind === "missing") {
+          // Only announce the fallback when there is actually a cached
+          // buffer to fall back to; a brand-new terminal has nothing to restore.
+          if (savedBuffer) {
+            term.write(savedBuffer.text);
+            term.write("\r\n\x1b[2m── local terminal cache fallback; server history unavailable ──\x1b[0m\r\n");
+          }
+          connectSocket();
+          return;
+        }
+        serverHistoryRestored = true;
+        connectSocket(result.snapshotEnd);
+      }).catch((err: unknown) => {
+        restoreSettled = true;
+        if (restoreTimer !== null) {
+          clearTimeout(restoreTimer);
+          restoreTimer = null;
+        }
+        if (restoreCancelled || restoreController.signal.aborted) return;
+        // Do not leave a partial server replay on screen before attaching
+        // without a cursor. A resumed shell will send its capped replay, while
+        // a fresh shell starts from a clean buffer; either way this avoids
+        // overlapping partial output and live replay.
+        if (serverHistoryPartial) {
+          term.reset();
+          snapshot.markDirty();
+        }
+        const message = err instanceof TerminalHistoryError ? err.message : "terminal history restore failed";
+        console.error("terminal: history restore failed", err);
+        term.write(`\r\n\x1b[31m[${message}; live terminal attached without restore]\x1b[0m\r\n`);
         connectSocket();
+      });
+    };
+
+    const waitThenRestore = () => {
+      const waitMs = host ? remoteHostRetryInMs(host) : 0;
+      if (waitMs > 0) {
+        waitForRemoteHost(waitMs, waitThenRestore);
         return;
       }
-      serverHistoryRestored = true;
-      connectSocket(result.snapshotEnd);
-    }).catch((err: unknown) => {
-      restoreSettled = true;
-      if (restoreTimer !== null) {
-        clearTimeout(restoreTimer);
-        restoreTimer = null;
-      }
-      if (restoreCancelled || restoreController.signal.aborted) return;
-      // Do not leave a partial server replay on screen before attaching
-      // without a cursor. A resumed shell will send its capped replay, while
-      // a fresh shell starts from a clean buffer; either way this avoids
-      // overlapping partial output and live replay.
-      if (serverHistoryPartial) {
-        term.reset();
-        snapshot.markDirty();
-      }
-      const message = err instanceof TerminalHistoryError ? err.message : "terminal history restore failed";
-      console.error("terminal: history restore failed", err);
-      term.write(`\r\n\x1b[31m[${message}; live terminal attached without restore]\x1b[0m\r\n`);
-      connectSocket();
-    });
+      startRestore();
+    };
+    waitThenRestore();
 
     // Everything the client sends is text; the backend treats a frame starting
     // with {"type":"resize" as a control message and anything else as raw

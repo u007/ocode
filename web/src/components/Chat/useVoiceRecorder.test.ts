@@ -5,6 +5,7 @@ import {
   VOICE_PARTIAL_INTERVAL_MS,
   VOICE_TIMESLICE_MS,
   VOICE_UNAVAILABLE_MESSAGE,
+  VOICE_HOLD_THRESHOLD_MS,
   audioExtensionFor,
   describeMicError,
   pickRecordingMimeType,
@@ -59,24 +60,62 @@ describe("useVoiceRecorder state transitions", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it("toggle starts when idle and stops when recording, ignoring clicks mid-transcription", async () => {
+  it("press+release starts when idle, press+release stops when recording, ignoring input mid-transcription", async () => {
     let resolveTranscribe!: (v: { text: string; model: string }) => void;
     const transcribe = vi.fn(() => new Promise<{ text: string; model: string }>((r) => (resolveTranscribe = r)));
     const { result, onTranscript } = setup(transcribe);
 
-    await act(async () => result.current.toggle());
+    // A quick press+release starts recording.
+    act(() => result.current.press());
+    await act(async () => result.current.release());
     expect(result.current.state).toBe("recording");
-    act(() => result.current.toggle());
+
+    // A press (stop-intent) + release stops & transcribes.
+    act(() => result.current.press());
+    await act(async () => result.current.release());
     expect(result.current.state).toBe("transcribing");
 
-    // A third click while transcribing must not start a second recorder.
-    await act(async () => result.current.toggle());
+    // A third press while transcribing must not start a second recorder.
+    act(() => result.current.press());
     expect(FakeMediaRecorder.instances).toHaveLength(1);
     expect(env.getUserMedia).toHaveBeenCalledTimes(1);
 
     await act(async () => resolveTranscribe({ text: "done", model: "m" }));
     expect(onTranscript).toHaveBeenCalledWith("done");
     expect(result.current.state).toBe("idle");
+  });
+
+  it("holding past the threshold locks continuous mode; release does not stop", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveTranscribe!: (v: { text: string; model: string }) => void;
+      const transcribe = vi.fn(() => new Promise<{ text: string; model: string }>((r) => (resolveTranscribe = r)));
+      const onTranscript = vi.fn();
+      const { result } = renderHook(() => useVoiceRecorder({ transcribe, onTranscript }));
+
+      // Press and hold past the threshold: locks continuous mode.
+      act(() => result.current.press());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(VOICE_HOLD_THRESHOLD_MS);
+      });
+      expect(result.current.state).toBe("recording");
+      expect(result.current.holding).toBe(false);
+
+      // Releasing the hold does NOT stop continuous recording.
+      act(() => result.current.release());
+      expect(result.current.state).toBe("recording");
+
+      // A deliberate press+release now stops & transcribes.
+      act(() => result.current.press());
+      await act(async () => result.current.release());
+      expect(result.current.state).toBe("transcribing");
+
+      await act(async () => resolveTranscribe({ text: "hello there", model: "m" }));
+      expect(onTranscript).toHaveBeenCalledWith("hello there");
+      expect(result.current.state).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stop() is a no-op unless recording", () => {
@@ -441,5 +480,107 @@ describe("useVoiceRecorder prewarm", () => {
     });
 
     expect(result.current.state).toBe("recording");
+  });
+});
+
+describe("useVoiceRecorder hold-timer lifecycle", () => {
+  it("does not start a second recording when a press is repeated", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = setup();
+      // A browser repeats keydown while a key is held, and the keydown handler
+      // calls press() on EVERY keydown. Each call re-armed the hold timer and
+      // orphaned the previous one, so the orphan fired later — after the user
+      // had already stopped the recording — and started a SECOND recording
+      // with no user action (the mic indicator stayed lit).
+      //
+      // The sequence below is the one a browser produces: keydown arms timer
+      // A, the click fallback arms timer B, the release clears B and starts
+      // the recording, the user stops it, and the orphan A fires afterwards.
+      act(() => {
+        result.current.press();
+      });
+      act(() => {
+        result.current.press();
+      });
+      act(() => {
+        result.current.release();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(result.current.state).toBe("recording");
+      expect(env.getUserMedia).toHaveBeenCalledTimes(1);
+
+      // The user stops the recording before the orphan would fire.
+      act(() => {
+        result.current.stop();
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(result.current.state).toBe("idle");
+
+      // Now the orphan would fire.
+      await act(async () => {
+        vi.advanceTimersByTime(VOICE_HOLD_THRESHOLD_MS + 200);
+      });
+      expect(env.getUserMedia).toHaveBeenCalledTimes(1);
+      expect(FakeMediaRecorder.instances).toHaveLength(1);
+      expect(result.current.state).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the stop-intent when the hold timer fires", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result, transcribe } = setup();
+      // Press and hold past the threshold: the recording starts in continuous
+      // mode and the release must NOT stop it.
+      act(() => result.current.press());
+      await act(async () => {
+        vi.advanceTimersByTime(VOICE_HOLD_THRESHOLD_MS + 50);
+      });
+      expect(result.current.state).toBe("recording");
+
+      // A deliberate stop-press, then the release. The hold timer must not
+      // have wiped the stop-intent, so the release stops the recording and
+      // sends the transcript.
+      act(() => result.current.press());
+      act(() => result.current.release());
+      // The transcription is async; drive the microtask queue under fake
+      // timers (waitFor would not advance them).
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(transcribe).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the hold timer on unmount so no phantom recording starts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = setup();
+      // Arm the hold timer, then unmount before it fires.
+      act(() => result.current.press());
+      unmount();
+      await act(async () => {
+        vi.advanceTimersByTime(VOICE_HOLD_THRESHOLD_MS + 500);
+      });
+      // No microphone may be requested after the component is gone, and the
+      // track must not be left open (the OS recording indicator would stay lit).
+      expect(env.getUserMedia).not.toHaveBeenCalled();
+      expect(FakeMediaRecorder.instances).toHaveLength(0);
+      expect(env.trackStop).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

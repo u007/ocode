@@ -119,9 +119,75 @@ type modelsRegistry struct {
 	data             map[string]providerEntry
 	fetchedAt        time.Time
 	lastFetchAttempt time.Time
+	// refreshing is true while a background refresh started by loadRegistry
+	// is in flight. Guarded by mu.
+	refreshing bool
+	// lastBackgroundAttempt is the throttle for the BACKGROUND refresh only.
+	// It is separate from lastFetchAttempt (the cold-start throttle) so a
+	// background attempt cannot consume the cold-start budget: otherwise a
+	// failed background fetch would block the cold-start path for a whole TTL,
+	// leaving the registry stale with nothing retrying it.
+	lastBackgroundAttempt time.Time
 }
 
 var registry = &modelsRegistry{}
+
+// registryRefreshes tracks background refresh goroutines so tests can wait
+// for them to finish before they restore global state.
+var registryRefreshes sync.WaitGroup
+
+// startBackgroundRegistryRefreshLocked starts at most one background refresh,
+// and only when the throttle window has passed. The caller must hold
+// registry.mu for writing.
+//
+// The HTTP client is captured HERE, while the caller still holds the lock: the
+// refresh goroutine outlives this call, and a test that swaps fetchRemoteClient
+// and restores it on cleanup must not have the detached goroutine pick up the
+// restored (real-network) client afterwards.
+func startBackgroundRegistryRefreshLocked() {
+	if registry.refreshing || time.Since(registry.lastBackgroundAttempt) < modelsCacheTTL {
+		return
+	}
+	registry.refreshing = true
+	registry.lastBackgroundAttempt = time.Now()
+	startedAt := registry.lastBackgroundAttempt
+	client := fetchRemoteClient
+	registryRefreshes.Add(1)
+	crashguard.Go(func() { runBackgroundRegistryRefresh(startedAt, client) })
+}
+
+// runBackgroundRegistryRefresh fetches models.dev with registry.mu NOT held, so
+// readers keep getting the in-memory copy while the network is slow or down.
+// It takes the write lock only to publish the result.
+func runBackgroundRegistryRefresh(startedAt time.Time, client *http.Client) {
+	defer registryRefreshes.Done()
+	remote, err := refreshRegistryWithLockUsing(client)
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.refreshing = false
+	if err != nil {
+		// The fetch failed, but ANOTHER ocode process may have refreshed
+		// models.dev and written a newer on-disk cache while we were trying.
+		// The on-disk cache's mtime is the cross-process "last updated"
+		// record, so adopt it when it is newer than what we hold — otherwise
+		// this process keeps serving its older in-memory copy forever.
+		if cached, modTime, cerr := loadCache(); cerr == nil && modTime.After(registry.fetchedAt) {
+			registry.data = cached
+			registry.fetchedAt = modTime
+			return
+		}
+		emitDebug("AGENT", fmt.Sprintf("models.dev background refresh failed (using stale data): %v", err))
+		return
+	}
+	// A ForceRefreshRegistry that published while this fetch ran is newer than
+	// anything this fetch can return; never replace it with the older copy.
+	if registry.fetchedAt.After(startedAt) {
+		return
+	}
+	registry.data = remote
+	registry.fetchedAt = time.Now()
+}
 
 func cachePath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -364,10 +430,30 @@ func RegistryHistory(limit int) []HistoryEntry {
 
 // fetchRemoteClient is the HTTP client used by fetchRemote. Tests can swap
 // it for an httptest-backed client. Zero value uses a 10s-timeout default.
+//
+// It is read at CALL time by every synchronous path. A background refresh
+// therefore captures the client when it starts and passes it down explicitly
+// (see startBackgroundRegistryRefreshLocked): a test that swaps this var and
+// restores it on cleanup must not have a detached goroutine pick up the
+// restored (real-network) client afterwards.
 var fetchRemoteClient = &http.Client{Timeout: 10 * time.Second}
 
 func fetchRemote() (map[string]providerEntry, error) {
-	resp, err := fetchRemoteClient.Get(modelsDevURL)
+	return fetchRemoteWith(fetchRemoteClient)
+}
+
+// fetchRemoteWith fetches models.dev with an explicit client. Callers that
+// outlive the moment they started (the background registry refresh) pass the
+// client they captured, so a later swap of fetchRemoteClient cannot redirect
+// them to a different endpoint.
+//
+// A nil client is a programming error and panics loudly: silently falling
+// back to the global would reintroduce exactly the bug this split prevents.
+func fetchRemoteWith(client *http.Client) (map[string]providerEntry, error) {
+	if client == nil {
+		panic("fetchRemoteWith: nil HTTP client")
+	}
+	resp, err := client.Get(modelsDevURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch models.dev: %w", err)
 	}
@@ -487,7 +573,14 @@ func modelsLockPath() (string, error) {
 // another ocode process just refreshed it, and only fetches when that cache is
 // still stale.
 func refreshRegistryWithLock() (map[string]providerEntry, error) {
-	return fetchRegistryWithLock(true, "auto")
+	return refreshRegistryWithLockUsing(fetchRemoteClient)
+}
+
+// refreshRegistryWithLockUsing is refreshRegistryWithLock with an explicit
+// HTTP client. The background refresh passes the client it captured when it
+// started, so a later swap of fetchRemoteClient cannot redirect it.
+func refreshRegistryWithLockUsing(client *http.Client) (map[string]providerEntry, error) {
+	return fetchRegistryWithLock(true, "auto", client)
 }
 
 // forceFetchRegistryWithLock is the explicit path (ForceRefreshRegistry /
@@ -495,7 +588,7 @@ func refreshRegistryWithLock() (map[string]providerEntry, error) {
 // cache is fresh, but still serializes on the cross-process lock so two
 // processes can't fetch simultaneously.
 func forceFetchRegistryWithLock() (map[string]providerEntry, error) {
-	return fetchRegistryWithLock(false, "force")
+	return fetchRegistryWithLock(false, "force", fetchRemoteClient)
 }
 
 // fetchRegistryWithLock fetches the models.dev registry under a cross-process
@@ -509,7 +602,7 @@ func forceFetchRegistryWithLock() (map[string]providerEntry, error) {
 // Every actual fetch attempt (success or failure) is appended to the bounded
 // models-history.jsonl audit log, so "when was the registry last updated (and
 // by what)" has an explicit record rather than only a file mtime.
-func fetchRegistryWithLock(recheckFreshCache bool, source string) (map[string]providerEntry, error) {
+func fetchRegistryWithLock(recheckFreshCache bool, source string, client *http.Client) (map[string]providerEntry, error) {
 	lockPath, err := modelsLockPath()
 	if err != nil {
 		return nil, err
@@ -544,7 +637,7 @@ func fetchRegistryWithLock(recheckFreshCache bool, source string) (map[string]pr
 	}
 
 	start := time.Now()
-	remote, err := fetchRemote()
+	remote, err := fetchRemoteWith(client)
 	dur := time.Since(start)
 	if err != nil {
 		appendHistory(HistoryEntry{
@@ -616,10 +709,13 @@ func loadRegistry() map[string]providerEntry {
 	// The on-disk cache is the cross-process "last updated" record: its mtime
 	// is set by whichever ocode process fetched models.dev last. A fresh cache
 	// wins over the build-time snapshot — it is strictly newer registry state.
-	if cached, modTime, err := loadCache(); err == nil && time.Since(modTime) < modelsCacheTTL {
-		registry.data = cached
-		registry.fetchedAt = modTime
-		return cached
+	// Stat first: a stale cache is not parsed on every stale call.
+	if mt, ok := cacheModTime(); ok && time.Since(mt) < modelsCacheTTL {
+		if cached, modTime, err := loadCache(); err == nil && time.Since(modTime) < modelsCacheTTL {
+			registry.data = cached
+			registry.fetchedAt = modTime
+			return cached
+		}
 	}
 
 	// The embedded snapshot is only fresh within modelsCacheTTL of its
@@ -633,9 +729,15 @@ func loadRegistry() map[string]providerEntry {
 		}
 	}
 
-	// Everything is stale: refresh from models.dev, throttled to one attempt
-	// per TTL window per process so a down network or a slow lock holder can't
-	// stall every lookup or trigger concurrent refetching.
+	// Everything is stale. With a stale in-memory copy, serve it at once and
+	// refresh in the background: no caller waits on models.dev.
+	if registry.data != nil {
+		startBackgroundRegistryRefreshLocked()
+		return registry.data
+	}
+
+	// Cold start: nothing to serve, so fetch synchronously, throttled to one
+	// attempt per TTL window per process.
 	if time.Since(registry.lastFetchAttempt) >= modelsCacheTTL {
 		registry.lastFetchAttempt = time.Now()
 		if remote, err := refreshRegistryWithLock(); err == nil {

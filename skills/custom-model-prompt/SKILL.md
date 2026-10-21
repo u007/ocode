@@ -62,14 +62,17 @@ Search order is anchored at the session **project root**, never the process cwd 
 
 A filename stem ending in a single `*` is a **prefix wildcard** — it matches every model whose id starts with the stem's prefix. Example: `minimax-m*.OCODE.md` matches `minimax-m2`, `minimax-m2.5`, `minimax-m2.7`, `minimax-m3`, and any future `minimax-m*` release.
 
+**A wildcard is a prefix match, so it also sweeps in models you did not mean.** `minimax-m*.OCODE.md` served `minimax-m3.1-flash-free` as well as `minimax-m3` — a different model with different behaviour. That wildcard was narrowed to the exact `minimax-m3.OCODE.md` on 2026-10-21 for exactly this reason. When the family is not homogeneous, use one exact-stem file per model.
+
 Rules (see `internal/agent/context.go::LoadModelContext`):
 
 - Only a **trailing** `*` is a wildcard. `*` anywhere else in the stem is literal — so `minimax-*.5` is a literal stem, not a glob.
 - A bare `*` stem (`*.OCODE.md`) is **rejected**. Without this guard, the project-root-wins precedence would silently shadow every real model-specific file.
 - In the same directory, an **exact match beats a wildcard match** for the same model. So a specific `minimax-m3.OCODE.md` overrides `minimax-m*.OCODE.md` for that one model, while siblings still get the wildcard.
+- An **exact** stem is a whole-string match, not a prefix match. `minimax-m3.OCODE.md` does NOT serve `minimax-m3.1-flash-free` — that sibling gets nothing unless it has its own file. There is no fallback from an exact file to a wildcard for a different model.
 - Across directories, the existing project-root > .opencode/ > global precedence still applies — a project-root wildcard beats a `.opencode/` exact match for the same model.
 
-When to use a wildcard: you have a family of models (e.g. `minimax-m*`) that share a policy, and you don't want to copy-paste the file per slug. When **not** to use a wildcard: the policy is model-specific and you only have one model — the exact-stem form is clearer.
+When to use a wildcard: you have a family of models (e.g. `minimax-m*`) that genuinely share a policy, and you don't want to copy-paste the file per slug. When **not** to use a wildcard: the policy is model-specific, the family is not homogeneous (a `3` and a `3.1` are different models), or you only have one model — the exact-stem form is clearer.
 
 ## 3. Verify (do not skip)
 

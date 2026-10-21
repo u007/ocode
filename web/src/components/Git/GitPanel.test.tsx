@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GitStash, GitWorkspace } from "@/api/types";
+import type { GitStash, GitStatus, GitWorkspace } from "@/api/types";
 
 const mocks = vi.hoisted(() => ({
   getGitWorkspace: vi.fn(),
@@ -500,11 +500,130 @@ describe("GitPanel", () => {
     expect(screen.getByText("remote rejected (fetch first)")).toBeTruthy();
   });
 
+  // stageNetwork configures the before-status (read from workspace.status by
+  // runMutation) and the after-status (returned by getGitWorkspace on load),
+  // so a pull/push/fetch can report a real ahead/behind delta.
+  const stageNetwork = (
+    before: Partial<GitStatus>,
+    after: GitStatus,
+  ) => {
+    workspace.status = { ...workspace.status, ...before, has_upstream: true };
+    mocks.getGitWorkspace.mockResolvedValue({ ...workspace, status: after });
+  };
+
+  afterEach(() => {
+    // Restore the shared workspace status so other tests see the defaults.
+    workspace.status = {
+      ...workspace.status,
+      ahead: 0,
+      behind: 0,
+      has_upstream: false,
+    };
+  });
+
   it("shows a transient success notice after a push and clears it after 5s", async () => {
     vi.useFakeTimers();
     try {
       render(<GitPanel projectPath="/proj" />);
-      // Let the initial load resolve.
+      // Let the initial load resolve before staging the before/after status,
+      // otherwise the mount load clobbers the `before` state runMutation reads.
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // ahead = 2 before the push, 0 after → 2 commits pushed.
+      stageNetwork(
+        { ahead: 2 },
+        { ...workspace.status, ahead: 0, has_upstream: true },
+      );
+
+      const pushBtn = screen.getByLabelText("Push to remote");
+      await act(async () => {
+        fireEvent.click(pushBtn);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("git-notice").textContent).toBe("pushed 2 commits");
+
+      await act(async () => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(screen.queryByTestId("git-notice")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // REGRESSION: the server's `has_upstream` does NOT mean "the branch has an
+  // upstream" — it means "the branch currently DIVERGES from its upstream"
+  // (internal/server/handler_git.go skips the "+0"/"-0" entries of
+  // `git status --porcelain=v2 --branch` and only falls back to
+  // `rev-parse @{upstream}` when that line is absent). So HasUpstream is FALSE
+  // whenever the branch is in sync — which is exactly the state right after a
+  // successful push or pull, i.e. precisely when the `after` snapshot is taken.
+  //
+  // Gating the count on `has_upstream` therefore reported "nothing to push"
+  // after a successful 2-commit push, and "nothing to pull" after a successful
+  // pull. These two tests pin the REAL after-state (has_upstream: false).
+  it("counts pushed commits even though the server reports has_upstream false after the push", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<GitPanel projectPath="/proj" />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // ahead = 2 before the push, 0 after → 2 commits pushed. The after-state
+      // has has_upstream:false because the branch is now in sync — exactly what
+      // the server really returns.
+      stageNetwork(
+        { ahead: 2, has_upstream: true },
+        { ...workspace.status, ahead: 0, behind: 0, has_upstream: false },
+      );
+
+      const pushBtn = screen.getByLabelText("Push to remote");
+      await act(async () => {
+        fireEvent.click(pushBtn);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("git-notice").textContent).toBe("pushed 2 commits");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts pulled commits even though the server reports has_upstream false after the pull", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<GitPanel projectPath="/proj" />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // behind = 5 before the pull, 0 after → 5 commits pulled.
+      stageNetwork(
+        { behind: 5, has_upstream: true },
+        { ...workspace.status, ahead: 0, behind: 0, has_upstream: false },
+      );
+
+      const pullBtn = screen.getByLabelText("Pull from remote");
+      await act(async () => {
+        fireEvent.click(pullBtn);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("git-notice").textContent).toBe("pulled 5 commits");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports 'nothing to push' when nothing is ahead of the upstream", async () => {
+    vi.useFakeTimers();
+    try {
+      stageNetwork(
+        { ahead: 0 },
+        { ...workspace.status, ahead: 0, has_upstream: true },
+      );
+      render(<GitPanel projectPath="/proj" />);
       await act(async () => {
         await Promise.resolve();
       });
@@ -515,13 +634,61 @@ describe("GitPanel", () => {
         await Promise.resolve();
       });
 
-      expect(screen.getByTestId("git-notice").textContent).toBe("pushed");
+      expect(screen.getByTestId("git-notice").textContent).toBe("nothing to push");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-      // After 5 seconds the notice is gone.
+  it("reports 'pulled N commits' and 'nothing to pull' for pull", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<GitPanel projectPath="/proj" />);
+      // Let the initial load resolve before staging the before/after status,
+      // otherwise the mount load clobbers the `before` state runMutation reads.
       await act(async () => {
-        vi.advanceTimersByTime(5000);
+        await Promise.resolve();
       });
-      expect(screen.queryByTestId("git-notice")).toBeNull();
+      // behind = 2 before, 0 after → 2 commits pulled.
+      stageNetwork(
+        { behind: 2 },
+        { ...workspace.status, behind: 0, has_upstream: true },
+      );
+
+      const pullBtn = screen.getByLabelText("Pull from remote");
+      await act(async () => {
+        fireEvent.click(pullBtn);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("git-notice").textContent).toBe("pulled 2 commits");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports 'fetched N commits' and 'nothing fetched' for fetch", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<GitPanel projectPath="/proj" />);
+      // Let the initial load resolve before staging the before/after status,
+      // otherwise the mount load clobbers the `before` state runMutation reads.
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // behind = 0 before, 4 after → 4 commits fetched.
+      stageNetwork(
+        { behind: 0 },
+        { ...workspace.status, behind: 4, has_upstream: true },
+      );
+
+      const fetchBtn = screen.getByLabelText("Fetch all remotes");
+      await act(async () => {
+        fireEvent.click(fetchBtn);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("git-notice").textContent).toBe("fetched 4 commits");
     } finally {
       vi.useRealTimers();
     }

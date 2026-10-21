@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"sort"
@@ -159,19 +160,33 @@ func (h *Handler) HandleDBConnectList(w http.ResponseWriter, r *http.Request) {
 		Name     string `json:"name"`
 		Driver   string `json:"driver"`
 		Unlocked bool   `json:"unlocked"`
+		// FromEnv reports that the connection's URL comes from an
+		// environment template rather than a stored secret. The template
+		// itself is NOT returned: it names variables, but the resolved URL
+		// is a credential and stays on the server.
+		FromEnv bool `json:"from_env"`
 	}
 	conns := cfg.DB.Connections
 	sort.Slice(conns, func(i, j int) bool { return conns[i].Name < conns[j].Name })
 	out := make([]entry, 0, len(conns))
 	for _, c := range conns {
 		_, unlocked := h.dbGrantURL(surface, c.Name)
-		out = append(out, entry{Name: c.Name, Driver: c.Driver, Unlocked: unlocked})
+		out = append(out, entry{
+			Name:     c.Name,
+			Driver:   c.Driver,
+			Unlocked: unlocked,
+			FromEnv:  c.EnvTemplate != "",
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"connections": out})
 }
 
 // HandleDBConnectAdd seals a plaintext URL under the master password and saves it.
 // The URL and password are never logged or echoed back.
+//
+// A URL that contains an environment reference ("${DATABASE_URL}") is NOT a
+// secret: it names a variable, not a credential. It is saved as a template,
+// in the clear, and resolved per project when the connection is unlocked.
 func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name     string `json:"name"`
@@ -197,24 +212,29 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verified := cfg.DB.Connections
-	for _, c := range verified {
-		if _, err := dbconnect.OpenURL(c.EncryptedURL, req.Password); err != nil {
-			log.Printf("dbconnect: add %q: password check against %q: %v", req.Name, c.Name, err)
-			writeError(w, http.StatusUnauthorized, "master password does not match saved connection "+c.Name)
-			return
-		}
-	}
-	sealed, err := dbconnect.SealURL(req.URL, req.Password)
-	if err != nil {
-		log.Printf("dbconnect: add %q: seal: %v", req.Name, err)
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := dbCheckMasterPassword(verified, req.Password); err != nil {
+		log.Printf("dbconnect: add %q: %v", req.Name, err)
+		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	if err := config.AddDBConnection(config.DBConnection{
-		Name:         req.Name,
-		Driver:       config.DBDriverPostgres,
-		EncryptedURL: sealed,
-	}, verified); err != nil {
+	conn := config.DBConnection{
+		Name:   req.Name,
+		Driver: config.DBDriverPostgres,
+	}
+	if dbconnect.IsTemplate(req.URL) {
+		// A template is not a secret, so it is stored in the clear. It is
+		// resolved — and validated — when the connection is unlocked.
+		conn.EnvTemplate = req.URL
+	} else {
+		sealed, err := dbconnect.SealURL(req.URL, req.Password)
+		if err != nil {
+			log.Printf("dbconnect: add %q: seal: %v", req.Name, err)
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		conn.EncryptedURL = sealed
+	}
+	if err := config.AddDBConnection(conn, verified); err != nil {
 		log.Printf("dbconnect: add %q: save: %v", req.Name, err)
 		if errors.Is(err, config.ErrDBConnectionsChanged) {
 			writeError(w, http.StatusConflict, err.Error())
@@ -224,6 +244,25 @@ func (h *Handler) HandleDBConnectAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"name": req.Name})
+}
+
+// dbCheckMasterPassword verifies that the master password opens every saved
+// envelope, so a later unlock cannot be half-applied.
+//
+// A template connection has no envelope, so it contributes nothing to this
+// check. The password is still REQUIRED for the whole set — the unlock flow
+// stays uniform, and a connection whose name a stranger can guess is still
+// gated on a secret the stranger does not have.
+func dbCheckMasterPassword(conns []config.DBConnection, password string) error {
+	for _, c := range conns {
+		if c.EncryptedURL == "" {
+			continue
+		}
+		if _, err := dbconnect.OpenURL(c.EncryptedURL, password); err != nil {
+			return fmt.Errorf("master password does not match saved connection %s", c.Name)
+		}
+	}
+	return nil
 }
 
 // HandleDBConnectRemove deletes a saved connection and drops any grant for it.
@@ -241,10 +280,19 @@ func (h *Handler) HandleDBConnectRemove(w http.ResponseWriter, r *http.Request) 
 // HandleDBConnectUnlock opens every saved connection with the master password and
 // grants the surface access to all of them. Any envelope that fails to open
 // rejects the whole unlock, so a password mismatch is never half-applied.
+//
+// A connection saved as an environment template is resolved here, against the
+// project the session belongs to, and its resolved URL is held in the grant
+// exactly like a decrypted one. The resolved URL is never returned, logged,
+// or written to disk.
 func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Surface  string `json:"surface"`
 		Password string `json:"password"`
+		// SessionID names the session whose project provides the .env files
+		// for a template connection. It is optional: without it, only the
+		// process environment is consulted.
+		SessionID string `json:"session_id"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		log.Printf("dbconnect: unlock: decode request: %v", err)
@@ -265,14 +313,39 @@ func (h *Handler) HandleDBConnectUnlock(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "no saved connections")
 		return
 	}
+	projectRoot := h.sessionProjectRoot(req.SessionID)
 	grant := make(dbGrant, len(cfg.DB.Connections))
 	names := make([]string, 0, len(cfg.DB.Connections))
+	// Every envelope is decrypted EXACTLY ONCE. Argon2id is deliberately
+	// slow, so a second pass over the same envelopes would double the cost
+	// of an unlock for no benefit. The first envelope that fails to open
+	// rejects the whole unlock, so a password mismatch is never
+	// half-applied.
+	//
+	// A template connection has no envelope, so it contributes nothing to
+	// that check. The password is still REQUIRED for the whole set — the
+	// flow stays uniform, and a connection whose name a stranger can guess
+	// is still gated on a secret the stranger does not have.
 	for _, c := range cfg.DB.Connections {
-		u, err := dbconnect.OpenURL(c.EncryptedURL, req.Password)
-		if err != nil {
-			log.Printf("dbconnect: unlock %q: %v", c.Name, err)
-			writeError(w, http.StatusUnauthorized, "master password does not open connection "+c.Name)
-			return
+		var u string
+		if c.EnvTemplate != "" {
+			resolved, err := dbResolveTemplate(c.EnvTemplate, projectRoot)
+			if err != nil {
+				// The error names the missing variable or the invalid URL
+				// shape, never a value, so it is safe to show the user.
+				log.Printf("dbconnect: unlock %q: resolve template: %v", c.Name, err)
+				writeError(w, http.StatusBadRequest, "connection "+c.Name+": "+err.Error())
+				return
+			}
+			u = resolved
+		} else {
+			opened, err := dbconnect.OpenURL(c.EncryptedURL, req.Password)
+			if err != nil {
+				log.Printf("dbconnect: unlock %q: %v", c.Name, err)
+				writeError(w, http.StatusUnauthorized, "master password does not open connection "+c.Name)
+				return
+			}
+			u = opened
 		}
 		grant[c.Name] = u
 		names = append(names, c.Name)

@@ -43,7 +43,7 @@ var bundledSkills embed.FS
 //go:embed all:.opencode/plugins
 var bundledPlugins embed.FS
 
-//go:embed deepseek-v4-flash.OCODE.md muse-spark-1.2.OCODE.md
+//go:embed deepseek-v4-flash.OCODE.md muse-spark-1.2.OCODE.md minimax-m3.OCODE.md
 var bundledModelConfigs embed.FS
 
 // bundledSkillsFS exposes the embedded skills/ tree to the skill package
@@ -57,14 +57,15 @@ func bundledSkillsFS() fs.FS {
 
 // bundledModelConfigFS exposes the embedded model-specific OCODE.md files
 // (the concrete, non-wildcard *.OCODE.md at the repo root, e.g.
-// deepseek-v4-flash.OCODE.md and muse-spark-1.2.OCODE.md) as a plain fs.FS.
-// The agent package uses these as a fallback when no disk-based model context
-// file is found, ensuring every build ships with its own model instructions
-// baked in. NOTE: the minimax-m*.OCODE.md wildcard-named file is intentionally
-// absent — go:embed cannot embed filenames containing '*', and the wildcard
-// file only matters for disk-based wildcard matching (handled by LoadModelContext
-// against the working tree), not the exact-name bundled fallback. Add any new
-// concrete model prompt file here so it is baked into the build.
+// deepseek-v4-flash.OCODE.md, muse-spark-1.2.OCODE.md and minimax-m3.OCODE.md)
+// as a plain fs.FS. The agent package uses these as a fallback when no
+// disk-based model context file is found, ensuring every build ships with
+// its own model instructions baked in. NOTE: a wildcard-named file (a stem
+// ending in '*') is intentionally absent — go:embed cannot embed filenames
+// containing '*', and the wildcard form only matters for disk-based wildcard
+// matching (handled by LoadModelContext against the working tree), not the
+// exact-name bundled fallback. Add any new concrete model prompt file here
+// so it is baked into the build.
 func bundledModelConfigFS() fs.FS {
 	return bundledModelConfigs
 }

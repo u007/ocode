@@ -404,8 +404,11 @@ export interface CommandContext {
     listModels?: (host?: string) => Promise<{ name: string; model: string; provider: string; active: boolean }[]>;
     getConfigModel?: (host?: string) => Promise<{ model: string }>;
     setConfigModel?: (model: string, host?: string) => Promise<unknown>;
-    getFeaturesConfig?: () => Promise<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>;
-    setFeaturesConfig?: (memory_enabled: boolean, doc_prompt_enabled: boolean) => Promise<unknown>;
+    getFeaturesConfig?: () => Promise<{ memory_enabled: boolean; doc_prompt_enabled: boolean; suggested_responses_enabled?: boolean }>;
+    // The third argument is optional: a caller that omits it leaves the
+    // server's stored suggested-responses value untouched (the /mem and /docs
+    // commands must not silently turn that feature off).
+    setFeaturesConfig?: (memory_enabled: boolean, doc_prompt_enabled: boolean, suggested_responses_enabled?: boolean) => Promise<unknown>;
     getPathsInfo?: () => Promise<{ work_dir: string; extra_allowed_paths: string[]; upload_dir: string; text: string }>;
     getPathsConfig?: () => Promise<{ extra_allowed_paths: string[]; upload_dir: string }>;
     setPathsConfig?: (extra_allowed_paths: string[], upload_dir: string) => Promise<unknown>;

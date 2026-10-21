@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useChatDispatch } from "../stores/chatStore";
 import { api } from "../api/client";
 import { eventBus } from "../lib/eventBus";
+import { periodicRemoteRead } from "../lib/remoteHostGate";
 
 /**
  * useSessionStatus — per-session status on tab activation.
@@ -32,11 +33,11 @@ export function useSessionStatus(sessionId: string | null, host?: string): void 
       if (initial && !hadCached) {
         dispatch({ type: "SET_STATUS_LOADING", sessionId, loading: true });
       }
-      api
-        .getSessionStatus(sessionId, host)
-        .then((status) => {
-          if (cancelled) return;
-          dispatch({ type: "SET_TUI_STATUS", sessionId, status });
+      periodicRemoteRead(host, sessionId, () => api.getSessionStatus(sessionId, host))
+        .then((read) => {
+          // null: the host is in its retry window; keep the last status.
+          if (cancelled || read === null) return;
+          dispatch({ type: "SET_TUI_STATUS", sessionId, status: read.value });
         })
         .catch((err) => {
           if (!cancelled) console.warn(`failed to fetch status for session ${sessionId}`, err);

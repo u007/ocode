@@ -158,14 +158,14 @@ func TestExternalHoldsSlotThroughBodyStream(t *testing.T) {
 	wg.Go(func() {
 		req := httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil)
 		req.AddCookie(cookie)
-		s.handleLocal(first, req, tgt)
+		s.handleLocal(first, req, tgt, "")
 	})
 
 	<-gotHeaders // first request is mid-stream
 	second := httptest.NewRecorder()
 	req2 := httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil)
 	req2.AddCookie(cookie)
-	s.handleLocal(second, req2, tgt)
+	s.handleLocal(second, req2, tgt, "")
 	if second.Code != http.StatusServiceUnavailable {
 		t.Errorf("over-cap status = %d, want 503", second.Code)
 	}
@@ -178,7 +178,7 @@ func TestExternalHoldsSlotThroughBodyStream(t *testing.T) {
 	third := httptest.NewRecorder()
 	req3 := httptest.NewRequest("GET", "/b/tab:slow/http/"+host+"/", nil)
 	req3.AddCookie(cookie)
-	s.handleLocal(third, req3, tgt)
+	s.handleLocal(third, req3, tgt, "")
 	if third.Code != http.StatusOK {
 		t.Errorf("post-release status = %d, want 200 (slot was returned)", third.Code)
 	}
@@ -205,13 +205,13 @@ func TestExternalLocalShareOneCapPerStateKey(t *testing.T) {
 		t.Fatalf("pre-fill: %v", err)
 	}
 	w := httptest.NewRecorder()
-	s.handleLocal(w, httptest.NewRequest("GET", "/b/tab:shared/http/"+host+"/", nil), tgt)
+	s.handleLocal(w, httptest.NewRequest("GET", "/b/tab:shared/http/"+host+"/", nil), tgt, "")
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("local over-cap status = %d, want 503", w.Code)
 	}
 	release()
 	w2 := httptest.NewRecorder()
-	s.handleLocal(w2, httptest.NewRequest("GET", "/b/tab:shared/http/"+host+"/", nil), tgt)
+	s.handleLocal(w2, httptest.NewRequest("GET", "/b/tab:shared/http/"+host+"/", nil), tgt, "")
 	if w2.Code != http.StatusOK {
 		t.Errorf("local after release status = %d, want 200", w2.Code)
 	}
@@ -231,7 +231,7 @@ func TestExternalBusyClosesNavPair(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/b/tab:nav/http/127.0.0.1:9/", nil)
 	req.Header.Set("Sec-Fetch-Dest", "document")
-	s.handleLocal(w, req, target{StateKey: "tab:nav", Scheme: "http", Host: "127.0.0.1:9", Path: "/", Local: true})
+	s.handleLocal(w, req, target{StateKey: "tab:nav", Scheme: "http", Host: "127.0.0.1:9", Path: "/", Local: true}, "")
 	if len(navs) != 2 {
 		t.Fatalf("navs = %d, want loading+503 pair, got %+v", len(navs), navs)
 	}
@@ -242,7 +242,7 @@ func TestExternalBusyClosesNavPair(t *testing.T) {
 	// A failed SUBRESOURCE must stay silent on the address bar (Part 07).
 	sub := httptest.NewRequest("GET", "/b/tab:nav/http/127.0.0.1:9/i.png", nil)
 	sub.Header.Set("Sec-Fetch-Dest", "image")
-	s.handleLocal(httptest.NewRecorder(), sub, target{StateKey: "tab:nav", Scheme: "http", Host: "127.0.0.1:9", Path: "/i.png", Local: true})
+	s.handleLocal(httptest.NewRecorder(), sub, target{StateKey: "tab:nav", Scheme: "http", Host: "127.0.0.1:9", Path: "/i.png", Local: true}, "")
 	if len(navs) != before {
 		t.Errorf("subresource busy emitted navs (total %d), want %d", len(navs), before)
 	}

@@ -206,6 +206,10 @@ const SESSION_SCOPED_EVENTS = new Set([
   // Mirrors sessionScopedEvents in internal/server/event_bus.go; the two lists
   // must stay in step.
   "todo_updated",
+  // The follow-up options the agent proposed at the end of its reply. Session
+  // scoped, so the row is bound to the session that produced it. Mirrors
+  // sessionScopedEvents in internal/server/event_bus.go.
+  "suggestions",
 ]);
 
 /** Every event name `routeBusEnvelope` handles — the two process-global ones
@@ -553,6 +557,19 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
       clearSessionActivity(sessionId);
       const error = (data as { error?: string }).error || "turn failed";
+      // A user cancellation (Stop / Esc) is an EXPECTED outcome of the user's
+      // own action, not a failure. The server flags it explicitly
+      // (internal/server/run_states.go::ErrTurnCancelled). Painting it as a
+      // red error and offering "Retry the last message" makes a deliberate
+      // Stop look like a crash, and it also blocks the composer (the error
+      // state plus the interrupt barrier) right when the user wants to type
+      // their next message. Clear the error surface instead and let the
+      // composer return to its normal state.
+      const cancelled = (data as { cancelled?: boolean }).cancelled === true;
+      if (cancelled) {
+        r.dispatch({ type: "SET_ERROR", sessionId, error: null });
+        return;
+      }
       r.dispatch({ type: "SET_ERROR", sessionId, error });
       // Mark this as a retryable LLM-loop failure so the composer offers Retry.
       // A submit/validation failure sets `error` directly via useChat and must
@@ -684,6 +701,17 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
           r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
         }
         return;
+      case "suggestions": {
+        // The follow-up options the agent proposed at the end of its reply.
+        // The server strips the raw block from the message content, so only
+        // the parsed options travel here.
+        const raw = (data as { suggestions?: unknown }).suggestions;
+        if (!Array.isArray(raw)) return;
+        const suggestions = raw.filter((s): s is string => typeof s === "string" && s.trim() !== "");
+        if (suggestions.length === 0) return;
+        r.dispatch({ type: "SET_SUGGESTIONS", sessionId, suggestions });
+        return;
+      }
       case "discovery":
         // Discovery attach notice ("Discovered: …"), mirrored from the TUI's
         // transient transcript notice. Flush buffered deltas first so the

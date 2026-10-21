@@ -48,9 +48,9 @@ var catalog = []spec{
 		Engine:      EngineLocal,
 		Upstream:    "nemo-parakeet-tdt-0.6b-v3",
 		Repo:        "istupakov/parakeet-tdt-0.6b-v3-onnx",
-		Languages:   "25 European languages",
+		Languages:   "English",
 		SizeMB:      478,
-		Description: "Offline and fast on CPU. Recommended default.",
+		Description: "Offline, fast on CPU, English-only. Recommended default for English dictation.",
 	},
 	{
 		ID:          "parakeet-tdt-0.6b-v2",

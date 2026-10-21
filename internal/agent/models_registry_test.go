@@ -283,15 +283,18 @@ func withSnapshotBytes(t *testing.T, data []byte) {
 	prevRegData := registry.data
 	prevFetchedAt := registry.fetchedAt
 	prevAttempt := registry.lastFetchAttempt
+	prevBackgroundAttempt := registry.lastBackgroundAttempt
 	registry.data = nil
 	registry.fetchedAt = time.Time{}
 	registry.lastFetchAttempt = time.Time{}
+	registry.lastBackgroundAttempt = time.Time{}
 	registry.mu.Unlock()
 	t.Cleanup(func() {
 		registry.mu.Lock()
 		registry.data = prevRegData
 		registry.fetchedAt = prevFetchedAt
 		registry.lastFetchAttempt = prevAttempt
+		registry.lastBackgroundAttempt = prevBackgroundAttempt
 		registry.mu.Unlock()
 	})
 }
@@ -539,6 +542,365 @@ func TestLoadRegistryConcurrentCallersSingleFetch(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 fetch across %d concurrent callers, got %d", workers, got)
+	}
+}
+
+// A stale read must answer from the in-memory copy while models.dev is still
+// being fetched, and the fetch must run once however many callers ask.
+func TestLoadRegistryStaleReadDoesNotWaitForFetch(t *testing.T) {
+	withSandboxedModelsCache(t)
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "staleprov", time.Now().Add(-time.Hour)))
+	withRegistryState(t, map[string]providerEntry{"stale": {ID: "stale"}}, time.Now().Add(-time.Hour))
+
+	body, _ := json.Marshal(map[string]providerEntry{"live": {ID: "live"}})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFetch := func() { releaseOnce.Do(func() { close(release) }) }
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	defer releaseFetch()
+	withFetchRemoteServer(t, srv)
+
+	const callers = 8
+	results := make(chan map[string]providerEntry, callers)
+	for i := 0; i < callers; i++ {
+		go func() { results <- loadRegistry() }()
+	}
+	deadline := time.After(3 * time.Second)
+	for i := 0; i < callers; i++ {
+		select {
+		case got := <-results:
+			if _, ok := got["stale"]; !ok {
+				t.Fatalf("expected the stale in-memory copy while the fetch is blocked, got keys: %v", keysOf(got))
+			}
+		case <-deadline:
+			t.Fatal("a stale loadRegistry call waited on the models.dev fetch")
+		}
+	}
+
+	for start := time.Now(); hits.Load() != 1; {
+		if time.Since(start) > 3*time.Second {
+			t.Fatalf("expected the background refresh to reach models.dev, got %d hits", hits.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	releaseFetch()
+	for start := time.Now(); ; {
+		registry.mu.RLock()
+		_, published := registry.data["live"]
+		registry.mu.RUnlock()
+		if published {
+			break
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("background refresh never published the fetched data")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 fetch across %d concurrent stale callers, got %d", callers, got)
+	}
+}
+
+// registry.refreshing is the flag that collapses concurrent stale readers into
+// a single fetch. If a test helper leaves it true, every LATER test in the
+// process silently stops refreshing: startBackgroundRegistryRefreshLocked
+// returns early and the stale branch never fetches again. withRegistryState
+// must therefore save and restore it.
+func TestWithRegistryStateRestoresRefreshingFlag(t *testing.T) {
+	registry.mu.Lock()
+	prev := registry.refreshing
+	registry.refreshing = true
+	registry.mu.Unlock()
+	t.Cleanup(func() {
+		registry.mu.Lock()
+		registry.refreshing = prev
+		registry.mu.Unlock()
+	})
+
+	withSandboxedModelsCache(t)
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "staleprov", time.Now().Add(-time.Hour)))
+	withRegistryState(t, map[string]providerEntry{"stale": {ID: "stale"}}, time.Now().Add(-time.Hour))
+
+	// While the test holds the state, the flag must be usable (not stuck).
+	registry.mu.RLock()
+	during := registry.refreshing
+	registry.mu.RUnlock()
+	if during {
+		t.Fatal("withRegistryState left registry.refreshing true; the background refresh would be disabled for every later test")
+	}
+}
+
+// The background refresh outlives the loadRegistry call that started it, so
+// it must capture the HTTP client at start. If it read the package-level
+// fetchRemoteClient at fetch time instead, a test that swaps the client and
+// restores it on cleanup would let the detached goroutine use the RESTORED
+// client — a live request to models.dev, and a writeCache aimed at whatever
+// HOME the test has restored to.
+//
+// The refresh is made to reach its fetch LATE by holding the cross-process
+// refresh lock, so the client is read only after the test has restored the
+// global — which is exactly the window the bug lives in.
+func TestBackgroundRefreshUsesTheClientCapturedAtStart(t *testing.T) {
+	withSandboxedModelsCache(t)
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "staleprov", time.Now().Add(-time.Hour)))
+	withRegistryState(t, map[string]providerEntry{"stale": {ID: "stale"}}, time.Now().Add(-time.Hour))
+
+	// The test server the refresh is expected to use.
+	var testHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		testHits.Add(1)
+		_, _ = w.Write([]byte(`{"live":{"id":"live","models":{}}}`))
+	}))
+	defer srv.Close()
+	withFetchRemoteServer(t, srv)
+
+	// Hold the cross-process refresh lock so the background refresh blocks
+	// BEFORE its fetch. The refresh must not fetch while we hold it.
+	lockPath, err := modelsLockPath()
+	if err != nil {
+		t.Fatalf("models lock path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatalf("create models cache dir: %v", err)
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatalf("open models lock: %v", err)
+	}
+	defer lockFile.Close()
+	if err := tryLockFile(lockFile); err != nil {
+		t.Fatalf("lock models lock file: %v", err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_ = unlockFile(lockFile)
+		}
+	}()
+
+	// Start the background refresh. It blocks on the lock we hold.
+	loadRegistry()
+
+	// Give the goroutine time to reach the lock wait.
+	time.Sleep(300 * time.Millisecond)
+	if got := testHits.Load(); got != 0 {
+		t.Fatalf("the refresh fetched while the lock was held (%d requests)", got)
+	}
+
+	// Now simulate the test's cleanup restoring the REAL client, exactly as
+	// withFetchRemoteServer's t.Cleanup does.
+	var restoredHits atomic.Int32
+	fetchRemoteClient = &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			restoredHits.Add(1)
+			return http.DefaultTransport.RoundTrip(req)
+		}),
+	}
+
+	// Release the lock so the refresh proceeds to its fetch — which now
+	// happens AFTER the global was restored.
+	locked = false
+	if err := unlockFile(lockFile); err != nil {
+		t.Fatalf("unlock models lock file: %v", err)
+	}
+
+	// Wait for the refresh to publish.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		registry.mu.RLock()
+		_, published := registry.data["live"]
+		registry.mu.RUnlock()
+		if published {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background refresh never published the fetched data")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := restoredHits.Load(); got != 0 {
+		t.Fatalf("background refresh used the RESTORED client (%d requests to the real models.dev); it must use the client captured at start", got)
+	}
+	if got := testHits.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 request to the test server, got %d", got)
+	}
+}
+
+// A published refresh must also make the registry FRESH, not just populate
+// the data. RegistryReady() and the TUI's waitForRegistry() both gate on
+// fetchedAt, so a refresh that publishes the data but leaves fetchedAt stale
+// would keep the UI waiting for a registry that is already there.
+func TestBackgroundRefreshMarksRegistryFresh(t *testing.T) {
+	withSandboxedModelsCache(t)
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "staleprov", time.Now().Add(-time.Hour)))
+	withRegistryState(t, map[string]providerEntry{"stale": {ID: "stale"}}, time.Now().Add(-time.Hour))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"live":{"id":"live","models":{}}}`))
+	}))
+	defer srv.Close()
+	withFetchRemoteServer(t, srv)
+
+	before := time.Now()
+	loadRegistry()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		registry.mu.RLock()
+		_, published := registry.data["live"]
+		fetchedAt := registry.fetchedAt
+		registry.mu.RUnlock()
+		if published {
+			if fetchedAt.Before(before) {
+				t.Fatalf("registry.fetchedAt = %v, want a timestamp from the background refresh (>= %v)", fetchedAt, before)
+			}
+			if time.Since(fetchedAt) >= modelsCacheTTL {
+				t.Fatalf("registry.fetchedAt = %v is older than the TTL; the registry would still count as stale", fetchedAt)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background refresh never published the fetched data")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A background refresh that FAILS must leave the stale data in place, clear
+// the refreshing flag (or every later refresh in the process is disabled),
+// and leave fetchedAt stale (or the registry would claim to be fresh when it
+// is not).
+func TestBackgroundRefreshFailureKeepsStaleData(t *testing.T) {
+	withSandboxedModelsCache(t)
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "staleprov", time.Now().Add(-time.Hour)))
+	withRegistryState(t, map[string]providerEntry{"stale": {ID: "stale"}}, time.Now().Add(-time.Hour))
+
+	withFetchRemoteError(t, errors.New("simulated network down"))
+	loadRegistry()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		registry.mu.RLock()
+		refreshing := registry.refreshing
+		_, hasStale := registry.data["stale"]
+		fetchedAt := registry.fetchedAt
+		registry.mu.RUnlock()
+		if !refreshing {
+			if !hasStale {
+				t.Fatal("the failed background refresh dropped the stale data")
+			}
+			if time.Since(fetchedAt) < modelsCacheTTL {
+				t.Fatalf("registry.fetchedAt = %v is fresh after a failed refresh; the registry must stay stale", fetchedAt)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the failed background refresh never cleared registry.refreshing")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A background attempt must not consume the COLD-START throttle budget.
+// They are separate: a failed background fetch used to set lastFetchAttempt,
+// which blocked the cold-start path for a whole TTL — leaving the registry
+// stale with nothing retrying it.
+func TestBackgroundAttemptDoesNotBlockColdStartThrottle(t *testing.T) {
+	withSandboxedModelsCache(t)
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "staleprov", time.Now().Add(-time.Hour)))
+	withRegistryState(t, map[string]providerEntry{"stale": {ID: "stale"}}, time.Now().Add(-time.Hour))
+
+	// A failed background refresh sets the background throttle.
+	withFetchRemoteError(t, errors.New("simulated network down"))
+	loadRegistry()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		registry.mu.RLock()
+		refreshing := registry.refreshing
+		registry.mu.RUnlock()
+		if !refreshing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the failed background refresh never cleared registry.refreshing")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The cold-start throttle must still be free, so a cold start can retry.
+	registry.mu.RLock()
+	coldStartBlocked := time.Since(registry.lastFetchAttempt) < modelsCacheTTL
+	backgroundSet := !registry.lastBackgroundAttempt.IsZero()
+	registry.mu.RUnlock()
+	if coldStartBlocked {
+		t.Fatal("a background attempt consumed the cold-start throttle budget")
+	}
+	if !backgroundSet {
+		t.Fatal("the background attempt did not set the background throttle")
+	}
+}
+
+// When the background fetch fails, a NEWER on-disk cache written by another
+// ocode process must still be adopted — the cache's mtime is the
+// cross-process "last updated" record.
+//
+// The cache is written with a mtime that is newer than the in-memory copy but
+// OLDER than the TTL: a fresh cache is returned by the fetch path's own
+// re-check (before any error), so only a STALE-but-newer cache reaches the
+// error branch this test is about.
+func TestBackgroundRefreshFailureAdoptsNewerDiskCache(t *testing.T) {
+	withSandboxedModelsCache(t)
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "staleprov", time.Now().Add(-time.Hour)))
+	withRegistryState(t, map[string]providerEntry{"stale": {ID: "stale"}}, time.Now().Add(-time.Hour))
+
+	// Write a newer on-disk cache, as another process would.
+	cached := map[string]providerEntry{"fromother": {ID: "fromother"}}
+	body, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatalf("marshal cache: %v", err)
+	}
+	path, err := cachePath()
+	if err != nil {
+		t.Fatalf("cache path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create cache dir: %v", err)
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+	// Newer than the in-memory copy (an hour old) but STALE by the TTL, so
+	// the fetch path's re-check does not short-circuit on it.
+	mtime := time.Now().Add(-time.Hour).Add(time.Minute)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes cache: %v", err)
+	}
+
+	// The background fetch fails.
+	withFetchRemoteError(t, errors.New("simulated network down"))
+	loadRegistry()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		registry.mu.RLock()
+		_, adopted := registry.data["fromother"]
+		registry.mu.RUnlock()
+		if adopted {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the failed background refresh did not adopt the newer on-disk cache")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

@@ -15,6 +15,10 @@ export interface Message {
    *  Dedup identity for the snapshot-before-SSE race; absent/0 on legacy
    *  messages, which are never deduplicated. */
   user_seq?: number;
+  /** The follow-up options the agent proposed at the end of this reply.
+   *  The raw machine-readable block is stripped from `content` server-side, so
+   *  the transcript shows only the human-readable reply. */
+  suggestions?: string[];
 }
 
 export type PendingRewindStatus = "armed" | "committed" | "stale";
@@ -1515,11 +1519,14 @@ export interface PulseChatPage {
   current: string;
 }
 
-/** GET /api/config/pulse-system-prompt. `prompt` is the override ("" when
- *  unset); `default` is the built-in prompt text the override replaces. */
+/** GET /api/config/pulse-system-prompt. `prompt` is the operator's own
+ *  instructions ("" when unset); `default` is the built-in prompt text;
+ *  `effective` is exactly what the assistant's system prompt will be — the
+ *  built-in prompt with `prompt` APPENDED as a final section. */
 export interface PulseSystemPrompt {
   prompt: string;
   default: string;
+  effective: string;
 }
 
 // Speech-to-text (voice input). Mirrors internal/stt's catalog JSON. `engine`

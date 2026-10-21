@@ -741,7 +741,7 @@ async function remoteLifecycleRequest<T>(
       return {};
     })) as { error?: string; stage?: string };
     const message = body.error || res.statusText || `HTTP ${res.status}`;
-    throw new Error(body.stage ? `${message} (stage: ${body.stage})` : message);
+    throw new ApiError(body.stage ? `${message} (stage: ${body.stage})` : message, res.status);
   }
   const text = await res.text();
   if (!text.trim()) return undefined as T;
@@ -909,6 +909,9 @@ export interface DBConnectConnection {
   driver: string;
   /** True when the caller's surface holds an unlock grant for this connection. */
   unlocked: boolean;
+  /** True when the connection's URL comes from an environment template
+   *  ("${DATABASE_URL}") rather than a stored secret. */
+  fromEnv: boolean;
 }
 
 /** A Postgres query result. Values are JSON scalars, or objects for json/array columns. */
@@ -1647,6 +1650,32 @@ export const api = {
       host,
     ),
 
+  // Explain a PENDING tool call in plain prose for the ask dialog. Session-scoped
+  // so the digest reuses that session's agent (credentials, profile, model) and
+  // runs on the host that owns it. `request_id` is authoritative while the ask
+  // is live (the server reads the ask from its own transcript); the posted
+  // tool/command/args are the fallback for a stale or sub-agent ask. A failure
+  // is a real HTTP error: the button surfaces it instead of pretending the model
+  // had nothing to say.
+  explainToolCall: (
+    sessionId: string,
+    payload: {
+      request_id?: string;
+      tool?: string;
+      command?: string;
+      args?: unknown;
+      rule?: string;
+      scope?: string;
+    },
+    host?: string,
+    signal?: AbortSignal,
+  ) =>
+    fetchJSON<{ summary: string; model: string }>(
+      `/api/sessions/${sessionId}/tool-call-digest`,
+      { method: "POST", body: JSON.stringify(payload), signal },
+      host,
+    ),
+
   // Advisor model + backend + trigger set. With a sessionId these read/write
   // THAT chat's own pinned values (persisted to its transcript metadata by the
   // server, never to global config); without one they are the process-wide
@@ -1954,17 +1983,33 @@ export const api = {
     fetchJSON<{ tabs: HtrTab[]; error?: string }>("/api/config/ocode/htr/tabs"),
 
   getFeaturesConfig: () =>
-    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>(
-      "/api/config/ocode/features",
-    ),
-  setFeaturesConfig: (memory_enabled: boolean, doc_prompt_enabled: boolean) =>
-    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>(
-      "/api/config/ocode/features",
-      {
-        method: "PUT",
-        body: JSON.stringify({ memory_enabled, doc_prompt_enabled }),
-      },
-    ),
+    fetchJSON<{
+      memory_enabled: boolean;
+      doc_prompt_enabled: boolean;
+      suggested_responses_enabled: boolean;
+    }>("/api/config/ocode/features"),
+  setFeaturesConfig: (
+    memory_enabled: boolean,
+    doc_prompt_enabled: boolean,
+    suggested_responses_enabled?: boolean,
+  ) =>
+    fetchJSON<{
+      memory_enabled: boolean;
+      doc_prompt_enabled: boolean;
+      suggested_responses_enabled: boolean;
+    }>("/api/config/ocode/features", {
+      method: "PUT",
+      body: JSON.stringify({
+        memory_enabled,
+        doc_prompt_enabled,
+        // Omitted when the caller does not care: the server keeps the stored
+        // value for an absent key, so a 2-arg call (e.g. the /mem and /docs
+        // slash commands) does not silently reset the toggle.
+        ...(suggested_responses_enabled === undefined
+          ? {}
+          : { suggested_responses_enabled }),
+      }),
+    }),
   getChatVerbosityConfig: () =>
     fetchJSON<ChatVerbosityResponse>("/api/config/ocode/chat-verbosity"),
   setChatVerbosityConfig: (cfg: ChatVerbosityConfig) =>
@@ -3713,8 +3758,20 @@ export const api = {
   // `projectPath` selects the project whose .ocode/settings.json holds the
   // preference (the sidebar writes project scope). `sessionId` asks the server
   // to rebuild that chat's agent so the change lands without a restart.
-  getManageableSkills: (host?: string, projectPath?: string) => {
+  //
+  // `global: true` writes the GLOBAL layer (the machine-wide ocodeconfig.json)
+  // instead of a project's layer. It is an EXPLICIT selector, not an omission:
+  // the server's default workDir is never empty in a real deployment, so
+  // omitting the scope would silently write the PROJECT layer of whatever
+  // project the server last used — which is what made the Settings → Skills
+  // form's "disabled in every new chat on this machine" promise false.
+  getManageableSkills: (
+    host?: string,
+    projectPath?: string,
+    global?: boolean,
+  ) => {
     const qs = new URLSearchParams();
+    if (global) qs.set("scope", "global");
     if (projectPath) qs.set("path", projectPath);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return fetchJSON<ManageableSkillsResponse>(`/api/skills/manage${suffix}`, undefined, host);
@@ -3726,8 +3783,10 @@ export const api = {
     host?: string,
     projectPath?: string,
     sessionId?: string,
+    global?: boolean,
   ) => {
     const qs = new URLSearchParams();
+    if (global) qs.set("scope", "global");
     if (projectPath) qs.set("path", projectPath);
     if (sessionId) qs.set("session_id", sessionId);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
@@ -4165,10 +4224,24 @@ export const api = {
   // the remote and only the local desktop mux can answer.
   listPortMaps: (target?: PortMapTarget) =>
     fetchJSON<PortMapView[]>(portMapsPath(target)),
-  addPortMap: (remotePort: number, localPort: number, target?: PortMapTarget) =>
+  addPortMap: (
+    remotePort: number,
+    localPort: number,
+    target?: PortMapTarget,
+    reverse = false,
+  ) =>
     fetchJSON<PortMapView[]>(portMapsPath(target), {
       method: "POST",
-      body: JSON.stringify({ remote_port: remotePort, local_port: localPort }),
+      body: JSON.stringify({
+        remote_port: remotePort,
+        local_port: localPort,
+        // Direction: false = `-L` (this machine reaches the remote's port),
+        // true = `-R` (the remote reaches this machine's port). Sent
+        // explicitly rather than omitted so the server's answer is
+        // unambiguous, and so an old server that predates the field simply
+        // ignores it (Go's decoder skips unknown fields).
+        reverse,
+      }),
     }),
   removePortMap: (remotePort: number, target?: PortMapTarget) =>
     fetchJSON<PortMapView[]>(portMapsPath(target, `/${remotePort}`), {
@@ -4194,19 +4267,21 @@ export const api = {
     fetchJSON<{ connections: DBConnectConnection[] | null }>(
       `/api/dbconnect/connections?surface=${encodeURIComponent(surface)}`,
     ).then((r) => ({ connections: r.connections ?? [] })),
-  dbConnectAdd: (name: string, url: string, password: string) =>
+  dbConnectAdd: (name: string, url: string, password: string, sessionId?: string) =>
     fetchJSON<{ name: string }>("/api/dbconnect/connections", {
       method: "POST",
-      body: JSON.stringify({ name, url, password }),
+      body: JSON.stringify({ name, url, password, session_id: sessionId }),
     }),
   dbConnectRemove: (name: string) =>
     fetchEmpty(`/api/dbconnect/connections/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
-  dbConnectUnlock: (surface: string, password: string) =>
+  /** `sessionId` names the session whose project provides the .env files for
+   *  an environment-backed connection. */
+  dbConnectUnlock: (surface: string, password: string, sessionId?: string) =>
     fetchJSON<{ unlocked: string[] }>("/api/dbconnect/unlock", {
       method: "POST",
-      body: JSON.stringify({ surface, password }),
+      body: JSON.stringify({ surface, password, session_id: sessionId }),
     }),
   dbConnectLock: (surface: string) =>
     fetchEmpty("/api/dbconnect/lock", {

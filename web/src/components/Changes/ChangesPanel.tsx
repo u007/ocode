@@ -6,6 +6,7 @@ import ChangesDiffView from "./ChangesDiffView";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useKeyedLoad, type LoadingEventHandler } from "@/hooks/useKeyedLoad";
+import { isHostUnreachable, noteRemoteHostUnreachable, remoteHostRetryInMs } from "@/lib/remoteHostGate";
 
 const REFRESH_INTERVAL = 10_000;
 
@@ -54,6 +55,7 @@ function ChangesPanel({ session, host, active = true, projectRoot, onOpenFile, l
         setError(null);
         setLoading(false);
       } else if (result.status === "error") {
+        if (host && isHostUnreachable(result.error)) noteRemoteHostUnreachable(host);
         console.error("Changes load failed:", result.error);
         setError(result.message);
         setLoading(false);
@@ -66,9 +68,13 @@ function ChangesPanel({ session, host, active = true, projectRoot, onOpenFile, l
     // Poll only while frontmost; activation refreshes once so re-opening a
     // tab shows current data before the next tick.
     if (!active) return;
-    const interval = setInterval(refresh, REFRESH_INTERVAL);
+    const interval = setInterval(() => {
+      // A host inside its retry window is not asked again until the window ends.
+      if (host && remoteHostRetryInMs(host) > 0) return;
+      void refresh();
+    }, REFRESH_INTERVAL);
     return () => clearInterval(interval);
-  }, [refresh, active]);
+  }, [refresh, active, host]);
 
   const confirmUndo = useCallback(async () => {
     if (!pendingUndo) return;

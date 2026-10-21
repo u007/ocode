@@ -9,6 +9,7 @@ import {
   saveEditorTabs,
 } from "../components/Files/editorTabsPersistence";
 import { isLegacyOfficePath, previewOnlyKindForPath } from "../lib/previewKind";
+import { isHostUnreachable, noteRemoteHostUnreachable, remoteHostRetryInMs } from "../lib/remoteHostGate";
 import { noteDraftPersistFailure, noteDraftPersistPending, noteDraftPersistSuccess, reconcileDraftGuard } from "../lib/editorDraftGuard";
 
 export interface EditorTab {
@@ -613,6 +614,12 @@ export function useEditorTabs(): UseEditorTabsResult {
           }),
         );
       } catch (err) {
+        if (tab.projectHost && isHostUnreachable(err)) {
+          // The host did not answer. That says nothing about the file, so the
+          // tab keeps its state; the host's retry window opens instead.
+          noteRemoteHostUnreachable(tab.projectHost);
+          return;
+        }
         console.error("External-change check failed (file unreadable):", err);
         if (!cancelled) {
           setEditorTabs((prev) =>
@@ -630,6 +637,8 @@ export function useEditorTabs(): UseEditorTabsResult {
       // sequential keeps server contention low when many tabs are open.
       for (const tab of tabs) {
         if (cancelled) break;
+        // A host inside its retry window is not asked again until it ends.
+        if (tab.projectHost && remoteHostRetryInMs(tab.projectHost) > 0) continue;
         // eslint-disable-next-line no-await-in-loop
         await checkOne(tab);
       }

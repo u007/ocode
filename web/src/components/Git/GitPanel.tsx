@@ -27,6 +27,7 @@ import type { ContextMenuItem } from "@/components/Layout/ContextMenu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { conflictSideLabels } from "./conflictSideLabels";
+import { isHostUnreachable, noteRemoteHostUnreachable, remoteHostRetryInMs } from "@/lib/remoteHostGate";
 import { ConflictChunks } from "./ConflictChunks";
 import WorktreesSection from "./WorktreesSection";
 import type {
@@ -36,6 +37,7 @@ import type {
   GitHunkAction,
   GitOperation,
   GitOperationRequest,
+  GitStatus,
   GitStash,
   GitWorkspace,
 } from "@/api/types";
@@ -357,6 +359,9 @@ export default function GitPanel({
         void load(opts);
       },
     }).then((result) => {
+      if (result.status === "error" && projectHost && isHostUnreachable(result.error)) {
+        noteRemoteHostUnreachable(projectHost);
+      }
       if (result.status === "success" || result.status === "empty") {
         const { ws, log, stashList } = result.value;
         setWorkspace(ws);
@@ -396,6 +401,16 @@ export default function GitPanel({
             staged: sel.staged ? inStaged : !inUnstaged ? inStaged : false,
           };
         });
+        // Return the fresh workspace so callers (runMutation) can compare the
+        // before/after ahead/behind counts to report how many commits were
+        // pulled, pushed or fetched — or that nothing changed.
+        //
+        // The workspace is returned FROM THIS BRANCH, where the union is
+        // narrowed to the members that actually carry `value`. The other
+        // members of KeyedLoadResult (error/stale/aborted) have no `value`
+        // property at all, so reading it outside the narrowed branch does not
+        // typecheck.
+        return ws;
       } else if (result.status === "error") {
         // A background refresh failing is not the user's action — don't let a
         // transient poll error overwrite the outcome of what they just did.
@@ -403,13 +418,19 @@ export default function GitPanel({
         if (!background) setError(result.message);
       }
       if (result.status !== "stale" && result.status !== "aborted") setRefreshing(false);
+      // No workspace for the error/stale/aborted outcomes.
+      return null;
     });
   }, [projectPath, projectHost, runKeyedLoad]);
 
   useEffect(() => {
     load();
     if (!active) return;
-    const interval = setInterval(() => load({ background: true }), REFRESH_INTERVAL);
+    const interval = setInterval(() => {
+      // A host inside its retry window is not asked again until the window ends.
+      if (projectHost && remoteHostRetryInMs(projectHost) > 0) return;
+      void load({ background: true });
+    }, REFRESH_INTERVAL);
     return () => clearInterval(interval);
   }, [load, active]);
 
@@ -455,21 +476,41 @@ export default function GitPanel({
     });
   }, [workspace]);
 
+  // `successMessage` may be a static string or a formatter that receives the
+  // GitStatus before and after the mutation. The formatter is how pull/push/
+  // fetch report the commit count ("pulled 3") or that nothing changed
+  // ("nothing to pull") based on the ahead/behind delta.
   const runMutation = useCallback(
-    async (fn: () => Promise<unknown>, successMessage?: string) => {
+    async (
+      fn: () => Promise<unknown>,
+      // The formatter may return `null` to suppress the notice (nothing changed).
+      successMessage?: string | ((before: GitStatus | null, after: GitStatus | null) => string | null),
+    ) => {
       setBusy(true);
       setError(null);
+      // Snapshot the before-status so it stays stable even if the same object
+      // is later reused for the after-status (keeps before/after comparable in
+      // tests and production alike).
+      const before = workspace?.status ? { ...workspace.status } : null;
       try {
         await fn();
-        if (successMessage) showNotice(successMessage);
-        await load();
+        const after = (await load())?.status ?? null;
+        let message: string | null = null;
+        if (typeof successMessage === "function") {
+          message = successMessage(before, after);
+        } else if (successMessage) {
+          message = successMessage;
+        }
+        if (message) showNotice(message);
       } catch (e) {
         setError(e instanceof Error ? e.message : "git action failed");
       } finally {
         setBusy(false);
       }
     },
-    [load, showNotice],
+    // `workspace` is a dependency so the closure captures the current status
+    // as `before` (runMutation is recreated whenever the workspace refreshes).
+    [load, showNotice, workspace],
   );
 
   // Conflict resolution + operation recovery. Both go through runMutation so
@@ -598,14 +639,81 @@ export default function GitPanel({
     );
   };
 
+  // commitsTransferred reports how many commits the mutation moved, computed
+  // from the ahead/behind delta between the status before and after.
+  // `ahead` = local commits not yet pushed; `behind` = remote commits not yet
+  // integrated. A successful push clears ahead; a successful pull/fetch
+  // clears behind. Returns 0 when nothing changed, or when ahead/behind is
+  // unavailable (e.g. no upstream branch), so the caller can say so explicitly.
+  //
+  // DO NOT gate on `has_upstream` here. The server's HasUpstream does NOT mean
+  // "the branch has an upstream" — it means "the branch currently DIVERGES
+  // from its upstream": internal/server/handler_git.go skips the "+0"/"-0"
+  // entries of `git status --porcelain=v2 --branch`, and only falls back to
+  // `rev-parse @{upstream}` when that line is ABSENT. So HasUpstream is FALSE
+  // whenever the branch is in sync — which is exactly the state right after a
+  // successful push or pull, i.e. precisely when the `after` snapshot is
+  // taken. Gating on it therefore forced the count to 0 for every successful
+  // push and pull ("nothing to push" after pushing 2 commits).
+  //
+  // `ahead`/`behind` are real numbers in both states (0 when in sync), so the
+  // delta is computable without the flag.
+  function commitsTransferred(
+    op: "pull" | "push" | "fetch",
+    before: GitStatus | null,
+    after: GitStatus | null,
+  ): number {
+    if (!before || !after) return 0;
+    const clamp = (n: number) => Math.max(0, n);
+    switch (op) {
+      case "push":
+        return clamp(clamp(before.ahead) - clamp(after.ahead));
+      case "pull":
+        return clamp(clamp(before.behind) - clamp(after.behind));
+      case "fetch":
+        // A fetch advances the remote-tracking ref without moving HEAD, so
+        // `behind` GROWS when newly discovered remote commits appear. A fetch
+        // that discovers nothing leaves both counts unchanged → 0.
+        return clamp(clamp(after.behind) - clamp(before.behind));
+    }
+  }
+
+  // networkActionMessage builds the success notice for a network action:
+  // "pulled 3 commits" / "pushed 1 commit" / "fetched 2 commits", or an
+  // explicit "nothing to pull" / "nothing to push" / "nothing fetched" when
+  // nothing changed.
+  function networkActionMessage(
+    op: "pull" | "push" | "fetch",
+    before: GitStatus | null,
+    after: GitStatus | null,
+  ): string | null {
+    const n = commitsTransferred(op, before, after);
+    const noun = n === 1 ? "commit" : "commits";
+    switch (op) {
+      case "pull":
+        return n === 0 ? "nothing to pull" : `pulled ${n} ${noun}`;
+      case "push":
+        return n === 0 ? "nothing to push" : `pushed ${n} ${noun}`;
+      case "fetch":
+        return n === 0 ? "nothing fetched" : `fetched ${n} ${noun}`;
+    }
+    return null;
+  }
+
   // Network actions. Each surfaces a 5-second success notice on completion,
   // mirroring the TUI's status-bar toast.
   const doFetch = () =>
-    runMutation(() => api.gitFetch(projectPath, projectHost), "fetched");
+    runMutation(() => api.gitFetch(projectPath, projectHost), (b, a) =>
+      networkActionMessage("fetch", b, a),
+    );
   const doPull = () =>
-    runMutation(() => api.gitPull(projectPath, projectHost), "pulled");
+    runMutation(() => api.gitPull(projectPath, projectHost), (b, a) =>
+      networkActionMessage("pull", b, a),
+    );
   const doPush = () =>
-    runMutation(() => api.gitPush(projectPath, false, projectHost), "pushed");
+    runMutation(() => api.gitPush(projectPath, false, projectHost), (b, a) =>
+      networkActionMessage("push", b, a),
+    );
 
   // Force-push confirmation flow
   const [pendingForcePush, setPendingForcePush] = useState(false);

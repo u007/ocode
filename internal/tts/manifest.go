@@ -348,7 +348,7 @@ func paradeeRequirements() []string {
 }
 
 const (
-	kyutaiVersion = "kyutai-3.3.0"
+	kyutaiVersion = "kyutai-4.0.0"
 )
 
 var kyutaiVoices = []string{"alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma", "charles", "eve", "george", "mary", "michael", "paul", "vera"}
@@ -372,7 +372,7 @@ var kyutaiManifest = Manifest{
 }
 
 func kyutaiRequirements() []string {
-	return []string{"pocket-tts==3.3.0", "scipy==1.14.1", "torch==2.5.1"}
+	return []string{"pocket-tts==4.0.0", "scipy==1.14.1", "torch==2.5.1"}
 }
 
 const (

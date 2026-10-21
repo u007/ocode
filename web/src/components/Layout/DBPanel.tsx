@@ -203,7 +203,7 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
   const addConnection = () =>
     withBusy("add", async () => {
       const name = addName.trim();
-      await api.dbConnectAdd(name, addUrl.trim(), addPassword);
+      await api.dbConnectAdd(name, addUrl.trim(), addPassword, sessionId);
       setAddUrl("");
       setAddPassword("");
       setAddName("");
@@ -213,7 +213,9 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
 
   const unlockConnection = () =>
     withBusy("unlock", async () => {
-      await api.dbConnectUnlock(surface, unlockPassword);
+      // The session id lets the server resolve an environment-backed
+      // connection against THIS project's .env / .env.local.
+      await api.dbConnectUnlock(surface, unlockPassword, sessionId);
       setUnlockPassword("");
       await refresh();
       if (selected) await loadTables(selected, 0);
@@ -259,6 +261,7 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
                   <SelectItem key={c.name} value={c.name} className="text-xs">
                     {c.name}
                     {c.unlocked ? " (unlocked)" : ""}
+                    {c.fromEnv ? " (env)" : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -299,6 +302,14 @@ export default function DBPanel({ sessionId }: { sessionId: string }) {
       {current && (
         <div className="flex items-center gap-2 text-xs">
           <span className="font-medium">{current.name}</span>
+          {current.fromEnv && (
+            <span
+              className="rounded border border-border px-1 py-0.5 font-mono text-[10px] text-muted-foreground"
+              title="The connection URL comes from an environment variable, resolved when you unlock."
+            >
+              env
+            </span>
+          )}
           {unlocked && (
             <Button size="sm" variant="outline" className="ml-auto h-7" disabled={busy !== null} onClick={() => void lockConnections()}>
               <Lock className="mr-1 h-3 w-3" /> Lock
@@ -559,27 +570,43 @@ function AddFields({
         Name
         <Input value={name} onChange={(e) => onName(e.target.value)} className="h-8 text-xs" />
       </label>
-      <label className="block space-y-1 text-xs font-medium text-muted-foreground">
-        Connection URL
-        <Input
-          type="password"
-          autoComplete="off"
-          placeholder="postgres://user:pass@host:5432/db"
-          value={url}
-          onChange={(e) => onUrl(e.target.value)}
-          className="h-8 font-mono text-xs"
-        />
-      </label>
-      <label className="block space-y-1 text-xs font-medium text-muted-foreground">
-        Master password (encrypts the URL)
-        <Input
-          type="password"
-          autoComplete="off"
-          value={password}
-          onChange={(e) => onPassword(e.target.value)}
-          className="h-8 text-xs"
-        />
-      </label>
+      <div className="space-y-1">
+        <label className="block text-xs font-medium text-muted-foreground">
+          Connection URL
+          <Input
+            type="password"
+            autoComplete="off"
+            placeholder="postgres://user:pass@host:5432/db"
+            value={url}
+            onChange={(e) => onUrl(e.target.value)}
+            className="h-8 font-mono text-xs"
+          />
+        </label>
+        {/* The hint sits OUTSIDE the label: text inside a label becomes part
+            of the input's accessible name, and the field's name must stay
+            "Connection URL". */}
+        <p className="text-[11px] text-muted-foreground">
+          Use <code className="font-mono">{"${DATABASE_URL}"}</code> to read the URL from the
+          environment (the project&apos;s <code className="font-mono">.env</code> /{" "}
+          <code className="font-mono">.env.local</code>).
+        </p>
+      </div>
+      <div className="space-y-1">
+        <label className="block text-xs font-medium text-muted-foreground">
+          Master password (encrypts the URL)
+          <Input
+            type="password"
+            autoComplete="off"
+            value={password}
+            onChange={(e) => onPassword(e.target.value)}
+            className="h-8 text-xs"
+          />
+        </label>
+        <p className="text-[11px] text-muted-foreground">
+          Still required. An environment-backed URL is not stored, so the password
+          gates the whole set of connections.
+        </p>
+      </div>
     </div>
   );
 }

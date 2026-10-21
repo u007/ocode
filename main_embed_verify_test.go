@@ -24,6 +24,7 @@ func TestBundledModelConfigsResolve(t *testing.T) {
 	}{
 		{"muse-spark-1.2", "Engineering conventions"},
 		{"deepseek-v4-flash", "Model-Specific Instructions"},
+		{"minimax-m3", "Model-Specific Instructions for minimax-m3"},
 	}
 	for _, tc := range cases {
 		ctx := agent.LoadModelContext(tc.model)

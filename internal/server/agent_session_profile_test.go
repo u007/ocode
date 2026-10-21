@@ -83,6 +83,60 @@ func TestReconcileProfileAgentNoChangeKeepsAgent(t *testing.T) {
 	}
 }
 
+// TestReconcileProfileAgentRebuildsOnSuggestedResponsesToggle proves a
+// suggested-responses toggle reaches a live session. The fragment is baked into
+// the cached system prompt at build time, and a toggle made mid-turn skips the
+// rebuild, so the next turn's reconcile must catch the mismatch. A second
+// reconcile must then keep the rebuilt agent, or every turn would rebuild.
+func TestReconcileProfileAgentRebuildsOnSuggestedResponsesToggle(t *testing.T) {
+	setHomeTree(t, t.TempDir())
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+
+	ready := make(chan struct{})
+	close(ready)
+	h.mcpCache = &mcpCache{ready: ready, tools: []tool.Tool{}, errs: nil}
+
+	h.mu.Lock()
+	h.cfg.Ocode.SuggestedResponsesEnabled = false
+	h.mu.Unlock()
+	as, stage, err := h.buildAgentSession(id, "opencode-go/deepseek-v4-flash", nil, proj)
+	if err != nil {
+		t.Fatalf("build agent: %v (stage %s)", err, stage)
+	}
+	defer as.agent.Shutdown()
+	if as.agent.SuggestedResponsesEnabled() {
+		t.Fatalf("agent built with suggestions off reports enabled")
+	}
+	h.replaceAgentSession(id, as)
+
+	h.mu.Lock()
+	h.cfg.Ocode.SuggestedResponsesEnabled = true
+	h.mu.Unlock()
+
+	reb, err := h.reconcileProfileAgent(id, as, as.model)
+	if err != nil {
+		t.Fatalf("reconcile (after toggle on): %v", err)
+	}
+	if reb == as {
+		t.Fatalf("expected a rebuilt agent after the suggestions toggle")
+	}
+	defer reb.agent.Shutdown()
+	if !reb.agent.SuggestedResponsesEnabled() {
+		t.Fatalf("rebuilt agent still has suggestions off")
+	}
+
+	again, err := h.reconcileProfileAgent(id, reb, reb.model)
+	if err != nil {
+		t.Fatalf("reconcile (no further change): %v", err)
+	}
+	if again != reb {
+		t.Fatalf("reconcile rebuilt again with no suggestions change")
+	}
+}
+
 // TestResolveSessionProfileOrdering checks the precedence env > window profile
 // > global fallback used by both buildAgentSession and reconcileProfileAgent.
 func TestResolveSessionProfileOrdering(t *testing.T) {

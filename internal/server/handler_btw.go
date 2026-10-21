@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -73,6 +74,17 @@ func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+
+	// The side query clones the resident agent's model, so a model picked since
+	// the last turn must be applied first or /btw answers on the stale one.
+	// reconcileProfileAgent is a no-op while a turn is active.
+	reb, err := h.reconcileProfileAgent(id, as, h.effectiveSessionModel(id))
+	if err != nil {
+		log.Printf("btw: reconcile agent for %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
+		return
+	}
+	as = reb
 
 	msgs := h.btwMessages(id, as)
 	msgs = append(msgs, agent.Message{Role: "user", Content: content})

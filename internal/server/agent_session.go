@@ -629,7 +629,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if h.RCBridge() == nil {
 		h.wireJobEventCallbacks(sessionID, ag)
 	}
-	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot)}
+	as := &agentSession{agent: ag, messages: messages, model: model, thinkingBudget: thinkingBudget, profile: prof, credVersion: auth.CredentialVersion(), childAsks: newChildPermAsks(), disabledSkills: skill.DisabledForRoot(projectRoot), suggestedResponses: boolPtr(ag.SuggestedResponsesEnabled())}
 	// Give this session's sub-agents a working permission-ask callback. Without
 	// one a child's ask took the PERMISSION_ASK sentinel path, and since the
 	// server never wires OnSubAgentMessage and a child's messages never reach
@@ -735,7 +735,24 @@ func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model strin
 	// (that path deliberately defers the swap). skill.DisabledForRoot is
 	// TTL-cached and invalidated by the toggle itself, so this is cheap.
 	skillsChanged := !sameSkillSet(as.disabledSkills, skill.DisabledForRoot(entry.ProjectRoot))
-	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion && !skillsChanged {
+	// The suggested-responses fragment is also baked into the cached system prompt
+	// at build time. Its toggle is deferred mid-turn (rebuildAgentsForFeatureChange),
+	// so compare the value the agent was BUILT WITH against the CURRENT config.
+	//
+	// Comparing the BUILT agent's live flag against the config was wrong: an
+	// agent is not always built from the server's config, and the zero value of
+	// the flag is `false` while the server's default is `true`. Such an agent
+	// then reported "changed" on EVERY turn, and the rebuild it triggered
+	// failed (a 500 on a chat that had nothing to do with suggestions).
+	//
+	// An UNSET snapshot means the session was not built by buildAgentSession
+	// (a test or a helper injected its own agent), so the flag is unknown and
+	// there is nothing to compare — treat it as "no change".
+	h.mu.Lock()
+	suggestedNow := h.cfg == nil || h.cfg.Ocode.SuggestedResponsesEnabled
+	h.mu.Unlock()
+	suggestedChanged := as.suggestedResponses != nil && *as.suggestedResponses != suggestedNow
+	if !modelChanged && !budgetChanged && cur == as.profile && curCredVersion == as.credVersion && !skillsChanged && !suggestedChanged {
 		return as, nil
 	}
 	newAs, stage, err := h.buildAgentSession(id, model, as.messages, entry.ProjectRoot)
@@ -990,6 +1007,13 @@ func (h *Handler) publishTurnError(sessionID string, err error, stage string) {
 	data := map[string]any{"session_id": sessionID, "error": err.Error()}
 	if stage != "" {
 		data["stage"] = stage
+	}
+	// A user cancellation is NOT a failure. Flag it explicitly so the client
+	// can clear the turn state without painting a red error banner or offering
+	// the Retry affordance (see web/src/lib/sessionEvents.ts). The error text
+	// stays for backward compatibility with clients that only read "error".
+	if IsTurnCancelled(err) {
+		data["cancelled"] = true
 	}
 	if !startedAt.IsZero() {
 		data["started_at"] = startedAt.UTC().Format(time.RFC3339Nano)
@@ -1264,7 +1288,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		// cancellation so the caller stops draining queued messages.
 		if as.agent.Cancelled() {
 			h.commitPartialTranscript(sessionID, as, as.messages, resp, headless)
-			cancelErr := fmt.Errorf("cancelled")
+			cancelErr := ErrTurnCancelled
 			h.publishTurnError(sessionID, cancelErr, "")
 			if headless {
 				h.broadcastEvent(SSEEvent{
@@ -1309,15 +1333,17 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 				autoContinueCount++
 				autoContinueActions = append(autoContinueActions, fire.Action)
 				messages = append(messages, hint)
+				messages, turnBaseLen = h.compactBeforeResume(sessionID, as, headless, messages, turnBaseLen)
 				continue
 			}
 		}
 		// A live /goal judges the natural stop (the triage judge stood aside
 		// in autoContinueShouldResume). A goal resume is not an auto-continue,
 		// so autoContinueCount is left alone.
-		if as.agent.GoalEvaluable() && !tailIsPermissionAsk(as.messages) && !tailIsQuestionAsk(as.messages) {
+		if as.agent.GoalEvaluable() && !h.sessionHasOutstandingAsk(as) {
 			if prompt, ok := h.goalShouldResume(sessionID, as, headless); ok {
 				messages = append(messages, prompt)
+				messages, turnBaseLen = h.compactBeforeResume(sessionID, as, headless, messages, turnBaseLen)
 				continue
 			}
 		}
@@ -1418,6 +1444,31 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 // server turn, mirroring the TUI's autoContinueMaxChain (agent.AutoContinueChainCap).
 const autoContinueChainCap = agent.AutoContinueChainCap
 
+// sessionHasOutstandingAsk reports whether the session is waiting on the user
+// for a permission or a question answer.
+//
+// TWO sources, and BOTH matter:
+//
+//   - The transcript tail (tailIsPermissionAsk / tailIsQuestionAsk): the MAIN
+//     agent's own ask, whose sentinel lives in as.messages.
+//   - The child-ask registry (as.childAsks): a SUB-AGENT's ask. It never
+//     reaches as.messages — the child's ask is registered in the session and
+//     the CHILD is blocked on it — so the tail scan alone cannot see it.
+//
+// A resume that fires while either is outstanding starts a second model
+// (minutes, for the Claude Code backend) underneath a dialog the user is
+// still looking at. The advisor has the same gate on the agent side
+// (see internal/agent/advisor_pending_ask.go); this is the server-side twin.
+func (h *Handler) sessionHasOutstandingAsk(as *agentSession) bool {
+	if as == nil {
+		return false
+	}
+	if tailIsPermissionAsk(as.messages) || tailIsQuestionAsk(as.messages) {
+		return true
+	}
+	return as.childAsks != nil && len(as.childAsks.list()) > 0
+}
+
 // autoContinueShouldResume decides whether the just-finished Step should be
 // auto-resumed, mirroring the TUI streamDoneMsg logic for headless (and
 // bridged-web session) turns: a hard /max-step cutoff resumes immediately up
@@ -1432,7 +1483,14 @@ func (h *Handler) autoContinueShouldResume(sessionID string, as *agentSession, c
 	}
 	// A turn paused on a pending permission/question sentinel must not be
 	// resumed behind the user's back — the dialog owns the next move.
-	if tailIsPermissionAsk(as.messages) || tailIsQuestionAsk(as.messages) {
+	//
+	// This covers the MAIN agent's ask (the transcript tail) AND a sub-agent's
+	// ask (the child-ask registry). The child's ask never reaches as.messages
+	// — the child is blocked on it in the registry — so the tail scan alone
+	// cannot see it, and without the registry check the auto-continue would
+	// fire (and start a second model) while the user was still looking at the
+	// child's permission prompt.
+	if h.sessionHasOutstandingAsk(as) {
 		return autoContinueFire{}, ""
 	}
 	if !as.agent.AutoContinueEnabled() {
@@ -1835,16 +1893,11 @@ func (h *Handler) beginSyncTurn(id string) func() {
 	}
 	h.turnInFlight[id]++
 	h.cancelMu.Unlock()
-	return func() {
-		h.cancelMu.Lock()
-		defer h.cancelMu.Unlock()
-		if n := h.turnInFlight[id] - 1; n <= 0 {
-			delete(h.turnInFlight, id)
-			delete(h.pendingCancel, id)
-		} else {
-			h.turnInFlight[id] = n
-		}
-	}
+	// The release clears a stale pendingCancel when the last in-flight unit
+	// for the session ends, exactly like releaseTurnInFlight (a Stop during a
+	// synchronous turn sets the flag, but no executeTurnJob runs to consume
+	// it, so a stale flag would cancel the next message).
+	return func() { h.releaseTurnInFlight(id) }
 }
 
 // runSyncTurn runs a synchronous turn counted by beginSyncTurn.
@@ -1885,13 +1938,7 @@ func (h *Handler) dispatchTurnWithRewind(id, model, content string, opts turnOpt
 	go func() {
 		defer h.turnJobsWG.Done()
 		h.executeTurnJob(id, job)
-		h.cancelMu.Lock()
-		if n := h.turnInFlight[id] - 1; n <= 0 {
-			delete(h.turnInFlight, id)
-		} else {
-			h.turnInFlight[id] = n
-		}
-		h.cancelMu.Unlock()
+		h.releaseTurnInFlight(id)
 	}()
 	return job, nil
 }
@@ -2003,7 +2050,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 	// If cancelled, keep the pending message for retry after Resume — don't
 	// shift it, just publish a cancelled turn_error so the UI clears.
 	if h.consumePendingCancel(id) {
-		h.publishTurnError(id, fmt.Errorf("cancelled"), "")
+		h.publishTurnError(id, ErrTurnCancelled, "")
 		return
 	}
 
@@ -2022,7 +2069,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 			if as != nil && as.agent != nil {
 				as.agent.Cancel()
 			}
-			h.publishTurnError(id, fmt.Errorf("cancelled"), stage)
+			h.publishTurnError(id, ErrTurnCancelled, stage)
 			return
 		}
 		if err != nil {
@@ -2053,7 +2100,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		if as != nil && as.agent != nil {
 			as.agent.Cancel()
 		}
-		h.publishTurnError(id, fmt.Errorf("cancelled"), "")
+		h.publishTurnError(id, ErrTurnCancelled, "")
 		return
 	}
 
@@ -2064,7 +2111,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		// Treat a post-cancellation successful return as a cancellation so the
 		// pending-cancel marker does not linger (see the draining loop below).
 		if err == nil && as != nil && as.agent != nil && as.agent.Cancelled() {
-			err = fmt.Errorf("cancelled")
+			err = ErrTurnCancelled
 		}
 		if errors.Is(err, ErrPermissionPending) {
 			h.publishTurnError(id, err, "")
@@ -2086,7 +2133,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		// until the user resumes. Preserve remaining queue.
 		if h.isPendingCancel(id) {
 			h.consumePendingCancel(id)
-			h.publishTurnError(id, fmt.Errorf("cancelled"), "")
+			h.publishTurnError(id, ErrTurnCancelled, "")
 			return
 		}
 		// Every drained item is a human message queued by dispatchTurn, so it
@@ -2100,7 +2147,7 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		// queued messages are not auto-drained. Agent.Step can return
 		// (newMsgs, nil) when cancelled after a successful LLM call.
 		if err == nil && as != nil && as.agent != nil && as.agent.Cancelled() {
-			err = fmt.Errorf("cancelled")
+			err = ErrTurnCancelled
 		}
 		if errors.Is(err, ErrPermissionPending) {
 			// runTurn refused before appending — leave the message pending
@@ -2230,6 +2277,21 @@ func (h *Handler) tryEnqueueInjection(sessionID, content string) bool {
 	if as == nil || !h.sessions.IsTurnActive(sessionID) {
 		return false
 	}
+	// A CANCELLED agent must not receive an injection. The agent's stop
+	// channel is already closed, so the running Step loop will never reach
+	// the tool-call boundary where the injection queue is drained — the
+	// message would sit in the queue until the turn unwinds, and
+	// flushStrandedInjections (runTurn's defer) would then dispatch it as a
+	// follow-up turn. That path works, but it races the user's own next
+	// send: two messages can end up out of order, or the follow-up dispatch
+	// can be swallowed by the pendingCancel flag the Stop recorded.
+	//
+	// Refusing the injection here lets the caller fall through to the normal
+	// dispatchTurn path, which starts a fresh turn with the message — the
+	// same thing the TUI does when a message arrives after Esc.
+	if as.agent.Cancelled() {
+		return false
+	}
 	as.agent.EnqueueInjection(agent.Message{Role: "user", Content: content})
 	// Mid-turn injection is still NEW user input, so it must clear the
 	// consecutive-subagent-dispatch counter too — otherwise the guard keeps
@@ -2335,6 +2397,77 @@ func (h *Handler) handleServerJobEvent(sessionID string, ag *agent.Agent, ev age
 	}
 }
 
+// spliceCompactResultLocked splices a compaction summary into as.messages,
+// persists the compacted transcript and broadcasts the new snapshot. The caller
+// holds as.mu. It reports false (leaving the transcript untouched) when the
+// result no longer fits the transcript.
+func (h *Handler) spliceCompactResultLocked(sessionID string, as *agentSession, r agent.CompactResult) bool {
+	if len(as.messages) < r.OriginalLen || r.ReplaceFrom < 0 || r.ReplaceTo > len(as.messages) || r.ReplaceFrom > r.ReplaceTo {
+		log.Printf("serve: auto-compaction result for session %s dropped: transcript changed (len=%d, splice=[%d:%d), snapshot=%d)",
+			sessionID, len(as.messages), r.ReplaceFrom, r.ReplaceTo, r.OriginalLen)
+		return false
+	}
+	compacted := make([]agent.Message, 0, r.ReplaceFrom+1+len(as.messages)-r.ReplaceTo)
+	compacted = append(compacted, as.messages[:r.ReplaceFrom]...)
+	compacted = append(compacted, r.Summary)
+	compacted = append(compacted, as.messages[r.ReplaceTo:]...)
+	as.messages = compacted
+
+	if err := h.replaceSession(sessionID, "", as.messages, nil); err != nil {
+		log.Printf("serve: persisting compacted transcript for session %s: %v", sessionID, err)
+	}
+	if h.RCBridge() == nil {
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "messages",
+			Data:      as.messages,
+		})
+	}
+	return true
+}
+
+// compactBeforeResume compacts the transcript between two Steps of one runTurn
+// chain and waits for it, so an auto-continue or /goal resume never starts
+// another LLM round on a context that is already over the compaction threshold.
+// The Step has ended, so no tool-call pair is open (the reason mid-Step
+// compaction is unsafe). It runs inline because runTurn holds as.mu for the
+// whole chain: the async OnCompact path takes that lock and could only land
+// after the chain ended. Headless only; a bridged TUI owns its own transcript
+// and has its own compaction barrier.
+//
+// It returns the LLM input for the next Step, the new turn base length, and
+// whether the transcript was rewritten. A pass that failed or no longer fits is
+// not fatal: the chain resumes uncompacted, exactly as before this barrier
+// existed, and the agent latches auto-compaction off after a real failure.
+func (h *Handler) compactBeforeResume(sessionID string, as *agentSession, headless bool, messages []agent.Message, turnBaseLen int) ([]agent.Message, int) {
+	if !headless {
+		return messages, turnBaseLen
+	}
+	r, started := as.agent.MaybeCompactSync(as.messages)
+	if !started {
+		return messages, turnBaseLen
+	}
+	compactionErr := ""
+	cancelled := errors.Is(r.Err, agent.ErrCompactionCanceled)
+	if r.Err != nil && !cancelled {
+		compactionErr = r.Err.Error()
+		log.Printf("serve: between-step compaction failed for session %s: %v", sessionID, r.Err)
+	}
+	defer h.finishCompaction(sessionID, compactionErr)
+	if !r.OK || !h.spliceCompactResultLocked(sessionID, as, r) {
+		return messages, turnBaseLen
+	}
+	// The compacted transcript is now durable, so it is the new base: the
+	// live-persist view restarts from it and the turn-end reconcile compares
+	// against it. Rows before this point (including this turn's earlier rows)
+	// are summarised, so the reply text collected at turn end covers only what
+	// follows.
+	if as.liveReset != nil {
+		as.liveReset(as.messages)
+	}
+	return append([]agent.Message(nil), as.messages...), len(as.messages)
+}
+
 // applyCompactResult splices an async compaction summary into the session
 // transcript, persists it, and broadcasts the new snapshot so connected
 // browsers drop their stale (pre-compaction) message lists. Runs on the
@@ -2372,27 +2505,9 @@ func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
 		return
 	}
 	as.mu.Lock()
-	if len(as.messages) < r.OriginalLen || r.ReplaceFrom < 0 || r.ReplaceTo > len(as.messages) || r.ReplaceFrom > r.ReplaceTo {
+	if !h.spliceCompactResultLocked(sessionID, as, r) {
 		as.mu.Unlock()
-		log.Printf("serve: auto-compaction result for session %s dropped: transcript changed (len=%d, splice=[%d:%d), snapshot=%d)",
-			sessionID, len(as.messages), r.ReplaceFrom, r.ReplaceTo, r.OriginalLen)
 		return
-	}
-	compacted := make([]agent.Message, 0, r.ReplaceFrom+1+len(as.messages)-r.ReplaceTo)
-	compacted = append(compacted, as.messages[:r.ReplaceFrom]...)
-	compacted = append(compacted, r.Summary)
-	compacted = append(compacted, as.messages[r.ReplaceTo:]...)
-	as.messages = compacted
-
-	if err := h.replaceSession(sessionID, "", as.messages, nil); err != nil {
-		log.Printf("serve: persisting compacted transcript for session %s: %v", sessionID, err)
-	}
-	if h.RCBridge() == nil {
-		h.broadcastEvent(SSEEvent{
-			SessionID: sessionID,
-			Event:     "messages",
-			Data:      as.messages,
-		})
 	}
 	as.mu.Unlock()
 
@@ -2506,6 +2621,14 @@ func (h *Handler) wireLivePersist(sessionID string, as *agentSession, base []age
 		appendLive(m)
 	}
 	as.liveAppend = appendLive
+	// liveReset restarts the live view from a transcript that was rewritten and
+	// persisted synchronously (between-step compaction). Without it the next
+	// appendLive would save the pre-compaction rows plus the new ones.
+	as.liveReset = func(msgs []agent.Message) {
+		mu.Lock()
+		live = append([]agent.Message(nil), msgs...)
+		mu.Unlock()
+	}
 }
 
 // loadSession is the read-side counterpart to saveSession: it resolves the

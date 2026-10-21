@@ -36,6 +36,41 @@ type skillManageEntry struct {
 	Enabled     bool   `json:"enabled"`
 }
 
+// skillScopeGlobal is the query value that selects the machine-wide layer.
+const skillScopeGlobal = "global"
+
+// skillScope returns the requested preference scope and whether it was given.
+//
+// The scope selects the LAYER a toggle is written to, NOT the project the
+// skills are discovered in. Those are two different things: a global toggle
+// still has to resolve the skill NAME, and the name is resolved from the
+// caller's project.
+//
+// WHY THIS EXISTS: the Settings → Skills form is a GLOBAL control ("a skill
+// switched off here is disabled in every NEW chat on this machine"), but it
+// cannot reach the global layer by OMITTING its params, because the save
+// target falls back to h.workDir and h.workDir is never empty in a real
+// server (NewHandler sets it to os.Getwd(), SetWorkDir overwrites it, and the
+// desktop boot sets it to the last-used project). So an un-scoped request
+// wrote the PROJECT layer of whatever project the server last used, and the
+// form's promise was false.
+//
+// An unknown scope is an error, not a silent fall-through to the project
+// layer: a typo must not quietly write the wrong layer.
+func skillScope(r *http.Request) (string, bool, error) {
+	if r == nil {
+		return "", false, nil
+	}
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope == "" {
+		return "", false, nil
+	}
+	if strings.EqualFold(scope, skillScopeGlobal) {
+		return skillScopeGlobal, true, nil
+	}
+	return "", false, fmt.Errorf("unknown skill scope %q (want %q)", scope, skillScopeGlobal)
+}
+
 // skillPrefsRoot resolves the project root a skill preference applies to.
 //
 // Precedence: the session's project root (canonical, home-expanded), then an
@@ -48,6 +83,10 @@ type skillManageEntry struct {
 // above, so session-scoped work always follows that session's project rather
 // than the server's default. A final empty result means "no project", and the
 // toggle writes the GLOBAL layer.
+//
+// The scope (?scope=global) does NOT participate here: it selects the LAYER the
+// toggle is written to, while this function resolves the PROJECT the skills are
+// discovered in.
 //
 // The cwd is deliberately never consulted: a Finder/Dock-launched desktop app
 // boots with cwd "/", so resolving against it would read the wrong project and
@@ -89,12 +128,26 @@ func (h *Handler) skillPrefsRoot(r *http.Request) (string, error) {
 // are INCLUDED (with enabled:false) — the sidebar shows them dimmed below the
 // enabled ones so the user can switch them back on.
 func (h *Handler) HandleListManageableSkills(w http.ResponseWriter, r *http.Request) {
+	// The scope selects the LAYER whose state is reported; the root selects the
+	// PROJECT the skills are discovered in. A global scope reports the global
+	// layer alone (an empty root means "no project layer" to the resolver), so
+	// the Settings form shows the machine-wide truth rather than the union with
+	// whatever project the server last used.
+	scope, global, err := skillScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	root, err := h.skillPrefsRoot(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	disabled := skill.DisabledForRoot(root)
+	stateRoot := root
+	if global {
+		stateRoot = ""
+	}
+	disabled := skill.DisabledForRoot(stateRoot)
 	all := skill.LoadSkillsForRoot(root)
 
 	out := make([]skillManageEntry, 0, len(all))
@@ -130,7 +183,8 @@ func (h *Handler) HandleListManageableSkills(w http.ResponseWriter, r *http.Requ
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"project_root": root,
+		"project_root": stateRoot,
+		"scope":        scope,
 		"skills":       out,
 	})
 }
@@ -151,10 +205,26 @@ func (h *Handler) HandleSetSkillEnabled(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// The scope selects the LAYER the toggle is written to; the root selects
+	// the PROJECT the skill is discovered and resolved in. A global scope
+	// writes the global layer ("") but still resolves the name against the
+	// caller's project.
+	scope, global, err := skillScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	root, err := h.skillPrefsRoot(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// The layer the preference is written to. The global scope maps to the
+	// empty root, which config.SaveSkillEnabled writes to the machine-wide
+	// ocodeconfig.json.
+	saveRoot := root
+	if global {
+		saveRoot = ""
 	}
 
 	// Resolve the skill through the UNFILTERED loader: a currently disabled
@@ -174,7 +244,7 @@ func (h *Handler) HandleSetSkillEnabled(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if err := config.SaveSkillEnabled(root, resolved.Name, enabled); err != nil {
+	if err := config.SaveSkillEnabled(saveRoot, resolved.Name, enabled); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -193,10 +263,15 @@ func (h *Handler) HandleSetSkillEnabled(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":         resolved.Name,
 		"enabled":      enabled,
-		"project_root": root,
+		"project_root": saveRoot,
+		"scope":        scope,
 		"session_id":   sessionID,
 	})
 }
+
+// boolPtr returns a pointer to b. It exists so a snapshot field can
+// distinguish "not recorded" (nil) from "recorded as false".
+func boolPtr(b bool) *bool { return &b }
 
 // sameSkillSet reports whether two effective disabled-name sets are equal. Nil
 // and empty are equivalent (both mean "nothing disabled").
@@ -246,4 +321,28 @@ func (h *Handler) rebuildAgentForPreferenceChange(sessionID, what string) {
 	}
 	newAs.agent.SetParentAdvisorInFlight(as.agent.AdvisorGuard())
 	h.replaceAgentSession(sessionID, newAs)
+}
+
+// rebuildAgentsForFeatureChange rebuilds EVERY resident agent session after a
+// feature toggle that is baked into the agent's construction (the
+// suggested-responses prompt fragment).
+//
+// The suggested-responses toggle lives in the cached SYSTEM prompt, so an
+// agent built before the toggle keeps the old fragment until it is rebuilt.
+// Rebuilding is deferred while a turn is active (rebuildAgentForPreferenceChange),
+// so in-flight work keeps its agent and the next turn picks the change up.
+//
+// h.mu is held only to SNAPSHOT the session ids — never across the rebuild
+// itself, which constructs an agent (slow) and must not freeze the whole
+// server (see the locking rules in docs/concepts/web-server-locking-and-liveness-rules.md).
+func (h *Handler) rebuildAgentsForFeatureChange(what string) {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.agents))
+	for id := range h.agents {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+	for _, id := range ids {
+		h.rebuildAgentForPreferenceChange(id, what)
+	}
 }

@@ -107,14 +107,37 @@ func TestHandleUnknownSubcommand(t *testing.T) {
 
 // The status line names a reverse entry's direction so it is never read as a
 // -L forward. Added straight to the store: the add path itself spawns ssh.
+//
+// The arrow shows the direction TRAFFIC FLOWS, source on the left: a -R
+// forward is entered on the remote and exits on this machine, so it reads
+// "remote -> localhost". Drawing it as "remote <- localhost" would read as
+// localhost -> remote — the -L direction, the exact opposite.
 func TestHandleStatusShowsReverseDirection(t *testing.T) {
 	hook, fm := newTestHook(t)
 	if err := hook.store.AddReversePortMap(hook.ref, 9222, 9222); err != nil {
 		t.Fatalf("AddReversePortMap: %v", err)
 	}
 	out, _ := hook.Handle(fm, "/port status")
-	if !strings.Contains(out, "remote:9222 <- localhost:9222 (reverse)") {
+	if !strings.Contains(out, "remote:9222 -> localhost:9222 (reverse)") {
 		t.Fatalf("status = %q, want the reverse arrow and label", out)
+	}
+}
+
+// A -L forward is entered on this machine and exits on the remote, so its
+// arrow reads "localhost -> remote". The status line used to print the
+// inverted "remote -> localhost", contradicting the add message in the same
+// package.
+func TestHandleStatusShowsForwardDirection(t *testing.T) {
+	hook, fm := newTestHook(t)
+	if err := hook.store.AddPortMap(hook.ref, 3000, 4000); err != nil {
+		t.Fatalf("AddPortMap: %v", err)
+	}
+	out, _ := hook.Handle(fm, "/port status")
+	if !strings.Contains(out, "localhost:4000 -> remote:3000") {
+		t.Fatalf("status = %q, want the forward arrow from localhost to remote", out)
+	}
+	if strings.Contains(out, "remote:3000 -> localhost:4000") {
+		t.Fatalf("status = %q, want the forward arrow NOT inverted", out)
 	}
 }
 

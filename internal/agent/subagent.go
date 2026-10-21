@@ -431,6 +431,13 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// prompt — never the whole conversation. A recap block here would be noise
 	// in the parent's transcript and factually wrong, so opt out explicitly.
 	subAgent.SetRecapPromptEnabled(false)
+	// The suggestions block is a MAIN-agent affordance: it rides in the
+	// assistant's own output and is rendered as one-click chips under the
+	// composer. A child's reply is returned to the parent as a TOOL RESULT,
+	// so a raw <ocode:suggestions> block would land in the parent's transcript
+	// and in the parent's live context — where it can prompt the model to emit
+	// another one. Opt out explicitly, like the recap fragment above.
+	subAgent.SetSuggestedResponsesEnabled(false)
 	// Draw concurrency slots from the same pool as the dispatcher instead of
 	// NewAgent's fresh per-agent default. Without this, max_concurrent_agents
 	// only caps direct dispatches at each nesting level independently, and

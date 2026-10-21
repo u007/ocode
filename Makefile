@@ -94,7 +94,7 @@ bundle-desktop-assets:
 	cp -R skills/. cmd/ocode-desktop/embedded-assets/skills
 	cp -R .opencode/plugins/. cmd/ocode-desktop/embedded-assets/.opencode/plugins
 	# Copy every concrete (non-wildcard) model prompt. Files whose names
-	# contain '*' (e.g. minimax-m*.OCODE.md, the disk-only wildcard catch-all)
+	# contain '*' (a disk-only wildcard catch-all, e.g. "foo*.OCODE.md")
 	# are excluded: go:embed cannot embed such names, and they are not used by
 	# the exact-name bundled fallback.
 	find . -maxdepth 1 -name '*.OCODE.md' ! -name '*[*]*' -exec cp -f {} cmd/ocode-desktop/embedded-assets/ \;

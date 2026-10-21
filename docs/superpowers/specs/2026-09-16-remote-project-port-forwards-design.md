@@ -121,6 +121,19 @@ scoping.
   otherwise.
 
 ## Addendum (2026-10-09): reverse forwards
+Status: accepted design (2026-09-16) unchanged; the 2026-10-09 feature (reverse `-R`
+direction field, loopback-pinned argv, readiness estimate) is documented in the gotcha.
+
+## Addendum (2026-10-21): web panel supports `-R` (Reverse checkbox)
+The web Ports add form (`PortMapsWidget`) now supports direction selection: unticked = `-L`,
+ticked (`reverse = true`) = `-R`. The checkbox (`data-testid="portmap-reverse-toggle"`) sends
+`"reverse": true` in the POST body (`web/src/api/client.ts`); resets to unticked after a
+successful add; and shows a security warning (`data-testid="portmap-reverse-warning"`) when
+ticked. The CLI `/port status` and `/port add -R` direction labels were previously inverted
+(`remote:N <- localhost:M` read opposite of traffic flow) and fixed to source-on-left
+(`localhost:L -> remote:N` for `-L`; `remote:N -> localhost:M (reverse)` for `-R`). The original
+spec's `-L`-only scope is superseded for the web form; the `PortMap.Reverse` field and
+`PortMap.Runtime()` conversion rule remain the approved design.
 
 This spec covers `-L` only. Reverse (`-R`) forwards, which let the remote host reach a desktop
 service such as the htrcli relay or Chrome CDP, are documented in

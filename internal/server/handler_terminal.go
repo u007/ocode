@@ -315,6 +315,7 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// sockets for the same brand-new id spawn exactly one shell: losers get
 	// created=false and a done channel, then reattach to the winner.
 	existing, created, done := h.terminalSessions.reserveForProject(terminalID, project)
+	log.Printf("terminal %s: websocket attach project=%q spawn=%t", terminalID, project, created)
 	if remoteAdmissionLocked {
 		h.remoteProjectMu.Unlock()
 		remoteAdmissionLocked = false

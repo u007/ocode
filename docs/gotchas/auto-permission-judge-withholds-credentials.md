@@ -146,7 +146,7 @@ an explicit decision that is still owed — with an `// intentional:` comment
 either way, mirroring the registry-gated decision above.
 
 Pinned by `TestSideClientsCarryRedactionHook`
-(`internal/agent/agent_test.go:3485`): removing `attachRedactionHook` from
+(`internal/agent/agent_test.go:3539`): removing `attachRedactionHook` from
 `bindSideClient` fails every case.
 
 ## Rules for maintainers

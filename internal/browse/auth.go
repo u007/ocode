@@ -146,7 +146,13 @@ func (a *authStore) revoke(stateKey string) {
 // A grant whose target is a local upstream marks the new session local
 // (localDoc=true) — the sole way private-host mode is entered. Remote-workspace
 // mode changes the transport used for public hosts, not this security state.
-func (a *authStore) authenticate(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+//
+// basePath is the mount prefix the origin is served under ("" = root-mounted).
+// It must be applied to BOTH the session cookie's Path and the redemption
+// redirect: a redirect to a bare "/b/..." would leave the mount and land on
+// the wrong origin, and a cookie scoped to "/b/" would never be sent for the
+// prefixed path. See basepath.go.
+func (a *authStore) authenticate(w http.ResponseWriter, r *http.Request, basePath string) (string, string, bool) {
 	if g := r.URL.Query().Get("__grant"); g != "" {
 		local := false
 		if t, err := parseTarget(r.URL.Path, r.URL.RawQuery); err == nil {
@@ -156,15 +162,22 @@ func (a *authStore) authenticate(w http.ResponseWriter, r *http.Request) (string
 		if !ok {
 			return "", "", false
 		}
+		// The cookie must cover BOTH the /b/ route tree AND the capture
+		// script ("/__ocode_capture.js"), because the injected <script src>
+		// is a ROOT-RELATIVE path: a cookie scoped to "/b/" is not sent for
+		// it, so the capture bundle would 401 at the proxy gate and the
+		// panel would lose its console/network/telemetry bridge entirely.
+		// Path is the mount prefix itself ("" = root) so it covers every
+		// path the origin serves under this mount.
 		http.SetCookie(w, &http.Cookie{
-			Name: browseCookie, Value: cookieVal, Path: "/b/",
+			Name: browseCookie, Value: cookieVal, Path: cookiePath(basePath),
 			HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		})
 		clean := *r.URL
 		q := clean.Query()
 		q.Del("__grant")
 		clean.RawQuery = q.Encode()
-		return stateKey, clean.String(), true
+		return stateKey, withBasePath(basePath, clean.String()), true
 	}
 	c, err := r.Cookie(browseCookie)
 	if err != nil {

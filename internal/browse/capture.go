@@ -14,7 +14,12 @@ var captureJS []byte
 // injectCapture inserts the bootstrap + capture <script> as the first children
 // of <head> so wrapping happens before any page script runs. Falls back to
 // before </body>, </html>, or append so capture is never silently skipped.
-func injectCapture(html []byte, stateKey, spaOrigin string) []byte {
+//
+// basePath is the mount prefix the origin is served under ("" = root-mounted).
+// The capture script is fetched by an absolute root-relative path, so a
+// non-root mount MUST prefix it or the browser fetches the WRONG origin's
+// capture bundle. See basepath.go.
+func injectCapture(html []byte, stateKey, spaOrigin string, basePath string) []byte {
 	// json.Marshal of a plain string cannot fail; err intentionally not logged.
 	sk, _ := json.Marshal(stateKey)
 	so, _ := json.Marshal(spaOrigin)
@@ -24,7 +29,7 @@ func injectCapture(html []byte, stateKey, spaOrigin string) []byte {
 	b.WriteString(",spaOrigin:")
 	b.Write(so)
 	b.WriteString("};</script>")
-	b.WriteString(`<script src="/__ocode_capture.js"></script>`)
+	b.WriteString(`<script src="` + withBasePath(basePath, "/__ocode_capture.js") + `"></script>`)
 	snippet := []byte(b.String())
 
 	lower := bytes.ToLower(html)

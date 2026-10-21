@@ -20,6 +20,10 @@ resource: internal/tool/sqlite.go; internal/dbbrowse/dbbrowse.go; internal/dbbro
 
 The web/desktop preview pane renders `.sqlite` / `.sqlite3` / `.db` / `.db3` files with an interactive browser (Data / Query / Schema tabs) that can page, filter, sort, run confirmed SQL, edit rows, and view/download/replace BLOB cells. This page records **why** each choice was made and **which invariants must not regress**. The step-by-step implementation checklist lives in `skills/ocode-web/SKILL.md` item 64 — read that for the mechanical "where is the code" detail; this page is the rationale.
 
+## Environment templates for SQLite paths
+
+A SQLite file path may contain ${NAME} or $NAME references (docs/concepts/db-environment-templates.md). The path is expanded by dbExpandPath (handler_db.go:191) before resolution and containment: dbconnect.IsTemplate checks whether the value must expand (expand.go:151), then ExpandEnv substitutes it against the session project (dbconnect_env.go:27 dbEnvLookup). The expanded path then goes through the same resolveDBPath containment gate (handler_db.go:91) — expansion is never a bypass: an expanded path pointing outside allowed roots is refused exactly like a literal one (handler_db.go:89). A bare $NAME never makes a path a template, so a file named we$ird.db stays literal. A braced ${DB_FILE} is expanded, and a missing one produces an error naming the variable. See the new doc for the full mechanism.
+
 ## 1. The engine is server-side, never WASM
 
 The database is a **real file on disk** — possibly remote over SSH, possibly large, possibly in WAL mode — and writes must persist to that file. So browsing/querying/writing happens in Go over `modernc.org/sqlite` (already a dependency, no cgo). `sql.js`/WASM is not used: it would require shipping the whole file to the browser, cannot persist writes back, and cannot honour the same containment boundary.

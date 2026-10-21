@@ -626,3 +626,52 @@ func TestEvictionKeepsBtwGeneration(t *testing.T) {
 		t.Error("entry not marked done after cancel")
 	}
 }
+
+// TestHandleBtwAppliesPendingModelSwitch: a model picked since the last turn is
+// only applied by a rebuild on the next turn, and the side query clones the
+// resident agent's model, so /btw must reconcile first or it answers on the
+// stale model.
+func TestHandleBtwAppliesPendingModelSwitch(t *testing.T) {
+	h := NewHandler()
+	proj := t.TempDir()
+	id := session.NewSessionID()
+	h.sessions.Register(id, proj)
+	if err := session.AppendUserMessageForDir(proj, id, "hello"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ready := make(chan struct{})
+	close(ready)
+	h.mcpCache = &mcpCache{ready: ready, tools: []tool.Tool{}, errs: nil}
+
+	as, stage, err := h.buildAgentSession(id, "opencode-go/minimax-m3.1-flash-free", nil, proj)
+	if err != nil {
+		t.Fatalf("build agent: %v (stage %s)", err, stage)
+	}
+	h.replaceAgentSession(id, as)
+	defer func() {
+		if cur := h.lookupAgentSession(id); cur != nil {
+			cur.agent.Shutdown()
+		}
+	}()
+
+	const picked = "opencode-go/deepseek-v4.1-flash"
+	if _, err := h.setSessionModelOverride(id, picked); err != nil {
+		t.Fatalf("set model override: %v", err)
+	}
+
+	var gotModel string
+	prev := btwAskLoopFn
+	btwAskLoopFn = func(a *agent.Agent, _ []agent.Message, _ agent.AskLoopOptions, _ func(string, error)) func() {
+		gotModel = a.Client().GetProvider() + "/" + a.Client().GetModel()
+		return func() {}
+	}
+	t.Cleanup(func() { btwAskLoopFn = prev })
+
+	if rec := btwRequest(h, id, "aside"); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if gotModel != picked {
+		t.Fatalf("side query ran on %q, want %q", gotModel, picked)
+	}
+}

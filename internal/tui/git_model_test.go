@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -614,5 +615,179 @@ func TestRootModelRoutesGitStatusTimeout(t *testing.T) {
 	updated, _ := m.Update(gitStatusTimeoutMsg{seq: m.git.statusSeq})
 	if got := updated.(model).git.statusMsg; got != "" {
 		t.Fatalf("root Update did not route gitStatusTimeoutMsg: statusMsg=%q", got)
+	}
+}
+
+func TestNetworkActionMessage(t *testing.T) {
+	cases := []struct {
+		op           string
+		beforeAhead  int
+		beforeBehind int
+		afterAhead   int
+		afterBehind  int
+		want         string
+	}{
+		// push: ahead = local commits not yet pushed; a successful push clears it.
+		{"push", 3, 0, 0, 0, "pushed 3 commits"},
+		{"push", 1, 0, 0, 0, "pushed 1 commit"},
+		{"push", 0, 0, 0, 0, "nothing to push"},
+		// pull / fetch: behind = remote commits not yet integrated; cleared on success.
+		{"pull", 0, 2, 0, 0, "pulled 2 commits"},
+		{"pull", 0, 1, 0, 0, "pulled 1 commit"},
+		{"pull", 0, 0, 0, 0, "nothing to pull"},
+		{"fetch", 0, 0, 0, 4, "fetched 4 commits"},
+		{"fetch", 0, 0, 0, 1, "fetched 1 commit"},
+		{"fetch", 0, 0, 0, 0, "nothing fetched"},
+		// Unavailable counts (-1, e.g. no upstream) fall back to "nothing changed".
+		{"push", -1, 0, -1, 0, "nothing to push"},
+		{"pull", 0, -1, 0, -1, "nothing to pull"},
+	}
+	for _, c := range cases {
+		got := networkActionMessage(c.op, c.beforeAhead, c.beforeBehind, c.afterAhead, c.afterBehind)
+		if got != c.want {
+			t.Errorf("networkActionMessage(%s, %d, %d, %d, %d) = %q, want %q",
+				c.op, c.beforeAhead, c.beforeBehind, c.afterAhead, c.afterBehind, got, c.want)
+		}
+	}
+}
+
+// makeGitRepo creates a local repo with one commit, a bare remote, and the
+// upstream branch set, then returns (localDir, remoteDir, gitHelper).
+func makeNetworkTestRepo(t *testing.T) (string, string, func(string, ...string) string) {
+	t.Helper()
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	if err := exec.Command("git", "init", "--bare", remote).Run(); err != nil {
+		t.Fatalf("init bare remote: %v", err)
+	}
+	local := filepath.Join(root, "local")
+	if err := os.Mkdir(local, 0o755); err != nil {
+		t.Fatalf("mkdir local: %v", err)
+	}
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v", args, dir, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git(local, "init")
+	git(local, "config", "user.email", "t@t.co")
+	git(local, "config", "user.name", "T")
+	git(local, "remote", "add", "origin", remote)
+	git(local, "commit", "--allow-empty", "-m", "base")
+	git(local, "push", "-u", "origin", "HEAD")
+	return local, remote, git
+}
+
+func TestCmdNetworkOpPushReportsCount(t *testing.T) {
+	local, _, git := makeNetworkTestRepo(t)
+	// One more local commit: ahead = 1.
+	git(local, "commit", "--allow-empty", "-m", "second")
+	if got := git(local, "rev-list", "--count", "@{u}..HEAD"); got != "1" {
+		t.Fatalf("expected ahead=1 before push, got %q", got)
+	}
+	m := gitModel{workDir: local}
+	msg := m.cmdNetworkOp("push", "push")()
+	gs, ok := msg.(gitStatusMsg)
+	if !ok {
+		t.Fatalf("expected gitStatusMsg, got %T", msg)
+	}
+	if got := gs.text; got != "pushed 1 commit" {
+		t.Fatalf("expected 'pushed 1 commit', got %q", got)
+	}
+	if got := git(local, "rev-list", "--count", "@{u}..HEAD"); got != "0" {
+		t.Fatalf("expected ahead=0 after push, got %q", got)
+	}
+}
+
+func TestCmdNetworkOpNothingPushed(t *testing.T) {
+	local, _, git := makeNetworkTestRepo(t)
+	// Nothing ahead: a push is a no-op.
+	if got := git(local, "rev-list", "--count", "@{u}..HEAD"); got != "0" {
+		t.Fatalf("expected ahead=0, got %q", got)
+	}
+	m := gitModel{workDir: local}
+	msg := m.cmdNetworkOp("push", "push")()
+	gs, ok := msg.(gitStatusMsg)
+	if !ok {
+		t.Fatalf("expected gitStatusMsg, got %T", msg)
+	}
+	if got := gs.text; got != "nothing to push" {
+		t.Fatalf("expected 'nothing to push', got %q", got)
+	}
+}
+
+func TestCmdNetworkOpErrorKeepsFailureLabel(t *testing.T) {
+	// A push against a repo with no remote must fail and keep the "push failed"
+	// label so gitStatusIsError still classifies it as an error.
+	m := gitModel{workDir: t.TempDir()}
+	msg := m.cmdNetworkOp("push", "push")()
+	gs, ok := msg.(gitStatusMsg)
+	if !ok {
+		t.Fatalf("expected gitStatusMsg, got %T", msg)
+	}
+	if !strings.HasPrefix(gs.text, "push failed:") {
+		t.Fatalf("expected 'push failed: ...', got %q", gs.text)
+	}
+	if !gitStatusIsError(gs.text) {
+		t.Fatalf("expected error classification for %q", gs.text)
+	}
+}
+
+// TestGitNetworkKeysRunNoGitInHandler pins that ctrl+g/ctrl+p/ctrl+o build their
+// Cmd without spawning git. The before ahead/behind counts must run inside the
+// Cmd, so the key handler returns before any git child process exists.
+func TestGitNetworkKeysRunNoGitInHandler(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell stub for git")
+	}
+	cases := []struct{ key, op string }{
+		{"ctrl+g", "fetch"},
+		{"ctrl+p", "pull"},
+		{"ctrl+o", "push"},
+	}
+	for _, c := range cases {
+		t.Run(c.key, func(t *testing.T) {
+			dir := t.TempDir()
+			logPath := filepath.Join(dir, "git-calls.log")
+			stub := filepath.Join(dir, "git-stub")
+			script := "#!/bin/sh\necho call >> '" + logPath + "'\necho 0\n"
+			if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			oldBin := gitBinary
+			gitBinary = stub
+			defer func() { gitBinary = oldBin }()
+
+			m := gitModel{workDir: dir, section: gitSectionChanges, panel: gitPanelFiles}
+			_, cmd := m.handleFilesKey(c.key)
+			if cmd == nil {
+				t.Fatalf("%s: expected a command", c.key)
+			}
+			if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+				t.Fatalf("%s: git ran synchronously inside the key handler (stat err=%v)", c.key, err)
+			}
+
+			// The network op itself runs real git in a non-repo dir, so it fails
+			// fast; the two before-count rev-list calls must have run first.
+			gs, ok := cmd().(gitStatusMsg)
+			if !ok {
+				t.Fatalf("%s: expected gitStatusMsg from Cmd", c.key)
+			}
+			if !strings.HasPrefix(gs.text, c.op+" failed") {
+				t.Fatalf("%s: expected %q prefix, got %q", c.key, c.op+" failed", gs.text)
+			}
+			b, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("%s: before counts did not run inside the Cmd: %v", c.key, err)
+			}
+			if got := strings.Count(string(b), "call"); got != 2 {
+				t.Fatalf("%s: want 2 rev-list calls inside the Cmd, got %d", c.key, got)
+			}
+		})
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/dbbrowse"
+	"github.com/u007/ocode/internal/dbconnect"
 	"github.com/u007/ocode/internal/paths"
 )
 
@@ -77,8 +78,22 @@ func (h *Handler) dbRoots() []string {
 // calling resolveProjectFilePath alone skips containment for an absolute path
 // with no project_root, which is the sibling-asymmetry bug where one endpoint
 // accepts a path another rejects.
+//
+// A path may name an environment variable ("${DB_NAME}.db", or a whole path
+// held in a variable). The reference is expanded HERE, before the path is
+// resolved, so every endpoint gets the same behaviour and none can forget it.
+//
+// The expansion is NOT a way around containment: the expanded value goes
+// through exactly the same resolution and allowed-roots check as a literal
+// path, so a variable that points outside the project roots is refused just
+// like a literal path would be. The expanded value is never trusted, only
+// checked.
 func (h *Handler) resolveDBPath(projectRoot, path string) (string, string) {
-	resolved, errMsg := h.resolveProjectFilePath(projectRoot, path)
+	expanded, errMsg := h.dbExpandPath(path, projectRoot)
+	if errMsg != "" {
+		return "", errMsg
+	}
+	resolved, errMsg := h.resolveProjectFilePath(projectRoot, expanded)
 	if errMsg != "" {
 		return "", errMsg
 	}
@@ -157,6 +172,35 @@ func (h *Handler) resolveDBRequest(w http.ResponseWriter, r *http.Request) (stri
 		return "", false
 	}
 	return resolved, true
+}
+
+// dbExpandPath expands environment references in a database file path.
+//
+// A path may name an environment variable ("${DB_NAME}.db", or a whole path
+// held in a variable), so the same template mechanism the Postgres connector
+// uses applies to the SQLite IDE.
+//
+// The expansion happens BEFORE the path is resolved and checked for
+// containment, and containment stays the last gate: an expanded path that
+// points outside the allowed project roots is refused exactly as a literal
+// one would be. Expanding first is safe only because of that ordering — the
+// expanded value is never trusted, only checked.
+//
+// projectRoot is the project whose .env files are consulted. An empty
+// projectRoot means only the process environment is used.
+func (h *Handler) dbExpandPath(path, projectRoot string) (string, string) {
+	if !dbconnect.IsTemplate(path) {
+		return path, ""
+	}
+	expanded, err := dbconnect.ExpandEnv(path, dbEnvLookup(projectRoot))
+	if err != nil {
+		// The error names the missing variable, never a value.
+		return "", err.Error()
+	}
+	if expanded == "" {
+		return "", "path expanded to an empty value"
+	}
+	return expanded, ""
 }
 
 // dbIntParam parses a non-negative integer query parameter, returning def when

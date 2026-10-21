@@ -93,11 +93,17 @@ func (h *storePortMapHook) status(fm *remote.ForwardManager) string {
 				state = "live"
 			}
 		}
+		// The arrow always shows the direction TRAFFIC FLOWS, source on the
+		// left: a -L forward is entered on this machine and exits on the
+		// remote (localhost -> remote), a -R forward is entered on the
+		// remote and exits here (remote -> localhost). The reverse arrow
+		// used to be drawn as "remote <- localhost", which reads as
+		// localhost -> remote — the exact opposite of what -R does.
 		if m.Reverse {
-			fmt.Fprintf(&b, "  remote:%d <- localhost:%d (reverse)  [%s]\n", m.RemotePort, m.LocalPort, state)
+			fmt.Fprintf(&b, "  remote:%d -> localhost:%d (reverse)  [%s]\n", m.RemotePort, m.LocalPort, state)
 			continue
 		}
-		fmt.Fprintf(&b, "  remote:%d -> localhost:%d  [%s]\n", m.RemotePort, m.LocalPort, state)
+		fmt.Fprintf(&b, "  localhost:%d -> remote:%d  [%s]\n", m.LocalPort, m.RemotePort, state)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -146,7 +152,7 @@ func (h *storePortMapHook) add(fm *remote.ForwardManager, spec string, reverse b
 		return "saved, but failed to open now: " + err.Error()
 	}
 	if reverse {
-		return fmt.Sprintf("added: remote:%d <- localhost:%d (reverse)", remotePort, localPort)
+		return fmt.Sprintf("added: remote:%d -> localhost:%d (reverse)", remotePort, localPort)
 	}
 	return fmt.Sprintf("added: localhost:%d -> remote:%d", localPort, remotePort)
 }

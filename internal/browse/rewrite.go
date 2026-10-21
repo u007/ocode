@@ -58,7 +58,12 @@ func resolutionBase(t target, base string) *url.URL {
 // mapURL resolves raw against the document base and returns a browse-origin
 // path /b/{stateKey}/{scheme}/{host}/{path}?{query}. Untouched schemes and
 // anchors pass through verbatim.
-func mapURL(raw string, t target, base string) string {
+//
+// basePath is the mount prefix the origin is served under ("" = root-mounted).
+// The emitted path is root-relative, so a non-root mount MUST prefix it —
+// otherwise the browser resolves it against the proxy root and lands on the
+// wrong origin (this machine's, instead of the host's). See basepath.go.
+func mapURL(raw string, t target, base string, basePath string) string {
 	if untouchedScheme(raw) {
 		return raw
 	}
@@ -77,7 +82,7 @@ func mapURL(raw string, t target, base string) string {
 	}
 	// DNS is case-insensitive; lowercase the host so route parsing round-trips
 	// consistently (the scheme is already lowercased by url.Parse).
-	out := fmt.Sprintf("/b/%s/%s/%s%s", t.StateKey, abs.Scheme, strings.ToLower(abs.Host), path)
+	out := withBasePath(basePath, fmt.Sprintf("/b/%s/%s/%s%s", t.StateKey, abs.Scheme, strings.ToLower(abs.Host), path))
 	if abs.RawQuery != "" {
 		out += "?" + abs.RawQuery
 	}
@@ -93,16 +98,16 @@ var (
 )
 
 // rewriteCSS rewrites url(...) and @import "..." targets. Quoting is preserved.
-func rewriteCSS(body []byte, t target) []byte {
+func rewriteCSS(body []byte, t target, basePath string) []byte {
 	out := cssURLRe.ReplaceAllFunc(body, func(m []byte) []byte {
 		sub := cssURLRe.FindSubmatch(m)
 		q1, raw, q2 := string(sub[1]), string(sub[2]), string(sub[3])
-		return []byte("url(" + q1 + mapURL(raw, t, "") + q2 + ")")
+		return []byte("url(" + q1 + mapURL(raw, t, "", basePath) + q2 + ")")
 	})
 	out = cssImportRe.ReplaceAllFunc(out, func(m []byte) []byte {
 		sub := cssImportRe.FindSubmatch(m)
 		q1, raw, q2 := string(sub[1]), string(sub[2]), string(sub[3])
-		return []byte("@import " + q1 + mapURL(raw, t, "") + q2)
+		return []byte("@import " + q1 + mapURL(raw, t, "", basePath) + q2)
 	})
 	return out
 }
@@ -130,7 +135,10 @@ var metaRefreshURLRe = regexp.MustCompile(`(?i)(url\s*=\s*)(\S+)`)
 // rewriteHTML rewrites the static URL surface of an HTML document. base is an
 // externally supplied resolution base (normally ""); a <base href> found in
 // the document overrides it for subsequent elements and is then removed.
-func rewriteHTML(body []byte, t target, base string) ([]byte, error) {
+//
+// basePath is the mount prefix the origin is served under ("" = root-mounted);
+// every emitted root-relative path is prefixed with it. See basepath.go.
+func rewriteHTML(body []byte, t target, base string, basePath string) ([]byte, error) {
 	node, err := html.Parse(bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("browse: html parse: %w", err)
@@ -154,7 +162,7 @@ func rewriteHTML(body []byte, t target, base string) ([]byte, error) {
 				n.DataAtom = 0
 				return
 			}
-			rewriteElement(n, t, curBase)
+			rewriteElement(n, t, curBase, basePath)
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
@@ -181,7 +189,7 @@ func resolveBase(t target, curBase, href string) string {
 	return resolutionBase(t, curBase).ResolveReference(ref).String()
 }
 
-func rewriteElement(n *html.Node, t target, base string) {
+func rewriteElement(n *html.Node, t target, base string, basePath string) {
 	rewroteURL := false
 	setAttr := func(i int, v string) { n.Attr[i].Val = v }
 
@@ -189,27 +197,27 @@ func rewriteElement(n *html.Node, t target, base string) {
 		key := strings.ToLower(a.Key)
 		// srcset (img/source).
 		if key == "srcset" {
-			n.Attr[i].Val = rewriteSrcset(a.Val, t, base)
+			n.Attr[i].Val = rewriteSrcset(a.Val, t, base, basePath)
 			rewroteURL = true
 			continue
 		}
 		// inline style url().
 		if key == "style" && strings.Contains(a.Val, "url(") {
-			setAttr(i, string(rewriteCSS([]byte(a.Val), t)))
+			setAttr(i, string(rewriteCSS([]byte(a.Val), t, basePath)))
 			continue
 		}
 		// meta http-equiv=refresh content.
 		if n.DataAtom == atom.Meta && key == "content" && metaIsRefresh(n) {
 			setAttr(i, metaRefreshURLRe.ReplaceAllStringFunc(a.Val, func(m string) string {
 				sub := metaRefreshURLRe.FindStringSubmatch(m)
-				return sub[1] + mapURL(sub[2], t, base)
+				return sub[1] + mapURL(sub[2], t, base, basePath)
 			}))
 			continue
 		}
 		// generic URL attributes for this element.
 		for _, ua := range urlAttrs[n.DataAtom] {
 			if key == ua && !untouchedScheme(a.Val) {
-				setAttr(i, mapURL(a.Val, t, base))
+				setAttr(i, mapURL(a.Val, t, base, basePath))
 				rewroteURL = true
 			}
 		}
@@ -238,14 +246,14 @@ func metaIsRefresh(n *html.Node) bool {
 }
 
 // rewriteSrcset rewrites each "url [descriptor]" entry in a srcset list.
-func rewriteSrcset(val string, t target, base string) string {
+func rewriteSrcset(val string, t target, base string, basePath string) string {
 	parts := strings.Split(val, ",")
 	for i, p := range parts {
 		fields := strings.Fields(strings.TrimSpace(p))
 		if len(fields) == 0 {
 			continue
 		}
-		fields[0] = mapURL(fields[0], t, base)
+		fields[0] = mapURL(fields[0], t, base, basePath)
 		parts[i] = strings.Join(fields, " ")
 	}
 	return strings.Join(parts, ", ")

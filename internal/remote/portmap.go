@@ -138,6 +138,12 @@ func (m *ForwardManager) SetOnExit(fn func(remotePort, exitCode int, uptime time
 	m.onExit = fn
 }
 
+// Target returns the manager's target in its canonical form ("[user@]host" or
+// "wsl:<distro>"). It is read-only, so it needs no lock.
+func (m *ForwardManager) Target() string {
+	return m.target.String()
+}
+
 // IsLive reports whether remotePort currently has a running forward process.
 // Accurate because the reaper removes the entry as soon as the child exits —
 // this is a liveness signal, not "Start was called and did not error".

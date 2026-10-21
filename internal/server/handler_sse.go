@@ -45,6 +45,16 @@ type ToolResultEvent struct {
 	Output string `json:"output"`
 }
 
+// SuggestionsEvent carries the follow-up options the agent proposed at the
+// end of its reply. The client renders them as one-click suggestions under
+// the composer; clicking one fills the composer with that text.
+//
+// It is published only when the agent actually produced options, so an
+// absent frame means "no suggestions", never "clear the row".
+type SuggestionsEvent struct {
+	Suggestions []string `json:"suggestions"`
+}
+
 // ToolOutputEvent carries incremental output produced by a running tool, so a
 // browser can watch a long command progress instead of staring at a bubble that
 // reads "running…" until the call completes.
@@ -251,6 +261,12 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 					Command: tc.Function.Arguments,
 				})
 			}
+		}
+		// Suggested responses: the follow-up options the agent proposed at the
+		// end of its reply. The agent already stripped the raw block from the
+		// message content, so this carries the parsed options only.
+		if m.Role == "assistant" && len(m.Suggestions) > 0 {
+			sendSSE(w, flusher, "suggestions", SuggestionsEvent{Suggestions: m.Suggestions})
 		}
 		if m.Role == "tool" {
 			sendSSE(w, flusher, "tool_result", ToolResultEvent{

@@ -120,7 +120,10 @@ describe("PortMapsWidget", () => {
     ]);
     render(<PortMapsWidget />);
     fireEvent.click(await screen.findByTitle("Port forwards"));
-    expect(await screen.findByText("remote:9222 ← localhost:9222 (reverse)")).toBeInTheDocument();
+    // The arrow shows the direction TRAFFIC FLOWS, source on the left: a -R
+    // forward is entered on the remote and exits on this machine. "remote <-
+    // localhost" would read as localhost -> remote — the -L direction.
+    expect(await screen.findByText("remote:9222 → localhost:9222 (reverse)")).toBeInTheDocument();
   });
 
   it("adds a forward against the active project", async () => {
@@ -137,8 +140,77 @@ describe("PortMapsWidget", () => {
     fireEvent.change(screen.getByPlaceholderText("3000"), { target: { value: "4000" } });
     fireEvent.click(screen.getByTitle("Add"));
 
-    await waitFor(() => expect(mockAddPortMap).toHaveBeenCalledWith(4000, 4000, SSH_TARGET));
+    // The direction is always passed explicitly, so the assertion pins that
+    // the default add is a -L (forward) and not an omitted/undefined flag.
+    await waitFor(() =>
+      expect(mockAddPortMap).toHaveBeenCalledWith(4000, 4000, SSH_TARGET, false),
+    );
     expect(await screen.findByText(/localhost:4000/)).toBeInTheDocument();
+  });
+
+  it("adds a reverse forward when the direction box is ticked", async () => {
+    setActiveProject(SSH_PROJECT);
+    mockIsPortMapsAvailable.mockResolvedValue(true);
+    mockListPortMaps.mockResolvedValue([]);
+    mockAddPortMap.mockResolvedValue([
+      { remote_port: 9222, local_port: 9222, enabled: true, reverse: true, live: false },
+    ]);
+    render(<PortMapsWidget />);
+    fireEvent.click(await screen.findByTitle("Port forwards"));
+    await screen.findByText(/No extra port forwards yet/);
+
+    fireEvent.click(screen.getByTestId("portmap-reverse-toggle"));
+    fireEvent.change(screen.getByPlaceholderText("3000"), { target: { value: "9222" } });
+    fireEvent.click(screen.getByTitle("Add"));
+
+    await waitFor(() =>
+      expect(mockAddPortMap).toHaveBeenCalledWith(9222, 9222, SSH_TARGET, true),
+    );
+    expect(await screen.findByText("remote:9222 → localhost:9222 (reverse)")).toBeInTheDocument();
+  });
+
+  it("warns that a reverse forward exposes a local port to the remote host", async () => {
+    setActiveProject(SSH_PROJECT);
+    mockIsPortMapsAvailable.mockResolvedValue(true);
+    mockListPortMaps.mockResolvedValue([]);
+    render(<PortMapsWidget />);
+    fireEvent.click(await screen.findByTitle("Port forwards"));
+    await screen.findByText(/No extra port forwards yet/);
+
+    // No warning until the direction is actually reversed.
+    expect(screen.queryByTestId("portmap-reverse-warning")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("portmap-reverse-toggle"));
+    const warning = await screen.findByTestId("portmap-reverse-warning");
+    expect(warning).toBeInTheDocument();
+    expect(warning.textContent).toMatch(/remote host's loopback/i);
+    expect(warning.textContent).toMatch(/9222/);
+  });
+
+  it("resets the direction after an add so the next forward is not silently inverted", async () => {
+    setActiveProject(SSH_PROJECT);
+    mockIsPortMapsAvailable.mockResolvedValue(true);
+    mockListPortMaps.mockResolvedValue([]);
+    mockAddPortMap.mockResolvedValue([
+      { remote_port: 9222, local_port: 9222, enabled: true, reverse: true, live: false },
+    ]);
+    render(<PortMapsWidget />);
+    fireEvent.click(await screen.findByTitle("Port forwards"));
+    await screen.findByText(/No extra port forwards yet/);
+
+    fireEvent.click(screen.getByTestId("portmap-reverse-toggle"));
+    fireEvent.change(screen.getByPlaceholderText("3000"), { target: { value: "9222" } });
+    fireEvent.click(screen.getByTitle("Add"));
+    await waitFor(() =>
+      expect(mockAddPortMap).toHaveBeenCalledWith(9222, 9222, SSH_TARGET, true),
+    );
+
+    // The box is unticked again, so a second add is a forward, not another
+    // reverse that would expose another local port.
+    await waitFor(() =>
+      expect(screen.getByTestId("portmap-reverse-toggle")).not.toBeChecked(),
+    );
+    expect(screen.queryByTestId("portmap-reverse-warning")).not.toBeInTheDocument();
   });
 
   it("removes and toggles against the active project", async () => {

@@ -630,9 +630,92 @@ func (m *gitModel) cmdLoadMoreLog() tea.Cmd {
 	}
 }
 
-func (m *gitModel) cmdNetworkOp(statusDone, statusFail string, args ...string) tea.Cmd {
+// networkActionMessage builds the success notice for a network action:
+// "pulled 3 commits" / "pushed 1 commit" / "fetched 2 commits", or an
+// explicit "nothing to pull" / "nothing to push" / "nothing fetched" when
+// nothing changed. before*/after* are ahead/behind counts from
+// aheadBehindCountsIn; -1 means unavailable (e.g. no upstream branch).
+func networkActionMessage(op string, beforeAhead, beforeBehind, afterAhead, afterBehind int) string {
+	n := 0
+	switch op {
+	case "push":
+		if beforeAhead >= 0 && afterAhead >= 0 {
+			n = beforeAhead - afterAhead
+			if n < 0 {
+				n = 0
+			}
+		}
+	case "pull":
+		if beforeBehind >= 0 && afterBehind >= 0 {
+			n = beforeBehind - afterBehind
+			if n < 0 {
+				n = 0
+			}
+		}
+	case "fetch":
+		// Fetch only advances remote-tracking refs; it does not move HEAD,
+		// so behind GROWS as newly discovered remote commits appear.
+		if beforeBehind >= 0 && afterBehind >= 0 {
+			n = afterBehind - beforeBehind
+			if n < 0 {
+				n = 0
+			}
+		}
+	}
+	if n == 0 {
+		switch op {
+		case "pull":
+			return "nothing to pull"
+		case "push":
+			return "nothing to push"
+		case "fetch":
+			return "nothing fetched"
+		}
+	}
+	noun := "commits"
+	if n == 1 {
+		noun = "commit"
+	}
+	switch op {
+	case "pull":
+		return fmt.Sprintf("pulled %d %s", n, noun)
+	case "push":
+		return fmt.Sprintf("pushed %d %s", n, noun)
+	case "fetch":
+		return fmt.Sprintf("fetched %d %s", n, noun)
+	}
+	return op
+}
+
+// aheadBehindCountsIn returns the ahead/behind counts versus the upstream branch
+// (@{u}) of the repo at dir, mirroring aheadBehindString. Both are -1 when there
+// is no upstream configured or the refs cannot be read. It takes dir rather than
+// the receiver because cmdNetworkOp calls it from the returned tea.Cmd, which
+// runs off the Update goroutine.
+func aheadBehindCountsIn(dir string) (ahead, behind int) {
+	ahead = -1
+	behind = -1
+	aheadStr, err1 := gitRunInDir(dir, "rev-list", "--count", "@{u}..HEAD")
+	behindStr, err2 := gitRunInDir(dir, "rev-list", "--count", "HEAD..@{u}")
+	if err1 != nil || err2 != nil {
+		return -1, -1
+	}
+	ahead, _ = strconv.Atoi(strings.TrimSpace(aheadStr))
+	behind, _ = strconv.Atoi(strings.TrimSpace(behindStr))
+	return ahead, behind
+}
+
+// cmdNetworkOp runs a network git op (pull/push/fetch) and reports how many
+// commits it transferred, computed from the ahead/behind delta. The before
+// counts are read inside the returned Cmd, right before the op runs, so the key
+// handler that builds the Cmd never blocks on git. After counts are read once
+// the op completes. Errors keep the "op failed: <git stderr>" label so
+// gitStatusIsError still classifies them as failures.
+func (m *gitModel) cmdNetworkOp(op string, args ...string) tea.Cmd {
 	workDir := m.workDir
+	statusFail := op + " failed"
 	return func() tea.Msg {
+		beforeAhead, beforeBehind := aheadBehindCountsIn(workDir)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "git", args...)
@@ -647,7 +730,8 @@ func (m *gitModel) cmdNetworkOp(statusDone, statusFail string, args ...string) t
 			}
 			return gitStatusMsg{text: statusFail + ": " + msg}
 		}
-		return gitStatusMsg{text: statusDone}
+		afterAhead, afterBehind := aheadBehindCountsIn(workDir)
+		return gitStatusMsg{text: networkActionMessage(op, beforeAhead, beforeBehind, afterAhead, afterBehind)}
 	}
 }
 
@@ -1521,17 +1605,18 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 	case "ctrl+g":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "fetching..."
-			return m, m.cmdNetworkOp("fetched", "fetch failed", "fetch", "--all")
+			return m, m.cmdNetworkOp("fetch", "fetch", "--all")
 		}
 	case "ctrl+p":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "pulling..."
-			return m, m.cmdNetworkOp("pulled", "pull failed", "pull")
+			return m, m.cmdNetworkOp("pull", "pull")
 		}
+
 	case "ctrl+o":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "pushing..."
-			return m, m.cmdNetworkOp("pushed", "push failed", "push")
+			return m, m.cmdNetworkOp("push", "push")
 		}
 	case "ctrl+n":
 		if m.section == gitSectionBranches {
@@ -1539,6 +1624,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			m.branchInputText = ""
 			m.statusMsg = "new branch name:"
 		}
+
 	case "ctrl+x":
 		if m.section == gitSectionBranches && m.branchCursor < len(m.branches) {
 			branch := m.branches[m.branchCursor]

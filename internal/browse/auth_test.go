@@ -23,7 +23,12 @@ func TestGrantExchangeSetsCookieAndIsOneTime(t *testing.T) {
 	for _, c := range cookies {
 		if c.Name == browseCookie {
 			sess = c.Value
-			if !c.HttpOnly || c.Path != "/b/" {
+			// The cookie must cover the WHOLE origin ("/"), not just
+			// "/b/": the injected capture script is a root-relative path
+			// ("/__ocode_capture.js"), and a "/b/"-scoped cookie is not sent
+			// for it — the bundle then 401s at the proxy gate and the panel
+			// loses its console/network bridge entirely.
+			if !c.HttpOnly || c.Path != "/" {
 				t.Fatalf("cookie flags wrong: %+v", c)
 			}
 		}

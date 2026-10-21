@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ScopedDialog,
@@ -14,7 +14,10 @@ import {
   Check,
   X,
   ShieldCheck,
+  Sparkles,
+  Loader2,
 } from "lucide-react";
+import { api } from "@/api/client";
 import type { PermissionDecision } from "@/api/types";
 import type { AskContext } from "@/stores/chatStore";
 import type { ContentGuardScore } from "@/stores/chatStore";
@@ -66,6 +69,12 @@ interface Props {
   agentName?: string;
   /** Assistant message (prose + reasoning) that led to this ask. */
   context?: AskContext | null;
+  /** Session the ask belongs to. Required for the "Explain this tool call"
+   *  action; without it the button is not rendered. */
+  sessionId?: string;
+  /** Remote project host, so the digest runs on the server that owns the ask
+   *  instead of this machine (a remote session does not exist locally). */
+  host?: string;
   requestId: string;
   onDecide: (requestId: string, decision: PermissionDecision) => Promise<PermissionDecideResult>;
 }
@@ -122,6 +131,8 @@ export default function PermissionDialog({
   untrustedFailure,
   agentName,
   context,
+  sessionId,
+  host,
   requestId,
   onDecide,
 }: Props) {
@@ -143,6 +154,13 @@ export default function PermissionDialog({
   // submit is never silent (the store's per-session error is not rendered in
   // the chat view). Cleared on the next attempt or a new request.
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // On-demand explanation of the pending call. Kept per request (reset below)
+  // and aborted on a new ask/unmount so a slow reply cannot land on a different
+  // ask's dialog.
+  const [digest, setDigest] = useState<{ summary: string; model: string } | null>(null);
+  const [digestLoading, setDigestLoading] = useState(false);
+  const [digestError, setDigestError] = useState<string | null>(null);
+  const digestAbort = useRef<AbortController | null>(null);
 
   const canAlwaysRule = useMemo(
     () => alwaysRuleAvailable(tool, scope, prefix),
@@ -158,7 +176,16 @@ export default function PermissionDialog({
     setLoading(false);
     setConfirming(null);
     setSubmitError(null);
+    digestAbort.current?.abort();
+    digestAbort.current = null;
+    setDigest(null);
+    setDigestLoading(false);
+    setDigestError(null);
   }, [requestId, open]);
+
+  // A dialog torn down mid-request (ask resolved elsewhere, tab closed) must not
+  // leave the provider call running.
+  useEffect(() => () => digestAbort.current?.abort(), []);
 
   const handleResponse = async (decision: PermissionDecision) => {
     setLoading(true);
@@ -180,6 +207,37 @@ export default function PermissionDialog({
 
   const toolIcon =
     tool === "bash" || tool === "bash_output" ? Terminal : FileCode;
+
+  // Ask the small model (main-model fallback) what this call will do. The
+  // request_id doubles as the authoritative key: while the ask is live the
+  // server explains ITS copy of the parameters, not this component's props.
+  const handleExplain = async () => {
+    if (!sessionId || digestLoading) return;
+    digestAbort.current?.abort();
+    const controller = new AbortController();
+    digestAbort.current = controller;
+    setDigestLoading(true);
+    setDigestError(null);
+    try {
+      const res = await api.explainToolCall(
+        sessionId,
+        { request_id: requestId, tool, command, args, rule, scope },
+        host,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setDigest(res);
+    } catch (err) {
+      // A superseded/aborted click is not a failure to report.
+      if (controller.signal.aborted) return;
+      setDigestError(err instanceof Error ? err.message : "the explanation failed");
+    } finally {
+      if (digestAbort.current === controller) {
+        digestAbort.current = null;
+        setDigestLoading(false);
+      }
+    }
+  };
 
   // Describes exactly what confirming will persist — mirrors the TUI's
   // renderPermConfirmBody so both surfaces describe the same write.
@@ -421,6 +479,58 @@ export default function PermissionDialog({
                   )}
                 </div>
               </div>
+              {/* No digest for a content ask: that tool already ran, so there is
+                  no pending call to explain (the flagged result has its own
+                  review UI below). */}
+              {!isContentAsk && sessionId && (
+                <section aria-label="AI explanation" className="min-w-0 max-w-full space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleExplain()}
+                      disabled={digestLoading || loading}
+                    >
+                      {digestLoading ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-4 h-4 mr-2" />
+                      )}
+                      {digestLoading
+                        ? "Asking the small model…"
+                        : digest
+                          ? "Explain again"
+                          : "Explain this tool call"}
+                    </Button>
+                    <span className="min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                      Sends this call's parameters to your small model (or the main model when
+                      the small model is off).
+                    </span>
+                  </div>
+                  {digest && (
+                    <div
+                      role="status"
+                      className="max-w-full rounded-lg border border-blue-900/60 bg-blue-950/30 p-3 text-sm text-blue-100"
+                    >
+                      <div className="mb-1 text-xs font-medium tracking-wide text-blue-300 uppercase">
+                        AI summary{digest.model ? ` · ${digest.model}` : ""} · not a safety verdict
+                      </div>
+                      <p className="break-words [overflow-wrap:anywhere]">{digest.summary}</p>
+                    </div>
+                  )}
+                  {digestError && (
+                    <div
+                      role="alert"
+                      className="max-w-full rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200"
+                    >
+                      <div className="font-medium">Could not explain this call:</div>
+                      <div className="mt-1 break-words [overflow-wrap:anywhere]">{digestError}</div>
+                    </div>
+                  )}
+                </section>
+              )}
+
               {parameters !== undefined && (
                 <section aria-label="Tool execution parameters" className="min-w-0 max-w-full">
                   <div className="mb-2 text-sm font-medium text-foreground">Tool execution parameters</div>

@@ -2323,32 +2323,50 @@ func (h *Handler) HandleListHTRTabs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs})
 }
 
-// HandleGetFeaturesConfig reports the memory/doc-prompt feature toggles.
+// HandleGetFeaturesConfig reports the memory/doc-prompt/suggested-responses feature toggles.
 func (h *Handler) HandleGetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	mem, doc := false, false
+	mem, doc, sugg := false, false, false
 	if h.cfg != nil {
 		mem = h.cfg.Ocode.MemoryEnabled
 		doc = h.cfg.Ocode.DocPromptEnabled
+		sugg = h.cfg.Ocode.SuggestedResponsesEnabled
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"memory_enabled":     mem,
-		"doc_prompt_enabled": doc,
+		"memory_enabled":              mem,
+		"doc_prompt_enabled":          doc,
+		"suggested_responses_enabled": sugg,
 	})
 }
 
-// HandleSetFeaturesConfig persists the memory/doc-prompt feature toggles.
+// HandleSetFeaturesConfig persists the memory/doc-prompt/suggested-responses feature toggles.
 func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		MemoryEnabled    bool `json:"memory_enabled"`
 		DocPromptEnabled bool `json:"doc_prompt_enabled"`
+		// The suggested-responses toggle is OPTIONAL in the request body: a
+		// caller that does not know about it (an older client, or the /mem and
+		// /docs slash commands) omits the key, and the stored value is kept. A
+		// plain bool would decode an absent key as false and silently turn the
+		// feature off.
+		SuggestedResponsesEnabled *bool `json:"suggested_responses_enabled"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := config.SaveOcodeFeatures(req.MemoryEnabled, req.DocPromptEnabled); err != nil {
+	suggested := true
+	if req.SuggestedResponsesEnabled != nil {
+		suggested = *req.SuggestedResponsesEnabled
+	} else {
+		h.mu.Lock()
+		if h.cfg != nil {
+			suggested = h.cfg.Ocode.SuggestedResponsesEnabled
+		}
+		h.mu.Unlock()
+	}
+	if err := config.SaveOcodeFeatures(req.MemoryEnabled, req.DocPromptEnabled, suggested); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
 	}
@@ -2356,11 +2374,18 @@ func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request
 	if h.cfg != nil {
 		h.cfg.Ocode.MemoryEnabled = req.MemoryEnabled
 		h.cfg.Ocode.DocPromptEnabled = req.DocPromptEnabled
+		h.cfg.Ocode.SuggestedResponsesEnabled = suggested
 	}
 	h.mu.Unlock()
+	// The suggested-responses toggle is baked into the agent's cached system
+	// prompt, so a resident agent must be rebuilt for it to take effect. The
+	// rebuild is deferred while a turn is active (see
+	// rebuildAgentForPreferenceChange) so in-flight work keeps its agent.
+	h.rebuildAgentsForFeatureChange("suggested responses")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"memory_enabled":     req.MemoryEnabled,
-		"doc_prompt_enabled": req.DocPromptEnabled,
+		"memory_enabled":              req.MemoryEnabled,
+		"doc_prompt_enabled":          req.DocPromptEnabled,
+		"suggested_responses_enabled": suggested,
 	})
 }
 

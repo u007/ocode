@@ -720,6 +720,17 @@ type permissionAskMsg struct {
 	toolCallID string
 }
 
+// permDigestMsg carries one "explain this tool call" reply back to the dialog.
+// seq is compared against the model's current digest generation so a reply for
+// a previous ask (or a previous click) is dropped instead of shown against the
+// wrong command.
+type permDigestMsg struct {
+	seq     int
+	summary string
+	model   string
+	err     error
+}
+
 type shellFinishedMsg struct {
 	command    string
 	output     string
@@ -1628,6 +1639,11 @@ type model struct {
 	pendingToolArgs          json.RawMessage
 	pendingToolCallID        string
 	pendingPermission        agent.PermissionRequest
+	permDigest               string              // on-demand small-model explanation of the pending call
+	permDigestModel          string              // provider-qualified model id that produced permDigest
+	permDigestErr            string              // explanation failure, shown inside the dialog body
+	permDigestBusy           bool                // one explanation in flight
+	permDigestSeq            int                 // generation; a stale permDigestMsg is dropped
 	permAskQueue             []queuedPermAsk     // permission asks waiting for the dialog, in arrival order (see queuedPermAsk)
 	questionAskQueue         []queuedQuestionAsk // question prompts waiting for the dialog, in arrival order (see queuedQuestionAsk)
 	styles                   Styles
@@ -5219,6 +5235,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitForCronDelivery(m.cronDeliveryCh)
 		}
 		return m, nil
+	case permDigestMsg:
+		// A reply from an older ask (or an older click) is dropped: showing it
+		// under the current command would be worse than showing nothing.
+		if msg.seq != m.permDigestSeq {
+			return m, nil
+		}
+		m.permDigestBusy = false
+		if msg.err != nil {
+			m.permDigestErr = msg.err.Error()
+			m.permDigest = ""
+			m.permDigestModel = ""
+		} else {
+			m.permDigest = msg.summary
+			m.permDigestModel = msg.model
+			m.permDigestErr = ""
+		}
+		// Re-size the viewport to the grown body, then pin to the bottom so the
+		// explanation is on screen instead of below the fold.
+		m.layout()
+		m.permViewport.GotoBottom()
+		return m, nil
 	case rcResolveMsg:
 		// A permission/question resolution arrived from an external client
 		// (Telegram bot) for a paused RC turn. Reuse the same resume paths the
@@ -5247,6 +5284,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			cmd := m.handlePermissionChoice(choice)
 			m.broadcastRC("permission_resolved", map[string]string{"request_id": res.RequestID})
+			// The remote decision arrived: the ask is no longer outstanding.
+			// handlePermissionChoice's own paths re-sync, but the RC slot was
+			// cleared here — re-sync so the flag cannot stay stale.
+			m.syncPendingAskFlag()
 			return m, tea.Batch(cmd, waitForRCResolve(m.rcResolveCh))
 		}
 		if m.rcPendingQuestion != nil && res.RequestID == m.rcPendingQuestion.requestID {
@@ -5268,10 +5309,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.renderTranscript()
 				m.saveSession()
 				m.broadcastRC("question_resolved", map[string]string{"request_id": res.RequestID})
+				// Dismissed remotely: the ask is no longer outstanding.
+				m.syncPendingAskFlag()
 				return m, waitForRCResolve(m.rcResolveCh)
 			}
 			cmd := m.submitRCQuestionAnswers(pend.requestID, pend.questions, res.Answers)
 			m.broadcastRC("question_resolved", map[string]string{"request_id": res.RequestID})
+			// The remote answer arrived: the ask is no longer outstanding.
+			m.syncPendingAskFlag()
 			return m, tea.Batch(cmd, waitForRCResolve(m.rcResolveCh))
 		}
 		// Stale/unmatched resolution: keep listening, do not stall the turn.
@@ -6620,7 +6665,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 	if m.showPermDialog {
 		switch keyStr {
-		case "y", "Y", "n", "N", "a", "A", "t", "T":
+		case "y", "Y", "n", "N", "a", "A", "t", "T", "e", "E":
 			cmd, closed := m.permDialogInput(strings.ToLower(keyStr))
 			if closed {
 				m.layout()
@@ -9398,8 +9443,16 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 // awaiting the user's answer, so any queued input must not be injected into
 // the LLM until the answer is submitted (submitQuestionAnswers calls
 // askAgent again, which fires a later streamDoneMsg that processes the queue).
+//
+// It uses anyAskPending, NOT the dialog slots alone. A round can raise SEVERAL
+// asks (parallel dispatch runs every call before the pause check), and a
+// sub-agent's ask parks in the slot without ever opening a local dialog. Both
+// are outstanding dialogs the user owes an answer to, and a resume that fired
+// while one of them was open would start a second model (the auto-continue
+// judge, the goal judge, the advisor) underneath a dialog the user was still
+// looking at.
 func (m *model) queueDrainBlocked() bool {
-	return m.showQuestionDialog || m.showPermDialog
+	return m.anyAskPending()
 }
 
 // removeQueuedInputByText removes the first queueItemInput entry matching
@@ -14708,6 +14761,10 @@ func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
 	// rendered anything once the entire run finished, so long commands (e.g.
 	// /review-changes) left the chat frozen for minutes.
 	m.agent.ResetCancellation()
+	// Same pending-ask declaration as askAgent: a slash command can start a
+	// Step while a permission dialog is still open, and the advisor checkpoint
+	// must stand down for it too.
+	m.syncPendingAskFlag()
 	agentMsgs := []agent.Message{{Role: "user", Content: prompt}}
 	agentMsgs = m.prepareAgentMessages(agentMsgs)
 	return m.streamStep(agentMsgs)
@@ -15144,6 +15201,11 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				// and wait for the remote decision; do not open the local dialog.
 				if m.pendingRC != nil && m.pendingRC.RemoteApproval && m.pendingRC.StreamCh != nil {
 					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⏳ Permission request (%s) sent to Telegram for approval.", req.ToolName), raw: &copyMsg})
+					// The local dialog never opens, but the ask is still OUTSTANDING:
+					// the turn is paused on a remote decision. Declare it so the
+					// advisor stands down — this path returns without touching
+					// showPermAsk, so it would otherwise leave the flag clear.
+					m.syncPendingAskFlag()
 					m.rerenderTranscriptAndMaybeScroll()
 					return
 				}
@@ -15181,6 +15243,9 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				// The remote client owns this prompt, so it stays in the slot rather
 				// than going through the local queue.
 				m.rcPendingQuestion = rcAsk
+				// Same as the permission twin: no local dialog opens, but the
+				// question is still outstanding, so the advisor must stand down.
+				m.syncPendingAskFlag()
 				m.messages = append(m.messages, message{role: roleAssistant, text: "❓ Question sent to Telegram.", raw: &copyMsg})
 				m.rerenderTranscriptAndMaybeScroll()
 				return
@@ -15336,9 +15401,39 @@ func (m *model) promoteNextQueuedAsk() bool {
 
 // anyAskPending reports whether anything at all is waiting on the user, across
 // both ask kinds. The turn may only resume when this is false.
+//
+// The RC (remote-control / Telegram) slots count: in those modes the ask is
+// answered from another device and NO local dialog opens, so the slot — not
+// the dialog — is what holds the outstanding ask.
 func (m *model) anyAskPending() bool {
 	return len(m.permAskQueue) > 0 || len(m.questionAskQueue) > 0 ||
-		m.showPermDialog || m.pendingSubAgentResp != nil || m.showQuestionDialog
+		m.showPermDialog || m.pendingSubAgentResp != nil || m.showQuestionDialog ||
+		m.rcPendingPerm != nil || m.rcPendingQuestion != nil
+}
+
+// syncPendingAskFlag tells the agent whether a permission/question dialog is
+// currently on screen.
+//
+// WHY: the TUI strips the PERMISSION_ASK / QUESTION_PROMPT sentinel rows from
+// the transcript BEFORE handing it to Step (buildAgentMessagesSnapshot) — a raw
+// sentinel in the LLM input is a malformed tool-call/tool-result pairing the
+// model cannot recover from. That strip also hid the ask from the AGENT's own
+// "is a dialog open" scan, so the advisor checkpoint gate was inert here: a
+// plan/done checkpoint could start a second model (minutes, for the Claude Code
+// backend) underneath a permission dialog the user was still looking at.
+//
+// The flag is the host's explicit statement, and it covers every live ask:
+// the dialog slot, the queued asks of a multi-ask round, and a parked
+// sub-agent ask — not just the slot.
+//
+// It is re-synced on every ask-state change (show/clear/promote) and before
+// every Step, so it can never go stale: a stale true would mute the advisor
+// for the rest of the session.
+func (m *model) syncPendingAskFlag() {
+	if m.agent == nil {
+		return
+	}
+	m.agent.SetPendingAsk(m.anyAskPending())
 }
 
 // showPermAsk loads one ask into the dialog slot and opens the dialog. It is the
@@ -15355,9 +15450,15 @@ func (m *model) showPermAsk(q queuedPermAsk) {
 	m.pendingToolArgs = q.req.Args
 	m.pendingToolCallID = q.toolCallID
 	m.pendingSubAgentResp = q.subResp
+	// A new ask gets a fresh explanation slot: showing the previous command's
+	// digest under a different command would be actively misleading.
+	m.resetPermDigest()
 	if q.rc != nil {
 		m.rcPendingPerm = q.rc
 	}
+	// A dialog is now on screen: the agent must stand its advisor checkpoints
+	// down for as long as it stays up.
+	m.syncPendingAskFlag()
 	m.layout() // shrink the transcript viewport to make room for the dialog
 }
 
@@ -15376,6 +15477,9 @@ func (m *model) enqueuePermAsk(q queuedPermAsk) {
 	log.Printf("[perm] permission dialog busy; queued ask tool=%s rule=%s command=%q (depth=%d)",
 		q.req.ToolName, q.req.Rule, q.req.Command, len(m.permAskQueue)+1)
 	m.permAskQueue = append(m.permAskQueue, q)
+	// A queued ask is still an ask the user owes an answer: the agent must
+	// stand its advisor checkpoints down for it too.
+	m.syncPendingAskFlag()
 }
 
 // promoteNextPermAsk moves the oldest queued ask into the dialog slot, which the
@@ -15412,6 +15516,10 @@ func (m *model) clearPendingPermAskSlot() {
 	m.pendingToolCallID = ""
 	m.pendingSubAgentResp = nil
 	m.rcPendingPerm = nil
+	m.resetPermDigest()
+	// The slot is empty, but the round may still have queued asks — re-sync
+	// rather than clearing blindly, so the flag reflects every live ask.
+	m.syncPendingAskFlag()
 }
 
 // clearPermAskState drops the dialog and every queued ask. Called wherever the
@@ -15656,6 +15764,13 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 		m.permConfirm = choice
 		m.layout()
 		return nil, false
+	case "e", "explain":
+		// Explain is an ACTION, not a decision: it must be handled here or the
+		// unknown-choice fallthrough below would answer the ask instead.
+		if m.permConfirm != "" {
+			return nil, false
+		}
+		return m.startPermDigest(), false
 	case "y", "yes", "allow", "once", "n", "no", "deny":
 		m.showPermDialog = false
 		return m.handlePermissionChoice(choice), true
@@ -16149,6 +16264,11 @@ func (m *model) askAgent() tea.Cmd {
 	// short-circuited by a stopCh that was closed by a previous Escape/Cancel.
 	if m.agent != nil {
 		m.agent.ResetCancellation()
+		// Tell the agent whether a dialog is on screen. The TUI strips the ask
+		// sentinel from the transcript before Step, so the agent's own scan
+		// cannot see it — without this the advisor checkpoint could start a
+		// second model underneath an open permission dialog.
+		m.syncPendingAskFlag()
 	}
 	// Load context once — both buildAgentMessagesSnapshot and Step call
 	// BasePromptMessages, which would otherwise re-read context files twice.
@@ -17703,14 +17823,131 @@ func (m *model) clearSyncLoginState() {
 	m.syncDeviceCode = ""
 }
 
+// permDigestActionLabel is the hint-row affordance that asks the small model
+// to explain the pending call. It is a single-line chip rather than a fifth
+// bordered button because five bordered buttons overflow the dialog below ~90
+// columns; the hit-test region for it is registered in updatePermButtonRegions.
+const permDigestActionLabel = "[e] explain"
+
+// permDigestActionAvailable reports whether this ask has a pending tool call to
+// explain. A content-guardrail ask is about a result that already ran, so there
+// is nothing to explain.
+func (m *model) permDigestActionAvailable() bool {
+	// The always-allow confirmation step replaces the body and only offers
+	// confirm/back, so an explain chip there would be a dead control.
+	if m.permConfirm != "" {
+		return false
+	}
+	if m.agent == nil || m.pendingPermission.ToolName == "" {
+		return false
+	}
+	return m.pendingPermission.Scope != agent.PermissionScopeContent
+}
+
+// resetPermDigest empties the explanation slot and invalidates any in-flight
+// reply (the generation bump makes the stale permDigestMsg a no-op).
+func (m *model) resetPermDigest() {
+	m.permDigest = ""
+	m.permDigestModel = ""
+	m.permDigestErr = ""
+	m.permDigestBusy = false
+	m.permDigestSeq++
+}
+
+// startPermDigest kicks off one explanation. It is an ACTION, never a decision:
+// it returns without answering the ask and the dialog stays open.
+func (m *model) startPermDigest() tea.Cmd {
+	if m.permDigestBusy || m.permConfirm != "" || !m.permDigestActionAvailable() {
+		return nil
+	}
+	m.permDigestSeq++
+	seq := m.permDigestSeq
+	m.permDigestBusy = true
+	m.permDigestErr = ""
+	req := m.pendingPermission
+	a := m.agent
+	m.layout()
+	return func() tea.Msg {
+		d, err := a.SummarizeToolCall(agent.ToolCallDigestInput{
+			Tool:    req.ToolName,
+			Command: req.Command,
+			Args:    req.Args,
+			Rule:    req.Rule,
+			Scope:   string(req.Scope),
+		})
+		if err != nil {
+			return permDigestMsg{seq: seq, err: err}
+		}
+		return permDigestMsg{seq: seq, summary: d.Summary, model: d.Model}
+	}
+}
+
+// renderPermDigest renders the explanation section appended to the dialog body.
+// It lives INSIDE the body (and therefore inside the viewport) so a long
+// explanation scrolls instead of pushing the buttons off-screen and breaking
+// their hit-test rows.
+func (m *model) renderPermDigest(contentWidth int) string {
+	width := max(1, contentWidth)
+	switch {
+	case m.permDigestBusy:
+		return "\n\n" + lipgloss.NewStyle().Width(width).Render(hintStyle.Render("Asking the small model…"))
+	case m.permDigestErr != "":
+		return "\n\n" + lipgloss.NewStyle().Width(width).Render(
+			errorStyle.Render("Could not explain this call: "+m.permDigestErr))
+	case m.permDigest == "":
+		return ""
+	}
+	header := "AI summary"
+	if m.permDigestModel != "" {
+		header += " · " + m.permDigestModel
+	}
+	header += " · not a safety verdict"
+	// The viewport does not soft-wrap, so wrap the prose here: a 1200-char
+	// explanation must not run off the right edge with no way to read it.
+	prose := lipgloss.NewStyle().Width(width).Render(m.permDigest)
+	return "\n\n" + dimStyle.Render(header) + "\n" + prose
+}
+
+// permissionBodyText is the single source for the dialog's scrollable body. The
+// viewport, the scroll indicator and the hit-test height must all see the same
+// text, so every one of them goes through here.
+func (m *model) permissionBodyText(contentWidth int) string {
+	if m.permConfirm != "" {
+		return renderPermConfirmBody(m.pendingPermission, m.pendingToolName, m.permConfirm)
+	}
+	body := renderPermissionRequestBody(m.pendingPermission)
+	if m.permDigestActionAvailable() {
+		body += m.renderPermDigest(contentWidth)
+	}
+	return body
+}
+
+// renderPermHintRow is the row under the decision buttons: the explain chip and
+// the copy hint. Kept one line tall so adding it did not shift the buttons'
+// clickable rows.
+func (m *model) renderPermHintRow() string {
+	parts := make([]string, 0, 2)
+	if m.permDigestActionAvailable() {
+		style := lipgloss.NewStyle().
+			Bold(true).
+			Padding(0, 1).
+			Foreground(hintStyle.GetForeground())
+		if m.permHoverChoice == "e" {
+			style = style.
+				Foreground(m.styles.Selected.GetForeground()).
+				Background(m.styles.Selected.GetBackground())
+		}
+		parts = append(parts, style.Render(permDigestActionLabel))
+	}
+	parts = append(parts, hintStyle.Render(" ^y copy"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
 func (m *model) syncPermViewport(contentWidth int) {
 	if contentWidth < 1 {
 		contentWidth = 1
 	}
-	body := renderPermissionRequestBody(m.pendingPermission)
-	if m.permConfirm != "" {
-		body = renderPermConfirmBody(m.pendingPermission, m.pendingToolName, m.permConfirm)
-	}
+	body := m.permissionBodyText(contentWidth)
 	prevYOffset := m.permViewport.YOffset()
 	m.permViewport.SetWidth(contentWidth)
 	m.permViewport.SetContent(body)
@@ -17743,7 +17980,7 @@ func (m *model) renderPermissionDialog(width int) string {
 
 	contentWidth := max(0, width-2)
 
-	body := renderPermissionRequestBody(req)
+	body := m.permissionBodyText(contentWidth)
 	headerText := "⚠ Permission required"
 	if req.DenyReason != "" {
 		headerText = "⚠ Auto-denied by LLM — override?"
@@ -17759,7 +17996,6 @@ func (m *model) renderPermissionDialog(width int) string {
 	}
 	header := m.styles.Header.Render(headerText)
 	if m.permConfirm != "" {
-		body = renderPermConfirmBody(req, m.pendingToolName, m.permConfirm)
 		header = m.styles.Header.Render("⚠ Confirm always-allow")
 	}
 
@@ -17805,10 +18041,10 @@ func (m *model) renderPermissionDialog(width int) string {
 		}
 	}
 
-	copyHint := hintStyle.Render("^y copy")
+	hintRow := m.renderPermHintRow()
 
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
-		header + "\n\n" + bodyView + "\n\n" + buttonRow + "\n" + copyHint,
+		header + "\n\n" + bodyView + "\n\n" + buttonRow + "\n" + hintRow,
 	)
 }
 
@@ -17851,6 +18087,20 @@ func (m *model) updatePermButtonRegions() {
 			y2:     buttonTopY + h - 1,
 		})
 		x += w
+	}
+	// The explain chip lives on the HINT row, one line below the 3-line button
+	// row, so its region is at buttonTopY+3. Same x origin as the first button
+	// (border + padding), and it is rendered first in renderPermHintRow.
+	if m.permDigestActionAvailable() {
+		style := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+		w := lipgloss.Width(style.Render(permDigestActionLabel))
+		m.permButtonRegions = append(m.permButtonRegions, permButtonRegion{
+			choice: "e",
+			x1:     2,
+			x2:     1 + w,
+			y1:     buttonTopY + 3,
+			y2:     buttonTopY + 3,
+		})
 	}
 }
 
@@ -20041,7 +20291,7 @@ func (m model) renderModelContextRow() string {
 	}
 	msg := fmt.Sprintf("◆ Model prompt · %s (%s)%s", base, source, tokInfo)
 	// Also surface the active model id so the banner makes sense when the
-	// file is a wildcard match (e.g. minimax-m*.OCODE.md → minimax-m2.5).
+	// file is a wildcard match (e.g. a "foo*.OCODE.md" stem → foo-2.5).
 	if mcModel := m.agent.Client().GetModel(); mcModel != "" {
 		msg += fmt.Sprintf(" · %s", mcModel)
 	}

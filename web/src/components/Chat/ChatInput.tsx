@@ -8,6 +8,7 @@ import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
 import { Loader2, Mic, MicOff, Paperclip, RotateCcw, Square, X } from "lucide-react";
 import QuickActionsBar, { type QuickActionItem } from "./QuickActionsBar";
+import SuggestedResponses from "./SuggestedResponses";
 import { useQuickActions, visibleChips, chipDispatchKind, chipDispatchesCompact, quickActionIconComponent } from "../../lib/quickActions";
 import ConfirmDialog from "@/components/common/ConfirmDialog";
 import { api, apiPath, authHeaders, remoteApiBase, ApiError, STTInstallRequiredError } from "@/api/client";
@@ -151,10 +152,14 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   // is dropped — while a later, DISTINCT message (different tick, after the
   // previous send resolved and busy flipped) is never blocked.
   const submittingRef = useRef(false);
+  // True when the current click was already handled by onMouseDown/onMouseUp
+  // (real browsers fire both). onClick uses it to avoid double-handling, while
+  // still acting as a fallback for assistive-tech paths that fire only `click`.
+  const clickHandledRef = useRef(false);
   const delayedInputsRef = useRef<string[]>([]);
   const delayedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const delayedGenerationRef = useRef(0);
-  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost, transcriptScrolledUp, recentInputs } = useChat(sessionTabId ?? null, {
+  const { sendMessage, executeShell, stop, resume, retryLastTurn, wasInterrupted, turnError, isStreaming, pendingPermission, hasConversation, projectHost, transcriptScrolledUp, recentInputs, suggestions: rawSuggestions } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -163,6 +168,11 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachRef = useRef<HTMLInputElement>(null);
+  // The follow-up options the agent proposed. Defaulted to an empty array:
+  // the composer must render even when the hook does not supply the field
+  // (a stubbed hook in a test, or a client talking to an older server), and
+  // a missing array must never crash the composer.
+  const suggestions = rawSuggestions ?? [];
   // Input-history navigation (↑/↓). A ref rather than state: it only matters
   // inside the keydown handler, and putting it in state would re-render the
   // composer on every step. `historyIndex` is -1 when not navigating; entering
@@ -741,6 +751,15 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     runQuickDispatch(chip.message, chipDispatchKind(chip));
   };
 
+  // A suggested response fills the composer, exactly like a "fill" quick
+  // action. It never auto-sends: the suggestion is a starting point the user
+  // may want to edit, and a one-click send of model-authored text is a
+  // surprising way to start a turn.
+  const runSuggestedResponse = (suggestion: string) => {
+    updateDraft(suggestion);
+    textareaRef.current?.focus();
+  };
+
   const cancelPendingRewind = () => {
     if (!pendingRewind || !sessionTabId || pendingRewindBusyRef.current) return;
     pendingRewindBusyRef.current = true;
@@ -969,7 +988,36 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
       const finalMessage = parts.join(" ");
       setAttachedFiles([]);
 
-      if (wasInterrupted || compacting || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
+      if (wasInterrupted) {
+        // The user stopped the previous turn, and is now submitting a new
+        // message. That message IS their intent to continue, so release the
+        // interrupt barrier and send it (TUI parity: after Esc the TUI's
+        // streaming flag is false, so the next Enter starts a new turn
+        // immediately — internal/tui/model.go's send path only queues while
+        // `m.streaming`).
+        //
+        // Without this the message sat in the client queue forever: the drain
+        // effect is gated on `wasInterrupted` (see the effect above), and
+        // nothing but the explicit "Resume" button ever cleared the barrier.
+        // The server has no problem running a message after a Stop — the
+        // cancelled turn unwinds, pendingCancel is consumed by that turn's own
+        // job, and the next dispatch starts a fresh turn.
+        //
+        // Queue the new message BEHIND anything already queued, then release
+        // the barrier. `resume()` clears the barrier locally (it does NOT
+        // contact the server; the cancel already happened on Stop), which
+        // fires the drain effect: it sends the queue in the order typed, once
+        // the turn is idle, and re-queues an item at the head if a submit is
+        // rejected. Sending the new message directly here raced that drain —
+        // both reached the server at once (duplicate rows, a transcript
+        // conflict) and the pre-Stop queue was left stale.
+        pushQueued(sessionTabId, { kind: "message", text: finalMessage });
+        setQueuedItems([...getQueue(sessionTabId)]);
+        resume();
+        return;
+      }
+
+      if (compacting || drainingRef.current.has(sessionTabId) || getCompactionState(sessionTabId)?.status === "active") {
         // Local barriers: queue without injecting into a paused/compacting
         // session or overtaking the command currently owned by the drain.
         pushQueued(sessionTabId, { kind: "message", text: finalMessage });
@@ -1400,10 +1448,62 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
         </button>
         <button
           type="button"
-          onClick={voice.toggle}
+          // Press-and-hold: a quick press starts recording (traditional), holding
+          // past VOICE_HOLD_THRESHOLD_MS locks continuous mode where release
+          // won't stop it — only an explicit stop click does. Mouse events are
+          // used (jsdom has no PointerEvent); browsers synthesize mouse from
+          // touch so touchscreens are covered too.
+          onMouseDown={(e) => {
+            e.preventDefault();
+            voice.press();
+          }}
+          onMouseUp={() => {
+            voice.release();
+            clickHandledRef.current = true;
+          }}
+          onMouseLeave={voice.cancelPress}
+          onClick={() => {
+            if (clickHandledRef.current) {
+              clickHandledRef.current = false;
+              return;
+            }
+            // Fallback for assistive-tech / browser paths that fire only
+            // `click` (no mousedown/mouseup): the same quick press/release.
+            voice.press();
+            voice.release();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              // IGNORE auto-repeat. A held key produces a stream of keydown
+              // events with repeat=true, and every one of them called
+              // press(), arming a new hold timer and orphaning the previous
+              // one. The orphan fired later and started a second recording
+              // with no user action, and it wiped a legitimate stop-intent so
+              // the recording was never transcribed. The FIRST keydown is the
+              // press; the repeats are noise.
+              if (e.repeat) return;
+              voice.press();
+            }
+          }}
+          onKeyUp={(e) => {
+            // Space activates a button on keyup, so the browser fires a native
+            // click right after it. Mark that click handled, as onMouseUp does,
+            // or onClick runs a second press/release and stops the recording.
+            // Enter is not flagged: its click is suppressed by the keydown
+            // preventDefault above, and a stale flag would swallow the next click.
+            if (e.key === " ") clickHandledRef.current = true;
+            if (e.key === "Enter" || e.key === " ") voice.release();
+          }}
           disabled={!voice.supported || voiceTranscribing}
-          aria-pressed={voiceRecording}
-          aria-label={voiceRecording ? "Stop recording" : "Start voice input"}
+          aria-pressed={voiceRecording || voice.holding}
+          aria-label={
+            voiceRecording
+              ? "Stop recording"
+              : voice.holding
+                ? "Hold to record continuously"
+                : "Start voice input"
+          }
           title={
             !voice.supported
               ? VOICE_UNAVAILABLE_MESSAGE
@@ -1411,12 +1511,16 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
                 ? "Stop recording and send"
                 : voiceTranscribing
                   ? "Transcribing…"
+                : voice.holding
+                  ? "Hold to record continuously"
                   : "Voice input"
           }
           className={`composer-control flex w-8 shrink-0 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 ${
-            voiceRecording
-              ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            voice.holding
+              ? "ring-destructive bg-destructive/10 text-destructive-foreground"
+              : voiceRecording
+                ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
           }`}
         >
           {voiceTranscribing ? (
@@ -1534,6 +1638,15 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
           </Button>
         )}
       </div>
+      {/* Suggested responses: the follow-up options the agent proposed at the
+          end of its last reply. Rendered ABOVE the quick-action strip, inside
+          the same padded container, so the two read as one block of
+          "what you can do next" affordances. Hidden while a turn is
+          streaming: the options belong to the reply that just finished, and
+          the next reply will propose a fresh set. */}
+      {!isStreaming && suggestions.length > 0 && (
+        <SuggestedResponses suggestions={suggestions} onSelect={runSuggestedResponse} />
+      )}
       {showQuickActions && quickActions.length > 0 && (
         <QuickActionsBar actions={quickActions} onSelect={runQuickAction} />
       )}

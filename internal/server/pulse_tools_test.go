@@ -492,8 +492,67 @@ func TestPulseSystemPrompt(t *testing.T) {
 	if !strings.Contains(def, "CURRENT message explicitly asks") {
 		t.Fatal("default prompt must gate write tools on the operator's current message")
 	}
-	if got := pulseSystemPrompt("  custom prompt  ", tools); got != "  custom prompt  " {
-		t.Fatalf("custom prompt must be used verbatim, got %q", got)
+	// No custom text: the result must be EXACTLY the built-in prompt, so a
+	// session that never customised it keeps a byte-identical cached prefix.
+	if def != pulseBaseSystemPrompt(tools) {
+		t.Fatal("empty custom prompt must yield the built-in prompt unchanged")
+	}
+}
+
+// The operator's custom instructions are APPENDED to the built-in prompt,
+// never substituted for it. A style instruction like "answer in at most two
+// sentences" must not delete the tool list, the stop-report format or the
+// activation-gate protocol.
+func TestPulseSystemPromptAppendsCustomInstructions(t *testing.T) {
+	h := pulseTestHandler(t)
+	tools := h.pulseTools()
+	base := pulseBaseSystemPrompt(tools)
+
+	got := pulseSystemPrompt("  answer in at most two sentences  ", tools)
+
+	// The operator's text is present, trimmed.
+	if !strings.Contains(got, "answer in at most two sentences") {
+		t.Fatalf("custom instructions missing from prompt: %q", got)
+	}
+	if strings.Contains(got, "  answer in at most two sentences  ") {
+		t.Fatal("custom instructions must be trimmed")
+	}
+	// Everything the built-in prompt carries survives.
+	for _, want := range []string{
+		"You are the Pulse assistant, the operator's overview chat",
+		"CURRENT message explicitly asks",
+		"stops this round, nothing needs me.",
+		"Activation gate:",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("appended prompt lost the built-in contract %q", want)
+		}
+	}
+	// The tool list survives: every registered tool is still advertised.
+	for _, pt := range tools {
+		if !strings.Contains(got, "- "+pt.Name()+": "+pt.Description()) {
+			t.Errorf("appended prompt missing tool %q", pt.Name())
+		}
+	}
+	// The custom text comes AFTER the built-in prompt, so it refines it.
+	baseIdx := strings.Index(got, "You are the Pulse assistant")
+	customIdx := strings.Index(got, "answer in at most two sentences")
+	if baseIdx < 0 || customIdx < 0 || customIdx < baseIdx {
+		t.Fatalf("custom instructions must come after the built-in prompt (base=%d custom=%d)", baseIdx, customIdx)
+	}
+	// The base is a PREFIX: the built-in text is untouched, not rewritten.
+	if !strings.HasPrefix(got, base) {
+		t.Fatal("appended prompt must keep the built-in prompt as an unchanged prefix")
+	}
+}
+
+// A whitespace-only custom prompt is no custom prompt: it must not append an
+// empty section.
+func TestPulseSystemPromptIgnoresWhitespaceOnlyCustom(t *testing.T) {
+	h := pulseTestHandler(t)
+	tools := h.pulseTools()
+	if got := pulseSystemPrompt("   \n\t ", tools); got != pulseBaseSystemPrompt(tools) {
+		t.Fatal("whitespace-only custom prompt must not append anything")
 	}
 }
 

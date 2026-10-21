@@ -32,7 +32,7 @@ func TestMapURL(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := mapURL(c.raw, tgt(), base)
+			got := mapURL(c.raw, tgt(), base, "")
 			if got != c.want {
 				t.Fatalf("mapURL(%q) = %q, want %q", c.raw, got, c.want)
 			}
@@ -42,13 +42,13 @@ func TestMapURL(t *testing.T) {
 
 func TestMapURLWithBase(t *testing.T) {
 	// <base href="https://example.com/app/"> shifts relative resolution.
-	got := mapURL("x.js", tgt(), "https://example.com/app/")
+	got := mapURL("x.js", tgt(), "https://example.com/app/", "")
 	want := "/b/tab:abc/https/example.com/app/x.js"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
 	// Absolute base to another host.
-	got2 := mapURL("y.js", tgt(), "https://cdn.z.com/lib/")
+	got2 := mapURL("y.js", tgt(), "https://cdn.z.com/lib/", "")
 	if !strings.HasPrefix(got2, "/b/tab:abc/https/cdn.z.com/lib/y.js") {
 		t.Fatalf("got %q", got2)
 	}
@@ -61,7 +61,7 @@ body { background: url(/img/bg.png); }
 @import '/theme.css';
 .x { cursor: url(data:image/png;base64,AA), auto; }
 `)
-	out := string(rewriteCSS(in, tgt()))
+	out := string(rewriteCSS(in, tgt(), ""))
 	if !strings.Contains(out, "url(/b/tab:abc/https/example.com/img/bg.png)") {
 		t.Fatalf("bg not rewritten: %s", out)
 	}
@@ -91,7 +91,7 @@ func TestRewriteHTML(t *testing.T) {
 <div style="background:url(/bg.png)"></div>
 <a href="mailto:x@y.com">mail</a>
 </body></html>`)
-	out, err := rewriteHTML(in, tgt(), "")
+	out, err := rewriteHTML(in, tgt(), "", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestMapURLEdgeCases(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := mapURL(c.raw, tgt(), ""); got != c.want {
+			if got := mapURL(c.raw, tgt(), "", ""); got != c.want {
 				t.Fatalf("mapURL(%q) = %q, want %q", c.raw, got, c.want)
 			}
 		})
@@ -167,7 +167,7 @@ func TestRewriteHTMLRelativeBase(t *testing.T) {
 	// <base href="../lib/"> relative to document /page/ resolves to /lib/.
 	in := []byte(`<!doctype html><html><head><base href="../lib/"></head>
 <body><img src="x.png"></body></html>`)
-	out, err := rewriteHTML(in, tgt(), "")
+	out, err := rewriteHTML(in, tgt(), "", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

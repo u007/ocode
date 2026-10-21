@@ -64,8 +64,6 @@ func getAdvisorEnabledField(t *testing.T, h *Handler, sessionID string) bool {
 	return resp.Enabled
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 // TestPerSessionAdvisorToggleIsolation is the regression test for the sidebar
 // bug where toggling the advisor in one chat flipped it for every other chat:
 // a session-scoped PUT must move only that session's live agent, persist only
