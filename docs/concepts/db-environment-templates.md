@@ -76,29 +76,29 @@ form (`${P}`) when a missing variable must be an error.
 
 ## Where values come from, and precedence (`internal/envfile/envfile.go`)
 
-`envfile` defines the dotenv parser (`envfile.go:39` `Parse`) and the loader
-(`envfile.go:167` `Load`). The constants (`envfile.go:24`):
+`envfile` defines the dotenv parser (`envfile.go:41` `Parse`) and the loader
+(`envfile.go:182` `Load`). The constants (`envfile.go:24`):
 
 - `FileName = ".env"`
 - `LocalFileName = ".env.local"`
 
-`Load(dir)` (`envfile.go:175`) reads `.env` first and `.env.local` second; a
+`Load(dir)` (`envfile.go:182`) reads `.env` first and `.env.local` second; a
 key in `.env.local` overrides the same key in `.env`. A missing file is **not**
-an error (`envfile.go:195` `loadFile`: `os.IsNotExist` yields an empty map). A file
-that exists but cannot be parsed **is** an error (`envfile.go:201`): the caller logs
+an error (`envfile.go:202` `loadFile`: `os.IsNotExist` yields an empty map). A file
+that exists but cannot be parsed **is** an error (`envfile.go:208`): the caller logs
 it and continues with the process environment only, so the connection fails with
 an explicit "not set" error naming the variable (`dbconnect_env.go:45`).
 
 The dotenv format (`envfile.go:8`): `KEY=VALUE`, optional `export ` prefix
-(`envfile.go:71` `strings.CutPrefix`), `#` comments, blank lines skipped, single-quoted
-values (literal, no escape processing — `envfile.go:121`), double-quoted values with
-`\n`, `\t`, `\r`, `\\` unescaped (`envfile.go:138` `unescapeDouble`). The first
-`=` outside quotes splits key from value (`envfile.go:95` `indexUnquoted`). A quoted
-value may contain `=`. A duplicate key in one file is a parse error (`envfile.go:53`
+(`envfile.go:79` `strings.CutPrefix`), `#` comments, blank lines skipped, single-quoted
+values (literal, no escape processing — `envfile.go:127`), double-quoted values with
+`\n`, `\t`, `\r`, `\\` unescaped (`envfile.go:145` `unescapeDouble`). The first
+`=` outside quotes splits key from value (`envfile.go:101` `indexUnquoted`). A quoted
+value may contain `=`. An unterminated quoted value (`DB_PASS="abc`) is a parse error that names the line and never echoes the value, so the line is not silently skipped. A duplicate key in one file is a parse error (`envfile.go:59`
 `fmt.Errorf("line %d: duplicate key %q", ...)`). There is no multi-line value, no
 interpolation inside a file (`envfile.md:10`), and no command substitution.
 
-`Lookup(name, fileValues)` (`envfile.go:218`) gives the precedence:
+`Lookup(name, fileValues)` (`envfile.go:225`) gives the precedence:
 
 1. Process environment (`os.LookupEnv`) — first.
 2. `.env.local` (merged over `.env` by `Load`).
@@ -106,7 +106,7 @@ interpolation inside a file (`envfile.md:10`), and no command substitution.
 
 So: **process env > `.env.local` > `.env`**. A value exported in the shell (or
 injected by CI) always wins over the file; `.env.local` still overrides the
-committed `.env`. A variable that is set but EMPTY counts as set (`envfile.go:215`
+committed `.env`. A variable that is set but EMPTY counts as set (`envfile.go:222`
 "A variable that is set but EMPTY counts as set"): an empty value is a deliberate
 value, not a missing one. That matters for a connection whose password is
 deliberately empty (`DB_PASS=`).
@@ -240,19 +240,19 @@ back **verbatim**, so the template survives any binary's save. The same mechanis
 already preserves `last_model` (see `lastModelKey`). The in-section `env_template`
 field (`DBConnection` struct, `db_connections.go:60`) does not survive by itself.
 
-### Two copies, reconciled (`internal/config/db_connections.go:70` `dbEnvTemplates`)
+### Two copies, reconciled (`internal/config/db_connections.go:71` `dbEnvTemplates`)
 
-The separate map is **authoritative** (`db_connections.go:87` `reconcileDBEnvTemplates`):
+The separate map is **authoritative** (`db_connections.go:98` `reconcileDBEnvTemplates`):
 
-- **On load** (`ocodeconfig.go:2308` `reconcileDBEnvTemplates`): the map from
+- **On load** (`ocodeconfig.go:2312` `reconcileDBEnvTemplates`): the map from
   `Extra` (`dbEnvTemplates(cfg.Extra)`) is copied onto the `"db"` connections
   (`reconcileDBEnvTemplates`). A connection whose `env_template` was stripped by
-  an older binary is restored here.
-- **On save** (`ocodeconfig.go:2809` `dbEnvTemplatesCanonical`): the canonical
-  map is rebuilt from the connections (`dbConnectionTemplates`, `db_connections.go:172`)
-  and written AFTER the `Extra` loop (`ocodeconfig.go:2938`), so the canonical
-  value always wins over any stale `Extra` copy (`ocodeconfig.go:2801` comment).
-- When no template connection remains (`ocodeconfig.go:2945` `delete`): the key
+  an older binary is restored here. Only a connection with no `url` takes a template: a map entry under the name of a literal connection is stale (its connection was deleted by an older binary) and is ignored. A malformed map is logged and left on disk, and a save never deletes it because it failed to parse.
+- **On save** (`ocodeconfig.go:2813` `dbEnvTemplatesCanonical`): the canonical
+  map is rebuilt from the connections (`dbConnectionTemplates`, `db_connections.go:178`)
+  and written AFTER the `Extra` loop (`ocodeconfig.go:2942`), so the canonical
+  value always wins over any stale `Extra` copy (`ocodeconfig.go:2811` comment).
+- When no template connection remains (`ocodeconfig.go:2956` `delete`): the key
   is removed entirely, so a stale map cannot resurrect a deleted connection.
 
 The two copies never drift: the separate key is derived from the connections at
@@ -282,9 +282,9 @@ last template connection is deleted (`test:214`).
 ### Regression: mutation-verified (`scripts/mutcheck_dbenv.py`)
 
 A mutation-testing script (`scripts/mutcheck_dbenv.py`) verifies the mechanism by
-temporarily removing the canonical map assignment (`ocodeconfig.go:2940`) and
+temporarily removing the canonical map assignment (`ocodeconfig.go:2947`) and
 confirming the regression tests fail; removing the `reconcileDBEnvTemplates` call
-(`ocodeconfig.go:2308`) also fails the repair tests. Both mutations are verified to
+(`ocodeconfig.go:2312`) also fails the repair tests. Both mutations are verified to
 compile (`mutcheck_dbenv.py:137-151`).
 
 

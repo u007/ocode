@@ -91,6 +91,10 @@ Rules:
   and the row then simply does not render.
 - Parsing is tolerant: a malformed block is discarded silently (the visible text is
   kept intact) rather than failing the turn.
+- The block is anchored on the FINAL closing marker and the last opening marker before
+  it. A prose mention of the opening marker earlier in the reply cannot swallow the
+  text between the mention and the real block. The live stream applies the same rule,
+  so the streamed text matches the persisted message.
 
 ## 5. Configuration
 
