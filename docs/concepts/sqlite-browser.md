@@ -14,7 +14,7 @@ tags:
   - server
   - security
 timestamp: 2026-10-07T05:55:15Z
-resource: internal/tool/sqlite.go; internal/dbbrowse/dbbrowse.go; internal/dbbrowse/page.go; internal/dbbrowse/write.go; internal/dbbrowse/blob.go; internal/dbbrowse/rowkeys.go; internal/server/handler_db.go; internal/server/handler_db_blob.go; web/src/api/client.ts; web/src/components/Preview/SQLiteViewer.tsx; web/src/components/Preview/SQLiteDialogs.tsx; web/src/components/Preview/BlobDialog.tsx; web/src/components/Preview/blobPreview.ts; web/src/components/Preview/csvExport.ts
+resource: internal/tool/sqlite.go; internal/dbbrowse/dbbrowse.go; internal/dbbrowse/page.go; internal/dbbrowse/write.go; internal/dbbrowse/blob.go; internal/dbbrowse/rowkeys.go; internal/server/handler_db.go; internal/server/handler_db_blob.go; web/src/api/client.ts; web/src/components/Preview/SQLiteViewer.tsx; web/src/components/Preview/SQLiteResultGrid.tsx; web/src/components/Preview/SQLiteDialogs.tsx; web/src/components/Preview/BlobDialog.tsx; web/src/components/Preview/blobPreview.ts; web/src/components/Preview/csvExport.ts
 ---
 # SQLite Browser / DB IDE (preview pane)
 

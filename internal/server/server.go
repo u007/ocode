@@ -324,6 +324,8 @@ func (s *Server) registerRoutes() {
 	// model id rides in the JSON body because "provider/model" ids contain "/".
 	s.mux.HandleFunc("PUT /api/models/favorite", s.authMiddleware(s.handler.HandleAddFavoriteModel))
 	s.mux.HandleFunc("DELETE /api/models/favorite", s.authMiddleware(s.handler.HandleRemoveFavoriteModel))
+	// Remove a model from the Recently Used list (web/desktop context menu).
+	s.mux.HandleFunc("DELETE /api/models/recent", s.authMiddleware(s.handler.HandleRemoveRecentModel))
 	// Password vault. Unlock state is per client-supplied "surface" (granted on
 	// init/unlock, dropped by a surface-scoped lock, or by handleBrowseRevoke
 	// when a browse panel closes). Vault request bodies are never logged.

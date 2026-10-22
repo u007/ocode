@@ -13,7 +13,7 @@ import {
 import { useResizableSidebar } from "../../hooks/useResizableSidebar";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../Preview/SQLiteDialogs";
-import { ResultGrid } from "../Preview/SQLiteViewer";
+import { ResultGrid } from "../Preview/SQLiteResultGrid";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";

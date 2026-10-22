@@ -40,8 +40,11 @@
   // The stateKey is known (injected in __OCODE_BROWSE__), so the "/b/" marker
   // is located by its exact position rather than by a greedy regex: the
   // document path is {prefix}/b/{stateKey}/...
+  // The server writes the stateKey into the path unencoded (rewrite.go), so the
+  // pathname carries it raw (e.g. "side:chat:abc"). Encoding it here would make
+  // the already-routed check and the marker lookup miss, double-wrapping URLs.
   function mountBase() {
-    var marker = "/b/" + encodeURIComponent(stateKey);
+    var marker = "/b/" + stateKey;
     var i = location.pathname.indexOf(marker);
     if (i === -1) {
       // Fall back to the last "/b/<something>" segment.
@@ -54,7 +57,7 @@
   // --- /b/ base of the current document, e.g. "/b/tab:abc" ---
   function browseBase() {
     // location.pathname === {prefix}/b/{stateKey}/{scheme}/{host}/{path...}
-    return mountBase() + "/b/" + encodeURIComponent(stateKey);
+    return mountBase() + "/b/" + stateKey;
   }
 
   // Full route prefix of the current document, e.g. "/b/tab:abc/http/localhost:3000".

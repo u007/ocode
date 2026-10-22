@@ -280,6 +280,33 @@ func RemoveFavoriteModel(providerModel string) error {
 	})
 }
 
+// RemoveRecentModel removes the given "provider/model" from the recent list.
+func RemoveRecentModel(providerModel string) error {
+	provID, modelID := splitProviderModel(providerModel)
+	if provID == "" || modelID == "" {
+		return fmt.Errorf("invalid provider/model id: %q", providerModel)
+	}
+	return readWriteModelState(func(full map[string]json.RawMessage) error {
+		var rec []modelStateEntry
+		if raw, ok := full["recent"]; ok {
+			_ = json.Unmarshal(raw, &rec)
+		}
+		filtered := make([]modelStateEntry, 0, len(rec))
+		for _, e := range rec {
+			if e.ProviderID == provID && e.ModelID == modelID {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		newRec, err := json.Marshal(filtered)
+		if err != nil {
+			return err
+		}
+		full["recent"] = newRec
+		return nil
+	})
+}
+
 // IsFavorite checks whether the given "provider/model" is favorited.
 func IsFavorite(providerModel string) bool {
 	for _, f := range LoadFavorites() {

@@ -1320,6 +1320,15 @@ export const api = {
       },
       host,
     ),
+  // Remove a "provider/model" from the recently used list (web/desktop context
+  // menu). Idempotent; responds with the full recents list so the picker can
+  // resynchronize its Recently Used section without a model refetch.
+  removeModelRecent: (model: string, host?: string) =>
+    fetchJSON<{ model: string; recent: boolean; recents: string[] }>(
+      "/api/models/recent",
+      { method: "DELETE", body: JSON.stringify({ model }) },
+      host,
+    ),
   // Extended-thinking (reasoning effort) budget for the main model. budget 0 =
   // off; levels list the canonical off/low/med/high/xhigh/max options shared
   // with the TUI's /effort command.

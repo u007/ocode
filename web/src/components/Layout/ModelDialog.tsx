@@ -8,13 +8,19 @@ import { setCompactConfig, summaryModelPatch } from "../../lib/compactConfig";
 import { setSpeechSummaryConfig } from "../../lib/speechSummaryConfig";
 import { useSpeechOptional } from "../Speech/SpeechProvider";
 import { useListNavigation } from "../../hooks/useListNavigation";
-import { Search, Check, Star, X, RefreshCw } from "lucide-react";
+import { Search, Check, Star, X, RefreshCw, Trash2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 /** The single model-selection purpose this dialog is opened for. Each settings
  *  field opens the dialog for exactly one purpose — there are no tabs. */
@@ -66,6 +72,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
   // Model id whose favorite toggle request is in flight; its star is disabled
   // until the response resyncs, so double-clicks can't race the shared file.
   const [pendingFavorite, setPendingFavorite] = useState<string | null>(null);
+  // Model id whose "remove from recently used" request is in flight; its row
+  // stays in place until the response resyncs, so double-clicks can't race.
+  const [pendingRecent, setPendingRecent] = useState<string | null>(null);
   // True while the explicit Refresh action is fetching live provider lists.
   const [refreshing, setRefreshing] = useState(false);
   // "All providers" toggle (default off): off requests configured=true, so
@@ -626,6 +635,36 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     }
   };
 
+  // Remove a model from the Recently Used list (web/desktop counterpart of the
+  // TUI picker only offering recents as a read-only section). Optimistically
+  // drops the row from the section, then resyncs the recent flags from the
+  // canonical recents list the endpoint returns; reverts on failure.
+  const removeFromRecents = async (m: ModelInfo) => {
+    if (pendingRecent) return;
+    setPendingRecent(m.name);
+    // Optimistic removal: the row leaves the Recently Used section immediately.
+    setModels((prev) =>
+      prev.map((x) => (x.name === m.name ? { ...x, recent: false } : x)),
+    );
+    try {
+      const res = await api.removeModelRecent(m.name, ...hostArgs);
+      const recentsSet = new Set(res.recents);
+      setModels((prev) =>
+        prev.map((x) => ({ ...x, recent: recentsSet.has(x.name) })),
+      );
+    } catch (err) {
+      console.error(err);
+      setModels((prev) =>
+        prev.map((x) =>
+          x.name === m.name ? { ...x, recent: m.recent ?? false } : x,
+        ),
+      );
+      reportActionError(err, "Removing from recently used");
+    } finally {
+      setPendingRecent(null);
+    }
+  };
+
   const handleClear = () => {
     switch (purpose) {
       case "small":
@@ -744,12 +783,20 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       m.display_name && m.display_name !== m.model && m.display_name !== m.name
         ? `${m.display_name} (${baseLabel})`
         : baseLabel;
+    const isRecent = section === "recents";
+    // Only canonical "provider/model" ids can be removed from recents (the
+    // server validates the same way); pseudo-rows like locally-added LM Studio
+    // entries never show the option.
+    const canRemove = isRecent && m.name.includes("/");
+
     return (
-      <div key={m.name} className="flex items-start gap-1">
-        <button
-          {...(navProps ?? {})}
-          type="button"
-          onClick={() => handleSelect(m)}
+      <ContextMenu key={m.name}>
+        <ContextMenuTrigger asChild>
+          <div className="flex items-start gap-1">
+            <button
+              {...(navProps ?? {})}
+              type="button"
+              onClick={() => handleSelect(m)}
           className={`w-full min-w-0 flex items-start justify-between gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
             selected ? "bg-blue-600/20 text-blue-400" : "text-foreground hover:bg-muted"
           } ${navIndex >= 0 && modelNavigation.isActive(navIndex) ? "ring-2 ring-inset ring-blue-400" : ""}`}
@@ -786,7 +833,20 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
             <Star className="h-4 w-4" fill={m.favorite ? "currentColor" : "none"} />
           </button>
         )}
-      </div>
+          </div>
+        </ContextMenuTrigger>
+        {canRemove && (
+          <ContextMenuContent>
+            <ContextMenuItem
+              onClick={() => removeFromRecents(m)}
+              disabled={pendingRecent === m.name}
+            >
+              <Trash2 className="mr-2 h-4 w-4 shrink-0" />
+              Remove from recently used
+            </ContextMenuItem>
+          </ContextMenuContent>
+        )}
+      </ContextMenu>
     );
   };
 
