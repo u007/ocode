@@ -7002,27 +7002,28 @@ func TestRunBanCmdListsAddsAndRemovesPrefixes(t *testing.T) {
 	}
 
 	runBanCmd(&m, []string{"remove", "grep", "-n"})
-	if got := m.agent.Permissions().BashPrefixRules()["grep -n"]; got != agent.PermissionAsk {
-		t.Fatalf("expected grep -n to be unbanned to ask, got %s", got)
+	// Unban is a DELETE, not a downgrade to ask: an inert ask entry would
+	// outlive the ban and keep showing up as a rule in /permissions.
+	if _, ok := m.agent.Permissions().BashPrefixRules()["grep -n"]; ok {
+		t.Fatalf("expected grep -n rule to be deleted, still present")
 	}
 	if dec := m.agent.Permissions().Decide("bash", json.RawMessage(`{"command":"grep -n needle file.txt"}`)); dec.Level == agent.PermissionDeny {
 		t.Fatalf("expected grep -n command to stop being denied after removal, got %s", dec.Level)
 	}
 
 	runBanCmd(&m, []string{"remove", "sed"})
-	if got := m.agent.Permissions().BashPrefixRules()["sed"]; got != agent.PermissionAsk {
-		t.Fatalf("expected sed to be unbanned to ask, got %s", got)
+	if _, ok := m.agent.Permissions().BashPrefixRules()["sed"]; ok {
+		t.Fatalf("expected sed rule to be deleted, still present")
 	}
 
 	var loaded config.Config
 	if err := config.LoadOcodeConfig(&loaded); err != nil {
 		t.Fatalf("LoadOcodeConfig failed: %v", err)
 	}
-	if got := loaded.Ocode.Permissions.Bash.Prefixes["grep -n"]; got != "ask" {
-		t.Fatalf("expected grep -n unban override to persist to disk, got %q", got)
-	}
-	if got := loaded.Ocode.Permissions.Bash.Prefixes["sed"]; got != "ask" {
-		t.Fatalf("expected sed unban override to persist to disk, got %q", got)
+	for _, prefix := range []string{"grep -n", "sed"} {
+		if got, ok := loaded.Ocode.Permissions.Bash.Prefixes[prefix]; ok {
+			t.Fatalf("expected %q to be removed from disk, got %q", prefix, got)
+		}
 	}
 
 	runBanCmd(&m, nil)
@@ -7069,11 +7070,10 @@ func TestRunBanCmdClearRequiresConfirmation(t *testing.T) {
 	if m.banClearConfirm {
 		t.Fatal("expected ban clear dialog to close after confirmation")
 	}
-	if got := m.agent.Permissions().BashPrefixRules()["grep -n"]; got != agent.PermissionAsk {
-		t.Fatalf("expected grep -n to be cleared to ask, got %s", got)
-	}
-	if got := m.agent.Permissions().BashPrefixRules()["sed"]; got != agent.PermissionAsk {
-		t.Fatalf("expected sed to be cleared to ask, got %s", got)
+	for _, prefix := range []string{"grep -n", "sed"} {
+		if _, ok := m.agent.Permissions().BashPrefixRules()[prefix]; ok {
+			t.Fatalf("expected %q to be deleted by clear, still present", prefix)
+		}
 	}
 	if dec := m.agent.Permissions().Decide("bash", json.RawMessage(`{"command":"grep -n needle file.txt"}`)); dec.Level == agent.PermissionDeny {
 		t.Fatalf("expected grep -n to stop being denied after clear, got %s", dec.Level)
@@ -7083,14 +7083,65 @@ func TestRunBanCmdClearRequiresConfirmation(t *testing.T) {
 	if err := config.LoadOcodeConfig(&loaded); err != nil {
 		t.Fatalf("LoadOcodeConfig failed: %v", err)
 	}
-	if got := loaded.Ocode.Permissions.Bash.Prefixes["grep -n"]; got != "ask" {
-		t.Fatalf("expected cleared grep -n to persist as ask, got %q", got)
-	}
-	if got := loaded.Ocode.Permissions.Bash.Prefixes["sed"]; got != "ask" {
-		t.Fatalf("expected cleared sed to persist as ask, got %q", got)
+	for _, prefix := range []string{"grep -n", "sed"} {
+		if got, ok := loaded.Ocode.Permissions.Bash.Prefixes[prefix]; ok {
+			t.Fatalf("expected cleared %q to be removed from disk, got %q", prefix, got)
+		}
 	}
 	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "Cleared 2 banned bash prefixes") {
 		t.Fatalf("expected clear confirmation message, got %q", got)
+	}
+}
+
+func TestBanRemoveAndClearOnlyTouchBannedRules(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	m := model{
+		config: &cfg,
+		agent:  newTestAgent(retryTestClient{}, nil, &cfg, nil),
+		input:  textarea.New(),
+	}
+
+	runBanCmd(&m, []string{"add", "sed"})
+	runBanCmd(&m, []string{"add", "grep", "-n"})
+	// A rule the user explicitly allowed and one they explicitly set to ask.
+	// Neither is a ban, so /ban must leave both alone — this is the security
+	// boundary of the delete-on-unban change: it removes the NAMED ban, never
+	// the whole prefix table or another level's rule.
+	m.agent.Permissions().SetBashPrefixRule("npm install", agent.PermissionAllow)
+	m.agent.Permissions().SetBashPrefixRule("aws", agent.PermissionAsk)
+	m.permDirty.bashPrefixes = map[string]string{
+		"npm install": string(agent.PermissionAllow),
+		"aws":         string(agent.PermissionAsk),
+	}
+
+	runBanCmd(&m, []string{"remove", "sed"})
+	rules := m.agent.Permissions().BashPrefixRules()
+	if _, ok := rules["sed"]; ok {
+		t.Fatalf("expected sed ban to be deleted")
+	}
+	if _, ok := rules["grep -n"]; !ok {
+		t.Fatalf("removing sed must not touch the unrelated grep -n ban")
+	}
+	if got := rules["npm install"]; got != agent.PermissionAllow {
+		t.Fatalf("removing a ban must not touch an allow rule, got %q", got)
+	}
+	if got := rules["aws"]; got != agent.PermissionAsk {
+		t.Fatalf("removing a ban must not touch an ask rule, got %q", got)
+	}
+
+	m.clearAllBashBans()
+	rules = m.agent.Permissions().BashPrefixRules()
+	if _, ok := rules["grep -n"]; ok {
+		t.Fatalf("expected clear to delete the remaining ban")
+	}
+	if got := rules["npm install"]; got != agent.PermissionAllow {
+		t.Fatalf("clear must not touch an allow rule, got %q", got)
+	}
+	if got := rules["aws"]; got != agent.PermissionAsk {
+		t.Fatalf("clear must not touch an ask rule, got %q", got)
 	}
 }
 

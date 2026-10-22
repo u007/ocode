@@ -3976,7 +3976,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 				case name == "bash":
 					// Reuse the bash builder so the dialog shows the command and
 					// its prefix, not a thinner args-only summary.
-					req = *bashPermissionRequest(args, bashCommand(args), "")
+					req = *bashPermissionRequest(args, bashCommand(args), "", nil)
 				case name == "webfetch":
 					// This is the cached-always-allow case, where Decide returned a
 					// bare PermissionAllow and so built no request. Falling
@@ -4003,7 +4003,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 		// verdict. A denial or judge failure falls through to the human ask.
 		if name == "bash" && decision.Level == PermissionAllow && !guardEscalated && autoEnabled &&
 			a.permissions.Mode() == PermissionModeSandbox && isDecisionModel(a.autoPermissionModelName()) {
-			decision = PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, bashCommand(args), "sandbox.judge")}
+			decision = PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, bashCommand(args), "sandbox.judge", nil)}
 			a.emitDebug("PERMISSION", "tier=sandbox_judge_gate tool=bash")
 		}
 
@@ -4084,7 +4084,7 @@ func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args
 					if decision.Request == nil && name == "bash" {
 						// Reuse the bash builder so the deny dialog shows the
 						// command/prefix, not a thinner args-only summary.
-						req = *bashPermissionRequest(args, bashCommand(args), "")
+						req = *bashPermissionRequest(args, bashCommand(args), "", nil)
 					}
 					if consulted {
 						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))

@@ -27,7 +27,7 @@ function trailingToolRunStart(messages: Message[]): number {
   return i;
 }
 
-function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
+export function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
   if (msg.role !== "tool" || !msg.content.startsWith(SENTINEL_PERMISSION_ASK)) return null;
   const payload = msg.content.slice(SENTINEL_PERMISSION_ASK.length).trim();
   if (!payload) return null;
@@ -53,6 +53,9 @@ function parsePermissionFromMessage(msg: Message): PermissionRequest | null {
       request_id: toolCallId || (req["request_id"] as string) || "",
       scope: (req["scope"] as string) || undefined,
       prefix: (req["prefix"] as string) || undefined,
+      prefix_candidates: Array.isArray(req["prefix_candidates"])
+        ? (req["prefix_candidates"] as string[])
+        : undefined,
       out_of_scope_path: (req["out_of_scope_path"] as string) || undefined,
       untrusted_content: (req["untrusted_content"] as string) || undefined,
       untrusted_source: (req["untrusted_source"] as string) || undefined,
@@ -206,6 +209,8 @@ export interface PermissionRequest {
   scope?: string;
   /** Bash prefix for bash_prefix-scope asks (e.g. "rm"). */
   prefix?: string;
+  /** Bash word-prefix rules the user may persist, narrowest first. */
+  prefix_candidates?: string[];
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
   /** Content-guardrail ask (scope "content"): the flagged result text. */
@@ -279,6 +284,12 @@ export interface SessionSlice {
    * explicitly dismissed with "Don't answer".
    */
   hiddenQuestionRequestId: string | null;
+  /**
+   * Request id the user intentionally hid from the permission dialog. This is
+   * local UI state only: the server-side ask remains pending until it is
+   * answered or explicitly dismissed.
+   */
+  hiddenPermissionRequestId: string | null;
   totalMessages: number; // total messages on server
   hasMore: boolean; // whether older messages exist
   loadingMore: boolean; // currently fetching older messages
@@ -417,6 +428,7 @@ export const emptySessionSlice: SessionSlice = {
   permissionQueue: [],
   pendingQuestion: null,
   hiddenQuestionRequestId: null,
+  hiddenPermissionRequestId: null,
   totalMessages: 0,
   hasMore: false,
   loadingMore: false,
@@ -551,6 +563,8 @@ export type ChatAction =
   | { type: "QUESTION_HIDE"; sessionId: string; requestId: string }
   | { type: "QUESTION_SHOW"; sessionId: string; requestId: string }
   | { type: "QUESTION_RESOLVED"; sessionId: string; requestId?: string }
+  | { type: "PERMISSION_HIDE"; sessionId: string; requestId: string }
+  | { type: "PERMISSION_SHOW"; sessionId: string; requestId: string }
   | {
       type: "QUESTION_ANSWERED";
       sessionId: string;
@@ -725,6 +739,15 @@ function hiddenQuestionAfterHydration(
   return slice.hiddenQuestionRequestId;
 }
 
+/** Keep a local hide only when the recovered permission is the same request. */
+function hiddenPermissionAfterHydration(
+  slice: SessionSlice,
+  permission: PermissionRequest | null,
+): string | null {
+  if (!permission || slice.hiddenPermissionRequestId !== permission.request_id) return null;
+  return slice.hiddenPermissionRequestId;
+}
+
 /** Locate the live tool part a streamed chunk or result belongs to.
  *
  *  With a callId the match is exact, which is what keeps concurrent tool calls
@@ -791,6 +814,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
           hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
+          hiddenPermissionRequestId: hiddenPermissionAfterHydration(s, pending.pendingPermission),
           // Restore the suggestions the last reply proposed. The transcript is
           // the source of truth on a reload — the live "suggestions" event
           // only fires when a reply ARRIVES.
@@ -999,6 +1023,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ...s,
           pendingPermission: action.permission,
           permissionQueue: [...s.permissionQueue, s.pendingPermission],
+          // Replays/recovery of the same request must respect a local hide. A
+          // different request is genuinely new and must open normally.
+          hiddenPermissionRequestId:
+            s.hiddenPermissionRequestId === action.permission.request_id
+              ? s.hiddenPermissionRequestId
+              : null,
         };
       });
     case "PERMISSION_RESOLVED":
@@ -1018,7 +1048,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         }
         const queue = [...s.permissionQueue];
         const next = queue.pop();
-        return { ...s, pendingPermission: next ?? null, permissionQueue: queue };
+        return {
+          ...s,
+          pendingPermission: next ?? null,
+          permissionQueue: queue,
+          // Clearing the resolved ask also clears its local hide so a later
+          // re-derivation of pending_asks starts from a clean slate.
+          hiddenPermissionRequestId:
+            s.hiddenPermissionRequestId === action.requestId ? null : s.hiddenPermissionRequestId,
+        };
       });
     case "QUESTION_REQUEST":
       return updateSession(state, action.sessionId, (s) => ({
@@ -1053,6 +1091,29 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           return s;
         }
         return { ...s, hiddenQuestionRequestId: null };
+      });
+    case "PERMISSION_HIDE":
+      return updateSession(state, action.sessionId, (s) => {
+        if (
+          !s.pendingPermission ||
+          s.pendingPermission.request_id !== action.requestId ||
+          (s.hiddenPermissionRequestId && s.hiddenPermissionRequestId !== action.requestId)
+        ) {
+          return s;
+        }
+        if (s.hiddenPermissionRequestId === action.requestId) return s;
+        return { ...s, hiddenPermissionRequestId: action.requestId };
+      });
+    case "PERMISSION_SHOW":
+      return updateSession(state, action.sessionId, (s) => {
+        if (
+          !s.pendingPermission ||
+          s.pendingPermission.request_id !== action.requestId ||
+          s.hiddenPermissionRequestId !== action.requestId
+        ) {
+          return s;
+        }
+        return { ...s, hiddenPermissionRequestId: null };
       });
     case "QUESTION_RESOLVED":
       return updateSession(state, action.sessionId, (s) => {
@@ -1156,7 +1217,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       delete sessions[action.oldId];
       // A hidden id is tied to the old session's UI lifecycle. Keep the
       // pending question/transcript, but let the rekeyed session show it.
-      sessions[action.newId] = { ...slice, hiddenQuestionRequestId: null };
+      sessions[action.newId] = {
+        ...slice,
+        hiddenQuestionRequestId: null,
+        hiddenPermissionRequestId: null,
+      };
       return { ...state, sessions };
     }
     case "TOGGLE_RUN_COLLAPSED":
@@ -1299,6 +1364,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         permissionQueue: [],
         pendingQuestion: null,
         hiddenQuestionRequestId: null,
+        hiddenPermissionRequestId: null,
         live: [],
       }));
     case "SET_TUI_STATUS_READY":
@@ -1395,6 +1461,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               s,
               s.pendingQuestion ?? pending.pendingQuestion,
             ),
+            hiddenPermissionRequestId: hiddenPermissionAfterHydration(
+              s,
+              s.pendingPermission ?? pending.pendingPermission,
+            ),
           };
         }
         const capped = capMessages(action.messages, action.total);
@@ -1413,6 +1483,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           permissionQueue: pending.permissionQueue,
           pendingQuestion: pending.pendingQuestion,
           hiddenQuestionRequestId: hiddenQuestionAfterHydration(s, pending.pendingQuestion),
+          hiddenPermissionRequestId: hiddenPermissionAfterHydration(s, pending.pendingPermission),
           // Restore the suggestions the last reply proposed. This is the
           // RELOAD path: the live "suggestions" event only fires when a reply
           // arrives, so without this a refreshed page would show no row until
@@ -1434,6 +1505,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           permissionQueue: [],
           pendingQuestion: null,
           hiddenQuestionRequestId: null,
+          hiddenPermissionRequestId: null,
           // The truncated tail may have carried the suggestions; re-derive
           // from what is left so the row never shows options for a reply the
           // user just discarded.

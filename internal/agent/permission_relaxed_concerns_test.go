@@ -86,6 +86,17 @@ func TestRelaxedConcernsClauseEmptyWhenNothingRelaxed(t *testing.T) {
 	}
 }
 
+// A switched-off secrets category must tell the judge what is accepted, not only
+// that enforcement is off; an unrelated category must not carry that sentence.
+func TestRelaxedSecretsClauseStatesWhatIsAccepted(t *testing.T) {
+	if got := relaxedConcernsClause([]string{"secrets"}); !strings.Contains(got, "Secrets are ACCEPTED") {
+		t.Fatalf("secrets clause lacks the accepted note: %s", got)
+	}
+	if got := relaxedConcernsClause([]string{"network"}); strings.Contains(got, "Secrets are ACCEPTED") {
+		t.Fatalf("network clause leaked the secrets note: %s", got)
+	}
+}
+
 func a(keys []string) *Agent { return &Agent{} }
 
 // so a model that reads state before instructions still sees them.

@@ -2240,3 +2240,37 @@ describe("ChatPanel latest thinking under the auto policy", () => {
     expect(screen.getByText("live reasoning")).toBeInTheDocument();
   });
 });
+
+describe("ChatPanel transcript minimum height", () => {
+  // jsdom has no layout engine, so the 60%-of-screen guarantee can only be
+  // pinned as a CSS contract here (same approach as ProjectSidebar's badge-wrap
+  // test). The measured before/after is in the change description.
+  it("puts the caller's min-height class on the message scroll container", async () => {
+    const { container } = render(
+      <ChatProvider>
+        <LiveSeed sessionId="ses-minheight" messages={[mk("user", "hi")]} />
+        <ChatPanel sessionId="ses-minheight" transcriptMinHeightClass="min-h-[60dvh]" />
+      </ChatProvider>,
+    );
+    await tick();
+    const transcript = container.querySelector(".overflow-y-auto");
+    expect(transcript).not.toBeNull();
+    expect(transcript!.className).toContain("min-h-[60dvh]");
+    // It must NOT land on the panel root: that would spend the 60% on the
+    // Speak header + model-prompt row instead of on the messages.
+    expect((transcript!.parentElement as HTMLElement).className).not.toContain("min-h-[60dvh]");
+  });
+
+  it("adds no min-height when the caller omits it (Pulse's floating window)", async () => {
+    const { container } = render(
+      <ChatProvider>
+        <LiveSeed sessionId="ses-minheight-none" messages={[mk("user", "hi")]} />
+        <ChatPanel sessionId="ses-minheight-none" />
+      </ChatProvider>,
+    );
+    await tick();
+    const transcript = container.querySelector(".overflow-y-auto");
+    expect(transcript).not.toBeNull();
+    expect(transcript!.className).not.toContain("60dvh");
+  });
+});

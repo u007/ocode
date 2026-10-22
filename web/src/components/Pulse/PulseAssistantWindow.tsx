@@ -747,6 +747,7 @@ function AssistantChat({
           modelUnavailable={pendingPermission.model_unavailable}
           scope={pendingPermission.scope}
           prefix={pendingPermission.prefix}
+          prefixCandidates={pendingPermission.prefix_candidates}
           outOfScopePath={pendingPermission.out_of_scope_path}
           untrustedContent={pendingPermission.untrusted_content}
           untrustedSource={pendingPermission.untrusted_source}

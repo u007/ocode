@@ -20,6 +20,16 @@ func strippedSnapshotTranscript() []Message {
 	}
 }
 
+// stubOrphanedBash replaces bash for a test that Steps strippedSnapshotTranscript.
+// That transcript's bash call has no result row, so Step's orphan recovery
+// (recoverOrphanedToolCalls) re-executes it. Unstubbed, that ran the real
+// `go test ./...` in the package directory on every such test: ~30s per test,
+// and a full module download into the test HOME that then could not be removed.
+// The fake keeps the orphan shape the TUI produces; the call is simply inert.
+func stubOrphanedBash(a *Agent) {
+	a.tools["bash"] = fakeTool{"bash"}
+}
+
 // TestAdvisorCheckpointsDoNotFireOnHostDeclaredPendingAsk is the regression
 // test for the TUI half of the "an advisor call started underneath a permission
 // dialog" bug.
@@ -37,6 +47,7 @@ func TestAdvisorCheckpointsDoNotFireOnHostDeclaredPendingAsk(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
 	a.tools["write"] = &checkpointFakeWrite{}
+	stubOrphanedBash(a)
 	// Three scripted responses so the assertion below is reached either way:
 	// with the gate shut the turn finishes early; with the gate open (a mutant)
 	// both checkpoints fire and drive the loop around to response 3, and the
@@ -76,6 +87,7 @@ func TestAdvisorCheckpointsFireAfterHostClearsPendingAsk(t *testing.T) {
 	t.Setenv("OPENCODE_ADVISOR_MODEL", "")
 	a, fake := checkpointTestAgent(t, []string{"plan", "done"})
 	a.tools["write"] = &checkpointFakeWrite{}
+	stubOrphanedBash(a)
 	a.client = &scriptedClient{msgs: []*Message{
 		{Role: "assistant", Content: "writing the fix", ToolCalls: []ToolCall{newToolCall("call-w", "write", `{"path":"a.go","content":"x"}`)}},
 		{Role: "assistant", Content: "the review landed, finishing up"},

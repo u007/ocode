@@ -414,6 +414,8 @@ export interface CommandContext {
     setPathsConfig?: (extra_allowed_paths: string[], upload_dir: string) => Promise<unknown>;
     getMemoryStatus?: () => Promise<import("../../api/types").MemoryStatusResponse>;
     setBashRule?: (prefix: string, level: "allow" | "deny" | "ask") => Promise<unknown>;
+    /** Batch delta behind the Settings editor; `remove` is a true DELETE. */
+    setBashRules?: (delta: import("../../api/types").BashRulesDelta) => Promise<unknown>;
     getPermissions?: (sessionId?: string, host?: string) => Promise<PermissionsResponse>;
     getAutoContinue?: (sessionId?: string, host?: string) => Promise<{ enabled: boolean; model: string }>;
     setAutoContinue?: (fields: { enabled?: boolean; model?: string; clear?: boolean }, sessionId?: string, host?: string) => Promise<{ enabled: boolean; model: string }>;
@@ -2669,9 +2671,12 @@ async function handleBan(args: string, ctx: CommandContext): Promise<CommandResu
     }
     if (sub === "remove") {
       const prefixes = parts.slice(1).map((p) => p.toLowerCase());
-      if (!prefixes.length || !ctx.api.setBashRule) return ok("Usage: `/ban remove <prefix…>` (sets the rule back to ask).");
-      for (const p of prefixes) await ctx.api.setBashRule(p, "ask");
-      return ok(`Un-banned (set to ask): ${prefixes.map((p) => `\`${p}\``).join(", ")}.`);
+      // Unban is a DELETE, matching the Settings editor and the TUI. Writing
+      // "ask" left an inert rule that outlived the ban and still listed under
+      // "Other bash rules".
+      if (!prefixes.length || !ctx.api.setBashRules) return ok("Usage: `/ban remove <prefix…>` (e.g. `/ban remove rm git push`).");
+      await ctx.api.setBashRules({ remove: prefixes });
+      return ok(`Removed bash rule(s): ${prefixes.map((p) => `\`${p}\``).join(", ")} — they follow the default policy again.`);
     }
     // Bare /ban <cmd…> falls through to add (TUI parity).
     return handleBan(`add ${args}`, ctx);

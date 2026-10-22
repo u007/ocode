@@ -88,6 +88,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const hiddenQuestionRequestId = useChatSelector(
     (s) => getSessionSlice(s, sessionId).hiddenQuestionRequestId,
   );
+  const hiddenPermissionRequestId = useChatSelector(
+    (s) => getSessionSlice(s, sessionId).hiddenPermissionRequestId,
+  );
   // The follow-up options the agent proposed at the end of its last reply.
   // Shallow-compared for the same reason as `recentInputs`: the store replaces
   // the array on every new proposal, and a streamed token must not hand the
@@ -364,11 +367,15 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   // continuation never ran). A 404/409 means the server no longer holds the
   // ask, so staying dismissed is correct.
   const resolvePermission = useCallback(
-    async (requestId: string, decision: PermissionDecision): Promise<PermissionDecideResult> => {
+    async (
+      requestId: string,
+      decision: PermissionDecision,
+      prefix?: string,
+    ): Promise<PermissionDecideResult> => {
       if (!sessionId) return { ok: false, error: "no active session" };
       dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
       try {
-        const response = await api.resolvePermission(requestId, sessionId, decision, projectHost);
+        const response = await api.resolvePermission(requestId, sessionId, decision, projectHost, prefix);
         const model = dispatchedModel(response);
         if (model) {
           dispatch({ type: "SET_LAST_DISPATCHED_MODEL", sessionId, model });
@@ -480,6 +487,22 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     [dispatch, sessionId],
   );
 
+  const hidePermission = useCallback(
+    (requestId: string) => {
+      if (!sessionId) return;
+      dispatch({ type: "PERMISSION_HIDE", sessionId, requestId });
+    },
+    [dispatch, sessionId],
+  );
+
+  const showPermission = useCallback(
+    (requestId: string) => {
+      if (!sessionId) return;
+      dispatch({ type: "PERMISSION_SHOW", sessionId, requestId });
+    },
+    [dispatch, sessionId],
+  );
+
   // Execute a shell command directly (for ! prefix commands). A remote
   // project's command runs on its host through the host's own login shell;
   // `host` is omitted for local projects so the server keeps its local path.
@@ -528,6 +551,9 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     pendingPermission,
     pendingQuestion,
     hiddenQuestionRequestId,
+    hiddenPermissionRequestId,
+    hidePermission,
+    showPermission,
     askContext,
     // The composer's suggested-responses row. A narrow, shallow-compared
     // selector: it changes only when the agent proposes a new set.

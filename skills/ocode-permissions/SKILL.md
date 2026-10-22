@@ -48,7 +48,7 @@ Every tool/prefix rule resolves to one of:
 
 ## 4. Default tool rules
 
-Hardcoded in `NewPermissionManager()` (`permissions.go:1299`):
+Hardcoded in `NewPermissionManager()` (`permissions.go:1776`):
 
 ```
 Always allow (no prompt):  read, glob, grep, rgrep, list, lsp, lsp_diagnostics,
@@ -94,7 +94,7 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 
 ### 5a. Hard blocks (always deny)
 
-`IsHarmfulBashCommand()` (`permissions.go:1193`) — these can never be auto-allowed or persisted as "always allow":
+`IsHarmfulBashCommand()` (`permissions.go:1542`) — these can never be auto-allowed or persisted as "always allow":
 
 **Git destructive prefixes** (any args):
 - `git revert`, `git stash`, `git reset`, `git clean`, `git checkout`, `git restore`, `git switch`
@@ -115,8 +115,8 @@ Bash commands go through a multi-layer evaluation pipeline in `Decide()`:
 
 **Loopback carve-out requires that nothing redirects the request.** A
 curl/wget/httpie command counts as local-only (`isLoopbackNetworkCommand`
-auto-allows it and the exfiltration check exempts it, `permissions.go:1236` /
-`:1232`) only when every visible token is a loopback target **and** no
+auto-allows it and the exfiltration check exempts it, `permissions.go:1436` /
+`:1460`) only when every visible token is a loopback target **and** no
 connection-redirecting flag is present. `--connect-to`, `--resolve`,
 proxy/socks/unix-socket flags, `--config`/`-K`, `--doh-url`, and wget
 `-e`/`--execute` void it — they can keep `http://localhost/` as the URL while
@@ -170,15 +170,28 @@ Configured in `permissions.bash.prefix_modes`:
 | `mutating` | Auto-allow in-root calls once; do NOT persist |
 | `never_auto` | Disable auto-allow for that prefix entirely |
 
-### 5h. Claude Code settings (`.claude/settings.json`)
+### 5h. "Always allow" from a permission ask (bash)
 
+The permission dialog's always-allow choice never persists a tool-level bash rule. What it offers is derived from the command itself:
+
+- `agent.BashPrefixCandidates(command)` (`bash_prefix_candidates.go`) returns the word-prefix rules that command supports, **narrowest first**: `npm run build` → `["npm run build", "npm run", "npm"]`; `go test ./...` → `["go test", "go"]`; `ls -la` → `["ls"]`. Git is capped at two words (`git status`) and never yields a bare `git`.
+- A candidate is a sequence of literal words; the match is word-prefix (`matchBashPrefixRuleWordsIn`), so the rule for `npm run` auto-allows `npm run test` too. The UIs render each candidate as `<prefix> *`; the stored key never contains the star.
+- No candidate is derived when the words that would be matched are not the words that run: compound lines (`a && b`), wrapper invocations (`env`, `sudo`, `sh -c`), shell control keywords, or any non-bare word (flag, path, glob, or a quoted word containing whitespace) in a non-head position — the candidate list is cut at the first one, so `npm run "my script"` → `["npm run", "npm"]`.
+- The candidates ride the ask (`PermissionRequest.PrefixCandidates` → `PermissionEvent.prefix_candidates`). The chosen one is sent back as the resolve body's `prefix` and validated against the ask's candidates (`agent.ResolveBashPrefixChoice`); empty means "use the narrowest".
+- Persistence is `config.SaveSingleBashPrefixRule` (targeted load-modify-write), never a whole-config save.
+- **A bash ask with no real command prefix offers no always-allow at all** (`AlwaysRuleChoiceAvailable` returns false for scope `tool`, a `.sensitive_path` rule, or a synthetic prefix such as `sandbox.sensitive`). Before this, "always allow rule" on such an ask fell through to `permissions.tools.bash = allow`, which blanket-approves every future shell command. Out-of-scope *path* asks and interpreter script grants keep their own always-allow (path root / exact script), which are not prefix rules.
+- A broader chosen rule is honoured on later calls by `matchBashPrefixRuleWordsIn(rules, words, PermissionAllow)` in `decideSingleCommand`; the exact `rules[rulePrefix]` lookup alone would re-ask forever.
+
+`ValidateBashPrefixRule` still rejects a bare `git` allow (destructive subcommands); other heads (`rm`, `curl`) are intentionally persistable because the destructive-rm / exfiltration gates run before prefix matching, so a prefix allow cannot bypass them.
+
+### 5i. Claude Code settings (`.claude/settings.json`)
 `LoadClaudePermissions` (`claude_settings.go`) merges global `~/.claude/settings.json` with project `.claude/settings.json` + `.claude/settings.local.json`; only `permissions.allow/ask` entries for `Bash(...)` are honored, and **ask wins over allow**. **`permissions.deny` is deliberately not read** (since 2026-10-03): ocode's banned commands come only from its own config (`/ban`, `permissions.bash` deny prefixes), so a Claude Code deny such as `Bash(rm -rf /*)` or `Bash(git stash *)` has no effect in ocode. Claude ask/allow are evaluated in `decideSingleCommand` after the user ban and harmful-command checks.
 
 Pattern semantics: `*` matches any character sequence (including empty), so an ask of `Bash(git stash *)` matches **every** `git stash …` form, including the read-only `git stash list`/`show`. A bare `Bash` ask (no pattern) asks for every bash command; a bare `Bash` allow is a wildcard allow.
 
 `PermissionDecision.DenyReason` is populated by `Decide` on every static-deny path (user bash ban prefix, locked mode, tool/path/webfetch rules, hard blocks) and rendered into the tool-error text by `denyToolMessage` (`agent.go`), so a blocked call names the offending rule instead of a generic "permission rules" message. Remote SSH projects run the agent on the host, so **the host's** `.claude/settings.json` allow/ask rules are the ones that apply.
 
-### 5i. Every rule table is copy-on-write, and every write path validates first
+### 5j. Every rule table is copy-on-write, and every write path validates first
 
 **EIGHT tables, not one.** `PermissionManager` holds `rules`, `userConfirmedRules`,
 `patterns` (the glob-style tool patterns), `pathPatterns`, `bashPrefixes`,
@@ -253,10 +266,11 @@ the rule was not saved instead of seeing "Always allowing …".
 surface added between the editor's load and its save is never clobbered. `remove` of
 an absent key is a no-op; a prefix in both maps resolves to the set (a rename).
 
-**Removals are real deletes.** Settings' Remove deletes the key. `/ban remove` instead
-rewrites the rule to `ask` (TUI parity) and therefore leaves an inert
-`"prefix": "ask"` line in `ocodeconfig.json` — expect to see those; they show up in
-`/permissions` and `/ban list` as "other bash rules".
+**Removals are real deletes on every surface.** Settings' Remove deletes the key, and
+`/ban remove` / `/ban clear` (TUI and web) delete it too. They used to rewrite the
+rule to `ask`, which left an inert `"prefix": "ask"` line in `ocodeconfig.json` that
+survived the ban and still showed up in `/permissions` and the Settings editor. A
+removed prefix now falls back to the default policy (which may auto-allow it again).
 
 **YOLO does not consult these rules.** `Decide` returns `PermissionAllow` for bash in
 yolo mode *before* `decideSingleCommand` ever runs, so a `deny` rule does not apply
@@ -274,7 +288,7 @@ bypass this gate.
 
 ### 6b. Sensitive paths
 
-`isSensitivePath()` (`permissions.go:2807`) flags these for `ask`, and is the
+`isSensitivePath()` (`permissions.go:3350`) flags these for `ask`, and is the
 OR of two narrower predicates used to split read from write in sandbox:
 - **`isSecretMaterialPath()`** — secret on READ or write:
   - Exact filenames: `.env`, `.netrc`, `.npmrc`, `.pypirc`
@@ -309,7 +323,7 @@ First webfetch to a domain prompts `ask`. Once approved/denied, the decision is 
 ### 6e. Read-target existence gate (Unicode-space recovery)
 
 Before locked-mode/YOLO/path-rule evaluation, `Decide` checks whether a `read`
-target exists on disk (`targetExists`, `permissions.go:1519`); a genuinely
+target exists on disk (`targetExists`, `permissions.go:6933`); a genuinely
 missing target is an immediate `HardDeny` (this is the only filesystem
 existence check permitted in the permission system). Two refinements:
 
@@ -472,7 +486,7 @@ Implementation: `internal/config/auto_permission_prompt.go` (versioned body, sta
 
 ## 8. Permission evaluation entry point
 
-`PermissionManager.Decide(toolName, args)` (`permissions.go:1417`):
+`PermissionManager.Decide(toolName, args)` (`permissions.go:1886`):
 
 ```
 1. If locked mode → read-only tools allow, everything else deny
@@ -513,8 +527,8 @@ Project config overrides global. The `opencode.json` `permission` field is a sep
 | `/permissions bash:rm deny` | Deny a bash prefix |
 | `/ban [list]` | List banned prefixes |
 | `/ban add <prefix…>` | Deny a prefix (bare `/ban <cmd>` is shorthand for add) |
-| `/ban remove <prefix…>` | Rewrite the rule back to `ask` — NOT a delete |
-| `/ban clear` | Confirm-gated: rewrite every ban to `ask` |
+| `/ban remove <prefix…>` | Delete the rule (falls back to the default policy) |
+| `/ban clear` | Confirm-gated: delete every banned prefix rule |
 | `/yolo` or `/yolo status` | Show YOLO mode status |
 | `/yolo on` | Enable YOLO mode |
 | `/yolo off` | Disable YOLO mode |
@@ -553,18 +567,18 @@ Unknown groups produce a diagnostic warning. Non-shorthand (object-valued) permi
 
 | Function | File:Line | Purpose |
 |---|---|---|
-| `NewPermissionManager()` | `permissions.go:1299` | Creates PM with defaults |
-| `Decide()` | `permissions.go:1417` | Main entry point for permission checks |
-| `Check()` | `permissions.go:1340` | Tool-level rule lookup |
+| `NewPermissionManager()` | `permissions.go:1776` | Creates PM with defaults |
+| `Decide()` | `permissions.go:1886` | Main entry point for permission checks |
+| `Check()` | `permissions.go:1815` | Tool-level rule lookup |
 | `CheckPathPatterns()` | (via patterns) | Path-glob pattern matching |
-| `IsHarmfulBashCommand()` | `permissions.go:1193` | Hard-block detection |
-| `IsHarmfulRequest()` | `permissions.go:1253` | Wraps bash check for PermissionRequest |
-| `isExfiltrationRiskCommand()` | `permissions.go:1146` | curl/wget/httpie/nc exfil detection |
-| `isSensitivePath()` | `permissions.go:2695` | Sensitive file/dir detection |
-| `isWithinWorkDir()` | `permissions.go:1801` | Workdir containment check |
-| `matchSubcommandAllow()` | `permissions.go:3113` | Safe subcommand matching |
+| `IsHarmfulBashCommand()` | `permissions.go:1542` | Hard-block detection |
+| `IsHarmfulRequest()` | `permissions.go:1644` | Wraps bash check for PermissionRequest |
+| `isExfiltrationRiskCommand()` | `permissions.go:1460` | curl/wget/httpie/nc exfil detection |
+| `isSensitivePath()` | `permissions.go:3350` | Sensitive file/dir detection |
+| `isWithinWorkDir()` | `permissions.go:2416` | Workdir containment check |
+| `matchSubcommandAllow()` | `permissions.go:3989` | Safe subcommand matching |
 | `buildPermissionManagerFromAgent()` | `agent_permissions.go:3` | Agent-definition PM builder |
-| `LoadFromOcode()` | `permissions.go:1375` | Load rules from config |
-| `LoadFromConfig()` | `permissions.go:1354` | Load rules from opencode.json format |
+| `LoadFromOcode()` | `permissions.go:1850` | Load rules from config |
+| `LoadFromConfig()` | `permissions.go:1829` | Load rules from opencode.json format |
 | `claudeIsAsk()` / `claudeIsAllowed()` | `claude_settings.go` | Match a command against Claude `.claude/settings.json` ask/allow patterns (deny is not read) |
 | `denyToolMessage()` | `agent.go` | Renders a static Deny into the tool error, including `DenyReason` |

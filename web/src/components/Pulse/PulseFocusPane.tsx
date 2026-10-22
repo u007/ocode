@@ -253,6 +253,7 @@ export function PulseFocusPane({ row, onClose }: { row: PulseRow; onClose: () =>
           modelUnavailable={asks.permission.model_unavailable}
           scope={asks.permission.scope}
           prefix={asks.permission.prefix}
+          prefixCandidates={asks.permission.prefix_candidates}
           outOfScopePath={asks.permission.out_of_scope_path}
           agentName={asks.permission.agent_name}
           requestId={asks.permission.request_id}

@@ -1795,6 +1795,7 @@ type model struct {
 	subAgentPermMu       *sync.Mutex                   // serialises concurrent sub-agent permission asks
 	pendingSubAgentResp  chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
 	permConfirm          string                        // "a"/"t" while the always-allow confirmation step is shown; "" otherwise. Meaningful only while showPermDialog.
+	permChosenPrefix     string                        // bash prefix picked in the always-rule confirmation ("" = the ask's narrowest candidate)
 	lastClickTime        time.Time
 	lastClickX           int
 	lastClickY           int
@@ -15443,6 +15444,7 @@ func (m *model) syncPendingAskFlag() {
 func (m *model) showPermAsk(q queuedPermAsk) {
 	m.showPermDialog = true
 	m.permConfirm = ""
+	m.permChosenPrefix = ""
 	m.activeTab = tabChat
 	m.chatUnread = false
 	m.pendingPermission = q.req
@@ -15509,6 +15511,7 @@ func (m *model) promoteNextPermAsk() bool {
 func (m *model) clearPendingPermAskSlot() {
 	m.showPermDialog = false
 	m.permConfirm = ""
+	m.permChosenPrefix = ""
 	m.permHoverChoice = ""
 	m.pendingPermission = agent.PermissionRequest{}
 	m.pendingToolName = ""
@@ -15718,6 +15721,9 @@ func renderPermissionPrompt(req agent.PermissionRequest) string {
 	b.WriteString("\n\n[y] once  [n] deny")
 	if permAlwaysRuleAvailable(req) {
 		b.WriteString("  [a] always this rule")
+		if len(permBashPrefixChoices(req)) > 1 {
+			b.WriteString(" (pick prefix)")
+		}
 	}
 	if permAlwaysToolAvailable(req) {
 		b.WriteString("  [t] always this tool")
@@ -15744,6 +15750,18 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 			m.permConfirm = ""
 			m.layout()
 			return nil, false
+		}
+		// A digit picks a prefix granularity and confirms in one keypress. The
+		// confirmation step exists to show WHICH rule is written, so a numbered
+		// choice must not resolve without going through handlePermissionChoice
+		// (which re-applies the harmful/availability guards).
+		if m.permConfirm == "a" {
+			if idx, ok := permPrefixChoiceIndex(choice, m.pendingPermission); ok {
+				m.permChosenPrefix = permBashPrefixChoices(m.pendingPermission)[idx]
+				m.permConfirm = ""
+				m.showPermDialog = false
+				return m.handlePermissionChoice("a"), true
+			}
 		}
 		return nil, false
 	}
@@ -15815,6 +15833,22 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 	args := m.pendingToolArgs
 	if len(args) == 0 {
 		args = req.Args
+	}
+	// The always-rule confirmation step may have picked a broader/narrower prefix
+	// than the ask's default. Only an offered candidate is honoured, so a stale or
+	// hand-set choice cannot widen the rule. Applied to the local copy so BOTH
+	// persistence paths below (main agent and parked sub-agent) write the same
+	// rule.
+	if choice == "a" || choice == "always" || choice == "always allow" {
+		if chosen := m.permChosenPrefix; chosen != "" && req.Scope == agent.PermissionScopeBashPrefix {
+			for _, cand := range req.PrefixCandidates {
+				if cand == chosen {
+					req.Prefix = cand
+					req.Rule = "bash.prefix." + cand
+					break
+				}
+			}
+		}
 	}
 
 	// Sub-agent permission ask: the sub-agent goroutine is blocked on respCh.
@@ -15990,12 +16024,17 @@ func permissionRuleLabel(req agent.PermissionRequest) string {
 // this session. Only dirty fields are flushed by persistPermissions, preventing
 // stale in-memory snapshots from clobbering concurrent sessions' changes.
 type permDirtyFlags struct {
-	autoEnabled    bool
-	mode           bool
-	toolRules      map[string]string // tool -> level for each changed rule
-	bashPrefixes   map[string]string // prefix -> level for each changed rule
-	bashAutoAllow  map[string]bool   // prefix -> add(true)/remove(false)
-	bashPrefixMode map[string]string // prefix -> mode for each changed entry
+	autoEnabled  bool
+	mode         bool
+	toolRules    map[string]string // tool -> level for each changed rule
+	bashPrefixes map[string]string // prefix -> level for each changed rule
+	// bashPrefixRemovals records prefixes whose rule must be DELETED from
+	// config. "Unban" is a delete, not a downgrade to ask: an explicit ask
+	// entry outlives the ban and still shows up in /permissions and the
+	// Settings editor as a rule the user never intended to create.
+	bashPrefixRemovals map[string]bool
+	bashAutoAllow      map[string]bool   // prefix -> add(true)/remove(false)
+	bashPrefixMode     map[string]string // prefix -> mode for each changed entry
 }
 
 // setPermissionRule applies a permission answer to the rule tables. It returns
@@ -16024,6 +16063,9 @@ func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.Permi
 			m.permDirty.bashPrefixes = make(map[string]string)
 		}
 		m.permDirty.bashPrefixes[req.Prefix] = string(level)
+		// A pending unbind for the same prefix (this session) must not win over
+		// a rule the user just approved in the dialog.
+		delete(m.permDirty.bashPrefixRemovals, req.Prefix)
 		return nil
 	}
 	m.setToolPermission(req.ToolName, level)
@@ -16092,6 +16134,19 @@ func (m *model) persistPermissions() {
 	if bashPrefixesDirty && len(m.permDirty.bashPrefixes) == 0 {
 		m.permDirty.bashPrefixes = nil
 	}
+	// Deletions are flushed AFTER the sets: a prefix that appears in both maps
+	// (set then removed in one session) must end up absent on disk.
+	bashPrefixRemovalsDirty := len(m.permDirty.bashPrefixRemovals) > 0
+	for prefix := range m.permDirty.bashPrefixRemovals {
+		if err := config.DeleteBashPrefixRule(prefix); err != nil {
+			errs = append(errs, prefix+": "+err.Error())
+			continue
+		}
+		delete(m.permDirty.bashPrefixRemovals, prefix)
+	}
+	if bashPrefixRemovalsDirty && len(m.permDirty.bashPrefixRemovals) == 0 {
+		m.permDirty.bashPrefixRemovals = nil
+	}
 	bashAutoAllowDirty := len(m.permDirty.bashAutoAllow) > 0
 	for prefix, add := range m.permDirty.bashAutoAllow {
 		if err := config.SaveBashAutoAllowPrefixEntry(prefix, add); err != nil {
@@ -16131,11 +16186,13 @@ func (m *model) clearAllBashBans() {
 		return
 	}
 	for _, prefix := range banned {
-		m.agent.Permissions().SetBashPrefixRule(prefix, agent.PermissionAsk)
-		if m.permDirty.bashPrefixes == nil {
-			m.permDirty.bashPrefixes = make(map[string]string)
+		// Clear = delete, same contract as /ban remove and the Settings editor.
+		m.agent.Permissions().RemoveBashPrefixRule(prefix)
+		delete(m.permDirty.bashPrefixes, prefix)
+		if m.permDirty.bashPrefixRemovals == nil {
+			m.permDirty.bashPrefixRemovals = make(map[string]bool)
 		}
-		m.permDirty.bashPrefixes[prefix] = string(agent.PermissionAsk)
+		m.permDirty.bashPrefixRemovals[prefix] = true
 	}
 	m.persistPermissions()
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cleared %d banned bash prefixes.", len(banned))})
@@ -17730,6 +17787,34 @@ func (m *model) permDialogBtnDefs() []permBtnDef {
 	return defs
 }
 
+// permBashPrefixChoices returns the prefix granularities the user may persist
+// for req, narrowest first. Empty when the ask persists something other than a
+// command prefix (an interpreter script grant, an out-of-scope path root, a
+// synthetic gate) or when a legacy request carries no candidate list.
+func permBashPrefixChoices(req agent.PermissionRequest) []string {
+	if req.ToolName != "bash" || req.Scope != agent.PermissionScopeBashPrefix {
+		return nil
+	}
+	if agent.IsSyntheticBashPrefix(req.Prefix) {
+		return nil
+	}
+	return req.PrefixCandidates
+}
+
+// permPrefixChoiceIndex maps a 1-based digit key to an index into
+// permBashPrefixChoices. Used only on the always-rule confirmation step.
+func permPrefixChoiceIndex(choice string, req agent.PermissionRequest) (int, bool) {
+	if len(choice) != 1 || choice[0] < '1' || choice[0] > '9' {
+		return 0, false
+	}
+	idx := int(choice[0] - '1')
+	choices := permBashPrefixChoices(req)
+	if idx >= len(choices) {
+		return 0, false
+	}
+	return idx, true
+}
+
 // renderPermConfirmBody describes exactly what selecting "always allow" will
 // persist, mirroring setPermissionRule / setToolPermission / allowOutOfScopePath
 // so the confirmation never drifts from what is actually written to settings.
@@ -17761,6 +17846,12 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 			lang := strings.TrimPrefix(req.Prefix, "bash.interpreter.")
 			lines = append(lines, fmt.Sprintf("Persist an exact %s script grant: this script file, this exact command, this directory.", lang))
 			lines = append(lines, "Stops matching if the file changes. Heredoc and inline code cannot be saved.")
+		} else if choices := permBashPrefixChoices(req); len(choices) > 1 {
+			lines = append(lines, "Persist a bash-prefix rule. Choose how broad it is:")
+			for i, cand := range choices {
+				lines = append(lines, fmt.Sprintf("  [%d] allow `%s ...`", i+1, cand))
+			}
+			lines = append(lines, fmt.Sprintf("Press 1-%d to pick and confirm, or [y] to use %q.", len(choices), choices[0]))
 		} else {
 			lines = append(lines, fmt.Sprintf("Persist a bash-prefix rule: always allow `%s ...` (all commands starting with %q).", req.Prefix, req.Prefix))
 		}

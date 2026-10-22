@@ -311,6 +311,7 @@ export const ToolBlock = memo(function ToolBlock({
   stream,
   highlight = "",
   onOpenQuestion,
+  onOpenPermission,
   callKey = "tool-call",
   outputKey = "tool-output",
   forceOpen = false,
@@ -325,6 +326,9 @@ export const ToolBlock = memo(function ToolBlock({
   /** Set for a `question` call still waiting on the user: shows that same
    *  request again after the dialog is locally hidden. */
   onOpenQuestion?: () => void;
+  /** Set for a `permission` call still waiting on the user: shows that same
+   *  request again after the dialog is locally hidden. */
+  onOpenPermission?: () => void;
   /** Stable transcript identity plus region. Manual disclosure survives remounts. */
   callKey?: string;
   outputKey?: string;
@@ -435,8 +439,12 @@ export const ToolBlock = memo(function ToolBlock({
           >
             <span>{open ? "▾" : "▸"}</span>
             <span className="min-w-0 truncate" data-copy-content="" title={argsHint || undefined}>🔧 {argsHint || tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
-            {pending && !onOpenQuestion && <span className="ml-1 animate-pulse text-amber-400/70">running…</span>}
-            {onOpenQuestion && <span className="ml-1 text-amber-400/70">awaiting your answer</span>}
+            {pending && !(onOpenQuestion || onOpenPermission) && (
+              <span className="ml-1 animate-pulse text-amber-400/70">running…</span>
+            )}
+            {(onOpenQuestion || onOpenPermission) && (
+              <span className="ml-1 text-amber-400/70">awaiting your answer</span>
+            )}
           </button>
           {copyText !== "" && (
             <BlockCopyControl
@@ -454,6 +462,15 @@ export const ToolBlock = memo(function ToolBlock({
             className="mt-2 rounded border border-amber-500/50 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-500/15"
           >
             Open question
+          </button>
+        )}
+        {onOpenPermission && (
+          <button
+            type="button"
+            onClick={onOpenPermission}
+            className="mt-2 rounded border border-amber-500/50 px-2 py-0.5 text-[11px] text-amber-200 hover:bg-amber-500/15"
+          >
+            Open permission
           </button>
         )}
         {open && (

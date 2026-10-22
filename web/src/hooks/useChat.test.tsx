@@ -94,8 +94,18 @@ describe("useChat.resolvePermission", () => {
     await act(async () => {
       expect(await result.current.chat.resolvePermission("call-1", "deny")).toEqual({ ok: true });
     });
-    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "deny", undefined);
+    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "deny", undefined, undefined);
     expect(result.current.chat.pendingPermission).toBeNull();
+  });
+
+  it("forwards the chosen bash prefix with an always-rule decision", async () => {
+    mockResolvePermission.mockResolvedValueOnce({});
+    const { result } = setup();
+    act(() => result.current.dispatch({ type: "PERMISSION_REQUEST", sessionId: "sess-1", permission: ask }));
+    await act(async () => {
+      expect(await result.current.chat.resolvePermission("call-1", "always_rule", "npm run")).toEqual({ ok: true });
+    });
+    expect(mockResolvePermission).toHaveBeenCalledWith("call-1", "sess-1", "always_rule", undefined, "npm run");
   });
 });
 

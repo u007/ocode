@@ -1,6 +1,14 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useChatSelector, useChatDispatch, getSessionSlice, parseQuestionFromMessage, type QuestionRequest } from "../../stores/chatStore";
+import {
+  useChatSelector,
+  useChatDispatch,
+  getSessionSlice,
+  parsePermissionFromMessage,
+  parseQuestionFromMessage,
+  type PermissionRequest,
+  type QuestionRequest,
+} from "../../stores/chatStore";
 import { useProjectDispatch } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import MessageBubble, { AssistantText, hasRenderableText } from "./MessageBubble";
@@ -33,6 +41,7 @@ import { requestSpeech } from "../Speech/SpeechProvider";
 import { SpeakButton } from "../Speech/SpeakButton";
 import { lastRenderedSpeechText, renderedSpeechTexts } from "../Speech/speechUtils";
 import { ArrowDown, ArrowUp } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 /** Rough per-row height for an unmeasured virtualized transcript row. Real
  *  heights vary a lot (code blocks vs. one-line replies); `measureElement`
@@ -86,9 +95,15 @@ interface ChatPanelProps {
    *  passes this callback down; must be a STABLE reference or the memo on this
    *  component is defeated for every mounted tab. */
   onContinueInterrupted?: (sessionId: string) => void;
+  /** Optional min-height class for the message list (the scroll container).
+   *  App does not pass it: a min-height on the transcript overflows the box the
+   *  composer leaves on a short viewport and covers the composer, so the
+   *  transcript takes exactly the space the composer leaves. PulseAssistantWindow
+   *  omits it too. */
+  transcriptMinHeightClass?: string;
 }
 
-function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
+function ChatPanel({ sessionId, host, onContinueInterrupted, transcriptMinHeightClass }: ChatPanelProps) {
   // Scoped to this tab's own session: getSessionSlice returns the exact same
   // object reference across dispatches that don't touch this session (see
   // updateSession's immutable per-key update), so other tabs' streamed
@@ -307,6 +322,9 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           /** The unanswered `question` prompt this call is paused on, so the
            *  card can re-open its dialog on demand. */
           pendingQuestion?: QuestionRequest;
+          /** The unanswered `permission` prompt this call is paused on, so the
+           *  card can re-open its dialog on demand. */
+          pendingPermission?: PermissionRequest;
         }>;
       };
 
@@ -342,6 +360,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
   const renderEntries: RenderEntry[] = useMemo(() => {
     const resultById = new Map<string, { content: string; idx: number }>();
     const pendingQuestionById = new Map<string, QuestionRequest>();
+    const pendingPermissionById = new Map<string, PermissionRequest>();
     messages.forEach((m, idx) => {
       if (m.role === "tool" && m.tool_call_id && !isSentinelToolContent(m.content)) {
         resultById.set(m.tool_call_id, { content: m.content, idx });
@@ -349,6 +368,8 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       if (m.role === "tool" && m.tool_call_id) {
         const q = parseQuestionFromMessage(m);
         if (q) pendingQuestionById.set(m.tool_call_id, q);
+        const p = parsePermissionFromMessage(m);
+        if (p) pendingPermissionById.set(m.tool_call_id, p);
       }
     });
     const entries: RenderEntry[] = [];
@@ -392,7 +413,18 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
           const sessionPending = slice.pendingQuestion;
           const hiddenMatches = hiddenId && sessionPending && hiddenId === sessionPending.request_id && hiddenId === tc.id;
           const derivedPending = hiddenMatches ? sessionPending : pendingQuestionById.get(tc.id);
-          return { tc, resultContent: undefined, resultIdx: undefined, pendingQuestion: derivedPending };
+          const hiddenPermId = slice.hiddenPermissionRequestId;
+          const sessionPermPending = slice.pendingPermission;
+          const hiddenPermMatches =
+            hiddenPermId && sessionPermPending && hiddenPermId === sessionPermPending.request_id && hiddenPermId === tc.id;
+          const derivedPermission = hiddenPermMatches ? sessionPermPending : pendingPermissionById.get(tc.id);
+          return {
+            tc,
+            resultContent: undefined,
+            resultIdx: undefined,
+            pendingQuestion: derivedPending,
+            pendingPermission: derivedPermission,
+          };
         });
         entries.push({ kind: "tool-group", assistant: msg, originalIndex: i, calls });
         continue;
@@ -413,7 +445,13 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     // hiddenQuestionRequestId/pendingQuestion participate: derivedPending reads
     // them, and a recompute must happen when X/Escape flips the hidden state
     // (messages do not change then — otherwise the button never appears).
-  }, [messages, slice.hiddenQuestionRequestId, slice.pendingQuestion]);
+  }, [
+    messages,
+    slice.hiddenQuestionRequestId,
+    slice.pendingQuestion,
+    slice.hiddenPermissionRequestId,
+    slice.pendingPermission,
+  ]);
   renderEntriesRef.current = renderEntries;
 
   // The last thinking block in the latest assistant turn follows the
@@ -494,6 +532,31 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
     }
     return parts;
   }, [live]);
+
+  // X/Escape hides the ask locally, and the ask's tool card is the only reopen
+  // affordance for it. A sub-agent ask has no card: its request id is the
+  // child's, not a parent tool-call id, and it writes no PERMISSION_ASK sentinel.
+  // Such a hidden ask gets a standalone reopen row (see below), so it is never
+  // unreachable until reload.
+  const hiddenPermission =
+    slice.pendingPermission &&
+    slice.hiddenPermissionRequestId === slice.pendingPermission.request_id
+      ? slice.pendingPermission
+      : null;
+  const hiddenPermissionHasCard =
+    hiddenPermission !== null &&
+    (renderEntries.some(
+      (entry) =>
+        entry.kind === "tool-group" &&
+        entry.calls.some((c) => c.pendingPermission?.request_id === hiddenPermission.request_id),
+    ) ||
+      liveRenderParts.some(
+        (entry) =>
+          entry.kind === "part" &&
+          entry.part.kind === "tool" &&
+          entry.part.tool === "permission" &&
+          (entry.part.callId == null || entry.part.callId === hiddenPermission.request_id),
+      ));
 
   // Only committed messages are virtualized — a long session's history is
   // what was growing the DOM (and retained JS heap: fiber nodes, markdown/
@@ -1718,7 +1781,9 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
       )}
       <div
         ref={scrollRef}
-        className="relative flex-1 min-h-0 overflow-y-auto p-4 [overflow-anchor:none]"
+        className={`relative flex-1 min-h-0 overflow-y-auto p-4 [overflow-anchor:none] ${
+          transcriptMinHeightClass ?? ""
+        }`}
         onScroll={handleScroll}
         onMouseUp={() => setSelectedText(window.getSelection()?.toString().trim() ?? "")}
       >
@@ -1837,7 +1902,7 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                             forceOpen={forceOpen}
                           />
                         ) : null}
-                        {entry.calls.map(({ tc, resultContent, pendingQuestion }) => (
+                        {entry.calls.map(({ tc, resultContent, pendingQuestion, pendingPermission }) => (
                           <ToolBlock
                             key={tc.id}
                             tool={tc.function.name}
@@ -1851,6 +1916,16 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                                       type: "QUESTION_SHOW",
                                       sessionId,
                                       requestId: pendingQuestion.request_id,
+                                    })
+                                : undefined
+                            }
+                            onOpenPermission={
+                              pendingPermission
+                                ? () =>
+                                    dispatch({
+                                      type: "PERMISSION_SHOW",
+                                      sessionId,
+                                      requestId: pendingPermission.request_id,
                                     })
                                 : undefined
                             }
@@ -1949,11 +2024,42 @@ function ChatPanel({ sessionId, host, onContinueInterrupted }: ChatPanelProps) {
                           })
                       : undefined
                   }
+                  onOpenPermission={
+                    part.tool === "permission" &&
+                    slice.pendingPermission &&
+                    (part.callId == null || part.callId === slice.pendingPermission.request_id)
+                      ? () =>
+                          dispatch({
+                            type: "PERMISSION_SHOW",
+                            sessionId,
+                            requestId: slice.pendingPermission!.request_id,
+                          })
+                      : undefined
+                  }
                   callKey={`${liveKey}:call:${part.callId ?? "tool"}`}
                   outputKey={`${liveKey}:output:${part.callId ?? "tool"}`}
                 />
               );
             })}
+          </div>
+        )}
+
+        {hiddenPermission && !hiddenPermissionHasCard && (
+          <div className="mt-2 flex justify-start">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                dispatch({
+                  type: "PERMISSION_SHOW",
+                  sessionId,
+                  requestId: hiddenPermission.request_id,
+                })
+              }
+            >
+              Open permission
+            </Button>
           </div>
         )}
 

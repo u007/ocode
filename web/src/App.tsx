@@ -205,10 +205,12 @@ function HomeApp() {
     pendingPermission,
     pendingQuestion,
     hiddenQuestionRequestId,
+    hiddenPermissionRequestId,
     askContext,
     submitQuestionAnswers,
     cancelQuestion,
     hideQuestion,
+    hidePermission,
   } = useChat(activeTabId);
   // Host of the active session's project. The model dialog and the command
   // context route their session-scoped calls there so a remote session's model
@@ -1126,6 +1128,7 @@ function HomeApp() {
         setPathsConfig: (paths, uploadDir) => api.setPathsConfig(paths, uploadDir),
         getMemoryStatus: () => api.getMemoryStatus(),
         setBashRule: (prefix, level) => api.setBashRule(prefix, level),
+        setBashRules: (delta) => api.setBashRules(delta),
         getPermissions: (sessionId, host) => api.getPermissions(sessionId, host),
         getAutoContinue: (host?) => api.getAutoContinue(host),
         setAutoContinue: (fields, host?) => api.setAutoContinue(fields, host),
@@ -1801,7 +1804,12 @@ function HomeApp() {
                             data-testid="chat-ask-surface"
                             className="relative flex min-h-0 flex-1 flex-col"
                           >
-                            <div className="relative flex-1 min-h-0 overflow-hidden">
+                            {/* No overflow class: ChatPanel's transcript scroller
+                                is the one vertical scroller, bounded by this
+                                flex-1 min-h-0 box. The composer is a SIBLING of
+                                this wrapper, so it stays pinned and visible on
+                                short viewports. */}
+                            <div className="relative flex-1 min-h-0">
                               <ChatPanel
                                 sessionId={tab.id}
                                 host={resolveSessionHost(projectState, tab.id)}
@@ -2130,7 +2138,10 @@ function HomeApp() {
           surface gate AND the container are both required: off-view this panel
           is `display:none` (ui/tabs.tsx `data-[state=inactive]:hidden`), so
           confining alone would render an invisible dialog with no signal. */}
-      {pendingPermission && sessionAskVisible && chatSurfaceEl && (
+      {pendingPermission &&
+        hiddenPermissionRequestId !== pendingPermission.request_id &&
+        sessionAskVisible &&
+        chatSurfaceEl && (
         <PermissionDialog
           open={true}
           container={chatSurfaceEl}
@@ -2143,6 +2154,7 @@ function HomeApp() {
           modelUnavailable={pendingPermission.model_unavailable}
           scope={pendingPermission.scope}
           prefix={pendingPermission.prefix}
+          prefixCandidates={pendingPermission.prefix_candidates}
           outOfScopePath={pendingPermission.out_of_scope_path}
           untrustedContent={pendingPermission.untrusted_content}
           untrustedSource={pendingPermission.untrusted_source}
@@ -2155,6 +2167,7 @@ function HomeApp() {
           host={activeSessionHost}
           requestId={pendingPermission.request_id}
           onDecide={resolvePermission}
+          onHide={hidePermission}
         />
       )}
 

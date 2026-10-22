@@ -4045,6 +4045,9 @@ export const api = {
     sessionId: string | null,
     decision: PermissionDecision,
     host?: string,
+    // For always_rule on a bash ask: the prefix rule the user picked from the
+    // ask's candidates. Omitted means "use the narrowest derived rule".
+    prefix?: string,
   ) =>
     fetchJSON<ChatResponse>(
       "/api/permissions/resolve",
@@ -4054,6 +4057,7 @@ export const api = {
           request_id: requestId,
           session_id: sessionId ?? undefined,
           decision,
+          prefix,
         }),
       },
       host,

@@ -613,6 +613,13 @@ export interface SSEPermissionEvent {
   scope?: string;
   /** Bash prefix for bash_prefix-scope asks (e.g. "rm", "git push"). */
   prefix?: string;
+  /**
+   * Bash word-prefix rules this ask can persist, narrowest first (e.g.
+   * ["npm run build", "npm run", "npm"]). The dialog renders each as
+   * `<prefix> *`; the chosen value goes back in the resolve body's `prefix`.
+   * Empty/absent for non-bash asks and for asks with no safe prefix.
+   */
+  prefix_candidates?: string[];
   /** Out-of-workspace target path; "always" persists this root to extra_allowed_paths. */
   out_of_scope_path?: string;
   /** Name of the sub-agent that raised the ask; absent for a main-agent ask. */
