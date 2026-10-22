@@ -163,10 +163,12 @@ Rules:
   project binding). New session-scoped calls must pass that host — plus an
   `X-Ocode-Project` header when they carry a path — or they hit the wrong
   machine. Local calls pass no host and keep byte-identical URLs.
-- **Version mismatch is reused, never auto-restarted.** `EnsureRemoteServer`
-  reuses an alive, healthy but version-mismatched server (`ServeState.Outdated`);
-  restart is an explicit, unguarded `POST /api/remote/{host}/restart` — running
-  turns and terminals are not drained.
+- **A version-mismatched remote server is retired on connect.** `EnsureRemoteServer`
+  kills an alive, healthy server whose version differs from the local build, starts
+  a fresh one, then reaps every other-version `ocode serve` on the host
+  (`killOtherVersionServers`) — leftovers held memory and starved sshd. Running
+  turns and terminals on the old server are not drained. Explicit restart remains
+  `POST /api/remote/{host}/restart`.
 - **Terminal reattach keys are host-qualified** (`projectTerminalsKey(path,
   host)` = `<host>::<path>` for remote, bare path for local), so a local and a
   remote project at the same path cannot share terminal tabs.

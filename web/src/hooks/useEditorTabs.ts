@@ -49,6 +49,10 @@ export interface UseEditorTabsResult {
   activeEditorTabId: string | null;
   setActiveEditorTabId: (id: string | null) => void;
   handleOpenFile: (path: string, projectRoot?: string, host?: string) => Promise<boolean>;
+  /** Grants the file editor access to a path OUTSIDE any project root and
+   *  opens it anchored to the granted directory. The grant is editor-only —
+   *  it never widens the agent's file scope. */
+  openOutsideProject: (path: string, host?: string) => Promise<boolean>;
   reloadTabFromDisk: (id: string) => Promise<void>;
   dismissExternalChange: (id: string) => void;
   handleEditorChange: (id: string, content: string) => void;
@@ -113,7 +117,14 @@ export function useEditorTabs(): UseEditorTabsResult {
     const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), {
       headers: authHeaders(),
     });
-    if (!res.ok) throw new Error("Failed to load file");
+    if (!res.ok) {
+      // Surface the server's message, not a generic one: the caller has to be
+      // able to tell "this file is outside the project root" (grantable) from
+      // "this file does not exist" (not grantable). The server's body is
+      // {"error": "..."} — a JSON parse failure falls back to the status text.
+      const body = await res.json().catch(() => null as { error?: string } | null);
+      throw new Error(body?.error || `Failed to load file (${res.status})`);
+    }
     const data = await res.json();
     return { content: data.content as string, isBinary: !!data.is_binary };
   }, []);
@@ -237,6 +248,38 @@ export function useEditorTabs(): UseEditorTabsResult {
     setActiveEditorTabId(id);
     return true;
   }, [fetchFileContent]);
+
+  // ── Out-of-project files ───────────────────────────────────────────────
+  //
+  // The server confines the file surfaces to the project roots, the extra
+  // allowed paths, and the directories the user has explicitly GRANTED. This
+  // is the client half of that contract:
+  //
+  //   openOutsideProject(path, host) grants the path's directory and opens
+  //   the file anchored to the granted root. The grant is editor-only — it
+  //   does not widen the agent's file scope.
+  //
+  // The granted root becomes the tab's projectRoot, so every later read
+  // (editor content, preview viewers, the media token) is anchored to it
+  // without needing any special case in those surfaces.
+  const openOutsideProject = useCallback(
+    async (path: string, host?: string): Promise<boolean> => {
+      const clean = path.trim();
+      if (!clean) return false;
+      try {
+        const { root } = await api.grantFilePath(clean, host);
+        if (!root) return false;
+        // Open the file relative to the granted root: the server then applies
+        // the same containment check it applies to a project-relative path.
+        const rel = root.endsWith("/") ? clean.slice(root.length) : clean.slice(root.length + 1);
+        return await handleOpenFile(rel || clean, root, host);
+      } catch (err) {
+        console.error("Failed to grant access to path:", err);
+        return false;
+      }
+    },
+    [handleOpenFile],
+  );
 
   // Restore the previously open editor tabs once on mount. Content is
   // re-fetched; a file that no longer exists on disk simply fails its fetch
@@ -702,6 +745,7 @@ export function useEditorTabs(): UseEditorTabsResult {
     activeEditorTabId,
     setActiveEditorTabId,
     handleOpenFile,
+    openOutsideProject,
     reloadTabFromDisk,
     dismissExternalChange,
     handleEditorChange,

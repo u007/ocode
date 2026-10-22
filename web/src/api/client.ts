@@ -71,6 +71,7 @@ import type {
   STTTranscribeResult,
   TTSInstallState,
   PortMapView,
+  HtrForwardStatus,
   PortMapTarget,
   ContextBudgetReport,
   VaultItem,
@@ -3276,6 +3277,51 @@ export const api = {
     return { content: data.content as string, is_binary: !!data.is_binary };
   },
 
+  // ── Editor grant: allow the file editor/preview to open a path OUTSIDE
+  // any project root.
+  //
+  // The server keeps these grants in memory, per server process, and NEVER
+  // exposes them to the agent's permission scope — granting a directory here
+  // does not let the agent read or write it without asking. The response root
+  // is the canonical directory that was granted (the path itself when it is a
+  // directory, its parent when it is a file) and is what the caller must pass
+  // back as `project_root` so every later read of that file is anchored to
+  // it.
+  //
+  // host routes the grant to a remote project's host — the grant then lives in
+  // the remote server's own grant list (the remote runs the same code).
+  grantFilePath: async (
+    path: string,
+    host?: string,
+  ): Promise<{ root: string; granted: boolean; roots: string[] }> => {
+    // A remote project's grant must land in the REMOTE server's grant list
+    // (the remote runs the same code, with its own roots). The proxy prefix
+    // routes the request there.
+    const prefix = remoteApiBase(host);
+    return fetchJSON<{ root: string; granted: boolean; roots: string[] }>(
+      `${prefix}/api/files/grant`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    );
+  },
+
+  // ── Editor grant: revoke a previously granted directory.
+  revokeFileGrant: async (
+    path: string,
+    host?: string,
+  ): Promise<{ root: string; revoked: boolean; roots: string[] }> => {
+    const prefix = remoteApiBase(host);
+    return fetchJSON<{ root: string; revoked: boolean; roots: string[] }>(
+      `${prefix}/api/files/grant`,
+      { method: "DELETE", body: JSON.stringify({ path }) },
+    );
+  },
+
+  // ── Editor grant: list the currently granted directories.
+  listFileGrants: async (host?: string): Promise<{ roots: string[] }> => {
+    const prefix = remoteApiBase(host);
+    return fetchJSON<{ roots: string[] }>(`${prefix}/api/files/grants`);
+  },
+
   // ── Sidebar preview: open with the OS default app (native-fidelity
   // playback for pptx/docx) — forces the system opener, never the editor.
   openFileWithOS: (path: string, projectRoot?: string) =>
@@ -4271,6 +4317,20 @@ export const api = {
         method: "POST",
       },
     ),
+
+  // htrcli reverse forward for the target's SSH host (project-scoped family
+  // only: there is no desktop-family equivalent).
+  getHtrForward: (target: PortMapTarget) =>
+    fetchJSON<HtrForwardStatus>(portMapsPath(target, "/htr")),
+  startHtrForward: (target: PortMapTarget) =>
+    fetchJSON<HtrForwardStatus>(portMapsPath(target, "/htr/start"), {
+      method: "POST",
+    }),
+  setHtrForwardAutoStart: (enabled: boolean, target: PortMapTarget) =>
+    fetchJSON<HtrForwardStatus>(portMapsPath(target, "/htr/autostart"), {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
 
   // ── Postgres connector ──
   // Saved connections are global (ocodeconfig.json), not directory-bound, so

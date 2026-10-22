@@ -139,7 +139,7 @@ func (a *Agent) titleClients() []LLMClient {
 				continue
 			}
 			seen[m] = true
-			if c := NewClient(&titleCfg, m); c != nil {
+			if c := a.newClient(&titleCfg, m); c != nil {
 				clients = append(clients, a.bindSideClient(c))
 			}
 		}

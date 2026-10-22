@@ -93,7 +93,7 @@ func (t TaskTool) verifierClient() LLMClient {
 	if model == "" {
 		return a.client
 	}
-	if client := newClientFn(a.config, model); client != nil {
+	if client := a.newClient(a.config, model); client != nil {
 		// Inherit the main conversation identity (opencode* request affinity).
 		return a.bindSideClient(client)
 	}

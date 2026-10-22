@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Network, Plus, Trash2 } from "lucide-react";
 import { api, isPortMapsAvailable, ApiError } from "../../api/client";
-import type { PortMapTarget, PortMapView } from "../../api/types";
+import type { HtrForwardStatus, PortMapTarget, PortMapView } from "../../api/types";
 import { useProjectState } from "../../stores/projectStore";
 import { remoteForwardTarget } from "../../lib/trustedProject";
 import {
@@ -55,6 +55,7 @@ export default function PortMapsWidget() {
   // direction), so this only describes the row being composed.
   const [reverse, setReverse] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [htr, setHtr] = useState<HtrForwardStatus | null>(null);
   // Bounded re-fetch budget for the background auto-start; reset whenever the
   // dialog opens or the project changes, so each open gets a fresh budget.
   const livePollAttempts = useRef(0);
@@ -71,6 +72,7 @@ export default function PortMapsWidget() {
     let cancelled = false;
     setAvailable(false);
     setMaps([]);
+    setHtr(null);
     setError("");
     setOpen(false);
     livePollAttempts.current = 0;
@@ -89,9 +91,63 @@ export default function PortMapsWidget() {
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
 
+  const refreshHtr = useCallback(() => {
+    const t = targetRef.current;
+    if (!t) return;
+    api
+      .getHtrForward(t)
+      .then(setHtr)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+
   useEffect(() => {
-    if (open) refresh();
-  }, [open, targetKey, refresh]);
+    if (open) {
+      refresh();
+      refreshHtr();
+    }
+  }, [open, targetKey, refresh, refreshHtr]);
+
+  // The htrcli forward opens in the background on list, so poll its status
+  // while it is expected to come up (auto-start on, daemon running, not live).
+  useEffect(() => {
+    if (!open || !htr) return;
+    if (!(htr.auto_start && htr.local_running && !htr.live)) return;
+    if (livePollAttempts.current >= 5) return;
+    const timer = setTimeout(() => {
+      livePollAttempts.current += 1;
+      refreshHtr();
+    }, LIVE_POLL_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [open, htr, refreshHtr]);
+
+  const handleHtrStart = async () => {
+    const t = targetRef.current;
+    if (!t) return;
+    setBusy(true);
+    setError("");
+    try {
+      setHtr(await api.startHtrForward(t));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+      refreshHtr();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleHtrAutoStart = async (enabled: boolean) => {
+    const t = targetRef.current;
+    if (!t) return;
+    setBusy(true);
+    setError("");
+    try {
+      setHtr(await api.setHtrForwardAutoStart(enabled, t));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // The server opens this project's forwards in the BACKGROUND, so the first
   // list reports live=false for anything still coming up. Re-fetch while an
@@ -251,6 +307,50 @@ export default function PortMapsWidget() {
           </form>
 
           {error && <p className="text-sm text-destructive">{error}</p>}
+
+          {htr && (
+            <div
+              className="rounded-md border border-border p-2 space-y-1.5"
+              data-testid="htr-forward"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex-1 text-sm">
+                  htrcli browser relay
+                  <span className="block text-[11px] text-muted-foreground">
+                    {htr.local_running
+                      ? `remote:${htr.port} → localhost:${htr.port}`
+                      : "Local htrcli daemon is not running."}
+                  </span>
+                </span>
+                <span
+                  className={`text-xs ${htr.live ? "text-emerald-500" : "text-muted-foreground"}`}
+                >
+                  {htr.live ? "live" : htr.opening ? "opening…" : "not mapped"}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy || htr.live || !htr.local_running}
+                  onClick={handleHtrStart}
+                >
+                  Start
+                </Button>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={htr.auto_start}
+                  disabled={busy}
+                  onChange={(e) => handleHtrAutoStart(e.target.checked)}
+                  data-testid="htr-autostart-toggle"
+                />
+                Auto-start when this panel opens or the mapping drops
+              </label>
+              {htr.last_error && !htr.live && (
+                <p className="text-[11px] text-destructive break-words">{htr.last_error}</p>
+              )}
+            </div>
+          )}
 
           <div className="space-y-1 max-h-64 overflow-y-auto">
             {maps.length === 0 && (

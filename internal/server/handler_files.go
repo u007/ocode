@@ -69,7 +69,7 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "server has no working directory configured; explicit path not allowed")
 			return
 		}
-		dir, ok := h.fileTreeRootFor(root)
+		dir, ok := h.fileTreeRootForEditor(root)
 		if !ok {
 			writeError(w, http.StatusBadRequest, "path outside working directory")
 			return
@@ -421,7 +421,7 @@ func (h *Handler) parseSearchParams(r *http.Request) (fileSearchParams, error) {
 		if h.workDir == "" {
 			return fileSearchParams{}, errors.New("server has no working directory configured; explicit path not allowed")
 		}
-		dir, ok := h.fileTreeRootFor(root)
+		dir, ok := h.fileTreeRootForEditor(root)
 		if !ok {
 			return fileSearchParams{}, errors.New("path outside working directory")
 		}
@@ -745,6 +745,38 @@ func (h *Handler) HandleFileSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// fileTreeRootForEditor is fileTreeRootFor PLUS the editor grants: the
+// directories the user explicitly opened the editor at. It backs the FILE
+// TREE and FILE SEARCH surfaces only.
+//
+// It is deliberately NOT the function resolveSecretPath uses: encrypting or
+// decrypting a directory is a far stronger action than browsing it, so the
+// secret-job surface keeps the project/extra-path boundary and never reaches
+// a grant.
+func (h *Handler) fileTreeRootForEditor(root string) (string, bool) {
+	if dir, ok := h.fileTreeRootFor(root); ok {
+		return dir, true
+	}
+	// A grant is an exact directory: the requested root must BE the granted
+	// directory (or live inside it).
+	best := ""
+	for _, grant := range h.fileGrants().list() {
+		if grant == "" {
+			continue
+		}
+		if !containedIn(root, grant) && !containedLexical(root, grant) {
+			continue
+		}
+		if best == "" || len(grant) > len(best) {
+			best = grant
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
 // fileTreeRootFor reports whether root may be browsed by HandleFileTree —
 // inside the server's workDir, inside a saved project root
 // (allowedProjectRoots), or inside a configured extra-allowed-path — and, if
@@ -875,26 +907,82 @@ func containsDotDot(p string) bool {
 	return false
 }
 
+// filePathScope selects which root set a file request is confined to.
+//
+// The surfaces differ deliberately: the DB browser keeps its OWN unconditional
+// allowed-roots check (resolveDBPath → pathWithinAllowedRoots, which does NOT
+// include editor grants), while the editor/preview surfaces additionally honour
+// the user's explicit grants. Both share the traversal rule and the
+// project_root anchoring below.
+type filePathScope int
+
+const (
+	// scopeProjectRoots confines a request to the server's project roots plus
+	// the configured extra allowed paths. An absolute path with no
+	// project_root is returned verbatim for the caller to check against its
+	// OWN stricter root set (the DB browser's unconditional allowed-roots
+	// check). This is the historical behaviour of resolveProjectFilePath.
+	scopeProjectRoots filePathScope = iota
+	// scopeEditorRoots confines a request to the project roots, the extra
+	// allowed paths, AND the user's explicit editor grants. An absolute path
+	// with no project_root must land inside one of them.
+	scopeEditorRoots
+)
+
 // resolveProjectFilePath applies the file-content containment rules to a
 // requested path and returns the absolute path to read. The second return is a
-// client-facing error message, empty on success. It is shared by the file
-// content endpoint and the SQLite browser so both enforce ONE boundary: an
-// optional project_root must be an allowed root, the raw path must not contain
-// "..", and the joined path must be contained (resolved or lexical) in it.
-// Relative paths with no project_root resolve against the anchored workDir so
-// they stay correct when the process CWD differs from the project root (e.g. a
-// Finder-launched desktop .app).
+// client-facing error message, empty on success.
+//
+// The rules, in order:
+//
+//  1. A raw path carrying a ".." component is ALWAYS rejected. The check runs
+//     on the UNJOINED request value, before Join/Clean: "link/../escape"
+//     otherwise collapses and hides the ".." that the OS resolves AFTER
+//     following "link".
+//  2. A relative path resolves against project_root when one is given, else
+//     against the anchored workDir (never os.Getwd() — a Finder-launched
+//     desktop .app starts with cwd "/").
+//  3. An ABSOLUTE path must be contained in one of the roots the scope
+//     allows. Containment is resolved OR lexical — the Files tab browses
+//     symlinked folders inside the project, so a linked path must stay
+//     readable.
+//
+// The named project_root may be an allowed project root OR an editor GRANT
+// (handler_file_grants.go): the web passes a granted directory back as
+// project_root so every later read of that file stays anchored to it.
+//
+// scope selects the root set for step 3 — see filePathScope.
 func (h *Handler) resolveProjectFilePath(projectRoot, path string) (string, string) {
+	return h.resolveProjectFilePathScoped(scopeProjectRoots, projectRoot, path)
+}
+
+// resolveEditorFilePath is resolveProjectFilePath with the EDITOR scope: the
+// project roots, the extra allowed paths, and the user's explicit grants.
+//
+// The editor scope closes an LFI-shaped hole: before it, an absolute path with
+// NO project_root was returned verbatim with NO containment check on the read
+// endpoints (/api/files/content and /api/files/raw). The web always sent a
+// project_root, so it never hit that path — but the endpoint was reachable.
+func (h *Handler) resolveEditorFilePath(projectRoot, path string) (string, string) {
+	return h.resolveProjectFilePathScoped(scopeEditorRoots, projectRoot, path)
+}
+
+func (h *Handler) resolveProjectFilePathScoped(scope filePathScope, projectRoot, path string) (string, string) {
+	if containsDotDot(path) {
+		return "", "path is outside the project root"
+	}
 	if projectRoot != "" {
 		root, ok := h.fileContentRootFor(projectRoot)
 		if !ok {
-			return "", "project_root is not an allowed project root"
-		}
-		// Check traversal on the raw value before Join cleans it:
-		// "link/../escape" would otherwise collapse and hide the ".."
-		// that the OS resolves AFTER following "link".
-		if containsDotDot(path) {
-			return "", "path is outside the project root"
+			// The named root is not an allowed project root. It may still be
+			// a directory the user granted to the editor (the web passes the
+			// granted root back as project_root so every later read of that
+			// file is anchored to it).
+			var isGrant bool
+			root, isGrant = h.grantedRootFor(projectRoot)
+			if !isGrant {
+				return "", "project_root is not an allowed project root"
+			}
 		}
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(root, path)
@@ -906,11 +994,123 @@ func (h *Handler) resolveProjectFilePath(projectRoot, path string) (string, stri
 		if !containedIn(path, root) && !containedLexical(path, root) {
 			return "", "path is outside the project root"
 		}
+		return path, ""
 	}
-	if !filepath.IsAbs(path) && h.workDir != "" {
-		path = filepath.Join(h.workDir, path)
+	// No project_root: the path must still land inside a root this server
+	// may touch. A relative path resolves against the anchored workDir.
+	if !filepath.IsAbs(path) {
+		if h.workDir != "" {
+			path = filepath.Join(h.workDir, path)
+		}
+		return path, ""
+	}
+	if scope == scopeEditorRoots && !h.pathWithinAnyFileRoot(path) {
+		return "", "path is outside the project root"
 	}
 	return path, ""
+}
+
+// grantedRootFor reports whether root is one of the editor's explicit grants
+// and returns its canonical form. It is the ONLY way a request may name a
+// directory outside every project root.
+func (h *Handler) grantedRootFor(root string) (string, bool) {
+	canonical, ok := canonicalGrantRoot(root)
+	if !ok {
+		return "", false
+	}
+	if !h.fileGrants().contains(canonical) {
+		return "", false
+	}
+	return canonical, true
+}
+
+// fileAccessRoots returns every directory root the file surfaces may read and
+// write: the server's project roots, the configured extra allowed paths, and
+// the editor's explicit grants.
+//
+// The grants are included HERE ONLY — this list feeds the file editor/preview
+// endpoints. It is never handed to the agent's permission layer, so granting a
+// directory to the editor does NOT let the agent read or write it without
+// asking.
+func (h *Handler) fileAccessRoots() []string {
+	roots := h.allowedProjectRoots()
+	h.mu.Lock()
+	if h.cfg != nil {
+		roots = append(roots, h.cfg.Ocode.ExtraAllowedPaths...)
+	}
+	h.mu.Unlock()
+	roots = append(roots, h.fileGrants().list()...)
+	return roots
+}
+
+// writeScopeRoot resolves the single directory a WRITE is confined to.
+//
+// It returns a client-facing error message (empty on success). The rules:
+//
+//   - project_root given → it must be an allowed project root or an editor
+//     GRANT; that directory is the scope.
+//   - absolute path, no project_root → the scope is the most specific root
+//     that contains the path (project root, extra allowed path, or grant).
+//     Without this the write would have no root to be confined to at all.
+//   - relative path, no project_root → the server workDir (legacy).
+//
+// The most-specific rule matters when roots nest: a file under
+// /Users/x/www/ocode must be scoped by /Users/x/www/ocode, not by a broader
+// /Users/x/www that may also be granted — the narrower scope is the one the
+// user actually pointed at.
+func (h *Handler) writeScopeRoot(projectRoot, path string) (string, string) {
+	if projectRoot != "" {
+		if root, ok := h.fileContentRootFor(projectRoot); ok {
+			return root, ""
+		}
+		if root, ok := h.grantedRootFor(projectRoot); ok {
+			return root, ""
+		}
+		return "", "project_root is not an allowed project root"
+	}
+	if filepath.IsAbs(path) {
+		best := ""
+		for _, root := range h.fileAccessRoots() {
+			if root == "" {
+				continue
+			}
+			if !containedIn(path, root) && !containedLexical(path, root) {
+				continue
+			}
+			abs, err := filepath.Abs(root)
+			if err != nil {
+				continue
+			}
+			if best == "" || len(abs) > len(best) {
+				best = abs
+			}
+		}
+		if best == "" {
+			return "", "path is outside the project root"
+		}
+		return best, ""
+	}
+	root := h.workDir
+	if root == "" {
+		root = "."
+	}
+	return root, ""
+}
+
+// pathWithinAnyFileRoot reports whether an absolute path lies inside one of
+// the roots the file surfaces may touch. Containment is checked resolved OR
+// lexical, matching the read semantics above (the Files tab browses symlinked
+// folders that point outside the project).
+func (h *Handler) pathWithinAnyFileRoot(path string) bool {
+	for _, root := range h.fileAccessRoots() {
+		if root == "" {
+			continue
+		}
+		if containedIn(path, root) || containedLexical(path, root) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
@@ -924,7 +1124,7 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
-	path, errMsg := h.resolveProjectFilePath(r.URL.Query().Get("project_root"), path)
+	path, errMsg := h.resolveEditorFilePath(r.URL.Query().Get("project_root"), path)
 	if errMsg != "" {
 		writeError(w, http.StatusBadRequest, errMsg)
 		return
@@ -1041,28 +1241,15 @@ func (h *Handler) HandleFileRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if projectRoot := r.URL.Query().Get("project_root"); projectRoot != "" {
-		root, ok := h.fileContentRootFor(projectRoot)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
-			return
-		}
-		// Same raw-query traversal check as HandleFileContent above.
-		if containsDotDot(path) {
-			writeError(w, http.StatusBadRequest, "path is outside the project root")
-			return
-		}
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(root, path)
-		}
-		// Same symlink-through-project rule as HandleFileContent above.
-		if !containedIn(path, root) && !containedLexical(path, root) {
-			writeError(w, http.StatusBadRequest, "path is outside the project root")
-			return
-		}
-	} else if !filepath.IsAbs(path) && h.workDir != "" {
-		path = filepath.Join(h.workDir, path)
+	// Same containment rules as HandleFileContent — resolveEditorFilePath is
+	// the single implementation (it used to be duplicated inline here, which
+	// is how the two drifted).
+	resolved, errMsg := h.resolveEditorFilePath(r.URL.Query().Get("project_root"), path)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
 	}
+	path = resolved
 
 	ct, ok := previewRawTypes[strings.ToLower(filepath.Ext(path))]
 	if !ok {
@@ -1153,17 +1340,11 @@ func (h *Handler) HandleMediaToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "file type is not streamable media")
 		return
 	}
-	// Same anchoring/traversal preconditions as HandleFileRaw. The raw handler
-	// re-validates at use time (the token is only a capability, never a
-	// substitute for those checks).
-	if req.ProjectRoot != "" {
-		if _, ok := h.fileContentRootFor(req.ProjectRoot); !ok {
-			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
-			return
-		}
-	}
-	if containsDotDot(path) {
-		writeError(w, http.StatusBadRequest, "path is outside the project root")
+	// Same anchoring/traversal preconditions as HandleFileRaw, enforced by the
+	// ONE shared resolver. The raw handler re-validates at use time (the token
+	// is only a capability, never a substitute for those checks).
+	if _, errMsg := h.resolveEditorFilePath(req.ProjectRoot, path); errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
 		return
 	}
 	tok := h.mediaTokens.issue(path, req.ProjectRoot, "")
@@ -1231,20 +1412,27 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	root := h.workDir
-	if root == "" {
-		root = "."
+	// The write is confined to ONE scope root, and the target must resolve
+	// inside it. The scope root is:
+	//
+	//   - the named project_root (an allowed project root, or an editor
+	//     GRANT — the web passes a granted directory back as project_root so
+	//     a file opened outside the project stays anchored to it);
+	//   - for an absolute path with no project_root: the most specific root
+	//     that contains it (a project root, an extra allowed path, or a
+	//     grant);
+	//   - otherwise: the server workDir (unchanged legacy behaviour).
+	//
+	// Writes are STRICTER than reads: containment is checked against the
+	// symlink-RESOLVED target, so a symlink inside the scope cannot be used
+	// to write outside it.
+	root, errMsg := h.writeScopeRoot(req.ProjectRoot, req.Path)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
 	}
-	if req.ProjectRoot != "" {
-		var ok bool
-		root, ok = h.fileContentRootFor(req.ProjectRoot)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
-			return
-		}
-		if !filepath.IsAbs(req.Path) {
-			req.Path = filepath.Join(root, req.Path)
-		}
+	if !filepath.IsAbs(req.Path) {
+		req.Path = filepath.Join(root, req.Path)
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {

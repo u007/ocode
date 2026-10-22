@@ -261,6 +261,17 @@ type Handler struct {
 	headlessSubs map[chan SSEEvent]struct{}
 	headlessMu   sync.Mutex
 
+	// fileGrantStore holds the EDITOR-ONLY grants: directories OUTSIDE any
+	// project root that the user explicitly opened the file editor/preview at.
+	// It is deliberately NOT `extra_allowed_paths` — that list is shared with
+	// the AGENT's permission scope (tool.ExtraAllowedRoots →
+	// PermissionManager.AllowedRoots), so granting a path there would
+	// silently widen what the agent may read/write without asking. A grant
+	// here is consulted only by the file read/write/open surfaces.
+	//
+	// Lazily created by fileGrants(); nil until the first grant request.
+	fileGrantStore *fileGrantStore
+
 	// toolOutput batches incremental tool output into tool_output events.
 	// Keyed by session+call so concurrent tool calls stay independent; entries
 	// are released when their tool_result arrives.

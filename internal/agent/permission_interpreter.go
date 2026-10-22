@@ -235,7 +235,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 		return false, "local model unavailable: " + err.Error(), "", false
 	}
 
-	client := newClientFn(a.config, modelName)
+	client := a.newClient(a.config, modelName)
 	if client == nil {
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=client_creation_failed", ie.Language, modelLabel))
 		return false, "could not create LLM client", "", false

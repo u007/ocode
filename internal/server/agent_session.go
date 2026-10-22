@@ -538,6 +538,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 		tools = tool.InitBuiltinToolsWithComputerDriver(lspMgr, effCfg, h.cronToolService(projectRoot), computerDriver, computerDriverErr)
 	}
 	ag := agent.NewAgent(client, tools, effCfg, lspMgr)
+	ag.SetProfile(prof)
 	if pulse {
 		h.configurePulseAgent(ag, effCfg)
 	}

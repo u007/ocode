@@ -202,7 +202,7 @@ func (a *Agent) newSideQueryAgent(opts AskLoopOptions) (*Agent, error) {
 			modelID = a.config.Model
 		}
 		if modelID != "" && a.config != nil {
-			client = NewClient(a.config, modelID)
+			client = a.newClient(a.config, modelID)
 		}
 		if client == nil {
 			return nil, fmt.Errorf("could not build a side-query client for %q", modelID)

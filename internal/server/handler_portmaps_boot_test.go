@@ -399,13 +399,14 @@ func TestPortMapBootSweepAndListDoNotDoubleStart(t *testing.T) {
 }
 
 // TestPortMapListStartsHTRReverseForwardAfterBootSweep pins that the boot sweep
-// does not consume the list request's one chance to open the htrcli reverse
+// does not consume the list request's chance to open the htrcli reverse
 // forward.
 //
 // The sweep and the list both trigger the persisted-forward open, but only the
 // list opens the reverse forward. When both shared one Once, the sweep's run
 // swallowed the list's, so a saved project the user opened after boot never got
-// its htrcli relay. The first list must ask for it, and a second list must not.
+// its htrcli relay. The first list must ask for it, and a second list inside
+// htrAutoRetryInterval must not (the retry is throttled, not one-shot).
 func TestPortMapListStartsHTRReverseForwardAfterBootSweep(t *testing.T) {
 	installSleepingSSH(t, 30*time.Second)
 	h := newBootSweepHandler(t, "user@devbox")

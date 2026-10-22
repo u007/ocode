@@ -6,6 +6,9 @@ const mockListPortMaps = vi.hoisted(() => vi.fn());
 const mockAddPortMap = vi.hoisted(() => vi.fn());
 const mockRemovePortMap = vi.hoisted(() => vi.fn());
 const mockSetPortMapEnabled = vi.hoisted(() => vi.fn());
+const mockGetHtrForward = vi.hoisted(() => vi.fn());
+const mockStartHtrForward = vi.hoisted(() => vi.fn());
+const mockSetHtrAutoStart = vi.hoisted(() => vi.fn());
 
 const FakeApiError = vi.hoisted(() => {
   return class FakeApiError extends Error {
@@ -25,6 +28,9 @@ vi.mock("../../api/client", () => ({
     addPortMap: mockAddPortMap,
     removePortMap: mockRemovePortMap,
     setPortMapEnabled: mockSetPortMapEnabled,
+    getHtrForward: mockGetHtrForward,
+    startHtrForward: mockStartHtrForward,
+    setHtrForwardAutoStart: mockSetHtrAutoStart,
   },
 }));
 
@@ -57,6 +63,12 @@ function setActiveProject(project: { path: string; host?: string; remote_kind?: 
 describe("PortMapsWidget", () => {
   beforeEach(() => {
     projectState.value = { projects: [], activeProject: null };
+    mockGetHtrForward.mockReset();
+    mockGetHtrForward.mockResolvedValue({
+      local_running: false, port: 0, live: false, opening: false, auto_start: true, last_error: "",
+    });
+    mockStartHtrForward.mockReset();
+    mockSetHtrAutoStart.mockReset();
     mockIsPortMapsAvailable.mockReset();
     mockListPortMaps.mockReset().mockResolvedValue([]);
     mockAddPortMap.mockReset();
@@ -347,6 +359,49 @@ describe("PortMapsWidget", () => {
 
       await new Promise((r) => setTimeout(r, 300));
       expect(mockListPortMaps.mock.calls.length).toBe(callsAfterOpen);
+    });
+  });
+  describe("htrcli relay row", () => {
+    const status = {
+      local_running: true, port: 3845, live: false, opening: false, auto_start: true, last_error: "",
+    };
+
+    it("shows the unmapped relay and starts it on demand", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([]);
+      mockGetHtrForward.mockResolvedValue({ ...status, auto_start: false });
+      mockStartHtrForward.mockResolvedValue({ ...status, auto_start: false, live: true });
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      await screen.findByText("not mapped");
+      fireEvent.click(screen.getByRole("button", { name: "Start" }));
+      await screen.findByText("live");
+      expect(mockStartHtrForward).toHaveBeenCalledWith(SSH_TARGET);
+    });
+
+    it("persists the auto-start toggle", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([]);
+      mockGetHtrForward.mockResolvedValue({ ...status, auto_start: false });
+      mockSetHtrAutoStart.mockResolvedValue({ ...status, auto_start: true });
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      const toggle = await screen.findByTestId("htr-autostart-toggle");
+      fireEvent.click(toggle);
+      await waitFor(() => expect(mockSetHtrAutoStart).toHaveBeenCalledWith(true, SSH_TARGET));
+    });
+
+    it("disables Start when the local daemon is down", async () => {
+      setActiveProject(SSH_PROJECT);
+      mockIsPortMapsAvailable.mockResolvedValue(true);
+      mockListPortMaps.mockResolvedValue([]);
+      mockGetHtrForward.mockResolvedValue({ ...status, local_running: false, port: 0 });
+      render(<PortMapsWidget />);
+      fireEvent.click(await screen.findByTitle("Port forwards"));
+      await screen.findByText("Local htrcli daemon is not running.");
+      expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
     });
   });
 });

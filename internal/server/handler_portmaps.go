@@ -45,10 +45,16 @@ type portMapRegistry struct {
 
 	mu    sync.Mutex
 	byKey map[string]*portMapEntry
+	// htr holds one htrcli reverse-forward state per SSH HOST. The remote port
+	// is a host-wide resource (a second `ssh -R 3845` to the same host fails
+	// "remote port forwarding failed" and collides on the supervisor ID), so
+	// the forward cannot belong to a per-project manager.
+	htr map[string]*htrHost
 }
 
 type portMapEntry struct {
-	fm *remote.ForwardManager
+	fm     *remote.ForwardManager
+	target remote.Target
 	// ref is the store identity this entry's forwards are persisted under, so
 	// the watchdog can reconcile them without a request to resolve it.
 	ref projects.ProjectRef
@@ -59,14 +65,10 @@ type portMapEntry struct {
 	// project per process, on the boot sweep or the first list, whichever
 	// comes first. Any later edits go through the explicit add/enable handlers.
 	autoStartOnce sync.Once
-	// htrOnce runs the ephemeral htrcli reverse forward exactly once per
-	// project per process. It has its own guard so the boot sweep, which never
-	// opens that forward, cannot consume the list request's one attempt.
-	htrOnce sync.Once
 }
 
 func newPortMapRegistry(sup *tool.ProcessSupervisor) *portMapRegistry {
-	return &portMapRegistry{sup: sup, wake: make(chan struct{}, 1), byKey: make(map[string]*portMapEntry)}
+	return &portMapRegistry{sup: sup, wake: make(chan struct{}, 1), byKey: make(map[string]*portMapEntry), htr: make(map[string]*htrHost)}
 }
 
 // portMapKey is the registry's identity for a remote project. It deliberately
@@ -86,6 +88,7 @@ func (reg *portMapRegistry) entry(target remote.Target, path string) *portMapEnt
 	fm := remote.NewForwardManager(reg.sup, target)
 	e := &portMapEntry{
 		fm:     fm,
+		target: target,
 		ref:    projects.ProjectRef{Host: target.String(), Path: path},
 		policy: newPortMapPolicy(fm.Start, fm.Stop),
 	}
@@ -179,33 +182,16 @@ func (h *Handler) autoStartPortMaps(ref projects.ProjectRef, fm *remote.ForwardM
 	}
 }
 
-// openHTRReverseForward opens the ephemeral htrcli reverse forward for ref.
-//
-// It is deliberately NOT opened by the boot sweep: that forward is a relay for
-// the project the user is actually working in, so opening it for every saved
-// remote project at boot would open one extra reverse ssh child per project
-// (each of which exposes a local port to the remote host's loopback). Only the
-// list request, which means the user is looking at this project, calls it.
-func (h *Handler) openHTRReverseForward(ref projects.ProjectRef, fm *remote.ForwardManager) {
-	maps, err := h.projects.PortMaps(ref)
-	if err != nil {
-		log.Printf("port forwards: load %s:%s for htr reverse forward: %v", ref.Host, ref.Path, err)
-		return
-	}
-	if err := htrReverseForwardOpener()(fm, maps); err != nil {
-		log.Printf("port forwards: %s:%s: %v", ref.Host, ref.Path, err)
-	}
-}
-
 // portMapAutoStartOnce runs the persisted-enabled forwards exactly once per
 // project per process. Both triggers go through it — the boot sweep and the
 // first list request — so the two can never open a second ssh child for the
 // same port.
 //
-// withHTR also runs the ephemeral htrcli reverse forward, under its own guard
-// (htrOnce). The boot sweep passes false and leaves that forward alone; the
-// list request passes true. The guards are separate, so a boot sweep that has
-// already consumed autoStartOnce does not stop the list from opening it.
+// withHTR also tries the host's htrcli reverse forward (see htrHost). The boot
+// sweep passes false and leaves that forward alone; the list request passes
+// true, and — unlike the persisted forwards — retries on every list while the
+// forward is not live, so a failed open (stale remote listener, host briefly
+// unreachable) heals itself.
 //
 // The open runs in the background: a forward that cannot come up spends ~5s in
 // ForwardManager.Start's readiness probe, and the caller must not block on it.
@@ -219,10 +205,8 @@ func (h *Handler) portMapAutoStartOnce(entry *portMapEntry, ref projects.Project
 		})
 	})
 	if withHTR {
-		entry.htrOnce.Do(func() {
-			remote.RunAsync(fmt.Sprintf("htr reverse forward for %s:%s", ref.Host, ref.Path), func() {
-				h.openHTRReverseForward(ref, entry.fm)
-			})
+		remote.RunAsync(fmt.Sprintf("htr reverse forward for %s:%s", ref.Host, ref.Path), func() {
+			h.autoStartHTRReverse(ref, entry.target)
 		})
 	}
 }

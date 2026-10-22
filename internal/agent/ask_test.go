@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -373,5 +374,33 @@ func TestBtwExcludedToolsComplete(t *testing.T) {
 		if !have[n] {
 			t.Fatalf("BtwExcludedTools missing %q", n)
 		}
+	}
+}
+
+// TestSideQueryClientUsesAgentProfile guards the /btw 401 bug: the side query
+// must build its client under the agent's own credential profile, not the
+// process-global one NewClient falls back to.
+func TestSideQueryClientUsesAgentProfile(t *testing.T) {
+	var gotProfile, gotModel string
+	prev := newClientWithProfileFn
+	t.Cleanup(func() { newClientWithProfileFn = prev })
+	newClientWithProfileFn = func(_ *config.Config, model, profile string) LLMClient {
+		gotModel, gotProfile = model, profile
+		return &MockClient{}
+	}
+
+	main := newTestAgent(&MockClient{}, nil, &config.Config{}, nil)
+	main.SetProfile("work")
+	child, err := main.newSideQueryAgent(AskLoopOptions{})
+	if err != nil {
+		t.Fatalf("newSideQueryAgent err: %v", err)
+	}
+	defer child.shutdownTransient()
+
+	if gotProfile != "work" {
+		t.Fatalf("side-query client profile = %q, want %q", gotProfile, "work")
+	}
+	if gotModel != "mock/mock-model" {
+		t.Fatalf("side-query client model = %q, want the main client's model", gotModel)
 	}
 }

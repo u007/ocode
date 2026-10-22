@@ -683,7 +683,11 @@ type BrowserConfig struct {
 	HTRNativeHostName  string `json:"htr_native_host_name"`
 	HTRShared          bool   `json:"htr_shared"`
 	HTRToken           string `json:"htr_token"`
-	NoSandbox          bool   `json:"no_sandbox"`
+	// HTRRemoteAutoStart opens the htrcli reverse forward to an SSH remote
+	// host whenever the Port forwards panel lists that host and the forward is
+	// not live. Default true.
+	HTRRemoteAutoStart bool `json:"htr_remote_autostart"`
+	NoSandbox          bool `json:"no_sandbox"`
 }
 
 // DefaultBrowserConfig returns the canonical embedded-browser defaults. Callers
@@ -1354,6 +1358,7 @@ type browserConfigFile struct {
 	IdleTimeoutMinutes *int            `json:"idle_timeout_minutes,omitempty"`
 	ScreencastQuality  *int            `json:"screencast_quality,omitempty"`
 	HTREnabled         *bool           `json:"htr_enabled,omitempty"`
+	HTRRemoteAutoStart *bool           `json:"htr_remote_autostart,omitempty"`
 	HTRExtensionPath   string          `json:"htr_extension_path,omitempty"`
 	HTRCliPath         string          `json:"htrcli_path,omitempty"`
 	HTRPort            *int            `json:"htr_port,omitempty"`
@@ -1482,7 +1487,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Compact:                   defaultCompactConfig(),
 		Advisor:                   defaultAdvisorConfig(),
 		Permissions:               defaultPermissionConfig(),
-		Browser:                   BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", HTRShared: true, NoSandbox: true},
+		Browser:                   BrowserConfig{IdleTimeoutMinutes: 10, ScreencastQuality: DefaultScreencastQuality, HTREnabled: true, HTRRemoteAutoStart: true, HTRPort: 3846, HTRNativeHostName: "com.ocode.htrcontrol", HTRShared: true, NoSandbox: true},
 		TTS:                       TTSConfig{Engine: "browser-native", Mode: "manual"},
 		ChatVerbosity:             defaultChatVerbosityConfig(),
 		QuickActions:              SeedQuickActions(),
@@ -2581,6 +2586,9 @@ func applyBrowserConfig(dst *BrowserConfig, src browserConfigFile) error {
 	}
 	if src.HTREnabled != nil {
 		dst.HTREnabled = *src.HTREnabled
+	}
+	if src.HTRRemoteAutoStart != nil {
+		dst.HTRRemoteAutoStart = *src.HTRRemoteAutoStart
 	}
 	if src.HTRExtensionPath != "" {
 		dst.HTRExtensionPath = src.HTRExtensionPath
@@ -4460,6 +4468,15 @@ func SaveOcodeBrowserConfig(chromePath string, idleTimeoutMinutes, screencastQua
 		if screencastQuality > 0 {
 			c.Browser.ScreencastQuality = screencastQuality
 		}
+		return nil
+	})
+}
+
+// SaveOcodeHTRRemoteAutoStart persists browser.htr_remote_autostart in one
+// atomic lock-held write.
+func SaveOcodeHTRRemoteAutoStart(enabled bool) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Browser.HTRRemoteAutoStart = enabled
 		return nil
 	})
 }

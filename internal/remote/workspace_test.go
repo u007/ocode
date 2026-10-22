@@ -213,16 +213,18 @@ func TestConnectFatalOnSyncFailure(t *testing.T) {
 	}
 }
 
-// TestWorkspaceDiscoverOrStartServerFlagsOutdated proves the desktop host
-// registry path shares the new reuse policy: an alive, healthy, mismatched
-// server is reused (not replaced) and the returned state is flagged Outdated
-// so the sidebar can show the amber marker.
-func TestWorkspaceDiscoverOrStartServerFlagsOutdated(t *testing.T) {
+// TestWorkspaceDiscoverOrStartServerRetiresOutdated proves the desktop host
+// registry path shares the update policy: an alive mismatched server is
+// killed (SIGTERM issued) rather than reused, and a fresh one is launched.
+func TestWorkspaceDiscoverOrStartServerRetiresOutdated(t *testing.T) {
 	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "0.0.0-old"}
 	ft := newConnectFakeTransport(existing)
+	fresh := ServeState{PID: 77, Port: 4100, Token: "new", Version: version.Version}
+	freshData, _ := json.Marshal(fresh)
+	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd(version.Version), freshStateJSON: string(freshData)}
 
 	rw := &RemoteWorkspace{
-		Transport:  ft,
+		Transport:  k,
 		RemotePath: "/home/user/proj",
 	}
 
@@ -230,13 +232,11 @@ func TestWorkspaceDiscoverOrStartServerFlagsOutdated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverOrStartServer: %v", err)
 	}
-	if !state.Outdated {
-		t.Fatalf("expected Outdated=true for a mismatched alive server, got %+v", state)
+	if state.Outdated || state.PID != 77 {
+		t.Fatalf("expected the fresh server, got %+v", state)
 	}
-	for _, c := range ft.execCalls {
-		if strings.Contains(c, "nohup") && strings.Contains(c, "serve --remote") {
-			t.Fatalf("discoverOrStartServer launched a fresh server instead of reusing: %q", c)
-		}
+	if !k.killed || !k.launched {
+		t.Fatalf("killed=%v launched=%v, want both true", k.killed, k.launched)
 	}
 }
 

@@ -114,6 +114,8 @@ func (a *Agent) DrainPendingInjections() []Message {
 // internal/server/handler_logs.go. Called once at construction
 // (buildAgentSession); the TUI never calls this, so its entries stay
 // untagged (process-global), matching its single-session-per-process model.
+func (a *Agent) SetProfile(profile string) { a.profile = profile }
+
 func (a *Agent) SetSessionID(sessionID string) {
 	a.opencodeSessionMu.Lock()
 	a.sessionID = sessionID
@@ -456,6 +458,11 @@ type Agent struct {
 	// emitDebug). Empty in the TUI, where DebugAppend is process-global by
 	// design (single session per process).
 	sessionID string
+	// profile is the credential profile this agent's client was built with
+	// (server sessions resolve it per session). Side-query clients must reuse
+	// it: NewClient falls back to the process-global profile, whose key may
+	// differ or be expired. Empty means "process-global", as in the TUI.
+	profile string
 	// opencodeSessionID is the logical conversation identity used for OpenCode
 	// request affinity. It is separate from sessionID so the TUI can keep its
 	// process-global debug log while still sending a stable request identity.
@@ -2941,7 +2948,7 @@ func (a *Agent) recapClient() LLMClient {
 	// only controls whether auto-recap runs after each response).
 	recap := strings.TrimSpace(a.config.Ocode.RecapModel)
 	if recap != "" {
-		if client := NewClient(a.config, recap); client != nil {
+		if client := a.newClient(a.config, recap); client != nil {
 			return a.bindSideClient(client)
 		}
 	}
@@ -2950,7 +2957,7 @@ func (a *Agent) recapClient() LLMClient {
 	if small == "" || !a.SmallModelRuntimeEnabled() {
 		return a.client
 	}
-	if client := NewClient(a.config, small); client != nil {
+	if client := a.newClient(a.config, small); client != nil {
 		return a.bindSideClient(client)
 	}
 	return a.client
@@ -2970,7 +2977,7 @@ func (a *Agent) autoContinueJudgeClient() LLMClient {
 	if model == "" {
 		return nil
 	}
-	if client := newClientFn(a.config, model); client != nil {
+	if client := a.newClient(a.config, model); client != nil {
 		return a.bindSideClient(client)
 	}
 	return nil
@@ -3410,7 +3417,7 @@ func (a *Agent) compactSummaryClient() LLMClient {
 func (a *Agent) smallModelOrMainClient(cfg *config.Config) LLMClient {
 	if a.SmallModelRuntimeEnabled() {
 		if small := a.resolveSmallModel(); small != "" {
-			if client := NewClient(cfg, small); client != nil {
+			if client := a.newClient(cfg, small); client != nil {
 				return a.bindSideClient(client)
 			}
 		}
@@ -3464,7 +3471,7 @@ func (a *Agent) overrideModelClient(cfg *config.Config, provider, model string) 
 		}
 	}
 
-	if client := NewClient(cfg, targetModel); client != nil {
+	if client := a.newClient(cfg, targetModel); client != nil {
 		return a.bindSideClient(client)
 	}
 	if noThink := a.noThinkingClient(); noThink != nil {
@@ -4249,7 +4256,7 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 	// answer one allow/deny choice, so they replace BOTH chat paths below.
 	// isDecisionModel is the single place that decides which models these are.
 	if modelName := a.autoPermissionModelName(); isDecisionModel(modelName) {
-		client, ok := newClientFn(a.config, modelName).(Decider)
+		client, ok := a.newClient(a.config, modelName).(Decider)
 		if !ok {
 			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_typesafe_fail tool=%s model=%s error=client_creation_failed", name, modelName))
 			return false, "could not create the decision judge client (missing credential for " + modelName + "?)", "", false
@@ -4366,7 +4373,7 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		return false, "local model unavailable: " + err.Error(), false
 	}
 
-	client := newClientFn(a.config, modelName)
+	client := a.newClient(a.config, modelName)
 	if client == nil {
 		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))
 		return false, "could not create LLM client", false
@@ -6132,7 +6139,7 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 	if strings.TrimSpace(spec.Model) != "" {
 		if a.config == nil {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
-		} else if client := NewClient(a.config, spec.Model); client != nil {
+		} else if client := a.newClient(a.config, spec.Model); client != nil {
 			a.emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
 			client = a.bindSideClient(client)
 			// Also carry the debug-log sessionID: NewClient only binds the

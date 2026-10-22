@@ -3458,8 +3458,12 @@ func (pm *PermissionManager) sensitiveSandboxDecision(command string, args json.
 	if len(targets) == 0 {
 		return nil
 	}
+	// The user unchecked the "secrets" concern in auto-permission settings:
+	// .env-style secret material no longer Asks. auth.json, ~/.ssh and config
+	// writes stay gated regardless.
+	secretsRelaxed := pm.autoConfig.Load().ConcernRelaxed("secrets")
 	for _, tgt := range targets {
-		if sandboxSensitivePath(tgt, writeTargets[tgt]) {
+		if sandboxSensitivePathRelaxed(tgt, writeTargets[tgt], secretsRelaxed) {
 			pm.emitDebug("perm", fmt.Sprintf("sandbox sensitive ASK: command=%q", command))
 			return &PermissionDecision{
 				Level:   PermissionAsk,
@@ -3646,6 +3650,13 @@ var gitReadOnlyPathSubcommands = map[string]bool{
 // set. isWrite distinguishes write-only entries (config dir) from
 // read-or-write entries (auth.json, ~/.ssh, .env).
 func sandboxSensitivePath(resolved string, write bool) bool {
+	return sandboxSensitivePathRelaxed(resolved, write, false)
+}
+
+// sandboxSensitivePathRelaxed is sandboxSensitivePath with the secret-material
+// rule (.env, keys, certs, .netrc, .aws/) switchable off by the user's relaxed
+// "secrets" concern. Every other rule is unconditional.
+func sandboxSensitivePathRelaxed(resolved string, write, secretsRelaxed bool) bool {
 	if resolved == "" {
 		return false
 	}
@@ -3680,7 +3691,7 @@ func sandboxSensitivePath(resolved string, write bool) bool {
 	// Secret material (.env, .netrc, .npmrc, .pypirc, SSH key filenames,
 	// cert/key files, .aws/) is sensitive on READ or write: a read can
 	// exfiltrate a credential, which the OS write-wall cannot prevent.
-	if isSecretMaterialPath(clean) {
+	if !secretsRelaxed && isSecretMaterialPath(clean) {
 		return true
 	}
 

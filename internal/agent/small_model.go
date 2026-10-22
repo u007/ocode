@@ -23,6 +23,19 @@ var newClientFn = func(cfg *config.Config, model string) LLMClient {
 	return NewClient(cfg, model)
 }
 
+// newClientWithProfileFn is the profile-aware factory; tests override it.
+var newClientWithProfileFn = NewClientWithProfile
+
+// newClient builds a side client for model under this agent's credential
+// profile. Without a profile (TUI) it uses newClientFn, which falls back to the
+// process-global profile.
+func (a *Agent) newClient(cfg *config.Config, model string) LLMClient {
+	if a.profile != "" {
+		return newClientWithProfileFn(cfg, model, a.profile)
+	}
+	return newClientFn(cfg, model)
+}
+
 // ResolveSmallModel returns the first candidate in SmallModelPriority for which
 // a client can be constructed (i.e. its provider key is available). Returns the
 // already-configured value unchanged if cfg.Ocode.SmallModel is non-empty.

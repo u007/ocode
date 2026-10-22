@@ -370,9 +370,9 @@ The **ephemeral reverse (`-R`) htrcli forward** (`openHTRReverseForward`) is **d
 the list handler passes `withHTR = true` (`HandleListPortMaps`:305). The reverse forward is a
 relay for the project the user is actually working in; opening it for every saved remote
 project at boot would add one extra reverse ssh child per project, each exposing a local port
-(`:<htrPort>`) to the remote host's loopback. The `htrOnce` guard (`entry.htrOnce`) is separate
-from `autoStartOnce`, so a boot sweep that consumed `autoStartOnce` does not prevent the list
-from opening the reverse forward.
+(`:<htrPort>`) to the remote host's loopback. The reverse forward has no `Once` guard
+(`withHTR` is independent of `autoStartOnce`), so a boot sweep that consumed `autoStartOnce`
+does not prevent the list from opening it. See "Host-scoped htrcli forward" below.
 
 Only SSH targets are swept (`remote.KindSSH`). A project with no persisted forwards (`len(p.PortMaps) == 0`)
 gets no registry entry — the watchdog visits every entry each tick, so a forward-less entry
@@ -556,3 +556,21 @@ and `go test ./internal/server -run PortMap`):
 
 §1–§3 items were verified to fail with their fix reverted; the §4 items were run green
 against the current tree (the feature landed with them).
+
+### Host-scoped htrcli forward (2026-10-22)
+
+The remote port is a **host-wide** resource, but the forward used to live in the per-project
+`ForwardManager`, guarded by a per-project `htrOnce`. Two failures followed: a second project on
+the same host collided with the first (`process "remote-portmap-<host>-3845" already registered`,
+or sshd's `remote port forwarding failed`), and a single failed open (stale remote listener after
+a desktop restart, host briefly unreachable) was never retried, leaving the relay unmapped.
+
+- `portMapRegistry.htr` holds one `htrHost` (own `ForwardManager`, `opening` CAS, `lastErr`,
+  `lastAttempt`) per SSH host, shared by every project on it (`internal/server/htr_reverse.go`).
+- The list request calls `autoStartHTRReverse`: skipped when `browser.htr_remote_autostart` is
+  off or the forward is live, throttled to one attempt per `htrAutoRetryInterval` (15 s) per host,
+  retried on every later list until it is live.
+- Ports dialog row ("htrcli browser relay") + endpoints `GET /api/portmaps/htr`,
+  `POST /api/portmaps/htr/start` (explicit, ignores the throttle and the setting, surfaces the ssh
+  error) and `POST /api/portmaps/htr/autostart` (`{"enabled":bool}`, persists the global
+  `browser.htr_remote_autostart`, default true).

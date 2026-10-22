@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+
+	"github.com/u007/ocode/internal/config"
 )
 
 // TestSandboxRepoMetadataReadsAllow pins the fix for "git ls-files and
@@ -141,5 +143,26 @@ func TestSandboxTargetsWriteClassification(t *testing.T) {
 				t.Errorf("target %q missing from %v", tc.wantTarget, targets)
 			}
 		})
+	}
+}
+
+// TestSandboxRelaxedSecretsSkipsSecretMaterialAsk: unchecking the "secrets"
+// concern stops .env-style reads from Asking in sandbox mode, while auth.json
+// and ~/.ssh stay gated.
+func TestSandboxRelaxedSecretsSkipsSecretMaterialAsk(t *testing.T) {
+	pm := sandboxDecideTestPM(t)
+	if dec := decideBash(t, pm, "grep -c '^A=' .env"); dec.Level != PermissionAsk {
+		t.Fatalf("enforced: .env read = %s, want Ask", dec.Level)
+	}
+	pm.SetAutoPermissionConfig(&config.AutoPermissionConfig{RelaxedConcerns: []string{"secrets"}})
+	for _, f := range []string{".env", ".env.local", ".env.production"} {
+		if dec := decideBash(t, pm, "grep -c '^A=' "+f); dec.Level != PermissionAllow {
+			t.Errorf("relaxed: %s read = %s, want Allow", f, dec.Level)
+		}
+	}
+	for _, cmd := range []string{"cat auth.json", "cat ~/.ssh/id_rsa", "echo x > .git/config"} {
+		if dec := decideBash(t, pm, cmd); dec.Level != PermissionAsk {
+			t.Errorf("relaxed: %q = %s, want Ask", cmd, dec.Level)
+		}
 	}
 }

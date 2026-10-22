@@ -1314,6 +1314,18 @@ export interface PortMapView {
   live: boolean;
 }
 
+/** State of the htrcli reverse forward (remote:port -> this machine's htrcli
+ *  daemon) for one SSH host. auto_start is the global
+ *  browser.htr_remote_autostart setting. */
+export interface HtrForwardStatus {
+  local_running: boolean;
+  port: number;
+  live: boolean;
+  opening: boolean;
+  auto_start: boolean;
+  last_error: string;
+}
+
 /** The remote SSH project a port-forwards call is scoped to. Omit it to talk to
  *  the desktop remote-workspace's single-tunnel /api/desktop/portmaps family. */
 export interface PortMapTarget {

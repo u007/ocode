@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/u007/ocode/internal/auth"
 	"io/fs"
 	"log"
 	"net"
@@ -90,6 +91,9 @@ func StartServer(webFS fs.FS, workDir string, workspace *remote.RemoteWorkspace,
 		bindAddr = fmt.Sprintf("0.0.0.0:%d", savedPort)
 	}
 
+	// The desktop server resolves per-window profiles; see
+	// auth.EnableWindowStateFallback.
+	auth.EnableWindowStateFallback()
 	srv := server.New(bindAddr, "ocode", token, webFS)
 	srv.SetWorkDir(workDir)
 	srv.SetLocalTLS(cert)

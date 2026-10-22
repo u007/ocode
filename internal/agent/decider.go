@@ -122,7 +122,7 @@ func (a *Agent) resolveDecider(slot judgeSlot) Decider {
 	if a == nil || a.config == nil {
 		return nil
 	}
-	client := newClientFn(a.config, a.slotModel(slot))
+	client := a.newClient(a.config, a.slotModel(slot))
 	if client == nil {
 		return nil
 	}

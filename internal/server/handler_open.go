@@ -75,13 +75,27 @@ func (h *Handler) HandleOpenFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"path": abs, "status": "opened"})
 }
 
-// resolveOpenPath anchors reqPath under projectRoot when provided (same
-// allowlist as HandleFileContent's fileContentRootFor), else workDir.
+// resolveOpenPath anchors reqPath under projectRoot when provided, else
+// against the roots the file surfaces may touch.
+//
+// It shares the containment rules with the file read/write surfaces
+// (resolveProjectFilePath), so "Open in Finder"/"Open with OS app" cannot
+// reach a path the editor could not open, and a path the editor WAS granted
+// can be opened in the OS app too.
+//
+// The containment semantics match the read surface: resolved OR lexical, so a
+// symlinked folder inside the project stays openable in the OS app (the
+// project_root branch below has always been lexical — filepath.Rel — and the
+// WRITE surface is where the strict symlink-resolved check lives).
 func (h *Handler) resolveOpenPath(reqPath, projectRoot string) (string, error) {
 	if projectRoot != "" {
 		root, ok := h.fileContentRootFor(projectRoot)
 		if !ok {
-			return "", fmt.Errorf("project_root is not an allowed project root")
+			var isGrant bool
+			root, isGrant = h.grantedRootFor(projectRoot)
+			if !isGrant {
+				return "", fmt.Errorf("project_root is not an allowed project root")
+			}
 		}
 		p := reqPath
 		if !filepath.IsAbs(p) {
@@ -93,6 +107,15 @@ func (h *Handler) resolveOpenPath(reqPath, projectRoot string) (string, error) {
 			return "", fmt.Errorf("path is outside the project root")
 		}
 		return p, nil
+	}
+	if filepath.IsAbs(reqPath) {
+		// An absolute path with no anchor must still land inside a root the
+		// file surfaces may touch (a project root, an extra allowed path, or
+		// an editor grant).
+		if !h.pathWithinAnyFileRoot(reqPath) {
+			return "", fmt.Errorf("path is outside the project root")
+		}
+		return filepath.Clean(reqPath), nil
 	}
 	return h.resolveWithinWorkdir(reqPath)
 }

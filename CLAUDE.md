@@ -579,8 +579,8 @@ session's working directory. Details, endpoint params and remote-project routing
   and the proxy must restore the browser's websocket subprotocol on a 101. A remote
   failure blocks the turn (502 `remote-connect`) — never fall back to a local agent.
   `~` is expanded only by the server owning that `$HOME` (`projects.ExpandHome`). The SPA
-  resolves the host per session (`resolveSessionHost`). Version mismatch is reused, never
-  auto-restarted.
+  resolves the host per session (`resolveSessionHost`). A version-mismatched remote
+  server is killed and replaced on connect (`EnsureRemoteServer`).
 - **The open-terminal tab list is server state** (`GET/PUT /api/terminal-tabs`,
   `internal/termtabs`): keys are opaque (never `filepath.Clean`); the PUT is a MERGE
   (emit an explicit empty entry for a project whose last tab closed); closing a tab is a

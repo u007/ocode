@@ -388,6 +388,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/raw", s.mediaAuthMiddleware(s.handleFileRaw))
 	s.mux.HandleFunc("POST /api/files/media-token", s.authMiddleware(s.handleMediaToken))
 	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
+	// Editor grants: directories OUTSIDE any project root the user explicitly
+	// opened the file editor/preview at. Editor-only — these never reach the
+	// agent's permission scope (see internal/server/handler_file_grants.go).
+	s.mux.HandleFunc("POST /api/files/grant", s.authMiddleware(s.handleGrantFilePath))
+	s.mux.HandleFunc("DELETE /api/files/grant", s.authMiddleware(s.handleRevokeFilePath))
+	s.mux.HandleFunc("GET /api/files/grants", s.authMiddleware(s.handleListFileGrants))
 	// SQLite browser: browse, row CRUD, confirmed SQL writes and guided DDL.
 	// User-initiated like file save, so authMiddleware — not the agent
 	// permission gate. Remote projects reach these through the
@@ -702,6 +708,9 @@ func (s *Server) registerRoutes() {
 	// WSL targets are rejected — WSL2 already shares the Windows loopback.
 	s.mux.HandleFunc("GET /api/portmaps", s.authMiddleware(s.handler.HandleListPortMaps))
 	s.mux.HandleFunc("POST /api/portmaps", s.authMiddleware(s.handler.HandleAddPortMap))
+	s.mux.HandleFunc("GET /api/portmaps/htr", s.authMiddleware(s.handler.HandleHTRStatus))
+	s.mux.HandleFunc("POST /api/portmaps/htr/start", s.authMiddleware(s.handler.HandleHTRStart))
+	s.mux.HandleFunc("POST /api/portmaps/htr/autostart", s.authMiddleware(s.handler.HandleHTRAutoStart))
 	s.mux.HandleFunc("DELETE /api/portmaps/{port}", s.authMiddleware(s.handler.HandleRemovePortMap))
 	s.mux.HandleFunc("POST /api/portmaps/{port}/enable", s.authMiddleware(s.handler.HandleEnablePortMap))
 	s.mux.HandleFunc("POST /api/portmaps/{port}/disable", s.authMiddleware(s.handler.HandleDisablePortMap))
@@ -1880,6 +1889,18 @@ func (s *Server) handleSaveFileContent(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSaveFileContent(w, r)
 }
 
+func (s *Server) handleGrantFilePath(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGrantFilePath(w, r)
+}
+
+func (s *Server) handleRevokeFilePath(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRevokeFilePath(w, r)
+}
+
+func (s *Server) handleListFileGrants(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListFileGrants(w, r)
+}
+
 func (s *Server) handleOpenFile(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleOpenFile(w, r)
 }
@@ -2294,6 +2315,9 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 		return fmt.Errorf("generate remote API token: %w", err)
 	}
 
+	// `ocode serve` (including --remote on an SSH host) is a profile-aware
+	// server; the TUI's embedded web server also calls New but must not be.
+	auth.EnableWindowStateFallback()
 	srv := New(addr, username, password, webFS)
 	srv.SetRemoteMode(*remoteFlag)
 	// Anchor the server to the process working directory so relative-path

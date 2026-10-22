@@ -4687,6 +4687,16 @@ func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMC
 	// Profile sidecar credentials (auth.profiles.json) outrank config delta and
 	// base credentials but not OPENCODE_AUTH_TOKEN. This is the sparse-profile
 	// path that desktop window switches rely on for per-window keys.
+	// Outside the server (TUI, run) a provider env var such as OPENCODE_API_KEY
+	// is an explicit per-process choice and outranks any profile credential.
+	if apiKey == "" && provider != "" && auth.ProviderEnvOutranksProfile() {
+		if info, ok := providers[provider]; ok {
+			if v := os.Getenv(info.envKey); v != "" {
+				apiKey = v
+				emitDebug("AGENT", fmt.Sprintf("NewClient: %s env outranks profile — apiKey=%s", info.envKey, maskKey(apiKey)))
+			}
+		}
+	}
 	if apiKey == "" && profile != "" && provider != "" {
 		if cred, ok := auth.GetProfileCredential(profile, provider); ok {
 			switch cred.Kind {

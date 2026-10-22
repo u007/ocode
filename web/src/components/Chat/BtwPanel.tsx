@@ -68,7 +68,7 @@ export function BtwPanel({ sessionId, host }: { sessionId: string; host?: string
           <X className="h-3.5 w-3.5" />
         </Button>
       </div>
-      <ScrollArea className="max-h-52">
+      <ScrollArea className="[&>[data-radix-scroll-area-viewport]]:max-h-52">
         <div className="space-y-1 px-3 py-2 text-sm">
           {state.activity.map((line, i) => (
             <div

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/config"
@@ -227,7 +228,7 @@ func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
 	//     (all sessions see the most recent window's profile); per-window isolation
 	//     requires threading windowID through session/agent construction (follow-up).
 	activeProfile := activeProfileForResolution()
-	if activeProfile != "" {
+	if activeProfile != "" && !(ProviderEnvOutranksProfile() && p.EnvVar != "" && os.Getenv(p.EnvVar) != "") {
 		if cred, ok := GetProfileCredential(activeProfile, id); ok {
 			cred = refreshIfExpiring(id, cred)
 			if cred.Kind == KindAPIKey && cred.Key != "" {
@@ -298,6 +299,12 @@ func activeProfileForResolution() string {
 		return v
 	}
 	// window-state fallback makes desktop window switches affect next turn.
+	// Server processes only: the TUI and headless CLI have no window, and
+	// window-state.json is shared with the desktop app, so reading it there
+	// silently applies a stale desktop profile (and its expired keys).
+	if !windowStateFallback.Load() {
+		return ""
+	}
 	// v1 is global (win-1 preferred); per-window isolation needs windowID threading.
 	if m, err := config.WindowStateForTest(); err == nil {
 		if p, ok := m["win-1"]; ok && p != "" {
@@ -311,6 +318,18 @@ func activeProfileForResolution() string {
 	}
 	return ""
 }
+
+var windowStateFallback atomic.Bool
+
+// EnableWindowStateFallback lets profile resolution consult the desktop's
+// window-state.json. Only the web/desktop server calls it; every other process
+// (TUI, run) resolves the base config unless OCODE_PROFILE is set.
+func EnableWindowStateFallback() { windowStateFallback.Store(true) }
+
+// ProviderEnvOutranksProfile reports whether a provider env var (e.g.
+// OPENCODE_API_KEY) must beat profile credentials. True everywhere except the
+// server, where per-window profiles are the intended source of keys.
+func ProviderEnvOutranksProfile() bool { return !windowStateFallback.Load() }
 
 // ActiveProfile returns the currently effective profile for this process
 // (OCODE_PROFILE env or window-state fallback). Exported for server wiring.

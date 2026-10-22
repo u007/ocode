@@ -178,35 +178,68 @@ func TestEnsureRemoteServerStartsFreshWhenStale(t *testing.T) {
 	}
 }
 
-// TestEnsureRemoteServerReusesMismatchedAliveServer pins the new version
-// policy: a discovered server that is alive and healthy is reused even when
-// its version differs from the client's, and is flagged Outdated for the UI.
-// No launch command may run — replacing it would orphan its terminals.
-func TestEnsureRemoteServerReusesMismatchedAliveServer(t *testing.T) {
+// killedAfterTermFake makes pidAliveCmd(pid) report dead once killTERMCmd(pid)
+// has run, and the fresh state appear once the launch command has run.
+type killedAfterTermFake struct {
+	*fakeTransport
+	pid            int
+	launchCmd      string
+	freshStateJSON string
+	killed         bool
+	launched       bool
+}
+
+func (k *killedAfterTermFake) Exec(command string) (ExecResult, error) {
+	switch {
+	case command == killTERMCmd(k.pid):
+		k.killed = true
+	case command == pidAliveCmd(k.pid) && k.killed:
+		k.execCalls = append(k.execCalls, command)
+		return ExecResult{ExitCode: 1}, nil
+	case command == k.launchCmd:
+		k.launched = true
+	case command == remoteStateCatCmd && k.launched:
+		return ExecResult{Stdout: k.freshStateJSON}, nil
+	}
+	return k.fakeTransport.Exec(command)
+}
+
+// TestEnsureRemoteServerRetiresMismatchedAliveServer pins the update policy: a
+// healthy server from another version is killed and replaced by a fresh one at
+// the local version, and stragglers from other versions are reaped, so a patch
+// update does not leave old servers holding memory on the host.
+func TestEnsureRemoteServerRetiresMismatchedAliveServer(t *testing.T) {
 	existing := ServeState{PID: 42, Port: 4096, Token: "tok", Version: "1.0.0"}
 	data, _ := json.Marshal(existing)
+	fresh := ServeState{PID: 77, Port: 4100, Token: "new", Version: "2.0.0"}
+	freshData, _ := json.Marshal(fresh)
 
 	ft := newFakeTransport()
 	ft.execResults[remoteStateCatCmd] = ExecResult{Stdout: string(data)}
 	ft.execResults[pidAliveCmd(42)] = ExecResult{ExitCode: 0}
 	ft.execResults[healthProbeCmd(4096)] = ExecResult{Stdout: "200"}
 
-	state, reused, err := EnsureRemoteServer(ft, "2.0.0")
+	k := &killedAfterTermFake{fakeTransport: ft, pid: 42, launchCmd: launchServerCmd("2.0.0"), freshStateJSON: string(freshData)}
+	state, reused, err := EnsureRemoteServer(k, "2.0.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !reused {
-		t.Fatal("expected reused=true for an alive mismatched server")
+	if reused || state != fresh {
+		t.Errorf("got reused=%v state=%+v, want a fresh %+v", reused, state, fresh)
 	}
-	want := existing
-	want.Outdated = true
-	if state != want {
-		t.Errorf("got %+v, want %+v", state, want)
-	}
+	var killedOld, launched, reaped bool
 	for _, c := range ft.execCalls {
-		if c == launchServerCmd("2.0.0") {
-			t.Error("EnsureRemoteServer launched a fresh server instead of reusing the alive mismatched one")
+		switch c {
+		case killTERMCmd(42):
+			killedOld = true
+		case launchServerCmd("2.0.0"):
+			launched = true
+		case otherVersionServersCmd("2.0.0", "-KILL"):
+			reaped = true
 		}
+	}
+	if !killedOld || !launched || !reaped {
+		t.Errorf("killedOld=%v launched=%v reaped=%v, want all true; calls: %q", killedOld, launched, reaped, ft.execCalls)
 	}
 }
 

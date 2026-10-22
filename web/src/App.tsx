@@ -20,6 +20,9 @@ import { sessionAskSurfaceVisible } from "./lib/dialogScope";
 import { api, isRemoteSession, authToken, setAuthFailureHandler } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ActionErrorToast from "./components/common/ActionErrorToast";
+import { reportActionErrorMessage } from "./lib/actionErrors";
+import { looksLikeAbsolutePath } from "./lib/outOfProjectFiles";
+import OpenPathDialog from "./components/Files/OpenPathDialog";
 import { reportActionError } from "./lib/actionErrors";
 import { installQuitBlockedListener } from "./lib/editorDraftGuard";
 import AttentionSoundBridge from "./components/common/AttentionSoundBridge";
@@ -514,6 +517,7 @@ function HomeApp() {
     activeEditorTabId,
     setActiveEditorTabId,
     handleOpenFile,
+    openOutsideProject,
     handleEditorChange,
     handleSelectionChange,
     activeEditorContext,
@@ -664,6 +668,13 @@ function HomeApp() {
     setFilePickerOpen(false);
     setFilePickerQuery(undefined);
   }, []);
+  // "Open a file outside the project" dialog. ONE instance serves both entry
+  // points: the Files tab's toolbar button and a chat file link that points
+  // outside the project (which offers the grant instead of failing silently).
+  const [openPathDialogOpen, setOpenPathDialogOpen] = useState(false);
+  // The path the chat-link path pre-filled the dialog with, so the user does
+  // not have to retype it.
+  const [openPathSeed, setOpenPathSeed] = useState<string | undefined>(undefined);
 
   const openFileAndShow = useCallback(
     async (
@@ -695,6 +706,16 @@ function HomeApp() {
         // file wherever it actually lives (renamed, moved, or relative to a
         // different root). Tree/git/picker callers pass false — they are
         // already looking at a real file and must not get a modal.
+        //
+        // An ABSOLUTE path that the server refused for being outside the
+        // project root is a different case: the file exists, it is just
+        // outside the project. Offer the grant (the editor-only one) instead
+        // of the picker, which would only list project files and could never
+        // find it.
+        if (fallbackQuickOpen && looksLikeAbsolutePath(path)) {
+          requestOpenOutsideProject(path);
+          return;
+        }
         if (fallbackQuickOpen) openFilePicker(basename(path));
         return;
       }
@@ -722,6 +743,37 @@ function HomeApp() {
     },
     [handleOpenFile, openFilePicker, projectState.projects, projectState.activeProject],
   );
+
+  // ── Open a file OUTSIDE the active project ─────────────────────────────
+  //
+  // The server confines the file surfaces to the project roots, the extra
+  // allowed paths, and the directories the user has explicitly granted. This
+  // is the entry point for that grant: the user names an absolute path, the
+  // path's directory is granted to the EDITOR (never to the agent), and the
+  // file is opened anchored to the granted root.
+  //
+  // The host is the ACTIVE project's host, because the path is resolved on
+  // the machine that serves that project — a remote project's path lives on
+  // the remote host, not here.
+  const openPathOutsideProject = useCallback(
+    async (path: string) => {
+      const activeProject = projectState.activeProject;
+      const host = activeProject?.host;
+      const opened = await openOutsideProject(path, host);
+      if (!opened) {
+        reportActionErrorMessage(`Could not open ${path}. The server refused the path.`);
+        return;
+      }
+      setActiveView("files");
+    },
+    [openOutsideProject, projectState.activeProject],
+  );
+
+  // Open the dialog, optionally pre-filled with a path the user clicked.
+  const requestOpenOutsideProject = useCallback((seed?: string) => {
+    setOpenPathSeed(seed);
+    setOpenPathDialogOpen(true);
+  }, []);
 
   // File links in chat (markdown + plain text) dispatch this event.
   // Also handles editor link clicks (which carry projectRoot).
@@ -1573,6 +1625,7 @@ function HomeApp() {
                   <div className="absolute inset-0" style={{ width: fileTreePane.width }}>
                     <FileTree
                       onOpenFile={openFileAndShow}
+                      onRequestOpenOutsideProject={() => requestOpenOutsideProject()}
                       projectPath={projectState.activeProject?.path}
                       projectHost={projectState.activeProject?.host}
                       includedPaths={contextFileEntries.filter((e) => (e.projectRoot ?? "") === (projectState.activeProject?.path ?? "")).map((e) => e.path)}
@@ -2206,6 +2259,14 @@ function HomeApp() {
         onSave={confirmSaveAndClose}
         onDiscard={confirmDiscardAndClose}
         onCancel={cancelClose}
+      />
+      <OpenPathDialog
+        open={openPathDialogOpen}
+        onOpenChange={setOpenPathDialogOpen}
+        onSubmit={openPathOutsideProject}
+        projectPath={projectState.activeProject?.path}
+        projectHost={projectState.activeProject?.host}
+        initialPath={openPathSeed}
       />
     </div>
   );

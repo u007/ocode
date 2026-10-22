@@ -137,6 +137,10 @@ interface FileMenuActions {
 
 interface FileTreeProps {
   onOpenFile: (path: string, projectRoot?: string, line?: number, query?: string) => void;
+  /** Opens the "open a file outside the project" dialog. The dialog itself
+   *  lives in App (one instance serves the Files tab AND chat file links),
+   *  so the tree only asks for it. When omitted the affordance is hidden. */
+  onRequestOpenOutsideProject?: () => void;
   projectPath?: string;
   /** Registered remote target (SSH/WSL) when this is a remote project;
    *  every tree/content/fs/git request carries it so the server routes the
@@ -917,6 +921,7 @@ function PromptDialog({ state, onCancel }: { state: PromptState | null; onCancel
 
 export default function FileTree({
   onOpenFile,
+  onRequestOpenOutsideProject,
   projectPath,
   projectHost,
   includedPaths,
@@ -1962,6 +1967,17 @@ export default function FileTree({
           </Select>
         )}
         <div className="flex-1" />
+        {onRequestOpenOutsideProject && (
+          <button
+            type="button"
+            onClick={onRequestOpenOutsideProject}
+            title="Open a file outside the project"
+            aria-label="Open a file outside the project"
+            className="p-1.5 text-muted-foreground hover:text-foreground transition-colors rounded-md shrink-0"
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button
           type="button"
           onClick={refresh}

@@ -3,8 +3,10 @@ package remote
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -166,16 +168,54 @@ func StartFreshServer(t Transport, ver string) (ServeState, error) {
 func EnsureRemoteServer(t Transport, ver string) (state ServeState, reused bool, err error) {
 	if existing, ok := DiscoverServer(t); ok && serverHealthy(t, existing) {
 		existing.Outdated = existing.Version != ver
-		return existing, true, nil
+		if !existing.Outdated {
+			return existing, true, nil
+		}
+		// A patch update leaves the previous version's server running and
+		// holding memory; retire it and start one at the local version.
+		if err := KillServer(t, existing.PID); err != nil {
+			return ServeState{}, false, fmt.Errorf("retire outdated remote server v%s: %w", existing.Version, err)
+		}
 	}
 	fresh, err := StartFreshServer(t, ver)
 	if err != nil {
 		return ServeState{}, false, err
 	}
+	if err := killOtherVersionServers(t, ver); err != nil {
+		log.Printf("remote: reap old-version servers on %s: %v", t, err)
+	}
 	// A freshly launched server always reports the local version; a stale
 	// Outdated value can never leak in from the state file (json:"-").
 	fresh.Outdated = false
 	return fresh, false, nil
+}
+
+// otherVersionServersCmd signals (with sig) every
+// `<RemoteBinDir>/<version>/ocode serve` process whose version dir is not ver.
+// KillServer only knows the single pid in the state file, so servers orphaned
+// by earlier connects (a state file overwritten by a newer launch) stay alive
+// and hold memory until reaped here. The awk script never matches its own
+// command line: the ssh shell's $2 is "-c", not an ocode binary path.
+func otherVersionServersCmd(ver, sig string) string {
+	return fmt.Sprintf(`ps -eo pid=,args= | awk -v keep="$HOME/.ocode/bin/%s/ocode" '$2 ~ /\/\.ocode\/bin\/[^\/]+\/ocode$/ && $3 == "serve" && $2 != keep {print $1}' | xargs -r kill %s 2>/dev/null; true`, ver, sig)
+}
+
+var safeVersion = regexp.MustCompile(`^[0-9A-Za-z._+-]+$`)
+
+// killOtherVersionServers terminates remote servers left over from other
+// ocode versions (SIGTERM, then SIGKILL for survivors).
+func killOtherVersionServers(t Transport, ver string) error {
+	if !safeVersion.MatchString(ver) {
+		return fmt.Errorf("unsafe version string %q", ver)
+	}
+	if res, err := t.Exec(otherVersionServersCmd(ver, "-TERM")); err != nil {
+		return fmt.Errorf("terminate old servers: %w: %s", err, res.Stderr)
+	}
+	time.Sleep(2 * time.Second)
+	if res, err := t.Exec(otherVersionServersCmd(ver, "-KILL")); err != nil {
+		return fmt.Errorf("kill old servers: %w: %s", err, res.Stderr)
+	}
+	return nil
 }
 
 // killTERMCmd / killKILLCmd are the two signal commands KillServer issues.
