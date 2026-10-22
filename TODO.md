@@ -905,13 +905,19 @@ through `agent.ValidateBashPrefixRule` so no surface can claim a rule it did not
       a security-policy decision, not a UI bug — decide whether yolo should honour
       explicit user denies, and if so move the check above the yolo shortcut
       (it already runs above the sandbox one at `permissions.go:1885`).
-- [ ] **`/ban remove` leaves an inert `"prefix": "ask"` entry in the config file.**
+- [x] **`/ban remove` leaves an inert `"prefix": "ask"` entry in the config file.**
       The Settings Remove is a true delete; the TUI/web slash command is not, for
       parity with its own history. Every unbanned command accumulates a dead rule
       that still shows up in `/permissions` and `/ban list` as "other bash rules".
       Either give `/ban remove` the delete semantic (via the new
       `agent.RemoveBashPrefixRule` / `config.DeleteBashPrefixRule`) or document the
       difference where users will look for it.
+      **Fixed 2026-10-21:** TUI `/ban remove` and `/ban clear` now call
+      `pm.RemoveBashPrefixRule` and flush through `config.DeleteBashPrefixRule`
+      (new `permDirty.bashPrefixRemovals`, applied after sets so last-write-wins);
+      web `/ban remove` deletes through `PUT /api/permissions/bash-rules
+      {remove:[…]}`. Tests updated to assert absence from both the live table and
+      disk, and mutation-verified.
 - [ ] **The `docs/` bundle's `internal/agent/permissions.go:NNN` anchors are broadly
       stale and need a repair pass.** 54 anchors across 8 bundle pages; a symbol-based
       sweep found 34 pointing at the wrong line. Most were already stale BEFORE this
