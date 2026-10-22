@@ -1,8 +1,8 @@
 ---
 model_id: deepseek-v4.1-flash
-model_version: "4.1"
+model_version: "4.1-2026-10-21"
 evaluated_via: opencode-go
-evaluated_on: 2026-09-28
+evaluated_on: 2026-10-21
 stack: pdf
 stack_corpus_rev: 1
 threshold: 0.9
@@ -11,55 +11,75 @@ sample: full   # all 36 questions
 
 # Scorecard — deepseek-v4.1-flash on pdf
 
-> Valid ONLY for `deepseek-v4.1-flash` @ `4.1`. A version bump invalidates
+> Valid ONLY for `deepseek-v4.1-flash` @ `4.1-2026-10-21`. A version bump invalidates
 > this scorecard — re-benchmark.
 
-Answers: `../answers/deepseek-v4.1-flash.md`, produced closed-book (answerer saw
-only `_prompts/pdf.md`; audited zero tool calls). Graded against
-`questions.yaml` (corpus_rev 1; PyMuPDF facts verified on 1.27.1). Per the corpus
-header, an equivalent correct technique in another library earns the point;
-wrong PyMuPDF behaviour claims do not.
+Answers: `../answers/deepseek-v4.1-flash.md`, produced closed-book (see Provenance).
+Graded against `questions.yaml` (corpus_rev 1; PyMuPDF facts verified on 1.27.1).
+Per the corpus header, an equivalent correct technique in another library earns the
+point; wrong PyMuPDF behaviour claims do not; a cover-up (white box, hidden or
+clipped-away text) earns 0 for the removal point. A materially wrong claim about the
+construct a point tests withholds that point. Every question was graded before the
+previous scorecard was opened.
+
+## Provenance
+
+- Re-benchmark: opencode-go silently updated the model behind
+  `opencode-go/deepseek-v4.1-flash`, which invalidated the 2026-09-28 baseline
+  (`model_version: "4.1"`). This run is versioned `4.1-2026-10-21`.
+- **One fresh headless `ocode run -m opencode-go/deepseek-v4.1-flash -effort med`
+  session per question** (36 sessions) under ocode's real agent system prompt. The
+  previous baseline sent the whole answer sheet in ONE session.
+- Fake HOME: no global CLAUDE.md/AGENTS.md, no memory, no persisted roots. Every
+  builtin tool denied; the five existing `*-tuning-deepseek-v4.1-flash` Kaizen skills
+  (and `conduct-tuning-deepseek-v4-flash`) disabled, so this is a true no-skill
+  baseline. A probe before the sweep confirmed no tools advertised and no
+  Model-Specific Directives block. The generic `[ocode:provider]` DeepSeek
+  output-discipline block and the bundled skill-catalogue digest were present, as for
+  every user.
+- cwd an empty dir named `work`, stdin `/dev/null`. Every session's sqlite audited
+  after the sweep: 1 user + 1 assistant message, zero tool calls.
 
 ## Per-question results
 
 | id | tags | weight | full | awarded | normalized | notes |
 |----|------|-------:|-----:|--------:|-----------:|-------|
 | pdf-model-01 | pdf-model | 3 | 2 | 2 | 1.00 | |
-| pdf-model-02 | pdf-model, verify-safety | 3 | 2 | 2 | 1.00 | also notes redaction fill default |
+| pdf-model-02 | pdf-model, verify-safety | 3 | 2 | 2 | 1.00 | |
 | pdf-model-03 | pdf-model | 2 | 2 | 2 | 1.00 | |
-| pdf-model-04 | pdf-model | 2 | 2 | 2 | 1.00 | |
+| pdf-model-04 | pdf-model | 2 | 2 | 2 | 1.00 | rotation/CropBox detail correct; later answers (locate-03, cell-01) contradict it on whether extracted coords are rotated, not scored here |
 | pdf-locate-01 | table-locate | 3 | 2 | 2 | 1.00 | |
 | pdf-locate-02 | table-locate | 2 | 2 | 2 | 1.00 | |
-| pdf-locate-03 | table-locate, cell-edit | 2 | 2 | 2 | 1.00 | |
+| pdf-locate-03 | table-locate, cell-edit | 2 | 2 | 2 | 1.00 | manual bit-shift colour conversion accepted for "convert color int" |
 | pdf-locate-04 | table-locate, table-relayout | 2 | 2 | 2 | 1.00 | |
-| pdf-rowdel-01 | row-delete | 3 | 3 | 2 | 0.67 | redacts the row "sized to the row only", then stamps the content below one row higher with show_pdf_page without removing the original, so the content appears twice |
-| pdf-rowdel-02 | row-delete, cell-edit | 3 | 2 | 1 | 0.50 | **factual error**: says the default is `graphics=PDF_REDACT_LINE_ART_NONE` (the real default is REMOVE_IF_COVERED, which deletes covered rules and shading). Images=PIXELS is right, and it does say to pass options explicitly |
-| pdf-rowdel-03 | row-delete | 2 | 2 | 1 | 0.50 | show_pdf_page + clip from a copy is right, but it never says to redact the old region first, so the old region is duplicated |
+| pdf-rowdel-01 | row-delete | 3 | 3 | 2 | 0.67 | point 1 withheld: the row is never redacted/applied — the page is rebuilt from two `show_pdf_page(clip=...)` bands of an unredacted copy that skip the row. Supporting evidence, probe on 1.27.1: each band XObject embeds the WHOLE source page clipped by `/BBox`, so the deleted row's text survives in the saved file (absent from `get_text`, present in the stream). Shift/redraw and Total recompute + content below are right. Also claims redaction defaults "delete every drawing touching the rect" (wrong; see rowdel-02) |
+| pdf-rowdel-02 | row-delete, cell-edit | 3 | 2 | 0.5 | 0.25 | **factual error**: says the default is `graphics=PDF_REDACT_LINE_ART_NONE` ("vector line art is completely untouched"); the real default is REMOVE_IF_COVERED (1). Image-pixel default right. Point 2 withheld: it never says to pass `graphics=0, images=0` to keep the grid — it recommends REMOVE_IF_COVERED plus a padded rect. **Judgement call**: partial 0.5 (aware of the image side effect, wrong on graphics). The previous grader awarded point 2 for the same error |
+| pdf-rowdel-03 | row-delete | 2 | 2 | 1 | 0.50 | `show_pdf_page(clip=...)` from a pre-redaction snapshot is right. Point 2 withheld: the worked example redacts only the band BELOW the deleted row, so the deleted row is never removed and the stamp lands on top of it; `REMOVE_IF_TOUCHED` on a full-width band also deletes vertical rules that run up into the rows above |
 | pdf-rowdel-04 | row-delete, verify-safety | 2 | 2 | 2 | 1.00 | |
-| pdf-cell-01 | cell-edit | 3 | 3 | 3 | 1.00 | right-aligns to `cell_right` (no padding) here, though locate-04 gets the padding right; "explicit image/graphics options" is vague |
-| pdf-cell-02 | cell-edit | 2 | 2 | 2 | 1.00 | the ~1pt epsilon pad is bounded by the neighbour; doesn't say to re-check neighbours afterwards |
-| pdf-cell-03 | cell-edit, table-relayout | 2 | 2 | 1 | 0.50 | **factual error**: "writes only what fits and the overflow is lost" (it actually writes nothing). Options list is good |
-| pdf-cell-04 | cell-edit | 2 | 2 | 2 | 1.00 | |
-| pdf-relayout-01 | table-relayout | 3 | 3 | 3 | 1.00 | |
-| pdf-relayout-02 | table-relayout | 3 | 3 | 2 | 0.67 | never removes the old table (no redact) before redrawing at the new x; no mention of shading |
-| pdf-relayout-03 | table-relayout, pdf-model | 2 | 2 | 1 | 0.50 | risks are thorough, but it never suggests regenerating from the original source; calls the round-trip "acceptable" for simple docs rather than a last resort |
+| pdf-cell-01 | cell-edit | 3 | 3 | 3 | 1.00 | tight rect + `graphics=NONE, images=NONE` + right-align to old x1 + span style. Says omitting `graphics=` "deletes any vector line crossing the rect" (wrong: only fully covered) but acts correctly. Font-fallback code is broken (`if False else ...`) |
+| pdf-cell-02 | cell-edit | 2 | 2 | 2 | 1.00 | no explicit re-check of neighbours afterwards; awarded on the sizing reasoning |
+| pdf-cell-03 | cell-edit, table-relayout | 2 | 2 | 2 | 1.00 | now correct: nothing written, negative return, no exception |
+| pdf-cell-04 | cell-edit | 2 | 2 | 2 | 1.00 | descender sign slip in the bbox-baseline formula |
+| pdf-relayout-01 | table-relayout | 3 | 3 | 3 | 1.00 | Total + rules + content below are translated (moved, not overlaid) and the vertical rules extended; page overflow → next page with repeated header. No explicit redact step; awarded because the content is moved, not drawn over |
+| pdf-relayout-02 | table-relayout | 3 | 3 | 2 | 0.67 | assumes regeneration "from a layout model"; never removes the old table before redrawing at the new x positions (point 3) |
+| pdf-relayout-03 | table-relayout, pdf-model | 2 | 2 | 2 | 1.00 | prefer the true source; targeted in-place edit over a round trip |
 | pdf-relayout-04 | table-relayout, table-insert | 2 | 2 | 2 | 1.00 | |
-| pdf-tblins-01 | table-insert | 3 | 2 | 2 | 1.00 | |
-| pdf-tblins-02 | table-insert | 2 | 2 | 1 | 0.50 | missing the paint order inside the new table (fills first, then text/rules); repeats the "insert_textbox silently truncates" error |
-| pdf-tblins-03 | table-insert, table-relayout | 2 | 2 | 2 | 1.00 | says nothing about moved content overflowing the page |
-| pdf-imgrep-01 | image-replace | 3 | 3 | 3 | 1.00 | writes `doc.replace_image` (the API is `Page.replace_image`); concept correct |
-| pdf-imgrep-02 | image-replace, verify-safety | 2 | 2 | 2 | 1.00 | doesn't say to verify there is exactly one image at that rect |
-| pdf-imgrep-03 | image-replace | 2 | 2 | 2 | 1.00 | |
-| pdf-imgins-01 | image-insert | 3 | 2 | 1 | 0.50 | anchors to `page.rect` minus a hard-coded 36pt margin, not to the real content edges (table x1, footer top); aspect ratio and the collision check are right |
-| pdf-imgins-02 | image-insert | 2 | 2 | 1 | 0.50 | xref reuse is right; never mentions a `garbage>=3` dedup save |
+| pdf-tblins-01 | table-insert | 3 | 2 | 2 | 1.00 | reportlab overlay + pypdf `merge_page` accepted as the stamp approach |
+| pdf-tblins-02 | table-insert | 2 | 2 | 1 | 0.50 | style borrowing good; never orders the table's own fills before its text and rules (its only ordering remark is overlay-after-page-content) |
+| pdf-tblins-03 | table-insert, table-relayout | 2 | 2 | 2 | 1.00 | |
+| pdf-imgrep-01 | image-replace | 3 | 3 | 3 | 1.00 | single-occurrence fix by re-pointing page 1's resource to a new xref (equivalent) |
+| pdf-imgrep-02 | image-replace, verify-safety | 2 | 2 | 2 | 1.00 | |
+| pdf-imgrep-03 | image-replace | 2 | 2 | 2 | 1.00 | repeats "default graphics is usually LINE_ART_NONE" but explicitly sets removal, so the action is right |
+| pdf-imgins-01 | image-insert | 3 | 2 | 1 | 0.50 | anchors to `page.rect.x1 - 36` (hard-coded margin), not the real content edges; aspect ratio, top-left coords and the collision check are right |
+| pdf-imgins-02 | image-insert | 2 | 2 | 2 | 1.00 | xref reuse; dedup after the fact via `mutool clean -gggg` / Ghostscript accepted as equivalent of a `garbage=4` save |
 | pdf-imgins-03 | image-insert, pdf-model | 2 | 2 | 2 | 1.00 | |
 | pdf-fonts-01 | fonts | 3 | 2 | 2 | 1.00 | |
 | pdf-fonts-02 | fonts | 2 | 2 | 2 | 1.00 | |
-| pdf-fonts-03 | fonts, cell-edit | 2 | 2 | 2 | 1.00 | |
-| pdf-verify-01 | verify-safety | 3 | 3 | 2 | 0.67 | re-extract and render are covered, but it never says a render alone can't tell an overlay from a real edit |
+| pdf-fonts-03 | fonts, cell-edit | 2 | 2 | 2 | 1.00 | bold = flags & 16 right; says flag 1 = serif (it is superscript; serif is 4) |
+| pdf-verify-01 | verify-safety | 3 | 3 | 3 | 1.00 | |
 | pdf-verify-02 | verify-safety | 3 | 2 | 2 | 1.00 | |
 | pdf-verify-03 | verify-safety | 2 | 2 | 2 | 1.00 | |
-| pdf-verify-04 | verify-safety, pdf-model | 2 | 2 | 2 | 1.00 | |
+| pdf-verify-04 | verify-safety, pdf-model | 2 | 2 | 1 | 0.50 | strong on verifying the saved output; never names the edit-call silent failures (negative `insert_textbox` return, empty `search_for`, off-page text, collateral redaction) |
 
 `normalized = min(awarded, full) / full`
 
@@ -72,133 +92,96 @@ wrong PyMuPDF behaviour claims do not.
 | fonts | 1.00 | 3 | low-n | omit |
 | verify-safety | 0.94 | 7 | ok | omit |
 | pdf-model | 0.94 | 7 | ok | omit |
+| table-relayout | 0.94 | 7 | ok | omit |
 | table-insert | 0.89 | 4 | ok | **derive** |
-| cell-edit | 0.84 | 7 | ok | **derive** |
-| table-relayout | 0.81 | 7 | ok | **derive** |
-| row-delete | 0.65 | 4 | ok | **derive** |
-| image-insert | 0.64 | 3 | low-n | **derive** (low-n) |
+| cell-edit | 0.86 | 7 | ok | **derive** |
+| image-insert | 0.79 | 3 | low-n | **derive** (low-n) |
+| row-delete | 0.58 | 4 | ok | **derive** |
 
 `subscore = Σ(normalized×weight) / Σ(weight)` over that tag's questions.
 
 ## Stack score
 
 ```
-stack_score = Σ(normalized×weight) / Σ(weight) = 75.0 / 86 = 87.2%
+stack_score = Σ(normalized×weight) / Σ(weight) = 77.25 / 86 = 89.8%
 ```
 
-## Live behavioural probe — editing a real PDF (2026-09-28)
+## Change vs previous baseline
 
-Model driven with `ocode run -yolo` in a fresh git repo containing an invoice PDF: a ruled, shaded table, a
-logo, and a page 2 that must stay unchanged. One task per run. The output is checked on the **text layer** by
-`docs/okf/pdf/probe/check.py`, which rejects white-box overlays, so passing requires real removal, not just a
-correct-looking render. Renders were also inspected by eye. The harness is in `docs/okf/pdf/probe/`.
+Previous: `model_version "4.1"`, 2026-09-28, whole sheet in one session, **87.2%**.
+Now: one session per question, **89.8%** (+2.6 pts).
 
-| task | baseline | with skill (digest injected) |
-|---|---|---|
-| delete-row | PASS (292s) | PASS (5833s) |
-| edit-cell | PASS (187s) | PASS (176s) |
-| add-row | PASS (519s) | PASS (289s) |
-| add-column | FAIL (152s) | PASS (161s) |
-| insert-table | PASS (200s) | PASS (92s) |
-| edit-cell-subset | PASS (151s) | PASS (167s) |
-| replace-image | PASS (390s) | PASS (352s) |
-| insert-image | PASS (157s) | PASS (154s) |
+| tag | new | old | delta | notes |
+|-----|----:|----:|------:|-------|
+| table-locate | 1.00 | 1.00 (old) | = | |
+| image-replace | 1.00 | 1.00 (old, low-n) | = | |
+| fonts | 1.00 | 1.00 (old, low-n) | = | |
+| verify-safety | 0.94 | 0.94 (old) | = | verify-01 now names "render alone can't catch overlays"; verify-04 now misses the edit-call silent failures |
+| pdf-model | 0.94 | 0.94 (old) | = | relayout-03 now earns "prefer the source"; verify-04 drop |
+| table-relayout | 0.94 | 0.81 (old) | +0.13 | cell-03 and relayout-03 now correct; relayout-02 still never removes the old table |
+| table-insert | 0.89 | 0.89 (old) | = | tblins-02 still has no fill→text→rules order |
+| cell-edit | 0.86 | 0.84 (old) | +0.02 | cell-03 fixed; rowdel-02 graded stricter (see below) |
+| image-insert | 0.79 | 0.64 (old, low-n) | +0.15 | imgins-02 now covers a dedup pass; imgins-01 still uses a fixed page margin |
+| row-delete | 0.58 | 0.65 (old) | −0.07 | see below |
 
-Baseline add-column: the new "SKU" header was drawn black on the navy header (every other header is white). Only the header-style check failed. Never loaded the bundled `pdf` skill. Baseline runs used a pre-fix binary, so no Kaizen digest was injected. The with-skill runs used a
-binary built after the `ocode run` bundled-skills fix; digest injection was verified by having the model quote
-the digest from its system prompt. Times above ~5,800s are wall clock across a host sleep; the session's
-monotonic clock shows about 500s of actual work.
+The row-delete drop is mostly **grading, not model regression**. The rowdel-02 error is
+the same wrong default (`LINE_ART_NONE`) the old answer made; this grader awards only
+the partial (0.5) where the old one awarded point 2. rowdel-01 changed technique
+(page rebuilt from clipped bands instead of stamp-without-redact) but still fails true
+removal, now verified by a byte-level probe. rowdel-03 still leaves part of the old
+content on the page (this time the deleted row itself).
+
+Real gains: cell-03 (`insert_textbox` writes nothing), verify-01 (render can't tell an
+overlay), imgins-02 (dedup), relayout-03 (regenerate from source first).
+
+The previous scorecard's live behavioural probe tables (2026-09-28) measured the
+earlier `4.1` model and are not carried forward; they remain in git history.
 
 ## Derivation targets
 
-Tags below threshold (`< 0.9`): **row-delete (0.65), image-insert (0.64, low-n),
-table-relayout (0.81), cell-edit (0.84), table-insert (0.89)** → feed into
-`derived/pdf.deepseek-v4.1-flash.SKILL.md`. PyMuPDF claims below were re-checked
-on 1.27.1.
+Tags below threshold (`< 0.9`): **row-delete (0.58), image-insert (0.79, low-n),
+cell-edit (0.86), table-insert (0.89)** → feed into
+`derived/pdf.deepseek-v4.1-flash.SKILL.md`. table-relayout (0.94) is now above
+threshold, and its section and the `insert_textbox` overflow rule are dropped.
 
-### row-delete (0.65)
+### row-delete (0.58)
 
-- **Wrong `apply_redactions` default (pdf-rowdel-02).** Quote: "graphics =
-  PDF_REDACT_LINE_ART_NONE, i.e. vector line art is left untouched". This is
-  false. The signature is `apply_redactions(images=2, graphics=1, text=0)`:
-  `graphics=PDF_REDACT_LINE_ART_REMOVE_IF_COVERED` deletes shading and rules lying
-  entirely inside the rect (a partly covered rule stays whole), and
-  `images=PDF_REDACT_IMAGE_PIXELS` blanks overlapping pixels. To keep them, pass
-  `graphics=0, images=0`. If the region is being rebuilt anyway, keep the
-  defaults and redraw.
-- **Region move without removing the source (pdf-rowdel-01, pdf-rowdel-03).**
-  Quotes: "sized to the row only so neighbouring rows ... are untouched", then
-  "stamp it into a target rect translated upward". The rows below are still on
-  the page, so stamping a shifted copy duplicates them. Redact the deleted row
-  AND the whole region that will move (or the whole table) first. Then stamp the
-  region from an untouched copy of the source doc
-  (`show_pdf_page(clip=...)`) one row higher, or redraw it.
+- **Wrong `apply_redactions` default** (rowdel-02, repeated in imgrep-03; rowdel-01
+  and cell-01 say "touching/crossing" instead). The defaults are `images=2` (blank
+  overlapping pixels), `graphics=1` (REMOVE_IF_COVERED: delete line art lying
+  entirely inside the rect), `text=0`. Keep the grid with `graphics=0, images=0`.
+- **Clipping is not removal** (rowdel-01). `show_pdf_page(clip=...)` embeds the whole
+  source page and only hides the outside via `/BBox`; a page rebuilt from clipped bands
+  still carries the deleted row in its bytes.
+- **Redaction scope** (rowdel-03). Redact the deleted row AND the region that moves,
+  then stamp; and don't use `REMOVE_IF_TOUCHED` on a band whose vertical rules run
+  into rows that stay.
 
-### image-insert (0.64, low-n)
+### image-insert (0.79, low-n)
 
-- **Placement from page edges, not content (pdf-imgins-01).** Quote:
-  `x1 = page.rect.x1 - margin` with `margin = 36.0`. Anchor to the real
-  content: right edge = the table's or text's x1, bottom = above the footer's
-  top plus padding. Then check the rect against the text, drawing and image
-  bboxes.
-- **No dedup save (pdf-imgins-02).** The `xref=` reuse was right, but the
-  answer never mentions a dedup save (`garbage>=3` per the rubric, plus
-  `deflate`) that merges identical image streams and also fixes a file that is
-  already bloated. Local check on 1.27.1: three identical images merged from
-  separate docs stayed three streams at `garbage=3` and became one at
-  `garbage=4`, so the skill names `garbage=4`.
+- Placement anchored to `page.rect` minus a fixed 36pt margin (imgins-01) instead
+  of the content's right edge and the footer's top.
 
-### table-relayout (0.81)
+### cell-edit (0.86)
 
-- **Old table not removed before the redraw (pdf-relayout-02).** The re-layout
-  plan ("move or redraw the vertical rules at the new x positions, reflow each
-  existing cell's content") never redacts the old table, so the old text stays
-  in the text layer under the redraw; it also never mentions redrawing the
-  header fill and row shading at the new x positions.
-- **Round-trip treated as acceptable (pdf-relayout-03).** Quote: "Acceptable
-  when the document is simple and semantically structured". It is a last
-  resort. The answer never says to ask for and regenerate from the original
-  source (template, HTML, reportlab code, spreadsheet) first, then to edit the
-  PDF surgically in place.
-- **`insert_textbox` overflow (pdf-cell-03).** See cell-edit.
-- Minor (full marks, noted): moving content down never considers content
-  pushed past the page bottom (pdf-tblins-03).
-
-### cell-edit (0.84)
-
-- **`insert_textbox` overflow (pdf-cell-03).** Quote: "writes only what fits
-  and the overflow is lost". False: when the text doesn't fit, it writes
-  **nothing** and returns a negative number, with no exception. The return
-  value must be checked. `insert_htmlbox` (default `scale_low=0`) shrinks the
-  text to fit and returns `(spare_height, scale)`.
-- **Wrong redaction default (pdf-rowdel-02).** Same error as row-delete: a
-  cell redaction with defaults deletes the cell's shading when it lies inside
-  the rect. Pass `graphics=0, images=0` to keep the grid.
-- Minor (full marks, noted): right-aligns to `cell_right` with no padding
-  (pdf-cell-01; the right edge is the existing value's x1); "explicit
-  image/graphics options" never names the values; a ~1pt padded redaction rect
-  with no re-check of the neighbouring cells afterwards (pdf-cell-02).
+- The rowdel-02 default error (shared with row-delete): a cell redaction with
+  defaults deletes shading lying inside the rect.
 
 ### table-insert (0.89)
 
-- **No paint order (pdf-tblins-02).** Never says to draw fills first and then
-  text and rules. A fill drawn after the text hides it in the render, while the
-  text stays in the text layer.
-- **`insert_textbox` overflow repeated (pdf-tblins-02).** Quote: "don't let
-  `insert_textbox` silently truncate". It writes nothing, not a truncated
-  string.
+- No paint order inside the new table (tblins-02): fills, then text, then rules.
 
-## Live behavioural probe — with the 0.9-threshold skill (2026-09-28)
+## Odd things in the answers (not scored)
 
-The model is driven with `ocode run -yolo` in a fresh git repo, one task per run, and the output is checked by `docs/okf/pdf/probe/check.py`. "not run" means that model had no skill for that phase, or its provider was out of credit. The 0.9 runs used a binary built before two late skill edits (pdf `new_page(pno + 1)`, mimo pptx iteration 2).
-
-| task | with 0.9 skill |
-|---|---|
-| delete-row | PASS (202s) |
-| edit-cell | PASS (94s) |
-| add-row | FAIL: horizontal rules = rows+1 (11) |
-| add-column | PASS (246s) |
-| insert-table | PASS (161s) |
-| edit-cell-subset | PASS (419s) |
-| replace-image | PASS (132s) |
-| insert-image | PASS (187s) |
+- Recap blocks (`ASKED / BUILT / FOUND / DECIDED / NEXT`) appear in relayout-01,
+  tblins-01 and tblins-02 — apparently leaking from the output-discipline block.
+- Sessions contradict each other on the redaction default (`LINE_ART_NONE` in
+  rowdel-02/imgrep-03 vs "deletes touching/crossing lines" in rowdel-01/cell-01) —
+  neither is the real REMOVE_IF_COVERED behaviour.
+- Broken font-fallback code in cell-01; flag 1 called "serif" in fonts-03; descender
+  sign slip in cell-04.
+- **Corpus note (key, not this model):** the pdf-rowdel-03 reference technique stamps
+  from an untouched copy of the original with `show_pdf_page(clip=...)`. Per the
+  1.27.1 probe, the stamped XObject then carries the whole original page, deleted row
+  included, hidden only by `/BBox`. Redacting the deleted row in the stamp source too
+  removes it. `questions.yaml` was left unchanged; rowdel-03 point 1 was graded per the key.

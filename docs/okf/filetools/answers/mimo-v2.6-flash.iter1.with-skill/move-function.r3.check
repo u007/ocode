@@ -1,0 +1,35 @@
+{
+ "task": "move-function",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "glob",
+  "grep",
+  "read",
+  "read",
+  "read",
+  "read",
+  "grep",
+  "read",
+  "write",
+  "edit",
+  "edit",
+  "edit",
+  "multi_file_edit",
+  "read",
+  "edit",
+  "read",
+  "edit",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace\" twice, to \"false\" and then to \"\". Re-issue this call once, with a single value for \"replace\"",
+  "Error: search block appears 350 times; must be unique or set replace_all=true"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

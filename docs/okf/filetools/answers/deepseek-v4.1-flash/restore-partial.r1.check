@@ -1,0 +1,27 @@
+{
+ "task": "restore-partial",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "bash",
+  "rgrep",
+  "bash",
+  "read",
+  "read",
+  "bash",
+  "bash",
+  "multi_file_edit",
+  "bash",
+  "read",
+  "bash",
+  "edit",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

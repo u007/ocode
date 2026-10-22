@@ -1,0 +1,30 @@
+{
+ "task": "restore-own",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "glob",
+  "read",
+  "read",
+  "multiedit",
+  "edit",
+  "edit",
+  "grep",
+  "bash",
+  "bash",
+  "read",
+  "bash",
+  "undo_file_change",
+  "undo_file_change",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: oldString not found in content"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

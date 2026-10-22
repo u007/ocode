@@ -1,0 +1,30 @@
+{
+ "task": "append-test",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "git changes the working tree",
+   "turn": 1,
+   "command": "git stash push -- test/engine.test.js >/dev/null && node test/run.js; echo \"baseline_exit=$?\"; git stash pop && node test/run.js; echo \"final_exit=$?\""
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "bash",
+  "bash",
+  "read",
+  "bash",
+  "read",
+  "read",
+  "apply_patch",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

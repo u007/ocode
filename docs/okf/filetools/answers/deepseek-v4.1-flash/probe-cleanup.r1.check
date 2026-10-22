@@ -1,0 +1,36 @@
+{
+ "task": "probe-cleanup",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell redirect to a file",
+   "turn": 1,
+   "command": "cd \"/private/tmp/claude-501/-Users-james-www-ocode/25be0bc4-c44c-462b-a299-2b25c57773fa/scratchpad/ftprobe/runs/v2-deepseek/deepseek-v4.1-flash/probe-cleanup.r1\" && cat > _parsedate_probe.mjs <<'EOF'\nimport { parseDate } from \"./src/utils.js\";\n\nconst input = \"2024-02-30\";\ntry {\n  const d = parseDate(input);\n  console.log(\"RESULT: returned a Date:\", d.toISOString());\n  console.log(\"dayOfMonth:\", d."
+  }
+ ],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cat > /tmp/_probe_parsedate.mjs <<'EOF'\nimport { parseDate } from \"/private/tmp/claude-501/-Users-james-www-ocode/25be0bc4-c44c-462b-a299-2b25c57773fa/scratchpad/ftprobe/runs/v2-deepseek/deepseek-v4.1-flash/probe-cleanup.r1/src/utils.js\";\n\nfor (const input of [\"2024-02-30\", \"2024-02-29\", \"2023-02-29\"]) {\n  try {\n    const d = parseDate(input);\n    console.log(input, \"->\", d.toISOString(), \"(valid:"
+  },
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cd \"/private/tmp/claude-501/-Users-james-www-ocode/25be0bc4-c44c-462b-a299-2b25c57773fa/scratchpad/ftprobe/runs/v2-deepseek/deepseek-v4.1-flash/probe-cleanup.r1\" && git status --porcelain && echo \"---clean-check-done---\" && rm -f /tmp/_probe_parsedate.mjs && echo tmp-removed"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

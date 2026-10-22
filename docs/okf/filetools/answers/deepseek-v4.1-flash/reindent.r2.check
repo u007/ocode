@@ -1,0 +1,26 @@
+{
+ "task": "reindent",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cd \"$(git rev-parse --show-toplevel)\" 2>/dev/null; echo \"--- diff ignoring whitespace (should be empty) ---\"; git diff --ignore-all-space -- src/legacy-style.js; echo \"--- lines: old->new indent widths ---\"; git show HEAD:src/legacy-style.js > /tmp/old.js; node -e '\nconst fs=require(\"fs\");\nconst o=fs.readFileSync(\"/tmp/old.js\",\"utf8\"), n=fs.readFileSync(\"src/legacy-style.js\",\"utf8\");\nconst ol=o.sp"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "bash",
+  "read",
+  "bash",
+  "bash",
+  "write",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0

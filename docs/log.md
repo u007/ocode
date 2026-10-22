@@ -6,6 +6,8 @@
 
 ## 2026-10-21
 
+* **Creation**: Bash Prefix Always-Allow Rules ([concepts/bash-prefix-always-allow.md](/concepts/bash-prefix-always-allow.md))
+* **Creation**: Reopen a locally hidden permission dialog ([superpowers/specs/2026-10-21-reopen-hidden-permission-dialog-design.md](/superpowers/specs/2026-10-21-reopen-hidden-permission-dialog-design.md))
 * **Creation**: Ask-dialog "Explain this call" digest ([concepts/ask-dialog-tool-call-digest.md](/concepts/ask-dialog-tool-call-digest.md))
 * **Update**: DB Environment Templates (.env / .env.local for connections and SQLite paths) ([concepts/db-environment-templates.md](/concepts/db-environment-templates.md))
 * **Creation**: Pending ask suppresses advisor, auto-continue, and goal-resume ([concepts/pending-ask-suppresses-advisor-auto-continue-goal.md](/concepts/pending-ask-suppresses-advisor-auto-continue-goal.md))

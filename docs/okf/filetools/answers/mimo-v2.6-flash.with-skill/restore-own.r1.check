@@ -1,0 +1,37 @@
+{
+ "task": "restore-own",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "read",
+  "multiedit",
+  "edit",
+  "edit",
+  "edit",
+  "edit",
+  "read",
+  "edit",
+  "read",
+  "replace_lines",
+  "read",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "multiedit",
+  "edit",
+  "edit",
+  "replace_lines",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: search block not found in file",
+  "Error: search block not found in file"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

@@ -1,0 +1,40 @@
+{
+ "task": "reindent",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell redirect to a file",
+   "turn": 1,
+   "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && git show HEAD:src/legacy-style.js > src/__head_probe__.js && node -e 'import(\"./src/__head_probe__.js\").then(m=>console.log(\"HEAD ns:\",Object.keys(m))).catch(e=>console.log(\"HEAD ERR:\",e.constructor.name,e.message))' ; rm -f src/__head_probe__.js; echo \"--- cleaned: $(ls src/__head_probe__.js 2>&1)\"; echo \"== line count old/new ==\"; git s"
+  }
+ ],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && echo \"== tabs (BSD grep) ==\"; grep -n \"$(printf '\\t')\" src/legacy-style.js || echo \"no tabs\"; echo \"== odd leading-space counts ==\"; awk '{ n=match($0,/[^ ]/); if (n==0) n=length($0)+1; if ((n-1)%2!=0) print NR\": [\"$0\"]\" }' src/legacy-style.js || true; echo \"== whitespace-insensitive content diff vs HEAD ==\"; git show HEAD:src/legacy-styl"
+  },
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && echo \"== strip ONLY leading whitespace, diff old vs new ==\"; git show HEAD:src/legacy-style.js | sed 's/^[[:space:]]*//' > /tmp/o.txt; sed 's/^[[:space:]]*//' < src/legacy-style.js > /tmp/n.txt; diff /tmp/o.txt /tmp/n.txt && echo \"CLEAN: non-leading content byte-identical\"; echo \"== trailing whitespace check ==\"; grep -n '[[:space:]]$' sr"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "read",
+  "write",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

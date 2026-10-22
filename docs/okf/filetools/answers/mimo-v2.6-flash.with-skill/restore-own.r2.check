@@ -1,0 +1,34 @@
+{
+ "task": "restore-own",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "read",
+  "read",
+  "edit",
+  "undo_file_change",
+  "edit",
+  "undo_file_change",
+  "multi_file_edit",
+  "multi_file_edit",
+  "read",
+  "read",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "undo_file_change",
+  "read",
+  "read",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: edit 1: missing required field(s); each edit needs path, search, replace \u2014 got oldString/newString, which is the multiedit shape (top-level file_path). Retry multi_file_edit with path/search/re"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

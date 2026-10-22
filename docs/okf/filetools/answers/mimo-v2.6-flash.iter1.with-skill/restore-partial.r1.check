@@ -1,0 +1,31 @@
+{
+ "task": "restore-partial",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "glob",
+  "grep",
+  "read",
+  "grep",
+  "multi_file_edit",
+  "grep",
+  "grep",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "read",
+  "edit",
+  "edit",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace\" twice, to \"false\" and then to \"See `fetchUser` for user lookups.\". Re-issue this call once, with a single value for \"replace\""
+ ]
+}
+PASS score=1.0 violations=0 problems=0

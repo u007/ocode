@@ -1,0 +1,39 @@
+{
+ "task": "big-json",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell redirect to a file",
+   "turn": 1,
+   "command": "cd . && echo \"--- counts ---\"; grep -cE '^      \"timeout_ms\": 5000,$' data/settings.json; grep -cE '^      \"timeout_ms\":' data/settings.json; grep -cE '^      \"retry_timeout_ms\": 3000,$' data/settings.json; echo \"--- json valid ---\"; node -e 'const d=JSON.parse(require(\"fs\").readFileSync(\"data/settings.json\",\"utf8\"));const s=Object.entries(d.services);console.log(\"services:\",s.length,\"all timeout "
+  },
+  {
+   "kind": "shell redirect to a file",
+   "turn": 1,
+   "command": "node -e 'const d=JSON.parse(require(\"fs\").readFileSync(\"data/settings.json\",\"utf8\"));const s=Object.entries(d.services);const bad=s.filter(([k,v])=>Object.keys(v).length!==4||v.weight!==+k.slice(8));console.log(\"mismatched:\",JSON.stringify(bad));console.log(\"sample keys:\",Object.keys(s[0][1]).join(\",\"));'; git show HEAD:data/settings.json > /private/tmp/claude-501/-Users-james-www-ocode/25be0bc4-c"
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "bash",
+  "read",
+  "bash",
+  "glob",
+  "read",
+  "edit",
+  "bash",
+  "read",
+  "bash",
+  "read",
+  "read",
+  "write",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=2 problems=0

@@ -1,0 +1,28 @@
+{
+ "task": "try-and-restore",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "glob",
+  "list",
+  "list",
+  "list",
+  "read",
+  "edit",
+  "edit",
+  "edit",
+  "bash",
+  "bash",
+  "edit",
+  "bash"
+ ],
+ "file_tool_errors": [
+  "Error: call skipped, nothing ran: arguments set \"replace_all\" twice, to false and then to false. Re-issue this call once, with a single value for \"replace_all\""
+ ]
+}
+PASS score=1.0 violations=0 problems=0

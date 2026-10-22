@@ -1,0 +1,29 @@
+{
+ "task": "probe-cleanup",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "rm tmp-probe-parse-date.mjs && git status --porcelain && echo \"---clean-check-done---\" && ls tmp-probe-parse-date.mjs 2>&1"
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "glob",
+  "glob",
+  "read",
+  "bash",
+  "read",
+  "read",
+  "write",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=1 problems=0

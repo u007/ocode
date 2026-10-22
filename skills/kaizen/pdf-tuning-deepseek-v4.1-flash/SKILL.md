@@ -2,11 +2,10 @@
 name: pdf-tuning-deepseek-v4.1-flash
 description: >
   Corrective PDF-editing guidance for deepseek-v4.1-flash: what PyMuPDF's
-  apply_redactions actually removes by default, deleting a table row without
-  duplicating the rows you move, what insert_textbox does when text doesn't
-  fit, removing the old table before a re-layout, paint order for new tables,
-  anchoring inserted images to real content, deduplicating repeated images,
-  and matching header style in new columns.
+  apply_redactions actually removes by default, deleting a table row with real
+  removal (a show_pdf_page clip hides content, it does not remove it), keeping
+  a cell's grid when replacing its text, paint order for new tables, anchoring
+  inserted images to real content, and matching header style in new columns.
 when_to_use: >
   Load when the provider-stripped model id (see stack-detection.md)
   resolves to exactly `deepseek-v4.1-flash`. There is no repo/detection gate: the
@@ -15,7 +14,7 @@ when_to_use: >
   attached from outside the repo, or one deeper than the glob limit.
   For any other model, do not load.
 tuned_for: deepseek-v4.1-flash
-tuned_version: "4.1"
+tuned_version: "4.1-2026-10-21"
 stack: pdf
 source_scorecard: ../scores/deepseek-v4.1-flash.md
 threshold: 0.9
@@ -24,101 +23,83 @@ revalidate_when: model_version changes
 # PDF-editing corrections for deepseek-v4.1-flash
 
 <!-- kaizen:digest -->
-**PDF edits (PyMuPDF): real removal, correct defaults, no duplicates:**
-1. `page.apply_redactions()` defaults are `images=PDF_REDACT_IMAGE_PIXELS` (2), `graphics=PDF_REDACT_LINE_ART_REMOVE_IF_COVERED` (1) and `text=PDF_REDACT_TEXT_REMOVE` (0): it DOES delete every rule/shading shape lying ENTIRELY inside the rect (partly covered shapes stay whole) and blanks image pixels. To change only text, pass `graphics=0, images=0`; if you redraw the region anyway, keep the defaults.
-2. Deleting a row: redact the deleted row AND every row or line that will move (or the whole table) BEFORE you redraw or stamp it one row higher (`show_pdf_page(new_rect, untouched_copy, pno, clip=old_rect)`); stamping first duplicates every moved row.
-3. `insert_textbox` that doesn't fit writes NOTHING and returns a negative number (no exception): always check the return value, then shrink the font, wrap into a taller row, widen the column, or use `insert_htmlbox`, which scales the text down to fit.
-4. Re-laying out a table (new column or row): redact the whole old table first, then redraw every column with header fill, row shading, rules and text at the new positions; content pushed past the page bottom goes onto a new page (`doc.new_page(pno + 1)` — it inserts BEFORE the given index).
-5. Drawing a new table: fills first, then text, then rules; take font and size from the page's spans and rule width, colour and header fill from `page.get_drawings()`.
-6. Insert images relative to real content (right edge = table/text x1, bottom = above the footer's top), never `page.rect` minus a fixed margin; reuse the xref `insert_image` returns and save with `garbage=4, deflate=True` to merge identical image streams.
-7. A new table column copies the existing header style exactly: text colour (white on a dark header), font, size and fill, read from the header spans (`get_text("dict")`).
+**PDF edits (PyMuPDF): real removal, correct defaults, no leftovers:**
+1. `page.apply_redactions()` defaults are `images=PDF_REDACT_IMAGE_PIXELS` (2), `graphics=PDF_REDACT_LINE_ART_REMOVE_IF_COVERED` (1) and `text=PDF_REDACT_TEXT_REMOVE` (0). It is NOT `LINE_ART_NONE`: it deletes every rule/shading shape lying ENTIRELY inside the rect (partly covered shapes stay whole, they are not "touched → removed") and blanks image pixels. To change only text (one cell), pass `graphics=0, images=0`; if you redraw the region anyway, keep the defaults.
+2. Deleting a row: redact the deleted row AND every row or line that will move (or the whole table), apply, THEN redraw the moved rows one row higher, or stamp them with `show_pdf_page(new_rect, src_copy, pno, clip=old_rect)` where `src_copy` is a copy in which the deleted row was ALSO redacted and applied. Never leave the deleted row on the page under a stamp.
+3. `show_pdf_page(clip=...)` HIDES the outside of the clip; it does not remove it. The stamped XObject embeds the whole source page, so stamping from an unredacted copy (or rebuilding a page from clipped bands) still carries the deleted row in its bytes, and `get_text()` will NOT show it. Real removal = redaction (or rebuilding the rows from extracted data).
+4. Don't use `graphics=PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED` on a band that touches vertical rules running into rows that stay: the whole rule is deleted, not just the part inside the band.
+5. Drawing a new table: fills first, then text, then rules.
+6. Insert images relative to real content (right edge = table/text x1, bottom = above the footer's top), never `page.rect` minus a fixed margin. One image on many pages: insert it once, keep the returned xref, then `page.insert_image(rect, xref=xref)` on the other pages (one stored copy). Identical bytes inserted again into the same document already reuse one xref, and `save(garbage=4)` merges duplicate streams (levels 0-3 do not). There is no `Document.insert_image`.
+7. In a stamp source, redact ONLY what is being deleted. For a pure move (no row deleted), stamp from an untouched copy; never redact the region you are about to stamp, or the stamp comes out empty.
+8. A new table column copies the existing header style exactly: text colour (white on a dark header), font, size and fill, read from the header spans (`get_text("dict")`).
 <!-- /kaizen:digest -->
 
-## row-delete: what redaction removes, and the order of operations
+## row-delete: what redaction removes, real removal, and the order of operations
 
 - The defaults of `apply_redactions` are `images=2` (blank the overlapping
-  pixels), `graphics=1` (remove line-art lying entirely inside the rect;
-  partly covered shapes stay whole) and `text=0` (remove any character whose
-  bbox overlaps). "Line art is left untouched" is false. With defaults, a
-  redaction over a whole row deletes that row's shading rectangle and any rule
-  lying entirely inside the rect.
-- Use `graphics=PDF_REDACT_LINE_ART_NONE, images=PDF_REDACT_IMAGE_NONE` only
-  when you want the grid and shading kept, for example when replacing text
-  inside one cell. When you rebuild the rows anyway, removing the old grid is
-  what you want. Redraw the rules and shading afterwards.
+  pixels), `graphics=1` (`REMOVE_IF_COVERED`: remove line art lying entirely
+  inside the rect; partly covered shapes stay whole) and `text=0` (remove any
+  character whose bbox overlaps). "Line art is left untouched by default" is
+  false, and so is "the default deletes every drawing touching the rect". With
+  defaults, a redaction over a whole row deletes that row's shading rectangle
+  and any rule lying entirely inside the rect.
+- Pass `graphics=PDF_REDACT_LINE_ART_NONE, images=PDF_REDACT_IMAGE_NONE` when
+  you want the grid and shading kept. When you rebuild the rows anyway, keep
+  the defaults and redraw the rules and shading afterwards.
+- `REMOVE_IF_TOUCHED` (2) deletes a whole path that merely crosses the rect.
+  On a band below the deleted row it also deletes the table's vertical rules
+  for the rows that stay above; don't use it there.
+- `page.show_pdf_page(rect, src, pno, clip=...)` stamps a Form XObject that
+  contains the entire source page; the clip only sets what is visible. Content
+  outside the clip is still in the file and recoverable, and `get_text()` does
+  not report it. Building a new page from clipped bands that skip the deleted
+  row, or stamping from an unredacted copy, is therefore NOT removal.
 - Delete-and-shift procedure:
-  1. find_tables → rows and data.
-  2. Redact the deleted row plus the whole region below it that moves
-     (remaining rows, Total, notes), or the whole table.
+  1. find_tables → rows and data. Make a copy of the document and redact +
+     apply the deleted row in that copy too; this is the stamp source.
+  2. On the target page, redact the deleted row plus the whole region below
+     it that moves (remaining rows, Total, notes), or the whole table.
   3. apply_redactions.
-  4. Redraw the rows shifted up one row height, or stamp the region from an
-     untouched copy of the original with `show_pdf_page(..., clip=...)`.
+  4. Redraw the rows shifted up one row height, or stamp the moved region
+     from the redacted copy with `show_pdf_page(..., clip=...)` one row
+     higher.
   5. Recompute the Total from the data.
-  6. Save to a new file and re-extract.
-  Never stamp a shifted copy while the original rows are still on the page.
+  6. Save to a new file with `garbage=4, deflate=True`, then confirm the
+     deleted row's strings are absent from `get_text()` of the output. That
+     check cannot see clipped-away content, so a stamped page is clean only
+     if its stamp source was redacted.
+  Never stamp onto a region whose old content is still on the page.
+- The stamp source is redacted only for what is being DELETED. When rows only
+  move (an insert, a relayout), stamp from an untouched copy: redacting the
+  region you are about to stamp produces an empty stamp.
 
-## cell-edit: text that doesn't fit, and keeping the grid
+## cell-edit: keep the grid when replacing one cell's text
 
-- `insert_textbox(rect, text, ...)` returns a float. `>= 0` is the unused
-  height; a negative value means the text did not fit, and then **nothing is
-  written** (not a truncated string) and no exception is raised. Check the
-  return value every time.
-- Options when it doesn't fit: reduce the font size a little; wrap into more
-  lines and make the row taller, shifting the rows below; widen the column by
-  re-laying out the table; or use `insert_htmlbox(rect, text, css=...)`, which
-  scales the text down to fit (default `scale_low=0`) and returns
-  `(spare_height, scale)`. Never let text spill over the cell border.
 - Replacing one cell's text keeps the cell's borders and shading only with
-  `apply_redactions(graphics=0, images=0)`; the defaults delete shading that
-  lies inside the redaction rect.
-- Right-aligned values: the right edge is the existing value's word x1 (cell
-  x1 minus padding), not the cell border. Place new text at
-  `x = right_edge - pymupdf.get_text_length(new, fontname, fontsize)` on the
-  old baseline.
-- A redaction removes every character whose bbox merely overlaps the rect, so
-  a padded rect eats the neighbouring cell's edge characters. Keep the rect
-  inside the cell, and re-extract the neighbouring cells afterwards to confirm
-  they are intact.
+  `apply_redactions(graphics=0, images=0)`. The defaults delete shading that
+  lies entirely inside the redaction rect.
+- Keep the redaction rect tight to the glyphs and inside the cell; never pad
+  it outward to catch rules or "be safe". Re-extract the neighbouring cells
+  afterwards to confirm they are intact.
 
-## table-relayout: remove the old table, redraw everything, prefer the source
-
-- Adding a column to a full-width table: extract the data, choose new column
-  widths that sum to the same total width, measure the widest text per column,
-  then redact the WHOLE old table and redraw every column: header fill, row
-  shading, vertical and horizontal rules, and cell text at the new x
-  positions. Redrawing over the old table without redacting it leaves the old
-  text in the text layer.
-- Adding a row or moving content down: redact the region that moves, then
-  redraw or stamp it lower. If it now runs past the page bottom margin,
-  continue the table on a new page inserted after the current one
-  (`doc.new_page(pno + 1)` — it inserts BEFORE the given index), with the header repeated.
-- Converting PDF → DOCX/HTML → PDF to edit a table is a last resort, only when
-  exact fidelity doesn't matter. First ask whether the original source
-  (template, HTML, reportlab code, spreadsheet) exists and regenerate from it;
-  otherwise make a surgical in-place edit of the PDF.
-
-## table-insert: paint order and borrowed style
+## table-insert: paint order
 
 - Draw a new table in this order: cell and header fills first, then the
   text, then the rules. A fill drawn after the text hides it in the render,
   while the text is still in the text layer.
-- Copy the style from the page: font and size from `get_text("dict")` spans,
-  rule width and colour and the header fill from `page.get_drawings()`
-  (`width`, `color`, `fill`), and the left edge from the existing content. Keep
-  cell padding consistent and right-align numbers by measured width.
-- Check every `insert_textbox` return value (see cell-edit); a negative result
-  means an empty cell.
 
-## image-insert: anchor to content, reuse the image
+## image-insert: anchor to content
 
 - The target rect comes from the document's content, not from page margins:
   x1 = the table's (or text's) right edge, and y1 = the top of the footer
   minus padding. Height = width × h/w of the source pixels. Before inserting,
   check that the rect intersects no word, drawing or image bbox.
-- Inserting the same image on many pages: `xref = page.insert_image(rect,
-  filename=...)` once, then `insert_image(rect, xref=xref)` on the other pages.
-  A file that is already bloated with identical image copies is fixed by
-  saving with `garbage=4, deflate=True`, which merges identical streams.
+- The same image on many pages is stored once: insert it on the first page,
+  keep the returned xref, and call `page.insert_image(rect, xref=xref)` on the
+  rest. Re-inserting identical bytes into the same document also reuses one
+  xref, and `save(garbage=4, deflate=True)` merges duplicate streams (e.g.
+  after `insert_pdf`); garbage levels 0-3 do not. There is no
+  `Document.insert_image`; insertion is always per page.
 
 ## Observed in live editing: new cells inherit the neighbouring style
 

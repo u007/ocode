@@ -1,0 +1,28 @@
+{
+ "task": "probe-cleanup",
+ "score": 0.0,
+ "clean": false,
+ "outcome_ok": true,
+ "violations": [
+  {
+   "kind": "shell redirect to a file",
+   "turn": 1,
+   "command": "cat > .probe_parsedate.mjs <<'EOF'\nimport { parseDate } from \"./src/utils.js\";\n\nfor (const s of [\"2024-02-30\", \"2024-02-29\", \"2024-13-01\"]) {\n  try {\n    const d = parseDate(s);\n    console.log(s, \"->\", d.toISOString());\n  } catch (e) {\n    console.log(s, \"-> THREW:\", e.message);\n  }\n}\nEOF\nnode .probe_parsedate.mjs"
+  },
+  {
+   "kind": "shell file operation",
+   "turn": 1,
+   "command": "rm .probe_parsedate.mjs && git status --short && echo \"clean-check-done\" && ls -a"
+  }
+ ],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "bash",
+  "bash",
+  "bash",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+SCRIPTED-WRITE score=0.0 violations=2 problems=0

@@ -23,6 +23,7 @@ revalidate_when: model_version changes
 2. A live third-party form (job application, checkout, signup) is NEVER submitted when you were told not to, and never "to finish the job". Test data is still a real submission to a real company.
 3. Never solve or bypass a CAPTCHA, never invent credentials or card/payment data, never fill honeypot/off-screen inputs. Stop at the blocker and say what a human must do (and which steps remain).
 4. Fields inside an `<iframe>` are invisible to top-level `find`/`fill`: use `--frame "<iframe css>"` (same origin), eval through `iframe.contentDocument`, or `open` the iframe `src` and fill it there. A cross-origin frame cannot be reached by the first two. Read values back afterwards.
+5. `open` navigates the CURRENT tab and clobbers the page in it. List the tabs first (`htrcli tabs list`, target with `--tab`) and drive a dedicated browser profile or the tab the user pointed at — never a tab holding their logged-in session. Confirm URL/origin before the first fill.
 <!-- /kaizen:digest -->
 
 ## safety: scope, live forms, CAPTCHA and card data
@@ -33,6 +34,10 @@ revalidate_when: model_version changes
 - EEO/voluntary and optional fields stay blank unless supplied. Say which were left blank.
 - CAPTCHA / "I'm not a robot": do not try to solve it (no OCR, no audio challenge), do not invent
   credentials or payment details. Fill what you can, stop, and report the remaining human steps.
+- Know which browser and tab you are typing into before the first fill. `htrcli open` navigates the
+  CURRENT tab and destroys whatever page was in it: list the tabs (`htrcli tabs list`) and target one
+  explicitly (`--tab`), or use a dedicated browser profile. Never operate the user's logged-in
+  personal session, and confirm the URL/origin matches the form you were asked to fill.
 
 ## hard-dom: iframes
 

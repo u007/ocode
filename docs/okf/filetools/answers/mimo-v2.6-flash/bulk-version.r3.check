@@ -1,0 +1,35 @@
+{
+ "task": "bulk-version",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [],
+ "problems": [],
+ "tools": [
+  "grep",
+  "glob",
+  "read",
+  "read",
+  "read",
+  "read",
+  "read",
+  "read",
+  "read",
+  "read",
+  "read",
+  "glob",
+  "grep",
+  "grep",
+  "multi_file_edit",
+  "multi_file_edit",
+  "grep",
+  "grep",
+  "bash",
+  "read"
+ ],
+ "file_tool_errors": [
+  "Error: edit 1: missing required field(s); each edit needs path, search, replace \u2014 got oldString/newString, which is the multiedit shape (top-level file_path). Retry multi_file_edit with path/search/re"
+ ]
+}
+PASS score=1.0 violations=0 problems=0

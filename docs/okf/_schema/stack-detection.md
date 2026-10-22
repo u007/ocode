@@ -59,6 +59,7 @@ cannot drift silently in either direction.
 | rust     | `file: Cargo.toml`                                |
 | pdf      | `file: *.pdf`, `*/*.pdf`, `*/*/*.pdf` (no `**` in Go glob) — **information only**, `mode: universal`, not a gate |
 | webforms | none — `mode: universal` (web forms live on any URL; nothing in a repo can detect the task) |
+| filetools | none — `mode: universal` (file edits happen in every repo; live-probe corpus) |
 | docx     | `file: *.docx`, `*.doc`, each at root, `*/`, `*/*/` (legacy `.doc` edited after conversion) |
 | pptx     | `file: *.pptx`, `*.ppt`, each at root, `*/`, `*/*/` (legacy `.ppt` edited after conversion) |
 
@@ -70,7 +71,7 @@ A derived skill `derived/<stack>.<model_id>.SKILL.md` activates when **both**:
 2. the active model's **canonical id** exactly equals the skill's `tuned_for`.
 
 **Exception — universal corpora.** Gate 1 does not apply to a corpus with
-`detection.mode: universal` (`conduct`, `hallucination`, `pdf`, `webforms`): it is admitted
+`detection.mode: universal` (`conduct`, `filetools`, `hallucination`, `pdf`, `webforms`): it is admitted
 on gate 2 alone. The universal set is the named package-level `universalStacks`
 map in `internal/skill/loader.go`, consulted by `stackActive` — a new universal
 corpus must be added there. The two reasons a corpus earns a place:

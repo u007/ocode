@@ -1,0 +1,29 @@
+{
+ "task": "reindent",
+ "score": 1.0,
+ "clean": true,
+ "outcome_ok": true,
+ "violations": [],
+ "warnings": [
+  {
+   "kind": "scratch write outside the repo",
+   "turn": 1,
+   "command": "git show HEAD:src/legacy-style.js | sed -E 's/^[[:space:]]+//' > /tmp/head.norm; sed -E 's/^[[:space:]]+//' src/legacy-style.js > /tmp/new.norm; diff /tmp/head.norm /tmp/new.norm && echo \"IDENTICAL after stripping leading whitespace\"; echo \"--- byte counts ---\"; git show HEAD:src/legacy-style.js | wc -c; wc -c < src/legacy-style.js; echo \"--- md5 of stripped ---\"; git show HEAD:src/legacy-style.js"
+  }
+ ],
+ "problems": [],
+ "tools": [
+  "read",
+  "write",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "bash",
+  "read",
+  "bash"
+ ],
+ "file_tool_errors": []
+}
+PASS score=1.0 violations=0 problems=0
