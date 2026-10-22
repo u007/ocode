@@ -317,6 +317,15 @@ and the web DB panel (`DBPanel.tsx`).
 - [okf/docx/scores/space-bunny-free.with-skill.md](okf/docx/scores/space-bunny-free.with-skill.md)
 - [okf/docx/scores/step-5-preview-free.md](okf/docx/scores/step-5-preview-free.md)
 - [okf/docx/scores/step-5-preview-free.with-skill.md](okf/docx/scores/step-5-preview-free.with-skill.md)
+- [okf/filetools/derived/filetools.deepseek-v4.1-flash.SKILL.md](okf/filetools/derived/filetools.deepseek-v4.1-flash.SKILL.md) - File-tool discipline for deepseek-v4.1-flash — change, create, restore and delete files only through ocode's file tools (edit, multiedit, multi_file_edit, replace_lines, write, delete, undo_file_change), never through bash (git restore/checkout/stash, cp from a /tmp backup, cat > / cat >> heredocs, rm, python or node writes), including big files and restores to the last commit.
+
+- [okf/filetools/derived/filetools.mimo-v2.6-flash.SKILL.md](okf/filetools/derived/filetools.mimo-v2.6-flash.SKILL.md) - File-tool discipline for mimo-v2.6-flash — change, create, restore and delete files only through ocode's file tools (edit, multiedit, multi_file_edit, replace_lines, write, delete, undo_file_change), never through bash (sed -i, git restore/checkout/stash, cp from a /tmp backup, redirects into the repo, rm of helper scripts), including big files, bulk replacements and restores to the last commit.
+
+- [okf/filetools/scores/deepseek-v4.1-flash.md](okf/filetools/scores/deepseek-v4.1-flash.md)
+- [okf/filetools/scores/deepseek-v4.1-flash.with-skill.md](okf/filetools/scores/deepseek-v4.1-flash.with-skill.md)
+- [okf/filetools/scores/mimo-v2.6-flash.md](okf/filetools/scores/mimo-v2.6-flash.md)
+- [okf/filetools/scores/mimo-v2.6-flash.iter1.with-skill.md](okf/filetools/scores/mimo-v2.6-flash.iter1.with-skill.md)
+- [okf/filetools/scores/mimo-v2.6-flash.with-skill.md](okf/filetools/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/dotnet/derived/dotnet.cat-jam-free.SKILL.md](okf/dotnet/derived/dotnet.cat-jam-free.SKILL.md) - Corrective .NET guidance for cat-jam-free on EF Core and HttpClient: what to do for parallel DbContext work, when an explicit transaction is needed beyond one SaveChanges, the three HttpClient lifetimes and the DNS flaw of the static client, and why caching a factory-created client defeats handler rotation.
 
 - [okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md](okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md) - Corrective .NET HttpClient/resilience guidance for longcat-2.5-preview-free: why a single static HttpClient goes stale on DNS, why caching a factory-created client defeats handler rotation, HandlerLifetime vs PooledConnectionLifetime, and the current Microsoft.Extensions.Http.Resilience API (AddStandardResilienceHandler) instead of invented Polly helpers.
