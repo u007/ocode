@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -432,7 +433,7 @@ func (t GrepTool) Parallel() bool { return true }
 func (t GrepTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "grep",
-		"description": "Fast plain text/regex search across file contents. Use this for exact strings, logs, config keys, comments, and non-structural matches. For symbol-name semantic queries (references/definition/callers), use the 'ast' tool when enabled. To search for multiple distinct patterns, call this tool once per pattern as separate parallel calls in the same message — do not chain multiple searches in one bash command.",
+		"description": "Fast plain text/regex search across file contents. Use this for exact strings, logs, config keys, comments, and non-structural matches. When ripgrep is installed the search runs through it: files ignored by .gitignore/.ignore (build output, vendored or generated code) and node_modules are skipped, and patterns use ripgrep (Rust) regex syntax; without ripgrep a built-in walker runs. For symbol-name semantic queries (references/definition/callers), use the 'ast' tool when enabled. To search for multiple distinct patterns, call this tool once per pattern as separate parallel calls in the same message — do not chain multiple searches in one bash command.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -474,9 +475,14 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 func (t GrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	// With ripgrep installed, grep runs through it: same params and output
 	// shape, but the search uses rg's engine instead of the in-process walk
-	// below. That walk is the fallback for machines without rg.
+	// below (the Definition description discloses the behavioural differences).
+	// The walk is the fallback for machines without rg, and for an rg that
+	// cannot be started.
 	if rgBinResolver() != "" {
-		return (&RgrepTool{}).ExecuteCtx(ctx, args)
+		out, err := (&RgrepTool{}).run(ctx, args, "grep")
+		if !errors.Is(err, errRgUnavailable) {
+			return out, err
+		}
 	}
 	defer maybeFreeOSMemory()
 	var params grepParams

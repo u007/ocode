@@ -1,6 +1,12 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { COMMANDS, loadDynamicCommands, reloadDynamicCommands, useCommands } from "./commands";
+import {
+  COMMANDS,
+  loadDynamicCommands,
+  reloadDynamicCommands,
+  setDynamicCommandsScope,
+  useCommands,
+} from "./commands";
 import { api } from "../../api/client";
 
 // The slash list is a discovery surface: when a skill is disabled from the chat
@@ -70,5 +76,35 @@ describe("reloadDynamicCommands", () => {
     await waitFor(() => {
       expect(screen.getByTestId("probe").textContent).not.toContain("/skill-one");
     });
+  });
+});
+
+describe("setDynamicCommandsScope", () => {
+  it("fetches the skill list for the active project and skips an unchanged scope", async () => {
+    vi.mocked(api.listSkills).mockClear();
+    vi.mocked(api.listSkills).mockResolvedValue([{ name: "proj-skill", description: "s" }]);
+
+    await setDynamicCommandsScope({ host: "h1", projectPath: "/work/a" });
+    expect(api.listSkills).toHaveBeenLastCalledWith("h1", "/work/a");
+    expect(commandNames()).toContain("/proj-skill");
+
+    // Same scope again (e.g. an effect re-running): no refetch.
+    const calls = vi.mocked(api.listSkills).mock.calls.length;
+    await setDynamicCommandsScope({ host: "h1", projectPath: "/work/a" });
+    expect(vi.mocked(api.listSkills).mock.calls.length).toBe(calls);
+
+    // A different project scopes the list to it, dropping the previous one's skill.
+    vi.mocked(api.listSkills).mockResolvedValue([{ name: "other-skill", description: "s" }]);
+    await setDynamicCommandsScope({ host: "h1", projectPath: "/work/b" });
+    expect(api.listSkills).toHaveBeenLastCalledWith("h1", "/work/b");
+    expect(commandNames()).not.toContain("/proj-skill");
+    expect(commandNames()).toContain("/other-skill");
+
+    // A reload with no scope argument keeps the current scope.
+    await reloadDynamicCommands();
+    expect(api.listSkills).toHaveBeenLastCalledWith("h1", "/work/b");
+
+    // Leave the shared module state unscoped for other tests.
+    await reloadDynamicCommands({});
   });
 });

@@ -49,9 +49,13 @@ var (
 //
 // A read error degrades to whatever layer could be read (never to "disable
 // everything"): this sits on the skill loading path, and failing closed here
-// would silently empty every catalog. The skill package has no logger, so the
-// error is surfaced to the caller that cares (the sidebar) by
-// config.EffectiveDisabledSkills.
+// would silently empty every catalog. A DEGRADED result is never cached as if it
+// were the truth: a transient read of a file mid-edit would otherwise re-advertise
+// every disabled skill for the whole TTL, and flip the catalog (and so rebuild the
+// agent) twice. While reads fail, the last good set stays in force; with none yet
+// it is returned uncached so the next call retries. The skill package has no
+// logger, so the error itself is surfaced to the caller that cares (the sidebar)
+// by config.EffectiveDisabledSkills.
 func DisabledForRoot(root string) map[string]bool {
 	key := prefsRoot(root)
 	disabledCacheMu.Lock()
@@ -62,14 +66,24 @@ func DisabledForRoot(root string) map[string]bool {
 	}
 	disabledCacheMu.Unlock()
 
-	disabled, _ := config.EffectiveDisabledSkills(key)
+	disabled, err := config.EffectiveDisabledSkills(key)
 	if disabled == nil {
 		disabled = map[string]bool{}
 	}
 
 	disabledCacheMu.Lock()
+	defer disabledCacheMu.Unlock()
+	if err != nil {
+		if prev, ok := disabledCache[key]; ok {
+			// Keep the last good set, and re-stamp it so a persistently broken
+			// file is retried once per TTL rather than on every call.
+			prev.ts = time.Now()
+			disabledCache[key] = prev
+			return prev.disabled
+		}
+		return disabled
+	}
 	disabledCache[key] = disabledCacheEntry{disabled: disabled, ts: time.Now()}
-	disabledCacheMu.Unlock()
 	return disabled
 }
 

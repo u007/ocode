@@ -9305,7 +9305,6 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		// mid-stream is exactly the point: arming or disarming auto-resume takes
 		// effect on the very turn at risk of being cut off.
 		cmd == "/localmodel" ||
-		cmd == "/localserver" ||
 		cmd == "/autocontinue" ||
 		// /explorer-model and /context-model are synchronous local config
 		// commands like /small-model and /recap: they never start an agent
@@ -9333,6 +9332,11 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// the stream is busy. Changing the persistent limit is deliberately queued,
 	// like the other mid-stream state mutations.
 	if cmd == "/agents" && (len(args) == 0 || args[0] == "status") {
+		isInstantCmd = true
+	}
+	// /localserver status|path only inspect the cached binary and run on a
+	// tea.Cmd; fix|reinstall replace it on disk and queue behind the turn.
+	if cmd == "/localserver" && localServerIsReadOnly(args) {
 		isInstantCmd = true
 	}
 	// /goal status and /goal clear are local and run mid-stream. Any other
@@ -10726,6 +10730,9 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 }
 
 // handleLocalServerCmd implements /localserver status|fix|reinstall|path.
+// Every subcommand does its disk/exec work on a returned tea.Cmd and reports
+// through localServerActionMsg: status execs `llama-server --version` (5s
+// probe) and must never run on the Update goroutine.
 func (m *model) handleLocalServerCmd(args []string) tea.Cmd {
 	cacheDir := agent.DiscoveryCacheDir()
 	sub := ""
@@ -10734,19 +10741,19 @@ func (m *model) handleLocalServerCmd(args []string) tea.Cmd {
 	}
 	switch sub {
 	case "", "status":
-		status := discovery.LocalServerStatus(cacheDir)
-		m.messages = append(m.messages, message{role: roleAssistant, text: status})
-		return nil
-	case "path":
-		p := discovery.LocalServerBinaryPath(cacheDir)
-		if p == "" {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Local server binary not found in cache."})
-		} else {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Local server binary: " + p})
+		return func() tea.Msg {
+			return localServerActionMsg{text: discovery.LocalServerStatus(cacheDir)}
 		}
-		return nil
+	case "path":
+		return func() tea.Msg {
+			if p := discovery.LocalServerBinaryPath(cacheDir); p != "" {
+				return localServerActionMsg{text: "Local server binary: " + p}
+			}
+			return localServerActionMsg{text: "Local server binary not found in cache."}
+		}
 	case "fix", "reinstall":
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Reinstalling local embed server (this may take a minute)..."})
+		m.rerenderTranscriptAndMaybeScroll()
 		return func() tea.Msg {
 			if err := discovery.ReinstallLocalServer(cacheDir); err != nil {
 				return localServerActionMsg{text: "", err: err}
@@ -10755,8 +10762,24 @@ func (m *model) handleLocalServerCmd(args []string) tea.Cmd {
 		}
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localserver [status|fix|reinstall|path]"})
+		m.rerenderTranscriptAndMaybeScroll()
 		return nil
 	}
+}
+
+// localServerIsReadOnly reports whether a /localserver invocation only
+// inspects state (status, path, no argument). Those may run mid-stream;
+// fix/reinstall swap the llama-server install on disk and queue behind the
+// turn like the other persistent-state mutations.
+func localServerIsReadOnly(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	switch strings.ToLower(args[0]) {
+	case "status", "path":
+		return true
+	}
+	return false
 }
 
 // handleLocalModelCmd implements /localmodel list|add|enable|disable|limit|status.

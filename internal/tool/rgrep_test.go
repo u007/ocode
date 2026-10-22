@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // rgAvailable reports whether a ripgrep binary resolves (PATH or fallback).
@@ -350,5 +351,74 @@ func TestRgFirstLines(t *testing.T) {
 	}
 	if len(rgFirstLines(strings.Repeat("x", 600))) > 500 {
 		t.Fatal("stderr error text must be bounded")
+	}
+}
+
+// grep delegating to ripgrep must keep reporting itself as "grep": the judge
+// ledger and error text are keyed on the tool the model actually called.
+func TestGrepDelegationKeepsGrepIdentity(t *testing.T) {
+	if !rgAvailable() {
+		t.Skip("rg not installed")
+	}
+	_, err := GrepTool{}.ExecuteCtx(context.Background(), json.RawMessage(`{"pattern":"   "}`))
+	if err == nil || !strings.HasPrefix(err.Error(), "grep:") {
+		t.Fatalf("expected a grep:-prefixed error, got %v", err)
+	}
+	_, err = (&RgrepTool{}).ExecuteCtx(context.Background(), json.RawMessage(`{"pattern":"   "}`))
+	if err == nil || !strings.HasPrefix(err.Error(), "rgrep:") {
+		t.Fatalf("expected an rgrep:-prefixed error, got %v", err)
+	}
+}
+
+// A cached rg path that no longer executes must fall back to the in-process
+// walk instead of failing every grep call.
+func TestGrepFallsBackWhenRgBinaryVanishes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := rgBinResolver
+	rgBinResolver = func() string { return filepath.Join(dir, "no-such-rg") }
+	t.Cleanup(func() { rgBinResolver = prev })
+
+	ctx := WithWorkDir(context.Background(), dir)
+	out, err := GrepTool{}.ExecuteCtx(ctx, json.RawMessage(`{"pattern":"needle","intent":"find needle","output_mode":"files_with_matches"}`))
+	if err != nil {
+		t.Fatalf("grep with a vanished rg: %v", err)
+	}
+	if !strings.Contains(out, "a.txt") {
+		t.Fatalf("fallback walk did not find the file: %q", out)
+	}
+}
+
+func TestCachedRgBinRechecksAMiss(t *testing.T) {
+	rgBinMu.Lock()
+	prevPath, prevAt := rgBinPath, rgBinCheckedAt
+	rgBinPath, rgBinCheckedAt = "", time.Now().Add(-2*rgBinRecheckAfter)
+	rgBinMu.Unlock()
+	t.Cleanup(func() {
+		rgBinMu.Lock()
+		rgBinPath, rgBinCheckedAt = prevPath, prevAt
+		rgBinMu.Unlock()
+	})
+
+	// A miss older than the recheck window is probed again, not trusted.
+	got := cachedRgBin()
+	if want := resolveRgBin(); got != want {
+		t.Fatalf("cachedRgBin after an expired miss = %q, want a fresh probe %q", got, want)
+	}
+	// A hit is cached until the path goes stale, then forgotten.
+	rgBinMu.Lock()
+	rgBinPath = "/cached/rg"
+	rgBinMu.Unlock()
+	if cachedRgBin() != "/cached/rg" {
+		t.Fatal("a found binary must stay cached")
+	}
+	forgetRgBin("/cached/rg")
+	rgBinMu.Lock()
+	cleared := rgBinPath == ""
+	rgBinMu.Unlock()
+	if !cleared {
+		t.Fatal("forgetRgBin did not clear the stale path")
 	}
 }

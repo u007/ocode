@@ -9,7 +9,7 @@ import { truncateTitle } from "../../lib/title";
 import { setSpeechSummaryConfig, speechSummaryDisplay } from "../../lib/speechSummaryConfig";
 import { useSpeechOptional } from "../Speech/SpeechProvider";
 import type { AgentInfo, LSPStatus, MCPStatus, ManageableSkill } from "../../api/types";
-import { reloadDynamicCommands } from "../Chat/commands";
+import { reloadDynamicCommands, setDynamicCommandsScope } from "../Chat/commands";
 import PluginsPanel from "./PluginsPanel";
 import ReasoningLevelSelector from "./ReasoningLevelSelector";
 import {
@@ -334,6 +334,13 @@ export default function CoworkSidebar({
       .getManageableSkills?.(sessionHost, activeProject?.path)
       ?.then((res) => {
         if (!cancelled) setSkills(res.skills ?? []);
+        // The slash list follows the active project, so a skill disabled for
+        // THIS project is not offered in its slash menu.
+        if (!cancelled) {
+          void setDynamicCommandsScope({ host: sessionHost, projectPath: activeProject?.path }).catch(
+            console.error,
+          );
+        }
       })
       ?.catch((e) => {
         console.error("failed to load skills", e);
@@ -833,7 +840,9 @@ export default function CoworkSidebar({
       setSkills(fresh.skills ?? []);
       // A disabled skill must also disappear from the slash commands; a
       // re-enabled one must come back.
-      void reloadDynamicCommands().catch(console.error);
+      void reloadDynamicCommands({ host: sessionHost, projectPath: activeProject?.path }).catch(
+        console.error,
+      );
     } catch (e) {
       console.error("toggle skill error", e);
       reportActionError(e, `Toggling skill ${name}`);

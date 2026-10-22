@@ -4,6 +4,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 type ModelPricing struct {
@@ -13,9 +14,46 @@ type ModelPricing struct {
 	CacheWritePerMillion float64
 }
 
-// unknownModelWarned records model names already reported by Lookup's
-// unknown-model warning, so each one logs once per process.
-var unknownModelWarned sync.Map
+// Unknown-model warnings are rate-limited, not once-ever, and bounded:
+//   - a model re-warns after unknownWarnTTL, so a model that gained pricing and
+//     later regressed to unknown (a registry refresh failure) is reported again;
+//   - at most unknownWarnMax names are remembered, because the keys are
+//     caller-supplied (user-typed or per-request model strings) and a
+//     long-lived server must not grow without bound.
+const (
+	unknownWarnTTL = time.Hour
+	unknownWarnMax = 256
+)
+
+var (
+	unknownWarnMu sync.Mutex
+	unknownWarned = map[string]time.Time{}
+)
+
+// shouldWarnUnknownModel reports whether model's unknown-pricing warning is due,
+// and records it. Lookup runs on every LLM call, so the common case is a map hit
+// under a short mutex.
+func shouldWarnUnknownModel(model string, now time.Time) bool {
+	unknownWarnMu.Lock()
+	defer unknownWarnMu.Unlock()
+	if at, ok := unknownWarned[model]; ok && now.Sub(at) < unknownWarnTTL {
+		return false
+	}
+	if len(unknownWarned) >= unknownWarnMax {
+		for name, at := range unknownWarned {
+			if now.Sub(at) >= unknownWarnTTL {
+				delete(unknownWarned, name)
+			}
+		}
+		if len(unknownWarned) >= unknownWarnMax {
+			// Every entry is fresh: forget them all rather than grow. The worst
+			// case is a repeat warning, never unbounded memory.
+			clear(unknownWarned)
+		}
+	}
+	unknownWarned[model] = now
+	return true
+}
 
 // registryLookup, when set, is consulted before the hardcoded fallback map.
 // The agent package registers its models.dev-backed lookup here at init so
@@ -125,8 +163,8 @@ func Lookup(model string) (ModelPricing, bool) {
 	// Model not found in any source — log a warning so users aren't surprised
 	// by silent $0 pricing. The caller always gets false and can decide how to
 	// handle it (e.g. fall back to default_cost, show "unknown" in UI).
-	// Lookup runs on every LLM call, so warn once per model name.
-	if _, seen := unknownModelWarned.LoadOrStore(model, struct{}{}); !seen {
+	// Lookup runs on every LLM call, so the warning is rate-limited per model.
+	if shouldWarnUnknownModel(model, time.Now()) {
 		log.Printf("[PRICING] unknown model %q — no pricing data found; falling back to $0", model)
 	}
 	return ModelPricing{}, false

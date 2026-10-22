@@ -42,7 +42,10 @@ timestamp: 2026-10-07T12:40:26Z
     SAME side-query mechanism (see below).
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/doc-sync`,
-    `/agents limit <n>`.
+    `/agents limit <n>`, `/localserver fix|reinstall` (replaces the cached
+    llama-server install on disk). `/localserver` with no argument, `status` or
+    `path` is instant through a separate check after the chain
+    (`localServerIsReadOnly`); it does its work on a `tea.Cmd`.
   - **`/goal` and `/orchestrate` are split.** `/goal` with no argument or a
     lone clear verb (`clear`, `stop`, `off`, `reset`, `none`, `cancel`) is
     instant through a separate `cmd == "/goal"` check after the chain

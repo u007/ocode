@@ -1098,7 +1098,7 @@ function HomeApp() {
         getCommandContext: (name, args, project, host) => api.getCommandContext(name, args, project, host),
         getSessionContext: (id, host) => api.getSessionContext(id, host),
         getLSPStatuses: (host) => api.getLSPStatuses(host),
-        listSkills: () => api.listSkills(),
+        listSkills: (host, projectPath) => api.listSkills(host, projectPath),
         getMCP: (host, sessionId) => api.getMCP(host, sessionId),
         startMCPAuth: (name, host) => api.startMCPAuth(name, host),
         getMCPAuthStatus: (jobId, host) => api.getMCPAuthStatus(jobId, host),

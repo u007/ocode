@@ -38,12 +38,23 @@ func localServerBinaryPath(cacheDir string, man ServerManifest) string {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "llama-") {
 			continue
 		}
-		candidate := filepath.Join(binDir, e.Name(), "llama-server")
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate
+		for _, name := range llamaServerNames() {
+			candidate := filepath.Join(binDir, e.Name(), name)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate
+			}
 		}
 	}
 	return ""
+}
+
+// llamaServerNames lists the file names the llama-server binary can have in an
+// extracted release: the Windows build carries an .exe suffix.
+func llamaServerNames() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"llama-server.exe", "llama-server"}
+	}
+	return []string{"llama-server"}
 }
 
 // LocalServerBinaryPath is the exported form, using CurrentManifest().
@@ -127,13 +138,28 @@ func LocalServerStatus(cacheDir string) string {
 	return b.String()
 }
 
-// ReinstallLocalServer removes the cached local embed server binary and
-// re-downloads + re-extracts it from the pinned archive. It returns nil on
-// success.
+// ensureArtifactFn is the artifact downloader; a package var so tests can
+// simulate a download without the network.
+var ensureArtifactFn = EnsureArtifact
+
+// renameFn is os.Rename; a package var so tests can inject a mid-swap failure.
+var renameFn = os.Rename
+
+// stagingPrefix names the scratch directories a reinstall creates inside the
+// cache dir. The fallback binary scan only looks at llama-* entries, so these
+// never read as an installed version.
+const stagingPrefix = ".reinstall-"
+
+// ReinstallLocalServer re-downloads and re-extracts the pinned local embed
+// server archive. The new tree is built in a scratch directory first and only
+// then swapped over the installed one, so a failed download (offline, bad SHA)
+// leaves the previous install untouched rather than turning a degraded install
+// into no install. It returns nil on success.
+//
+// It holds localMu (so a concurrent EnsureLocalServer in this process waits
+// instead of spawning from a half-swapped tree) and the cross-process embed
+// start lock (so another ocode cannot spawn mid-swap).
 func ReinstallLocalServer(cacheDir string) error {
-	// Drop the in-process handle so the next EnsureLocalServer re-probes
-	// instead of reusing a handle that points at the now-deleted binary.
-	StopLocalServer()
 	man, ok := CurrentManifest()
 	if !ok {
 		return fmt.Errorf("no local server manifest for %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -143,31 +169,144 @@ func ReinstallLocalServer(cacheDir string) error {
 	}
 	binDir := localServerBinDir(cacheDir, man)
 
-	// Remove extracted version directories (llama-*) and the marker for each
-	// artifact's Dest.
-	entries, err := os.ReadDir(binDir)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read cache dir: %w", err)
+	localMu.Lock()
+	defer localMu.Unlock()
+	// Drop the in-process handle so the next EnsureLocalServer re-probes
+	// instead of reusing a handle that points at the replaced binary.
+	localBase, localModelID = "", ""
+
+	acquired, release, err := acquireEmbedStartLock(cacheDir)
+	if err != nil {
+		return err
 	}
-	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "llama-") {
-			if err := os.RemoveAll(filepath.Join(binDir, e.Name())); err != nil {
-				return fmt.Errorf("remove %s: %w", e.Name(), err)
+	if !acquired {
+		return fmt.Errorf("another ocode process is starting the local embed server; try again in a moment")
+	}
+	defer release()
+
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+	removeStaleStaging(binDir)
+
+	stage, err := os.MkdirTemp(binDir, stagingPrefix+"stage-")
+	if err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
+	defer os.RemoveAll(stage)
+
+	// Only archive artifacts are re-extracted: the raw model files (.gguf) are
+	// large, SHA-checked by EnsureArtifact and unaffected by a broken binary,
+	// so they are left in place and re-verified after the swap.
+	var raw []Artifact
+	for _, a := range man.Artifacts {
+		if a.Archive == ArchiveNone {
+			raw = append(raw, a)
+			continue
+		}
+		if err := ensureArtifactFn(a, stage); err != nil {
+			return fmt.Errorf("reinstall %s: %w", a.Dest, err)
+		}
+	}
+
+	// Everything the new install replaces: every extracted llama-* version dir
+	// (a version bump leaves old ones behind) and each archive's marker.
+	var retire []string
+	if entries, err := os.ReadDir(binDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "llama-") {
+				retire = append(retire, e.Name())
 			}
 		}
 	}
 	for _, a := range man.Artifacts {
-		marker := markerPath(filepath.Join(binDir, a.Dest))
-		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove marker %s: %w", marker, err)
+		if a.Archive != ArchiveNone {
+			retire = append(retire, filepath.Base(markerPath(a.Dest)))
+		}
+	}
+	if err := installStaged(binDir, stage, retire); err != nil {
+		return err
+	}
+
+	for _, a := range raw {
+		if err := ensureArtifactFn(a, binDir); err != nil {
+			return fmt.Errorf("reinstall %s: %w", a.Dest, err)
+		}
+	}
+	return nil
+}
+
+// removeStaleStaging deletes scratch directories a crashed reinstall left
+// behind. The caller holds the embed start lock, so none is in use.
+func removeStaleStaging(binDir string) {
+	entries, err := os.ReadDir(binDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), stagingPrefix) {
+			os.RemoveAll(filepath.Join(binDir, e.Name()))
+		}
+	}
+}
+
+// installStaged swaps the top-level entries of stage into binDir. Entries in
+// retire, and any installed entry the stage would overwrite, are first moved
+// aside; if any rename fails the moves are undone so the previous install
+// stays intact. A rename of a running executable fails on Windows, which
+// surfaces here as an error before anything is lost.
+func installStaged(binDir, stage string, retire []string) error {
+	staged, err := os.ReadDir(stage)
+	if err != nil {
+		return fmt.Errorf("read staging dir: %w", err)
+	}
+	backup, err := os.MkdirTemp(binDir, stagingPrefix+"old-")
+	if err != nil {
+		return fmt.Errorf("create backup dir: %w", err)
+	}
+	// On success this holds the replaced install; on rollback it is empty.
+	defer os.RemoveAll(backup)
+
+	names := append([]string(nil), retire...)
+	for _, e := range staged {
+		names = append(names, e.Name())
+	}
+	var retired, installed []string
+	rollback := func() {
+		for _, n := range installed {
+			os.RemoveAll(filepath.Join(binDir, n))
+		}
+		for _, n := range retired {
+			renameFn(filepath.Join(backup, n), filepath.Join(binDir, n))
 		}
 	}
 
-	// Re-download all artifacts.
-	for _, a := range man.Artifacts {
-		if err := EnsureArtifact(a, binDir); err != nil {
-			return fmt.Errorf("reinstall %s: %w", a.Dest, err)
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			continue
 		}
+		seen[n] = true
+		src := filepath.Join(binDir, n)
+		if _, err := os.Lstat(src); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			rollback()
+			return fmt.Errorf("inspect %s: %w", n, err)
+		}
+		if err := renameFn(src, filepath.Join(backup, n)); err != nil {
+			rollback()
+			return fmt.Errorf("replace %s (is the embed server still running?): %w", n, err)
+		}
+		retired = append(retired, n)
+	}
+	for _, e := range staged {
+		if err := renameFn(filepath.Join(stage, e.Name()), filepath.Join(binDir, e.Name())); err != nil {
+			rollback()
+			return fmt.Errorf("install %s: %w", e.Name(), err)
+		}
+		installed = append(installed, e.Name())
 	}
 	return nil
 }
