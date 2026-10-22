@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// Universal corpora are ADMITTED on model match alone, but only conduct and
-// hallucination are force-injected. pdf and webforms are catalog-only
+// Universal corpora are ADMITTED on model match alone, but only conduct,
+// filetools and hallucination are force-injected. pdf and webforms are catalog-only
 // (catalogOnlyStacks): their digest is parsed faithfully, but ForceInjected is
 // false, so every injection consumer (prompt, TUI notice, web badge and row,
 // budget rows) leaves them out of the base prompt while they stay advertised.
@@ -18,6 +18,7 @@ func TestKaizenCatalogOnlyStacksAdvertiseWithoutInjecting(t *testing.T) {
 		wantInjected bool
 	}{
 		{"conduct", true},
+		{"filetools", true},
 		{"hallucination", true},
 		{"pdf", false},
 		{"webforms", false},
