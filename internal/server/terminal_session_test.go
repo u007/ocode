@@ -64,13 +64,14 @@ func TestTerminalWSHistoryCursorReplaysOnlyPostSnapshotBytes(t *testing.T) {
 	if resumed {
 		t.Fatal("fresh terminal must not report resumed=true")
 	}
-	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("echo cursor-before\n")); err != nil {
+	// The command is typed before the shell's readline is active, so the tty
+	// echoes the typed line and readline may echo it again after the prompt. The
+	// quoted "" splits the word in the echo only; sh prints the joined word, so
+	// the marker appears solely in real command output and never in an echo.
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte(`echo cursor-be""fore`+"\n")); err != nil {
 		t.Fatalf("write before snapshot: %v", err)
 	}
-	// The PTY can echo the command before the shell's initial prompt has been
-	// delivered. Wait for both the echoed command and its command output before
-	// taking the durable cursor snapshot.
-	readUntilOccurrences(t, conn, "cursor-before\r\n", 2)
+	readUntilOccurrences(t, conn, "cursor-before\r\n", 1)
 	sess := h.terminalSessions.lookup("term-history-cursor")
 	if sess == nil {
 		t.Fatal("session disappeared before snapshot")
