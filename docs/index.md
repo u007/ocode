@@ -60,6 +60,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [Discovery Web Surfaces](concepts/discovery-web-surfaces.md) - Discovery visibility in the web UI: live transient notices via SSE and runtime status endpoint, with map-race safety rule.
 - [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md) - TypeSafe/Jev relevance judge for doc_search results — filters out-of-scope knowledge docs before get_top body inlining.
 - [Environment Prompt](concepts/environment-prompt.md) - The env block the LLM receives at session start via internal/agent/prompt.go, including the extra Project host line for remote (SSH/WSL) projects and why there is no git branch line.
+- [File Editor Grants — Editor-Only Out-of-Project Access](concepts/file-editor-grants.md) - The editor/preview opens files outside the active project through per-request, in-memory grants separated from the agent's file scope; records the LFI-shaped hole the scope split fixed.
 - [File search result ordering: shortest path first](concepts/file-search-shortest-path-ordering.md) - How file-name search results are ordered: relevance first, then shortest path as tiebreak, with shared Go/TS helpers and explicit carve-outs for content search. Amended 2026-10-20: added what the index contains and why a filter can return fewer matches than expected (walk truncation + virtualizer tail clipping), cross-linked to file-tree-walk-budget.md.
 - [File tree walk: node budget, symlink budget, and truncation](concepts/file-tree-walk-budget.md) - How GET /api/files/tree caps its walk (maxTreeNodes, collective maxSymlinkTreeNodes), visits files before directories, detects symlink cycles, and surfaces truncation — and why a filter can legitimately return fewer matches than the user expects.
 - [Git conflicts and halted-operation recovery (web Git tab)](concepts/git-conflicts-and-operations.md) - Shipped server behavior for conflicted files and halted git operations (phases 01-05): shared transport-neutral state parser/probe, ours/theirs stage semantics and the rebase relabel rule, per-file resolve + operation action matrix, HTTP status-code contract, literal-pathspec + editor suppression, 60s operation timeout, remote SSH/WSL parity, the shipped Git-tab UI (phase 06) and badge sweep (phase 07), the completed phase 07 consumer sweep, and block-by-block resolution of a single file (local projects only, fingerprint-guarded).
@@ -195,7 +196,6 @@ and the web DB panel (`DBPanel.tsx`).
 - [Remote git commit/stash messages must be shell-quoted (remoteGitCommand contract)](gotchas/remote-git-shell-quoting.md) - Free-form git messages and git pathspecs passed to remoteGitCommand must be shell-quoted by the caller; remote lookups against path sets keep the raw spec.
 - [Remote Project Paths Must Not Enter the Local Filesystem Trust Boundary](gotchas/remote-project-path-trust-boundary.md) - Gotcha: remote project paths must not enter the local filesystem trust boundary — now marked Fixed 2026-09-28 with verified anchors.
 - [Remote session listing 404s for tilde-keyed projects](gotchas/remote-session-list-tilde-404.md) - Remote session listing 404'd for every tilde-keyed project: desktop registers ~/path verbatim, host registry holds the expanded path, exact-match gate in HandleListProjectSessions 404'd; fixed via resolveRegisteredProjectRoot (host-side binary).
-- [TUI picked up a stale desktop window profile — expired key on every opencode-go model](gotchas/tui-ignores-desktop-window-profile.md) - The TUI resolved profile credentials from the desktop's window-state.json, so a leftover window entry silently swapped its keys; the TUI now uses the base config unless OCODE_PROFILE is set, and provider env keys outrank profiles there.
 - [Remote SSH chat ignored the desktop active profile — proxy silent on window→profile mapping](gotchas/remote-ssh-chat-profile-not-applied.md) - A desktop profile with a custom key (e.g. opencode-go) applied to local chats but ignored on remote SSH projects — the remote kept using the base key despite the profile's key being synced to the host.
 - [Remote SSH terminal 502s from provisioning and path bugs](gotchas/remote-terminal-502-provisioning.md) - Three reproduced root causes of remote SSH terminal 502s: binary not activated after upload, SSH launch command not detached, and tilde project paths not expanded on the host for terminal endpoints. Plus a bonus stale-registration fix.
 - [Remote Terminal Custom Port Omitted from WebSocket](gotchas/remote-terminal-custom-port-omitted.md) - TerminalPanel propagates remotePort for history restoration but omits it from the live WebSocket connection, breaking non-default SSH port routing.
@@ -223,6 +223,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [TUI copy over SSH never reaches the local clipboard — route every copy through OSC 52 (`copyToClipboard`)](gotchas/tui-clipboard-remote-ssh-osc52.md) - A TUI that copies via a local clipboard utility (pbcopy/xclip/xsel/wl-copy) silently fails on a remote SSH host; route every TUI copy through copyToClipboard → tea.SetClipboard (OSC 52) with the local utility as fallback.
 - [TUI Input Queueing Behind a ! Shell Command — Gates That Only Knew About Streaming](gotchas/tui-input-queueing-behind-shell-command.md) - Input-queue gates only checked m.streaming, so text typed during a ! shell command fell into the 1.5s debounce and fired at the LLM while the shell ran; the queue also never drained on shellFinishedMsg. Four fixes (including drainReplacementQueueIfReady) + shellInFlight() helper + an invariant stated as a named-gate checklist.
 - [TUI Leaves Mouse Tracking On After Silent Exit — Diagnose via tui-crash.log](gotchas/tui-mouse-garbage-after-idle-crash-log.md) - After long idle with two TUI instances, the shell prompt appeared under the still-visible frame and every mouse move printed "35;14;1M" garbage. No panic, no zsh job message, no resume summary. Root cause unconfirmed; fd 2 is now mirrored to ~/.local/share/ocode/logs/tui-crash.log with tty job-control state so the next occurrence self-reports.
+- [TUI picked up a stale desktop window profile — expired key on every opencode-go model](gotchas/tui-ignores-desktop-window-profile.md) - The TUI resolved profile credentials from the desktop's window-state.json, so a leftover window entry silently swapped its keys; the TUI now uses the base config unless OCODE_PROFILE is set, and provider env keys outrank profiles there.
 - [TUI Selection Context Lost on Double Preparation](gotchas/tui-selection-context-lost-on-double-preparation.md) - Confirmed regression: Agent.Step re-prepares TUI-prepared messages with an empty selection and removes the existing [ocode:selection] context.
 - [TUI: skipLLM is not a render gate — fake-agent and cron replies vanish on fresh sessions](gotchas/tui-skipllm-is-not-a-render-gate.md) - Gotcha: renderTranscript in internal/tui/model.go used skipLLM as a "should this render?" predicate, hiding assistant output (fake-agent replies, cron deliveries, LLM errors) on fresh sessions where every message was transient or a user echo. Fix: gate on transient + isCommandHistoryMessage only; skipLLM must never drive rendering.
 - [Two Terminal Emulators Render The Pulse Screen And Disagree](gotchas/pulse-screen-emulator-parity.md) - The Pulse dashboard card replays a terminal log through @xterm/headless; the terminal_screen tool replays it through charmbracelet/x/vt. A 22-case parity run found three disagreements. Two are x/vt bugs and one is a window-start rule that differs between the two paths. Records the decision to keep the card on xterm, the fixes that followed, and the one open gap.
@@ -246,6 +247,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [okf/conduct/scores/cat-jam-free.with-skill.md](okf/conduct/scores/cat-jam-free.with-skill.md)
 - [okf/conduct/scores/deepseek-v4-flash.md](okf/conduct/scores/deepseek-v4-flash.md)
 - [okf/conduct/scores/deepseek-v4.1-flash.md](okf/conduct/scores/deepseek-v4.1-flash.md)
+- [okf/conduct/scores/deepseek-v4.1-flash.with-skill.md](okf/conduct/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/conduct/scores/glm-5.3-flash.md](okf/conduct/scores/glm-5.3-flash.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.md](okf/conduct/scores/longcat-2.5-preview-free.md)
 - [okf/conduct/scores/longcat-2.5-preview-free.rerun-2026-10-05.md](okf/conduct/scores/longcat-2.5-preview-free.rerun-2026-10-05.md)
@@ -318,15 +320,6 @@ and the web DB panel (`DBPanel.tsx`).
 - [okf/docx/scores/space-bunny-free.with-skill.md](okf/docx/scores/space-bunny-free.with-skill.md)
 - [okf/docx/scores/step-5-preview-free.md](okf/docx/scores/step-5-preview-free.md)
 - [okf/docx/scores/step-5-preview-free.with-skill.md](okf/docx/scores/step-5-preview-free.with-skill.md)
-- [okf/filetools/derived/filetools.deepseek-v4.1-flash.SKILL.md](okf/filetools/derived/filetools.deepseek-v4.1-flash.SKILL.md) - File-tool discipline for deepseek-v4.1-flash — change, create, restore and delete files only through ocode's file tools (edit, multiedit, multi_file_edit, replace_lines, write, delete, undo_file_change), never through bash (git restore/checkout/stash, cp from a /tmp backup, cat > / cat >> heredocs, rm, python or node writes), including big files and restores to the last commit.
-
-- [okf/filetools/derived/filetools.mimo-v2.6-flash.SKILL.md](okf/filetools/derived/filetools.mimo-v2.6-flash.SKILL.md) - File-tool discipline for mimo-v2.6-flash — change, create, restore and delete files only through ocode's file tools (edit, multiedit, multi_file_edit, replace_lines, write, delete, undo_file_change), never through bash (sed -i, git restore/checkout/stash, cp from a /tmp backup, redirects into the repo, rm of helper scripts), including big files, bulk replacements and restores to the last commit.
-
-- [okf/filetools/scores/deepseek-v4.1-flash.md](okf/filetools/scores/deepseek-v4.1-flash.md)
-- [okf/filetools/scores/deepseek-v4.1-flash.with-skill.md](okf/filetools/scores/deepseek-v4.1-flash.with-skill.md)
-- [okf/filetools/scores/mimo-v2.6-flash.md](okf/filetools/scores/mimo-v2.6-flash.md)
-- [okf/filetools/scores/mimo-v2.6-flash.iter1.with-skill.md](okf/filetools/scores/mimo-v2.6-flash.iter1.with-skill.md)
-- [okf/filetools/scores/mimo-v2.6-flash.with-skill.md](okf/filetools/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/dotnet/derived/dotnet.cat-jam-free.SKILL.md](okf/dotnet/derived/dotnet.cat-jam-free.SKILL.md) - Corrective .NET guidance for cat-jam-free on EF Core and HttpClient: what to do for parallel DbContext work, when an explicit transaction is needed beyond one SaveChanges, the three HttpClient lifetimes and the DNS flaw of the static client, and why caching a factory-created client defeats handler rotation.
 
 - [okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md](okf/dotnet/derived/dotnet.longcat-2.5-preview-free.SKILL.md) - Corrective .NET HttpClient/resilience guidance for longcat-2.5-preview-free: why a single static HttpClient goes stale on DNS, why caching a factory-created client defeats handler rotation, HandlerLifetime vs PooledConnectionLifetime, and the current Microsoft.Extensions.Http.Resilience API (AddStandardResilienceHandler) instead of invented Polly helpers.
@@ -378,6 +371,11 @@ and the web DB panel (`DBPanel.tsx`).
 - [okf/elixir/scores/step-5-preview-free.with-skill.md](okf/elixir/scores/step-5-preview-free.with-skill.md)
 - [okf/elixir/scores/tencent__hy3.md](okf/elixir/scores/tencent__hy3.md)
 - [okf/elixir/scores/tencent__hy3.with-skill.md](okf/elixir/scores/tencent__hy3.with-skill.md)
+- [okf/filetools/scores/deepseek-v4.1-flash.md](okf/filetools/scores/deepseek-v4.1-flash.md)
+- [okf/filetools/scores/deepseek-v4.1-flash.with-skill.md](okf/filetools/scores/deepseek-v4.1-flash.with-skill.md)
+- [okf/filetools/scores/mimo-v2.6-flash.iter1.with-skill.md](okf/filetools/scores/mimo-v2.6-flash.iter1.with-skill.md)
+- [okf/filetools/scores/mimo-v2.6-flash.md](okf/filetools/scores/mimo-v2.6-flash.md)
+- [okf/filetools/scores/mimo-v2.6-flash.with-skill.md](okf/filetools/scores/mimo-v2.6-flash.with-skill.md)
 - [okf/golang/scores/cat-jam-free.md](okf/golang/scores/cat-jam-free.md)
 - [okf/golang/scores/glm-5.3-flash.md](okf/golang/scores/glm-5.3-flash.md)
 - [okf/golang/scores/longcat-2.5-preview-free.md](okf/golang/scores/longcat-2.5-preview-free.md)
@@ -451,6 +449,7 @@ and the web DB panel (`DBPanel.tsx`).
 
 - [okf/pdf/scores/cat-jam-free.md](okf/pdf/scores/cat-jam-free.md)
 - [okf/pdf/scores/cat-jam-free.with-skill.md](okf/pdf/scores/cat-jam-free.with-skill.md)
+- [okf/pdf/scores/deepseek-v4.1-flash.iter1.with-skill.md](okf/pdf/scores/deepseek-v4.1-flash.iter1.with-skill.md)
 - [okf/pdf/scores/deepseek-v4.1-flash.md](okf/pdf/scores/deepseek-v4.1-flash.md)
 - [okf/pdf/scores/deepseek-v4.1-flash.with-skill.md](okf/pdf/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pdf/scores/glm-5.3-flash.md](okf/pdf/scores/glm-5.3-flash.md)
@@ -485,7 +484,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [okf/php/scores/tencent__hy3.md](okf/php/scores/tencent__hy3.md)
 - [okf/pptx/derived/pptx.cat-jam-free.SKILL.md](okf/pptx/derived/pptx.cat-jam-free.SKILL.md) - Corrective pptx-editing guidance for cat-jam-free: one a:tc per gridCol through merges, choose tables by header with a unique-row assert, placeholder table insertion, finishing row deletes/inserts (fills, bottom check, runs), dropping replaced image rels, full save-and-verify, and returning legacy .ppt.
 
-- [okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md](okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md) - Corrective pptx-editing guidance for deepseek-v4.1-flash: pick the table by header text with a unique-row assert, python-pptx has no add_row (deepcopy the a:tr), then recompute totals and sync the frame height and bottom, drop_rel ignores r:embed and an undropped image rel still ships the media, and prove removals by re-opening the saved file.
+- [okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md](okf/pptx/derived/pptx.deepseek-v4.1-flash.SKILL.md) - Corrective pptx-editing guidance for deepseek-v4.1-flash: pick the table by header text with a unique-row assert, python-pptx has no add_row (deepcopy the a:tr), then recompute totals and sync the frame height and bottom, drop_rel ignores r:embed and an undropped image rel still ships the media.
 
 - [okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md](okf/pptx/derived/pptx.glm-5.3-flash.SKILL.md) - Corrective pptx-editing guidance for glm-5.3-flash: locate tables by header text (searching groups) with a unique-row assert, drop replaced image rels safely (drop_rel does not see r:embed), sync the graphic frame height after XML row edits, and re-band explicit row fills.
 
@@ -502,6 +501,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [okf/pptx/scores/cat-jam-free.iter1.with-skill.md](okf/pptx/scores/cat-jam-free.iter1.with-skill.md)
 - [okf/pptx/scores/cat-jam-free.md](okf/pptx/scores/cat-jam-free.md)
 - [okf/pptx/scores/cat-jam-free.with-skill.md](okf/pptx/scores/cat-jam-free.with-skill.md)
+- [okf/pptx/scores/deepseek-v4.1-flash.iter1.with-skill.md](okf/pptx/scores/deepseek-v4.1-flash.iter1.with-skill.md)
 - [okf/pptx/scores/deepseek-v4.1-flash.md](okf/pptx/scores/deepseek-v4.1-flash.md)
 - [okf/pptx/scores/deepseek-v4.1-flash.with-skill.md](okf/pptx/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/pptx/scores/glm-5.3-flash.md](okf/pptx/scores/glm-5.3-flash.md)
@@ -651,6 +651,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [okf/webforms/scores/cat-jam-free.md](okf/webforms/scores/cat-jam-free.md)
 - [okf/webforms/scores/cat-jam-free.with-skill.md](okf/webforms/scores/cat-jam-free.with-skill.md)
 - [okf/webforms/scores/deepseek-v4.1-flash.md](okf/webforms/scores/deepseek-v4.1-flash.md)
+- [okf/webforms/scores/deepseek-v4.1-flash.with-skill.md](okf/webforms/scores/deepseek-v4.1-flash.with-skill.md)
 - [okf/webforms/scores/mimo-v2.6-flash.iter1.with-skill.md](okf/webforms/scores/mimo-v2.6-flash.iter1.with-skill.md)
 - [okf/webforms/scores/mimo-v2.6-flash.md](okf/webforms/scores/mimo-v2.6-flash.md)
 - [okf/webforms/scores/mimo-v2.6-flash.with-skill.md](okf/webforms/scores/mimo-v2.6-flash.with-skill.md)
@@ -764,6 +765,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [deepseek-v4-flash.md](okf/conduct/answers/deepseek-v4-flash.md)
 - [deepseek-v4-flash.spotcheck.md](okf/conduct/answers/deepseek-v4-flash.spotcheck.md)
 - [deepseek-v4.1-flash.md](okf/conduct/answers/deepseek-v4.1-flash.md)
+- [deepseek-v4.1-flash.with-skill.md](okf/conduct/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/conduct/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/conduct/answers/longcat-2.5-preview-free.md)
 - [longcat-2.5-preview-free.rerun-2026-10-05.md](okf/conduct/answers/longcat-2.5-preview-free.rerun-2026-10-05.md)
@@ -860,6 +862,13 @@ and the web DB panel (`DBPanel.tsx`).
 - [tencent__hy3.md](okf/elixir/answers/tencent__hy3.md)
 - [tencent__hy3.with-skill.md](okf/elixir/answers/tencent__hy3.with-skill.md)
 - [questions.md](okf/elixir/questions.md)
+- [filetools.deepseek-v4.1-flash.SKILL.md](okf/filetools/derived/filetools.deepseek-v4.1-flash.SKILL.md)
+- [filetools.mimo-v2.6-flash.SKILL.md](okf/filetools/derived/filetools.mimo-v2.6-flash.SKILL.md)
+- [README.md](okf/filetools/probe/README.md)
+- [CHANGELOG.md](okf/filetools/probe/fixtures/project/CHANGELOG.md)
+- [README.md](okf/filetools/probe/fixtures/project/README.md)
+- [api.md](okf/filetools/probe/fixtures/project/docs/api.md)
+- [install.md](okf/filetools/probe/fixtures/project/docs/install.md)
 - [cat-jam-free.md](okf/golang/answers/cat-jam-free.md)
 - [glm-5.3-flash.md](okf/golang/answers/glm-5.3-flash.md)
 - [longcat-2.5-preview-free.md](okf/golang/answers/longcat-2.5-preview-free.md)
@@ -909,6 +918,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [questions.md](okf/nextjs/questions.md)
 - [cat-jam-free.md](okf/pdf/answers/cat-jam-free.md)
 - [cat-jam-free.with-skill.md](okf/pdf/answers/cat-jam-free.with-skill.md)
+- [deepseek-v4.1-flash.iter1.with-skill.md](okf/pdf/answers/deepseek-v4.1-flash.iter1.with-skill.md)
 - [deepseek-v4.1-flash.md](okf/pdf/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/pdf/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pdf/answers/glm-5.3-flash.md)
@@ -941,6 +951,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [cat-jam-free.iter1.with-skill.md](okf/pptx/answers/cat-jam-free.iter1.with-skill.md)
 - [cat-jam-free.md](okf/pptx/answers/cat-jam-free.md)
 - [cat-jam-free.with-skill.md](okf/pptx/answers/cat-jam-free.with-skill.md)
+- [deepseek-v4.1-flash.iter1.with-skill.md](okf/pptx/answers/deepseek-v4.1-flash.iter1.with-skill.md)
 - [deepseek-v4.1-flash.md](okf/pptx/answers/deepseek-v4.1-flash.md)
 - [deepseek-v4.1-flash.with-skill.md](okf/pptx/answers/deepseek-v4.1-flash.with-skill.md)
 - [glm-5.3-flash.md](okf/pptx/answers/glm-5.3-flash.md)
@@ -1056,6 +1067,7 @@ and the web DB panel (`DBPanel.tsx`).
 - [cat-jam-free.md](okf/webforms/answers/cat-jam-free.md)
 - [cat-jam-free.with-skill.md](okf/webforms/answers/cat-jam-free.with-skill.md)
 - [deepseek-v4.1-flash.md](okf/webforms/answers/deepseek-v4.1-flash.md)
+- [deepseek-v4.1-flash.with-skill.md](okf/webforms/answers/deepseek-v4.1-flash.with-skill.md)
 - [mimo-v2.6-flash.iter1.with-skill.md](okf/webforms/answers/mimo-v2.6-flash.iter1.with-skill.md)
 - [mimo-v2.6-flash.md](okf/webforms/answers/mimo-v2.6-flash.md)
 - [mimo-v2.6-flash.with-skill.md](okf/webforms/answers/mimo-v2.6-flash.with-skill.md)

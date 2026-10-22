@@ -51,9 +51,23 @@ protected by the hard deny.
   sees all segments.
 - The Deny → auto-judge branch in `handleToolCall` runs the same gate before
   consulting the model; a harmful denied line stays denied.
+- **Always-allow rules are judged on the whole line too.** A persisted prefix
+  rule is a grant for future invocations, so `IsHarmfulAlwaysRule` splits the
+  full line with the shared splitter and refuses the rule when the line cannot
+  be split, a segment has an opaque head or an unevaluable `sh -c`/`eval` body,
+  any segment is harmful, or the prefix is a bare shell, interpreter, `eval` or
+  launcher (`bashPrefixTooBroad`). Fail closed. The web resolve endpoints
+  (`handleChildPermResolve` and `HandleResolvePermission`) and the TUI
+  (`permAlwaysRefusal`) all call one helper, `IsHarmfulAlwaysDecision(decision, req)`,
+  which refuses any unknown always-style decision. A sibling harmful segment
+  therefore blocks the rule for the segment the user asked about.
 
 ## Tests
 
+- `TestIsHarmfulAlwaysRule*` (`harmful_always_rule_test.go`): whole-line refusal,
+  opaque/unparseable lines, broad prefixes, harmless line allowed.
+- `TestHandleResolvePermissionAlwaysRefusedForHarmfulSibling`,
+  `TestResolveChildAskWholeLineAlwaysAllowGuards`, `TestPermAlwaysRule*` (TUI).
 - `TestIsHarmfulRequestUsesFullCommandFromArgs` (`permissions_test.go`)
 - `TestHandleToolCallAutoPermissionHarmfulSegmentNotMaskedByEarlierAsk`
   (`agent_test.go`, ask-path and deny-path with a judge that says ALLOW).

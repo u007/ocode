@@ -584,6 +584,92 @@ func TestHandleResolvePermissionAlwaysRefusedForHarmfulRequest(t *testing.T) {
 	}
 }
 
+// harmfulSiblingAsk is a pending bash ask whose asked segment (`go test`) is
+// harmless but whose whole line carries `git reset --hard` as a sibling. The
+// rule is judged against the whole line, so always_rule must be refused.
+func harmfulSiblingAsk() agent.PermissionRequest {
+	return agent.PermissionRequest{
+		ToolName: "bash",
+		Command:  "go test ./...",
+		Args:     json.RawMessage(`{"command":"go test ./... && git reset --hard HEAD~1"}`),
+		Scope:    agent.PermissionScopeBashPrefix,
+		Prefix:   "go test",
+		Rule:     "bash.prefix.go test",
+	}
+}
+
+func harmlessLineAsk() agent.PermissionRequest {
+	return agent.PermissionRequest{
+		ToolName: "bash",
+		Command:  "go test ./internal/agent/",
+		Args:     json.RawMessage(`{"command":"go test ./internal/agent/ && ls -la"}`),
+		Scope:    agent.PermissionScopeBashPrefix,
+		Prefix:   "go test",
+		Rule:     "bash.prefix.go test",
+	}
+}
+
+func pendingBashAskSession(t *testing.T, req agent.PermissionRequest) *agentSession {
+	t.Helper()
+	return &agentSession{
+		agent: agent.NewAgent(questionFakeClient{}, nil, nil, nil),
+		model: "fake-model",
+		messages: []agent.Message{
+			{Role: "user", Content: "run the tests"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "call-1"}}},
+			{Role: "tool", ToolID: "call-1", Content: permissionAskContent(t, req)},
+		},
+	}
+}
+
+func TestHandleResolvePermissionAlwaysRefusedForHarmfulSibling(t *testing.T) {
+	isolatedConfigHome(t)
+	h := NewHandler()
+	as := pendingBashAskSession(t, harmfulSiblingAsk())
+
+	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !tailIsPermissionAsk(as.messages) {
+		t.Fatalf("a refused always_rule must keep the ask pending")
+	}
+	if _, ok := savedOcodeConfig(t); ok {
+		t.Fatalf("no config write expected when a sibling segment is harmful")
+	}
+}
+
+func TestHandleResolvePermissionAlwaysToolRefusedForHarmfulBash(t *testing.T) {
+	isolatedConfigHome(t)
+	h := NewHandler()
+	as := pendingBashAskSession(t, harmfulSiblingAsk())
+
+	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_tool"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !tailIsPermissionAsk(as.messages) {
+		t.Fatalf("a refused always_tool must keep the ask pending")
+	}
+	if _, ok := savedOcodeConfig(t); ok {
+		t.Fatalf("no config write expected for an always_tool on bash")
+	}
+}
+
+func TestHandleResolvePermissionAlwaysRuleAcceptsHarmlessLine(t *testing.T) {
+	isolatedConfigHome(t)
+	h := NewHandler()
+	as := pendingBashAskSession(t, harmlessLineAsk())
+
+	rec := resolveBody(t, h, as, `{"request_id":"call-1","decision":"always_rule"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if prefixes := savedBashPrefixes(t); prefixes == nil || prefixes["go test"] != "allow" {
+		t.Fatalf("expected permissions.bash.prefixes[go test]=allow, got %v", prefixes)
+	}
+}
+
 func TestHandleResolvePermissionAlwaysAvailabilityGuards(t *testing.T) {
 	cases := []struct {
 		name     string

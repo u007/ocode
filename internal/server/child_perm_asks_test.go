@@ -436,6 +436,81 @@ func TestResolveChildAskAlwaysAllowDeliversAPlainAllow(t *testing.T) {
 // cannot wave an always_* request past a guard the dialog hid the button for,
 // and — critically — that NOTHING is delivered to the parked child when a guard
 // fires, so the child stays parked and answerable another way.
+// TestResolveChildAskWholeLineAlwaysAllowGuards: the sub-agent path judges the
+// same request the main-agent path does. A harmful sibling segment refuses
+// always_rule, a bash always_tool is refused, and a harmless line is accepted
+// and delivered to the child as a plain allow.
+func TestResolveChildAskWholeLineAlwaysAllowGuards(t *testing.T) {
+	bash := func(command, args, prefix string) agent.PermissionRequest {
+		return agent.PermissionRequest{
+			ToolName:  "bash",
+			Command:   command,
+			Args:      json.RawMessage(`{"command":"` + args + `"}`),
+			Scope:     agent.PermissionScopeBashPrefix,
+			Prefix:    prefix,
+			Rule:      "bash.prefix." + prefix,
+			AgentName: "scout",
+		}
+	}
+	cases := []struct {
+		name       string
+		decision   string
+		req        agent.PermissionRequest
+		wantStatus int
+		wantMsg    string
+		wantAllow  bool
+	}{
+		{
+			name:       "always_rule with a harmful sibling segment",
+			decision:   PermDecisionAlwaysRule,
+			req:        bash("go test ./...", "go test ./... && git reset --hard HEAD~1", "go test"),
+			wantStatus: http.StatusConflict,
+			wantMsg:    "considered harmful",
+		},
+		{
+			name:       "always_tool on bash",
+			decision:   PermDecisionAlwaysTool,
+			req:        bash("go test ./...", "go test ./... && git reset --hard HEAD~1", "go test"),
+			wantStatus: http.StatusConflict,
+			wantMsg:    "always-allow tool is not available",
+		},
+		{
+			name:       "always_rule with a harmless line",
+			decision:   PermDecisionAlwaysRule,
+			req:        bash("go test ./internal/agent/", "go test ./internal/agent/ && ls -la", "go test"),
+			wantStatus: http.StatusOK,
+			wantAllow:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			harn := newChildAskHarness(t, 0)
+			respCh := harn.ask(tc.req)
+			requestID := harn.as.childAsks.list()[0].RequestID
+
+			rec := harn.resolve(requestID, tc.decision)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d (%s), want %d", rec.Code, rec.Body.String(), tc.wantStatus)
+			}
+			if tc.wantMsg != "" && !strings.Contains(rec.Body.String(), tc.wantMsg) {
+				t.Fatalf("body = %s, want it to mention %q", rec.Body.String(), tc.wantMsg)
+			}
+			if !tc.wantAllow {
+				select {
+				case resp := <-respCh:
+					t.Fatalf("refused decision still resumed the child with %v", resp.Level)
+				case <-time.After(150 * time.Millisecond):
+				}
+				waitForRegistryLen(t, harn.as, 1)
+				return
+			}
+			if resp := <-respCh; resp.Level != agent.PermissionAllow {
+				t.Fatalf("child received %v, want Allow", resp.Level)
+			}
+		})
+	}
+}
+
 func TestResolveChildAskEnforcesAlwaysAllowGuards(t *testing.T) {
 	cases := []struct {
 		name     string

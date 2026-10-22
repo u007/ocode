@@ -3286,19 +3286,20 @@ export const api = {
   // is the canonical directory that was granted (the path itself when it is a
   // directory, its parent when it is a file) and is what the caller must pass
   // back as `project_root` so every later read of that file is anchored to
-  // it.
+  // it. The response path is the requested file in that same canonical root
+  // spelling (symlinks resolved), so it can be placed relative to the root.
   //
   // host routes the grant to a remote project's host — the grant then lives in
   // the remote server's own grant list (the remote runs the same code).
   grantFilePath: async (
     path: string,
     host?: string,
-  ): Promise<{ root: string; granted: boolean; roots: string[] }> => {
+  ): Promise<{ root: string; path: string; granted: boolean; roots: string[] }> => {
     // A remote project's grant must land in the REMOTE server's grant list
     // (the remote runs the same code, with its own roots). The proxy prefix
     // routes the request there.
     const prefix = remoteApiBase(host);
-    return fetchJSON<{ root: string; granted: boolean; roots: string[] }>(
+    return fetchJSON<{ root: string; path: string; granted: boolean; roots: string[] }>(
       `${prefix}/api/files/grant`,
       { method: "POST", body: JSON.stringify({ path }) },
     );

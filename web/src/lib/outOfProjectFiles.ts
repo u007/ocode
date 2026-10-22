@@ -56,3 +56,86 @@ export function looksLikeAbsolutePath(path: string): boolean {
 export function normalizeUserPath(path: string): string {
   return path.trim();
 }
+
+/**
+ * Returns `path` relative to `root` when it lies inside it, else null.
+ *
+ * Used to open a granted file: the server contains a path against the named
+ * root, so the tab must be opened RELATIVE to the granted root rather than by
+ * its absolute path.
+ *
+ * A plain `path.slice(root.length)` is wrong here — `root=/a/b` would match
+ * `/a/bc/d` — so the boundary separator is required. Both separators are
+ * accepted because a Windows host reports `C:\Users\x`.
+ */
+export function relativeToRoot(path: string, root: string): string | null {
+  if (!path || !root) return null;
+  const windows = isWindowsStylePath(root);
+  const fold = (s: string) => (windows ? s.toLowerCase() : s);
+  const p = splitPath(path, windows);
+  const r = splitPath(root, windows);
+  if (!p.absolute || !r.absolute || fold(p.anchor) !== fold(r.anchor)) return null;
+  if (r.segments.length > p.segments.length) return null;
+  for (let i = 0; i < r.segments.length; i++) {
+    if (fold(p.segments[i]) !== fold(r.segments[i])) return null;
+  }
+  const rest = p.segments.slice(r.segments.length);
+  return rest.length === 0 ? "." : rest.join("/");
+}
+
+/** A Windows-style root: a drive letter ("C:\..." or "C:/...") or a UNC share
+ *  ("\\server\share"). Only these fold case; a POSIX root stays case-sensitive. */
+function isWindowsStylePath(p: string): boolean {
+  return /^[a-zA-Z]:(?:[\\/]|$)/.test(p) || p.startsWith("\\\\");
+}
+
+interface PathParts {
+  /** Drive ("C:") or UNC marker ("//"), or "" for a POSIX path. */
+  anchor: string;
+  absolute: boolean;
+  /** Normalised components: no empty, "." or ".." entries. */
+  segments: string[];
+}
+
+/** Splits a path into anchor, absoluteness and normalised components. Mixed
+ *  separators are folded to "/" for Windows-style paths only, so a backslash
+ *  in a POSIX filename stays literal. */
+function splitPath(input: string, windows: boolean): PathParts {
+  let s = windows ? input.replace(/\\/g, "/") : input;
+  let anchor = "";
+  let absolute = s.startsWith("/");
+  if (windows) {
+    const drive = /^[a-zA-Z]:/.exec(s);
+    if (drive) {
+      anchor = drive[0].toUpperCase();
+      s = s.slice(2);
+      absolute = s.startsWith("/");
+    } else if (s.startsWith("//")) {
+      anchor = "//";
+      absolute = true;
+      s = s.slice(2);
+    }
+  }
+  return { anchor, absolute, segments: normalizeSegments(s, absolute) };
+}
+
+/** Resolves "." and ".." lexically. An absolute path clamps ".." at its root
+ *  (as the OS does); a relative path keeps a leading ".." so it can never match
+ *  a root. */
+function normalizeSegments(s: string, absolute: boolean): string[] {
+  const out: string[] = [];
+  for (const seg of s.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      const top = out[out.length - 1];
+      if (top !== undefined && top !== "..") {
+        out.pop();
+      } else if (!absolute) {
+        out.push("..");
+      }
+      continue;
+    }
+    out.push(seg);
+  }
+  return out;
+}

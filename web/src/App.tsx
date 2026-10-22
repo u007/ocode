@@ -759,7 +759,15 @@ function HomeApp() {
     async (path: string) => {
       const activeProject = projectState.activeProject;
       const host = activeProject?.host;
-      const opened = await openOutsideProject(path, host);
+      let opened: boolean;
+      try {
+        opened = await openOutsideProject(path, host);
+      } catch (err) {
+        // The hook throws when the granted root does not contain the file the
+        // server returned; surface that exact reason to the user.
+        reportActionErrorMessage(err instanceof Error ? err.message : `Could not open ${path}.`);
+        return;
+      }
       if (!opened) {
         reportActionErrorMessage(`Could not open ${path}. The server refused the path.`);
         return;

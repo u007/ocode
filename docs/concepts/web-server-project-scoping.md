@@ -195,3 +195,6 @@ shared, one attachment slot / `superseded` / **Take over**) lives in
   only detaches and keeps both (2 h local / 24 h remote TTL). With the list
   shared, a close ends the session for EVERY client, including one attached to
   that shell. `TestTerminalKillDropsDiskHistory` pins the history removal.
+
+### Editor file-access grants (see `docs/concepts/file-editor-grants.md`)
+The editor/preview opens files outside the active project via an EDITOR-ONLY in-memory grant (internal/server/handler_file_grants.go), separate from extra_allowed_paths — which feeds the agent scope. resolveEditorFilePath (scopeEditorRoots, handler_files.go:966) uses it; the DB browser (scopeProjectRoots) excludes grants (handler_db.go:46). See file-editor-grants.md for the LFI-shaped hole (handler_files.go:1007) and verified anchors.

@@ -10,6 +10,7 @@ import {
 } from "../components/Files/editorTabsPersistence";
 import { isLegacyOfficePath, previewOnlyKindForPath } from "../lib/previewKind";
 import { isHostUnreachable, noteRemoteHostUnreachable, remoteHostRetryInMs } from "../lib/remoteHostGate";
+import { relativeToRoot } from "../lib/outOfProjectFiles";
 import { noteDraftPersistFailure, noteDraftPersistPending, noteDraftPersistSuccess, reconcileDraftGuard } from "../lib/editorDraftGuard";
 
 export interface EditorTab {
@@ -266,17 +267,26 @@ export function useEditorTabs(): UseEditorTabsResult {
     async (path: string, host?: string): Promise<boolean> => {
       const clean = path.trim();
       if (!clean) return false;
+      let grant: { root: string; path: string };
       try {
-        const { root } = await api.grantFilePath(clean, host);
-        if (!root) return false;
-        // Open the file relative to the granted root: the server then applies
-        // the same containment check it applies to a project-relative path.
-        const rel = root.endsWith("/") ? clean.slice(root.length) : clean.slice(root.length + 1);
-        return await handleOpenFile(rel || clean, root, host);
+        grant = await api.grantFilePath(clean, host);
       } catch (err) {
         console.error("Failed to grant access to path:", err);
         return false;
       }
+      if (!grant.root) return false;
+      // Open the file relative to the granted root: the server then applies
+      // the same containment check it applies to a project-relative path. Both
+      // the file and the root come back from the server in one canonical
+      // spelling (symlinks resolved), so the relative path is computed from
+      // those, never from the path the user typed. `relativeToRoot` enforces
+      // the separator boundary — a bare slice(root.length) would turn
+      // root=/a/b + path=/a/bc/d into "c/d".
+      const rel = relativeToRoot(grant.path, grant.root);
+      if (rel === null) {
+        throw new Error(`Cannot open ${clean}: it is not inside the granted folder ${grant.root}.`);
+      }
+      return handleOpenFile(rel, grant.root, host);
     },
     [handleOpenFile],
   );

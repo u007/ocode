@@ -15888,6 +15888,16 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 			log.Printf("[perm] sub-agent permission ALLOWED once: tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed sub-agent %q once.", toolName), transient: true})
 		case "a", "always", "always allow":
+			if refusal := permAlwaysRefusal(agent.AlwaysDecisionRule, req); refusal != "" {
+				// Refused: nothing is delivered to the parked sub-agent and the
+				// dialog stays up, as for an invalid choice.
+				log.Printf("[perm] sub-agent permission ALWAYS ALLOW BLOCKED (rule): tool=%s", toolName)
+				m.messages = append(m.messages, message{role: roleAssistant, text: refusal, transient: true})
+				m.pendingSubAgentResp = respCh
+				m.showPermDialog = true
+				m.updatePermButtonRegions()
+				return nil, false
+			}
 			if isOutOfScopePathRequest(req) {
 				// Persist only the out-of-workspace path (registered globally via
 				// tool.AddExtraAllowedPath, so the sub-agent sees it too) — never a
@@ -15915,6 +15925,14 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 			}
 			m.persistPermissions()
 		case "t":
+			if refusal := permAlwaysRefusal(agent.AlwaysDecisionTool, req); refusal != "" {
+				log.Printf("[perm] sub-agent permission ALWAYS ALLOW BLOCKED (tool): tool=%s", toolName)
+				m.messages = append(m.messages, message{role: roleAssistant, text: refusal, transient: true})
+				m.pendingSubAgentResp = respCh
+				m.showPermDialog = true
+				m.updatePermButtonRegions()
+				return nil, false
+			}
 			resp = agent.PermissionResponse{Level: agent.PermissionAllow, PersistTool: true}
 			log.Printf("[perm] sub-agent permission ALWAYS ALLOW (tool): tool=%s", toolName)
 			m.setToolPermission(toolName, agent.PermissionAllow)
@@ -15957,9 +15975,9 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 		}
 		return m.executeApprovedTool(toolName, args, pathRoot), true
 	case "a", "always", "always allow":
-		if agent.IsHarmfulRequest(req) {
-			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful): tool=%s", toolName)
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow %s — this operation is considered harmful and always requires human approval.", permissionRuleLabel(req)), transient: true})
+		if refusal := permAlwaysRefusal(agent.AlwaysDecisionRule, req); refusal != "" {
+			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (rule): tool=%s", toolName)
+			m.messages = append(m.messages, message{role: roleAssistant, text: refusal, transient: true})
 			m.showPermDialog = true
 			m.updatePermButtonRegions()
 			return nil, false
@@ -15997,9 +16015,9 @@ func (m *model) answerPermAsk(choice string) (tea.Cmd, bool) {
 		// where the next sub-command still needs approval).
 		return m.executeApprovedTool(toolName, args, outOfScopePathRoot(req)), true
 	case "t":
-		if agent.IsHarmfulRequest(req) {
-			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful tool): tool=%s", toolName)
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow tool %q — this operation is considered harmful and always requires human approval.", toolName), transient: true})
+		if refusal := permAlwaysRefusal(agent.AlwaysDecisionTool, req); refusal != "" {
+			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (tool): tool=%s", toolName)
+			m.messages = append(m.messages, message{role: roleAssistant, text: refusal, transient: true})
 			m.showPermDialog = true
 			m.updatePermButtonRegions()
 			return nil, false
@@ -17790,6 +17808,27 @@ func permAlwaysRuleAvailable(req agent.PermissionRequest) bool {
 // from one prompt, which is too broad to surface here).
 func permAlwaysToolAvailable(req agent.PermissionRequest) bool {
 	return agent.AlwaysToolChoiceAvailable(req)
+}
+
+// permAlwaysRefusal returns the message for an always-style choice that the
+// shared guards refuse, or "" when the choice may persist. decision is
+// agent.AlwaysDecisionRule or agent.AlwaysDecisionTool: rule and tool choices
+// are gated separately, in the same order the web resolve endpoint uses
+// (availability, then harm), so both surfaces refuse the same requests.
+func permAlwaysRefusal(decision string, req agent.PermissionRequest) string {
+	subject := permissionRuleLabel(req)
+	available := permAlwaysRuleAvailable(req)
+	if decision == agent.AlwaysDecisionTool {
+		subject = fmt.Sprintf("tool %q", req.ToolName)
+		available = permAlwaysToolAvailable(req)
+	}
+	if !available {
+		return fmt.Sprintf("Cannot always allow %s — this choice is not offered for this request. Approve it individually.", subject)
+	}
+	if agent.IsHarmfulAlwaysDecision(decision, req) {
+		return fmt.Sprintf("Cannot always allow %s — this operation is considered harmful and always requires human approval.", subject)
+	}
+	return ""
 }
 
 func (m *model) permDialogBtnDefs() []permBtnDef {

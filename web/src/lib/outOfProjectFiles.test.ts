@@ -3,6 +3,7 @@ import {
   isOutsideRootError,
   looksLikeAbsolutePath,
   normalizeUserPath,
+  relativeToRoot,
 } from "./outOfProjectFiles";
 
 describe("outOfProjectFiles", () => {
@@ -64,5 +65,94 @@ describe("outOfProjectFiles", () => {
     it("trims surrounding whitespace", () => {
       expect(normalizeUserPath("  /etc/hosts  ")).toBe("/etc/hosts");
     });
+  });
+});
+
+describe("relativeToRoot", () => {
+  it("returns the path relative to the root", () => {
+    expect(relativeToRoot("/Users/x/Downloads/notes.md", "/Users/x/Downloads")).toBe("notes.md");
+    expect(relativeToRoot("/Users/x/Downloads/sub/a.md", "/Users/x/Downloads")).toBe("sub/a.md");
+  });
+
+  it("ignores a trailing separator on the root", () => {
+    expect(relativeToRoot("/Users/x/Downloads/notes.md", "/Users/x/Downloads/")).toBe("notes.md");
+  });
+
+  it("requires a SEPARATOR boundary (a plain prefix is not containment)", () => {
+    // /a/bc/d is NOT inside /a/b — slicing root.length would wrongly yield "c/d".
+    expect(relativeToRoot("/a/bc/d", "/a/b")).toBeNull();
+  });
+
+  it("returns '.' for the root itself", () => {
+    expect(relativeToRoot("/a/b", "/a/b")).toBe(".");
+  });
+
+  it("returns null for a path outside the root", () => {
+    expect(relativeToRoot("/etc/hosts", "/Users/x/Downloads")).toBeNull();
+  });
+
+  it("handles Windows separators", () => {
+    expect(relativeToRoot("C:\\Users\\x\\notes.md", "C:\\Users\\x")).toBe("notes.md");
+  });
+
+  it("handles mixed separators on a Windows root", () => {
+    expect(relativeToRoot("C:/Users\\x/notes.md", "C:\\Users\\x")).toBe("notes.md");
+    expect(relativeToRoot("C:\\Users/x\\sub/a.md", "C:/Users/x")).toBe("sub/a.md");
+  });
+
+  it("matches Windows drive paths case-insensitively", () => {
+    expect(relativeToRoot("c:\\users\\X\\notes.md", "C:\\Users\\x")).toBe("notes.md");
+    expect(relativeToRoot("C:\\Users\\x\\notes.md", "c:\\users\\X")).toBe("notes.md");
+    expect(relativeToRoot("D:\\Users\\x\\notes.md", "C:\\Users\\x")).toBeNull();
+  });
+
+  it("keeps POSIX roots case-sensitive", () => {
+    expect(relativeToRoot("/Users/x/notes.md", "/users/x")).toBeNull();
+    expect(relativeToRoot("/users/x/notes.md", "/users/x")).toBe("notes.md");
+  });
+
+  it("does not treat a backslash in a POSIX path as a separator", () => {
+    expect(relativeToRoot("/a/b\\c", "/a")).toBe("b\\c");
+    expect(relativeToRoot("/a\\b/c", "/a")).toBeNull();
+  });
+
+  it("resolves '..' segments before the containment check", () => {
+    expect(relativeToRoot("/a/b/../b/c.md", "/a/b")).toBe("c.md");
+    expect(relativeToRoot("/a/b/./c.md", "/a/b")).toBe("c.md");
+    expect(relativeToRoot("/a/b/sub/../c.md", "/a/b")).toBe("c.md");
+  });
+
+  it("returns null for a path that escapes the root with '..'", () => {
+    expect(relativeToRoot("/a/b/../../etc/hosts", "/a/b")).toBeNull();
+    expect(relativeToRoot("/a/b/../c/x.md", "/a/b")).toBeNull();
+    expect(relativeToRoot("C:\\Users\\x\\..\\..\\Windows\\win.ini", "C:\\Users\\x")).toBeNull();
+  });
+
+  it("resolves '..' in the root as well", () => {
+    expect(relativeToRoot("/a/b/c.md", "/a/x/../b")).toBe("c.md");
+  });
+
+  it("treats a relative path or root as not containable", () => {
+    expect(relativeToRoot("a/b.md", "/a")).toBeNull();
+    expect(relativeToRoot("/a/b.md", "a")).toBeNull();
+  });
+
+  it("uses a POSIX filesystem root '/' as the root, not as an empty string", () => {
+    expect(relativeToRoot("/etc/hosts", "/")).toBe("etc/hosts");
+    expect(relativeToRoot("/", "/")).toBe(".");
+    expect(relativeToRoot("/etc/hosts", "//")).toBe("etc/hosts");
+  });
+
+  it("uses a Windows drive root 'C:\\' as the root, keeping the remainder relative", () => {
+    expect(relativeToRoot("C:\\Users\\x\\notes.md", "C:\\")).toBe("Users/x/notes.md");
+    expect(relativeToRoot("C:/Users/x/notes.md", "C:/")).toBe("Users/x/notes.md");
+    expect(relativeToRoot("c:\\users\\a.md", "C:\\")).toBe("users/a.md");
+    expect(relativeToRoot("C:\\", "C:\\")).toBe(".");
+    expect(relativeToRoot("D:\\a.md", "C:\\")).toBeNull();
+  });
+
+  it("returns null for empty inputs", () => {
+    expect(relativeToRoot("", "/a")).toBeNull();
+    expect(relativeToRoot("/a/b", "")).toBeNull();
   });
 });

@@ -406,7 +406,7 @@ judge says met or impossible, or pauses the goal. Concept, verdict table and end
 - **Every agent-side goal mutation bumps `goalGen`.** `GoalJudgeSync` writes its verdict
   back only when the generation is unchanged; otherwise the verdict is `stale` and dropped.
 - **`goal` is a session-owned metadata key** (`sessionOwnedMetadataKeys`,
-  `internal/tui/model.go:21813`), so the TUI's carry-forward copy cannot overwrite it.
+  `internal/tui/model.go:21852`), so the TUI's carry-forward copy cannot overwrite it.
 
 ## Task Output Contracts (`expected_output`)
 An optional `expected_output` on a `task` dispatch is verified (shape, not truth)

@@ -68,6 +68,7 @@ web/
     │   ├── projectGitCounts.ts # Per-project git changed-file counts (project-list badges)
     │   ├── compactConfig.ts    # Compaction summary model: picker patch + whole-block read-modify-write
     │   ├── previewKind.ts      # Preview file type detection
+    │   ├── outOfProjectFiles.ts # Out-of-project path detection + containment-error recognition
     │   ├── userMessageNav.ts   # Pure helpers for the alt+up/down prompt walk (cursor clamp/seed, label, counting predicate)
     │   ├── recentInputs.ts     # Pure helpers for the composer's "recent inputs" strip (stricter than userMessageNav's predicate — see gotcha 57)
     │   ├── trustedProject.ts   # Trusted project resolution
@@ -141,6 +142,7 @@ web/
         │   ├── FileEditor.tsx      # Monaco editor (tabbed, multi-language)
         │   ├── FileTabContent.tsx  # Lazy-loaded file content wrapper
         │   ├── FilePicker.tsx      # File picker dialog
+        │   ├── OpenPathDialog.tsx  # Open a file OUTSIDE the project (grants its dir)
         │   └── MonacoSettingsPanel.tsx # Monaco editor settings
         ├── Git/
         │   └── GitPanel.tsx        # SourceTree-style: staged/unstaged panes, hunk actions, commit log, commit box (Commit + Commit & Push)
@@ -889,3 +891,18 @@ Test harness rules: **`useChatDispatch` must return a STABLE reference** when re
     - **The composer is compact below 640px**: `p-3 sm:p-4`, with the quick-action and suggested-response chip rows on `max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:scrollbar-hide` (wrapped chips cost ~28px).
     - Measured after (390×844 / 1440×900): transcript **63–66% / 59–62%** of the viewport (the spread is ChatPanel's Speak header, 33px when a transcript renders it), with the transcript ELEMENT never below 60dvh, zero nested scroll and the composer pinned; 390×780 → 63%. Only a deliberately short window (1440×700) makes the message region scroll (~89px), which is the accepted trade for keeping the input visible.
     - Regression: `ChatPanel.test.tsx` ("ChatPanel transcript minimum height" — the class lands on the transcript and is absent without the prop), `StatusBar.collapse.test.tsx` ("StatusBar on phones"), `QuickActionsBar.test.tsx` (mobile single-row contract). jsdom has no layout engine, so these pin the CSS contract; the percentages come from `go build -o /tmp/ocode-test .` + Playwright at 390×844 and 1440×900.
+
+76. **The file editor and preview can open files OUTSIDE the project — via an EDITOR-ONLY grant that must never reach the agent's scope.** Opening `~/Downloads/notes.md` or `/etc/hosts` used to 400 with "path is outside the project root". The Files tab header has an **Open a file outside the project** button (`OpenPathDialog`), and an absolute path in a chat file link opens the same dialog pre-filled instead of falling back to the basename picker. The server keeps the grants; the client only collects the path and anchors the tab to the granted root. Rules that are easy to get wrong:
+
+    - **A grant is NOT `extra_allowed_paths`.** That list is global, persistent, AND shared with the agent (`applyExtraAllowedPathsToRuntime` → `tool.SetPersistentExtraAllowedPaths` → `PermissionManager.AllowedRoots`), so adding a path there to open a file would silently let the agent read/write it without asking. `internal/server/handler_file_grants.go` keeps a separate in-memory `fileGrantStore` consulted ONLY by the file surfaces. `POST/DELETE/GET /api/files/grant(s)`.
+    - **Grants are per-process and die on restart** — deliberate: a persisted grant is a standing capability the user did not ask for. Do not "improve" this into config without re-opening the agent-scope question.
+    - **ONE resolver, two scopes.** `resolveProjectFilePath` takes a `filePathScope`: `scopeProjectRoots` (the SQLite browser's `resolveDBPath`, which keeps its OWN unconditional `pathWithinAllowedRoots` check and must NOT accept grants) and `scopeEditorRoots` (`resolveEditorFilePath`, used by content/raw/save/media-token/open). Never call `resolveEditorFilePath` from a DB endpoint — it would make a granted directory reachable by the DB browser, whose write capability makes that a different risk.
+    - **`HandleFileRaw` no longer has its own copy of the containment logic.** It had an inline duplicate that drifted from `HandleFileContent`; both now call the shared resolver. Any new file endpoint MUST call it too.
+    - **An absolute path with NO `project_root` used to be UNSCOPED** on `GET /api/files/content` and `/api/files/raw` (verified 200 for a file outside every root). It is now confined — do not restore the old early-return.
+    - **The web must read the server's error BODY.** `useEditorTabs.fetchFileContent` throws the server's `{"error": ...}` message, not a generic "Failed to load file", because `isOutsideRootError` (`lib/outOfProjectFiles.ts`) needs to tell a grantable containment refusal from a missing file. A generic message makes the two indistinguishable.
+    - **The granted root becomes the tab's `projectRoot`**, and the file is opened RELATIVE to it (`openOutsideProject` slices the prefix). That keeps every later read — editor content, preview viewers, the media token — anchored without special cases in those components. Do not pass the absolute path with the project's own root: the server contains it against the named root and refuses.
+    - **The tree/search accept a granted root; the secret-job surface does NOT.** `fileTreeRootForEditor` = `fileTreeRootFor` + grants, used by `HandleFileTree`/`parseSearchParams`. `resolveSecretPath` deliberately keeps `fileTreeRootFor` — encrypt/decrypt is a far stronger action than browsing.
+    - Writes stay stricter than reads: the save path still resolves the target's parent symlinks and re-checks containment, and `expected_hash` still 409s. Traversal (`..` in the RAW value) is rejected in every scope.
+
+    Regression: `internal/server/handler_file_grants_test.go` (10 cases incl. "grant does not widen the agent/DB scope" and "absolute path with no project_root is scoped"), `web/src/lib/outOfProjectFiles.test.ts`, `web/src/hooks/useEditorTabs.outsideProject.test.ts`.
+

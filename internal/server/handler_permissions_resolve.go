@@ -18,8 +18,8 @@ import (
 const (
 	PermDecisionAllow      = "allow"
 	PermDecisionDeny       = "deny"
-	PermDecisionAlwaysRule = "always_rule" // persist the narrowest matching rule
-	PermDecisionAlwaysTool = "always_tool" // allow ALL future uses of the tool
+	PermDecisionAlwaysRule = agent.AlwaysDecisionRule // persist the narrowest matching rule
+	PermDecisionAlwaysTool = agent.AlwaysDecisionTool // allow ALL future uses of the tool
 )
 
 // validPermDecision reports whether s is a decision value this endpoint
@@ -156,8 +156,8 @@ func isPermissionAskMsg(m agent.Message) bool {
 //
 // The always_* decisions route through the same guarded persist path the TUI
 // uses: agent.AlwaysRuleChoiceAvailable / AlwaysToolChoiceAvailable gate which
-// choices exist at all, agent.IsHarmfulRequest refuses to persist harmful
-// operations, out-of-workspace asks persist only the path root to
+// choices exist at all, agent.IsHarmfulAlwaysDecision refuses to persist harmful
+// operations (whole-line for always_rule, see agent.IsHarmfulAlwaysRule), out-of-workspace asks persist only the path root to
 // extra_allowed_paths, webfetch-domain asks set the session domain cache, and
 // everything else lands as a bash-prefix or user-confirmed tool rule in both
 // the live PermissionManager and ocodeconfig.json.
@@ -294,7 +294,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 				"always-allow tool is not available for this request — it must be approved individually")
 			return
 		}
-		if agent.IsHarmfulRequest(permReq) {
+		if agent.IsHarmfulAlwaysDecision(decision, permReq) {
 			log.Printf("serve: always-allow refused (harmful): session=%s tool=%s", sessID, permReq.ToolName)
 			as.mu.Unlock()
 			writeError(w, http.StatusConflict,
@@ -560,7 +560,7 @@ func (h *Handler) handleChildPermResolve(w http.ResponseWriter, sessionID, reque
 				"always-allow tool is not available for this request — it must be approved individually")
 			return true
 		}
-		if agent.IsHarmfulRequest(ask.req) {
+		if agent.IsHarmfulAlwaysDecision(decision, ask.req) {
 			log.Printf("serve: always-allow refused (harmful, sub-agent): session=%s tool=%s", sessID, ask.req.ToolName)
 			writeError(w, http.StatusConflict,
 				"cannot always allow this operation — it is considered harmful and always requires human approval")

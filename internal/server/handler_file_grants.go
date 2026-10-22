@@ -166,12 +166,35 @@ func (h *Handler) HandleGrantFilePath(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path could not be resolved")
 		return
 	}
+	file, err := canonicalGrantFile(req.Path, root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path could not be resolved")
+		return
+	}
 	added := h.fileGrants().add(root, req.Path)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"root":    root,
+		"path":    file,
 		"granted": added,
 		"roots":   h.fileGrants().list(),
 	})
+}
+
+// canonicalGrantFile spells the requested path in the same canonical form as
+// its granted root, so the web can open it relative to that root. The root's
+// symlinks are resolved, so a path typed through a link (macOS /var/... names
+// /private/var/...) must come back spelled the same way, or it cannot be
+// placed under the root. A path that named the granted directory itself is
+// the root; any other path is the root joined with the file's name.
+func canonicalGrantFile(requested, root string) (string, error) {
+	abs, err := filepath.Abs(strings.TrimSpace(requested))
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		return root, nil
+	}
+	return filepath.Join(root, filepath.Base(abs)), nil
 }
 
 // HandleRevokeFilePath revokes a previously granted directory.

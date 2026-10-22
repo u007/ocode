@@ -4,6 +4,10 @@
 
 
 
+
+## 2026-10-22
+
+* **Creation**: File Editor Grants — Editor-Only Out-of-Project Access ([docs/concepts/file-editor-grants.md](/docs/concepts/file-editor-grants.md))
 ## 2026-10-21
 
 * **Creation**: Bash Prefix Always-Allow Rules ([concepts/bash-prefix-always-allow.md](/concepts/bash-prefix-always-allow.md))

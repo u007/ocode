@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1662,6 +1663,185 @@ func IsHarmfulRequest(req PermissionRequest) bool {
 		}
 	}
 	return false
+}
+
+// Always-allow decision names. The web/desktop resolve endpoint and the TUI
+// both route their always-style choices through IsHarmfulAlwaysDecision, so
+// these are the single spelling of the decision for every surface.
+const (
+	AlwaysDecisionRule = "always_rule" // persist the narrowest matching rule
+	AlwaysDecisionTool = "always_tool" // allow ALL future uses of the tool
+)
+
+// IsHarmfulAlwaysDecision reports whether an always-style decision must be
+// refused for req. always_rule is judged by IsHarmfulAlwaysRule (whole-line
+// split, fail closed); always_tool by IsHarmfulRequest. Any other decision is
+// refused: a caller that reaches this with an unknown always-style value must
+// not persist anything, so the check fails closed rather than guessing which
+// gate applies.
+func IsHarmfulAlwaysDecision(decision string, req PermissionRequest) bool {
+	switch decision {
+	case AlwaysDecisionRule:
+		return IsHarmfulAlwaysRule(req)
+	case AlwaysDecisionTool:
+		return IsHarmfulRequest(req)
+	default:
+		return true
+	}
+}
+
+// IsHarmfulAlwaysRule reports whether an "always allow rule" persist must be
+// refused. A persisted rule is not limited to the one segment the ask names:
+// the user is granting that prefix for future invocations, so the rule is
+// judged against the WHOLE line (req.Args, falling back to req.Command) split
+// into every constituent command. The line is refused when:
+//   - it cannot be split (parse error);
+//   - any constituent command has an opaque head (a shell expansion such as
+//     "$g stash", or the body of an `eval "$x"`), or is a shell re-exec whose
+//     script is not a literal `-c` body that parses;
+//   - any constituent command is harmful (IsHarmfulBashCommand, wrappers
+//     peeled);
+//   - the prefix the rule would persist is broader than the splitter can
+//     evaluate (a bare shell, interpreter, eval or launcher head).
+//
+// Non-bash requests have no whole-line split and use IsHarmfulRequest.
+func IsHarmfulAlwaysRule(req PermissionRequest) bool {
+	if req.ToolName != "bash" {
+		return IsHarmfulRequest(req)
+	}
+	command := bashCommand(req.Args)
+	if command == "" {
+		command = req.Command
+	}
+	if command == "" {
+		// Nothing to split: refuse rather than persist a rule judged on nothing.
+		return true
+	}
+	if req.Command != "" && !bashLineRuleSafe(req.Command) {
+		return true
+	}
+	if !bashLineRuleSafe(command) {
+		return true
+	}
+	if bashPrefixTooBroad(req.Prefix) {
+		return true
+	}
+	return slices.ContainsFunc(req.PrefixCandidates, bashPrefixTooBroad)
+}
+
+// bashLineRuleSafe reports whether every constituent command of command can be
+// evaluated statically and none is harmful. It is the fail-closed half of
+// IsHarmfulAlwaysRule: false means "refuse the always-rule".
+func bashLineRuleSafe(command string) bool {
+	parsed, ok := parseEvaluableScript(command)
+	if !ok {
+		return false
+	}
+	numericVars := numericAssignedVars(command)
+	for _, c := range parsed {
+		if !bashSegmentRuleSafe(c.cmdWords, numericVars) {
+			return false
+		}
+	}
+	return true
+}
+
+// bashSegmentRuleSafe judges one constituent command (see bashLineRuleSafe).
+// Wrapper and re-exec layers are walked by effectiveCommandWords so every
+// command the segment actually runs is checked.
+func bashSegmentRuleSafe(words []string, numericVars map[string]bool) bool {
+	if len(words) == 0 {
+		return true
+	}
+	if isOpaqueCommandHead(words) {
+		return false
+	}
+	if isHarmfulBashCommandWithVars(rebuildCommandLine(words), numericVars) {
+		return false
+	}
+	for _, eff := range effectiveCommandWords(words) {
+		if isOpaqueCommandHead(eff) || shellBodyUnevaluable(eff) {
+			return false
+		}
+	}
+	return true
+}
+
+// parseEvaluableScript splits script with the shared splitter, but reports
+// false when the splitter would have to guess. parseShellCommandLine is lenient
+// at end of input, so an unterminated quote parses into a word the gates would
+// read as harmless; such a line is a syntax error to a real shell.
+func parseEvaluableScript(script string) ([]parsedShellCommand, bool) {
+	if !shellQuotesClosed(script) {
+		return nil, false
+	}
+	parsed, err := parseShellCommandLine(script)
+	return parsed, err == nil
+}
+
+// shellQuotesClosed reports whether every single and double quote in script is
+// terminated. Backslash escapes are honoured outside single quotes.
+func shellQuotesClosed(script string) bool {
+	inSingle, inDouble, escaped := false, false, false
+	for _, r := range script {
+		switch {
+		case inSingle:
+			inSingle = r != '\''
+		case escaped:
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case inDouble:
+			inDouble = r != '"'
+		case r == '\'':
+			inSingle = true
+		case r == '"':
+			inDouble = true
+		}
+	}
+	return !inSingle && !inDouble
+}
+
+// shellBodyUnevaluable reports whether eff runs a body the splitter cannot
+// evaluate: an eval or shell whose body is not a literal that parses. A shell
+// with no `-c` runs a file or stdin the static gates never see.
+func shellBodyUnevaluable(eff []string) bool {
+	head := eff[0]
+	var body string
+	switch {
+	case head == "eval":
+		if len(eff) == 1 {
+			return false
+		}
+		body = strings.Join(eff[1:], " ")
+	case shellReexecBinaries[head]:
+		script, ok := shellDashCScript(eff[1:])
+		if !ok {
+			return true
+		}
+		body = script
+	default:
+		return false
+	}
+	_, ok := parseEvaluableScript(body)
+	return !ok
+}
+
+// bashPrefixTooBroad reports whether a rule for prefix would match invocations
+// the splitter cannot evaluate: its head is a shell, an interpreter, eval, or a
+// launcher that runs another command (xargs, env, sudo, …). Such a rule would
+// approve whatever program or script the invocation carries.
+func bashPrefixTooBroad(prefix string) bool {
+	fields := strings.Fields(prefix)
+	if len(fields) == 0 || IsSyntheticBashPrefix(prefix) {
+		return false
+	}
+	head := path.Base(fields[0])
+	if head == "eval" || shellReexecBinaries[head] || isInterpreterSubprocessBinary(head) {
+		return true
+	}
+	_, wrapper := transparentWrappers[head]
+	return wrapper
 }
 
 // ShellControlKeywords are bash/sh constructs that are not real commands and

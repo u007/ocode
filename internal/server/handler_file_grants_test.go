@@ -45,6 +45,57 @@ func grantPath(t *testing.T, h *Handler, path string) string {
 	return resp.Root
 }
 
+// The grant response carries the requested file in the SAME canonical spelling
+// as the granted root, so the web can place it under the root. A file typed
+// through a symlink must come back under the resolved root, and a granted
+// directory is its own path.
+func TestFileGrant_ResponsePathIsCanonicalUnderRoot(t *testing.T) {
+	h, _ := newFilesHandler(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "notes.md"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(outside, alias); err != nil {
+		t.Fatal(err)
+	}
+	realOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	grant := func(path string) (root, file string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		body := `{"path":"` + path + `"}`
+		h.HandleGrantFilePath(rec, httptest.NewRequest("POST", "/api/files/grant", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("grant %q: status = %d body=%s", path, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Root string `json:"root"`
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("grant decode: %v", err)
+		}
+		return resp.Root, resp.Path
+	}
+
+	root, file := grant(filepath.Join(alias, "notes.md"))
+	if root != realOutside {
+		t.Fatalf("root = %q, want the resolved %q", root, realOutside)
+	}
+	if want := filepath.Join(realOutside, "notes.md"); file != want {
+		t.Fatalf("path = %q, want %q (typed through a link, spelled under the resolved root)", file, want)
+	}
+
+	root, file = grant(outside)
+	if root != realOutside || file != realOutside {
+		t.Fatalf("directory grant: root=%q path=%q, want both %q", root, file, realOutside)
+	}
+}
+
 func TestFileGrant_AllowsReadOutsideProject(t *testing.T) {
 	h, tmpDir := newFilesHandler(t)
 	outside := t.TempDir()
@@ -333,5 +384,67 @@ func TestFileGrant_GrantedDirIsTreeRoot(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "a.txt") {
 		t.Fatalf("tree body = %s, want a.txt", rec.Body.String())
+	}
+}
+
+// The PREVIEW surfaces (pdf/docx/pptx/excel/image/mermaid) read their bytes
+// through /api/files/raw, NOT /api/files/content. A grant must cover that path
+// too, or "the editor can open it" would be true while the preview stayed
+// broken — half the feature.
+func TestFileGrant_AllowsRawPreviewOutsideProject(t *testing.T) {
+	h, _ := newFilesHandler(t)
+	outside := t.TempDir()
+	target := filepath.Join(outside, "doc.pdf")
+	if err := os.WriteFile(target, []byte("%PDF-1.4 test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before the grant the raw read is refused.
+	rec := httptest.NewRecorder()
+	h.HandleFileRaw(rec, httptest.NewRequest("GET", "/api/files/raw?path="+url.QueryEscape(target), nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("before grant: status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	root := grantPath(t, h, target)
+	for _, q := range []string{
+		"/api/files/raw?path=" + url.QueryEscape(target),
+		"/api/files/raw?path=" + url.QueryEscape("doc.pdf") + "&project_root=" + url.QueryEscape(root),
+	} {
+		rec := httptest.NewRecorder()
+		h.HandleFileRaw(rec, httptest.NewRequest("GET", q, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("after grant %q: status = %d body=%s", q, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "%PDF-1.4") {
+			t.Fatalf("after grant %q: body = %q, want the file bytes", q, rec.Body.String())
+		}
+	}
+}
+
+// The media TOKEN endpoint is the other preview path (audio/video elements
+// cannot send an Authorization header, so they ask for a token first). It must
+// accept a granted directory as the anchor for the same reason.
+func TestFileGrant_AllowsMediaTokenOutsideProject(t *testing.T) {
+	h, _ := newFilesHandler(t)
+	outside := t.TempDir()
+	target := filepath.Join(outside, "clip.mp4")
+	if err := os.WriteFile(target, []byte("VIDEO"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.HandleMediaToken(rec, httptest.NewRequest("POST", "/api/files/media-token",
+		strings.NewReader(`{"path":"`+target+`"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("before grant: status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	root := grantPath(t, h, target)
+	rec2 := httptest.NewRecorder()
+	h.HandleMediaToken(rec2, httptest.NewRequest("POST", "/api/files/media-token",
+		strings.NewReader(`{"path":"clip.mp4","project_root":"`+root+`"}`)))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("after grant: status = %d body=%s", rec2.Code, rec2.Body.String())
 	}
 }

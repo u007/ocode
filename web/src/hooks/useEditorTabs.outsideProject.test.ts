@@ -32,7 +32,7 @@ afterEach(() => {
 
 describe("useEditorTabs — out-of-project files", () => {
   it("grants the path's directory and opens the file anchored to the grant", async () => {
-    grantFilePath.mockResolvedValue({ root: "/Users/x/Downloads", granted: true, roots: ["/Users/x/Downloads"] });
+    grantFilePath.mockResolvedValue({ root: "/Users/x/Downloads", path: "/Users/x/Downloads/notes.md", granted: true, roots: ["/Users/x/Downloads"] });
 
     const { result } = renderHook(() => useEditorTabs());
     await act(async () => {
@@ -52,7 +52,7 @@ describe("useEditorTabs — out-of-project files", () => {
   });
 
   it("passes the remote host through so the grant lands on the remote server", async () => {
-    grantFilePath.mockResolvedValue({ root: "/home/x/notes", granted: true, roots: ["/home/x/notes"] });
+    grantFilePath.mockResolvedValue({ root: "/home/x/notes", path: "/home/x/notes/a.md", granted: true, roots: ["/home/x/notes"] });
 
     const { result } = renderHook(() => useEditorTabs());
     await act(async () => {
@@ -76,7 +76,7 @@ describe("useEditorTabs — out-of-project files", () => {
   });
 
   it("returns false when the grant response carries no root", async () => {
-    grantFilePath.mockResolvedValue({ root: "", granted: false, roots: [] });
+    grantFilePath.mockResolvedValue({ root: "", path: "", granted: false, roots: [] });
 
     const { result } = renderHook(() => useEditorTabs());
     let ok = true;
@@ -85,6 +85,45 @@ describe("useEditorTabs — out-of-project files", () => {
     });
 
     expect(ok).toBe(false);
+    expect(result.current.editorTabs).toHaveLength(0);
+  });
+
+  it("opens a link-typed path relative to the server's canonical root", async () => {
+    // macOS: the user typed /var/x/notes.md, the server resolved the grant to
+    // /private/var/x and spells the file under that same root.
+    grantFilePath.mockResolvedValue({
+      root: "/private/var/x",
+      path: "/private/var/x/notes.md",
+      granted: true,
+      roots: ["/private/var/x"],
+    });
+
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      const ok = await result.current.openOutsideProject("/var/x/notes.md");
+      expect(ok).toBe(true);
+    });
+
+    await waitFor(() => expect(result.current.editorTabs).toHaveLength(1));
+    expect(result.current.editorTabs[0].path).toBe("notes.md");
+    expect(result.current.editorTabs[0].projectRoot).toBe("/private/var/x");
+  });
+
+  it("throws a clear error when the file is not inside the granted root", async () => {
+    grantFilePath.mockResolvedValue({
+      root: "/Users/x/Downloads",
+      path: "/Users/x/Other/notes.md",
+      granted: true,
+      roots: ["/Users/x/Downloads"],
+    });
+
+    const { result } = renderHook(() => useEditorTabs());
+    await act(async () => {
+      await expect(result.current.openOutsideProject("/Users/x/Other/notes.md")).rejects.toThrow(
+        "Cannot open /Users/x/Other/notes.md: it is not inside the granted folder /Users/x/Downloads.",
+      );
+    });
+
     expect(result.current.editorTabs).toHaveLength(0);
   });
 
