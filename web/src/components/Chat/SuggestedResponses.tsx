@@ -27,7 +27,7 @@ export default function SuggestedResponses({ suggestions, onSelect }: Props) {
     <div
       role="toolbar"
       aria-label="Suggested responses"
-      className="mt-2 flex flex-wrap items-center gap-1"
+      className="mt-2 flex flex-wrap items-center gap-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:scrollbar-hide"
     >
       {suggestions.map((suggestion) => (
         <button

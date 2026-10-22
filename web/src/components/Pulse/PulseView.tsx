@@ -272,7 +272,13 @@ export function PulseView() {
             </div>
           </div>
         ) : (
-          <div className="flex-1 min-h-0 overflow-auto p-4" onKeyDown={onKeyDown}>
+          // Wider RIGHT gutter on purpose: a live card's stream swallows the
+          // wheel, so this padding strip is the only spot where the pointer
+          // reaches the board's scroller. Sides explicit — `p-4` would win.
+          <div
+            className="flex-1 min-h-0 overflow-auto pt-4 pb-4 pl-4 pr-8"
+            onKeyDown={onKeyDown}
+          >
             {!anyRows && !error && scope === "live" && (
               <div className="text-center py-16 text-muted-foreground">
                 <p className="text-sm">No live sessions</p>

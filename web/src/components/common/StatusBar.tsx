@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useChatSelector, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { useIsMobile } from "../../hooks/useIsMobile";
 import { Button } from "@/components/ui/button";
 import { PanelRight, Mic, MicOff, Activity, ChevronDown, ChevronUp } from "lucide-react";
 import { CopyableValue } from "./CopyValueButton";
@@ -160,7 +161,19 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   // reloads and syncs across windows/tabs.
   const [collapsed, setCollapsed] = useState(loadStatusBarCollapsed);
   useEffect(() => subscribeStatusBarCollapsed(setCollapsed), []);
+  // Phones start on the slim row: the expanded bar wraps into ~6 rows at 390px
+  // (measured 191px = 23% of an 844px viewport), which squeezed the transcript
+  // into a strip. The chevron still expands it for the session — `mobileExpanded`
+  // is local and deliberately NOT persisted, so the desktop preference
+  // (`saveStatusBarCollapsed`) is untouched and a phone always starts compact.
+  const isMobile = useIsMobile();
+  const [mobileExpanded, setMobileExpanded] = useState(false);
+  const collapsedNow = isMobile ? !mobileExpanded : collapsed;
   const toggleCollapsed = () => {
+    if (isMobile) {
+      setMobileExpanded((v) => !v);
+      return;
+    }
     const next = !collapsed;
     setCollapsed(next);
     saveStatusBarCollapsed(next);
@@ -269,7 +282,7 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
       </span>
     ) : null;
 
-  if (collapsed) {
+  if (collapsedNow) {
     return (
       <div className="flex items-center border-t border-border px-4 py-1 text-xs text-muted-foreground">
         <div className="flex items-center gap-3 min-w-0 flex-1 flex-wrap">

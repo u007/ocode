@@ -137,6 +137,48 @@ export function popLastQueued(tabId: string | null | undefined): QueuedItem | un
   return list.splice(list.length - 1, 1)[0];
 }
 
+/** Restore `item` and every later queued MESSAGE into the composer draft,
+ *  leaving anything still queued ahead of them (FIFO) untouched.
+ *
+ *  Why a suffix and not just the clicked item: the queue drains oldest-first, so
+ *  pulling back a later item while an earlier one is still pending would send
+ *  the restored text after the item the user clicked past. Restoring the
+ *  clicked item plus everything after it keeps submission order intact —
+ *  clicking the first queued item therefore restores the whole queue, and
+ *  clicking the last restores only the last.
+ *
+ *  Commands are deliberately left queued (same rule as
+ *  `drainQueuedMessagesIntoDraft`): a `/compact` or `!ls` inlined into a
+ *  multi-message composer block becomes prose and would never execute. A suffix
+ *  with no messages removes nothing and returns null.
+ *
+ *  `dispatched` messages are restored too, matching `popLastQueued`: they stay
+ *  recallable until the server echoes that the agent picked them up.
+ *
+ *  Addressed by the item itself rather than a numeric index: the queue can drain
+ *  between the render that drew the row and the click, and a stale index would
+ *  then restore a DIFFERENT suffix. A reference that is no longer queued is a
+ *  no-op. */
+export function restoreQueuedFrom(
+  tabId: string | null | undefined,
+  item: QueuedItem,
+  draft: string,
+): MergedDraft | null {
+  if (!tabId) return null;
+  const list = queues.get(tabId);
+  if (!list || list.length === 0) return null;
+  const index = list.indexOf(item);
+  if (index === -1) return null;
+  const texts = list.slice(index)
+    .filter((entry) => entry.kind === "message")
+    .map((entry) => entry.text);
+  if (texts.length === 0) return null;
+  // Keep the untouched prefix and any commands from the restored suffix, in
+  // their original relative order, so they still auto-drain normally.
+  queues.set(tabId, list.filter((entry, i) => i < index || entry.kind === "command"));
+  return mergeQueuedIntoDraft(texts, draft);
+}
+
 /** Move a queue from one tab id to another. Used when a temp `new-*` tab becomes
  *  a real session: ChatInput queues by the temp id, and without the rekey those
  *  queued items would be orphaned under the old id and never drain. */

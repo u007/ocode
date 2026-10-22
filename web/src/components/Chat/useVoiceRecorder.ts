@@ -115,6 +115,10 @@ export interface VoiceRecorder {
   /** Clears an armed hold timer without starting anything (pointer left the
    *  button while holding). */
   cancelPress: () => void;
+  /** Clears the last error notice. The composer renders it as a dismissible
+   *  banner, so a stale failure (mic denied, transcription failed, nothing
+   *  heard) can be closed without starting another recording. */
+  dismissError: () => void;
 }
 
 export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorder {
@@ -177,6 +181,10 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
   const report = useCallback((message: string | null) => {
     if (mountedRef.current) setError(message);
   }, []);
+
+  /** The composer's dismiss affordance. The hook owns the state, so the
+   *  component never needs a local copy that could outlive a newer failure. */
+  const dismissError = useCallback(() => report(null), [report]);
 
   const setPartial = useCallback((text: string) => {
     if (mountedRef.current) setPartialTextState(text);
@@ -479,5 +487,5 @@ export function useVoiceRecorder(options: UseVoiceRecorderOptions): VoiceRecorde
     };
   }, [releaseStream, stopPartials]);
 
-  return { supported, state, partialText, error, holding, start, stop, cancel, press, release, cancelPress };
+  return { supported, state, partialText, error, holding, start, stop, cancel, press, release, cancelPress, dismissError };
 }

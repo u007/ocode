@@ -129,6 +129,28 @@ describe("ChatInput pending rewind", () => {
     expect(textarea().value).toBe("recovered draft");
   });
 
+  it("lets the user dismiss a failed rewind validation notice", async () => {
+    savePendingRewind({
+      version: 1,
+      host: "devbox",
+      sessionId: "ses-1",
+      token: "c".repeat(64),
+      draft: "recovered draft",
+      previousDraft: "",
+      targetPreview: "recovered",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    getRewind.mockRejectedValue(new Error("boom"));
+
+    render(<ChatInput sessionTabId="ses-1" isActive />);
+
+    await waitFor(() => expect(screen.getByText(/Validate restore failed: boom/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss restore error" }));
+
+    expect(screen.queryByText(/Validate restore failed: boom/)).toBeNull();
+  });
+
   it("rolls back a server resource when the local record cannot be persisted", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
       throw new Error("quota");

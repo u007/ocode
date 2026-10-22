@@ -30,4 +30,15 @@ describe("QuickActionsBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Generate session recap (/recap)" }));
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
+
+  it("scrolls horizontally on phones so a long chip row can't steal chat height", () => {
+    // jsdom has no layout engine, so this pins the CSS contract that keeps the
+    // composer compact below 640px: wrapped chips cost ~28px of transcript
+    // height. Desktop keeps wrapping as before.
+    render(<QuickActionsBar actions={actions} onSelect={vi.fn()} />);
+    const bar = screen.getByRole("toolbar", { name: "Quick actions" });
+    expect(bar.className).toContain("flex-wrap");
+    expect(bar.className).toContain("max-sm:flex-nowrap");
+    expect(bar.className).toContain("max-sm:overflow-x-auto");
+  });
 });

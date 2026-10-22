@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import StatusBar from "./StatusBar";
 import { STATUS_BAR_COLLAPSED_STORAGE_KEY } from "./statusBarCollapse";
 
@@ -33,10 +33,16 @@ vi.mock("../../components/Speech/SpeechProvider", () => ({
   useSpeech: () => ({ toolbarVisible: false, toggleToolbar: vi.fn() }),
 }));
 
+// Phone layout is decided by useIsMobile (max-width: 767px). Mutable so one
+// describe can flip it without affecting the desktop cases.
+const viewport = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../hooks/useIsMobile", () => ({ useIsMobile: () => viewport.mobile }));
+
 const KEY = STATUS_BAR_COLLAPSED_STORAGE_KEY;
 
 describe("StatusBar collapse", () => {
   beforeEach(() => {
+    viewport.mobile = false;
     window.localStorage.removeItem(KEY);
     state.spendingUSD = 0;
     state.slice = { isStreaming: false, error: null, live: [], tuiStatus: null, turnActive: false };
@@ -145,5 +151,40 @@ describe("StatusBar collapse", () => {
 
     expect(screen.queryByText("ocode web")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Expand status bar" })).toBeInTheDocument();
+  });
+});
+
+describe("StatusBar on phones", () => {
+  beforeEach(() => {
+    viewport.mobile = true;
+    window.localStorage.removeItem(KEY);
+    state.spendingUSD = 0;
+    state.slice = { isStreaming: false, error: null, live: [], tuiStatus: null, turnActive: false };
+  });
+  afterEach(() => {
+    viewport.mobile = false;
+  });
+
+  it("starts on the slim row when the viewport is <=767px, even though the desktop preference is expanded", () => {
+    render(<StatusBar />);
+
+    // The expanded detail rows (and their brand label) are gone...
+    expect(screen.queryByText("ocode web")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expand status bar" })).toBeInTheDocument();
+    // ...and the short viewport did NOT overwrite the desktop preference.
+    expect(window.localStorage.getItem(KEY)).toBeNull();
+  });
+
+  it("expands on demand from the slim row without persisting the phone choice", () => {
+    render(<StatusBar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand status bar" }));
+
+    expect(screen.getByText("ocode web")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse status bar" })).toBeInTheDocument();
+    // Re-collapsing on a phone must not write the desktop preference either.
+    fireEvent.click(screen.getByRole("button", { name: "Collapse status bar" }));
+    expect(screen.queryByText("ocode web")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(KEY)).toBeNull();
   });
 });

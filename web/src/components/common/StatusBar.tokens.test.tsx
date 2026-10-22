@@ -1,7 +1,22 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import StatusBar from "./StatusBar";
 import { STATUS_BAR_COLLAPSED_STORAGE_KEY } from "./statusBarCollapse";
+
+// jsdom ships no matchMedia and StatusBar now reads the mobile breakpoint via
+// useIsMobile; default to the desktop answer (matches: false).
+beforeAll(() => {
+  window.matchMedia = ((media: string) => ({
+    matches: false,
+    media,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+});
 
 // StatusBar reads two stores and the speech provider; stub all three so the
 // test drives only the per-session token segment (mirrors the collapse suite).

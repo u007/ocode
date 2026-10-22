@@ -143,6 +143,20 @@ describe("ChatInput voice input", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it("lets the user dismiss a failed-transcription notice without recording again", async () => {
+    vi.spyOn(api, "transcribeSpeech").mockRejectedValue(new Error("STT worker crashed"));
+    render(<ChatInput sessionTabId={TAB} />);
+
+    await recordOnce();
+    expect(screen.getByRole("alert").textContent).toContain("STT worker crashed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss voice error" }));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    // Dismissing must not disturb the send path: the failure still sent nothing.
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it("disables the mic with an explanatory tooltip when the browser cannot record", () => {
     removeVoiceEnv();
     render(<ChatInput sessionTabId={TAB} />);
