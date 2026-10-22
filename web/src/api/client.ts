@@ -3802,7 +3802,14 @@ export const api = {
 
   // ── Dynamic commands / skills ──
   listCommands: () => fetchJSON<CommandEntry[]>("/api/commands"),
-  listSkills: () => fetchJSON<SkillEntry[]>("/api/skills"),
+  // `projectPath` scopes the list to one project (its own disables apply too);
+  // without it the shared, project-agnostic list is returned.
+  listSkills: (host?: string, projectPath?: string) => {
+    const qs = new URLSearchParams();
+    if (projectPath) qs.set("path", projectPath);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<SkillEntry[]>(`/api/skills${suffix}`, undefined, host);
+  },
 
   // ── Skill enable/disable (chat sidebar) ──────────────────────────────────
   // "Enabled" means DISCOVERABLE: advertised in the skill catalog, discovery

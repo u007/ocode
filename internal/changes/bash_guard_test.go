@@ -430,20 +430,20 @@ func TestTargetTokensHandlesQuotedPaths(t *testing.T) {
 			keep:    []string{"internal/projects/projects.go"},
 		},
 		{
-			name:    "python variable with double-quoted path",
+			name: "python variable with double-quoted path",
 			command: `cd ` + workDir + ` && python3 - <<'PY'
 p="web/src/components/Layout/ProjectSidebar.tsx"
 s=open(p).read()
 open(p,"w").write(s)
 PY`,
-			keep:    []string{"web/src/components/Layout/ProjectSidebar.tsx"},
+			keep: []string{"web/src/components/Layout/ProjectSidebar.tsx"},
 		},
 		{
-			name:    "single-quoted path",
+			name: "single-quoted path",
 			command: `cd ` + workDir + ` && cat > 'internal/config/skill_prefs.go' <<'EOF'
 package config
 EOF`,
-			keep:    []string{"internal/config/skill_prefs.go"},
+			keep: []string{"internal/config/skill_prefs.go"},
 		},
 	}
 
@@ -505,5 +505,40 @@ func TestStatBashRecorderQuotedPathNoLeak(t *testing.T) {
 	}
 	if list[0].OriginalPath != fileA {
 		t.Errorf("expected %s, got %s", fileA, list[0].OriginalPath)
+	}
+}
+
+// TestTargetTokensRequiresBoundary pins that a path token must start at a
+// boundary: variables, URLs and dotted names must not yield mangled
+// mid-token candidates that could be attributed to an unrelated file.
+func TestTargetTokensRequiresBoundary(t *testing.T) {
+	workDir := filepath.Join(string(filepath.Separator)+"Users", "james", "www", "ocode")
+	rec := newTestRecorder(t, workDir, NewRegistry())
+
+	for _, tc := range []struct {
+		name, command string
+		drop          []string
+	}{
+		{"shell variable prefix", `echo hi > $HOME/foo`, []string{"HOME/foo"}},
+		{"braced variable prefix", `cp a.txt ${OUT}/x`, []string{"OUT}/x", "}/x"}},
+		{"url", `curl https://example.com/a/b -o out.txt`, []string{"example.com/a/b", "//example.com/a/b"}},
+		{"colon path", `echo a:/b/c`, []string{"b/c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rec.targetTokens(tc.command)
+			for _, d := range tc.drop {
+				if _, ok := got[d]; ok {
+					t.Errorf("targetTokens produced mid-token candidate %q; got %v", d, keysOf(got))
+				}
+			}
+		})
+	}
+
+	// Boundaries that must keep working, including both quote styles.
+	got := rec.targetTokens(`x=dir/a.txt; cat "dir/b.txt" 'dir/c.txt' (dir/d.txt)`)
+	for _, want := range []string{"dir/a.txt", "dir/b.txt", "dir/c.txt", "dir/d.txt"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing %q; got %v", want, keysOf(got))
+		}
 	}
 }

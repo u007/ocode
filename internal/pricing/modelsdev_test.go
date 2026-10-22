@@ -2,9 +2,11 @@ package pricing
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLookupReturnsBundledPricing(t *testing.T) {
@@ -91,5 +93,54 @@ func TestLookupFallsBackToCodexGPT56Pricing(t *testing.T) {
 	// Provider-prefixed form must normalize the same way.
 	if _, ok := Lookup("openai/gpt-5.6-terra"); !ok {
 		t.Fatal("expected openai/gpt-5.6-terra pricing to resolve")
+	}
+}
+
+func resetUnknownWarned(t *testing.T) {
+	t.Helper()
+	unknownWarnMu.Lock()
+	clear(unknownWarned)
+	unknownWarnMu.Unlock()
+}
+
+func TestShouldWarnUnknownModelRewarnsAfterTTL(t *testing.T) {
+	resetUnknownWarned(t)
+	t0 := time.Now()
+	if !shouldWarnUnknownModel("m", t0) {
+		t.Fatal("first sighting must warn")
+	}
+	if shouldWarnUnknownModel("m", t0.Add(unknownWarnTTL-time.Second)) {
+		t.Fatal("repeat inside the TTL must not warn")
+	}
+	if !shouldWarnUnknownModel("m", t0.Add(unknownWarnTTL)) {
+		t.Fatal("a model still unknown after the TTL must be reported again")
+	}
+}
+
+func TestShouldWarnUnknownModelIsBounded(t *testing.T) {
+	resetUnknownWarned(t)
+	now := time.Now()
+	for i := 0; i < unknownWarnMax*4; i++ {
+		shouldWarnUnknownModel(fmt.Sprintf("model-%d", i), now)
+		unknownWarnMu.Lock()
+		n := len(unknownWarned)
+		unknownWarnMu.Unlock()
+		if n > unknownWarnMax {
+			t.Fatalf("warned set grew to %d, cap is %d", n, unknownWarnMax)
+		}
+	}
+	// Expired entries are evicted first, so a still-fresh name survives a sweep.
+	resetUnknownWarned(t)
+	shouldWarnUnknownModel("old", now.Add(-2*unknownWarnTTL))
+	for i := 0; i < unknownWarnMax-1; i++ {
+		shouldWarnUnknownModel(fmt.Sprintf("fresh-%d", i), now)
+	}
+	shouldWarnUnknownModel("trigger", now) // at capacity: sweeps "old" only
+	unknownWarnMu.Lock()
+	_, oldKept := unknownWarned["old"]
+	_, freshKept := unknownWarned["fresh-0"]
+	unknownWarnMu.Unlock()
+	if oldKept || !freshKept {
+		t.Fatalf("sweep evicted wrongly: old kept=%v, fresh kept=%v", oldKept, freshKept)
 	}
 }

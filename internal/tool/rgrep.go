@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,21 +44,49 @@ var rgFallbackPaths = []string{
 	"/usr/local/bin/rg",
 }
 
-// rgBinOnce and rgBinPath hold the process-wide resolution. rg is looked up
-// once per app instance, not per search: a PATH lookup plus fallback stats on
-// every grep call is pure overhead, and the answer does not change while the
-// app runs.
+// rgBinMu guards the process-wide resolution. A found binary is cached for the
+// life of the process: a PATH lookup plus fallback stats on every grep call is
+// pure overhead. A miss is cached only for rgBinRecheckAfter, so installing rg
+// mid-session is noticed without paying the lookup on every call.
 var (
-	rgBinOnce sync.Once
-	rgBinPath string
+	rgBinMu        sync.Mutex
+	rgBinPath      string
+	rgBinCheckedAt time.Time
 )
 
-// cachedRgBin returns the ripgrep binary resolved on first use, or "" when it
-// was not found. The result is memoised for the life of the process.
+// rgBinRecheckAfter bounds how long "rg is not installed" is trusted.
+const rgBinRecheckAfter = 30 * time.Second
+
+// cachedRgBin returns the ripgrep binary, or "" when it is not installed.
 func cachedRgBin() string {
-	rgBinOnce.Do(func() { rgBinPath = resolveRgBin() })
+	rgBinMu.Lock()
+	defer rgBinMu.Unlock()
+	if rgBinPath != "" {
+		return rgBinPath
+	}
+	if !rgBinCheckedAt.IsZero() && time.Since(rgBinCheckedAt) < rgBinRecheckAfter {
+		return ""
+	}
+	rgBinPath = resolveRgBin()
+	rgBinCheckedAt = time.Now()
 	return rgBinPath
 }
+
+// forgetRgBin drops a cached path that no longer executes (rg was removed or
+// moved after it was resolved) so the next lookup probes again.
+func forgetRgBin(bad string) {
+	rgBinMu.Lock()
+	defer rgBinMu.Unlock()
+	if rgBinPath == bad {
+		rgBinPath = ""
+		rgBinCheckedAt = time.Time{}
+	}
+}
+
+// errRgUnavailable marks a failure to start rg at all (binary missing or not
+// executable), as opposed to rg running and reporting a search problem.
+// GrepTool falls back to its in-process walk on it.
+var errRgUnavailable = errors.New("ripgrep binary unavailable")
 
 // rgBinResolver is an indirection point so tests can simulate a missing
 // binary without touching the real PATH. Production uses cachedRgBin.
@@ -160,13 +189,19 @@ func (t *RgrepTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (t *RgrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	return t.run(ctx, args, "rgrep")
+}
+
+// run is the ripgrep search shared by rgrep and by grep when it delegates;
+// name labels errors and the relevance judge with the tool the model called.
+func (t *RgrepTool) run(ctx context.Context, args json.RawMessage, name string) (string, error) {
 	var p grepParams
 
 	if err := json.Unmarshal(args, &p); err != nil {
-		return "", fmt.Errorf("rgrep: invalid params: %w", err)
+		return "", fmt.Errorf("%s: invalid params: %w", name, err)
 	}
 	if strings.TrimSpace(p.Pattern) == "" {
-		return "", fmt.Errorf("rgrep: 'pattern' is required")
+		return "", fmt.Errorf("%s: 'pattern' is required", name)
 	}
 	if len(p.Pattern) > rgMaxPatternLen {
 		return "", fmt.Errorf("pattern too long (max %d characters)", rgMaxPatternLen)
@@ -176,7 +211,7 @@ func (t *RgrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		p.OutputMode = "content"
 	case "content", "files_with_matches", "count":
 	default:
-		return "", fmt.Errorf("rgrep: invalid output_mode %q", p.OutputMode)
+		return "", fmt.Errorf("%s: invalid output_mode %q", name, p.OutputMode)
 	}
 
 	// Same anchoring as grep/glob/list: relative paths join the session's
@@ -254,8 +289,13 @@ func (t *RgrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 	cmd.Stdout = stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+			// rg could not be started: the cached path went stale.
+			forgetRgBin(bin)
+			return "", fmt.Errorf("%w: %v", errRgUnavailable, err)
+		}
 		if runCtx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("rgrep: timed out after %s", rgTimeout)
+			return "", fmt.Errorf("%s: timed out after %s", name, rgTimeout)
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -267,7 +307,7 @@ func (t *RgrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("rgrep failed: %s", rgFirstLines(msg))
+		return "", fmt.Errorf("%s failed: %s", name, rgFirstLines(msg))
 	}
 
 	// Group rg's output into per-file results, then run the relevance judge
@@ -279,7 +319,7 @@ func (t *RgrepTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 	for i, r := range results {
 		judgeResults[i] = SearchResult{Path: r.path, Count: r.count, Summary: strings.Join(r.sample, "\n")}
 	}
-	outcome := runSearchJudge(ctx, "rgrep", p.Intent, map[string]string{
+	outcome := runSearchJudge(ctx, name, p.Intent, map[string]string{
 		"pattern": p.Pattern,
 		"path":    p.Path,
 		"include": p.Include,

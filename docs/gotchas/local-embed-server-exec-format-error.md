@@ -54,11 +54,29 @@ Run:
 /localserver fix
 ```
 
-`ReinstallLocalServer` (`internal/discovery/localserver_repair.go`) removes the
-`llama-*` extraction directories and the SHA markers from the cache dir, then
-re-downloads and re-extracts from the pinned archive. `EnsureArtifact`
-(`internal/discovery/download.go`) verifies SHA256 and writes atomically, so a
-partial/corrupt download is also repaired this way.
+`ReinstallLocalServer` (`internal/discovery/localserver_repair.go`) re-downloads
+and re-extracts the pinned archive into a scratch directory
+(`.reinstall-stage-*` inside the cache dir) and only then swaps it over the
+installed tree (`installStaged`): the old `llama-*` directories and markers are
+moved aside, the new ones renamed in, and everything is rolled back if any
+rename fails. A failed download (offline, SHA mismatch) therefore leaves the
+previous install untouched — `/localserver fix` can never turn a degraded
+install into no install. `EnsureArtifact` (`internal/discovery/download.go`)
+verifies SHA256, so a partial/corrupt download is also repaired this way. Large
+raw artifacts (the `.gguf` model) are not re-fetched; they are re-verified after
+the swap.
+
+The reinstall holds `localMu` (a concurrent in-process `EnsureLocalServer` waits
+rather than spawning from a half-swapped tree) and the cross-process embed start
+lock; if another ocode is mid-spawn it refuses with "another ocode process is
+starting the local embed server". On Windows a running `llama-server.exe` cannot
+be renamed, which surfaces as an error before anything is lost.
+
+In the TUI, `/localserver status` and `path` run on a `tea.Cmd` (status execs
+`llama-server --version` under a 5 s timeout and must not run on the Update
+goroutine) and stay available mid-stream; `fix`/`reinstall` replace the install
+on disk, so they queue behind a running turn like other persistent-state
+mutations.
 
 ## Restart caveat
 

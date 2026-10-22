@@ -25,9 +25,9 @@ Its contract is **fail-open**: a judge can only ever hide a result. An error, a 
 ## What is filtered
 
 - `grep`, `rgrep` and `glob` each build a structured `[]tool.SearchResult` — one entry per matching file with `Path`, `Summary` (a bounded sample of matched lines, line numbers preserved) and `Count` (`SearchResult`, `internal/tool/search_judge.go:11`) — run the judge on the whole set, then format only the kept files through their existing `output_mode` switch (`writeSearchResultBlock`, `internal/tool/search_judge_apply.go:107`).
-- Judge call sites: `grep` at `internal/tool/search.go:648` (`runSearchJudge(ctx, "grep", …)`), `glob` at `internal/tool/search.go:313`, `rgrep` at `internal/tool/rgrep.go:265` (after `groupResults` at `internal/tool/rgrep.go:363` groups rg's JSON records per file).
+- Judge call sites: `grep` at `internal/tool/search.go:663` (`runSearchJudge(ctx, "grep", …)`), `glob` at `internal/tool/search.go:314`, `rgrep` at `internal/tool/rgrep.go:322` (after `groupResults` at `internal/tool/rgrep.go:420` groups rg's JSON records per file). When ripgrep is installed `grep` delegates to the rg path (`RgrepTool.run(ctx, args, "grep")`), which judges under the name it was given, so a delegated `grep` is still booked and prompted as `grep`, not `rgrep`.
 - Judging is per **file**, not per matching line: one out-of-scope file takes every one of its matching lines with it.
-- In `grep` the judge runs **before** `truncateOutput` (`internal/tool/search.go:682`), so the output cap applies to the kept set; the disclosure footer is appended after truncation so a cut can never hide that results were filtered.
+- In `grep` the judge runs **before** `truncateOutput` (`internal/tool/search.go:697`), so the output cap applies to the kept set; the disclosure footer is appended after truncation so a cut can never hide that results were filtered.
 - `glob` results carry only a `Path` (`Count` 0 — a plain listing); `grep`/`rgrep` carry counts and sampled match lines.
 
 ## When the judge is live
@@ -38,7 +38,7 @@ With no judge, `runSearchJudge` returns every result untouched (`internal/tool/s
 
 ## The `intent` argument
 
-`grep`, `rgrep` and `glob` gained a new schema argument `intent` — one sentence stating what the caller is looking for and why — listed in `required`: glob at `internal/tool/search.go:212`, grep at `internal/tool/search.go:465`, rgrep at `internal/tool/rgrep.go:136` (field `grepParams.Intent`, `internal/tool/search.go:422`).
+`grep`, `rgrep` and `glob` gained a new schema argument `intent` — one sentence stating what the caller is looking for and why — listed in `required`: glob at `internal/tool/search.go:213`, grep at `internal/tool/search.go:466`, rgrep at `internal/tool/rgrep.go:182` (field `grepParams.Intent`, `internal/tool/search.go:423`).
 
 - **`required` is a teaching device, not enforcement.** An empty `intent` skips the judge entirely and logs `intent-missing` (`internal/agent/search_typesafe.go:156`); it never returns an error demanding the argument, which would burn a turn on a formality.
 - The requirement is also reinforced in the prompt directive that already names the search tools (`internal/agent/prompt.go:52`), pinned by `TestDocPromptDirectiveRequiresSearchIntent` (`internal/agent/search_wiring_test.go:272`).
@@ -78,7 +78,7 @@ Two regression tests pin this (`internal/agent/search_wiring_test.go`):
 
 `SearchJudgeMaxCandidates` = **40** (`internal/tool/search_judge_apply.go:14`). Results past the cap are **kept unjudged, never dropped** — the cap is a cost control and must not decide relevance — and the footer discloses how many were not judged (`runSearchJudge`, `internal/tool/search_judge_apply.go:78`).
 
-The pre-judge order is each tool's existing output order, so the 40 judged candidates are the first 40 in that order. For `glob` that order is **mtime descending** (`sort.Slice`, `internal/tool/search.go:291`), so on a large glob the 40 judged files are the 40 most recently touched. Because unjudged results are kept, a skewed sample costs coverage, not correctness — but on a large `glob` the cap, not relevance, decides how much judging happens, and the footer's unjudged count makes that visible.
+The pre-judge order is each tool's existing output order, so the 40 judged candidates are the first 40 in that order. For `glob` that order is **mtime descending** (`sort.Slice`, `internal/tool/search.go:292`), so on a large glob the 40 judged files are the 40 most recently touched. Because unjudged results are kept, a skewed sample costs coverage, not correctness — but on a large `glob` the cap, not relevance, decides how much judging happens, and the footer's unjudged count makes that visible.
 
 ## Rubric and state
 
@@ -108,7 +108,7 @@ Found N matching file(s), but none are in scope for this intent (relevance judge
 Narrow "pattern"/"include", or re-run with an intent that matches what these files contain.
 ```
 
-The tail differs per tool: `grep` and `rgrep` say `Narrow "pattern"/"include"` (`internal/tool/search.go:655`, `internal/tool/rgrep.go:272`); `glob` says `Narrow "pattern"/"path"` (`internal/tool/search.go:318`).
+The tail differs per tool: `grep` and `rgrep` say `Narrow "pattern"/"include"` (`internal/tool/search.go:670`, `internal/tool/rgrep.go:329`); `glob` says `Narrow "pattern"/"path"` (`internal/tool/search.go:319`).
 
 ## Debug lines
 
@@ -123,7 +123,7 @@ Emitted under kind `TOOL`, tag `search_typesafe`:
 - **`read` is never judged.** Reading a named path is an explicit caller choice — the same carve-out the doc_search judge applies to `doc_get` (see [Doc Search Relevance Judge](concepts/doc-search-relevance-judge.md), "Scope boundary"). A judge cannot improve an explicit choice.
 - **`ast`, `lsp`, `ast_grep` are out of v1.** They return precise symbol hits, so the noise problem is materially smaller, and a wrong veto there hides a definition or call site the model specifically asked for. Stated honestly: the model *can* route around a judged `grep` by reaching for `ast`, so the "a second unjudged path is a bypass" principle ([Discovery MCP Tool Gating](concepts/discovery-mcp-tool-gating.md)) does not hold in its strong form here — that principle governs attach gates, while this is a context-economy filter where the judge can only ever hide a result, never grant one. If debug logs show the model preferring `ast` to evade filtering, adding those tools is the v2 move.
 - **Custom and MCP search tools are out.** Nothing in ocode can enforce a `required` argument on a third-party tool schema.
-- **`list` is deferred.** It is `os.ReadDir` on a single directory (`ListTool`, `internal/tool/search.go:685`) with no cap: judging sibling filenames is the weakest relevance signal of the code-search tools and the highest false-positive risk (a veto hides a name the model needed) for the least context saved. Tracked in `TODO.md` under "Code-search relevance judge (2026-09-28)" (`TODO.md:2718`); rationale in spec §8. Adding it later is a `SearchResult` producer plus one call site.
+- **`list` is deferred.** It is `os.ReadDir` on a single directory (`ListTool`, `internal/tool/search.go:729`) with no cap: judging sibling filenames is the weakest relevance signal of the code-search tools and the highest false-positive risk (a veto hides a name the model needed) for the least context saved. Tracked in `TODO.md` under "Code-search relevance judge (2026-09-28)" (`TODO.md:2718`); rationale in spec §8. Adding it later is a `SearchResult` producer plus one call site.
 
 ## See also
 
