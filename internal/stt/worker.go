@@ -35,9 +35,10 @@ import (
 
 const (
 	// workerIdleTimeout unloads the worker after this long without a
-	// request. A resident model costs real memory (a couple of GB for the
-	// fp32 Parakeet export), so it must not outlive the user's session.
-	workerIdleTimeout = 2 * time.Minute
+	// request. The int8 Parakeet export costs real memory (about 1.5 GB
+	// resident), so it must not outlive the user's session, but the timeout is
+	// long enough that dictation never pays a cold load mid-session.
+	workerIdleTimeout = 30 * time.Minute
 	// workerLoadTimeout bounds the handshake, which includes downloading the
 	// model on a first run and can therefore take minutes.
 	workerLoadTimeout = 10 * time.Minute
@@ -75,12 +76,22 @@ type worker struct {
 	// key is the model identity this worker was started for.
 	key workerKey
 
-	mu      sync.Mutex
-	nextID  int
-	lastUse time.Time
-	pid     int
-	loads   int
-	dead    bool
+	mu     sync.Mutex
+	nextID int
+	pid    int
+	loads  int
+	dead   bool
+
+	// lastUse is the UnixNano of the last activity (see touch) and busy is set
+	// while a request runs. The idle timer reads both without taking mu: a
+	// request holds mu for its whole duration, so a TryLock from the timer made
+	// a concurrent preview fail with ErrWorkerBusy while the worker was idle.
+	lastUse atomic.Int64
+	busy    atomic.Bool
+
+	// idleTimer unloads the worker once it has gone workerIdleTimeout
+	// without a request. Guarded by workerState.mu.
+	idleTimer *time.Timer
 
 	// exited is set by the reaper goroutine once the child has been waited
 	// on. A crashed worker is a zombie until it is reaped, and a zombie
@@ -124,9 +135,31 @@ var ErrWorkerBusy = errors.New("speech-to-text: worker busy")
 //go:embed stt_worker.py
 var workerScript string
 
-// workerScriptPath writes the embedded worker script to a stable per-user
-// location and returns its path. The file is rewritten whenever the embedded
-// content changes, so an upgrade picks up a new worker without a cache purge.
+// modelPrepScript is the model preparation module both embedded Python helpers
+// import. It is written next to the script that imports it, because python -I
+// keeps the script's directory off sys.path. See stt_model_prep.py.
+//
+//go:embed stt_model_prep.py
+var modelPrepScript string
+
+// writeScriptFile writes content to dir/name, rewriting the file only when its
+// content changed, and returns its path.
+func writeScriptFile(dir, name, content string) (string, error) {
+	path := filepath.Join(dir, name)
+	want := []byte(content)
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == string(want) {
+		return path, nil
+	}
+	if err := os.WriteFile(path, want, 0o644); err != nil {
+		return "", fmt.Errorf("speech-to-text: write %s: %w", name, err)
+	}
+	return path, nil
+}
+
+// workerScriptPath writes the embedded worker and its shared module to a stable
+// per-user location and returns the worker's path. The files are rewritten
+// whenever the embedded content changes, so an upgrade picks up a new worker
+// without a cache purge.
 func workerScriptPath() (string, error) {
 	base, err := os.UserCacheDir()
 	if err != nil {
@@ -136,15 +169,10 @@ func workerScriptPath() (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("speech-to-text: create worker dir: %w", err)
 	}
-	path := filepath.Join(dir, "stt_worker.py")
-	want := []byte(workerScript)
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == string(want) {
-		return path, nil
+	if _, err := writeScriptFile(dir, "stt_model_prep.py", modelPrepScript); err != nil {
+		return "", err
 	}
-	if err := os.WriteFile(path, want, 0o644); err != nil {
-		return "", fmt.Errorf("speech-to-text: write worker script: %w", err)
-	}
-	return path, nil
+	return writeScriptFile(dir, "stt_worker.py", workerScript)
 }
 
 // acquireWorker returns a live worker for key, starting one if needed. The
@@ -186,12 +214,45 @@ func releaseWorker(w *worker) {
 	// The idle clock is NOT reset here: activity was already recorded when
 	// the request was made. Resetting it on release would make the timeout
 	// unreachable, and the resident model would never be unloaded.
-	w.mu.Lock()
-	idle := time.Since(w.lastUse)
-	w.mu.Unlock()
+	idle := w.idleFor()
 	if idle >= workerIdleTimeout {
 		stopWorkerLocked(w)
+		return
 	}
+	armIdleTimerLocked(w, workerIdleTimeout-idle)
+}
+
+// armIdleTimerLocked schedules the idle unload. Checking idleness only when a
+// request is released never fires for a worker nobody calls again, so a model
+// would stay resident for the life of the process. The caller holds
+// workerState.mu.
+func armIdleTimerLocked(w *worker, after time.Duration) {
+	if w.idleTimer != nil {
+		w.idleTimer.Stop()
+	}
+	w.idleTimer = time.AfterFunc(after, func() { unloadIfIdle(w) })
+}
+
+// unloadIfIdle is the idle timer's callback: it stops w when it has been idle
+// for workerIdleTimeout, and re-arms for the remainder otherwise.
+func unloadIfIdle(w *worker) {
+	workerState.mu.Lock()
+	defer workerState.mu.Unlock()
+	if workerState.active != w {
+		return
+	}
+	// A request in flight keeps the worker. releaseWorker re-arms the timer when
+	// that request finishes, so there is nothing to do here. The timer never
+	// takes w.mu (see the busy field).
+	if w.busy.Load() {
+		return
+	}
+	idle := w.idleFor()
+	if idle >= workerIdleTimeout {
+		stopWorkerLocked(w)
+		return
+	}
+	armIdleTimerLocked(w, workerIdleTimeout-idle)
 }
 
 // stopWorkerLocked stops a worker and clears it as the active one. The caller
@@ -201,6 +262,9 @@ func stopWorkerLocked(w *worker) {
 		return
 	}
 	w.dead = true
+	if w.idleTimer != nil {
+		w.idleTimer.Stop()
+	}
 	if w.stdin != nil {
 		_ = w.stdin.Close()
 	}
@@ -263,14 +327,14 @@ func startWorker(ctx context.Context, key workerKey, interpreter []string) (*wor
 	}
 
 	w := &worker{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  bufio.NewReader(stdout),
-		stderr:  stderr,
-		key:     key,
-		pid:     cmd.Process.Pid,
-		lastUse: time.Now(),
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: bufio.NewReader(stdout),
+		stderr: stderr,
+		key:    key,
+		pid:    cmd.Process.Pid,
 	}
+	w.touch()
 	// Reap the child in the background. Without this the worker becomes a
 	// zombie when it exits, and a zombie cannot be distinguished from a live
 	// process by a signal probe.
@@ -315,6 +379,8 @@ func (w *worker) recognize(ctx context.Context, path string) (string, error) {
 
 // recognizeLocked performs one request. The caller holds w.mu.
 func (w *worker) recognizeLocked(ctx context.Context, path string) (string, error) {
+	w.busy.Store(true)
+	defer w.busy.Store(false)
 	if w.dead {
 		return "", errors.New("speech-to-text: worker is not running")
 	}
@@ -408,11 +474,15 @@ func (w *worker) isDead() bool {
 	return exited
 }
 
-// touch records activity.
+// touch records activity. It takes no lock, so the idle timer and an acquire
+// never wait on a request in flight.
 func (w *worker) touch() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.lastUse = time.Now()
+	w.lastUse.Store(time.Now().UnixNano())
+}
+
+// idleFor reports how long the worker has gone unused.
+func (w *worker) idleFor() time.Duration {
+	return time.Since(time.Unix(0, w.lastUse.Load()))
 }
 
 // stderrSuffix returns the captured stderr, for error messages.

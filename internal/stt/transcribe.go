@@ -311,8 +311,12 @@ func transcribeOnnx(ctx context.Context, interpreter []string, repo, upstream, m
 		return "", err
 	}
 	defer os.RemoveAll(scriptDir)
-	scriptPath := filepath.Join(scriptDir, "transcribe_onnx.py")
-	if err := os.WriteFile(scriptPath, []byte(transcribeOnnxScript), 0o600); err != nil {
+	// The shared module goes first: the script loads it from its own directory.
+	if _, err := writeScriptFile(scriptDir, "stt_model_prep.py", modelPrepScript); err != nil {
+		return "", err
+	}
+	scriptPath, err := writeScriptFile(scriptDir, "transcribe_onnx.py", transcribeOnnxScript)
+	if err != nil {
 		return "", err
 	}
 

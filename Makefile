@@ -1,4 +1,4 @@
-.PHONY: restart-app test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
+.PHONY: restart-app test-judges test-postgres build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release prepare-htr-assets up-patch up-minor
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -193,10 +193,23 @@ clean:
 
 # ── Test ─────────────────────────────────────────────────────────────────────
 # Run all Go tests in the repo. Exits non-zero on any failure.
+# Excludes the Jev/permission-judge tests in internal/agent (see JEV_TESTS);
+# other packages run in full. Run the excluded ones with
+# `make test-judges`.
 # Usage: make test
 
+JEV_TESTS = Permission|Typesafe|TypeSafe|NetworkGuard|ContentGuard|Judge|Decider|StateBudget|Clef|Discovery|DocSearch|AutoContinue|Goal
+
 test:
-	go test ./...
+	go test $$(go list ./... | grep -v '/internal/agent$$')
+	go test ./internal/agent -skip '$(JEV_TESTS)'
+
+# Permission + decision-judge (Jev/TypeSafe) tests only: permission rules, the
+# auto-permission judge, network/content guards, discovery/doc_search judges,
+# state budget. Faster than `make test`.
+# Usage: make test-judges
+test-judges:
+	go test ./internal/agent -run '$(JEV_TESTS)'
 
 # Postgres integration tests (build tag pgintegration) against a throwaway
 # postgres:16 container, started with the docker CLI. Not part of `make test`,

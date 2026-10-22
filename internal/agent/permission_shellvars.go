@@ -363,6 +363,13 @@ func (e *judgeExpander) lookup(name string) (string, bool) {
 	if e.opaque[name] {
 		return "", false
 	}
+	// PWD/OLDPWD in ocode's environment describe the server process, not the
+	// directory the command runs in (a desktop app boots with cwd "/", and the
+	// command may cd first). Resolving them hands the judge a confidently wrong
+	// path, which scored allow@0.04 with outside_allowed_roots; leave them verbatim.
+	if name == "PWD" || name == "OLDPWD" {
+		return "", false
+	}
 	v, ok := judgeLookupEnv(name)
 	if !ok {
 		return "", false

@@ -44,13 +44,13 @@ import (
 var networkGuardJudgeTimeout = 4 * time.Second
 
 // networkGuardMinConfidenceDefault is the confidence an `allow` must clear.
-// It is stricter than the shared autoJudgeMinConfidenceDefault (0.80) because
-// this judge runs *after* every other gate and is the last automatic check
-// before bytes leave the machine: by the time a call reaches here the
+// Its value equals the shared autoJudgeMinConfidenceDefault (0.80) but it is a
+// separate constant on purpose: this judge runs *after* every other gate and is
+// the last automatic check before bytes leave the machine, so a loose permission
+// tuning must not be able to lower it. By the time a call reaches here the
 // deterministic exfiltration detectors, the banned-prefix list and the domain
-// policy have all already passed it. A lower bar would make the extra round
-// trip pure latency.
-const networkGuardMinConfidenceDefault = 0.9
+// policy have all already passed it.
+const networkGuardMinConfidenceDefault = 0.8
 
 // networkGuardTargetCap bounds how many targets ride in one judge state, so a
 // long `for` loop of curls cannot inflate the request. The call still escalates

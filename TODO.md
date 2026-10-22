@@ -68,7 +68,8 @@ Open:
 
   The paired difference (same audio through both variants) is **+3.03 pp for int8, t = 4.42** over 217 clips: 35 clips worse, 8 better, 174 identical. The regression is **not** number-specific — number-related errors are equal (181 fp32 vs 180 int8) and int8's extra 23 errors are in ordinary words. On the silent clip fp32 returned nothing while int8 hallucinated "Thank you."
 
-  **Decision: do not default to int8.** It is measurably less accurate AND ~40 % slower per clip, and its only real advantages (a 0.4 s faster load, ~1.2 GB less RAM) no longer matter, because the resident worker amortises the load across utterances and fp32's warm load is already ~1.3 s. The int8 path is still reachable by setting `quantization="int8"` on `onnx_asr.load_model` if a user explicitly wants the memory saving. Re-measure with real recorded speech before revisiting: the corpus is synthetic, so its absolute WER is not real-world accuracy, only a controlled A/B.
+  **Decision: do not default to int8 (2026-10-20). REVERSED 2026-10-22: int8 is now the default, adopted for memory and disk; see `docs/architecture/stt-resident-worker.md`, "int8 quantization — ADOPTED 2026-10-22".** The 2026-10-20 reasoning is kept as history. It is measurably less accurate AND ~40 % slower per clip, and its only real advantages (a 0.4 s faster load, ~1.2 GB less RAM) no longer matter, because the resident worker amortises the load across utterances and fp32's warm load is already ~1.3 s. The int8 path is still reachable by setting `quantization="int8"` on `onnx_asr.load_model` if a user explicitly wants the memory saving. Re-measure with real recorded speech before revisiting: the corpus is synthetic, so its absolute WER is not real-world accuracy, only a controlled A/B.
+- **STT worker never idle-unloaded (FIXED 2026-10-22).** The 2-minute `workerIdleTimeout` was only evaluated inside `releaseWorker` right after a request (idle ≈ 0), so a worker nobody called again lived forever; a 15 h `stt_worker.py` was found swapped out at 17+ GB-equivalent. `internal/stt/worker.go` now arms an idle timer (`armIdleTimerLocked`/`unloadIfIdle`, timeout raised to 30 min); `TestWorkerIdleTimerUnloadsWithoutFurtherRequests` is mutation-verified. The worker now loads the int8 export (~1.65 GB peak RSS, ~0.7 GB on disk) and downloads only int8 files. **Open:** the 17 GB peak itself is unexplained — suspect ONNX Runtime's CPU arena growing on a long clip and never shrinking; not reproduced. Also unverified: the Unified EN model's int8 path (`bobNight/...`, renamed `encoder.int8.onnx`) was not run end to end.
 - **Prewarm on record start: DONE (2026-10-20).** `stt.Prewarm` starts the resident worker for the selected local model, so the load overlaps the user speaking instead of delaying the first transcription. The TUI calls it from a `crashguard.Go` goroutine inside the existing start command (`internal/tui/voice.go`), so the recording never waits for the model load and the start command keeps returning a single message. The web/desktop path calls `POST /api/stt/prewarm` (answered immediately; the load continues in the background) from `useVoiceRecorder`'s `start()`. Prewarm is best-effort and never prompts for an install: the install-approval contract stays with the transcription path. Measured with the real model: cold first transcription 9.49 s, prewarm 1.54 s, first transcription after the prewarm **0.17 s**.
 
   Two follow-ups remain:
@@ -88,6 +89,17 @@ Open:
 - **Autoinstall tests were host-dependent (2026-10-20). FIXED.** `TestInstallLocalBuildsManagedVenv`, `TestStatusForReportsInstallableModelAvailable`, `TestInstallLocalSurfacesPipOutput` and `TestInstallLocalRepairsBrokenVenv` failed on machines whose real `python3` has `onnx_asr` installed: `installLocal`'s "another caller already installed it" scan returned the host's interpreter, so the managed venv was never built and the test asserted against the wrong python. They now call `isolatePath` (the same helper as the install-gate tests), so the scan can only find the fake. `go test ./internal/stt/` passes on this machine.
 
 - **Linux-only `Pdeathsig` — RECOMMENDATION: leave it as is.** On macOS and the BSDs there is no parent-death signal in Go's `syscall` package, so an abruptly killed ocode relies on the worker noticing stdin EOF to exit (`internal/stt/stt_worker.py` ends its request loop at EOF; covered by `TestRealWorkerScriptExitsOnStdinEOF`, which runs the real script with stubbed dependencies and whose mutation — a worker that ignores EOF — is caught). The idle timeout bounds the damage otherwise. EOF is equivalent to parent-death here: the pipe breaks when the parent dies, so a second mechanism (a getppid() poll, or a heartbeat) would guard the same thing twice. **Decision: no code change; this entry exists to record the reasoning, not to request work.**
+
+- **Worker repair may be blocked offline (OPEN, 2026-10-22).** `startWorker` sets `HF_HUB_OFFLINE=1` on the resident worker (added in 810104a6). A ready marker whose int8 files are gone is repaired by a fresh download inside the worker, and that download runs under the variable, so it should fail until a one-shot transcription repairs the install. The same variable may also block a first download inside the worker. Verify both against the real huggingface_hub, then decide whether the worker drops the variable. Not changed here, because it alters when the worker may touch the network.
+- **Repair leaves the pre-int8 fp32 graph files on disk (OPEN, 2026-10-22).** A repaired install keeps the old fp32 export next to the int8 files, about 2.4 GB that nothing loads. Pruning is deliberately not done: it deletes user files, so it needs a decision.
+
+## Open: flaky judge-log test (2026-10-22)
+
+- **`TestPermissionJudgeLog_RecordsOutcomeEndToEnd` failed once in four filtered runs (OPEN).** The "below floor" and "denied" subtests got `transport_error` against `127.0.0.1:1`, not their mock server. `newTypesafeJudge` swaps the package-level `newClientFn` and restores it in `t.Cleanup`, so something else reading `newClientFn` while the test runs can route the request elsewhere. Three reruns passed. Not investigated; the test file was not changed.
+
+## Open: permission floor documentation drift (2026-10-22)
+
+- **Floor default documented as 0.85 but set to 0.80 (OPEN).** `autoJudgeMinConfidenceDefault` in `internal/agent/permissions.go` is 0.80. The enforced-categories concept doc and several code comments still say 0.85. Found while fixing the enforced-only gate; not corrected there.
 
 ## Open: second-listener browse proxy — manual verification (2026-10-18)
 
@@ -869,6 +881,45 @@ Checked items are done; the unchecked ones each need a decision.
 - [ ] **Unit tests write to the real `permission-judge.log`.** 2,852 of its 3,188
       rows came from `go test` in `internal/agent` with a fake judge. Point the
       log at a temp dir under test.
+
+### Session review, 2026-10-22 (judge log 2026-10-06 → 10-22)
+
+About 290 asks the user then approved, against 27 they denied. The 27 denials
+(mostly `git worktree add`, `git show HEAD:f > f`, mutate scripts) sit at the same
+allow 0.5-0.78 / concern `none` as most approvals, so lowering the floor would
+leak them; only targeted fixes are safe.
+
+- [x] **SECURITY: a relaxed concern turned a credential-exfil deny into an allow.**
+      Fixed 2026-10-22 (user chose the enforced-only question): with a category
+      switched off, the same `Decide` call asks `enforced_concern`, and both relaxed
+      conversions need it to be `none`. Exfil forms now ask; 3 of 16 replayed past
+      relaxed grants ask too. See `docs/concepts/auto-permission-enforced-categories.md`
+      ("Enforced-only concern"). Still open: the eval grades raw answers and does not
+      apply the relaxed conversion, so it cannot show this class of leak.
+- [ ] **`cd X && python3 s.py` is denied because `s.py` is read from the pre-cd
+      directory.** 24 user-approved, 0 denied (judge deny 0.86-0.97,
+      `truncated_or_unknown`). Fix written and tested (`scriptBaseDir`: relative
+      scripts resolve against LEADING cds only; the truncation guard sees the same
+      file) but parked as a patch, because it extends the exfil hole above to
+      cd-reached scripts. Live replay: the denials become allows at 0.06-0.78, still
+      under the 0.80 floor, so it removes few asks on its own. Unblocked now that
+      the relaxed-concern fix is in; patch in the 2026-10-22 session scratchpad.
+- [ ] **Glob `rm` in temp/project dirs always asks.** `dangerousRmReasonWith` refuses
+      any `*?[]` target (`rm -f /tmp/zz_*.py`, `docs/results/*.json`): 11 approved, 0
+      denied. A narrow relaxation (wildcard only in the last component, literal dir
+      in scope, pattern cannot match `.git`, project dir or a root) needs a user
+      decision: it loosens a documented "refuse rather than guess" guard.
+- [ ] **Project scripts over 48 KiB always ask.** `personal/scripts/positions_db.py`
+      (81 KB) was asked 18 times, approved every time (`show`, `list`, `--help`).
+      Do not raise the byte ceiling (state budget). Option: a grant keyed on the
+      script's sha256 regardless of arguments.
+- [ ] **Read-only `ssh root@<host> '…'` inspections ask** (about 18, network concern,
+      0.22-0.60). Policy decision: a per-host allowlist or relaxing `network`.
+- [ ] **The user's own bash prefix rules cause asks.** `worktree: deny` makes the
+      judge deny `git worktree remove` (approved 8/8) while `git worktree add` (denied
+      7/7) is not caught; `git show: deny`, `git: ask` and junk keys (`add.`,
+      `rm sed`, `todowrite_shell=skip; true</arg_value>` in `permissions.tools`) also
+      reach the judge. Suggest `git worktree add: deny` in place of `worktree`.
 
 ## Content guardrail — follow-ups (2026-10-02)
 

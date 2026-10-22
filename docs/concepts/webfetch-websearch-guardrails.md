@@ -87,14 +87,14 @@ Two properties are load-bearing:
 
 **Test-secret note.** A test that proves masking must use a format `internal/redact/detect.go` actually recognises — Stripe `sk_live_…` (`:40`), OpenAI `sk-…` (`:46`), GitHub `ghp_…` (`:34`), AWS `AKIA…` (`:31`), JWT (`:43`). An invented `sk-live_…` format is correctly NOT matched by any of those regexes, so a test built on it would be testing nothing. `TestNetworkGuardMasksSecretsBeforeTheyLeaveTheHost` uses a real Stripe-shaped `sk_live_…` key.
 
-### Thresholds (deliberately not the shared ones)
+### Thresholds (their own constants, deliberately not read from the shared ones)
 
 | constant | value | why not the shared one |
 |---|---|---|
-| `networkGuardJudgeTimeout` (`:47`) | 4s, a `var` so tests can shrink it | Deliberately shorter than `DecideCtx`'s 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) because this gate sits in front of a user-visible call. Mirrors `searchJudgeTimeout`. |
-| `networkGuardMinConfidenceDefault` (`:56`) | **0.9** | **Stricter** than the shared `autoJudgeMinConfidenceDefault = 0.85` (`permissions.go:6619`) — this judge runs after every other gate, so a lower bar would make the extra round trip pure latency. Also **intentionally decoupled** from `permissions.auto.min_confidence` (same pattern as `relevanceJudgeMinConfidenceDefault` in `relevance_typesafe.go:20`, decoupled from the same key): that key is the user's bar for letting a *command* run unattended, and overloading it would let a loose permission tuning silently switch off the last check before data leaves the machine. Resolver: `resolveNetworkGuardMinConfidence`, `:419`. |
-| `networkGuardTargetCap` (`:61`) | 20 | A batch that trips the cap is not a safe batch — the call still escalates on the targets it kept. |
-| `networkGuardValueCap` (`:65`) | 2000 bytes, appends `"…(truncated)"` | A multi-megabyte heredoc piped into curl cannot dominate the request; the rubric treats the cut as not-fully-visible and escalates. Masking runs before this clip (see Secret masking above). |
+| `networkGuardJudgeTimeout` (`:44`) | 4s, a `var` so tests can shrink it | Deliberately shorter than `DecideCtx`'s 30s `typesafeRequestTimeout` (`internal/agent/typesafe.go:23`) because this gate sits in front of a user-visible call. Mirrors `searchJudgeTimeout`. |
+| `networkGuardMinConfidenceDefault` (`:53`) | **0.8** | Equal to the shared `autoJudgeMinConfidenceDefault = 0.80` (`permissions.go:7240`), but a **separate constant** on purpose: this judge runs after every other gate, so a loose permission tuning must not be able to lower the last automatic check before bytes leave the machine. Also **intentionally decoupled** from `permissions.auto.min_confidence` (same pattern as `relevanceJudgeMinConfidenceDefault` in `relevance_typesafe.go:20`, decoupled from the same key): that key is the user's bar for letting a *command* run unattended, and overloading it would let a loose permission tuning silently switch off the last check before data leaves the machine. Resolver: `resolveNetworkGuardMinConfidence`, `:416`. |
+| `networkGuardTargetCap` (`:58`) | 20 | A batch that trips the cap is not a safe batch — the call still escalates on the targets it kept. |
+| `networkGuardValueCap` (`:62`) | 2000 bytes, appends `"…(truncated)"` | A multi-megabyte heredoc piped into curl cannot dominate the request; the rubric treats the cut as not-fully-visible and escalates. Masking runs before this clip (see Secret masking above). |
 
 ## The contract
 
@@ -108,8 +108,8 @@ Two properties are load-bearing:
 | ctx cancelled mid-round-trip (turn aborted) | fail OPEN: returns promptly, `Escalate:false` — a cancelled turn never escalates |
 | missing verdict / non-choice answer | fail OPEN + `tier=netguard_fail err=no_verdict` |
 | unrecognised choice value | fail OPEN + `tier=netguard_fail err=unknown_choice` |
-| `allow` at/above 0.9 | proceed |
-| `allow` below 0.9 | **escalate** (hesitation is a veto) |
+| `allow` at/above 0.8 | proceed |
+| `allow` below 0.8 | **escalate** (hesitation is a veto) |
 | `escalate` | **escalate** |
 
 **Fail-open rationale:** `webfetch` and `websearch` are `PermissionAsk` by default (`permissions.go:1630`), and **in Normal and Sandbox modes** bash network calls are additionally gated by the deterministic exfiltration detectors (`isExfiltrationRiskBash` at `permissions.go:1713`/`:1723` in the sandbox branch; Normal mode reaches `IsHarmfulBashCommand` through the compound parser at `permissions.go:1917`-`:1774` → `decideSingleCommand` → `permissions.go:6349`) — so *in those modes* a provider outage removes this layer without removing the ones beneath it. Blocking every fetch while TypeSafe is down would trade a security property for an availability one the user did not ask for.

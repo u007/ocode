@@ -30,9 +30,11 @@ def main() -> int:
     stubs = os.path.join(tmp, "stubs")
     os.makedirs(stubs)
     with open(os.path.join(stubs, "huggingface_hub.py"), "w") as f:
-        f.write("def snapshot_download(repo, local_dir=None, local_files_only=False):\n"
+        f.write("def snapshot_download(repo, local_dir=None, local_files_only=False, allow_patterns=None):\n"
                 "    import os\n"
                 "    os.makedirs(local_dir, exist_ok=True)\n"
+                "    for name in ('encoder-model.int8.onnx', 'decoder_joint-model.int8.onnx', 'vocab.txt', 'config.json'):\n"
+                "        open(os.path.join(local_dir, name), 'a').close()\n"
                 "    return local_dir\n")
     with open(os.path.join(stubs, "onnx_asr.py"), "w") as f:
         f.write(textwrap.dedent('''

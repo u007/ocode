@@ -147,9 +147,12 @@ Config lives under the `stt` section of `ocodeconfig.json`
   (gated by `OCODE_STT_LIVE=<model dir>`) transcribe a spoken clip correctly.
   They are not run in CI because they need the models.
 - Parakeet Unified EN comes from `bobNight/parakeet-unified-en-0.6b-onnx`, a
-  third-party ONNX conversion of NVIDIA's model (CC-BY-4.0). The helper renames
-  its graph files, rebuilds its vocab from the SentencePiece tokenizer, and sets
-  the 128 mel-bin feature size, once per download (marked by `.ocode-ready`).
+  third-party ONNX conversion of NVIDIA's model (CC-BY-4.0). The shared
+  preparation in `internal/stt/stt_model_prep.py` renames its graph files,
+  rebuilds its vocab from the SentencePiece tokenizer, and sets the 128
+  mel-bin feature size, once per download (marked by `.ocode-ready`). It also
+  requires the int8 graph files and fails without them, so there is no fp32
+  fallback.
   The unified model is English-only and offline here; NVIDIA's streaming mode is
   not wired.
 - Remote (SSH/WSL) projects transcribe on whichever server the browser is

@@ -96,9 +96,17 @@ never writes to the terminal (the TUI runs in the alt-screen).
   processes, so there is no port to collide on and no socket to authenticate.
 - **Keyed by model.** The key is (upstream, repo, modelDir, provider). A model
   change stops the old worker and starts a new one.
-- **Idle unload.** The worker is stopped after 2 minutes without a request
-  (`workerIdleTimeout`). The fp32 export holds roughly 2.2 GB physical footprint (measured via vmmap on macOS, fp32 export), so it
-  must not outlive the user's session.
+- **Idle unload.** The worker is stopped after 30 minutes without a request
+  (`workerIdleTimeout`; it was 2 minutes before 2026-10-22, long enough to
+  feel like a cold load between dictations). `releaseWorker` arms a timer (`armIdleTimerLocked`,
+  callback `unloadIfIdle`) that fires even if nobody calls the worker again;
+  the original check ran only inside `releaseWorker`, right after a request,
+  when idle time is ~0, so an unused worker stayed resident indefinitely (a
+  15-hour worker was observed swapping out ~17 GB). The int8 export holds about 1.5 GB resident (1.65 GB peak RSS measured on
+  the v3 model; the fp32 export measured 2.2 GB), so it must not outlive the
+  user's session. The timer reads the last-use time and the busy flag without
+  taking the request lock, so an idle worker never makes a live preview fail as
+  busy.
 - **No controlling terminal.** The child is spawned with `Setsid`, so it can
   never open `/dev/tty` and steal the foreground process group from the TUI.
 - **Parent death.** On Linux the child gets `Pdeathsig=SIGKILL`, so a killed
@@ -189,14 +197,19 @@ and first transcription after the prewarm 0.17 s.
 
 ## Deferred
 
-- **int8 quantization** — MEASURED AND REJECTED. Over a 217-clip corpus
-  (6 en_US voices x 3 rates x 12 sentences + a silence clip, 940.5 s of
-  audio, 3132 reference words) int8 scored **9.83 % WER against fp32's
-  7.92 %** — a paired difference of +3.03 pp (t = 4.42 over 217 clips).
-  The regression is not number-specific: number-related errors are equal
-  (181 fp32 vs 180 int8) and int8's extra 23 errors are in ordinary words.
-  int8 is also ~40 % slower per clip. Its only advantages (a 0.4 s faster
-  load, ~1.2 GB less RSS) no longer matter, because the resident worker
-  amortises the load. Keep fp32.
+- **int8 quantization — ADOPTED 2026-10-22 (reverses an earlier rejection).**
+  The worker loads `quantization="int8"` and downloads only the int8 files
+  (`ALLOW_PATTERNS` in `stt_model_prep.py`, shared by both helpers): ~0.7 GB on
+  disk instead of 3 GB, and the fp32 2.4 GB weight file is never loaded. The
+  earlier measurement (217 synthetic `say` clips: int8 9.83 % WER vs fp32
+  7.92 %, ~40 % slower per clip) still stands; the user chose memory and disk
+  over that accuracy gap because the fp32 worker was swapping out ~17 GB.
+  Verified on the real v3 model: correct transcript, peak RSS 1.65 GB.
+  Installs made earlier keep their fp32 files on disk (unused). Every start
+  renames int8 graph files from other exporters (`rename_graphs`). A ready
+  marker whose int8 files are missing is dropped, and the model downloads
+  again. A download that still lacks the int8 files fails with an error that
+  names the repo and the files, and writes no marker (`ensure_model`). There is
+  no fp32 fallback.
 
 Both items are tracked in TODO.md.
